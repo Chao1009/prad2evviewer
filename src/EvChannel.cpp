@@ -12,11 +12,14 @@ using namespace evc;
 // convert evio status to the enum
 static inline status evio_status (int code)
 {
+    if ( static_cast<unsigned int>(code) == S_EVFILE_UNXPTDEOF ) {
+        return stats:incomplete;
+    }
+
     switch (code) {
     case S_SUCCESS:
         return status::success;
     case EOF:
-    case S_EVFILE_UNXPTDEOF:
         return status::eof;
     case S_EVFILE_TRUNC:
         return status::incomplete;
