@@ -5,6 +5,9 @@
 // Developer:                                                                ||
 // Chao Peng                                                                 ||
 // 09/07/2020                                                                ||
+//                                                                           ||
+// Updated: 2025 - Added TagSegmentHeader and CompositeHeader for            ||
+//          composite bank support (tag 0xe126)                              ||
 //=============================================================================
 #pragma once
 
@@ -84,6 +87,71 @@ struct SegmentHeader
     static size_t size() { return 1; }
 };
 
+/* TagSegment header (used inside composite data):
+ * ----------------------------------
+ * | tag:12 | type:4 | length:16    |
+ * ----------------------------------
+ * Note: no padding field in tagsegments.
+ */
+struct TagSegmentHeader
+{
+    uint32_t length, type, tag;
+
+    TagSegmentHeader() : length(0), type(0), tag(0) {}
+    TagSegmentHeader(const uint32_t *buf)
+    {
+        uint32_t word = buf[0];
+        tag    = (word >> 20) & 0xFFF;
+        type   = (word >> 16) & 0xF;
+        length = (word & 0xFFFF);
+    }
+
+    static size_t size() { return 1; }
+};
+
+/* Composite data envelope:
+ *   [TagSegment header]   -- contains format string (type = DATA_CHARSTAR8)
+ *   [format string words] -- padded to 32-bit boundary
+ *   [Bank header]         -- contains the actual data payload
+ *   [data payload words]
+ *
+ * CompositeHeader parses both the tagsegment and inner bank headers
+ * from a pointer to the start of the composite data (i.e. the first
+ * word after the outer bank header whose type == DATA_COMPOSITE).
+ */
+struct CompositeHeader
+{
+    TagSegmentHeader ts_header;    // tagsegment with format string
+    BankHeader       data_header;  // inner bank with actual data
+
+    // offsets in 32-bit words from the start of the composite data
+    size_t format_offset;    // where the format string bytes start
+    size_t data_offset;      // where the data payload starts (after inner bank header)
+    size_t data_nwords;      // number of payload words
+
+    CompositeHeader() : format_offset(0), data_offset(0), data_nwords(0) {}
+    CompositeHeader(const uint32_t *buf)
+    {
+        // parse tagsegment header
+        ts_header = TagSegmentHeader(buf);
+        format_offset = TagSegmentHeader::size();
+
+        // skip past the format string (ts_header.length words)
+        size_t inner_bank_start = TagSegmentHeader::size() + ts_header.length;
+
+        // parse the inner bank header
+        data_header = BankHeader(buf + inner_bank_start);
+        data_offset = inner_bank_start + BankHeader::size();
+        data_nwords = data_header.length - 1; // length is exclusive of the second header word
+    }
+
+    // total size of the composite envelope + data in 32-bit words
+    size_t total_words() const
+    {
+        return TagSegmentHeader::size() + ts_header.length + BankHeader::size() + data_nwords;
+    }
+};
+
 struct BlockHeader
 {
     bool valid;
@@ -137,5 +205,4 @@ struct EventHeader
     static size_t size() { return 1; }
 };
 
-} // namespace evio
-
+} // namespace evc

@@ -57,6 +57,7 @@ status EvChannel::Read()
 bool EvChannel::ScanBanks(const std::vector<uint32_t> &banks)
 {
     buffer_info.clear();
+    composite_info.clear();
 
     auto evh = BankHeader(&buffer[0]);
     // skip the header
@@ -86,15 +87,6 @@ bool EvChannel::ScanBanks(const std::vector<uint32_t> &banks)
 
     } catch (std::exception const& e) {
         std::cerr << e.what() << std::endl;
-        /*
-        std::cout << std::hex;
-        for (size_t i = 0; i < evh.length + 1; ++i) {
-            std::cout << "0x" << std::setw(8) << std::setfill('0') << buffer[i];
-            if (i == iword) { std::cout << "\t <-- this bank"; }
-            std::cout << "\n";
-        }
-        std::cout << std::dec;
-        */
         return false;
     }
 
@@ -153,9 +145,17 @@ size_t EvChannel::scanRocBank(const uint32_t *buf, size_t gindex, const std::vec
         auto bh = BankHeader(buf + iword);
         iword += BankHeader::size();
 
-        // only scan interested banks
-        if (banks.size() && (std::find(banks.begin(), banks.end(), bh.tag) != banks.end())) {
-            scanDataBank(&buf[iword], bh.length - 1, header.tag, bh.tag, gindex + iword);
+        // check if this bank is of interest
+        bool interested = banks.empty() || (std::find(banks.begin(), banks.end(), bh.tag) != banks.end());
+
+        if (interested) {
+            if (bh.type == DATA_COMPOSITE) {
+                // ---- Composite bank (e.g. tag 0xe126) ----
+                scanCompositeBank(&buf[iword], bh.length - 1, header.tag, bh.tag, gindex + iword);
+            } else {
+                // ---- Legacy raw data bank ----
+                scanDataBank(&buf[iword], bh.length - 1, header.tag, bh.tag, gindex + iword);
+            }
         }
 
         iword += bh.length - 1;
@@ -220,3 +220,38 @@ void EvChannel::scanDataBank(const uint32_t *buf, size_t buflen, uint32_t roc, u
     }
 }
 
+// ===================================================================
+//  Composite bank scanner
+//
+//  Composite evio structure (e.g. tag 0xe126):
+//
+//    [TagSegment header: 1 word]   tag:12 | type:4 | length:16
+//    [format string: ts.length words]     e.g. "c,m(c,ms)\0" padded
+//    [Bank header: 2 words]               length | tag:16 | pad:2 | type:6 | num:8
+//    [data payload: bank.length-1 words]  raw bytes in composite format
+//
+//  We parse the envelope to locate the data payload, then store a
+//  CompositeInfo so the caller can feed the bytes to a decoder
+//  (e.g. Fadc250Decoder::DecodeComposite).
+// ===================================================================
+void EvChannel::scanCompositeBank(const uint32_t *buf, size_t buflen, uint32_t roc, uint32_t bank, size_t gindex)
+{
+    if (buflen < 4) {
+        std::cerr << "EvChannel Warning: composite bank too short (" << buflen << " words) in roc "
+                  << roc << " bank 0x" << std::hex << bank << std::dec << "\n";
+        return;
+    }
+
+    CompositeHeader ch(buf);
+
+    // sanity: make sure the data payload fits
+    if (ch.data_offset + ch.data_nwords > buflen) {
+        std::cerr << "EvChannel Warning: composite data payload overflows bank boundary in roc "
+                  << roc << " bank 0x" << std::hex << bank << std::dec
+                  << " (data_offset=" << ch.data_offset << " data_nwords=" << ch.data_nwords
+                  << " buflen=" << buflen << ")\n";
+        return;
+    }
+
+    composite_info.emplace_back(roc, bank, static_cast<uint32_t>(gindex + ch.data_offset), static_cast<uint32_t>(ch.data_nwords));
+}

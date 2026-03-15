@@ -26,6 +26,16 @@ set(CODA_LIB_DIR     "${CODA_ROOT}/lib"
 set(CODA_INCLUDE_DIR "/usr/clas12/release/1.4.0/coda/common/include"
     CACHE PATH "Directory containing evio.h and et.h")
 
+# --- ROOT (optional, needed only if Fadc250Data uses ClassDef for I/O) ----
+# If ROOT is not found, a no-op ClassDef stub is provided so the decoder
+# still compiles for use without ROOT dictionary generation.
+find_package(ROOT QUIET COMPONENTS Core)
+if(ROOT_FOUND)
+    message(STATUS "ROOT: found at ${ROOT_DIR}")
+else()
+    message(STATUS "ROOT: not found – Fadc250Data ClassDef will be a no-op")
+endif()
+
 # --- evio -----------------------------------------------------------------
 if(EVIO_SOURCE STREQUAL "fetch")
     include(FetchContent)
@@ -90,6 +100,7 @@ endif()
 add_library(evc STATIC
     src/EvChannel.cpp
     src/EtChannel.cpp
+    src/Fadc250Decoder.cpp
 )
 
 target_include_directories(evc
@@ -104,6 +115,11 @@ target_link_libraries(evc
         evio
         et
 )
+
+# If ROOT was found, link it so TObject.h / ClassDef resolve properly
+if(ROOT_FOUND)
+    target_link_libraries(evc PUBLIC ROOT::Core)
+endif()
 
 # ---------------------------------------------------------------------------
 # Test executable
@@ -131,6 +147,8 @@ install(FILES
     include/EvChannel.h
     include/EtChannel.h
     include/EtConfigWrapper.h
+    include/Fadc250Data.h
+    include/Fadc250Decoder.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/evc
 )
 
@@ -142,4 +160,5 @@ message(STATUS "  evc ${PROJECT_VERSION}")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  evio source  : ${EVIO_SOURCE}")
 message(STATUS "  et source    : ${ET_SOURCE}")
+message(STATUS "  ROOT         : ${ROOT_FOUND}")
 message(STATUS "----------------------------------------------------")
