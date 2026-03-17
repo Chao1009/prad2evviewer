@@ -1,53 +1,57 @@
 cmake_minimum_required(VERSION 3.14)
-project(evc VERSION 1.0.0 LANGUAGES CXX)
+project(prad2dec VERSION 1.0.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
 # ---------------------------------------------------------------------------
+# Database and resource directories (auto-discovered, overridable)
+# ---------------------------------------------------------------------------
+if(NOT DEFINED DATABASE_DIR)
+    set(DATABASE_DIR "${CMAKE_SOURCE_DIR}/database")
+endif()
+get_filename_component(DATABASE_DIR "${DATABASE_DIR}" ABSOLUTE)
+
+if(NOT DEFINED RESOURCE_DIR)
+    set(RESOURCE_DIR "${CMAKE_SOURCE_DIR}/resources")
+endif()
+get_filename_component(RESOURCE_DIR "${RESOURCE_DIR}" ABSOLUTE)
+
+# ---------------------------------------------------------------------------
 # Dependencies: evio and et
-# Three modes, selected by -DEVIO_SOURCE=... and -DET_SOURCE=...
-#   prebuilt  (default) - use .a files from CODA_LIB_DIR
-#   fetch               - download and build from GitHub with FetchContent
-#   system              - let find_package locate an installed version
 # ---------------------------------------------------------------------------
 set(EVIO_SOURCE "fetch" CACHE STRING "evio provider: prebuilt | fetch | system")
 set(ET_SOURCE   "fetch" CACHE STRING "et provider:   prebuilt | fetch | system")
 
-set(CODA_ROOT "/usr/clas12/release/1.4.0/coda/Linux_x86_64_RHEL9"
+set(CODA_ROOT "/usr/clas12/release/2.0.0/coda/Linux_x86_64_RHEL9"
     CACHE PATH "Root of the prebuilt CODA installation")
-set(CODA_LIB_DIR     "${CODA_ROOT}/lib"
-    CACHE PATH "Directory containing prebuilt libevio.a and libet.a")
-set(CODA_INCLUDE_DIR "/usr/clas12/release/1.4.0/coda/common/include"
-    CACHE PATH "Directory containing evio.h and et.h")
+set(CODA_LIB_DIR     "${CODA_ROOT}/lib"     CACHE PATH "Prebuilt lib dir")
+set(CODA_INCLUDE_DIR "/usr/clas12/release/2.0.0/coda/common/include"
+    CACHE PATH "CODA include dir")
+
+set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
+include(FetchContent)
 
 # --- evio -----------------------------------------------------------------
 if(EVIO_SOURCE STREQUAL "fetch")
-    include(FetchContent)
     set(MAKE_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(evio
         GIT_REPOSITORY https://github.com/JeffersonLab/evio.git
         GIT_TAG        evio-6.0
+        GIT_PROGRESS   TRUE
     )
     FetchContent_MakeAvailable(evio)
-    message(STATUS "evio: building from source (FetchContent)")
-
 elseif(EVIO_SOURCE STREQUAL "system")
     find_package(evio REQUIRED)
-    message(STATUS "evio: using system installation")
-
-else()  # prebuilt
+else()
     find_library(EVIO_LIB NAMES evio PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
-    message(STATUS "evio: prebuilt at ${EVIO_LIB}")
-
     find_library(EXPAT_LIB NAMES expat REQUIRED)
-    message(STATUS "Found libexpat: ${EXPAT_LIB}")
-
     add_library(evio STATIC IMPORTED GLOBAL)
     set_target_properties(evio PROPERTIES
         IMPORTED_LOCATION             "${EVIO_LIB}"
@@ -58,24 +62,17 @@ endif()
 
 # --- et -------------------------------------------------------------------
 if(ET_SOURCE STREQUAL "fetch")
-    include(FetchContent)
     FetchContent_Declare(et
         GIT_REPOSITORY https://github.com/JeffersonLab/et.git
         GIT_TAG        main
+        GIT_PROGRESS   TRUE
     )
     FetchContent_MakeAvailable(et)
-    message(STATUS "et: building from source (FetchContent)")
-    # et's CMake doesn't always export its include path; set it explicitly.
     set(ET_INCLUDE_DIR "${et_SOURCE_DIR}/src/libsrc")
-
 elseif(ET_SOURCE STREQUAL "system")
     find_package(coda_et REQUIRED)
-    message(STATUS "et: using system installation")
-
-else()  # prebuilt
+else()
     find_library(ET_LIB NAMES et PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
-    message(STATUS "et: prebuilt at ${ET_LIB}")
-
     add_library(et STATIC IMPORTED GLOBAL)
     set_target_properties(et PROPERTIES
         IMPORTED_LOCATION             "${ET_LIB}"
@@ -84,39 +81,81 @@ else()  # prebuilt
     set(ET_INCLUDE_DIR "${CODA_INCLUDE_DIR}")
 endif()
 
-# ---------------------------------------------------------------------------
-# Static library: libevc.a
-# ---------------------------------------------------------------------------
-add_library(evc STATIC
-    src/EvChannel.cpp
-    src/EtChannel.cpp
-    src/Fadc250Decoder.cpp
-    src/WaveAnalyzer.cpp
+# --- nlohmann/json --------------------------------------------------------
+FetchContent_Declare(json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG        v3.11.3
+    GIT_SHALLOW    TRUE
 )
 
-target_include_directories(evc
+# --- websocketpp ----------------------------------------------------------
+FetchContent_Declare(websocketpp
+    GIT_REPOSITORY https://github.com/zaphoyd/websocketpp.git
+    GIT_TAG        0.8.2
+    GIT_SHALLOW    TRUE
+)
+
+# --- standalone asio ------------------------------------------------------
+FetchContent_Declare(asio
+    GIT_REPOSITORY https://github.com/chriskohlhoff/asio.git
+    GIT_TAG        asio-1-30-2
+    GIT_SHALLOW    TRUE
+)
+
+FetchContent_MakeAvailable(json websocketpp asio)
+
+if(NOT TARGET asio_standalone)
+    add_library(asio_standalone INTERFACE)
+    target_include_directories(asio_standalone INTERFACE ${asio_SOURCE_DIR}/asio/include)
+    target_compile_definitions(asio_standalone INTERFACE ASIO_STANDALONE)
+endif()
+
+if(NOT TARGET websocketpp_lib)
+    add_library(websocketpp_lib INTERFACE)
+    target_include_directories(websocketpp_lib INTERFACE ${websocketpp_SOURCE_DIR})
+    target_link_libraries(websocketpp_lib INTERFACE asio_standalone)
+endif()
+
+# ---------------------------------------------------------------------------
+# Static library: libprad2dec.a  (decoder + waveform analysis)
+# ---------------------------------------------------------------------------
+add_library(prad2dec STATIC
+    prad2dec/src/EvChannel.cpp
+    prad2dec/src/EtChannel.cpp
+    prad2dec/src/Fadc250Decoder.cpp
+    prad2dec/src/WaveAnalyzer.cpp
+)
+
+target_include_directories(prad2dec
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/prad2dec/include>
+        $<INSTALL_INTERFACE:include/prad2dec>
         $<BUILD_INTERFACE:${ET_INCLUDE_DIR}>
 )
 
-target_link_libraries(evc
-    PUBLIC
-        evio
-        et
-)
+target_link_libraries(prad2dec PUBLIC evio et)
 
 # ---------------------------------------------------------------------------
 # Test executable
 # ---------------------------------------------------------------------------
-add_executable(evc_test
-    test/test_main.cpp
+add_executable(evc_test test/test_main.cpp)
+target_link_libraries(evc_test PRIVATE prad2dec)
+
+# ---------------------------------------------------------------------------
+# Event viewer (HTTP server)
+# ---------------------------------------------------------------------------
+add_executable(evc_viewer src/evc_viewer.cpp)
+
+target_compile_definitions(evc_viewer PRIVATE
+    DATABASE_DIR="${DATABASE_DIR}"
+    RESOURCE_DIR="${RESOURCE_DIR}"
 )
 
-target_link_libraries(evc_test
-    PRIVATE
-        evc
+target_link_libraries(evc_viewer PRIVATE
+    prad2dec
+    nlohmann_json::nlohmann_json
+    websocketpp_lib
+    pthread
 )
 
 # ---------------------------------------------------------------------------
@@ -124,27 +163,17 @@ target_link_libraries(evc_test
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 
-install(TARGETS evc
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-
-install(FILES
-    include/EvStruct.h
-    include/EvChannel.h
-    include/EtChannel.h
-    include/EtConfigWrapper.h
-    include/Fadc250Data.h
-    include/Fadc250Decoder.h
-    include/WaveAnalyzer.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/evc
-)
+install(TARGETS prad2dec ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(DIRECTORY prad2dec/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/prad2dec)
 
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 message(STATUS "----------------------------------------------------")
-message(STATUS "  evc ${PROJECT_VERSION}")
+message(STATUS "  ${PROJECT_NAME} ${PROJECT_VERSION}")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  evio source  : ${EVIO_SOURCE}")
 message(STATUS "  et source    : ${ET_SOURCE}")
+message(STATUS "  Database     : ${DATABASE_DIR}")
+message(STATUS "  Resources    : ${RESOURCE_DIR}")
 message(STATUS "----------------------------------------------------")

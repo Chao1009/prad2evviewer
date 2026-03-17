@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PRad2 HyCal Event Viewer</title>
+<script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+<style>
+:root { --bg:#1a1a2e; --panel:#16213e; --border:#0f3460; --text:#e0e0e0; --accent:#00b4d8; --dim:#888; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:var(--text); }
+
+.header {
+    display:flex; align-items:center; gap:16px;
+    padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border);
+}
+.header h1 { font-size:16px; font-weight:600; color:var(--accent); white-space:nowrap; }
+.header .nav { display:flex; align-items:center; gap:8px; }
+.header button {
+    background:var(--border); border:none; color:var(--text); padding:4px 12px;
+    border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;
+}
+.header button:hover { background:var(--accent); color:#000; }
+.header input[type="number"] {
+    width:80px; background:var(--bg); border:1px solid var(--border); color:var(--text);
+    padding:3px 6px; border-radius:3px; font-family:inherit; font-size:13px; text-align:center;
+}
+.header .info { color:var(--dim); font-size:12px; margin-left:auto; }
+
+.main { display:flex; height:calc(100vh - 42px); }
+
+.geo-panel { flex:0 0 600px; display:flex; flex-direction:column; border-right:1px solid var(--border); }
+.geo-toolbar {
+    display:flex; align-items:center; gap:8px; padding:6px 10px;
+    background:var(--panel); border-bottom:1px solid var(--border); font-size:12px;
+}
+.geo-toolbar label { color:var(--dim); }
+.geo-toolbar select, .geo-toolbar input {
+    background:var(--bg); border:1px solid var(--border); color:var(--text);
+    padding:2px 6px; border-radius:3px; font-family:inherit; font-size:12px;
+}
+.geo-canvas-wrap { flex:1; position:relative; overflow:hidden; }
+.geo-canvas-wrap canvas { position:absolute; top:0; left:0; }
+.geo-tooltip {
+    display:none; position:absolute; background:rgba(0,0,0,0.9); color:#fff;
+    padding:4px 8px; border-radius:3px; font-size:11px; pointer-events:none;
+    white-space:pre; z-index:10;
+}
+
+.detail-panel { flex:1; display:flex; flex-direction:column; min-width:0; }
+.detail-header {
+    padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--border); font-size:13px;
+}
+.detail-header .mod-name { color:var(--accent); font-weight:600; }
+.waveform-wrap { flex:1; min-height:0; }
+.peaks-table-wrap {
+    max-height:160px; overflow-y:auto; border-top:1px solid var(--border); font-size:12px;
+}
+.peaks-table { width:100%; border-collapse:collapse; }
+.peaks-table th {
+    position:sticky; top:0; background:var(--panel); padding:4px 8px;
+    text-align:left; color:var(--dim); font-weight:500; border-bottom:1px solid var(--border);
+}
+.peaks-table td { padding:3px 8px; border-bottom:1px solid #222; }
+.peaks-table tr:hover { background:rgba(0,180,216,0.1); }
+
+.color-bar { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--dim); }
+.status-bar {
+    padding:4px 10px; background:var(--panel); border-top:1px solid var(--border);
+    font-size:11px; color:var(--dim);
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+    <h1>PRad2 HyCal Viewer</h1>
+    <div class="nav">
+        <button id="btn-prev" title="Left arrow">◀ Prev</button>
+        <label style="color:var(--dim);font-size:12px">Event</label>
+        <input type="number" id="ev-input" value="1" min="1">
+        <label style="color:var(--dim);font-size:12px" id="ev-total">/ 0</label>
+        <button id="btn-next" title="Right arrow">Next ▶</button>
+    </div>
+    <div class="info" id="header-info"></div>
+</div>
+
+<div class="main">
+    <div class="geo-panel">
+        <div class="geo-toolbar">
+            <label>Color:</label>
+            <select id="color-metric">
+                <option value="integral">Peak Integral</option>
+                <option value="height">Peak Height</option>
+                <option value="pedestal">Pedestal</option>
+            </select>
+            <label>Log</label>
+            <input type="checkbox" id="log-scale" checked>
+            <div class="color-bar">
+                <span>0</span>
+                <canvas id="colorbar-canvas" width="100" height="12"></canvas>
+                <span id="colorbar-max">max</span>
+            </div>
+        </div>
+        <div class="geo-canvas-wrap" id="geo-wrap">
+            <canvas id="geo-canvas"></canvas>
+            <div class="geo-tooltip" id="geo-tooltip"></div>
+        </div>
+    </div>
+
+    <div class="detail-panel">
+        <div class="detail-header" id="detail-header">Click a module to view its waveform</div>
+        <div class="waveform-wrap" id="waveform-div"></div>
+        <div class="peaks-table-wrap">
+            <table class="peaks-table">
+                <thead><tr>
+                    <th>#</th><th>Pos</th><th>Time (ns)</th><th>Height</th>
+                    <th>Integral</th><th>Range</th><th>OVF</th>
+                </tr></thead>
+                <tbody id="peaks-tbody"></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<div class="status-bar" id="status-bar">Ready</div>
+
+<script>
+// state
+let modules = [], totalEvents = 0, currentEvent = 1;
+let eventChannels = {};   // "roc_slot_ch" -> {s:[], pm, pr, pk:[]}
+let selectedModule = null, hoveredModule = null;
+let geoCanvas, geoCtx, geoWrap, scale = 1, offsetX = 0, offsetY = 0, canvasW, canvasH;
+const PEAK_COLORS = ['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
+
+// --- color scale (viridis-ish) ---
+function viridis(t) {
+    t = Math.max(0, Math.min(1, t));
+    const r = Math.round(255*Math.min(1, Math.max(0, -0.87+4.26*t-4.85*t*t+2.5*t*t*t)));
+    const g = Math.round(255*Math.min(1, Math.max(0, -0.03+0.77*t+1.32*t*t-1.87*t*t*t)));
+    const b = Math.round(255*Math.min(1, Math.max(0, 0.33+1.74*t-4.26*t*t+3.17*t*t*t)));
+    return `rgb(${r},${g},${b})`;
+}
+
+function drawColorBar() {
+    const c = document.getElementById('colorbar-canvas'), ctx = c.getContext('2d');
+    for (let i = 0; i < c.width; i++) { ctx.fillStyle = viridis(i/c.width); ctx.fillRect(i,0,1,c.height); }
+}
+
+// --- geometry canvas ---
+function initGeoCanvas() {
+    geoWrap = document.getElementById('geo-wrap');
+    geoCanvas = document.getElementById('geo-canvas');
+    geoCtx = geoCanvas.getContext('2d');
+    resizeGeo();
+    window.addEventListener('resize', resizeGeo);
+}
+
+function resizeGeo() {
+    canvasW = geoWrap.clientWidth; canvasH = geoWrap.clientHeight;
+    geoCanvas.width = canvasW; geoCanvas.height = canvasH;
+    if (modules.length) fitView();
+    drawGeo();
+}
+
+function fitView() {
+    const margin = 20;
+    let xmin=1e9, xmax=-1e9, ymin=1e9, ymax=-1e9;
+    for (const m of modules) {
+        xmin = Math.min(xmin, m.x-m.sx/2); xmax = Math.max(xmax, m.x+m.sx/2);
+        ymin = Math.min(ymin, m.y-m.sy/2); ymax = Math.max(ymax, m.y+m.sy/2);
+    }
+    scale = Math.min((canvasW-2*margin)/(xmax-xmin), (canvasH-2*margin)/(ymax-ymin));
+    offsetX = canvasW/2 - (xmin+xmax)/2*scale;
+    offsetY = canvasH/2 + (ymin+ymax)/2*scale;
+}
+
+function d2c(x,y) { return [x*scale+offsetX, -y*scale+offsetY]; }
+function c2d(cx,cy) { return [(cx-offsetX)/scale, -(cy-offsetY)/scale]; }
+
+function getModuleValue(m) {
+    const d = eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+    if (!d) return 0;
+    const metric = document.getElementById('color-metric').value;
+    if (metric === 'pedestal') return d.pm || 0;
+    // use first peak's property, or 0
+    if (!d.pk || !d.pk.length) return 0;
+    if (metric === 'height') return Math.max(...d.pk.map(p => p.h));
+    return d.pk.reduce((s, p) => s + p.i, 0);  // total integral
+}
+
+function drawGeo() {
+    if (!geoCtx) return;
+    const ctx = geoCtx;
+    ctx.clearRect(0, 0, canvasW, canvasH);
+    const useLog = document.getElementById('log-scale').checked;
+    const vals = modules.map(getModuleValue);
+    const vmax = Math.max(...vals, 1);
+    document.getElementById('colorbar-max').textContent = vmax.toFixed(0);
+
+    for (let idx = 0; idx < modules.length; idx++) {
+        const m = modules[idx];
+        const [cx,cy] = d2c(m.x, m.y);
+        const w = m.sx*scale, h = m.sy*scale;
+        const rx = cx-w/2, ry = cy-h/2;
+        const v = vals[idx];
+        const t = vmax > 0 ? (useLog ? Math.log1p(v)/Math.log1p(vmax) : v/vmax) : 0;
+
+        ctx.fillStyle = v > 0 ? viridis(t) : (m.t === 'G' ? '#1a1a2e' : '#12122a');
+        ctx.fillRect(rx, ry, w, h);
+
+        const isSel = selectedModule && selectedModule.n === m.n;
+        const isHov = hoveredModule && hoveredModule.n === m.n;
+        ctx.strokeStyle = isSel ? '#fff' : isHov ? '#00b4d8' : '#333';
+        ctx.lineWidth = isSel ? 2 : isHov ? 1.5 : 0.5;
+        ctx.strokeRect(rx, ry, w, h);
+    }
+}
+
+function hitTest(cx, cy) {
+    const [dx,dy] = c2d(cx, cy);
+    for (let i = modules.length-1; i >= 0; i--) {
+        const m = modules[i];
+        if (Math.abs(dx-m.x) <= m.sx/2 && Math.abs(dy-m.y) <= m.sy/2) return m;
+    }
+    return null;
+}
+
+// --- waveform plot (from cached event data, instant) ---
+function showWaveform(mod) {
+    selectedModule = mod;
+    const key = `${mod.roc}_${mod.sl}_${mod.ch}`;
+    const hdr = document.getElementById('detail-header');
+    hdr.innerHTML = `<span class="mod-name">${mod.n}</span> &nbsp; `
+        + `ROC 0x${mod.roc.toString(16)} &nbsp; slot ${mod.sl} &nbsp; ch ${mod.ch}`;
+
+    const d = eventChannels[key];
+    if (!d || !d.s) {
+        document.getElementById('waveform-div').innerHTML =
+            '<div style="padding:20px;color:var(--dim)">No data for this channel</div>';
+        document.getElementById('peaks-tbody').innerHTML = '';
+        drawGeo();
+        return;
+    }
+
+    const samples = d.s, peaks = d.pk || [];
+    const x = samples.map((_,i) => i);
+
+    const traces = [{
+        x, y: samples, type:'scatter', mode:'lines',
+        name:'Waveform', line:{color:'#8888aa', width:1},
+    }, {
+        x:[0, samples.length-1], y:[d.pm, d.pm],
+        type:'scatter', mode:'lines',
+        name:`Ped ${d.pm.toFixed(1)}±${d.pr.toFixed(1)}`,
+        line:{color:'#555', width:1, dash:'dash'},
+    }];
+
+    // threshold line
+    const thr = d.pm + Math.max(5*d.pr, 3);
+    traces.push({
+        x:[0,samples.length-1], y:[thr,thr], type:'scatter', mode:'lines',
+        line:{color:'#444', width:1, dash:'dot'}, showlegend:false,
+    });
+
+    peaks.forEach((p, i) => {
+        const color = PEAK_COLORS[i % PEAK_COLORS.length];
+        const px=[], py=[];
+        for (let j = p.l; j <= p.r; j++) { px.push(j); py.push(samples[j]); }
+        traces.push({
+            x:px, y:py, type:'scatter', mode:'lines',
+            name:`Peak ${i} (h=${p.h.toFixed(0)})`, line:{color, width:2},
+        });
+        traces.push({
+            x:[p.p], y:[samples[p.p]], type:'scatter', mode:'markers',
+            marker:{color, size:8, symbol:'diamond'}, showlegend:false,
+        });
+    });
+
+    Plotly.react('waveform-div', traces, {
+        paper_bgcolor:'#1a1a2e', plot_bgcolor:'#12122a',
+        font:{family:'Consolas, monospace', size:11, color:'#ccc'},
+        margin:{l:50, r:20, t:30, b:40},
+        title:{text:`${mod.n} — Event ${currentEvent}`, font:{size:13}},
+        xaxis:{title:'Sample', gridcolor:'#222', zerolinecolor:'#333'},
+        yaxis:{title:'ADC', gridcolor:'#222', zerolinecolor:'#333'},
+        legend:{x:1, y:1, xanchor:'right', bgcolor:'rgba(0,0,0,0.5)', font:{size:10}},
+    }, {responsive:true});
+
+    // peaks table
+    document.getElementById('peaks-tbody').innerHTML = peaks.map((p, i) => {
+        const color = PEAK_COLORS[i % PEAK_COLORS.length];
+        return `<tr style="border-left:3px solid ${color}">
+            <td>${i}</td><td>${p.p}</td><td>${p.t.toFixed(0)}</td>
+            <td>${p.h.toFixed(1)}</td><td>${p.i.toFixed(0)}</td>
+            <td>[${p.l}, ${p.r}]</td><td>${p.o ? '⚠' : ''}</td></tr>`;
+    }).join('');
+
+    drawGeo();
+}
+
+// --- event loading (single request, decoded on demand by C++) ---
+function loadEvent(evnum) {
+    currentEvent = evnum;
+    document.getElementById('ev-input').value = evnum;
+    document.getElementById('status-bar').textContent = `Loading event ${evnum}...`;
+
+    fetch(`/api/event/${evnum}`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) {
+                document.getElementById('status-bar').textContent = data.error;
+                return;
+            }
+            eventChannels = data.channels || {};
+            const nch = Object.keys(eventChannels).length;
+            const npeaks = Object.values(eventChannels).reduce((s,c) => s + (c.pk||[]).length, 0);
+            document.getElementById('status-bar').textContent =
+                `Event ${evnum}: ${nch} channels, ${npeaks} peaks`;
+            drawGeo();
+            if (selectedModule) showWaveform(selectedModule);
+        })
+        .catch(err => {
+            document.getElementById('status-bar').textContent = `Error: ${err}`;
+        });
+}
+
+// --- init ---
+function init() {
+    drawColorBar();
+    initGeoCanvas();
+
+    document.getElementById('btn-prev').onclick = () => { if (currentEvent > 1) loadEvent(currentEvent-1); };
+    document.getElementById('btn-next').onclick = () => { if (currentEvent < totalEvents) loadEvent(currentEvent+1); };
+    document.getElementById('ev-input').onchange = (e) => {
+        const v = parseInt(e.target.value);
+        if (v >= 1 && v <= totalEvents) loadEvent(v);
+    };
+    document.getElementById('color-metric').onchange = drawGeo;
+    document.getElementById('log-scale').onchange = drawGeo;
+
+    const tooltip = document.getElementById('geo-tooltip');
+    geoCanvas.addEventListener('mousemove', (e) => {
+        const rect = geoCanvas.getBoundingClientRect();
+        const m = hitTest(e.clientX-rect.left, e.clientY-rect.top);
+        if (m !== hoveredModule) { hoveredModule = m; drawGeo(); }
+        if (m) {
+            const d = eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+            let info = `${m.n} (${m.t==='G'?'PbGlass':'PbWO₄'})\nROC 0x${m.roc.toString(16)} slot ${m.sl} ch ${m.ch}`;
+            if (d && d.pk && d.pk.length)
+                info += `\nPed: ${d.pm.toFixed(1)} | Peak: ${d.pk[0].h.toFixed(0)} | Int: ${d.pk[0].i.toFixed(0)}`;
+            else if (d) info += `\nPed: ${d.pm.toFixed(1)} | no peaks`;
+            tooltip.textContent = info;
+            tooltip.style.display = 'block';
+            tooltip.style.left = (e.clientX-rect.left+12)+'px';
+            tooltip.style.top = (e.clientY-rect.top-10)+'px';
+        } else { tooltip.style.display = 'none'; }
+    });
+    geoCanvas.addEventListener('click', (e) => {
+        const rect = geoCanvas.getBoundingClientRect();
+        const m = hitTest(e.clientX-rect.left, e.clientY-rect.top);
+        if (m) showWaveform(m);
+    });
+    geoCanvas.addEventListener('mouseleave', () => { hoveredModule=null; tooltip.style.display='none'; drawGeo(); });
+    document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT') return;
+        if (e.key === 'ArrowLeft' && currentEvent > 1) loadEvent(currentEvent-1);
+        if (e.key === 'ArrowRight' && currentEvent < totalEvents) loadEvent(currentEvent+1);
+    });
+
+    fetch('/api/config').then(r => r.json()).then(data => {
+        // merge geometry (modules) + DAQ map into one array
+        const crateRoc = data.crate_roc || {};
+        const rawMods = data.modules || [];
+        const rawDaq = data.daq || [];
+
+        // if already merged (has 'roc' field), use directly
+        if (rawMods.length && rawMods[0].roc !== undefined) {
+            modules = rawMods.map(m => ({...m, t: m.t === 'PbGlass' ? 'G' : (m.t === 'G' ? 'G' : 'W')}));
+        } else {
+            // merge: build lookup from DAQ name → {crate, slot, channel}
+            const daqMap = {};
+            for (const d of rawDaq) daqMap[d.name] = d;
+            modules = [];
+            for (const m of rawMods) {
+                const d = daqMap[m.n];
+                if (!d) continue;
+                modules.push({
+                    n: m.n,
+                    t: (m.t === 'PbGlass') ? 'G' : 'W',
+                    x: m.x, y: m.y, sx: m.sx, sy: m.sy,
+                    roc: crateRoc[String(d.crate)] || 0,
+                    sl: d.slot, ch: d.channel,
+                });
+            }
+        }
+
+        totalEvents = data.total_events || 0;
+        document.getElementById('ev-total').textContent = `/ ${totalEvents}`;
+        document.getElementById('header-info').textContent = `${modules.length} modules, ${totalEvents} events`;
+        resizeGeo();
+        if (totalEvents > 0) loadEvent(1);
+    });
+}
+window.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
