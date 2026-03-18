@@ -84,6 +84,8 @@ struct FileData {
     std::vector<EventIndex> index;
     std::map<std::string, Histogram> histograms;
     std::map<std::string, Histogram> pos_histograms;
+    std::map<std::string, int> occupancy;       // events with ≥1 peak above threshold
+    std::map<std::string, int> occupancy_tcut;   // same, but peak must be in time window
     int hist_events_processed = 0;
 };
 
@@ -260,10 +262,14 @@ static void buildIndex(const std::string &path, std::vector<EventIndex> &index,
 static void buildHistograms(const std::string &path,
                             std::map<std::string, Histogram> &hists,
                             std::map<std::string, Histogram> &pos_hists,
+                            std::map<std::string, int> &occ,
+                            std::map<std::string, int> &occ_tcut,
                             int &events_out, Progress &prog)
 {
     hists.clear();
     pos_hists.clear();
+    occ.clear();
+    occ_tcut.clear();
     events_out = 0;
 
     EvChannel ch;
@@ -302,13 +308,18 @@ static void buildHistograms(const std::string &path,
                         std::string key = std::to_string(roc.tag) + "_"
                                         + std::to_string(s) + "_" + std::to_string(c);
 
-                        // integral histogram
+                        bool has_peak = false, has_peak_tcut = false;
+
+                        // integral histogram + occupancy
                         float best = -1;
                         for (int p = 0; p < wres.npeaks; ++p) {
                             auto &pk = wres.peaks[p];
                             if (pk.height < g_hist_cfg.threshold) continue;
-                            if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
+                            has_peak = true;
+                            if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max) {
+                                has_peak_tcut = true;
                                 if (pk.integral > best) best = pk.integral;
+                            }
                         }
                         if (best >= 0) {
                             auto &h = hists[key];
@@ -324,6 +335,10 @@ static void buildHistograms(const std::string &path,
                             if (ph.bins.empty()) ph.init(g_pos_nbins);
                             ph.fill(pk.time, g_hist_cfg.pos_min, g_hist_cfg.pos_step);
                         }
+
+                        // occupancy
+                        if (has_peak)      occ[key]++;
+                        if (has_peak_tcut) occ_tcut[key]++;
                     }
                 }
             }
@@ -357,6 +372,7 @@ static void loadFileAsync(const std::string &filepath)
     if (g_hist_enabled) {
         g_progress.total = (int)data->index.size();
         buildHistograms(filepath, data->histograms, data->pos_histograms,
+                        data->occupancy, data->occupancy_tcut,
                         data->hist_events_processed, g_progress);
         std::cerr << "  Histograms: " << data->hist_events_processed << " events, "
                   << data->histograms.size() << " channels\n";
@@ -524,6 +540,19 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // /api/poshist/<key>
     if (uri.rfind("/api/poshist/", 0) == 0) {
         reply(getHist(false, uri.substr(13)).dump()); return;
+    }
+
+    // /api/occupancy — per-channel event counts (for geo view)
+    if (uri == "/api/occupancy") {
+        std::shared_ptr<FileData> data;
+        { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
+        if (!data) { reply("{\"occ\":{},\"occ_tcut\":{},\"total\":0}"); return; }
+        json jocc = json::object(), jtcut = json::object();
+        for (auto &[k,v] : data->occupancy) jocc[k] = v;
+        for (auto &[k,v] : data->occupancy_tcut) jtcut[k] = v;
+        reply(json({{"occ", jocc}, {"occ_tcut", jtcut},
+                     {"total", data->hist_events_processed}}).dump());
+        return;
     }
 
     // /api/files — list .evio files under data-dir

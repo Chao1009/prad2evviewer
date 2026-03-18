@@ -96,6 +96,8 @@ static std::mutex g_ring_mtx;
 // histograms
 static std::map<std::string, Histogram> g_histograms;
 static std::map<std::string, Histogram> g_pos_histograms;
+static std::map<std::string, int> g_occupancy;
+static std::map<std::string, int> g_occupancy_tcut;
 static std::atomic<int> g_events_processed{0};
 static std::mutex g_hist_mtx;
 
@@ -220,13 +222,18 @@ static void fillHist(fdec::EventData &event, fdec::WaveAnalyzer &ana,
                 std::string key = std::to_string(roc.tag) + "_"
                                 + std::to_string(s) + "_" + std::to_string(c);
 
+                bool has_peak = false, has_peak_tcut = false;
+
                 // integral histogram: largest peak within time cut
                 float best = -1;
                 for (int p = 0; p < wres.npeaks; ++p) {
                     auto &pk = wres.peaks[p];
                     if (pk.height < g_hist_cfg.threshold) continue;
-                    if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
+                    has_peak = true;
+                    if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max) {
+                        has_peak_tcut = true;
                         if (pk.integral > best) best = pk.integral;
+                    }
                 }
                 if (best >= 0) {
                     auto &h = g_histograms[key];
@@ -234,7 +241,7 @@ static void fillHist(fdec::EventData &event, fdec::WaveAnalyzer &ana,
                     h.fill(best, g_hist_cfg.bin_min, g_hist_cfg.bin_step);
                 }
 
-                // position histogram: all peaks above threshold, no time cut
+                // position histogram
                 for (int p = 0; p < wres.npeaks; ++p) {
                     auto &pk = wres.peaks[p];
                     if (pk.height < g_hist_cfg.threshold) continue;
@@ -242,6 +249,10 @@ static void fillHist(fdec::EventData &event, fdec::WaveAnalyzer &ana,
                     if (ph.bins.empty()) ph.init(g_pos_nbins);
                     ph.fill(pk.time, g_hist_cfg.pos_min, g_hist_cfg.pos_step);
                 }
+
+                // occupancy
+                if (has_peak)      g_occupancy[key]++;
+                if (has_peak_tcut) g_occupancy_tcut[key]++;
             }
         }
     }
@@ -407,16 +418,29 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         reply("{\"error\":\"event not in ring buffer\"}"); return;
     }
 
-    // /api/hist/clear — clear all histograms
+    // /api/hist/clear — clear all histograms and occupancy
     if (uri == "/api/hist/clear") {
         {
             std::lock_guard<std::mutex> lk(g_hist_mtx);
             for (auto &[k, h] : g_histograms)     h.clear();
             for (auto &[k, h] : g_pos_histograms)  h.clear();
+            g_occupancy.clear();
+            g_occupancy_tcut.clear();
             g_events_processed = 0;
         }
         reply("{\"cleared\":true}");
         wsBroadcast("{\"type\":\"hist_cleared\"}");
+        return;
+    }
+
+    // /api/occupancy
+    if (uri == "/api/occupancy") {
+        std::lock_guard<std::mutex> lk(g_hist_mtx);
+        json jocc = json::object(), jtcut = json::object();
+        for (auto &[k,v] : g_occupancy) jocc[k] = v;
+        for (auto &[k,v] : g_occupancy_tcut) jtcut[k] = v;
+        reply(json({{"occ", jocc}, {"occ_tcut", jtcut},
+                     {"total", g_events_processed.load()}}).dump());
         return;
     }
 
