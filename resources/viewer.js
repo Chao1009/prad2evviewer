@@ -299,8 +299,16 @@ function showHistograms(mod){
 // =========================================================================
 // Event loading (works for both file and online mode)
 // =========================================================================
-function loadEventData(data) {
-    if (data.error) { document.getElementById('status-bar').textContent = data.error; return; }
+let eventRequestId = 0;  // increments on each fetch, stale responses ignored
+
+function loadEventData(reqId, data) {
+    if (reqId !== eventRequestId) return;  // stale response, discard
+    if (data.error) {
+        document.getElementById('status-bar').textContent = data.error;
+        // refresh ring selector to remove stale entries
+        if (mode === 'online') updateRingSelector();
+        return;
+    }
     currentEvent = data.event;
     eventChannels = data.channels || {};
     const nch = Object.keys(eventChannels).length;
@@ -313,14 +321,16 @@ function loadEventData(data) {
 
 function loadEvent(evnum) {
     currentEvent = evnum;
+    const reqId = ++eventRequestId;
     if (mode === 'file') document.getElementById('ev-input').value = evnum;
     document.getElementById('status-bar').textContent = `Loading event ${evnum}...`;
-    fetch(`/api/event/${evnum}`).then(r => r.json()).then(loadEventData)
+    fetch(`/api/event/${evnum}`).then(r => r.json()).then(d => loadEventData(reqId, d))
         .catch(err => { document.getElementById('status-bar').textContent = `Error: ${err}`; });
 }
 
 function loadLatestEvent() {
-    fetch('/api/event/latest').then(r => r.json()).then(loadEventData)
+    const reqId = ++eventRequestId;
+    fetch('/api/event/latest').then(r => r.json()).then(d => loadEventData(reqId, d))
         .catch(err => { document.getElementById('status-bar').textContent = `Error: ${err}`; });
 }
 
@@ -677,6 +687,7 @@ function init(){
         autoFollow=false;
         loadEvent(parseInt(e.target.value));
     };
+    document.getElementById('ring-select').onfocus=()=>{ updateRingSelector(); };
     document.getElementById('btn-clear-hist').onclick=clearHistograms;
 
     // geo mouse
