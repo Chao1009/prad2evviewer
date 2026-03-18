@@ -16,6 +16,7 @@ let lastEventFetch=0, lastHistFetch=0;  // throttle timestamps
 
 // occupancy data (fetched once per file load when histograms enabled)
 let occData={}, occTcutData={}, occTotal=0;
+let currentWaveform=null;  // {x:[], y:[]} for copy button
 
 // color range: null = auto from data, number = user-set or hist-synced
 let rangeMin=null, rangeMax=null;
@@ -155,12 +156,14 @@ function showWaveform(mod){
         `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
 
     if(!d||!d.s){
+        currentWaveform=null;
         Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
         document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
         showHistograms(mod); drawGeo(); return;
     }
 
     const samples=d.s, peaks=d.pk||[], x=samples.map((_,i)=>i);
+    currentWaveform={x, y:Array.from(samples)};
     const traces=[
         {x,y:samples,type:'scatter',mode:'lines',name:'Waveform',line:{color:'#7777aa',width:1}},
         {x:[0,samples.length-1],y:[d.pm,d.pm],type:'scatter',mode:'lines',name:'Pedestal',line:{color:'#555',width:1,dash:'dash'}},
@@ -517,6 +520,16 @@ function init(){
     Plotly.newPlot('waveform-div',[],{...PL,xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'}},PC2);
     Plotly.newPlot('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
     Plotly.newPlot('poshist-div',[],{...PL,title:{text:'Position Histogram',font:{size:10,color:'#555'}}},PC2);
+
+    // --- copy waveform data ---
+    document.getElementById('btn-copy-wf').onclick=()=>{
+        if(!currentWaveform){return;}
+        const text=`x: [${currentWaveform.x.join(', ')}]\ny: [${currentWaveform.y.join(', ')}]`;
+        navigator.clipboard.writeText(text).then(()=>{
+            const btn=document.getElementById('btn-copy-wf');
+            btn.textContent='✓'; setTimeout(()=>{btn.textContent='📋';},1000);
+        });
+    };
 
     // --- dividers ---
     // 1. main vertical: geo ↔ detail
