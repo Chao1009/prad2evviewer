@@ -572,6 +572,7 @@ function init(){
             edit.focus(); edit.select();
         }
         function applyEdit() {
+            if(!editing) return;
             editing=false; btn.classList.remove('editing'); btn.textContent='✎';
             edit.classList.remove('active'); show.style.display='';
             const v=parseFloat(edit.value);
@@ -579,9 +580,14 @@ function init(){
             updateRangeDisplay(); drawGeo();
         }
 
+        // prevent button click from blurring the input first
+        btn.addEventListener('mousedown', e => e.preventDefault());
         btn.onclick=()=>{ if(editing) applyEdit(); else startEdit(); };
-        edit.addEventListener('keydown',e=>{ if(e.key==='Enter') applyEdit(); if(e.key==='Escape'){editing=false;btn.classList.remove('editing');btn.textContent='✎';edit.classList.remove('active');show.style.display='';} });
-        edit.addEventListener('blur',()=>{ if(editing) applyEdit(); });
+        edit.addEventListener('keydown',e=>{
+            if(e.key==='Enter') applyEdit();
+            if(e.key==='Escape'){editing=false;btn.classList.remove('editing');btn.textContent='✎';edit.classList.remove('active');show.style.display='';}
+        });
+        edit.addEventListener('blur',()=>{ applyEdit(); });
     }
     setupRangeEdit('range-min-btn','range-min-edit','range-min-show',false);
     setupRangeEdit('range-max-btn','range-max-edit','range-max-show',true);
