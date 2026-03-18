@@ -12,7 +12,7 @@ let histEnabled=false, histConfig={};
 let mode='file';    // 'file' or 'online'
 let ws=null;        // WebSocket connection (online mode)
 let autoFollow=true; // auto-load latest event
-let lastEventFetch=0, lastHistFetch=0;  // throttle timestamps
+let lastEventFetch=0, lastHistFetch=0, lastOccFetch=0;  // throttle timestamps
 
 // occupancy data (fetched once per file load when histograms enabled)
 let occData={}, occTcutData={}, occTotal=0;
@@ -340,10 +340,17 @@ function connectWebSocket() {
                     lastHistFetch = now;
                     updateRingSelector();
                 }
+                // throttle occupancy refresh to ~0.5 Hz
+                if (now - lastOccFetch > 2000) {
+                    lastOccFetch = now;
+                    fetchOccupancy();
+                }
             } else if (msg.type === 'status') {
                 setEtStatus(msg.connected);
             } else if (msg.type === 'hist_cleared') {
+                occData={}; occTcutData={}; occTotal=0;
                 if (selectedModule) showHistograms(selectedModule);
+                drawGeo();
             }
         } catch (e) {}
     };
@@ -351,8 +358,10 @@ function connectWebSocket() {
 
 function clearHistograms() {
     fetch('/api/hist/clear').then(r => r.json()).then(data => {
-        document.getElementById('status-bar').textContent = 'Histograms cleared';
+        occData={}; occTcutData={}; occTotal=0;
+        document.getElementById('status-bar').textContent = 'Entries cleared';
         if (selectedModule) showHistograms(selectedModule);
+        drawGeo();
     });
 }
 
@@ -721,6 +730,8 @@ function init(){
             setEtStatus(data.et_connected||false);
             document.getElementById('header-info').textContent=
                 `${modules.length} modules · ONLINE · ring ${data.ring_buffer_size||20}`;
+            syncRangeFromHist();
+            fetchOccupancy();
             resizeGeo();
             connectWebSocket();
             updateRingSelector();
