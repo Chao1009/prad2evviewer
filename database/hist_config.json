@@ -5,6 +5,9 @@
         "bin_min": 0,
         "bin_max": 20000,
         "bin_step": 100,
-        "threshold": 3.0
+        "threshold": 3.0,
+        "pos_min": 0,
+        "pos_max": 400,
+        "pos_step": 4
     }
 }

@@ -51,18 +51,22 @@ static json g_config;
 // Histogram storage
 // -------------------------------------------------------------------------
 struct HistConfig {
-    float time_min  = 170;      // peak time range in ns
+    float time_min  = 170;      // peak time range in ns (for integral histogram)
     float time_max  = 190;
-    float bin_min   = 0;        // histogram range (integral units)
+    float bin_min   = 0;        // integral histogram range
     float bin_max   = 20000;
     float bin_step  = 100;
     float threshold = 3.0;      // minimum peak height (ADC above pedestal)
+    // peak position histogram
+    float pos_min   = 0;        // ns
+    float pos_max   = 400;      // ns
+    float pos_step  = 4;        // ns
 };
 
 struct Histogram {
     int underflow = 0;
     int overflow  = 0;
-    std::vector<int> bins;      // bins.size() = nbins
+    std::vector<int> bins;
 
     void init(int nbins) { bins.assign(nbins, 0); underflow = overflow = 0; }
 
@@ -77,9 +81,10 @@ struct Histogram {
 
 static HistConfig g_hist_cfg;
 static bool g_hist_enabled = false;
-// key = "roc_slot_ch", same as event channel keys
-static std::map<std::string, Histogram> g_histograms;
+static std::map<std::string, Histogram> g_histograms;      // integral histograms
+static std::map<std::string, Histogram> g_pos_histograms;   // peak position histograms
 static int g_hist_nbins = 0;
+static int g_pos_nbins  = 0;
 static int g_hist_events_processed = 0;
 
 // -------------------------------------------------------------------------
@@ -146,7 +151,10 @@ static void fillHistEvent(fdec::EventData &event, fdec::WaveAnalyzer &ana,
 
                 ana.Analyze(cd.samples, cd.nsamples, wres);
 
-                // find the largest peak within the time range
+                std::string key = std::to_string(roc.tag) + "_"
+                                + std::to_string(s) + "_" + std::to_string(c);
+
+                // --- integral histogram: largest peak within time cut ---
                 float best_integral = -1;
                 for (int p = 0; p < wres.npeaks; ++p) {
                     auto &pk = wres.peaks[p];
@@ -155,15 +163,20 @@ static void fillHistEvent(fdec::EventData &event, fdec::WaveAnalyzer &ana,
                     if (pk.integral > best_integral)
                         best_integral = pk.integral;
                 }
+                if (best_integral >= 0) {
+                    auto &h = g_histograms[key];
+                    if (h.bins.empty()) h.init(g_hist_nbins);
+                    h.fill(best_integral, g_hist_cfg.bin_min, g_hist_cfg.bin_step);
+                }
 
-                if (best_integral < 0) continue;   // no qualifying peak
-
-                std::string key = std::to_string(roc.tag) + "_"
-                                + std::to_string(s) + "_" + std::to_string(c);
-
-                auto &h = g_histograms[key];
-                if (h.bins.empty()) h.init(g_hist_nbins);
-                h.fill(best_integral, g_hist_cfg.bin_min, g_hist_cfg.bin_step);
+                // --- position histogram: all peaks above threshold, no time cut ---
+                for (int p = 0; p < wres.npeaks; ++p) {
+                    auto &pk = wres.peaks[p];
+                    if (pk.height < g_hist_cfg.threshold) continue;
+                    auto &ph = g_pos_histograms[key];
+                    if (ph.bins.empty()) ph.init(g_pos_nbins);
+                    ph.fill(pk.time, g_hist_cfg.pos_min, g_hist_cfg.pos_step);
+                }
             }
         }
     }
@@ -176,13 +189,19 @@ static void buildHistograms()
 {
     g_hist_nbins = std::max(1, (int)std::ceil(
         (g_hist_cfg.bin_max - g_hist_cfg.bin_min) / g_hist_cfg.bin_step));
+    g_pos_nbins = std::max(1, (int)std::ceil(
+        (g_hist_cfg.pos_max - g_hist_cfg.pos_min) / g_hist_cfg.pos_step));
     g_histograms.clear();
+    g_pos_histograms.clear();
     g_hist_events_processed = 0;
 
-    std::cerr << "Building histograms: time [" << g_hist_cfg.time_min << ", "
-              << g_hist_cfg.time_max << "], bins " << g_hist_nbins
-              << " (" << g_hist_cfg.bin_min << " to " << g_hist_cfg.bin_max
-              << ", step " << g_hist_cfg.bin_step << ")\n";
+    std::cerr << "Building histograms:\n"
+              << "  Integral: time [" << g_hist_cfg.time_min << ", " << g_hist_cfg.time_max
+              << "] ns, " << g_hist_nbins << " bins (" << g_hist_cfg.bin_min
+              << " to " << g_hist_cfg.bin_max << ", step " << g_hist_cfg.bin_step << ")\n"
+              << "  Position: " << g_pos_nbins << " bins ("
+              << g_hist_cfg.pos_min << " to " << g_hist_cfg.pos_max
+              << " ns, step " << g_hist_cfg.pos_step << " ns)\n";
 
     EvChannel ch;
     if (ch.Open(g_filepath) != status::success) {
@@ -286,15 +305,15 @@ static json decodeEvent(int ev1)
 }
 
 // -------------------------------------------------------------------------
-// Histogram API: return one channel's histogram
+// Histogram API
 // -------------------------------------------------------------------------
-static json getHistogram(const std::string &key)
+static json getHist(const std::map<std::string, Histogram> &hmap, const std::string &key)
 {
     if (!g_hist_enabled)
         return {{"error", "histograms not enabled (use --hist)"}};
 
-    auto it = g_histograms.find(key);
-    if (it == g_histograms.end())
+    auto it = hmap.find(key);
+    if (it == hmap.end())
         return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
                 {"events", g_hist_events_processed}};
 
@@ -338,11 +357,20 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         return;
     }
 
-    // /api/hist/<roc>_<slot>_<ch>
+    // /api/hist/<roc>_<slot>_<ch>  — integral histogram
     if (uri.rfind("/api/hist/", 0) == 0) {
         std::string key = uri.substr(10);
         con->set_status(websocketpp::http::status_code::ok);
-        con->set_body(getHistogram(key).dump());
+        con->set_body(getHist(g_histograms, key).dump());
+        con->append_header("Content-Type", "application/json");
+        return;
+    }
+
+    // /api/poshist/<roc>_<slot>_<ch>  — peak position histogram
+    if (uri.rfind("/api/poshist/", 0) == 0) {
+        std::string key = uri.substr(13);
+        con->set_status(websocketpp::http::status_code::ok);
+        con->set_body(getHist(g_pos_histograms, key).dump());
         con->append_header("Content-Type", "application/json");
         return;
     }
@@ -398,6 +426,9 @@ int main(int argc, char *argv[])
                 if (h.contains("bin_max"))   g_hist_cfg.bin_max   = h["bin_max"];
                 if (h.contains("bin_step"))  g_hist_cfg.bin_step  = h["bin_step"];
                 if (h.contains("threshold")) g_hist_cfg.threshold = h["threshold"];
+                if (h.contains("pos_min"))   g_hist_cfg.pos_min   = h["pos_min"];
+                if (h.contains("pos_max"))   g_hist_cfg.pos_max   = h["pos_max"];
+                if (h.contains("pos_step"))  g_hist_cfg.pos_step  = h["pos_step"];
             }
             std::cerr << "Hist config: " << hist_config_file << "\n";
         } else {
@@ -441,6 +472,9 @@ int main(int argc, char *argv[])
             {"bin_max",   g_hist_cfg.bin_max},
             {"bin_step",  g_hist_cfg.bin_step},
             {"threshold", g_hist_cfg.threshold},
+            {"pos_min",   g_hist_cfg.pos_min},
+            {"pos_max",   g_hist_cfg.pos_max},
+            {"pos_step",  g_hist_cfg.pos_step},
             {"events",    g_hist_events_processed},
         };
     }

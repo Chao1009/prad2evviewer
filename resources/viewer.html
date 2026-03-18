@@ -10,7 +10,6 @@
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:var(--text); overflow:hidden; }
 
-/* --- header bar --- */
 .header {
     display:flex; align-items:center; gap:16px;
     padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border);
@@ -28,16 +27,10 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 }
 .header .info { color:var(--dim); font-size:11px; margin-left:auto; }
 
-/* --- main layout: geo (large) | detail (narrow) --- */
 .main { display:flex; height:calc(100vh - 40px); }
 
-.geo-panel {
-    flex:none; width:65%; display:flex; flex-direction:column; min-width:300px;
-}
-.divider {
-    flex:none; width:5px; cursor:col-resize; background:var(--border);
-}
-.divider:hover, .divider.active { background:var(--accent); }
+/* --- geo panel (left) --- */
+.geo-panel { flex:none; width:55%; display:flex; flex-direction:column; min-width:300px; }
 .geo-toolbar {
     display:flex; align-items:center; gap:8px; padding:5px 10px;
     background:var(--panel); border-bottom:1px solid var(--border); font-size:12px; flex-shrink:0;
@@ -55,10 +48,14 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     white-space:pre; z-index:10; line-height:1.5;
 }
 
+/* --- dividers --- */
+.vdiv { flex:none; width:5px; cursor:col-resize; background:var(--border); }
+.hdiv { flex:none; height:5px; cursor:row-resize; background:var(--border); }
+.vdiv:hover,.vdiv.active { background:var(--accent); }
+.hdiv:hover,.hdiv.active { background:var(--accent); }
+
 /* --- detail panel (right) --- */
-.detail-panel {
-    flex:1; display:flex; flex-direction:column; min-width:280px; overflow:hidden;
-}
+.detail-panel { flex:1; display:flex; flex-direction:column; min-width:350px; overflow:hidden; }
 .detail-header {
     padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--border);
     font-size:13px; flex-shrink:0;
@@ -66,22 +63,15 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .detail-header .mod-name { color:var(--accent); font-weight:600; }
 .detail-header .mod-daq { color:var(--dim); font-size:11px; }
 
-.waveform-wrap { flex:none; height:55%; min-height:150px; }
+/* top panel: 2 histograms stacked */
+.top-panel { flex:none; height:45%; display:flex; flex-direction:column; min-height:120px; }
+.hist-cell { flex:1; min-height:60px; }
 
-.hdivider {
-    flex:none; height:5px; cursor:row-resize; background:var(--border);
-}
-.hdivider:hover, .hdivider.active { background:var(--accent); }
+/* bottom panel: table (left) + waveform (right) */
+.bottom-panel { flex:1; display:flex; flex-direction:row; min-height:120px; overflow:hidden; }
+.peaks-table-wrap { flex:none; width:50%; overflow-y:auto; font-size:12px; min-width:200px; }
+.waveform-wrap { flex:1; min-width:200px; min-height:0; }
 
-.peaks-table-wrap {
-    flex:1; overflow-y:auto; font-size:12px; min-height:60px; min-width:0;
-}
-.bottom-panel {
-    flex:1; display:flex; flex-direction:row; min-height:80px; overflow:hidden;
-}
-.hist-wrap {
-    flex:1; min-width:200px; min-height:80px; border-left:1px solid var(--border);
-}
 .peaks-table { width:100%; border-collapse:collapse; }
 .peaks-table th {
     position:sticky; top:0; background:var(--panel); padding:4px 8px;
@@ -97,7 +87,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     padding:3px 12px; background:var(--panel); border-top:1px solid var(--border);
     font-size:11px; color:var(--dim); z-index:20;
 }
-.empty-msg { padding:30px 20px; color:var(--dim); text-align:center; font-size:13px; }
+.empty-msg { padding:20px; color:var(--dim); text-align:center; font-size:13px; }
 </style>
 </head>
 <body>
@@ -105,16 +95,15 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 <div class="header">
     <h1>PRad2 HyCal Viewer</h1>
     <div class="nav">
-        <button id="btn-prev" title="← Arrow key">◀</button>
+        <button id="btn-prev" title="← key">◀</button>
         <input type="number" id="ev-input" value="1" min="1">
         <span style="color:var(--dim);font-size:12px" id="ev-total">/ 0</span>
-        <button id="btn-next" title="→ Arrow key">▶</button>
+        <button id="btn-next" title="→ key">▶</button>
     </div>
     <div class="info" id="header-info"></div>
 </div>
 
 <div class="main">
-    <!-- geo view (left) -->
     <div class="geo-panel" id="geo-panel">
         <div class="geo-toolbar">
             <label>Color:</label>
@@ -126,9 +115,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
             <label>Log</label>
             <input type="checkbox" id="log-scale" checked>
             <div class="color-bar">
-                <span>0</span>
-                <canvas id="colorbar-canvas" width="120" height="12"></canvas>
-                <span id="colorbar-max">max</span>
+                <span>0</span><canvas id="colorbar-canvas" width="120" height="12"></canvas><span id="colorbar-max">max</span>
             </div>
         </div>
         <div class="geo-canvas-wrap" id="geo-wrap">
@@ -137,27 +124,35 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
         </div>
     </div>
 
-    <!-- draggable divider -->
-    <div class="divider" id="divider"></div>
+    <div class="vdiv" id="div-main"></div>
 
-    <!-- detail panel (right) -->
     <div class="detail-panel" id="detail-panel">
         <div class="detail-header" id="detail-header">
-            <div class="empty-msg">Click a module to view waveform</div>
+            <div class="empty-msg">Click a module to view details</div>
         </div>
-        <div class="waveform-wrap" id="waveform-div"></div>
-        <div class="hdivider" id="hdivider"></div>
+
+        <!-- top: 2 histograms -->
+        <div class="top-panel" id="top-panel">
+            <div class="hist-cell" id="inthist-div"></div>
+            <div class="hdiv" id="div-hist"></div>
+            <div class="hist-cell" id="poshist-div"></div>
+        </div>
+
+        <div class="hdiv" id="div-tb"></div>
+
+        <!-- bottom: table + waveform -->
         <div class="bottom-panel" id="bottom-panel">
-            <div class="peaks-table-wrap" id="peaks-wrap">
+            <div class="peaks-table-wrap" id="table-wrap">
                 <table class="peaks-table">
                     <thead><tr>
-                        <th>#</th><th>Pos</th><th>Time (ns)</th><th>Height</th>
+                        <th>#</th><th>Pos</th><th>Time</th><th>Height</th>
                         <th>Integral</th><th>Left</th><th>Right</th><th>OVF</th>
                     </tr></thead>
                     <tbody id="peaks-tbody"></tbody>
                 </table>
             </div>
-            <div class="hist-wrap" id="hist-div"></div>
+            <div class="vdiv" id="div-tw"></div>
+            <div class="waveform-wrap" id="waveform-div"></div>
         </div>
     </div>
 </div>
@@ -168,413 +163,306 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 // =========================================================================
 // State
 // =========================================================================
-let modules = [], totalEvents = 0, currentEvent = 1;
-let eventChannels = {};
-let selectedModule = null, hoveredModule = null;
-let geoCanvas, geoCtx, geoWrap, scale = 1, offsetX = 0, offsetY = 0, canvasW, canvasH;
-const PC = ['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
-const CRATE_NAME = {
-    0x80:'adchycal1', 0x82:'adchycal2', 0x84:'adchycal3', 0x86:'adchycal4',
-    0x88:'adchycal5', 0x8a:'adchycal6', 0x8c:'adchycal7',
-};
-function crateName(roc) { return CRATE_NAME[roc] || `ROC 0x${roc.toString(16)}`; }
-
-let histEnabled = false, histConfig = {};
+let modules=[], totalEvents=0, currentEvent=1;
+let eventChannels={};
+let selectedModule=null, hoveredModule=null;
+let geoCanvas, geoCtx, geoWrap, scale=1, offsetX=0, offsetY=0, canvasW, canvasH;
+const PC=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
+const CRATE_NAME={0x80:'adchycal1',0x82:'adchycal2',0x84:'adchycal3',0x86:'adchycal4',0x88:'adchycal5',0x8a:'adchycal6',0x8c:'adchycal7'};
+function crateName(r){return CRATE_NAME[r]||`ROC 0x${r.toString(16)}`;}
+let histEnabled=false, histConfig={};
 
 // =========================================================================
 // Color scale
 // =========================================================================
-function viridis(t) {
-    t = Math.max(0, Math.min(1, t));
-    const r = Math.round(255*Math.min(1,Math.max(0,-0.87+4.26*t-4.85*t*t+2.5*t*t*t)));
-    const g = Math.round(255*Math.min(1,Math.max(0,-0.03+0.77*t+1.32*t*t-1.87*t*t*t)));
-    const b = Math.round(255*Math.min(1,Math.max(0,0.33+1.74*t-4.26*t*t+3.17*t*t*t)));
-    return `rgb(${r},${g},${b})`;
+function viridis(t){
+    t=Math.max(0,Math.min(1,t));
+    return `rgb(${Math.round(255*Math.min(1,Math.max(0,-0.87+4.26*t-4.85*t*t+2.5*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,-0.03+0.77*t+1.32*t*t-1.87*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,0.33+1.74*t-4.26*t*t+3.17*t*t*t)))})`;
 }
-
-function drawColorBar() {
-    const c = document.getElementById('colorbar-canvas'), ctx = c.getContext('2d');
-    for (let i = 0; i < c.width; i++) { ctx.fillStyle = viridis(i/c.width); ctx.fillRect(i,0,1,c.height); }
-}
+function drawColorBar(){const c=document.getElementById('colorbar-canvas'),x=c.getContext('2d');for(let i=0;i<c.width;i++){x.fillStyle=viridis(i/c.width);x.fillRect(i,0,1,c.height);}}
 
 // =========================================================================
-// Geometry canvas
+// Geo canvas
 // =========================================================================
-function initGeo() {
-    geoWrap = document.getElementById('geo-wrap');
-    geoCanvas = document.getElementById('geo-canvas');
-    geoCtx = geoCanvas.getContext('2d');
+function initGeo(){
+    geoWrap=document.getElementById('geo-wrap');
+    geoCanvas=document.getElementById('geo-canvas');
+    geoCtx=geoCanvas.getContext('2d');
     resizeGeo();
     new ResizeObserver(resizeGeo).observe(geoWrap);
 }
-
-function resizeGeo() {
-    canvasW = geoWrap.clientWidth; canvasH = geoWrap.clientHeight;
-    if (canvasW < 10 || canvasH < 10) return;
-    geoCanvas.width = canvasW; geoCanvas.height = canvasH;
-    if (modules.length) fitView();
-    drawGeo();
+function resizeGeo(){
+    canvasW=geoWrap.clientWidth; canvasH=geoWrap.clientHeight;
+    if(canvasW<10||canvasH<10)return;
+    geoCanvas.width=canvasW; geoCanvas.height=canvasH;
+    if(modules.length)fitView(); drawGeo();
 }
-
-function fitView() {
-    const m = 15;
-    let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
-    for (const d of modules) {
-        x0=Math.min(x0,d.x-d.sx/2); x1=Math.max(x1,d.x+d.sx/2);
-        y0=Math.min(y0,d.y-d.sy/2); y1=Math.max(y1,d.y+d.sy/2);
-    }
-    scale = Math.min((canvasW-2*m)/(x1-x0),(canvasH-2*m)/(y1-y0));
-    offsetX = canvasW/2-(x0+x1)/2*scale;
-    offsetY = canvasH/2+(y0+y1)/2*scale;
+function fitView(){
+    const m=15;let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
+    for(const d of modules){x0=Math.min(x0,d.x-d.sx/2);x1=Math.max(x1,d.x+d.sx/2);y0=Math.min(y0,d.y-d.sy/2);y1=Math.max(y1,d.y+d.sy/2);}
+    scale=Math.min((canvasW-2*m)/(x1-x0),(canvasH-2*m)/(y1-y0));
+    offsetX=canvasW/2-(x0+x1)/2*scale; offsetY=canvasH/2+(y0+y1)/2*scale;
 }
-
-function d2c(x,y) { return [x*scale+offsetX, -y*scale+offsetY]; }
-function c2d(cx,cy) { return [(cx-offsetX)/scale, -(cy-offsetY)/scale]; }
-
-function modVal(m) {
-    const d = eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
-    if (!d) return 0;
-    const mt = document.getElementById('color-metric').value;
-    if (mt==='pedestal') return d.pm||0;
-    if (!d.pk||!d.pk.length) return 0;
-    if (mt==='height') return Math.max(...d.pk.map(p=>p.h));
+function d2c(x,y){return[x*scale+offsetX,-y*scale+offsetY];}
+function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
+function modVal(m){
+    const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+    if(!d)return 0;const mt=document.getElementById('color-metric').value;
+    if(mt==='pedestal')return d.pm||0;if(!d.pk||!d.pk.length)return 0;
+    if(mt==='height')return Math.max(...d.pk.map(p=>p.h));
     return d.pk.reduce((s,p)=>s+p.i,0);
 }
-
-function drawGeo() {
-    if (!geoCtx) return;
-    const ctx = geoCtx;
-    ctx.clearRect(0,0,canvasW,canvasH);
-    const useLog = document.getElementById('log-scale').checked;
-    const vals = modules.map(modVal);
-    const vmax = Math.max(...vals,1);
-    document.getElementById('colorbar-max').textContent = vmax.toFixed(0);
-
-    for (let i=0; i<modules.length; i++) {
-        const m = modules[i];
-        const [cx,cy] = d2c(m.x,m.y);
-        const w=m.sx*scale, h=m.sy*scale;
-        const v = vals[i];
-        const t = vmax>0 ? (useLog ? Math.log1p(v)/Math.log1p(vmax) : v/vmax) : 0;
-        ctx.fillStyle = v>0 ? viridis(t) : (m.t==='G' ? '#1a1a2e' : '#12122a');
-        ctx.fillRect(cx-w/2, cy-h/2, w, h);
-
-        const sel = selectedModule && selectedModule.n===m.n;
-        const hov = hoveredModule && hoveredModule.n===m.n;
-        ctx.strokeStyle = sel ? '#fff' : hov ? '#00b4d8' : '#333';
-        ctx.lineWidth = sel ? 2.5 : hov ? 1.5 : 0.5;
-        ctx.strokeRect(cx-w/2, cy-h/2, w, h);
+function drawGeo(){
+    if(!geoCtx)return;const ctx=geoCtx;ctx.clearRect(0,0,canvasW,canvasH);
+    const useLog=document.getElementById('log-scale').checked;
+    const vals=modules.map(modVal),vmax=Math.max(...vals,1);
+    document.getElementById('colorbar-max').textContent=vmax.toFixed(0);
+    for(let i=0;i<modules.length;i++){
+        const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale,v=vals[i];
+        const t=vmax>0?(useLog?Math.log1p(v)/Math.log1p(vmax):v/vmax):0;
+        ctx.fillStyle=v>0?viridis(t):(m.t==='G'?'#1a1a2e':'#12122a');
+        ctx.fillRect(cx-w/2,cy-h/2,w,h);
+        const sel=selectedModule&&selectedModule.n===m.n,hov=hoveredModule&&hoveredModule.n===m.n;
+        ctx.strokeStyle=sel?'#fff':hov?'#00b4d8':'#333';ctx.lineWidth=sel?2.5:hov?1.5:0.5;
+        ctx.strokeRect(cx-w/2,cy-h/2,w,h);
     }
 }
-
-function hitTest(cx,cy) {
-    const [dx,dy] = c2d(cx,cy);
-    for (let i=modules.length-1; i>=0; i--) {
-        const m=modules[i];
-        if (Math.abs(dx-m.x)<=m.sx/2 && Math.abs(dy-m.y)<=m.sy/2) return m;
-    }
+function hitTest(cx,cy){
+    const[dx,dy]=c2d(cx,cy);
+    for(let i=modules.length-1;i>=0;i--){const m=modules[i];if(Math.abs(dx-m.x)<=m.sx/2&&Math.abs(dy-m.y)<=m.sy/2)return m;}
     return null;
 }
 
 // =========================================================================
-// Waveform + peaks table
+// Plotly shared config
 // =========================================================================
-function showWaveform(mod) {
-    selectedModule = mod;
-    const key = `${mod.roc}_${mod.sl}_${mod.ch}`;
-    const d = eventChannels[key];
+const PL={paper_bgcolor:'#1a1a2e',plot_bgcolor:'#11112a',font:{family:'Consolas,monospace',size:10,color:'#aaa'},
+    margin:{l:45,r:10,t:24,b:32},xaxis:{gridcolor:'#1a1a3a',zerolinecolor:'#222'},
+    yaxis:{gridcolor:'#1a1a3a',zerolinecolor:'#222'}};
+const PC2={responsive:true,displayModeBar:false};
 
-    // header: module info + pedestal
-    const pedInfo = d ? ` &nbsp; Ped: ${d.pm.toFixed(1)} ± ${d.pr.toFixed(1)}` : '';
-    document.getElementById('detail-header').innerHTML =
-        `<span class="mod-name">${mod.n}</span> `
-        + `<span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
+function resizeAllPlots(){
+    for(const id of['waveform-div','inthist-div','poshist-div'])
+        try{Plotly.Plots.resize(id);}catch(e){}
+}
 
-    if (!d || !d.s) {
-        Plotly.react('waveform-div', [], {
-            ...PLOT_LAYOUT,
-            title:{text:`${mod.n} — No data`, font:{size:12, color:'#555'}},
-        }, PLOT_CFG);
-        document.getElementById('peaks-tbody').innerHTML =
-            '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
-        showHistogram(mod);
-        drawGeo(); return;
+// =========================================================================
+// Waveform
+// =========================================================================
+function showWaveform(mod){
+    selectedModule=mod;
+    const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
+    const d=eventChannels[key];
+    const pedInfo=d?` &nbsp; Ped: ${d.pm.toFixed(1)} ± ${d.pr.toFixed(1)}`:'';
+    document.getElementById('detail-header').innerHTML=
+        `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
+
+    if(!d||!d.s){
+        Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
+        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+        showHistograms(mod); drawGeo(); return;
     }
 
-    const samples = d.s, peaks = d.pk||[];
-    const x = samples.map((_,i) => i);
-
-    // --- plotly traces ---
-    const traces = [
-        { x, y:samples, type:'scatter', mode:'lines', name:'Waveform',
-          line:{color:'#7777aa', width:1} },
-        { x:[0,samples.length-1], y:[d.pm,d.pm], type:'scatter', mode:'lines',
-          name:`Pedestal`, line:{color:'#555', width:1, dash:'dash'} },
+    const samples=d.s, peaks=d.pk||[], x=samples.map((_,i)=>i);
+    const traces=[
+        {x,y:samples,type:'scatter',mode:'lines',name:'Waveform',line:{color:'#7777aa',width:1}},
+        {x:[0,samples.length-1],y:[d.pm,d.pm],type:'scatter',mode:'lines',name:'Pedestal',line:{color:'#555',width:1,dash:'dash'}},
     ];
-    const thr = d.pm + Math.max(5*d.pr, 3);
-    traces.push({ x:[0,samples.length-1], y:[thr,thr], type:'scatter', mode:'lines',
-        line:{color:'#333', width:1, dash:'dot'}, showlegend:false });
-
-    peaks.forEach((p,i) => {
-        const col = PC[i%PC.length], px=[], py=[];
-        for (let j=p.l; j<=p.r; j++) { px.push(j); py.push(samples[j]); }
-        traces.push({ x:px, y:py, type:'scatter', mode:'lines',
-            name:`Peak ${i}`, line:{color:col, width:2.5} });
-        traces.push({ x:[p.p], y:[samples[p.p]], type:'scatter', mode:'markers',
-            marker:{color:col, size:7, symbol:'diamond'}, showlegend:false });
+    const thr=d.pm+Math.max(5*d.pr,3);
+    traces.push({x:[0,samples.length-1],y:[thr,thr],type:'scatter',mode:'lines',line:{color:'#333',width:1,dash:'dot'},showlegend:false});
+    peaks.forEach((p,i)=>{
+        const col=PC[i%PC.length],px=[],py=[];
+        for(let j=p.l;j<=p.r;j++){px.push(j);py.push(samples[j]);}
+        traces.push({x:px,y:py,type:'scatter',mode:'lines',name:`Peak ${i}`,line:{color:col,width:2.5}});
+        traces.push({x:[p.p],y:[samples[p.p]],type:'scatter',mode:'markers',marker:{color:col,size:7,symbol:'diamond'},showlegend:false});
     });
 
-    Plotly.react('waveform-div', traces, {
-        ...PLOT_LAYOUT,
-        title:{text:`${mod.n} — Event ${currentEvent}`, font:{size:12, color:'#ccc'}},
-    }, PLOT_CFG);
+    Plotly.react('waveform-div',traces,{...PL,
+        title:{text:`${mod.n} — Event ${currentEvent}`,font:{size:11,color:'#ccc'}},
+        xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'},
+        legend:{x:1,y:1,xanchor:'right',bgcolor:'rgba(0,0,0,0.6)',font:{size:9}},
+    },PC2);
 
-    // --- peaks table (only peak rows, no pedestal row) ---
-    let rows = '';
-    peaks.forEach((p,i) => {
-        const col = PC[i%PC.length];
-        rows += `<tr style="border-left:3px solid ${col}">`
-              + `<td>${i}</td><td>${p.p}</td><td>${p.t.toFixed(0)}</td>`
-              + `<td>${p.h.toFixed(1)}</td><td>${p.i.toFixed(0)}</td>`
-              + `<td>${p.l}</td><td>${p.r}</td>`
-              + `<td style="text-align:center">${p.o?'⚠':''}</td></tr>`;
+    // peaks table
+    let rows='';
+    peaks.forEach((p,i)=>{
+        const col=PC[i%PC.length];
+        rows+=`<tr style="border-left:3px solid ${col}"><td>${i}</td><td>${p.p}</td><td>${p.t.toFixed(0)}</td><td>${p.h.toFixed(1)}</td><td>${p.i.toFixed(0)}</td><td>${p.l}</td><td>${p.r}</td><td style="text-align:center">${p.o?'⚠':''}</td></tr>`;
     });
-    if (peaks.length === 0) {
-        rows += `<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No peaks</td></tr>`;
-    }
-    document.getElementById('peaks-tbody').innerHTML = rows;
-    showHistogram(mod);
+    if(!peaks.length) rows='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No peaks</td></tr>';
+    document.getElementById('peaks-tbody').innerHTML=rows;
+
+    showHistograms(mod);
     drawGeo();
 }
 
 // =========================================================================
-// Histogram display
+// Histograms
 // =========================================================================
-const HIST_LAYOUT = {
-    paper_bgcolor:'#1a1a2e', plot_bgcolor:'#11112a',
-    font:{family:'Consolas, monospace', size:10, color:'#aaa'},
-    margin:{l:45, r:10, t:26, b:34},
-    title:{text:'', font:{size:11, color:'#ccc'}},
-    xaxis:{title:'Peak Integral', gridcolor:'#1a1a3a', zerolinecolor:'#222'},
-    yaxis:{title:'Counts', gridcolor:'#1a1a3a', zerolinecolor:'#222'},
-    bargap:0.05,
-};
-
-function showHistogram(mod) {
-    if (!histEnabled) {
-        Plotly.react('hist-div', [], {
-            ...HIST_LAYOUT, title:{text:'Histograms disabled', font:{size:11, color:'#444'}},
-        }, PLOT_CFG);
+function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor){
+    if(!histEnabled){
+        Plotly.react(divId,[],{...PL,title:{text:'--hist not enabled',font:{size:10,color:'#444'}}},PC2);
         return;
     }
+    fetch(url).then(r=>r.json()).then(data=>{
+        if(data.error||!data.bins||!data.bins.length){
+            Plotly.react(divId,[],{...PL,title:{text:`${title} — No data`,font:{size:10,color:'#555'}}},PC2);
+            return;
+        }
+        const x=data.bins.map((_,i)=>binMin+(i+0.5)*binStep);
+        const sub=(data.underflow?` UF:${data.underflow}`:'')+(data.overflow?` OF:${data.overflow}`:'');
+        Plotly.react(divId,[{
+            x,y:data.bins,type:'bar',marker:{color:barColor,line:{width:0}},
+            hovertemplate:'%{x:.0f}: %{y}<extra></extra>',
+        }],{...PL,
+            title:{text:`${title} (${data.events} evts${sub})`,font:{size:10,color:'#ccc'}},
+            xaxis:{...PL.xaxis,title:xTitle},yaxis:{...PL.yaxis,title:'Counts'},bargap:0.05,
+        },PC2);
+    }).catch(()=>{
+        Plotly.react(divId,[],{...PL,title:{text:'Fetch error',font:{size:10,color:'#f66'}}},PC2);
+    });
+}
 
-    const key = `${mod.roc}_${mod.sl}_${mod.ch}`;
-    fetch(`/api/hist/${key}`)
-        .then(r => r.json())
-        .then(data => {
-            if (data.error || !data.bins || data.bins.length === 0) {
-                Plotly.react('hist-div', [], {
-                    ...HIST_LAYOUT,
-                    title:{text:`${mod.n} — No histogram data`, font:{size:11, color:'#555'}},
-                }, PLOT_CFG);
-                return;
-            }
-            const step = histConfig.bin_step || 100;
-            const bmin = histConfig.bin_min || 0;
-            const x = data.bins.map((_,i) => bmin + (i + 0.5) * step);
-            const title = `${mod.n} — ${data.events} events`
-                + (data.underflow ? ` (UF:${data.underflow})` : '')
-                + (data.overflow ? ` (OF:${data.overflow})` : '');
-            Plotly.react('hist-div', [{
-                x, y:data.bins, type:'bar',
-                marker:{color:'#00b4d8', line:{width:0}},
-                hovertemplate:'%{x:.0f}: %{y}<extra></extra>',
-            }], {
-                ...HIST_LAYOUT,
-                title:{text:title, font:{size:11, color:'#ccc'}},
-            }, PLOT_CFG);
-        })
-        .catch(() => {
-            Plotly.react('hist-div', [], {
-                ...HIST_LAYOUT, title:{text:'Histogram fetch error', font:{size:11, color:'#f66'}},
-            }, PLOT_CFG);
-        });
+function showHistograms(mod){
+    const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
+    const h=histConfig;
+    fetchAndPlotHist('inthist-div',`/api/hist/${key}`,
+        `${mod.n} Integral [${h.time_min||170}-${h.time_max||190} ns]`,
+        'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8');
+    fetchAndPlotHist('poshist-div',`/api/poshist/${key}`,
+        `${mod.n} Peak Position`,
+        'Time (ns)', h.pos_min||0, h.pos_step||4, '#51cf66');
 }
 
 // =========================================================================
 // Event loading
 // =========================================================================
-function loadEvent(evnum) {
-    currentEvent = evnum;
-    document.getElementById('ev-input').value = evnum;
-    document.getElementById('status-bar').textContent = `Loading event ${evnum}...`;
+function loadEvent(evnum){
+    currentEvent=evnum;
+    document.getElementById('ev-input').value=evnum;
+    document.getElementById('status-bar').textContent=`Loading event ${evnum}...`;
+    fetch(`/api/event/${evnum}`).then(r=>r.json()).then(data=>{
+        if(data.error){document.getElementById('status-bar').textContent=data.error;return;}
+        eventChannels=data.channels||{};
+        const nch=Object.keys(eventChannels).length;
+        const npk=Object.values(eventChannels).reduce((s,c)=>s+(c.pk||[]).length,0);
+        document.getElementById('status-bar').textContent=`Event ${evnum}: ${nch} channels, ${npk} peaks`;
+        drawGeo();
+        if(selectedModule)showWaveform(selectedModule);
+    }).catch(err=>{document.getElementById('status-bar').textContent=`Error: ${err}`;});
+}
 
-    fetch(`/api/event/${evnum}`)
-        .then(r => r.json())
-        .then(data => {
-            if (data.error) { document.getElementById('status-bar').textContent = data.error; return; }
-            eventChannels = data.channels || {};
-            const nch = Object.keys(eventChannels).length;
-            const npk = Object.values(eventChannels).reduce((s,c) => s+(c.pk||[]).length, 0);
-            document.getElementById('status-bar').textContent =
-                `Event ${evnum}: ${nch} channels, ${npk} peaks`;
-            drawGeo();
-            if (selectedModule) showWaveform(selectedModule);
-        })
-        .catch(err => { document.getElementById('status-bar').textContent = `Error: ${err}`; });
+// =========================================================================
+// Draggable dividers
+// =========================================================================
+function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, minB, onResize){
+    const div=document.getElementById(divId);
+    let active=false;
+    div.addEventListener('mousedown',e=>{
+        active=true; div.classList.add('active');
+        document.body.style.cursor=axis==='x'?'col-resize':'row-resize';
+        document.body.style.userSelect='none'; e.preventDefault();
+    });
+    document.addEventListener('mousemove',e=>{
+        if(!active)return;
+        const container=getContainer(), rect=container.getBoundingClientRect();
+        const pos=axis==='x'?e.clientX-rect.left-getOffset():e.clientY-rect.top-getOffset();
+        const max_=(axis==='x'?rect.width:rect.height)-getOffset()-minB;
+        const val=Math.max(minA,Math.min(max_,pos));
+        const target=getTarget();
+        if(axis==='x') target.style.width=val+'px'; else target.style.height=val+'px';
+        onResize();
+    });
+    document.addEventListener('mouseup',()=>{
+        if(!active)return; active=false; div.classList.remove('active');
+        document.body.style.cursor=''; document.body.style.userSelect='';
+    });
 }
 
 // =========================================================================
 // Init
 // =========================================================================
-const PLOT_LAYOUT = {
-    paper_bgcolor:'#1a1a2e', plot_bgcolor:'#11112a',
-    font:{family:'Consolas, monospace', size:11, color:'#aaa'},
-    margin:{l:48, r:12, t:28, b:36},
-    title:{text:'', font:{size:12, color:'#ccc'}},
-    xaxis:{title:'Sample', gridcolor:'#1a1a3a', zerolinecolor:'#222'},
-    yaxis:{title:'ADC', gridcolor:'#1a1a3a', zerolinecolor:'#222'},
-    legend:{x:1, y:1, xanchor:'right', bgcolor:'rgba(0,0,0,0.6)', font:{size:10}},
-};
-const PLOT_CFG = {responsive:true, displayModeBar:false};
+function init(){
+    drawColorBar(); initGeo();
+    Plotly.newPlot('waveform-div',[],{...PL,xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'}},PC2);
+    Plotly.newPlot('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
+    Plotly.newPlot('poshist-div',[],{...PL,title:{text:'Position Histogram',font:{size:10,color:'#555'}}},PC2);
 
-function init() {
-    drawColorBar();
-    initGeo();
+    // --- dividers ---
+    // 1. main vertical: geo ↔ detail
+    setupDivider('div-main','x',
+        ()=>document.getElementById('geo-panel'),
+        ()=>document.querySelector('.main'),
+        ()=>0, 300, 350, ()=>{resizeGeo();resizeAllPlots();});
+    // 2. horizontal: top-panel (histograms) ↔ bottom-panel
+    setupDivider('div-tb','y',
+        ()=>document.getElementById('top-panel'),
+        ()=>document.getElementById('detail-panel'),
+        ()=>document.getElementById('detail-header').offsetHeight,
+        120, 120, resizeAllPlots);
+    // 3. horizontal inside top-panel: inthist ↔ poshist
+    setupDivider('div-hist','y',
+        ()=>document.getElementById('inthist-div'),
+        ()=>document.getElementById('top-panel'),
+        ()=>0, 60, 60, resizeAllPlots);
+    // 4. vertical inside bottom-panel: table ↔ waveform
+    setupDivider('div-tw','x',
+        ()=>document.getElementById('table-wrap'),
+        ()=>document.getElementById('bottom-panel'),
+        ()=>0, 150, 200, resizeAllPlots);
 
-    // create an empty plot so Plotly.react always has a valid target
-    Plotly.newPlot('waveform-div', [], PLOT_LAYOUT, PLOT_CFG);
-    Plotly.newPlot('hist-div', [], HIST_LAYOUT, PLOT_CFG);
+    // nav
+    document.getElementById('btn-prev').onclick=()=>{if(currentEvent>1)loadEvent(currentEvent-1);};
+    document.getElementById('btn-next').onclick=()=>{if(currentEvent<totalEvents)loadEvent(currentEvent+1);};
+    document.getElementById('ev-input').onchange=e=>{const v=parseInt(e.target.value);if(v>=1&&v<=totalEvents)loadEvent(v);};
+    document.getElementById('color-metric').onchange=drawGeo;
+    document.getElementById('log-scale').onchange=drawGeo;
 
-    // --- draggable divider ---
-    const divider = document.getElementById('divider');
-    const geoPanel = document.getElementById('geo-panel');
-    let dragging = false;
-
-    divider.addEventListener('mousedown', e => {
-        dragging = true;
-        divider.classList.add('active');
-        document.body.style.cursor = 'col-resize';
-        document.body.style.userSelect = 'none';
-        e.preventDefault();
+    // geo mouse
+    const tip=document.getElementById('geo-tooltip');
+    geoCanvas.addEventListener('mousemove',e=>{
+        const r=geoCanvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);
+        if(m!==hoveredModule){hoveredModule=m;drawGeo();}
+        if(m){
+            const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+            let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
+            if(d&&d.pk&&d.pk.length)t+=`\nPed ${d.pm.toFixed(1)}  Peak ${d.pk[0].h.toFixed(0)}  Int ${d.pk[0].i.toFixed(0)}`;
+            else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
+            tip.textContent=t;tip.style.display='block';
+            tip.style.left=(e.clientX-r.left+14)+'px';tip.style.top=(e.clientY-r.top-8)+'px';
+        }else tip.style.display='none';
     });
-    document.addEventListener('mousemove', e => {
-        if (!dragging) return;
-        const main = document.querySelector('.main');
-        const rect = main.getBoundingClientRect();
-        const x = e.clientX - rect.left;
-        const min = 300, max = rect.width - 280;
-        geoPanel.style.width = Math.max(min, Math.min(max, x)) + 'px';
-        resizeGeo();
-        Plotly.Plots.resize('waveform-div');
-        Plotly.Plots.resize('hist-div');
-    });
-    document.addEventListener('mouseup', () => {
-        if (!dragging) return;
-        dragging = false;
-        divider.classList.remove('active');
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-    });
-
-    // --- horizontal divider (between waveform and table) ---
-    const hdivider = document.getElementById('hdivider');
-    const wfDiv = document.getElementById('waveform-div');
-    let hdragging = false;
-
-    hdivider.addEventListener('mousedown', e => {
-        hdragging = true;
-        hdivider.classList.add('active');
-        document.body.style.cursor = 'row-resize';
-        document.body.style.userSelect = 'none';
-        e.preventDefault();
-    });
-    document.addEventListener('mousemove', e => {
-        if (!hdragging) return;
-        const panel = document.getElementById('detail-panel');
-        const rect = panel.getBoundingClientRect();
-        const hdr = document.getElementById('detail-header').offsetHeight;
-        const y = e.clientY - rect.top - hdr;
-        const min = 100, max = rect.height - hdr - 80;
-        wfDiv.style.height = Math.max(min, Math.min(max, y)) + 'px';
-        Plotly.Plots.resize('waveform-div');
-        Plotly.Plots.resize('hist-div');
-    });
-    document.addEventListener('mouseup', () => {
-        if (!hdragging) return;
-        hdragging = false;
-        hdivider.classList.remove('active');
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-    });
-
-    document.getElementById('btn-prev').onclick = () => { if (currentEvent>1) loadEvent(currentEvent-1); };
-    document.getElementById('btn-next').onclick = () => { if (currentEvent<totalEvents) loadEvent(currentEvent+1); };
-    document.getElementById('ev-input').onchange = e => {
-        const v = parseInt(e.target.value);
-        if (v>=1 && v<=totalEvents) loadEvent(v);
-    };
-    document.getElementById('color-metric').onchange = drawGeo;
-    document.getElementById('log-scale').onchange = drawGeo;
-
-    // canvas mouse
-    const tip = document.getElementById('geo-tooltip');
-    geoCanvas.addEventListener('mousemove', e => {
-        const r = geoCanvas.getBoundingClientRect();
-        const m = hitTest(e.clientX-r.left, e.clientY-r.top);
-        if (m!==hoveredModule) { hoveredModule=m; drawGeo(); }
-        if (m) {
-            const d = eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
-            let t = `${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
-            if (d && d.pk && d.pk.length)
-                t += `\nPed ${d.pm.toFixed(1)}  Peak ${d.pk[0].h.toFixed(0)}  Int ${d.pk[0].i.toFixed(0)}`;
-            else if (d) t += `\nPed ${d.pm.toFixed(1)}  (no peaks)`;
-            tip.textContent=t; tip.style.display='block';
-            tip.style.left=(e.clientX-r.left+14)+'px';
-            tip.style.top=(e.clientY-r.top-8)+'px';
-        } else tip.style.display='none';
-    });
-    geoCanvas.addEventListener('click', e => {
-        const r=geoCanvas.getBoundingClientRect();
-        const m=hitTest(e.clientX-r.left, e.clientY-r.top);
-        if (m) showWaveform(m);
-    });
-    geoCanvas.addEventListener('mouseleave', () => { hoveredModule=null; tip.style.display='none'; drawGeo(); });
-    document.addEventListener('keydown', e => {
-        if (e.target.tagName==='INPUT') return;
-        if (e.key==='ArrowLeft' && currentEvent>1) loadEvent(currentEvent-1);
-        if (e.key==='ArrowRight' && currentEvent<totalEvents) loadEvent(currentEvent+1);
+    geoCanvas.addEventListener('click',e=>{const r=geoCanvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);if(m)showWaveform(m);});
+    geoCanvas.addEventListener('mouseleave',()=>{hoveredModule=null;tip.style.display='none';drawGeo();});
+    document.addEventListener('keydown',e=>{
+        if(e.target.tagName==='INPUT')return;
+        if(e.key==='ArrowLeft'&&currentEvent>1)loadEvent(currentEvent-1);
+        if(e.key==='ArrowRight'&&currentEvent<totalEvents)loadEvent(currentEvent+1);
     });
 
     // load config
-    fetch('/api/config').then(r=>r.json()).then(data => {
-        const crateRoc = data.crate_roc||{};
-        const rawMods = data.modules||[], rawDaq = data.daq||[];
-        if (rawMods.length && rawMods[0].roc !== undefined) {
-            modules = rawMods.map(m => ({...m, t:m.t==='PbGlass'?'G':(m.t==='G'?'G':'W')}));
-        } else {
-            const dm = {}; for (const d of rawDaq) dm[d.name]=d;
-            modules = [];
-            for (const m of rawMods) {
-                const d=dm[m.n]; if (!d) continue;
-                modules.push({ n:m.n, t:m.t==='PbGlass'?'G':'W',
-                    x:m.x, y:m.y, sx:m.sx, sy:m.sy,
-                    roc:crateRoc[String(d.crate)]||0, sl:d.slot, ch:d.channel });
-            }
+    fetch('/api/config').then(r=>r.json()).then(data=>{
+        const crateRoc=data.crate_roc||{};
+        const rawMods=data.modules||[],rawDaq=data.daq||[];
+        if(rawMods.length&&rawMods[0].roc!==undefined){
+            modules=rawMods.map(m=>({...m,t:m.t==='PbGlass'?'G':(m.t==='G'?'G':'W')}));
+        }else{
+            const dm={};for(const d of rawDaq)dm[d.name]=d;modules=[];
+            for(const m of rawMods){const d=dm[m.n];if(!d)continue;
+                modules.push({n:m.n,t:m.t==='PbGlass'?'G':'W',x:m.x,y:m.y,sx:m.sx,sy:m.sy,
+                    roc:crateRoc[String(d.crate)]||0,sl:d.slot,ch:d.channel});}
         }
-        totalEvents = data.total_events||0;
-        histEnabled = data.hist_enabled||false;
-        histConfig = data.hist||{};
-        document.getElementById('ev-total').textContent = `/ ${totalEvents}`;
-        const histInfo = histEnabled ? ` · hist [${histConfig.time_min}-${histConfig.time_max}]` : '';
-        document.getElementById('header-info').textContent =
-            `${modules.length} modules · ${totalEvents} events · ${Object.keys(crateRoc).length} crates${histInfo}`;
+        totalEvents=data.total_events||0;
+        histEnabled=data.hist_enabled||false;
+        histConfig=data.hist||{};
+        document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
+        const hi=histEnabled?` · hist [${histConfig.time_min}-${histConfig.time_max} ns]`:'';
+        document.getElementById('header-info').textContent=`${modules.length} modules · ${totalEvents} events${hi}`;
         resizeGeo();
-        if (totalEvents>0) loadEvent(1);
+        if(totalEvents>0)loadEvent(1);
     });
 }
-
-window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('DOMContentLoaded',init);
 </script>
 </body>
 </html>
