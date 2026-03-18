@@ -1,7 +1,7 @@
 {
     "hist": {
-        "time_min": 170,
-        "time_max": 190,
+        "time_min": 160,
+        "time_max": 220,
         "bin_min": 0,
         "bin_max": 20000,
         "bin_step": 100,
