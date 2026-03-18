@@ -34,13 +34,47 @@ const RANGE_DEFAULTS={
 };
 
 // =========================================================================
-// Color scale
+// Color scale — click the colorbar to cycle palettes
 // =========================================================================
-function viridis(t){
-    t=Math.max(0,Math.min(1,t));
-    return `rgb(${Math.round(255*Math.min(1,Math.max(0,-0.87+4.26*t-4.85*t*t+2.5*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,-0.03+0.77*t+1.32*t*t-1.87*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,0.33+1.74*t-4.26*t*t+3.17*t*t*t)))})`;
+const PALETTES={
+    viridis(t){
+        return `rgb(${Math.round(255*Math.min(1,Math.max(0,-0.87+4.26*t-4.85*t*t+2.5*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,-0.03+0.77*t+1.32*t*t-1.87*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,0.33+1.74*t-4.26*t*t+3.17*t*t*t)))})`;
+    },
+    inferno(t){
+        return `rgb(${Math.round(255*Math.min(1,Math.max(0,-0.02+2.16*t+4.79*t*t-8.13*t*t*t+2.17*t*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,-0.02-0.35*t+5.87*t*t-8.29*t*t*t+3.7*t*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,0.01+3.1*t-9.34*t*t+12.45*t*t*t-5.24*t*t*t*t)))})`;
+    },
+    coolwarm(t){
+        const r=Math.round(255*Math.min(1,Math.max(0, 0.23+2.22*t-1.83*t*t)));
+        const g=Math.round(255*Math.min(1,Math.max(0, 0.30+1.58*t-2.36*t*t+0.56*t*t*t)));
+        const b=Math.round(255*Math.min(1,Math.max(0, 0.75-0.44*t-0.81*t*t+0.53*t*t*t)));
+        return `rgb(${r},${g},${b})`;
+    },
+    hot(t){
+        const r=Math.round(255*Math.min(1, t*2.8));
+        const g=Math.round(255*Math.max(0, Math.min(1, (t-0.35)*2.8)));
+        const b=Math.round(255*Math.max(0, Math.min(1, (t-0.7)*3.3)));
+        return `rgb(${r},${g},${b})`;
+    },
+    jet(t){
+        t=0.125+t*0.75;  // remap to skip dark blue/red ends
+        const r=Math.round(255*Math.min(1, Math.max(0, 1.5-Math.abs(t-0.75)*4)));
+        const g=Math.round(255*Math.min(1, Math.max(0, 1.5-Math.abs(t-0.5)*4)));
+        const b=Math.round(255*Math.min(1, Math.max(0, 1.5-Math.abs(t-0.25)*4)));
+        return `rgb(${r},${g},${b})`;
+    },
+    greyscale(t){
+        const v=Math.round(255*t);
+        return `rgb(${v},${v},${v})`;
+    },
+};
+const PALETTE_NAMES=Object.keys(PALETTES);
+let paletteIdx=0;
+function colorScale(t){ t=Math.max(0,Math.min(1,t)); return PALETTES[PALETTE_NAMES[paletteIdx]](t); }
+function drawColorBar(){
+    const c=document.getElementById('colorbar-canvas'),x=c.getContext('2d');
+    for(let i=0;i<c.width;i++){x.fillStyle=colorScale(i/c.width);x.fillRect(i,0,1,c.height);}
+    c.title=PALETTE_NAMES[paletteIdx]+' (click to change)';
 }
-function drawColorBar(){const c=document.getElementById('colorbar-canvas'),x=c.getContext('2d');for(let i=0;i<c.width;i++){x.fillStyle=viridis(i/c.width);x.fillRect(i,0,1,c.height);}}
 
 // sync color range: hist config > defaults. Only called on metric change (not per-event).
 function syncRangeFromHist(){
@@ -123,7 +157,7 @@ function drawGeo(){
             if(useLog) t=Math.log1p(clamped-vmin)/Math.log1p(span);
             else t=(clamped-vmin)/span;
         }
-        ctx.fillStyle=(v!==null)?viridis(t):(m.t==='G'?'#1a1a2e':'#12122a');
+        ctx.fillStyle=(v!==null)?colorScale(t):(m.t==='G'?'#1a1a2e':'#12122a');
         ctx.fillRect(cx-w/2,cy-h/2,w,h);
         const sel=selectedModule&&selectedModule.n===m.n,hov=hoveredModule&&hoveredModule.n===m.n;
         ctx.strokeStyle=sel?'#fff':hov?'#00b4d8':'#333';ctx.lineWidth=sel?2.5:hov?1.5:0.5;
@@ -539,6 +573,10 @@ function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, min
 // =========================================================================
 function init(){
     drawColorBar(); initGeo();
+    document.getElementById('colorbar-canvas').onclick=()=>{
+        paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
+        drawColorBar(); drawGeo();
+    };
     Plotly.newPlot('waveform-div',[],{...PL,xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'}},PC2);
     Plotly.newPlot('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
     Plotly.newPlot('poshist-div',[],{...PL,title:{text:'Position Histogram',font:{size:10,color:'#555'}}},PC2);
