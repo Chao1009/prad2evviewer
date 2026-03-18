@@ -22,7 +22,7 @@
         <span id="et-status" style="font-size:12px;color:#f66">● Disconnected</span>
         <select id="ring-select" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:3px;font-family:inherit;font-size:12px;min-width:120px"></select>
         <button id="btn-clear-hist" title="Clear all histograms and occupancy">Clear Entries</button>
-        <span id="follow-status" style="font-size:11px;color:#ffd43b;display:none">⏸ Paused — press F to resume</span>
+        <button id="follow-status" style="font-size:11px;color:#ffd43b;background:none;border:1px solid #ffd43b;padding:2px 8px;border-radius:3px;display:none;cursor:pointer"></button>
     </div>
     <div class="info" id="header-info"></div>
 </div>
@@ -59,13 +59,15 @@
             <select id="color-metric">
                 <option value="integral">Peak Integral</option>
                 <option value="height">Peak Height</option>
+                <option value="count">Peak Count</option>
                 <option value="time">Peak Time</option>
                 <option value="pedestal">Pedestal</option>
                 <option value="occupancy">Occupancy</option>
-                <option value="occupancy_tcut">Occupancy (time cut)</option>
             </select>
             <label>Log</label>
             <input type="checkbox" id="log-scale" checked>
+            <label id="tcut-label">Time Cut</label>
+            <input type="checkbox" id="time-cut">
             <div class="color-bar">
                 <span class="range-val" id="range-min-show">0</span>
                 <input class="range-edit" id="range-min-edit" type="number" step="any">

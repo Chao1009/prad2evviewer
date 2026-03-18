@@ -27,10 +27,10 @@ let rangeUserEdited=false;  // true if user manually edited min/max
 const RANGE_DEFAULTS={
     integral:  [0, 10000],
     height:    [0, 1000],
+    count:     [0, 10],
     time:      [0, 400],
     pedestal:  [0, 500],
     occupancy: [0, 100],
-    occupancy_tcut: [0, 100],
 };
 
 // =========================================================================
@@ -92,6 +92,16 @@ function syncRangeFromHist(){
     updateRangeDisplay();
 }
 
+function updateTimeCutLabel(){
+    const el=document.getElementById('tcut-label');
+    if(!el) return;
+    const h=histConfig;
+    if(h.time_min!==undefined && h.time_max!==undefined)
+        el.textContent=`Time Cut [${h.time_min}, ${h.time_max}] ns`;
+    else
+        el.textContent='Time Cut';
+}
+
 function updateRangeDisplay(){
     const minEl=document.getElementById('range-min-show');
     const maxEl=document.getElementById('range-max-show');
@@ -123,23 +133,46 @@ function fitView(){
 }
 function d2c(x,y){return[x*scale+offsetX,-y*scale+offsetY];}
 function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
+// check if time cut checkbox is active and config exists
+function isTimeCut(){
+    return document.getElementById('time-cut').checked
+        && histConfig.time_min!==undefined && histConfig.time_max!==undefined;
+}
+
+// filter peaks by time cut if active
+function peaksInCut(peaks){
+    if(!peaks||!peaks.length) return [];
+    if(!isTimeCut()) return peaks;
+    const tmin=histConfig.time_min, tmax=histConfig.time_max;
+    return peaks.filter(p=>p.t>=tmin && p.t<=tmax);
+}
+
+// tallest peak from a list
+function tallest(peaks){
+    if(!peaks||!peaks.length) return null;
+    let best=peaks[0];
+    for(let i=1;i<peaks.length;i++) if(peaks[i].h>best.h) best=peaks[i];
+    return best;
+}
+
 function modVal(m){
     const key=`${m.roc}_${m.sl}_${m.ch}`;
     const mt=document.getElementById('color-metric').value;
-    // occupancy metrics: percentage (0–100)
-    if(mt==='occupancy') return occTotal>0 ? 100.0*(occData[key]||0)/occTotal : null;
-    if(mt==='occupancy_tcut') return occTotal>0 ? 100.0*(occTcutData[key]||0)/occTotal : null;
+    if(mt==='occupancy'){
+        if(occTotal<=0) return null;
+        const src=isTimeCut()?occTcutData:occData;
+        return 100.0*(src[key]||0)/occTotal;
+    }
     const d=eventChannels[key];
     if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
-    if(!d.pk||!d.pk.length)return null;
-    if(mt==='height')return Math.max(...d.pk.map(p=>p.h));
-    if(mt==='time'){
-        let best=d.pk[0];
-        for(let i=1;i<d.pk.length;i++) if(d.pk[i].h>best.h) best=d.pk[i];
-        return best.t;
-    }
-    return d.pk.reduce((s,p)=>s+p.i,0); // integral
+    const pks=peaksInCut(d.pk);
+    if(mt==='count') return pks.length;
+    const bp=tallest(pks);
+    if(!bp)return null;
+    if(mt==='height')return bp.h;
+    if(mt==='time')return bp.t;
+    return bp.i;
 }
 function drawGeo(){
     if(!geoCtx)return;const ctx=geoCtx;ctx.clearRect(0,0,canvasW,canvasH);
@@ -364,7 +397,12 @@ function setEtStatus(connected) {
 function updateFollowStatus() {
     const el = document.getElementById('follow-status');
     if (!el) return;
-    el.style.display = autoFollow ? 'none' : '';
+    if (autoFollow) {
+        el.style.display = 'none';
+    } else {
+        el.textContent = `⏸ Paused at event ${currentEvent} — click or press F to resume`;
+        el.style.display = '';
+    }
 }
 
 function connectWebSocket() {
@@ -515,6 +553,7 @@ function pollProgress() {
                 g_currentFile = cfg.current_file || '';
                 histEnabled = cfg.hist_enabled || false;
                 histConfig = cfg.hist || {};
+                updateTimeCutLabel();
                 g_histCheckbox = histEnabled;
                 const hcb = document.getElementById('hist-checkbox');
                 if (hcb) hcb.checked = histEnabled;
@@ -543,7 +582,7 @@ function fetchOccupancy() {
         occTotal = data.total || 0;
         // redraw if currently showing occupancy
         const mt = document.getElementById('color-metric').value;
-        if (mt === 'occupancy' || mt === 'occupancy_tcut') {
+        if (mt === 'occupancy') {
             syncRangeFromHist();
             drawGeo();
         }
@@ -642,6 +681,7 @@ function init(){
     document.getElementById('ev-input').onchange=e=>{const v=parseInt(e.target.value);if(v>=1&&v<=totalEvents)loadEvent(v);};
     document.getElementById('color-metric').onchange=()=>{rangeUserEdited=false;syncRangeFromHist();drawGeo();};
     document.getElementById('log-scale').onchange=drawGeo;
+    document.getElementById('time-cut').onchange=drawGeo;
 
     // --- file browser ---
     document.getElementById('btn-open').onclick = openFileDialog;
@@ -694,6 +734,7 @@ function init(){
         loadEvent(parseInt(e.target.value));
     };
     document.getElementById('ring-select').onfocus=()=>{ updateRingSelector(); };
+    document.getElementById('follow-status').onclick=()=>{ autoFollow=true; updateFollowStatus(); loadLatestEvent(); };
     document.getElementById('btn-clear-hist').onclick=clearHistograms;
 
     // geo mouse
@@ -706,14 +747,18 @@ function init(){
             const key=`${m.roc}_${m.sl}_${m.ch}`;
             let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
             if(d&&d.pk&&d.pk.length){
-                let best=d.pk[0]; for(let j=1;j<d.pk.length;j++) if(d.pk[j].h>best.h) best=d.pk[j];
-                t+=`\nPed ${d.pm.toFixed(1)}  H ${best.h.toFixed(0)}  Int ${best.i.toFixed(0)}  T ${best.t.toFixed(0)}ns`;
+                const pks=peaksInCut(d.pk);
+                const bp=tallest(pks);
+                const tc=isTimeCut();
+                if(bp) t+=`\nPed ${d.pm.toFixed(1)}  H ${bp.h.toFixed(0)}  Int ${bp.i.toFixed(0)}  T ${bp.t.toFixed(0)}ns  Pk ${pks.length}${tc?' (tcut)':''}`;
+                else t+=`\nPed ${d.pm.toFixed(1)}  (no peaks${tc?' in time cut':''})`;
             }
             else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
             if(occTotal>0){
-                const o=100.0*(occData[key]||0)/occTotal;
-                const ot=100.0*(occTcutData[key]||0)/occTotal;
-                t+=`\nOcc ${o.toFixed(1)}%  Occ(t) ${ot.toFixed(1)}%  (${occTotal} evts)`;
+                const tc=isTimeCut();
+                const occ=tc?occTcutData:occData;
+                const pct=100.0*(occ[key]||0)/occTotal;
+                t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${tc?' tcut':''})`;
             } else if(histEnabled===false){
                 t+=`\nOcc: not computed (enable histograms)`;
             }
@@ -757,6 +802,7 @@ function init(){
         totalEvents=data.total_events||0;
         histEnabled=data.hist_enabled||false;
         histConfig=data.hist||{};
+        updateTimeCutLabel();
         mode=data.mode||'file';
         g_currentFile=data.current_file||'';
         g_dataDirEnabled=data.data_dir_enabled||false;
