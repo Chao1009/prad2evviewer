@@ -82,6 +82,10 @@ add_executable(evchan_test test/evchan_test.cpp)
 target_link_libraries(evchan_test PRIVATE prad2dec)
 set_target_properties(evchan_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(evio_dump test/evio_dump.cpp)
+target_link_libraries(evio_dump PRIVATE prad2dec)
+set_target_properties(evio_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ---------------------------------------------------------------------------
 # Event viewer
 # ---------------------------------------------------------------------------
