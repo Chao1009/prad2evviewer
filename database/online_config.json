@@ -1,8 +1,8 @@
 {
     "et": {
-        "host": "localhost",
+        "host": "clondaq6",
         "port": 11111,
-        "et_file": "/tmp/et_sys_prad2",
+        "et_file": "/et/clasprod",
         "station": "prad2_monitor"
     },
     "ring_buffer_size": 20
