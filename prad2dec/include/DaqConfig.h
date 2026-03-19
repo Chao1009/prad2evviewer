@@ -45,6 +45,9 @@ struct DaqConfig
     // Trigger Interface (TI) data bank tag (present in every ROC data block)
     uint32_t ti_bank_tag        = 0xE10A;
 
+    // JLab event number/type bank (depth 1, single-event mode)
+    uint32_t trigger_bank_tag   = 0xC000;
+
     // Run info bank (in TI master crate only)
     uint32_t run_info_tag       = 0xE10F;
 
@@ -69,6 +72,11 @@ struct DaqConfig
     int ti_trigger_type_word  = 0;
     int ti_trigger_type_shift = 24;
     uint32_t ti_trigger_type_mask = 0xFF;
+
+    // --- JLab trigger bank format (tag 0xC000, single-event mode) -----------
+    // 3 words: event_number, event_tag, reserved
+    int trig_event_number_word = 0;
+    int trig_event_type_word   = 1;
 
     // --- run info bank format (tag 0xE10F, in TI master crate) --------------
     int ri_run_number_word     = 1;

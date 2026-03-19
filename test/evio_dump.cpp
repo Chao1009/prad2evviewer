@@ -58,6 +58,13 @@ static std::string tag_label(uint32_t tag)
     if (tag == 0x14) return "END(legacy)";
     if (tag == 0xC1) return "SYNC(legacy)";
 
+    // JLab single-event physics
+    if (tag == 0xB1) return "PHYSICS(single)";
+    if (tag == 0xFE) return "PHYSICS(single)";
+
+    // JLab-specific banks
+    if (tag == 0xC000) return "TRIGGER_BANK";
+
     // EPICS
     if (tag == 0x1F) return "EPICS";
 

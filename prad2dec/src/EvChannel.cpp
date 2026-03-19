@@ -311,6 +311,15 @@ bool EvChannel::decodeTriggerBank(int event_idx, fdec::EventInfo &info) const
 
 bool EvChannel::decodeTI(fdec::EventInfo &info) const
 {
+    // --- JLab trigger bank (0xC000): event number and type ------------------
+    if (auto *tb = FindFirstByTag(config.trigger_bank_tag)) {
+        const uint32_t *d = GetData(*tb);
+        size_t nw = tb->data_words;
+        if (config.trig_event_number_word >= 0 &&
+            static_cast<size_t>(config.trig_event_number_word) < nw)
+            info.event_number = static_cast<int32_t>(d[config.trig_event_number_word]);
+    }
+
     // --- TI data bank (0xE10A): trigger type, trigger number, timestamp -----
     auto *ti = FindFirstByTag(config.ti_bank_tag);
     if (ti) {
