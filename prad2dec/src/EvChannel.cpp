@@ -50,7 +50,12 @@ bool EvChannel::Scan()
     if (config.is_control(evh.tag)) {
         nevents = 0;
     } else if (config.is_physics(evh.tag)) {
-        nevents = std::max<int>(evh.num, 1);
+        // CODA built-trigger (0xFF50-0xFF8F): num = event count in block.
+        // Single-event mode (0xFE etc.): num = session ID, always 1 event.
+        if (evh.tag >= 0xFF50 && evh.tag <= 0xFF8F)
+            nevents = std::max<int>(evh.num, 1);
+        else
+            nevents = 1;
     } else {
         // EPICS, sync, and other non-physics events: single "event"
         nevents = (evtype == EventType::Epics || evtype == EventType::Sync) ? 1 : 0;
@@ -163,36 +168,65 @@ const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) c
     return reinterpret_cast<const uint8_t*>(&buffer[inner.data_begin]);
 }
 
-// === TI timestamp extraction ================================================
+// === Trigger bank, TI timestamp, and run info extraction ====================
 
 bool EvChannel::decodeTI(fdec::EventInfo &info) const
 {
+    // --- trigger bank (0xC000): event number and type -----------------------
+    auto trig_nodes = FindByTag(config.trigger_bank_tag);
+    if (!trig_nodes.empty()) {
+        const EvNode &tb = *trig_nodes[0];
+        const uint32_t *d = GetData(tb);
+        size_t nw = tb.data_words;
+        if (config.trig_event_number_word >= 0 &&
+            static_cast<size_t>(config.trig_event_number_word) < nw)
+            info.event_number = static_cast<int32_t>(d[config.trig_event_number_word]);
+    }
+
+    // --- TI data bank (0xE10A): trigger number + 48-bit timestamp -----------
     auto ti_nodes = FindByTag(config.ti_bank_tag);
-    if (ti_nodes.empty()) return false;
+    if (!ti_nodes.empty()) {
+        const EvNode &ti = *ti_nodes[0];
+        const uint32_t *d = GetData(ti);
+        size_t nw = ti.data_words;
 
-    const EvNode &ti = *ti_nodes[0];
-    const uint32_t *data = GetData(ti);
-    size_t nwords = ti.data_words;
+        // trigger number
+        if (config.ti_trigger_word >= 0 &&
+            static_cast<size_t>(config.ti_trigger_word) < nw)
+            info.trigger_number = static_cast<int32_t>(d[config.ti_trigger_word]);
 
-    // extract 48-bit timestamp: high 16 bits + low 32 bits
-    int lo = config.ti_time_low_word;
-    int hi = config.ti_time_high_word;
+        // 48-bit timestamp
+        int lo = config.ti_time_low_word;
+        int hi = config.ti_time_high_word;
+        if (lo >= 0 && hi >= 0 &&
+            static_cast<size_t>(lo) < nw &&
+            static_cast<size_t>(hi) < nw)
+        {
+            uint64_t time_low  = d[lo];
+            uint64_t time_high = (d[hi] & config.ti_time_high_mask);
+            if (config.ti_time_high_shift > 0)
+                time_high >>= config.ti_time_high_shift;
+            info.timestamp = (time_high << 32) | time_low;
+        }
+    }
 
-    if (lo < 0 || hi < 0 ||
-        static_cast<size_t>(lo) >= nwords ||
-        static_cast<size_t>(hi) >= nwords)
-        return false;
+    // --- run info bank (0xE10F, in TI master crate) -------------------------
+    auto ri_nodes = FindByTag(config.run_info_tag);
+    if (!ri_nodes.empty()) {
+        const EvNode &ri = *ri_nodes[0];
+        const uint32_t *d = GetData(ri);
+        size_t nw = ri.data_words;
 
-    uint64_t time_low  = data[lo];
-    uint64_t time_high = data[hi] & config.ti_time_high_mask;
+        if (config.ri_run_number_word >= 0 &&
+            static_cast<size_t>(config.ri_run_number_word) < nw)
+            info.run_number = d[config.ri_run_number_word];
 
-    info.timestamp = (time_high << 32) | time_low;
+        if (config.ri_unix_time_word >= 0 &&
+            static_cast<size_t>(config.ri_unix_time_word) < nw)
+            info.unix_time = d[config.ri_unix_time_word];
+    }
 
-    // trigger number from first word (common TI format)
-    if (nwords > 0)
-        info.trigger_number = static_cast<int32_t>(data[0]);
-
-    return true;
+    return !ti_nodes.empty();
 }
 
 // === DecodeEvent ============================================================

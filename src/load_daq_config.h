@@ -15,7 +15,7 @@
 namespace evc
 {
 
-// parse hex string like "0xFF50" to uint32_t
+// parse hex string like "0xFF50" or plain integer to uint32_t
 inline uint32_t parse_hex(const nlohmann::json &j)
 {
     if (j.is_number()) return j.get<uint32_t>();
@@ -32,7 +32,7 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     }
 
     nlohmann::json j;
-    try { j = nlohmann::json::parse(f); }
+    try { j = nlohmann::json::parse(f, nullptr, true, true); } // allow comments
     catch (const nlohmann::json::parse_error &e) {
         std::cerr << "load_daq_config: parse error: " << e.what() << std::endl;
         return false;
@@ -55,15 +55,34 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
         auto &bt = j["bank_tags"];
         if (bt.contains("fadc_composite")) cfg.fadc_composite_tag = parse_hex(bt["fadc_composite"]);
         if (bt.contains("ti_data"))        cfg.ti_bank_tag        = parse_hex(bt["ti_data"]);
+        if (bt.contains("trigger_bank"))   cfg.trigger_bank_tag   = parse_hex(bt["trigger_bank"]);
+        if (bt.contains("run_info"))       cfg.run_info_tag       = parse_hex(bt["run_info"]);
+        if (bt.contains("daq_config"))     cfg.daq_config_tag     = parse_hex(bt["daq_config"]);
         if (bt.contains("epics_data"))     cfg.epics_bank_tag     = parse_hex(bt["epics_data"]);
     }
 
     // TI format
     if (j.contains("ti_format")) {
         auto &ti = j["ti_format"];
-        if (ti.contains("time_low_word"))  cfg.ti_time_low_word  = ti["time_low_word"].get<int>();
-        if (ti.contains("time_high_word")) cfg.ti_time_high_word = ti["time_high_word"].get<int>();
-        if (ti.contains("time_high_mask")) cfg.ti_time_high_mask = static_cast<int>(parse_hex(ti["time_high_mask"]));
+        if (ti.contains("time_low_word"))   cfg.ti_time_low_word   = ti["time_low_word"].get<int>();
+        if (ti.contains("time_high_word"))  cfg.ti_time_high_word  = ti["time_high_word"].get<int>();
+        if (ti.contains("time_high_mask"))  cfg.ti_time_high_mask  = parse_hex(ti["time_high_mask"]);
+        if (ti.contains("time_high_shift")) cfg.ti_time_high_shift = ti["time_high_shift"].get<int>();
+    }
+
+    // trigger bank format
+    if (j.contains("trigger_bank")) {
+        auto &tb = j["trigger_bank"];
+        if (tb.contains("event_number_word")) cfg.trig_event_number_word = tb["event_number_word"].get<int>();
+        if (tb.contains("event_type_word"))   cfg.trig_event_type_word   = tb["event_type_word"].get<int>();
+    }
+
+    // run info format
+    if (j.contains("run_info")) {
+        auto &ri = j["run_info"];
+        if (ri.contains("run_number_word"))     cfg.ri_run_number_word   = ri["run_number_word"].get<int>();
+        if (ri.contains("event_count_word"))    cfg.ri_event_count_word  = ri["event_count_word"].get<int>();
+        if (ri.contains("unix_timestamp_word")) cfg.ri_unix_time_word    = ri["unix_timestamp_word"].get<int>();
     }
 
     // ROC tags
@@ -76,6 +95,10 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             cfg.roc_tags.push_back(re);
         }
     }
+
+    // TI master
+    if (j.contains("ti_master_tag"))
+        cfg.ti_master_tag = parse_hex(j["ti_master_tag"]);
 
     return true;
 }

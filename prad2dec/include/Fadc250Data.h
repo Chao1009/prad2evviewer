@@ -63,19 +63,25 @@ struct RocData {
     }
 };
 
-// --- event-level information (extracted from TI bank + event header) --------
+// --- event-level information (extracted from TI bank + trigger bank) ---------
 struct EventInfo {
     uint8_t  type;              // evc::EventType cast to uint8_t
     uint32_t event_tag;         // top-level bank tag (raw)
-    int32_t  trigger_number;    // trigger/event number
-    uint64_t timestamp;         // absolute 48-bit timestamp from TI
+    int32_t  event_number;      // from trigger bank (0xC000) or TI
+    int32_t  trigger_number;    // from TI data bank
+    uint64_t timestamp;         // 48-bit TI timestamp (250MHz ticks)
+    uint32_t run_number;        // from run info bank (0xE10F), 0 if absent
+    uint32_t unix_time;         // from run info bank, 0 if absent
 
     void clear()
     {
         type = 0;
         event_tag = 0;
+        event_number = 0;
         trigger_number = 0;
         timestamp = 0;
+        run_number = 0;
+        unix_time = 0;
     }
 };
 
