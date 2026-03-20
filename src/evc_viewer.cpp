@@ -607,15 +607,22 @@ static json computeClusters(int ev1)
             hits_j[std::to_string(i)] = std::round(mod_energy[i] * 100) / 100;
     }
 
-    // build cluster array
+    // build cluster array (only clusters that pass reconstruction thresholds)
+    // ReconstructHits iterates clusters_ in order and skips those below threshold.
+    // We mirror that iteration to pair each reco_hit with its source cluster.
     std::vector<fdec::ClusterHit> reco_hits;
     clusterer.ReconstructHits(reco_hits);
     auto &clusters = clusterer.GetClusters();
 
     json cl_arr = json::array();
-    for (size_t ci = 0; ci < clusters.size(); ++ci) {
-        auto &cl = clusters[ci];
-        auto &rh = reco_hits[ci];
+    size_t rhi = 0;
+    for (auto &cl : clusters) {
+        // skip same clusters that ReconstructHits skips
+        if (cl.energy < g_island_cfg.min_cluster_energy) continue;
+        if (static_cast<int>(cl.hits.size()) < g_island_cfg.min_cluster_size) continue;
+        if (rhi >= reco_hits.size()) break;
+
+        auto &rh = reco_hits[rhi++];
         auto &cmod = g_hycal.module(cl.center.index);
 
         json indices = json::array();
@@ -623,7 +630,7 @@ static json computeClusters(int ev1)
             indices.push_back(h.index);
 
         cl_arr.push_back({
-            {"id", (int)ci},
+            {"id", static_cast<int>(cl_arr.size())},
             {"center", cmod.name},
             {"center_id", cmod.id},
             {"x", std::round(rh.x * 10) / 10},
@@ -989,8 +996,12 @@ int main(int argc, char *argv[])
         };
         if (rcfg.contains("hycal_cluster"))
             loadClCfg(rcfg["hycal_cluster"], g_cluster_cfg);
-        if (rcfg.contains("island_cluster"))
+        if (rcfg.contains("island_cluster")) {
             loadClCfg(rcfg["island_cluster"], g_island_cfg);
+            std::cerr << "Island cfg: min_mod=" << g_island_cfg.min_module_energy
+                      << " min_center=" << g_island_cfg.min_center_energy
+                      << " min_cluster=" << g_island_cfg.min_cluster_energy << "\n";
+        }
         if (rcfg.contains("calibration")) {
             auto &cal = rcfg["calibration"];
             if (cal.contains("adc_to_mev")) g_adc_to_mev = cal["adc_to_mev"];

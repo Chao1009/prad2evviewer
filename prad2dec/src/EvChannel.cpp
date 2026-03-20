@@ -322,6 +322,7 @@ bool EvChannel::decodeTI(fdec::EventInfo &info) const
     }
 
     // --- TI data bank (0xE10A) from any ROC: trigger number, timestamp ------
+    // Also extract trigger bits here (PRad puts trigger type in every TI bank).
     auto *ti = FindFirstByTag(config.ti_bank_tag);
     if (ti) {
         const uint32_t *d = GetData(*ti);
@@ -330,6 +331,15 @@ bool EvChannel::decodeTI(fdec::EventInfo &info) const
         if (config.ti_trigger_word >= 0 &&
             static_cast<size_t>(config.ti_trigger_word) < nw)
             info.trigger_number = static_cast<int32_t>(d[config.ti_trigger_word]);
+
+        // trigger bits from first TI bank (overridden later if TI master found)
+        if (config.ti_trigger_type_word >= 0 &&
+            static_cast<size_t>(config.ti_trigger_type_word) < nw)
+        {
+            info.trigger_bits = (d[config.ti_trigger_type_word]
+                                 >> config.ti_trigger_type_shift)
+                                & config.ti_trigger_type_mask;
+        }
 
         int lo = config.ti_time_low_word;
         int hi = config.ti_time_high_word;
