@@ -595,7 +595,9 @@ static json computeClusters(int ev1)
               << "  E=[" << (nhits ? emin : 0) << ", " << emax << "]"
               << "  Esum=" << esum
               << "  evnum=" << event.info.event_number
-              << "  trigger=" << event.info.trigger_number
+              << "  trig_num=" << event.info.trigger_number
+              << "  trig_bits=0x" << std::hex << event.info.trigger_bits << std::dec
+              << "  ts=" << event.info.timestamp
               << "\n";
 
     clusterer.FormClusters();
