@@ -39,11 +39,14 @@
     },
 
     "roc_tags": [
-        {"tag": "0x01", "name": "PRadTS",    "crate": 0},
-        {"tag": "0x04", "name": "PRadROC_1", "crate": 1},
-        {"tag": "0x05", "name": "PRadROC_2", "crate": 2},
-        {"tag": "0x06", "name": "PRadROC_3", "crate": 3}
+        {"tag": "0x01", "name": "PRadTS",    "crate": 1},
+        {"tag": "0x04", "name": "PRadROC_1", "crate": 4},
+        {"tag": "0x05", "name": "PRadROC_2", "crate": 5},
+        {"tag": "0x06", "name": "PRadROC_3", "crate": 6}
     ],
 
-    "ti_master_tag": "0x01"
+    "ti_master_tag": "0x01",
+
+    "pedestal_file": "prad1/adc1881m_pedestals.json",
+    "daq_map_file": "prad1/prad_daq_map.json"
 }

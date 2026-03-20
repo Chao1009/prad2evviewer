@@ -858,11 +858,23 @@ int main(int argc, char *argv[])
 
     // load DAQ configuration (default = PRad-II, override with --daq-config)
     if (!daq_config_file.empty()) {
-        if (evc::load_daq_config(daq_config_file, g_daq_cfg))
+        if (evc::load_daq_config(daq_config_file, g_daq_cfg)) {
             std::cerr << "DAQ config: " << daq_config_file
                       << " (adc_format=" << g_daq_cfg.adc_format << ")\n";
-        else
+            // load pedestal file if specified in the DAQ config
+            std::ifstream dcf(daq_config_file);
+            if (dcf.is_open()) {
+                auto dcj = json::parse(dcf, nullptr, false, true);
+                if (dcj.contains("pedestal_file")) {
+                    std::string ped_file = findFile(dcj["pedestal_file"].get<std::string>(), db_dir);
+                    if (evc::load_pedestals(ped_file, g_daq_cfg))
+                        std::cerr << "Pedestals : " << ped_file
+                                  << " (" << g_daq_cfg.pedestals.size() << " channels)\n";
+                }
+            }
+        } else {
             std::cerr << "Warning: failed to load DAQ config: " << daq_config_file << "\n";
+        }
     }
 
     // always load histogram config (needed if user enables hist via GUI later)
@@ -898,8 +910,19 @@ int main(int argc, char *argv[])
     if (readFile(g_res_dir + "/viewer.html").empty())
         std::cerr << "Warning: viewer.html not found in " << g_res_dir << "\n";
 
-    std::string modules_file = findFile("hycal_modules.json", db_dir);
-    std::string daq_file    = findFile("daq_map.json", db_dir);
+    // module/DAQ files: allow override from DAQ config
+    std::string modules_filename = "hycal_modules.json";
+    std::string daq_filename     = "daq_map.json";
+    if (!daq_config_file.empty()) {
+        std::ifstream dcf2(daq_config_file);
+        if (dcf2.is_open()) {
+            auto dcj2 = json::parse(dcf2, nullptr, false, true);
+            if (dcj2.contains("modules_file")) modules_filename = dcj2["modules_file"].get<std::string>();
+            if (dcj2.contains("daq_map_file")) daq_filename = dcj2["daq_map_file"].get<std::string>();
+        }
+    }
+    std::string modules_file = findFile(modules_filename, db_dir);
+    std::string daq_file     = findFile(daq_filename, db_dir);
 
     json modules_j = json::array(), daq_j = json::array();
     { std::string s = readFile(modules_file);

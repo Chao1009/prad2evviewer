@@ -101,8 +101,9 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
         cfg.roc_tags.clear();
         for (auto &entry : j["roc_tags"]) {
             DaqConfig::RocEntry re;
-            re.tag  = parse_hex(entry["tag"]);
-            re.name = entry.value("name", "");
+            re.tag   = parse_hex(entry["tag"]);
+            re.name  = entry.value("name", "");
+            re.crate = entry.value("crate", -1);
             cfg.roc_tags.push_back(re);
         }
     }
@@ -111,6 +112,38 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     if (j.contains("ti_master_tag"))
         cfg.ti_master_tag = parse_hex(j["ti_master_tag"]);
 
+    // pedestal file (loaded separately if specified)
+    // Handled by the caller via load_pedestals()
+
+    return true;
+}
+
+// Load per-channel pedestals from JSON file.
+// Format: [{"crate":6,"slot":23,"channel":0,"mean":297.878,"rms":2.6972}, ...]
+inline bool load_pedestals(const std::string &path, DaqConfig &cfg)
+{
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        std::cerr << "load_pedestals: cannot open " << path << std::endl;
+        return false;
+    }
+
+    nlohmann::json j;
+    try { j = nlohmann::json::parse(f, nullptr, true, true); }
+    catch (const nlohmann::json::parse_error &e) {
+        std::cerr << "load_pedestals: parse error: " << e.what() << std::endl;
+        return false;
+    }
+
+    cfg.pedestals.clear();
+    for (auto &entry : j) {
+        int crate   = entry.value("crate", 0);
+        int slot    = entry.value("slot", 0);
+        int channel = entry.value("channel", 0);
+        float mean  = entry.value("mean", 0.f);
+        float rms   = entry.value("rms", 0.f);
+        cfg.pedestals[DaqConfig::pack_daq_key(crate, slot, channel)] = {mean, rms};
+    }
     return true;
 }
 

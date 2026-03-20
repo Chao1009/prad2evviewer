@@ -417,6 +417,29 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt) const
 
             fdec::Adc1881mDecoder::DecodeRoc(GetData(n), n.data_words, roc);
 
+            // pedestal subtraction: find crate index for this ROC tag
+            if (!config.pedestals.empty()) {
+                int crate = -1;
+                for (auto &re : config.roc_tags)
+                    if (re.tag == roc_tag) { crate = re.crate; break; }
+                if (crate >= 0) {
+                    for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+                        auto &slot = roc.slots[s];
+                        if (!slot.present) continue;
+                        for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
+                            if (!(slot.channel_mask & (1ull << c))) continue;
+                            auto &cd = slot.channels[c];
+                            if (cd.nsamples != 1) continue;
+                            auto *ped = config.get_pedestal(crate, s, c);
+                            if (ped) {
+                                int sub = static_cast<int>(cd.samples[0]) - static_cast<int>(ped->mean + 0.5f);
+                                cd.samples[0] = (sub > 0) ? static_cast<uint16_t>(sub) : 0;
+                            }
+                        }
+                    }
+                }
+            }
+
             evt.roc_index[roc_idx] = roc_idx;
             roc_idx++;
         }

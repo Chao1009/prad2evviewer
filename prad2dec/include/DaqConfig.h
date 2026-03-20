@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 namespace evc
 {
@@ -95,11 +96,31 @@ struct DaqConfig
     struct RocEntry {
         uint32_t    tag;
         std::string name;
+        int         crate = -1;
     };
     std::vector<RocEntry> roc_tags;
 
     // TI master crate tag (contains run info bank)
     uint32_t ti_master_tag = 0x27;
+
+    // --- per-channel pedestals (ADC1881M) ------------------------------------
+    struct PedEntry { float mean = 0.f; float rms = 0.f; };
+
+    // pedestal lookup: packed key (crate<<32 | slot<<16 | channel) → PedEntry
+    std::unordered_map<uint64_t, PedEntry> pedestals;
+
+    static uint64_t pack_daq_key(int crate, int slot, int ch)
+    {
+        return (static_cast<uint64_t>(crate) << 32) |
+               (static_cast<uint64_t>(slot)  << 16) |
+               static_cast<uint64_t>(ch);
+    }
+
+    const PedEntry *get_pedestal(int crate, int slot, int ch) const
+    {
+        auto it = pedestals.find(pack_daq_key(crate, slot, ch));
+        return (it != pedestals.end()) ? &it->second : nullptr;
+    }
 
     // --- helpers ------------------------------------------------------------
     bool is_physics(uint32_t tag) const
