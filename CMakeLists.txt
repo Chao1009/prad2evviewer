@@ -110,6 +110,14 @@ target_link_libraries(evc_monitor PRIVATE
 set_target_properties(evc_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
+# Qt WebEngine monitor client (optional)
+# ---------------------------------------------------------------------------
+option(BUILD_GUI "Build the Qt5 WebEngine monitor client" OFF)
+if(BUILD_GUI)
+    add_subdirectory(prad2_monitor)
+endif()
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 message(STATUS "----------------------------------------------------")
@@ -117,4 +125,5 @@ message(STATUS "  ${PROJECT_NAME} ${PROJECT_VERSION}")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Database     : ${DATABASE_DIR}")
 message(STATUS "  Resources    : ${RESOURCE_DIR}")
+message(STATUS "  Qt client    : ${BUILD_GUI}")
 message(STATUS "----------------------------------------------------")

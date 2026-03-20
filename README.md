@@ -16,6 +16,12 @@ CMake ≥ 3.14, C++17. Dependencies (`evio`, `et`, `nlohmann/json`, `websocketpp
 cmake .. -DEVIO_SOURCE=prebuilt -DET_SOURCE=prebuilt
 ```
 
+To build the Qt5 WebEngine monitor client:
+
+```bash
+cmake .. -DBUILD_GUI=ON
+```
+
 ## Event Viewer
 
 ```bash
@@ -60,6 +66,16 @@ Connects to a running ET system. Same GUI as the file viewer, plus:
 - Auto-follows latest event; press **F** to resume after browsing
 
 Events arrive via a background reader thread. The browser gets WebSocket push notifications, throttled to avoid flooding.
+
+## Monitor Client (Qt)
+
+A lightweight Qt5 WebEngine wrapper — just a dedicated browser window for the viewer or monitor.
+
+```bash
+prad2_monitor [url]          # default: http://localhost:8080
+```
+
+Requires Qt5 Widgets and WebEngineWidgets. Only built when `-DBUILD_GUI=ON` is set.
 
 ## Test Tools
 
@@ -117,6 +133,7 @@ resources/
 src/
     evc_viewer.cpp            File viewer (HTTP + evio decoder)
     evc_monitor.cpp           Online monitor (ET + WebSocket)
+prad2_monitor/                → Qt5 WebEngine client (optional, -DBUILD_GUI=ON)
 test/
     test_main.cpp             CLI decode/count tool
     et_feeder.cpp             Replay evio → ET
