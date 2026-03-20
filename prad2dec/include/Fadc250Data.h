@@ -15,7 +15,7 @@ namespace fdec
 // --- capacity limits (adjust to match your hardware) ------------------------
 static constexpr int MAX_SAMPLES  = 200;   // samples per channel per event
 static constexpr int MAX_CHANNELS = 64;    // channels per slot (16 for FADC250, 64 for ADC1881M)
-static constexpr int MAX_SLOTS    = 22;    // slot IDs 0..21 (VME slots 3-20 typical)
+static constexpr int MAX_SLOTS    = 32;    // slot IDs 0..31 (VME 3-20, Fastbus 0-25)
 static constexpr int MAX_ROCS     = 10;    // number of ROC crates
 
 // --- per-channel data -------------------------------------------------------
