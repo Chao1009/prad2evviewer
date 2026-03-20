@@ -67,10 +67,13 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     // TI format
     if (j.contains("ti_format")) {
         auto &ti = j["ti_format"];
-        if (ti.contains("time_low_word"))   cfg.ti_time_low_word   = ti["time_low_word"].get<int>();
-        if (ti.contains("time_high_word"))  cfg.ti_time_high_word  = ti["time_high_word"].get<int>();
-        if (ti.contains("time_high_mask"))  cfg.ti_time_high_mask  = parse_hex(ti["time_high_mask"]);
-        if (ti.contains("time_high_shift")) cfg.ti_time_high_shift = ti["time_high_shift"].get<int>();
+        if (ti.contains("time_low_word"))       cfg.ti_time_low_word       = ti["time_low_word"].get<int>();
+        if (ti.contains("time_high_word"))      cfg.ti_time_high_word      = ti["time_high_word"].get<int>();
+        if (ti.contains("time_high_mask"))      cfg.ti_time_high_mask      = parse_hex(ti["time_high_mask"]);
+        if (ti.contains("time_high_shift"))     cfg.ti_time_high_shift     = ti["time_high_shift"].get<int>();
+        if (ti.contains("trigger_type_word"))   cfg.ti_trigger_type_word   = ti["trigger_type_word"].get<int>();
+        if (ti.contains("trigger_type_shift"))  cfg.ti_trigger_type_shift  = ti["trigger_type_shift"].get<int>();
+        if (ti.contains("trigger_type_mask"))   cfg.ti_trigger_type_mask   = parse_hex(ti["trigger_type_mask"]);
     }
 
     // trigger bank format (0xC000)
