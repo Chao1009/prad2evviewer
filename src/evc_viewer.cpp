@@ -149,7 +149,7 @@ static evc::DaqConfig g_daq_cfg;              // DAQ configuration (default = PR
 
 static fdec::HyCalSystem g_hycal;
 static fdec::ClusterConfig g_cluster_cfg;
-static fdec::ClusterConfig g_island_cfg;
+static uint32_t g_cluster_skip_mask = 0;  // skip clustering if any of these trigger bits are set
 static float g_adc_to_mev = 1.0f;
 static std::unordered_map<int, int> g_roc_to_crate;  // ROC tag → crate index
 
@@ -550,7 +550,15 @@ static json computeClusters(int ev1)
 
     // per-request clusterer (lightweight, no mutex needed)
     fdec::HyCalCluster clusterer(g_hycal);
-    clusterer.SetConfig(g_island_cfg);
+    clusterer.SetConfig(g_cluster_cfg);
+
+    // skip clustering for certain trigger types (e.g. LMS calibration, pedestal)
+    if (g_cluster_skip_mask != 0 &&
+        (event.info.trigger_bits & g_cluster_skip_mask)) {
+        return {{"event", ev1}, {"hits", json::object()}, {"clusters", json::array()},
+                {"info", "trigger filtered (bits=0x" +
+                 ([&]{ char buf[16]; snprintf(buf,sizeof(buf),"%x",event.info.trigger_bits); return std::string(buf); })() + ")"}};
+    }
 
     // collect per-module energies
     int nmod = g_hycal.module_count();
@@ -656,8 +664,8 @@ static json computeClusters(int ev1)
     size_t rhi = 0;
     for (auto &cl : clusters) {
         // skip same clusters that ReconstructHits skips
-        if (cl.energy < g_island_cfg.min_cluster_energy) continue;
-        if (static_cast<int>(cl.hits.size()) < g_island_cfg.min_cluster_size) continue;
+        if (cl.energy < g_cluster_cfg.min_cluster_energy) continue;
+        if (static_cast<int>(cl.hits.size()) < g_cluster_cfg.min_cluster_size) continue;
         if (rhi >= reco_hits.size()) break;
 
         auto &rh = reco_hits[rhi++];
@@ -1032,13 +1040,18 @@ int main(int argc, char *argv[])
             if (hc.contains("least_split"))        cfg.least_split        = hc["least_split"];
             if (hc.contains("log_weight_thres"))   cfg.log_weight_thres   = hc["log_weight_thres"];
         };
-        if (rcfg.contains("hycal_cluster"))
-            loadClCfg(rcfg["hycal_cluster"], g_cluster_cfg);
-        if (rcfg.contains("island_cluster")) {
-            loadClCfg(rcfg["island_cluster"], g_island_cfg);
-            std::cerr << "Island cfg: min_mod=" << g_island_cfg.min_module_energy
-                      << " min_center=" << g_island_cfg.min_center_energy
-                      << " min_cluster=" << g_island_cfg.min_cluster_energy << "\n";
+        if (rcfg.contains("clustering")) {
+            auto &cc = rcfg["clustering"];
+            loadClCfg(cc, g_cluster_cfg);
+            if (cc.contains("skip_trigger_bits")) {
+                g_cluster_skip_mask = 0;
+                for (auto &b : cc["skip_trigger_bits"])
+                    g_cluster_skip_mask |= (1u << b.get<int>());
+            }
+            std::cerr << "Clustering: min_mod=" << g_cluster_cfg.min_module_energy
+                      << " min_center=" << g_cluster_cfg.min_center_energy
+                      << " min_cluster=" << g_cluster_cfg.min_cluster_energy
+                      << " skip_mask=0x" << std::hex << g_cluster_skip_mask << std::dec << "\n";
         }
         if (rcfg.contains("calibration")) {
             auto &cal = rcfg["calibration"];
