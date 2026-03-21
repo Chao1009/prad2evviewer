@@ -93,7 +93,7 @@ set_target_properties(ped_calc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINAR
 # ---------------------------------------------------------------------------
 # Event viewer
 # ---------------------------------------------------------------------------
-add_executable(evc_viewer src/evc_viewer.cpp)
+add_executable(evc_viewer src/evc_viewer.cpp src/app_state.cpp)
 target_compile_definitions(evc_viewer PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"
@@ -110,7 +110,7 @@ set_target_properties(evc_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # ---------------------------------------------------------------------------
 # Online monitor
 # ---------------------------------------------------------------------------
-add_executable(evc_monitor src/evc_monitor.cpp)
+add_executable(evc_monitor src/evc_monitor.cpp src/app_state.cpp)
 target_compile_definitions(evc_monitor PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"

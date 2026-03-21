@@ -454,7 +454,7 @@ static void buildHistograms(const std::string &path, FileData &fd,
                             if (cd.nsamples <= 0) continue;
 
                             const auto *mod = g_hycal.module_by_daq(crate, s, c);
-                            if (!mod || !mod->is_hycal()) continue;
+                            if (!mod) continue;  // include LMS modules
 
                             float val = 0;
                             if (is_adc1881m_lms) {
