@@ -2,6 +2,7 @@
     "_comment": "DAQ configuration for original PRad experiment — Fastbus ADC1881M readout",
 
     "adc_format": "adc1881m",
+    "sparsify_sigma": 5.0,
 
     "event_tags": {
         "_comment": "PRad uses CODA2 event tags: 0x81 = physics, 0xC1 = sync",

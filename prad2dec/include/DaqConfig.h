@@ -43,6 +43,10 @@ struct DaqConfig
     // "adc1881m" — Fastbus ADC1881M raw words (PRad)
     std::string adc_format = "fadc250";
 
+    // Zero-suppression threshold for ADC1881M (in units of pedestal sigma).
+    // Channels with (raw - ped_mean) < sparsify_sigma * ped_rms are suppressed.
+    float sparsify_sigma = 0.f;  // 0 = disabled
+
     // --- bank tags within physics events ------------------------------------
 
     // FADC250 composite data bank tag (used when adc_format == "fadc250")

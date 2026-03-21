@@ -57,6 +57,10 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     if (j.contains("adc_format"))
         cfg.adc_format = j["adc_format"].get<std::string>();
 
+    // zero-suppression threshold (in sigma)
+    if (j.contains("sparsify_sigma"))
+        cfg.sparsify_sigma = j["sparsify_sigma"].get<float>();
+
     // bank tags
     if (j.contains("bank_tags")) {
         auto &bt = j["bank_tags"];

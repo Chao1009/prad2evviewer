@@ -427,7 +427,7 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt) const
 
             fdec::Adc1881mDecoder::DecodeRoc(GetData(n), n.data_words, roc);
 
-            // pedestal subtraction: find crate index for this ROC tag
+            // pedestal subtraction + zero suppression
             if (!config.pedestals.empty()) {
                 int crate = -1;
                 for (auto &re : config.roc_tags)
@@ -442,8 +442,17 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt) const
                             if (cd.nsamples != 1) continue;
                             auto *ped = config.get_pedestal(crate, s, c);
                             if (ped) {
-                                int sub = static_cast<int>(cd.samples[0]) - static_cast<int>(ped->mean + 0.5f);
-                                cd.samples[0] = (sub > 0) ? static_cast<uint16_t>(sub) : 0;
+                                float raw = static_cast<float>(cd.samples[0]);
+                                float threshold = ped->mean + config.sparsify_sigma * ped->rms;
+                                if (config.sparsify_sigma > 0.f && raw < threshold) {
+                                    // below threshold: suppress channel
+                                    cd.nsamples = 0;
+                                    slot.channel_mask &= ~(1ull << c);
+                                    slot.nchannels--;
+                                } else {
+                                    int sub = static_cast<int>(raw) - static_cast<int>(ped->mean + 0.5f);
+                                    cd.samples[0] = (sub > 0) ? static_cast<uint16_t>(sub) : 0;
+                                }
                             }
                         }
                     }
