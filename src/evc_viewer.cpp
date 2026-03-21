@@ -153,6 +153,42 @@ static fdec::ClusterConfig g_island_cfg;
 static float g_adc_to_mev = 1.0f;
 static std::unordered_map<int, int> g_roc_to_crate;  // ROC tag → crate index
 
+// cached file reader — keeps EvChannel open between requests for fast sequential access
+static struct CachedReader {
+    EvChannel ch;
+    std::string filepath;
+    int current_buf = 0;
+    std::mutex mtx;
+
+    std::string seekTo(const std::string &path, int buf_num)
+    {
+        if (path != filepath || buf_num < current_buf) {
+            ch.Close();
+            ch.SetConfig(g_daq_cfg);
+            if (ch.Open(path) != status::success) {
+                filepath.clear(); current_buf = 0;
+                return "cannot open file";
+            }
+            filepath = path;
+            current_buf = 0;
+        }
+        while (current_buf < buf_num) {
+            if (ch.Read() != status::success) {
+                ch.Close(); filepath.clear(); current_buf = 0;
+                return "read error";
+            }
+            current_buf++;
+        }
+        return "";
+    }
+
+    void invalidate() {
+        ch.Close();
+        filepath.clear();
+        current_buf = 0;
+    }
+} g_reader;
+
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
@@ -413,49 +449,6 @@ static void loadFileAsync(const std::string &filepath)
     g_progress.phase = 0;
     std::cerr << "  Ready\n";
 }
-
-// -------------------------------------------------------------------------
-// Cached file reader — keeps the EvChannel open between requests
-// -------------------------------------------------------------------------
-static struct CachedReader {
-    EvChannel ch;
-    std::string filepath;
-    int current_buf = 0;   // number of buffers read so far
-    std::mutex mtx;
-
-    // Seek to buffer buf_num (1-based). Reuses current position if possible.
-    // Returns empty string on success, error message on failure.
-    std::string seekTo(const std::string &path, int buf_num)
-    {
-        // reopen if different file or need to go backwards
-        if (path != filepath || buf_num < current_buf) {
-            ch.Close();
-            ch.SetConfig(g_daq_cfg);
-            if (ch.Open(path) != status::success) {
-                filepath.clear(); current_buf = 0;
-                return "cannot open file";
-            }
-            filepath = path;
-            current_buf = 0;
-        }
-
-        // read forward to target buffer
-        while (current_buf < buf_num) {
-            if (ch.Read() != status::success) {
-                ch.Close(); filepath.clear(); current_buf = 0;
-                return "read error";
-            }
-            current_buf++;
-        }
-        return "";
-    }
-
-    void invalidate() {
-        ch.Close();
-        filepath.clear();
-        current_buf = 0;
-    }
-} g_reader;
 
 // -------------------------------------------------------------------------
 // Decode raw event from file (shared by decodeEvent and computeClusters)
