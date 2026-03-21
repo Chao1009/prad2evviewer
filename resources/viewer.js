@@ -686,7 +686,13 @@ function switchTab(tab){
     document.getElementById('detail-panel').style.display = isDQ ? 'flex' : 'none';
     document.getElementById('cluster-panel').style.display = isDQ ? 'none' : 'flex';
     if(tab==='cluster') {
+        selectedModule=null;  // clear DQ selection highlight
         loadClusterData(currentEvent);
+        // Plotly can't size in hidden divs — resize now that panel is visible
+        setTimeout(()=>{
+            try{Plotly.Plots.resize('cl-energy-hist');}catch(e){}
+            plotClHist();
+        }, 50);
     } else {
         drawGeo();
     }
@@ -1128,15 +1134,26 @@ function init(){
     geoCanvas.addEventListener('click',e=>{
         const r=geoCanvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);
         if(!m) return;
-        if(activeTab==='cluster' && clusterData){
+        if(activeTab==='cluster'){
+            selectedModule=null;  // clear DQ selection
+            if(!clusterData || !clusterData.clusters || !clusterData.clusters.length){
+                selectedCluster=-1;
+                drawClusterGeo(); updateClusterTable(); showClusterDetail();
+                return;
+            }
             // find cluster for this module
             const idx=modules.indexOf(m);
-            const clusters=clusterData.clusters||[];
+            const clusters=clusterData.clusters;
             let found=-1;
             for(let ci=0;ci<clusters.length;ci++){
                 if(clusters[ci].modules&&clusters[ci].modules.includes(idx)){ found=ci; break; }
             }
-            selectedCluster=(selectedCluster===found)?-1:found;
+            if(found<0){
+                // clicked outside any cluster — deselect
+                selectedCluster=-1;
+            } else {
+                selectedCluster=(selectedCluster===found)?-1:found;
+            }
             document.getElementById('cl-select').value=selectedCluster>=0?selectedCluster:'all';
             drawClusterGeo(); updateClusterTable(); showClusterDetail();
         } else {
