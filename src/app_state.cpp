@@ -352,6 +352,7 @@ void AppState::recordSyncTime(uint32_t unix_time, uint64_t last_ti_ts)
 void AppState::processEvent(fdec::EventData &event,
                             fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
 {
+    {
         std::lock_guard<std::mutex> lk(data_mtx);
         fillHist(event, ana, wres);
         clusterEvent(event, ana, wres);
