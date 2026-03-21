@@ -81,7 +81,16 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     border-top:1px solid var(--border); background:var(--panel);
 }
 .cl-info-text { color:var(--dim); }
-.cl-lms-panel { flex:0 0 150px; position:relative; border-top:1px solid var(--border); }
+
+/* --- LMS panel --- */
+.lms-plot-panel { flex:none; height:50%; min-height:100px; position:relative; }
+.lms-summary-wrap { flex:1; overflow-y:auto; min-height:0; font-size:12px; }
+#lms-detail-header {
+    flex:0 0 24px; padding:4px 10px; font-size:12px;
+    border-top:1px solid var(--border); background:var(--panel);
+}
+.lms-warn { color:#f66; font-weight:600; }
+.lms-ok { color:#51cf66; }
 #cl-detail-header .mod-name { color:var(--accent); font-weight:600; }
 #cl-detail-header .mod-daq { color:var(--dim); font-size:11px; }
 .detail-header .mod-name { color:var(--accent); font-weight:600; }

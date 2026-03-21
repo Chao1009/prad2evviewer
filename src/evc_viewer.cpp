@@ -18,6 +18,7 @@
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
 #include "load_daq_config.h"
+#include "viewer_utils.h"
 
 #include <nlohmann/json.hpp>
 
@@ -53,47 +54,9 @@ using namespace evc;
 #endif
 
 // -------------------------------------------------------------------------
-// Forward declarations
+// Types (HistConfig, Histogram, LmsEntry from viewer_utils.h)
 // -------------------------------------------------------------------------
-struct HistConfig;
-struct Histogram;
 struct EventIndex { int buffer_num, sub_event; };
-
-// -------------------------------------------------------------------------
-// Histogram types
-// -------------------------------------------------------------------------
-struct HistConfig {
-    float time_min  = 170;
-    float time_max  = 190;
-    float bin_min   = 0;
-    float bin_max   = 20000;
-    float bin_step  = 100;
-    float threshold = 3.0;
-    float pos_min   = 0;
-    float pos_max   = 400;
-    float pos_step  = 4;
-    float min_peak_ratio = 0.3f;
-};
-
-struct Histogram {
-    int underflow = 0, overflow = 0;
-    std::vector<int> bins;
-    void init(int n) { bins.assign(n, 0); underflow = overflow = 0; }
-    void fill(float v, float bmin, float bstep) {
-        if (v < bmin) { ++underflow; return; }
-        int b = (int)((v - bmin) / bstep);
-        if (b >= (int)bins.size()) { ++overflow; return; }
-        ++bins[b];
-    }
-};
-
-// -------------------------------------------------------------------------
-// LMS monitoring entry: one measurement per module per LMS event
-// -------------------------------------------------------------------------
-struct LmsEntry {
-    double time_sec;    // seconds since first event (from TI timestamp)
-    float  integral;    // peak integral within timing cut (or raw ADC for ADC1881M)
-};
 
 // -------------------------------------------------------------------------
 // Data container: holds everything for one loaded file
@@ -218,28 +181,6 @@ static struct CachedReader {
 } g_reader;
 
 // -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-static std::string readFile(const std::string &path) {
-    std::ifstream f(path);
-    if (!f) return "";
-    return {std::istreambuf_iterator<char>(f), {}};
-}
-
-static std::string findFile(const std::string &name, const std::string &base) {
-    { std::ifstream f(name); if (f.good()) return name; }
-    std::string p = base + "/" + name;
-    { std::ifstream f(p); if (f.good()) return p; }
-    return "";
-}
-
-static std::string contentType(const std::string &path) {
-    if (path.size() >= 5 && path.substr(path.size()-5) == ".html") return "text/html; charset=utf-8";
-    if (path.size() >= 4 && path.substr(path.size()-4) == ".css")  return "text/css; charset=utf-8";
-    if (path.size() >= 3 && path.substr(path.size()-3) == ".js")   return "application/javascript; charset=utf-8";
-    return "application/octet-stream";
-}
-
 // Serve a file from the resources directory (no directory traversal)
 static bool serveResource(const std::string &uri, websocketpp::server<websocketpp::config::asio>::connection_ptr con)
 {
@@ -465,15 +406,9 @@ static void buildHistograms(const std::string &path, FileData &fd,
                             if (is_adc1881m) {
                                 adc_val = cd.samples[0];
                             } else {
-                                // reuse wres from above (already analyzed)
-                                float best = -1;
-                                for (int p = 0; p < wres.npeaks; ++p) {
-                                    auto &pk = wres.peaks[p];
-                                    if (pk.height < g_hist_cfg.threshold) continue;
-                                    if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
-                                        if (pk.integral > best) best = pk.integral;
-                                }
-                                adc_val = best;
+                                // wres already analyzed above for this channel
+                                adc_val = bestPeakInWindow(wres, g_hist_cfg.threshold,
+                                                           g_hist_cfg.time_min, g_hist_cfg.time_max);
                             }
                             if (adc_val <= 0) continue;
 
@@ -499,7 +434,7 @@ static void buildHistograms(const std::string &path, FileData &fd,
             {
                 // compute time offset from first LMS event
                 if (fd.lms_first_ts == 0) fd.lms_first_ts = event.info.timestamp;
-                double time_sec = static_cast<double>(event.info.timestamp - fd.lms_first_ts) * 4e-9;  // 4ns per tick
+                double time_sec = static_cast<double>(event.info.timestamp - fd.lms_first_ts) * TI_TICK_SEC;
 
                 bool is_adc1881m_lms = (g_daq_cfg.adc_format == "adc1881m");
 
@@ -525,15 +460,9 @@ static void buildHistograms(const std::string &path, FileData &fd,
                             if (is_adc1881m_lms) {
                                 val = cd.samples[0];
                             } else {
-                                // FADC250: best peak integral in time window
-                                float best = -1;
-                                for (int p = 0; p < wres.npeaks; ++p) {
-                                    auto &pk = wres.peaks[p];
-                                    if (pk.height < g_hist_cfg.threshold) continue;
-                                    if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
-                                        if (pk.integral > best) best = pk.integral;
-                                }
-                                val = best;
+                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                val = bestPeakInWindow(wres, g_hist_cfg.threshold,
+                                                       g_hist_cfg.time_min, g_hist_cfg.time_max);
                             }
                             if (val <= 0) continue;
 
@@ -728,20 +657,11 @@ static json computeClusters(int ev1)
 
                 float adc_val = 0;
                 if (is_adc1881m) {
-                    // ADC1881M: single raw ADC value (hardware integral)
                     adc_val = cd.samples[0];
                 } else {
-                    // FADC250: use best peak integral in time window
                     ana.Analyze(cd.samples, cd.nsamples, wres);
-                    float best = -1;
-                    for (int p = 0; p < wres.npeaks; ++p) {
-                        auto &pk = wres.peaks[p];
-                        if (pk.height < g_hist_cfg.threshold) continue;
-                        if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max) {
-                            if (pk.integral > best) best = pk.integral;
-                        }
-                    }
-                    adc_val = best;
+                    adc_val = bestPeakInWindow(wres, g_hist_cfg.threshold,
+                                               g_hist_cfg.time_min, g_hist_cfg.time_max);
                 }
                 if (adc_val <= 0) continue;
 
@@ -755,38 +675,6 @@ static json computeClusters(int ev1)
             }
         }
     }
-
-    // debug: count hits and energy range
-    {
-        auto d2 = g_data;
-        int idx2 = ev1 - 1;
-        if (d2 && idx2 >= 0 && idx2 < (int)d2->index.size()) {
-            auto &ei2 = d2->index[idx2];
-            std::cerr << "  decode: ev1=" << ev1
-                      << " buf=" << ei2.buffer_num
-                      << " sub=" << ei2.sub_event << "\n";
-        }
-    }
-    int nhits = 0;
-    float emin = 1e9f, emax = 0.f, esum = 0.f;
-    for (int i = 0; i < nmod; ++i) {
-        if (mod_energy[i] > 0.f) {
-            nhits++;
-            esum += mod_energy[i];
-            if (mod_energy[i] < emin) emin = mod_energy[i];
-            if (mod_energy[i] > emax) emax = mod_energy[i];
-        }
-    }
-    std::cerr << "/api/clusters/" << ev1
-              << "  rocs=" << event.nrocs
-              << "  hits=" << nhits
-              << "  E=[" << (nhits ? emin : 0) << ", " << emax << "]"
-              << "  Esum=" << esum
-              << "  evnum=" << event.info.event_number
-              << "  trig_num=" << event.info.trigger_number
-              << "  trig_bits=0x" << std::hex << event.info.trigger_bits << std::dec
-              << "  ts=" << event.info.timestamp
-              << "\n";
 
     clusterer.FormClusters();
 

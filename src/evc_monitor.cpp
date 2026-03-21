@@ -11,6 +11,7 @@
 #include "WaveAnalyzer.h"
 #include "HyCalSystem.h"
 #include "load_daq_config.h"
+#include "viewer_utils.h"
 
 #include <nlohmann/json.hpp>
 
@@ -47,39 +48,13 @@ using namespace evc;
 #endif
 
 // -------------------------------------------------------------------------
-// Configuration
+// Configuration (HistConfig, Histogram, LmsEntry from viewer_utils.h)
 // -------------------------------------------------------------------------
 struct EtConfig {
     std::string host    = "localhost";
     int         port    = 11111;
     std::string et_file = "/tmp/et_sys_prad2";
     std::string station = "prad2_monitor";
-};
-
-struct HistConfig {
-    float time_min  = 170;
-    float time_max  = 190;
-    float bin_min   = 0;
-    float bin_max   = 20000;
-    float bin_step  = 100;
-    float threshold = 3.0;
-    float pos_min   = 0;
-    float pos_max   = 400;
-    float pos_step  = 4;
-    float min_peak_ratio = 0.3f;
-};
-
-struct Histogram {
-    int underflow = 0, overflow = 0;
-    std::vector<int> bins;
-    void init(int n) { bins.assign(n, 0); underflow = overflow = 0; }
-    void fill(float v, float bmin, float bstep) {
-        if (v < bmin) { ++underflow; return; }
-        int b = (int)((v - bmin) / bstep);
-        if (b >= (int)bins.size()) { ++overflow; return; }
-        ++bins[b];
-    }
-    void clear() { std::fill(bins.begin(), bins.end(), 0); underflow = overflow = 0; }
 };
 
 // -------------------------------------------------------------------------
@@ -123,11 +98,7 @@ static fdec::HyCalSystem g_hycal;
 static std::unordered_map<int, int> g_roc_to_crate;
 static evc::DaqConfig g_daq_cfg;
 
-// LMS monitoring
-struct LmsEntry {
-    double time_sec;
-    float  integral;
-};
+// LMS monitoring (LmsEntry from viewer_utils.h)
 static std::map<int, std::vector<LmsEntry>> g_lms_history;  // module_index → entries
 static std::atomic<int> g_lms_events{0};
 static uint64_t g_lms_first_ts = 0;
@@ -139,28 +110,7 @@ static float    g_lms_warn_thresh = 0.1f;
 static int      g_lms_max_history = 5000;
 static uint32_t g_lms_trigger_mask = 0;
 
-// -------------------------------------------------------------------------
-// Helpers
-// -------------------------------------------------------------------------
-static std::string readFile(const std::string &path) {
-    std::ifstream f(path);
-    if (!f) return "";
-    return {std::istreambuf_iterator<char>(f), {}};
-}
-static std::string findFile(const std::string &name, const std::string &base) {
-    { std::ifstream f(name); if (f.good()) return name; }
-    std::string p = base + "/" + name;
-    { std::ifstream f(p); if (f.good()) return p; }
-    return "";
-}
-
-static std::string contentType(const std::string &path) {
-    if (path.size() >= 5 && path.substr(path.size()-5) == ".html") return "text/html; charset=utf-8";
-    if (path.size() >= 4 && path.substr(path.size()-4) == ".css")  return "text/css; charset=utf-8";
-    if (path.size() >= 3 && path.substr(path.size()-3) == ".js")   return "application/javascript; charset=utf-8";
-    return "application/octet-stream";
-}
-
+// readFile, findFile, contentType from viewer_utils.h
 static bool serveResource(const std::string &uri, WsServer::connection_ptr con)
 {
     if (g_res_dir.empty()) return false;
@@ -386,7 +336,7 @@ static void etReaderThread()
                 {
                     std::lock_guard<std::mutex> lk(g_lms_mtx);
                     if (g_lms_first_ts == 0) g_lms_first_ts = event.info.timestamp;
-                    double time_sec = static_cast<double>(event.info.timestamp - g_lms_first_ts) * 4e-9;
+                    double time_sec = static_cast<double>(event.info.timestamp - g_lms_first_ts) * TI_TICK_SEC;
 
                     bool is_adc1881m = (g_daq_cfg.adc_format == "adc1881m");
 
@@ -412,16 +362,9 @@ static void etReaderThread()
                                 if (is_adc1881m) {
                                     val = cd.samples[0];
                                 } else {
-                                    // use wres from encodeEvent above
                                     ana.Analyze(cd.samples, cd.nsamples, wres);
-                                    float best = -1;
-                                    for (int p = 0; p < wres.npeaks; ++p) {
-                                        auto &pk = wres.peaks[p];
-                                        if (pk.height < g_hist_cfg.threshold) continue;
-                                        if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
-                                            if (pk.integral > best) best = pk.integral;
-                                    }
-                                    val = best;
+                                    val = bestPeakInWindow(wres, g_hist_cfg.threshold,
+                                                           g_hist_cfg.time_min, g_hist_cfg.time_max);
                                 }
                                 if (val <= 0) continue;
 

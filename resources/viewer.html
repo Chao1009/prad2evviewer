@@ -55,6 +55,7 @@
 <div class="tab-bar" id="tab-bar">
     <button class="tab active" data-tab="dq">Data Quality</button>
     <button class="tab" data-tab="cluster">Clustering</button>
+    <button class="tab" data-tab="lms">LMS Monitoring</button>
 </div>
 
 <div class="main">
@@ -100,6 +101,18 @@
             </div>
             <span style="margin-left:auto;color:var(--dim);font-size:11px" id="cl-summary"></span>
             <button class="geo-reset-btn" onclick="resetGeoView()" title="Reset view (double-click also works)">Reset</button>
+        </div>
+        <div class="geo-toolbar" id="geo-toolbar-lms" style="display:none">
+            <label>Color:</label>
+            <select id="lms-color-metric">
+                <option value="mean">LMS Mean</option>
+                <option value="rms_frac">RMS/Mean</option>
+                <option value="warn">Warnings</option>
+            </select>
+            <label>Log</label>
+            <input type="checkbox" id="lms-log-scale">
+            <span style="margin-left:auto;color:var(--dim);font-size:11px" id="lms-summary-text"></span>
+            <button class="geo-reset-btn" onclick="resetGeoView()" title="Reset view">Reset</button>
         </div>
         <div class="geo-canvas-wrap" id="geo-wrap">
             <canvas id="geo-canvas"></canvas>
@@ -168,8 +181,25 @@
         <div id="cl-detail-header">
             <span class="cl-info-text" id="cl-info-text">Click a module or select a cluster</span>
         </div>
-        <div class="cl-lms-panel" id="cl-lms-panel" style="display:none">
-            <div id="cl-lms-plot" style="width:100%;height:100%"></div>
+    </div>
+
+    <!-- LMS Monitoring panel -->
+    <div class="detail-panel" id="lms-panel" style="display:none">
+        <div class="lms-plot-panel" id="lms-plot-panel">
+            <div id="lms-plot" style="width:100%;height:100%"></div>
+        </div>
+        <div class="hdiv" id="div-lms-ht"></div>
+        <div class="lms-summary-wrap" id="lms-summary-wrap">
+            <table class="peaks-table" id="lms-table">
+                <thead><tr>
+                    <th>Module</th><th>Mean</th><th>RMS</th>
+                    <th>RMS/Mean</th><th>Count</th><th>Status</th>
+                </tr></thead>
+                <tbody id="lms-tbody"></tbody>
+            </table>
+        </div>
+        <div id="lms-detail-header">
+            <span class="cl-info-text" id="lms-info-text">Click a module to view LMS history</span>
         </div>
     </div>
 </div>
