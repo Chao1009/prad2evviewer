@@ -607,7 +607,7 @@ function pollProgress() {
                 if (hcb) hcb.checked = histEnabled;
                 document.getElementById('ev-total').textContent = `/ ${totalEvents}`;
                 updateHeaderInfo(cfg);
-                if (histEnabled) fetchOccupancy();
+                if (histEnabled) { fetchOccupancy(); fetchClHist(); }
                 syncRangeFromHist();
                 drawGeo();
                 if (totalEvents > 0) loadEvent(1);
@@ -705,8 +705,8 @@ function loadClusterData(evnum){
         selectedCluster=-1;
         drawClusterGeo();
         updateClusterUI();
-        // accumulate energy histogram
-        if(data.clusters && data.clusters.length>0){
+        // accumulate energy histogram (only if no prebuilt data)
+        if(!histEnabled && data.clusters && data.clusters.length>0){
             fillClHist(data.clusters);
             plotClHist();
         }
@@ -878,6 +878,19 @@ function initClHist(){
     currentClHist=null;
 }
 function clearClHist(){ initClHist(); plotClHist(); }
+
+function fetchClHist(){
+    fetch('/api/cluster_hist').then(r=>r.json()).then(data=>{
+        if(!data.bins||!data.bins.length) return;
+        // use server config if available
+        if(data.min!==undefined) clHistMin=data.min;
+        if(data.max!==undefined) clHistMax=data.max;
+        if(data.step!==undefined) clHistStep=data.step;
+        clHistBins=data.bins;
+        clHistEvents=data.events||0;
+        plotClHist();
+    }).catch(()=>{});
+}
 
 function fillClHist(clusters){
     if(!clHistBins) initClHist();
@@ -1196,7 +1209,7 @@ function init(){
         if(mode==='file'){
             document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
             updateHeaderInfo(data);
-            if(histEnabled) fetchOccupancy();
+            if(histEnabled) { fetchOccupancy(); fetchClHist(); }
             syncRangeFromHist();
             resizeGeo();
             if(totalEvents>0)loadEvent(1);

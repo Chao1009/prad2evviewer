@@ -98,6 +98,10 @@ struct FileData {
     std::map<std::string, int> occupancy;       // events with ≥1 peak above threshold
     std::map<std::string, int> occupancy_tcut;   // same, but peak must be in time window
     int hist_events_processed = 0;
+
+    // cluster energy histogram (prebuilt during --hist)
+    Histogram cluster_energy_hist;
+    int cluster_events_processed = 0;  // events that passed trigger filter
 };
 
 // -------------------------------------------------------------------------
@@ -320,18 +324,23 @@ static void buildIndex(const std::string &path, std::vector<EventIndex> &index,
 // -------------------------------------------------------------------------
 // Build histograms
 // -------------------------------------------------------------------------
-static void buildHistograms(const std::string &path,
-                            std::map<std::string, Histogram> &hists,
-                            std::map<std::string, Histogram> &pos_hists,
-                            std::map<std::string, int> &occ,
-                            std::map<std::string, int> &occ_tcut,
-                            int &events_out, Progress &prog)
+static void buildHistograms(const std::string &path, FileData &fd,
+                            Progress &prog)
 {
+    auto &hists = fd.histograms;
+    auto &pos_hists = fd.pos_histograms;
+    auto &occ = fd.occupancy;
+    auto &occ_tcut = fd.occupancy_tcut;
     hists.clear();
     pos_hists.clear();
     occ.clear();
     occ_tcut.clear();
-    events_out = 0;
+    fd.hist_events_processed = 0;
+    fd.cluster_events_processed = 0;
+
+    // cluster energy histogram
+    int cl_nbins = std::max(1, (int)std::ceil((g_cl_hist_max - g_cl_hist_min) / g_cl_hist_step));
+    fd.cluster_energy_hist.init(cl_nbins);
 
     EvChannel ch;
     ch.SetConfig(g_daq_cfg);
@@ -406,10 +415,68 @@ static void buildHistograms(const std::string &path,
                     }
                 }
             }
+
+            // --- clustering for this event ---
+            if (g_cluster_skip_mask == 0 ||
+                !(event.info.trigger_bits & g_cluster_skip_mask))
+            {
+                bool is_adc1881m = (g_daq_cfg.adc_format == "adc1881m");
+                fdec::HyCalCluster clusterer(g_hycal);
+                clusterer.SetConfig(g_cluster_cfg);
+
+                for (int r = 0; r < event.nrocs; ++r) {
+                    auto &roc = event.rocs[r];
+                    if (!roc.present) continue;
+                    auto cit = g_roc_to_crate.find(roc.tag);
+                    if (cit == g_roc_to_crate.end()) continue;
+                    int crate = cit->second;
+
+                    for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+                        if (!roc.slots[s].present) continue;
+                        auto &slot = roc.slots[s];
+                        for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
+                            if (!(slot.channel_mask & (1ull << c))) continue;
+                            auto &cd = slot.channels[c];
+                            if (cd.nsamples <= 0) continue;
+
+                            const auto *mod = g_hycal.module_by_daq(crate, s, c);
+                            if (!mod || !mod->is_hycal()) continue;
+
+                            float adc_val = 0;
+                            if (is_adc1881m) {
+                                adc_val = cd.samples[0];
+                            } else {
+                                // reuse wres from above (already analyzed)
+                                float best = -1;
+                                for (int p = 0; p < wres.npeaks; ++p) {
+                                    auto &pk = wres.peaks[p];
+                                    if (pk.height < g_hist_cfg.threshold) continue;
+                                    if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max)
+                                        if (pk.integral > best) best = pk.integral;
+                                }
+                                adc_val = best;
+                            }
+                            if (adc_val <= 0) continue;
+
+                            float energy = (mod->cal_factor > 0.)
+                                ? static_cast<float>(mod->energize(adc_val))
+                                : adc_val * g_adc_to_mev;
+                            clusterer.AddHit(mod->index, energy);
+                        }
+                    }
+                }
+
+                clusterer.FormClusters();
+                std::vector<fdec::ClusterHit> reco_hits;
+                clusterer.ReconstructHits(reco_hits);
+                for (auto &rh : reco_hits)
+                    fd.cluster_energy_hist.fill(rh.energy, g_cl_hist_min, g_cl_hist_step);
+                fd.cluster_events_processed++;
+            }
         }
     }
     ch.Close();
-    events_out = total;
+    fd.hist_events_processed = total;
 }
 
 // -------------------------------------------------------------------------
@@ -432,14 +499,13 @@ static void loadFileAsync(const std::string &filepath)
     buildIndex(filepath, data->index, g_progress);
     std::cerr << "  Indexed " << data->index.size() << " events\n";
 
-    // histograms
+    // histograms + clustering
     if (g_hist_enabled) {
         g_progress.total = (int)data->index.size();
-        buildHistograms(filepath, data->histograms, data->pos_histograms,
-                        data->occupancy, data->occupancy_tcut,
-                        data->hist_events_processed, g_progress);
+        buildHistograms(filepath, *data, g_progress);
         std::cerr << "  Histograms: " << data->hist_events_processed << " events, "
-                  << data->histograms.size() << " channels\n";
+                  << data->histograms.size() << " channels"
+                  << ", clusters: " << data->cluster_events_processed << " events\n";
     }
 
     // atomic swap
@@ -786,6 +852,24 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // /api/poshist/<key>
     if (uri.rfind("/api/poshist/", 0) == 0) {
         reply(getHist(false, uri.substr(13)).dump()); return;
+    }
+
+    // /api/cluster_hist — prebuilt cluster energy histogram
+    if (uri == "/api/cluster_hist") {
+        std::shared_ptr<FileData> data;
+        { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
+        if (!data || data->cluster_energy_hist.bins.empty()) {
+            reply(json({{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
+                         {"events", 0}, {"min", g_cl_hist_min}, {"max", g_cl_hist_max},
+                         {"step", g_cl_hist_step}}).dump());
+            return;
+        }
+        auto &h = data->cluster_energy_hist;
+        reply(json({{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
+                     {"events", data->cluster_events_processed},
+                     {"min", g_cl_hist_min}, {"max", g_cl_hist_max},
+                     {"step", g_cl_hist_step}}).dump());
+        return;
     }
 
     // /api/occupancy — per-channel event counts (for geo view)
