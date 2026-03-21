@@ -108,6 +108,10 @@ struct AppState {
     void processEvent(fdec::EventData &event,
                       fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
 
+    // Encode one decoded event as JSON (channels with waveforms, peaks, pedestal).
+    nlohmann::json encodeEventJson(fdec::EventData &event, int ev_id,
+                                   fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
+
     // Compute clusters for one decoded event, return JSON response.
     nlohmann::json computeClustersJson(fdec::EventData &event, int ev_id,
                                        fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);

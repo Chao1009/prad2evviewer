@@ -279,7 +279,7 @@ static std::string decodeRawEvent(int ev1, fdec::EventData &event) {
 }
 
 // -------------------------------------------------------------------------
-// Decode one event → JSON
+// Decode one event → JSON (delegates to AppState)
 // -------------------------------------------------------------------------
 static json decodeEvent(int ev1) {
     auto event_ptr = std::make_unique<fdec::EventData>();
@@ -290,49 +290,7 @@ static json decodeEvent(int ev1) {
     fdec::WaveAnalyzer ana;
     ana.cfg.min_peak_ratio = g_app.hist_cfg.min_peak_ratio;
     fdec::WaveResult wres;
-    json channels = json::object();
-
-    for (int r = 0; r < event.nrocs; ++r) {
-        auto &roc = event.rocs[r];
-        if (!roc.present) continue;
-        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-            if (!roc.slots[s].present) continue;
-            auto &slot = roc.slots[s];
-            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                if (!(slot.channel_mask & (1ull << c))) continue;
-                auto &cd = slot.channels[c];
-                if (cd.nsamples <= 0) continue;
-
-                ana.Analyze(cd.samples, cd.nsamples, wres);
-                std::string key = std::to_string(roc.tag) + "_"
-                                + std::to_string(s) + "_" + std::to_string(c);
-
-                json sarr = json::array();
-                for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
-
-                json parr = json::array();
-                for (int p = 0; p < wres.npeaks; ++p) {
-                    auto &pk = wres.peaks[p];
-                    parr.push_back({
-                        {"p", pk.pos}, {"t", std::round(pk.time * 10) / 10},
-                        {"h", std::round(pk.height * 10) / 10},
-                        {"i", std::round(pk.integral * 10) / 10},
-                        {"l", pk.left}, {"r", pk.right},
-                        {"o", pk.overflow ? 1 : 0},
-                    });
-                }
-                channels[key] = {
-                    {"s", sarr},
-                    {"pm", std::round(wres.ped.mean * 10) / 10},
-                    {"pr", std::round(wres.ped.rms * 10) / 10},
-                    {"pk", parr},
-                };
-            }
-        }
-    }
-    return {{"event", ev1}, {"channels", channels},
-            {"event_number", event.info.event_number},
-            {"trigger_bits", event.info.trigger_bits}};
+    return g_app.encodeEventJson(event, ev1, ana, wres);
 }
 
 // -------------------------------------------------------------------------
