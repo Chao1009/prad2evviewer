@@ -35,12 +35,36 @@ void AppState::init(const std::string &db_dir,
         }
     }
 
-    // --- Histogram config ---
-    std::string hcfg_path = hist_config_file.empty()
-        ? findFile("hist_config.json", db_dir) : hist_config_file;
-    std::string hcfg_str = readFile(hcfg_path);
-    if (!hcfg_str.empty()) {
-        auto hcfg = json::parse(hcfg_str, nullptr, false);
+    // --- Waveform / histogram config ---
+    // Try "waveform" section from config.json (loaded later in reco_file),
+    // then fall back to separate hist_config.json, then -H override.
+    auto loadWaveformConfig = [&](const json &w) {
+        if (w.contains("time_cut")) {
+            auto &tc = w["time_cut"];
+            if (tc.contains("min")) hist_cfg.time_min = tc["min"];
+            if (tc.contains("max")) hist_cfg.time_max = tc["max"];
+        }
+        if (w.contains("integral_hist")) {
+            auto &ih = w["integral_hist"];
+            if (ih.contains("min"))  hist_cfg.bin_min  = ih["min"];
+            if (ih.contains("max"))  hist_cfg.bin_max  = ih["max"];
+            if (ih.contains("step")) hist_cfg.bin_step = ih["step"];
+        }
+        if (w.contains("time_hist")) {
+            auto &th = w["time_hist"];
+            if (th.contains("min"))  hist_cfg.pos_min  = th["min"];
+            if (th.contains("max"))  hist_cfg.pos_max  = th["max"];
+            if (th.contains("step")) hist_cfg.pos_step = th["step"];
+        }
+        if (w.contains("thresholds")) {
+            auto &t = w["thresholds"];
+            if (t.contains("min_peak_height"))          hist_cfg.threshold      = t["min_peak_height"];
+            if (t.contains("min_secondary_peak_ratio")) hist_cfg.min_peak_ratio = t["min_secondary_peak_ratio"];
+        }
+    };
+
+    // legacy: load from separate hist_config.json or -H override
+    auto loadLegacyHistConfig = [&](const json &hcfg) {
         if (hcfg.contains("hist")) {
             auto &h = hcfg["hist"];
             if (h.contains("time_min"))  hist_cfg.time_min  = h["time_min"];
@@ -54,12 +78,43 @@ void AppState::init(const std::string &db_dir,
             if (h.contains("pos_step"))  hist_cfg.pos_step  = h["pos_step"];
             if (h.contains("min_peak_ratio")) hist_cfg.min_peak_ratio = h["min_peak_ratio"];
         }
-        std::cerr << "Hist config: " << hcfg_path << "\n";
+    };
+
+    // first try config.json for "waveform" section
+    std::string reco_file_pre = findFile("config.json", db_dir);
+    if (reco_file_pre.empty()) reco_file_pre = findFile("reconstruction.json", db_dir);
+    bool waveform_loaded = false;
+    if (!reco_file_pre.empty()) {
+        std::string s = readFile(reco_file_pre);
+        if (!s.empty()) {
+            auto j = json::parse(s, nullptr, false);
+            if (j.contains("waveform")) { loadWaveformConfig(j["waveform"]); waveform_loaded = true; }
+        }
     }
+
+    // fall back to hist_config.json or -H override
+    if (!waveform_loaded) {
+        std::string hcfg_path = hist_config_file.empty()
+            ? findFile("hist_config.json", db_dir) : hist_config_file;
+        std::string hcfg_str = readFile(hcfg_path);
+        if (!hcfg_str.empty()) {
+            loadLegacyHistConfig(json::parse(hcfg_str, nullptr, false));
+            std::cerr << "Hist config: " << hcfg_path << "\n";
+        }
+    }
+    // -H override always wins (if provided)
+    if (!hist_config_file.empty()) {
+        std::string hcfg_str = readFile(hist_config_file);
+        if (!hcfg_str.empty())
+            loadLegacyHistConfig(json::parse(hcfg_str, nullptr, false));
+    }
+
     hist_nbins = std::max(1, (int)std::ceil(
         (hist_cfg.bin_max - hist_cfg.bin_min) / hist_cfg.bin_step));
     pos_nbins = std::max(1, (int)std::ceil(
         (hist_cfg.pos_max - hist_cfg.pos_min) / hist_cfg.pos_step));
+    std::cerr << "Waveform  : time_cut=[" << hist_cfg.time_min << "," << hist_cfg.time_max
+              << "] threshold=" << hist_cfg.threshold << "\n";
 
     // --- HyCal system ---
     std::string modules_filename = "hycal_modules.json";
@@ -107,7 +162,9 @@ void AppState::init(const std::string &db_dir,
         roc_to_crate[v.get<int>()] = std::stoi(k);
 
     // --- Reconstruction config ---
-    std::string reco_file = findFile("reconstruction.json", db_dir);
+    // try config.json first, fall back to reconstruction.json
+    std::string reco_file = findFile("config.json", db_dir);
+    if (reco_file.empty()) reco_file = findFile("reconstruction.json", db_dir);
     std::string reco_str = readFile(reco_file);
     if (!reco_str.empty()) {
         auto rcfg = json::parse(reco_str, nullptr, false);

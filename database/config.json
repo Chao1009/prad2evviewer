@@ -1,4 +1,20 @@
 {
+    "online": {
+        "et_host": "clondaq6",
+        "et_port": 11111,
+        "et_file": "/et/clasprod",
+        "et_station": "prad2_monitor",
+        "ring_buffer_size": 20
+    },
+    "waveform": {
+        "time_cut": {"min": 160, "max": 220},
+        "integral_hist": {"min": 0, "max": 20000, "step": 100},
+        "time_hist": {"min": 0, "max": 400, "step": 4},
+        "thresholds": {
+            "min_peak_height": 10.0,
+            "min_secondary_peak_ratio": 0.3
+        }
+    },
     "clustering": {
         "min_module_energy": 1.0,
         "min_center_energy": 10.0,

@@ -4,7 +4,7 @@
 // accumulates histograms + LMS data, stores latest N events in a ring buffer,
 // pushes WebSocket notifications to the viewer on new events.
 //
-// Usage: evc_monitor [-p port] [-c online_config.json] [-H hist_config.json] [-D daq_config.json]
+// Usage: evc_monitor [-p port] [-c config.json] [-D daq_config.json]
 
 #include "EtChannel.h"
 #include "app_state.h"
@@ -361,28 +361,25 @@ int main(int argc, char *argv[])
 {
     int port = 5051;
     std::string config_file;
-    std::string hist_config_file;
     std::string daq_config_file;
 
     static struct option long_opts[] = {
         {"port",        required_argument, nullptr, 'p'},
         {"config",      required_argument, nullptr, 'c'},
-        {"hist-config", required_argument, nullptr, 'H'},
         {"daq-config",  required_argument, nullptr, 'D'},
         {"help",        no_argument,       nullptr, '?'},
         {nullptr, 0, nullptr, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:c:H:D:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:c:D:", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'p': port = std::atoi(optarg); break;
         case 'c': config_file = optarg; break;
-        case 'H': hist_config_file = optarg; break;
         case 'D': daq_config_file = optarg; break;
         default:
             std::cerr << "Usage: " << argv[0]
-                      << " [-p port] [-c online_config.json] [-H hist_config.json] [-D daq_config.json]\n";
+                      << " [-p port] [-c config.json] [-D daq_config.json]\n";
             return 1;
         }
     }
@@ -390,28 +387,39 @@ int main(int argc, char *argv[])
     std::string db_dir  = DATABASE_DIR;
     std::string res_dir = RESOURCE_DIR;
 
-    // load ET config
-    if (config_file.empty())
-        config_file = findFile("online_config.json", db_dir);
+    // load ET config from config.json "online" section, or legacy online_config.json
+    if (config_file.empty()) {
+        config_file = findFile("config.json", db_dir);
+        if (config_file.empty()) config_file = findFile("online_config.json", db_dir);
+    }
     std::string cfg_str = readFile(config_file);
     if (!cfg_str.empty()) {
         auto cfg = json::parse(cfg_str, nullptr, false);
-        if (cfg.contains("et")) {
+        // new format: "online" section in config.json
+        if (cfg.contains("online")) {
+            auto &e = cfg["online"];
+            if (e.contains("et_host"))    g_et_cfg.host    = e["et_host"];
+            if (e.contains("et_port"))    g_et_cfg.port    = e["et_port"];
+            if (e.contains("et_file"))    g_et_cfg.et_file = e["et_file"];
+            if (e.contains("et_station")) g_et_cfg.station = e["et_station"];
+            if (e.contains("ring_buffer_size")) g_ring_size = e["ring_buffer_size"];
+        }
+        // legacy format: "et" section in online_config.json
+        else if (cfg.contains("et")) {
             auto &e = cfg["et"];
             if (e.contains("host"))    g_et_cfg.host    = e["host"];
             if (e.contains("port"))    g_et_cfg.port    = e["port"];
             if (e.contains("et_file")) g_et_cfg.et_file = e["et_file"];
             if (e.contains("station")) g_et_cfg.station = e["station"];
+            if (cfg.contains("ring_buffer_size")) g_ring_size = cfg["ring_buffer_size"];
         }
-        if (cfg.contains("ring_buffer_size"))
-            g_ring_size = cfg["ring_buffer_size"];
-        std::cerr << "ET config : " << config_file << "\n";
+        std::cerr << "Config    : " << config_file << "\n";
     } else {
-        std::cerr << "ET config : using defaults\n";
+        std::cerr << "Config    : using defaults\n";
     }
 
     // initialize shared state (DAQ config, HyCal, histograms, clustering, LMS)
-    g_app.init(db_dir, daq_config_file, hist_config_file);
+    g_app.init(db_dir, daq_config_file, "");
 
     // build base_config JSON for /api/config
     json modules_j = json::array(), daq_j = json::array();

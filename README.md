@@ -29,7 +29,7 @@ cmake .. -DBUILD_GUI=ON
 ## Event Viewer
 
 ```bash
-evc_viewer [evio_file] [-p port] [-H] [-c hist_config.json] [-d data_dir] [-D daq_config.json]
+evc_viewer [evio_file] [-p port] [-H] [-c config.json] [-d data_dir] [-D daq_config.json]
 ```
 
 | Option | Description |
@@ -58,16 +58,16 @@ Geo view supports scroll-wheel zoom, left-drag pan, double-click or Reset button
 ## Online Monitor
 
 ```bash
-evc_monitor [-p port] [-c online_config.json] [-H hist_config.json] [-D daq_config.json]
+evc_monitor [-p port] [-c config.json] [-D daq_config.json]
 ```
 
 Connects to a running ET system. Same GUI as the viewer, plus:
 
 - ET connection status indicator
 - Ring buffer of recent events with dropdown selector
-- **Clear Hist** button resets histograms and occupancy
+- Per-tab **Clear** buttons reset tab-specific data
 - Auto-follows latest event; press **F** to resume after browsing
-- LMS monitoring runs continuously regardless of client connections
+- Gain monitoring runs continuously regardless of client connections
 
 ## Monitor Client (Qt)
 
@@ -86,39 +86,18 @@ See [test/README.md](test/README.md) for detailed usage of `evio_dump`, `evc_tes
 
 ## Configuration
 
-### `database/hist_config.json`
+### `database/config.json`
 
-Histogram and waveform analysis settings (shared by viewer and monitor):
-
-| Field | Description |
-|-------|-------------|
-| `time_min/max` | Time window (ns) for integral histogram and time-cut occupancy |
-| `bin_min/max/step` | Integral histogram binning |
-| `pos_min/max/step` | Peak position histogram binning (ns) |
-| `threshold` | Min peak height (ADC above pedestal) |
-| `min_peak_ratio` | Secondary peak must rise >= this fraction of main peak |
-
-### `database/reconstruction.json`
-
-Clustering, LMS monitoring, and calibration:
+Main configuration file (all settings for viewer and monitor):
 
 | Section | Key fields |
 |---------|------------|
+| `online` | `et_host`, `et_port`, `et_file`, `et_station`, `ring_buffer_size` |
+| `waveform` | `time_cut`, `integral_hist`, `time_hist`, `thresholds` |
 | `clustering` | `min_module_energy`, `min_cluster_energy`, `skip_trigger_bits`, `energy_hist` |
 | `lms_monitor` | `trigger_bit`, `warn_threshold`, `max_history`, `reference_channels` |
+| `color_ranges` | Per-tab:metric color range defaults (e.g. `"dq:integral": [0, 10000]`) |
 | `calibration` | `adc_to_mev`, `calibration_file` |
-
-### `database/online_config.json`
-
-ET connection settings (monitor only):
-
-```json
-{
-    "et": { "host": "localhost", "port": 11111,
-            "et_file": "/tmp/et_sys_prad2", "station": "prad2qtmon" },
-    "ring_buffer_size": 20
-}
-```
 
 ### PRad Support
 
@@ -138,7 +117,7 @@ Use `-D database/prad1/prad_daq_config.json` with both viewer and monitor.
 ```
 CMakeLists.txt
 database/
-    hist_config.json  reconstruction.json  online_config.json
+    config.json
     daq_map.json  hycal_modules.json  daq_config.json
     prad1/                  PRad-specific config and calibration
 prad2dec/                   libprad2dec.a (EVIO decoder library)
