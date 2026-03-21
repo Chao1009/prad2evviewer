@@ -78,6 +78,10 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 }
 #cl-detail-header {
     border-bottom:none; border-top:1px solid var(--border);
+    padding:4px 10px; font-size:12px;
+}
+#cl-detail-header .empty-msg {
+    padding:0; font-size:12px; text-align:left; color:var(--dim);
 }
 .detail-header .mod-name { color:var(--accent); font-weight:600; }
 .detail-header .mod-daq { color:var(--dim); font-size:11px; }
