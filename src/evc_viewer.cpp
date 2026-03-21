@@ -151,6 +151,11 @@ static fdec::HyCalSystem g_hycal;
 static fdec::ClusterConfig g_cluster_cfg;
 static uint32_t g_cluster_skip_mask = 0;  // skip clustering if any of these trigger bits are set
 static float g_adc_to_mev = 1.0f;
+
+// cluster energy histogram config
+static float g_cl_hist_min  = 0.f;
+static float g_cl_hist_max  = 3000.f;
+static float g_cl_hist_step = 10.f;
 static std::unordered_map<int, int> g_roc_to_crate;  // ROC tag → crate index
 
 // cached file reader — keeps EvChannel open between requests for fast sequential access
@@ -737,6 +742,9 @@ static json buildConfig()
         {"pos_min", g_hist_cfg.pos_min}, {"pos_max", g_hist_cfg.pos_max},
         {"pos_step", g_hist_cfg.pos_step},
     };
+    cfg["cluster_hist"] = {
+        {"min", g_cl_hist_min}, {"max", g_cl_hist_max}, {"step", g_cl_hist_step},
+    };
     return cfg;
 }
 
@@ -1048,10 +1056,18 @@ int main(int argc, char *argv[])
                 for (auto &b : cc["skip_trigger_bits"])
                     g_cluster_skip_mask |= (1u << b.get<int>());
             }
+            if (cc.contains("energy_hist")) {
+                auto &eh = cc["energy_hist"];
+                if (eh.contains("min"))  g_cl_hist_min  = eh["min"];
+                if (eh.contains("max"))  g_cl_hist_max  = eh["max"];
+                if (eh.contains("step")) g_cl_hist_step = eh["step"];
+            }
             std::cerr << "Clustering: min_mod=" << g_cluster_cfg.min_module_energy
                       << " min_center=" << g_cluster_cfg.min_center_energy
                       << " min_cluster=" << g_cluster_cfg.min_cluster_energy
-                      << " skip_mask=0x" << std::hex << g_cluster_skip_mask << std::dec << "\n";
+                      << " skip_mask=0x" << std::hex << g_cluster_skip_mask << std::dec
+                      << " hist=[" << g_cl_hist_min << "," << g_cl_hist_max
+                      << "]/" << g_cl_hist_step << "\n";
         }
         if (rcfg.contains("calibration")) {
             auto &cal = rcfg["calibration"];

@@ -35,6 +35,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .main { display:flex; height:calc(100vh - 66px); }
 
 /* --- clustering panel --- */
+.cl-hist-panel { flex:none; height:40%; min-height:100px; position:relative; }
 .cluster-info-wrap { flex:1; overflow-y:auto; }
 .cl-table-row.selected { background:rgba(0,180,216,0.15); }
 .cl-table-row:hover { background:rgba(0,180,216,0.08); cursor:pointer; }
