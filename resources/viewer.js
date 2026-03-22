@@ -63,6 +63,7 @@ let nblocksMin=0, nblocksMax=40, nblocksStep=1;
 
 // DQ tab working range (set by syncDqRange, used by drawGeo)
 let rangeMin=null, rangeMax=null;
+let updateGeoTooltip=()=>{};  // set in init(), called on data refresh
 
 // Light theme flag — set by report.js captureGeoForTab for print-friendly rendering
 let geoLightTheme=false;
@@ -528,6 +529,7 @@ function loadEventData(reqId, data) {
         drawGeo();
     }
     if (activeTab==='dq' && selectedModule) showWaveform(selectedModule);
+    updateGeoTooltip();
 }
 
 function loadEvent(evnum) {
@@ -801,6 +803,7 @@ function fetchOccupancy() {
             syncDqRange();
             drawGeo();
         }
+        updateGeoTooltip();
     }).catch(() => {});
 }
 
@@ -895,6 +898,7 @@ function loadClusterData(evnum){
         selectedCluster=-1;
         drawClusterGeo();
         updateClusterUI();
+        updateGeoTooltip();
         // accumulate energy histogram from per-event cluster data
         if(data.clusters && data.clusters.length>0){
             fillClHist(data.clusters);
@@ -1183,6 +1187,8 @@ function fetchLmsSummary(){
         lmsSummaryData=data;
         drawLmsGeo();
         updateLmsTable();
+        // refresh tooltip if hovering a module (data changed under cursor)
+        if(hoveredModule) updateGeoTooltip();
     }).catch(()=>{});
 }
 
@@ -1596,6 +1602,54 @@ function init(){
 
     // geo mouse
     const tip=document.getElementById('geo-tooltip');
+    // build tooltip text for a module
+    function tooltipText(m){
+        let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
+        if(activeTab==='lms' && lmsSummaryData){
+            const idx=modules.indexOf(m);
+            const md=lmsSummaryData.modules?lmsSummaryData.modules[String(idx)]:null;
+            if(md){
+                const rmsPct=md.mean>0?(md.rms/md.mean*100).toFixed(1):'--';
+                t+=`\nLMS Mean: ${md.mean.toFixed(1)}  RMS: ${md.rms.toFixed(2)}  (${rmsPct}%)`;
+                t+=`\n${md.count} pts  ${md.warn?'⚠ WARNING':'OK'}`;
+            } else { t+='\nNo LMS data'; }
+        } else if(activeTab==='cluster' && clusterData){
+            const idx=modules.indexOf(m);
+            const energy=clusterData.hits?clusterData.hits[String(idx)]:0;
+            if(energy) t+=`\nEnergy: ${energy.toFixed(1)} MeV`;
+            const clusters=clusterData.clusters||[];
+            for(let ci=0;ci<clusters.length;ci++){
+                if(clusters[ci].modules&&clusters[ci].modules.includes(idx)){
+                    t+=`\nCluster #${ci} (${clusters[ci].center}, ${clusters[ci].energy.toFixed(0)} MeV)`;
+                    break;
+                }
+            }
+        } else {
+            const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+            const key=`${m.roc}_${m.sl}_${m.ch}`;
+            if(d&&d.pk&&d.pk.length){
+                const pks=peaksInCut(d.pk);
+                const bp=tallest(pks);
+                const tc=isTimeCut();
+                if(bp) t+=`\nPed ${d.pm.toFixed(1)}  H ${bp.h.toFixed(0)}  Int ${bp.i.toFixed(0)}  T ${bp.t.toFixed(0)}ns  Pk ${pks.length}${tc?' (tcut)':''}`;
+                else t+=`\nPed ${d.pm.toFixed(1)}  (no peaks${tc?' in time cut':''})`;
+            }
+            else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
+            if(occTotal>0){
+                const tc=isTimeCut();
+                const occ=tc?occTcutData:occData;
+                const pct=100.0*(occ[key]||0)/occTotal;
+                t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${tc?' tcut':''})`;
+            } else if(histEnabled===false){
+                t+=`\nOcc: not computed (enable histograms)`;
+            }
+        }
+        return t;
+    }
+    // update tooltip content for currently hovered module (called on data refresh)
+    updateGeoTooltip=()=>{
+        if(hoveredModule) tip.textContent=tooltipText(hoveredModule);
+    };
     geoCanvas.addEventListener('mousemove',e=>{
         const r=geoCanvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);
         if(m!==hoveredModule){
@@ -1603,48 +1657,7 @@ function init(){
             redrawGeo();
         }
         if(m){
-            let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
-            if(activeTab==='lms' && lmsSummaryData){
-                const idx=modules.indexOf(m);
-                const md=lmsSummaryData.modules?lmsSummaryData.modules[String(idx)]:null;
-                if(md){
-                    const rmsPct=md.mean>0?(md.rms/md.mean*100).toFixed(1):'--';
-                    t+=`\nLMS Mean: ${md.mean.toFixed(1)}  RMS: ${md.rms.toFixed(2)}  (${rmsPct}%)`;
-                    t+=`\n${md.count} pts  ${md.warn?'⚠ WARNING':'OK'}`;
-                } else { t+='\nNo LMS data'; }
-            } else if(activeTab==='cluster' && clusterData){
-                const idx=modules.indexOf(m);
-                const energy=clusterData.hits?clusterData.hits[String(idx)]:0;
-                if(energy) t+=`\nEnergy: ${energy.toFixed(1)} MeV`;
-                // find which cluster this module belongs to
-                const clusters=clusterData.clusters||[];
-                for(let ci=0;ci<clusters.length;ci++){
-                    if(clusters[ci].modules&&clusters[ci].modules.includes(idx)){
-                        t+=`\nCluster #${ci} (${clusters[ci].center}, ${clusters[ci].energy.toFixed(0)} MeV)`;
-                        break;
-                    }
-                }
-            } else {
-                const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
-                const key=`${m.roc}_${m.sl}_${m.ch}`;
-                if(d&&d.pk&&d.pk.length){
-                    const pks=peaksInCut(d.pk);
-                    const bp=tallest(pks);
-                    const tc=isTimeCut();
-                    if(bp) t+=`\nPed ${d.pm.toFixed(1)}  H ${bp.h.toFixed(0)}  Int ${bp.i.toFixed(0)}  T ${bp.t.toFixed(0)}ns  Pk ${pks.length}${tc?' (tcut)':''}`;
-                    else t+=`\nPed ${d.pm.toFixed(1)}  (no peaks${tc?' in time cut':''})`;
-                }
-                else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
-                if(occTotal>0){
-                    const tc=isTimeCut();
-                    const occ=tc?occTcutData:occData;
-                    const pct=100.0*(occ[key]||0)/occTotal;
-                    t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${tc?' tcut':''})`;
-                } else if(histEnabled===false){
-                    t+=`\nOcc: not computed (enable histograms)`;
-                }
-            }
-            tip.textContent=t;tip.style.display='block';
+            tip.textContent=tooltipText(m);tip.style.display='block';
             tip.style.left=(e.clientX-r.left+14)+'px';tip.style.top=(e.clientY-r.top-8)+'px';
         }else tip.style.display='none';
     });
