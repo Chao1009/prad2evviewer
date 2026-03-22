@@ -56,6 +56,14 @@ struct AppState {
     int refresh_hist_ms  = 2000;
     int refresh_lms_ms   = 2000;
 
+    // Elog config
+    std::string elog_url;
+    std::string elog_logbook;
+    std::string elog_author;
+    std::vector<std::string> elog_tags;
+    std::string elog_cert;         // SSL client certificate path
+    std::string elog_key;          // SSL client key path
+
     // color range defaults: key "tab:metric" → [min, max]
     std::map<std::string, std::pair<float, float>> color_range_defaults;
 
@@ -81,6 +89,8 @@ struct AppState {
     std::atomic<int>                 events_processed{0};
 
     Histogram cluster_energy_hist;
+    Histogram nclusters_hist;
+    Histogram nblocks_hist;
     int       cluster_events_processed = 0;
 
     // ---- LMS data (guarded by lms_mtx) -------------------------------------

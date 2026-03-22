@@ -68,5 +68,13 @@
     "calibration": {
         "adc_to_mev": 0.078,
         "calibration_file": "prad1/prad_calibration.json"
+    },
+    "elog": {
+        "url": "https://logbooks.jlab.org",
+        "logbook": "PRADLOG",
+        "author": "clasrun",
+        "tags": ["AutoReport", "PRad2"],
+        "cert": "/usr/share/logbook-certs/logbook.cert",
+        "key": "/usr/share/logbook-certs/logbook.key"
     }
 }
