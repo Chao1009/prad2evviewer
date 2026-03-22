@@ -508,7 +508,9 @@ function loadEventData(reqId, data) {
     currentEventNumber = data.event_number || 0;
     currentTriggerBits = data.trigger_bits || 0;
     eventChannels = data.channels || {};
+    if(mode==='online') sampleCount=currentEvent;  // seq number = total samples
     updateStatusBar();
+    updateHeaderStats();
     if(activeTab==='cluster'){
         clusterEvent=-1; // invalidate cache
         loadClusterData(currentEvent);
@@ -763,6 +765,7 @@ function pollProgress() {
                 if (hcb) hcb.checked = histEnabled;
                 document.getElementById('ev-total').textContent = `/ ${totalEvents}`;
                 updateHeaderInfo(cfg);
+                updateHeaderStats();
                 if (histEnabled) { fetchOccupancy(); fetchClHist(); }
                 syncDqRange();
                 drawGeo();
@@ -793,11 +796,16 @@ function fetchOccupancy() {
     }).catch(() => {});
 }
 
-function updateHeaderInfo(cfg) {
-    const hi = cfg.hist_enabled ? ` · hist [${(cfg.hist||{}).time_min||170}-${(cfg.hist||{}).time_max||190} ns]` : '';
-    const fname = g_currentFile.replace(/.*\//, '') || '';
-    document.getElementById('header-info').textContent =
-        `${modules.length} mod · ${totalEvents} evts${hi}` + (fname ? ` · ${fname}` : '');
+function updateHeaderInfo(cfg) {}
+
+let sampleCount=0;
+function updateHeaderStats(){
+    const el=document.getElementById('header-stats');
+    if(mode==='online'){
+        el.textContent=`${sampleCount} samples`;
+    } else {
+        el.textContent=`${totalEvents} events`;
+    }
 }
 
 // =========================================================================
@@ -1416,16 +1424,6 @@ function init(){
         ()=>0,
         80, 80, ()=>{try{Plotly.Plots.resize('lms-plot');}catch(e){}});
     document.getElementById('lms-color-metric').onchange=drawLmsGeo;
-    document.getElementById('btn-clear-lms').onclick=()=>{
-        fetch('/api/lms/clear').then(r=>r.json()).then(()=>{
-            lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
-            Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
-            drawLmsGeo(); updateLmsTable();
-            document.getElementById('lms-detail-header').innerHTML=
-                '<span class="cl-info-text">Click a module to view LMS history</span>';
-            document.getElementById('status-bar').textContent='LMS data cleared';
-        });
-    };
     document.getElementById('lms-log-scale').onchange=drawLmsGeo;
 
     // LMS range editors
@@ -1530,20 +1528,44 @@ function init(){
     document.getElementById('ring-select').onfocus=()=>{ updateRingSelector(); };
     document.getElementById('follow-status').onclick=()=>{ autoFollow=true; updateFollowStatus(); loadLatestEvent(); };
     // per-tab clear buttons
-    document.getElementById('btn-clear-dq').onclick=()=>{
-        fetch('/api/hist/clear').then(r=>r.json()).then(()=>{
+
+    // Clear All — resets all tabs' data for new run
+    document.getElementById('btn-clear-all').onclick=()=>{
+        function clearFrontend(){
+            // DQ
             occData={}; occTcutData={}; occTotal=0;
             if(selectedModule) showHistograms(selectedModule);
-            drawGeo();
-            document.getElementById('status-bar').textContent='DQ histograms cleared';
-        });
-    };
-    document.getElementById('btn-clear-cl').onclick=()=>{
-        initClHist(); plotClHist(); plotClStatHists();
-        fetch('/api/hist/clear').then(r=>r.json()).then(()=>{
-            fetchClHist();
-            document.getElementById('status-bar').textContent='Cluster histogram cleared';
-        });
+
+            // Clustering
+            initClHist(); plotClHist(); plotClStatHists();
+            clusterData=null; clusterEvent=-1; selectedCluster=-1;
+            document.getElementById('cl-detail-header').innerHTML=
+                '<span class="cl-info-text">Click a module or select a cluster</span>';
+
+            // LMS
+            lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
+            Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
+            document.getElementById('lms-detail-header').innerHTML=
+                '<span class="cl-info-text">Click a module to view LMS history</span>';
+
+            sampleCount=0;
+            updateHeaderStats();
+            redrawGeo();
+            document.getElementById('status-bar').textContent='All data cleared — ready for new run';
+        }
+
+        if(mode==='online'){
+            // clear server-side, then frontend
+            Promise.all([
+                fetch('/api/hist/clear').then(r=>r.json()),
+                fetch('/api/lms/clear').then(r=>r.json()),
+            ]).then(clearFrontend).catch(()=>{
+                document.getElementById('status-bar').textContent='Error clearing data';
+            });
+        } else {
+            // file mode: frontend-only clear
+            clearFrontend();
+        }
     };
 
     // geo mouse
@@ -1704,14 +1726,13 @@ function init(){
         if(mode==='file'){
             document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
             updateHeaderInfo(data);
+            updateHeaderStats();
             if(histEnabled) { fetchOccupancy(); fetchClHist(); }
             syncDqRange();
             geoViewInit=false; resizeGeo();
             if(totalEvents>0)loadEvent(1);
         } else {
             setEtStatus(data.et_connected||false);
-            document.getElementById('header-info').textContent=
-                `${modules.length} modules · ONLINE · ring ${data.ring_buffer_size||20}`;
             syncDqRange();
             fetchOccupancy();
             resizeGeo();

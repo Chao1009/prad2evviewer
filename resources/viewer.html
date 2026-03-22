@@ -23,7 +23,8 @@
         <select id="ring-select" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:3px;font-family:inherit;font-size:12px;min-width:120px"></select>
         <button id="follow-status" style="font-size:11px;color:#ffd43b;background:none;border:1px solid #ffd43b;padding:2px 8px;border-radius:3px;display:none;cursor:pointer"></button>
     </div>
-    <div class="info" id="header-info"></div>
+    <span class="header-stats" id="header-stats"></span>
+    <button id="btn-clear-all" class="clear-all-btn" title="Clear all data (new run)">Clear All</button>
 </div>
 
 <!-- file browser dialog -->
@@ -82,7 +83,6 @@
                 <input class="range-edit" id="range-max-edit" type="number" step="any">
                 <span class="range-btn" id="range-max-btn" title="Edit max">✎</span>
             </div>
-            <button id="btn-clear-dq" class="geo-clear-btn" title="Clear DQ histograms and occupancy">Clear</button>
         </div>
         <div class="geo-toolbar" id="geo-toolbar-cl" style="display:none">
             <label>Cluster:</label>
@@ -99,7 +99,6 @@
                 <span class="range-btn" id="cl-range-max-btn" title="Edit max">&#x270E;</span>
             </div>
             <span style="color:var(--dim);font-size:11px" id="cl-summary"></span>
-            <button id="btn-clear-cl" class="geo-clear-btn" title="Clear cluster histogram">Clear</button>
         </div>
         <div class="geo-toolbar" id="geo-toolbar-lms" style="display:none">
             <label>Ref:</label>
@@ -121,7 +120,6 @@
                 <input class="range-edit" id="lms-range-max-edit" type="number" step="any">
                 <span class="range-btn" id="lms-range-max-btn" title="Edit max">&#x270E;</span>
             </div>
-            <button id="btn-clear-lms" class="geo-clear-btn" title="Clear LMS data">Clear</button>
         </div>
         <div class="geo-canvas-wrap" id="geo-wrap">
             <canvas id="geo-canvas"></canvas>
