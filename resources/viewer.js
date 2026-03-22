@@ -242,7 +242,33 @@ function redrawGeo(){
 }
 function geoHandleClick(cx,cy){
     const m=hitTest(cx,cy);
-    if(!m) return;
+    if(!m){
+        // click on empty canvas — deselect
+        if(activeTab==='cluster'){
+            selectedCluster=-1;
+            document.getElementById('cl-select').value='all';
+            drawClusterGeo(); updateClusterTable(); showClusterDetail();
+        } else if(activeTab==='lms'){
+            lmsSelectedModule=-1;
+            currentLmsData=null;
+            Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
+            document.getElementById('lms-detail-header').innerHTML=
+                '<span class="cl-info-text">Click a module to view LMS history</span>';
+            updateLmsTable(); drawLmsGeo();
+        } else {
+            selectedModule=null;
+            currentWaveform=null;
+            currentHist={};
+            document.getElementById('detail-header').innerHTML=
+                '<div class="empty-msg">Click a module to view details</div>';
+            Plotly.react('waveform-div',[],{...PL,xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'}},PC2);
+            Plotly.react('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
+            Plotly.react('poshist-div',[],{...PL,title:{text:'Position Histogram',font:{size:10,color:'#555'}}},PC2);
+            document.getElementById('peaks-tbody').innerHTML='';
+            drawGeo();
+        }
+        return;
+    }
     if(activeTab==='cluster'){
         selectedModule=null;
         const idx=modules.indexOf(m);

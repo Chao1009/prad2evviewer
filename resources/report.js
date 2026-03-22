@@ -112,13 +112,19 @@ function mdTable(headers,rows,alignments){
 // Report sections
 // =========================================================================
 
-// Helper: temporarily set LMS metric dropdown, capture geo, restore.
+// Helper: temporarily set LMS metric dropdown, capture geo, return md with range info.
 async function captureLmsGeo(metric,caption,filename){
     const sel=document.getElementById('lms-color-metric');
     const prev=sel.value;
     sel.value=metric;
-    try{ return await captureGeo('lms',caption,filename); }
-    finally{ sel.value=prev; }
+    try{
+        let md=await captureGeo('lms',caption,filename);
+        const rMin=document.getElementById('lms-range-min-show').textContent;
+        const rMax=document.getElementById('lms-range-max-show').textContent;
+        const useLog=document.getElementById('lms-log-scale').checked;
+        md+=`Color range: ${rMin} – ${rMax} | Scale: ${useLog?'log':'linear'}\n\n`;
+        return md;
+    }finally{ sel.value=prev; }
 }
 
 // Helper: find the ref index for a given ref channel name (e.g. 'LMS3').
