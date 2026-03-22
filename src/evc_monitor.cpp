@@ -277,6 +277,7 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         cfg["elog"] = {
             {"url", g_app.elog_url}, {"logbook", g_app.elog_logbook},
             {"author", g_app.elog_author}, {"tags", g_app.elog_tags},
+            {"username", g_app.elog_username},
         };
         reply(cfg.dump()); return;
     }
@@ -366,8 +367,8 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 
     // /api/elog/post — proxy elog submission via curl
     if (uri == "/api/elog/post") {
-        std::string xml_body = con->get_request_body();
-        if (xml_body.empty()) {
+        std::string body = con->get_request_body();
+        if (body.empty()) {
             con->set_status(websocketpp::http::status_code::bad_request);
             con->set_body("{\"ok\":false,\"error\":\"Empty body\"}");
             con->append_header("Content-Type", "application/json");
@@ -377,13 +378,22 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             reply("{\"ok\":false,\"error\":\"No elog URL configured\"}");
             return;
         }
+        // parse JSON: {xml, username, password}
+        auto req = json::parse(body, nullptr, false);
+        if (req.is_discarded() || !req.contains("xml")) {
+            reply("{\"ok\":false,\"error\":\"Invalid request\"}");
+            return;
+        }
+        std::string xml_body = req["xml"].get<std::string>();
+        std::string user = req.value("username", g_app.elog_username);
+        std::string pass = req.value("password", g_app.elog_password);
         // write XML to temp file
         std::string tmp = "/tmp/prad2_elog_" + std::to_string(std::time(nullptr)) + ".xml";
         { std::ofstream f(tmp); f << xml_body; }
         // curl it to elog server
         std::string auth_flag;
-        if (!g_app.elog_credentials.empty())
-            auth_flag = " -u '" + g_app.elog_credentials + "'";
+        if (!user.empty())
+            auth_flag = " -u '" + user + ":" + pass + "'";
         std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + auth_flag
                         + " --upload-file '" + tmp + "' '"
                         + g_app.elog_url + "/incoming/prad2_report.xml' 2>&1";

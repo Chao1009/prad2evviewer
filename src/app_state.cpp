@@ -260,10 +260,11 @@ void AppState::init(const std::string &db_dir,
             if (el.contains("author"))   elog_author    = el["author"];
             if (el.contains("tags"))
                 for (auto &t : el["tags"]) elog_tags.push_back(t);
-            if (el.contains("credentials")) elog_credentials = el["credentials"];
+            if (el.contains("username")) elog_username = el["username"];
+            if (el.contains("password")) elog_password = el["password"];
             std::cerr << "Elog      : " << elog_url
                       << " logbook=" << elog_logbook
-                      << (elog_credentials.empty() ? "" : " (auth)")
+                      << (elog_username.empty() ? "" : " (auth)")
                       << "\n";
         }
 

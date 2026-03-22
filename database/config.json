@@ -74,6 +74,7 @@
         "logbook": "PRADLOG",
         "author": "clasrun",
         "tags": ["AutoReport", "PRad2"],
-        "credentials": ""
+        "username": "clasrun",
+        "password": ""
     }
 }

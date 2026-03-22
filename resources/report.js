@@ -265,8 +265,7 @@ async function refreshDataForReport(){
 }
 
 // Generate the report. Returns {md, attachments} or null.
-// reportBy: optional name string to include in header.
-async function generateReport(reportBy){
+async function generateReport(reportBy,runNumber){
     if(!modules.length){
         alert('No data loaded. Please load data before generating a report.');
         return null;
@@ -279,9 +278,12 @@ async function generateReport(reportBy){
         reportAttachments=[];
         const ts=new Date().toLocaleString();
         const samples=mode==='online'?sampleCount:totalEvents;
-        let header=`# PRad2 HyCal Monitor Report\n\n`;
+        const runStr=runNumber?String(runNumber).padStart(6,'0'):'';
+        const titleRun=runStr?`Run ${runStr}: `:'';
+        let header=`# ${titleRun}PRad2 HyCal Monitor Report\n\n`;
         header+=`- **Generated:** ${ts}\n`;
         header+=`- **Samples:** ${samples}\n`;
+        if(runNumber) header+=`- **DAQ Run:** ${runNumber}\n`;
         if(reportBy) header+=`- **Report by:** ${reportBy}\n`;
         let sectionsMd='';
         for(const entry of reportRegistry){
@@ -340,8 +342,9 @@ function b64toBlob(b64,type){
 }
 
 async function downloadReport(){
+    const runNumber=prompt('DAQ Run Number (optional):','');
     const reportBy=prompt('Report by (your name, optional):','');
-    const report=await generateReport(reportBy||'');
+    const report=await generateReport(reportBy||'',runNumber||'');
     if(!report) return;
     const statusBar=document.getElementById('status-bar');
     const ts=new Date().toISOString().slice(0,19).replace(/[T:]/g,'-');
@@ -411,33 +414,42 @@ function hideElogDialog(){
 
 async function postToElog(){
     const reportBy=document.getElementById('elog-report-by').value.trim();
+    const runNum=document.getElementById('elog-run').value.trim();
     const title=document.getElementById('elog-title').value.trim();
     const logbook=document.getElementById('elog-logbook').value.trim();
-    const author=document.getElementById('elog-author').value.trim();
+    const elogUser=document.getElementById('elog-user').value.trim();
+    const elogPass=document.getElementById('elog-pass').value;
     const tagsStr=document.getElementById('elog-tags').value.trim();
     const tags=tagsStr?tagsStr.split(',').map(s=>s.trim()).filter(s=>s):[];
     const statusEl=document.getElementById('elog-status');
 
-    if(!title||!logbook||!author){
-        statusEl.textContent='Title, logbook, and posting account are required.';
+    if(!title||!logbook){
+        statusEl.textContent='Title and logbook are required.';
         statusEl.style.color='#c00';
         return;
     }
+    // build full title with run number
+    const fullTitle=runNum?`Run ${String(runNum).padStart(6,'0')}: ${title}`:title;
+
     statusEl.textContent='Generating report...';
     statusEl.style.color='var(--dim)';
 
-    const report=await generateReport(reportBy);
+    const report=await generateReport(reportBy,runNum);
     if(!report){statusEl.textContent='Failed to generate report.';statusEl.style.color='#c00';return;}
 
     // strip image markdown references from body (images go as attachments)
     const body=report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
 
     statusEl.textContent='Posting to elog...';
-    const xml=buildElogXml(title,logbook,author,tags,body,report.attachments);
+    // elog author is from config (e.g. clasrun); username/password are CUE credentials for HTTP auth
+    const xml=buildElogXml(fullTitle,logbook,elogConfig.author||'clasrun',tags,body,report.attachments);
 
     try{
         const resp=await fetch('/api/elog/post',{
-            method:'POST',headers:{'Content-Type':'application/xml'},body:xml});
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({xml,username:elogUser,password:elogPass})
+        });
         const result=await resp.json();
         if(result.ok){
             statusEl.textContent='Posted successfully! (HTTP '+result.status+')';
@@ -475,7 +487,7 @@ function initReport(data){
     if(data&&data.elog&&data.elog.url){
         elogConfig=data.elog;
         document.getElementById('elog-logbook').value=data.elog.logbook||'';
-        document.getElementById('elog-author').value=data.elog.author||'';
+        document.getElementById('elog-user').value=data.elog.username||'';
         document.getElementById('elog-tags').value=(data.elog.tags||[]).join(', ');
     } else {
         const eb=document.getElementById('btn-report-elog');
