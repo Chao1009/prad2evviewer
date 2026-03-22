@@ -396,18 +396,23 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             auth_flag = " -u '" + user + ":" + pass + "'";
         std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + auth_flag
                         + " --upload-file '" + tmp + "' '"
-                        + g_app.elog_url + "/incoming/prad2_report.xml' 2>&1";
+                        + g_app.elog_url + "/incoming/prad2_report.xml' 2>/dev/null";
         std::string http_code;
         FILE *p = popen(cmd.c_str(), "r");
         if (p) {
             char buf[256] = {};
             if (fgets(buf, sizeof(buf), p)) http_code = buf;
+            // trim whitespace/newlines
+            while (!http_code.empty() && (http_code.back()=='\n'||http_code.back()=='\r'))
+                http_code.pop_back();
             pclose(p);
         }
         std::remove(tmp.c_str());
         bool ok = (http_code.find("200") != std::string::npos ||
                    http_code.find("201") != std::string::npos);
-        std::cerr << "Elog post: " << g_app.elog_url << " -> HTTP " << http_code
+        std::cerr << "Elog post: " << g_app.elog_url
+                  << " user=" << (user.empty() ? "(none)" : user)
+                  << " -> HTTP " << http_code
                   << (ok ? " OK" : " FAIL") << "\n";
         reply(json({{"ok", ok}, {"status", http_code}}).dump());
         return;
