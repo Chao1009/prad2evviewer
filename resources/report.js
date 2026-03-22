@@ -25,19 +25,21 @@ function registerReportSection(section){
 async function captureGeoForTab(tab){
     const prev={tab:activeTab,w:geoCanvas.width,h:geoCanvas.height,
                 s:scale,ox:offsetX,oy:offsetY};
-    geoCanvas.width=1200; geoCanvas.height=900;
-    canvasW=1200; canvasH=900;
-    activeTab=tab;
-    geoLightTheme=true;
-    fitView(); redrawGeo();
-    const url=geoCanvas.toDataURL('image/png');
-    geoLightTheme=false;
-    geoCanvas.width=prev.w; geoCanvas.height=prev.h;
-    canvasW=prev.w; canvasH=prev.h;
-    scale=prev.s; offsetX=prev.ox; offsetY=prev.oy;
-    activeTab=prev.tab;
-    redrawGeo();
-    return url;
+    try{
+        geoCanvas.width=1200; geoCanvas.height=900;
+        canvasW=1200; canvasH=900;
+        activeTab=tab;
+        geoLightTheme=true;
+        fitView(); redrawGeo();
+        return geoCanvas.toDataURL('image/png');
+    }finally{
+        geoLightTheme=false;
+        geoCanvas.width=prev.w; geoCanvas.height=prev.h;
+        canvasW=prev.w; canvasH=prev.h;
+        scale=prev.s; offsetX=prev.ox; offsetY=prev.oy;
+        activeTab=prev.tab;
+        redrawGeo();
+    }
 }
 
 // Capture a geo view, register as attachment, return markdown image reference.
@@ -115,9 +117,8 @@ async function captureLmsGeo(metric,caption,filename){
     const sel=document.getElementById('lms-color-metric');
     const prev=sel.value;
     sel.value=metric;
-    const md=await captureGeo('lms',caption,filename);
-    sel.value=prev;
-    return md;
+    try{ return await captureGeo('lms',caption,filename); }
+    finally{ sel.value=prev; }
 }
 
 // Helper: find the ref index for a given ref channel name (e.g. 'LMS3').
