@@ -246,26 +246,26 @@ function buildReportHtml(sections){
     return `<!DOCTYPE html><html><head><meta charset="UTF-8">
 <title>PRad2 Monitor Report - ${ts}</title>
 <style>
-body{font-family:'Helvetica Neue',Arial,sans-serif;max-width:1100px;margin:0 auto;padding:20px;color:#222;background:#fff}
-h1{font-size:20px;border-bottom:2px solid #0074d9;padding-bottom:6px}
-h2{font-size:16px;color:#0074d9;margin-top:28px;border-bottom:1px solid #ddd;padding-bottom:4px;page-break-after:avoid}
-h3{font-size:13px;color:#333;margin:14px 0 6px}
+body{font-family:'Helvetica Neue',Arial,sans-serif;max-width:900px;margin:0 auto;padding:20px;color:#222;background:#fff}
+h1{font-size:20px;border-bottom:2px solid #0074d9;padding-bottom:6px;margin:0 0 6px}
+h2{font-size:16px;color:#0074d9;margin:24px 0 4px;border-bottom:1px solid #ddd;padding-bottom:4px;page-break-after:avoid}
+h3{font-size:13px;color:#333;margin:12px 0 6px}
+p{margin:4px 0}
 .meta{color:#666;font-size:12px;margin-bottom:16px}
 .meta span{margin-right:20px}
 img{max-width:100%;height:auto;display:block;margin:8px 0}
-table{border-collapse:collapse;width:100%;font-size:11px;margin:8px 0}
-th,td{border:1px solid #ccc;padding:3px 6px;text-align:right}
+table{border-collapse:collapse;width:100%;font-size:10px;margin:8px 0}
+th,td{border:1px solid #ccc;padding:2px 5px;text-align:right}
 th{background:#f0f0f0;font-weight:600}
 tr:nth-child(even){background:#fafafa}
 .warn{color:#c00;font-weight:600}
 .ok{color:#080}
-.section{page-break-inside:avoid}
-.geo-img{max-width:700px;border:1px solid #ddd}
-.chart-img{max-width:800px}
-.chart-row{display:flex;gap:10px}
-.chart-row img{max-width:48%}
+.geo-img{width:580px;border:1px solid #ddd}
+.chart-img{width:560px}
+.chart-row{display:flex;gap:8px}
+.chart-row img{width:280px}
 .no-data{color:#999;font-style:italic}
-@media print{body{padding:0}.section{page-break-inside:avoid}}
+@media print{body{padding:10px;max-width:none}h2{page-break-after:avoid}table{page-break-inside:auto}}
 </style></head><body>
 <h1>PRad2 HyCal Monitor Report</h1>
 <div class="meta">
@@ -316,33 +316,12 @@ async function generateReport(){
 async function downloadReportPdf(){
     const html=await generateReport();
     if(!html) return;
-    const statusBar=document.getElementById('status-bar');
-    statusBar.textContent='Rendering PDF...';
-    try{
-        // Render in a hidden iframe for CSS isolation from the monitor's styles
-        const iframe=document.createElement('iframe');
-        iframe.style.cssText='position:fixed;left:-9999px;top:0;width:1100px;height:900px;border:none';
-        document.body.appendChild(iframe);
-        const idoc=iframe.contentDocument||iframe.contentWindow.document;
-        idoc.open(); idoc.write(html); idoc.close();
-        // Wait for images to load
-        await new Promise(r=>setTimeout(r,200));
-
-        const ts=new Date().toISOString().slice(0,19).replace(/[T:]/g,'-');
-        await html2pdf().set({
-            margin:[10,10,10,10],
-            filename:`prad2_report_${ts}.pdf`,
-            image:{type:'png',quality:0.95},
-            html2canvas:{scale:2,useCORS:true,logging:false},
-            jsPDF:{unit:'mm',format:'a4',orientation:'portrait'},
-            pagebreak:{mode:['css','legacy'],avoid:'.section'}
-        }).from(idoc.body).save();
-        iframe.remove();
-        statusBar.textContent='PDF saved';
-        setTimeout(()=>{statusBar.textContent='Ready';},3000);
-    }catch(err){
-        statusBar.textContent=`PDF error: ${err.message}`;
-    }
+    // Open in a new window — clean CSS context, no monitor interference.
+    // Browser "Save as PDF" / Ctrl+P gives perfect results.
+    const w=window.open('','_blank');
+    if(!w){alert('Popup blocked — please allow popups for this site.');return;}
+    w.document.write(html);
+    w.document.close();
 }
 
 // =========================================================================
