@@ -420,6 +420,8 @@ async function postToElog(){
     const tagsStr=document.getElementById('elog-tags').value.trim();
     const tags=tagsStr?tagsStr.split(',').map(s=>s.trim()).filter(s=>s):[];
     const statusEl=document.getElementById('elog-status');
+    const submitBtn=document.getElementById('elog-submit');
+    const mainStatus=document.getElementById('status-bar');
 
     if(!title||!logbook){
         statusEl.textContent='Title and logbook are required.';
@@ -428,11 +430,19 @@ async function postToElog(){
     }
     const fullTitle=runNum?`Run ${String(runNum).padStart(6,'0')}: ${title}`:title;
 
+    // disable button during submission
+    submitBtn.disabled=true;
+    submitBtn.textContent='Posting...';
     statusEl.textContent='Generating report...';
     statusEl.style.color='var(--dim)';
 
     const report=await generateReport(reportBy,runNum);
-    if(!report){statusEl.textContent='Failed to generate report.';statusEl.style.color='#c00';return;}
+    if(!report){
+        statusEl.textContent='Failed to generate report.';
+        statusEl.style.color='#c00';
+        submitBtn.disabled=false; submitBtn.textContent='Post';
+        return;
+    }
 
     const body=report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
 
@@ -447,16 +457,24 @@ async function postToElog(){
         });
         const result=await resp.json();
         if(result.ok){
-            statusEl.textContent='Posted successfully! (HTTP '+result.status+')';
+            statusEl.textContent='Posted successfully!';
             statusEl.style.color='#080';
-            setTimeout(hideElogDialog,2000);
+            mainStatus.textContent=`Elog posted: ${fullTitle}`;
+            setTimeout(hideElogDialog,1500);
+            setTimeout(()=>{submitBtn.disabled=false;submitBtn.textContent='Post';},1500);
         }else{
-            statusEl.textContent='Post failed: HTTP '+result.status+(result.error?' - '+result.error:'');
+            const detail=result.status==='000'?'Server unreachable (check cert/network)'
+                :'HTTP '+result.status+(result.error?' — '+result.error:'');
+            statusEl.textContent='Post failed: '+detail;
             statusEl.style.color='#c00';
+            mainStatus.textContent='Elog post failed: '+detail;
+            submitBtn.disabled=false; submitBtn.textContent='Post';
         }
     }catch(err){
         statusEl.textContent='Network error: '+err.message;
         statusEl.style.color='#c00';
+        mainStatus.textContent='Elog post error: '+err.message;
+        submitBtn.disabled=false; submitBtn.textContent='Post';
     }
 }
 
