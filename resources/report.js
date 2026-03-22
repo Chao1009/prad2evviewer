@@ -417,8 +417,6 @@ async function postToElog(){
     const runNum=document.getElementById('elog-run').value.trim();
     const title=document.getElementById('elog-title').value.trim();
     const logbook=document.getElementById('elog-logbook').value.trim();
-    const elogUser=document.getElementById('elog-user').value.trim();
-    const elogPass=document.getElementById('elog-pass').value;
     const tagsStr=document.getElementById('elog-tags').value.trim();
     const tags=tagsStr?tagsStr.split(',').map(s=>s.trim()).filter(s=>s):[];
     const statusEl=document.getElementById('elog-status');
@@ -428,7 +426,6 @@ async function postToElog(){
         statusEl.style.color='#c00';
         return;
     }
-    // build full title with run number
     const fullTitle=runNum?`Run ${String(runNum).padStart(6,'0')}: ${title}`:title;
 
     statusEl.textContent='Generating report...';
@@ -437,18 +434,16 @@ async function postToElog(){
     const report=await generateReport(reportBy,runNum);
     if(!report){statusEl.textContent='Failed to generate report.';statusEl.style.color='#c00';return;}
 
-    // strip image markdown references from body (images go as attachments)
     const body=report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
 
     statusEl.textContent='Posting to elog...';
-    // elog author is from config (e.g. clasrun); username/password are CUE credentials for HTTP auth
     const xml=buildElogXml(fullTitle,logbook,elogConfig.author||'clasrun',tags,body,report.attachments);
 
     try{
         const resp=await fetch('/api/elog/post',{
             method:'POST',
             headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({xml,username:elogUser,password:elogPass})
+            body:JSON.stringify({xml})
         });
         const result=await resp.json();
         if(result.ok){
@@ -487,7 +482,6 @@ function initReport(data){
     if(data&&data.elog&&data.elog.url){
         elogConfig=data.elog;
         document.getElementById('elog-logbook').value=data.elog.logbook||'';
-        document.getElementById('elog-user').value=data.elog.username||'';
         document.getElementById('elog-tags').value=(data.elog.tags||[]).join(', ');
     } else {
         const eb=document.getElementById('btn-report-elog');

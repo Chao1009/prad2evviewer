@@ -277,7 +277,6 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         cfg["elog"] = {
             {"url", g_app.elog_url}, {"logbook", g_app.elog_logbook},
             {"author", g_app.elog_author}, {"tags", g_app.elog_tags},
-            {"username", g_app.elog_username},
         };
         reply(cfg.dump()); return;
     }
@@ -378,23 +377,21 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             reply("{\"ok\":false,\"error\":\"No elog URL configured\"}");
             return;
         }
-        // parse JSON: {xml, username, password}
+        // parse JSON: {xml}
         auto req = json::parse(body, nullptr, false);
         if (req.is_discarded() || !req.contains("xml")) {
             reply("{\"ok\":false,\"error\":\"Invalid request\"}");
             return;
         }
         std::string xml_body = req["xml"].get<std::string>();
-        std::string user = req.value("username", g_app.elog_username);
-        std::string pass = req.value("password", g_app.elog_password);
         // write XML to temp file
         std::string tmp = "/tmp/prad2_elog_" + std::to_string(std::time(nullptr)) + ".xml";
         { std::ofstream f(tmp); f << xml_body; }
-        // curl it to elog server
-        std::string auth_flag;
-        if (!user.empty())
-            auth_flag = " -u '" + user + ":" + pass + "'";
-        std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + auth_flag
+        // curl it to elog server with SSL client certificate
+        std::string cert_flag;
+        if (!g_app.elog_cert.empty())
+            cert_flag = " --cert '" + g_app.elog_cert + "' --key '" + g_app.elog_key + "'";
+        std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + cert_flag
                         + " --upload-file '" + tmp + "' '"
                         + g_app.elog_url + "/incoming/prad2_report.xml' 2>/dev/null";
         std::string http_code;
@@ -411,7 +408,6 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         bool ok = (http_code.find("200") != std::string::npos ||
                    http_code.find("201") != std::string::npos);
         std::cerr << "Elog post: " << g_app.elog_url
-                  << " user=" << (user.empty() ? "(none)" : user)
                   << " -> HTTP " << http_code
                   << (ok ? " OK" : " FAIL") << "\n";
         reply(json({{"ok", ok}, {"status", http_code}}).dump());

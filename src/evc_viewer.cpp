@@ -350,7 +350,6 @@ static json buildConfig() {
     cfg["elog"] = {
         {"url", g_app.elog_url}, {"logbook", g_app.elog_logbook},
         {"author", g_app.elog_author}, {"tags", g_app.elog_tags},
-        {"username", g_app.elog_username},
     };
     return cfg;
 }

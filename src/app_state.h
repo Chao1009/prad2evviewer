@@ -61,8 +61,8 @@ struct AppState {
     std::string elog_logbook;
     std::string elog_author;
     std::vector<std::string> elog_tags;
-    std::string elog_username;     // CUE username for HTTP Basic Auth
-    std::string elog_password;     // CUE password for HTTP Basic Auth
+    std::string elog_cert;         // SSL client certificate path
+    std::string elog_key;          // SSL client key path
 
     // color range defaults: key "tab:metric" → [min, max]
     std::map<std::string, std::pair<float, float>> color_range_defaults;

@@ -74,7 +74,7 @@
         "logbook": "PRADLOG",
         "author": "clasrun",
         "tags": ["AutoReport", "PRad2"],
-        "username": "clasrun",
-        "password": ""
+        "cert": "/usr/share/logbook-certs/logbook.cert",
+        "key": "/usr/share/logbook-certs/logbook.key"
     }
 }
