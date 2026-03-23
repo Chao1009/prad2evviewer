@@ -896,6 +896,9 @@ function switchTab(tab){
     if(tab===activeTab) return;
     activeTab=tab;
     selectedModule=null;
+    // clear notification dot on the tab being opened
+    if(tab==='lms') document.getElementById('lms-dot').className='tab-dot';
+    if(tab==='epics') document.getElementById('epics-dot').className='tab-dot';
     document.querySelectorAll('.tab').forEach(t=>{
         t.classList.toggle('active', t.dataset.tab===tab);
     });
@@ -1241,9 +1244,17 @@ function fetchLmsSummary(){
         lmsSummaryData=data;
         drawLmsGeo();
         updateLmsTable();
-        // refresh tooltip if hovering a module (data changed under cursor)
         if(hoveredModule) updateGeoTooltip();
+        // update tab dot if not currently on LMS tab
+        if(activeTab!=='lms') updateLmsDot();
     }).catch(()=>{});
+}
+
+function updateLmsDot(){
+    const dot=document.getElementById('lms-dot');
+    if(!lmsSummaryData||!lmsSummaryData.modules){dot.className='tab-dot';return;}
+    const hasWarn=Object.values(lmsSummaryData.modules).some(m=>m.warn);
+    dot.className='tab-dot'+(hasWarn?' alert':'');
 }
 
 function fetchLmsHistory(modIdx, modName){

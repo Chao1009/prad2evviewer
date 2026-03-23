@@ -70,7 +70,22 @@ function fetchEpicsLatest(){
     fetch('/api/epics/latest').then(r=>r.json()).then(data=>{
         epicsLatestData=data;
         updateEpicsTable();
+        if(activeTab!=='epics') updateEpicsDot();
     }).catch(()=>{});
+}
+
+function updateEpicsDot(){
+    const dot=document.getElementById('epics-dot');
+    if(!epicsLatestData||!epicsLatestData.channels){dot.className='tab-dot';return;}
+    let worst=0; // 0=ok, 1=warn, 2=alert
+    for(const ch of epicsLatestData.channels){
+        if(ch.count<epicsMinAvgPts||ch.mean===0) continue;
+        const dev=Math.abs(ch.value-ch.mean)/Math.abs(ch.mean);
+        if(dev>=epicsAlertThresh) worst=2;
+        else if(dev>=epicsWarnThresh && worst<1) worst=1;
+        if(worst===2) break;
+    }
+    dot.className='tab-dot'+(worst===2?' alert':worst===1?' warn':'');
 }
 
 // =========================================================================

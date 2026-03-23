@@ -35,6 +35,10 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 }
 .tab:hover { color:var(--text); }
 .tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+.tab { position:relative; }
+.tab-dot { display:none; width:7px; height:7px; border-radius:50%; position:absolute; top:4px; right:4px; }
+.tab-dot.warn { display:block; background:#ffa500; }
+.tab-dot.alert { display:block; background:#f66; }
 
 .main { display:flex; height:calc(100vh - 66px - 22px); }
 
