@@ -296,19 +296,32 @@ void AppState::init(const std::string &db_dir,
                 if (ea.contains("energy_max"))  ea_energy_max  = ea["energy_max"];
                 if (ea.contains("energy_step")) ea_energy_step = ea["energy_step"];
             }
-            if (ph.contains("position_hist")) {
-                auto &po = ph["position_hist"];
-                if (po.contains("x_min"))  pos_x_min  = po["x_min"];
-                if (po.contains("x_max"))  pos_x_max  = po["x_max"];
-                if (po.contains("x_step")) pos_x_step = po["x_step"];
-                if (po.contains("y_min"))  pos_y_min  = po["y_min"];
-                if (po.contains("y_max"))  pos_y_max  = po["y_max"];
-                if (po.contains("y_step")) pos_y_step = po["y_step"];
+            if (ph.contains("moller")) {
+                auto &ml = ph["moller"];
+                if (ml.contains("energy_tolerance")) moller_energy_tol = ml["energy_tolerance"];
+                if (ml.contains("angle_min"))        moller_angle_min  = ml["angle_min"];
+                if (ml.contains("angle_max"))        moller_angle_max  = ml["angle_max"];
+                if (ml.contains("xy_hist")) {
+                    auto &xy = ml["xy_hist"];
+                    if (xy.contains("x_min"))  moller_xy_x_min  = xy["x_min"];
+                    if (xy.contains("x_max"))  moller_xy_x_max  = xy["x_max"];
+                    if (xy.contains("x_step")) moller_xy_x_step = xy["x_step"];
+                    if (xy.contains("y_min"))  moller_xy_y_min  = xy["y_min"];
+                    if (xy.contains("y_max"))  moller_xy_y_max  = xy["y_max"];
+                    if (xy.contains("y_step")) moller_xy_y_step = xy["y_step"];
+                }
+                if (ml.contains("energy_hist")) {
+                    auto &eh = ml["energy_hist"];
+                    if (eh.contains("min"))  moller_e_min  = eh["min"];
+                    if (eh.contains("max"))  moller_e_max  = eh["max"];
+                    if (eh.contains("step")) moller_e_step = eh["step"];
+                }
             }
-            std::cerr << "Physics   : target=(" << target_x << "," << target_y << "," << target_z
+            std::cerr << "Physics   : beam=" << beam_energy << "MeV target=("
+                      << target_x << "," << target_y << "," << target_z
                       << ") HyCal=(" << hycal_transform.x << "," << hycal_transform.y << ","
-                      << hycal_transform.z << ") tilt=(" << hycal_transform.rx << ","
-                      << hycal_transform.ry << "," << hycal_transform.rz << ")\n";
+                      << hycal_transform.z << ") Moller: tol=" << moller_energy_tol
+                      << " angle=[" << moller_angle_min << "," << moller_angle_max << "]\n";
         }
 
         if (rcfg.contains("epics")) {
@@ -341,9 +354,10 @@ void AppState::init(const std::string &db_dir,
     int ea_nx = std::max(1, (int)std::ceil((ea_angle_max - ea_angle_min) / ea_angle_step));
     int ea_ny = std::max(1, (int)std::ceil((ea_energy_max - ea_energy_min) / ea_energy_step));
     energy_angle_hist.init(ea_nx, ea_ny);
-    int pos_nx = std::max(1, (int)std::ceil((pos_x_max - pos_x_min) / pos_x_step));
-    int pos_ny = std::max(1, (int)std::ceil((pos_y_max - pos_y_min) / pos_y_step));
-    pos_xy_hist.init(pos_nx, pos_ny);
+    int ml_nx = std::max(1, (int)std::ceil((moller_xy_x_max - moller_xy_x_min) / moller_xy_x_step));
+    int ml_ny = std::max(1, (int)std::ceil((moller_xy_y_max - moller_xy_y_min) / moller_xy_y_step));
+    moller_xy_hist.init(ml_nx, ml_ny);
+    moller_energy_hist.init(std::max(1, (int)std::ceil((moller_e_max - moller_e_min) / moller_e_step)));
 }
 
 //=============================================================================
@@ -448,22 +462,47 @@ void AppState::clusterEvent(fdec::EventData &event,
     clusterer.FormClusters();
     std::vector<fdec::ClusterHit> reco_hits;
     clusterer.ReconstructHits(reco_hits);
-    for (auto &rh : reco_hits) {
-        cluster_energy_hist.fill(rh.energy, cl_hist_min, cl_hist_step);
-        nblocks_hist.fill(rh.nblocks, nblocks_hist_min, nblocks_hist_step);
-        // transform hit from HyCal detector plane to lab frame
-        float lx, ly, lz;
-        hycal_transform.toLab(rh.x, rh.y, lx, ly, lz);
-        // compute scattering angle from target
-        float dx = lx - target_x, dy = ly - target_y, dz = lz - target_z;
+
+    // compute lab-frame coordinates and scattering angles for all clusters
+    struct ClusterInfo { float lx, ly, lz, theta; };
+    std::vector<ClusterInfo> cinfo(reco_hits.size());
+    for (size_t i = 0; i < reco_hits.size(); ++i) {
+        auto &rh = reco_hits[i];
+        auto &ci = cinfo[i];
+        hycal_transform.toLab(rh.x, rh.y, ci.lx, ci.ly, ci.lz);
+        float dx = ci.lx - target_x, dy = ci.ly - target_y, dz = ci.lz - target_z;
         float r = std::sqrt(dx*dx + dy*dy);
-        float theta_deg = std::atan2(r, dz) * (180.f / 3.14159265f);
-        energy_angle_hist.fill(theta_deg, rh.energy,
+        ci.theta = std::atan2(r, dz) * (180.f / 3.14159265f);
+    }
+
+    // fill standard histograms
+    for (size_t i = 0; i < reco_hits.size(); ++i) {
+        cluster_energy_hist.fill(reco_hits[i].energy, cl_hist_min, cl_hist_step);
+        nblocks_hist.fill(reco_hits[i].nblocks, nblocks_hist_min, nblocks_hist_step);
+        energy_angle_hist.fill(cinfo[i].theta, reco_hits[i].energy,
             ea_angle_min, ea_angle_step, ea_energy_min, ea_energy_step);
-        pos_xy_hist.fill(lx, ly, pos_x_min, pos_x_step, pos_y_min, pos_y_step);
     }
     nclusters_hist.fill(reco_hits.size(), nclusters_hist_min, nclusters_hist_step);
     cluster_events_processed++;
+
+    // Møller selection: exactly 2 clusters, energy sum ~ beam, one cluster in angle window
+    if (reco_hits.size() == 2 && beam_energy > 0) {
+        float esum = reco_hits[0].energy + reco_hits[1].energy;
+        bool energy_ok = std::abs(esum - beam_energy) < moller_energy_tol * beam_energy;
+        bool angle_ok = false;
+        for (int j = 0; j < 2; ++j) {
+            if (cinfo[j].theta >= moller_angle_min && cinfo[j].theta <= moller_angle_max)
+                angle_ok = true;
+        }
+        if (energy_ok && angle_ok) {
+            moller_events++;
+            for (int j = 0; j < 2; ++j) {
+                moller_xy_hist.fill(cinfo[j].lx, cinfo[j].ly,
+                    moller_xy_x_min, moller_xy_x_step, moller_xy_y_min, moller_xy_y_step);
+                moller_energy_hist.fill(reco_hits[j].energy, moller_e_min, moller_e_step);
+            }
+        }
+    }
 }
 
 void AppState::processLms(fdec::EventData &event,
@@ -685,7 +724,9 @@ void AppState::clearHistograms()
     nclusters_hist.clear();
     nblocks_hist.clear();
     energy_angle_hist.clear();
-    pos_xy_hist.clear();
+    moller_xy_hist.clear();
+    moller_energy_hist.clear();
+    moller_events = 0;
     cluster_events_processed = 0;
 }
 
@@ -757,14 +798,22 @@ json AppState::apiEnergyAngle() const
             {"events", cluster_events_processed}};
 }
 
-json AppState::apiPositionXY() const
+json AppState::apiMoller() const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
-    return {{"bins", pos_xy_hist.bins},
-            {"nx", pos_xy_hist.nx}, {"ny", pos_xy_hist.ny},
-            {"x_min", pos_x_min}, {"x_max", pos_x_max}, {"x_step", pos_x_step},
-            {"y_min", pos_y_min}, {"y_max", pos_y_max}, {"y_step", pos_y_step},
-            {"events", cluster_events_processed}};
+    auto histJson = [](const Histogram &h, float mn, float mx, float st) -> json {
+        return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
+                {"min", mn}, {"max", mx}, {"step", st}};
+    };
+    return {{"xy_bins", moller_xy_hist.bins},
+            {"xy_nx", moller_xy_hist.nx}, {"xy_ny", moller_xy_hist.ny},
+            {"xy_x_min", moller_xy_x_min}, {"xy_x_max", moller_xy_x_max}, {"xy_x_step", moller_xy_x_step},
+            {"xy_y_min", moller_xy_y_min}, {"xy_y_max", moller_xy_y_max}, {"xy_y_step", moller_xy_y_step},
+            {"energy_hist", histJson(moller_energy_hist, moller_e_min, moller_e_max, moller_e_step)},
+            {"moller_events", moller_events},
+            {"total_events", cluster_events_processed},
+            {"cuts", {{"energy_tolerance", moller_energy_tol},
+                      {"angle_min", moller_angle_min}, {"angle_max", moller_angle_max}}}};
 }
 
 json AppState::apiOccupancy() const
@@ -1012,9 +1061,9 @@ void AppState::fillConfigJson(json &cfg) const
             {"angle_min", ea_angle_min}, {"angle_max", ea_angle_max}, {"angle_step", ea_angle_step},
             {"energy_min", ea_energy_min}, {"energy_max", ea_energy_max}, {"energy_step", ea_energy_step},
         }},
-        {"position_hist", {
-            {"x_min", pos_x_min}, {"x_max", pos_x_max}, {"x_step", pos_x_step},
-            {"y_min", pos_y_min}, {"y_max", pos_y_max}, {"y_step", pos_y_step},
+        {"moller", {
+            {"energy_tolerance", moller_energy_tol},
+            {"angle_min", moller_angle_min}, {"angle_max", moller_angle_max},
         }},
     };
     cfg["elog"] = {
@@ -1035,8 +1084,8 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
         return {true, apiOccupancy().dump()};
     if (uri == "/api/physics/energy_angle")
         return {true, apiEnergyAngle().dump()};
-    if (uri == "/api/physics/position_xy")
-        return {true, apiPositionXY().dump()};
+    if (uri == "/api/physics/moller")
+        return {true, apiMoller().dump()};
     if (uri == "/api/cluster_hist")
         return {true, apiClusterHist().dump()};
     if (uri.rfind("/api/hist/", 0) == 0)

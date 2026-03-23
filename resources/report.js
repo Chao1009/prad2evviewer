@@ -258,16 +258,17 @@ registerReportSection({id:'cluster',title:'Clustering',order:20,
 // --- Physics ---
 registerReportSection({id:'physics',title:'Physics',order:25,
     generate:async()=>{
-        let data,posData;
+        let data,ml;
         try{ data=await fetch('/api/physics/energy_angle').then(r=>r.json()); }catch(e){}
-        try{ posData=await fetch('/api/physics/position_xy').then(r=>r.json()); }catch(e){}
-        if((!data||!data.events)&&(!posData||!posData.events)) return null;
+        try{ ml=await fetch('/api/physics/moller').then(r=>r.json()); }catch(e){}
+        if((!data||!data.events)&&(!ml||!ml.total_events)) return null;
 
         let md='## Physics\n\n';
-        const evts=data?.events||posData?.events||0;
+        const evts=data?.events||ml?.total_events||0;
         md+=`Events: ${evts}`;
         if(data?.beam_energy) md+=` | Beam: ${data.beam_energy} MeV`;
         if(data?.hycal_z) md+=` | HyCal z: ${data.hycal_z/1000}m`;
+        if(ml) md+=` | Møller: ${ml.moller_events}`;
         md+='\n\n';
 
         // energy vs angle heatmap + elastic line
@@ -300,23 +301,43 @@ registerReportSection({id:'physics',title:'Physics',order:25,
             }catch(e){}
         }
 
-        // XY position heatmap
-        if(posData&&posData.bins&&posData.bins.length&&posData.nx){
+        // Møller XY heatmap
+        if(ml&&ml.xy_bins&&ml.xy_bins.length&&ml.xy_nx&&ml.moller_events>0){
+            const cuts=ml.cuts||{};
+            md+=`### Møller Selection\n\nCuts: θ ∈ [${cuts.angle_min}, ${cuts.angle_max}]°, `
+               +`E_sum within ±${((cuts.energy_tolerance||0.1)*100).toFixed(0)}% of beam\n\n`;
             try{
                 const img=await plotToImage(async div=>{
                     const z=[];
-                    for(let iy=0;iy<posData.ny;iy++)
-                        z.push(posData.bins.slice(iy*posData.nx,(iy+1)*posData.nx).map(v=>v>0?Math.log10(v):null));
-                    const x=[];for(let i=0;i<posData.nx;i++) x.push(posData.x_min+(i+0.5)*posData.x_step);
-                    const y=[];for(let i=0;i<posData.ny;i++) y.push(posData.y_min+(i+0.5)*posData.y_step);
+                    for(let iy=0;iy<ml.xy_ny;iy++)
+                        z.push(ml.xy_bins.slice(iy*ml.xy_nx,(iy+1)*ml.xy_nx).map(v=>v>0?Math.log10(v):null));
+                    const x=[];for(let i=0;i<ml.xy_nx;i++) x.push(ml.xy_x_min+(i+0.5)*ml.xy_x_step);
+                    const y=[];for(let i=0;i<ml.xy_ny;i++) y.push(ml.xy_y_min+(i+0.5)*ml.xy_y_step);
                     await Plotly.newPlot(div,[{z,x,y,type:'heatmap',colorscale:'Hot',
                         colorbar:{title:'log₁₀(counts)',titleside:'right'}}],
                         {...RPL,xaxis:{...RPL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
                          yaxis:{...RPL.yaxis,title:'Y (mm)'},margin:{l:55,r:80,t:10,b:40}});
                 },600,600);
-                addAttachment(img,'position_xy.png','Cluster XY Position');
-                md+=`![Cluster Position](position_xy.png)\n\n`;
+                addAttachment(img,'moller_xy.png','Møller XY Position');
+                md+=`![Møller XY](moller_xy.png)\n\n`;
             }catch(e){}
+
+            // Møller energy histogram
+            const h=ml.energy_hist;
+            if(h&&h.bins&&h.bins.length){
+                try{
+                    const img=await plotToImage(async div=>{
+                        const x=[];for(let i=0;i<h.bins.length;i++) x.push(h.min+(i+0.5)*h.step);
+                        await Plotly.newPlot(div,[{x,y:h.bins,type:'bar',
+                            marker:{color:'#00b4d8'}}],
+                            {...RPL,xaxis:{...RPL.xaxis,title:'Energy (MeV)'},
+                             yaxis:{...RPL.yaxis,title:'Counts'},
+                             margin:{l:55,r:20,t:10,b:40},bargap:0});
+                    },800,400);
+                    addAttachment(img,'moller_energy.png','Møller Cluster Energy');
+                    md+=`![Møller Energy](moller_energy.png)\n\n`;
+                }catch(e){}
+            }
         }
         return md;
     }

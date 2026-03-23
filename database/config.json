@@ -84,13 +84,17 @@
             "energy_max": 3000.0,
             "energy_step": 100.0
         },
-        "position_hist": {
-            "x_min": -600.0,
-            "x_max": 600.0,
-            "x_step": 5.0,
-            "y_min": -600.0,
-            "y_max": 600.0,
-            "y_step": 5.0
+        "moller": {
+            "energy_tolerance": 0.1,
+            "angle_min": 1.0,
+            "angle_max": 1.2,
+            "xy_hist": {
+                "x_min": -600.0, "x_max": 600.0, "x_step": 5.0,
+                "y_min": -600.0, "y_max": 600.0, "y_step": 5.0
+            },
+            "energy_hist": {
+                "min": 0.0, "max": 2500.0, "step": 10.0
+            }
         }
     },
     "epics": {
