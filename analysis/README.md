@@ -1,4 +1,4 @@
-# Analysis Tools
+# Offline Analysis Tools
 
 Replay and physics analysis tools for PRad2. **Requires ROOT 6.0+** — automatically skipped if ROOT is not found.
 
@@ -60,3 +60,6 @@ analysis/
    ```
 
 All shared sources (`Replay.cpp`, `PhysicsTools.cpp`) and dependencies (`prad2dec`, `prad2ana`, ROOT) are linked automatically.
+
+## Contributors
+Yuan Li — Shandong University
