@@ -34,9 +34,10 @@ function fetchAndPlotEpicsSlot(slot){
         results.forEach((data,i)=>{
             if(!data||!data.time||!data.time.length) return;
             traces.push({
-                x:data.time,y:data.value,type:'scatter',mode:'lines',
+                x:data.time,y:data.value,type:'scatter',mode:'lines+markers',
                 name:data.name,
                 line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
+                marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
                 hovertemplate:`${data.name}: %{y:.3f}<extra></extra>`,
             });
         });
