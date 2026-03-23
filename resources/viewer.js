@@ -687,12 +687,7 @@ function connectWebSocket() {
                     }
                 }
             } else if (msg.type === 'epics_cleared') {
-                epicsLatestData=null;
-                epicsSlots=[[],[],[],[],[],[]];
-                if(activeTab==='epics'){
-                    for(let s=0;s<EPICS_NUM_SLOTS;s++){renderEpicsChips(s);Plotly.react('epics-plot-'+s,[],{...PL},PC2);}
-                    updateEpicsTable();
-                }
+                clearEpicsFrontend();
             }
         } catch (e) {}
     };
@@ -1395,173 +1390,6 @@ function drawLmsGeo(){
     }
 }
 
-// =========================================================================
-// EPICS monitoring
-// =========================================================================
-const EPICS_COLORS=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b'];
-const EPICS_MAX_PER_SLOT=6;
-let epicsChannels=[];
-let epicsDefaultChannels=[];
-const EPICS_NUM_SLOTS=6;
-let epicsSlots=[[],[],[],[],[],[]];  // 6 slots, each an array of channel names (max 6 per slot)
-let epicsWarnThresh=0.1, epicsAlertThresh=0.2, epicsMinAvgPts=10;
-let epicsLatestData=null;
-let lastEpicsFetch=0, refreshEpicsMs=2000;
-
-function fetchEpicsChannels(){
-    fetch('/api/epics/channels').then(r=>r.json()).then(data=>{
-        epicsChannels=data.channels||[];
-    }).catch(()=>{});
-}
-
-function fetchAndPlotEpicsSlot(slot){
-    const names=epicsSlots[slot];
-    if(!names.length){
-        Plotly.react('epics-plot-'+slot,[],{...PL},PC_EPICS);
-        return;
-    }
-    // fetch all channels for this slot in parallel
-    Promise.all(names.map(n=>
-        fetch(`/api/epics/channel/${encodeURIComponent(n)}`).then(r=>r.json()).catch(()=>null)
-    )).then(results=>{
-        const traces=[];
-        results.forEach((data,i)=>{
-            if(!data||!data.time||!data.time.length) return;
-            traces.push({
-                x:data.time,y:data.value,type:'scatter',mode:'lines',
-                name:data.name,
-                line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
-                hovertemplate:`${data.name}: %{y:.3f}<extra></extra>`,
-            });
-        });
-        Plotly.react('epics-plot-'+slot,traces,{...PL,
-            xaxis:{...PL.xaxis,title:'Time (s)'},
-            yaxis:{...PL.yaxis},
-            showlegend:traces.length>1,
-            legend:{font:{size:9,color:'#aaa'},bgcolor:'rgba(0,0,0,0)',x:0,y:1},
-        },PC_EPICS);
-    });
-}
-
-function fetchAllEpicsSlots(){
-    for(let i=0;i<EPICS_NUM_SLOTS;i++) fetchAndPlotEpicsSlot(i);
-}
-
-function fetchEpicsLatest(){
-    fetch('/api/epics/latest').then(r=>r.json()).then(data=>{
-        epicsLatestData=data;
-        updateEpicsTable();
-    }).catch(()=>{});
-}
-
-function addEpicsChannel(slot,name){
-    if(epicsSlots[slot].includes(name)) return;
-    if(epicsSlots[slot].length>=EPICS_MAX_PER_SLOT) return;
-    epicsSlots[slot].push(name);
-    renderEpicsChips(slot);
-    fetchAndPlotEpicsSlot(slot);
-}
-
-function removeEpicsChannel(slot,name){
-    epicsSlots[slot]=epicsSlots[slot].filter(n=>n!==name);
-    renderEpicsChips(slot);
-    fetchAndPlotEpicsSlot(slot);
-}
-
-function renderEpicsChips(slot){
-    const container=document.getElementById('epics-chips-'+slot);
-    container.innerHTML=epicsSlots[slot].map((name,i)=>
-        `<span class="epics-chip" style="background:${EPICS_COLORS[i%EPICS_COLORS.length]}33;color:${EPICS_COLORS[i%EPICS_COLORS.length]}">`+
-        `${name}<span class="chip-x" data-slot="${slot}" data-name="${name}">&times;</span></span>`
-    ).join('');
-    container.querySelectorAll('.chip-x').forEach(x=>{
-        x.onclick=()=>removeEpicsChannel(parseInt(x.dataset.slot),x.dataset.name);
-    });
-}
-
-function updateEpicsTable(){
-    const tbody=document.getElementById('epics-tbody');
-    if(!epicsLatestData||!epicsLatestData.channels||!epicsLatestData.channels.length){
-        tbody.innerHTML='<tr><td colspan="5" style="text-align:center;color:var(--dim)">Waiting for EPICS data...</td></tr>';
-        return;
-    }
-    let html='';
-    for(const ch of epicsLatestData.channels){
-        let cls='', statusText='OK';
-        if(ch.count>=epicsMinAvgPts && ch.mean!==0){
-            const dev=Math.abs(ch.value-ch.mean)/Math.abs(ch.mean);
-            if(dev>=epicsAlertThresh){ cls='epics-alert'; statusText='JUMPING'; }
-            else if(dev>=epicsWarnThresh){ cls='epics-warn'; statusText='CHANGING'; }
-        }else if(ch.count<epicsMinAvgPts){
-            statusText='--';
-        }
-        const fmtVal=typeof ch.value==='number'?ch.value.toFixed(3):ch.value;
-        const fmtMean=typeof ch.mean==='number'?ch.mean.toFixed(3):ch.mean;
-        html+=`<tr class="epics-table-row" data-channel="${ch.name}" draggable="true">`;
-        html+=`<td style="text-align:left">${ch.name}</td>`;
-        html+=`<td class="${cls}">${fmtVal}</td>`;
-        html+=`<td>${fmtMean}</td>`;
-        html+=`<td>${ch.count}</td>`;
-        html+=`<td class="${cls}">${statusText}</td></tr>`;
-    }
-    tbody.innerHTML=html;
-    // drag start
-    tbody.querySelectorAll('.epics-table-row').forEach(row=>{
-        row.ondragstart=(e)=>{
-            e.dataTransfer.setData('text/plain',row.dataset.channel);
-            e.dataTransfer.effectAllowed='copy';
-        };
-        // click: add to first slot with room
-        row.onclick=()=>{
-            const name=row.dataset.channel;
-            for(let s=0;s<EPICS_NUM_SLOTS;s++){
-                if(epicsSlots[s].length<EPICS_MAX_PER_SLOT && !epicsSlots[s].includes(name)){
-                    addEpicsChannel(s,name); return;
-                }
-            }
-        };
-    });
-}
-
-function initEpicsDragDrop(){
-    document.querySelectorAll('.epics-slot').forEach(slotEl=>{
-        const slot=parseInt(slotEl.dataset.slot);
-        slotEl.ondragover=(e)=>{e.preventDefault();e.dataTransfer.dropEffect='copy';slotEl.classList.add('drag-over');};
-        slotEl.ondragleave=()=>slotEl.classList.remove('drag-over');
-        slotEl.ondrop=(e)=>{
-            e.preventDefault();
-            slotEl.classList.remove('drag-over');
-            const name=e.dataTransfer.getData('text/plain');
-            if(name) addEpicsChannel(slot,name);
-        };
-    });
-}
-
-function initEpicsSearch(){
-    document.querySelectorAll('.epics-search').forEach(input=>{
-        const slot=parseInt(input.dataset.slot);
-        const dropdown=input.parentElement.querySelector('.epics-dropdown');
-        input.oninput=()=>{
-            const q=input.value.toLowerCase();
-            if(!q){dropdown.classList.remove('open');return;}
-            const matches=epicsChannels.filter(n=>n.toLowerCase().includes(q)).slice(0,20);
-            if(!matches.length){dropdown.classList.remove('open');return;}
-            dropdown.innerHTML=matches.map(n=>
-                `<div class="epics-dropdown-item" data-name="${n}">${n}</div>`
-            ).join('');
-            dropdown.classList.add('open');
-            dropdown.querySelectorAll('.epics-dropdown-item').forEach(item=>{
-                item.onclick=()=>{
-                    addEpicsChannel(slot,item.dataset.name);
-                    input.value='';
-                    dropdown.classList.remove('open');
-                };
-            });
-        };
-        input.onblur=()=>setTimeout(()=>dropdown.classList.remove('open'),200);
-    });
-}
-
 // Init
 // =========================================================================
 function init(){
@@ -1806,10 +1634,7 @@ function init(){
             document.getElementById('lms-tbody').innerHTML='';
 
             // EPICS: clear
-            epicsLatestData=null;
-            epicsSlots=[[],[],[],[],[],[]];
-            for(let s=0;s<EPICS_NUM_SLOTS;s++){renderEpicsChips(s);try{Plotly.react('epics-plot-'+s,[],{...PL},PC2);}catch(e){}}
-            document.getElementById('epics-tbody').innerHTML='';
+            clearEpicsFrontend();
 
             // Reset counters
             sampleCount=0;
@@ -1978,24 +1803,7 @@ function init(){
             refreshLmsMs=data.refresh_ms.lms||2000;
         }
         initReport(data);  // report.js: wire buttons + load elog defaults
-        // EPICS config
-        if(data.epics){
-            if(data.epics.warn_threshold!==undefined) epicsWarnThresh=data.epics.warn_threshold;
-            if(data.epics.alert_threshold!==undefined) epicsAlertThresh=data.epics.alert_threshold;
-            if(data.epics.min_avg_points!==undefined) epicsMinAvgPts=data.epics.min_avg_points;
-            // load per-slot default channels
-            const cfgSlots=data.epics.slots||[];
-            for(let s=0;s<Math.min(EPICS_NUM_SLOTS,cfgSlots.length);s++){
-                const names=cfgSlots[s]||[];
-                for(const n of names){
-                    if(epicsSlots[s].length<EPICS_MAX_PER_SLOT)
-                        epicsSlots[s].push(n);
-                }
-            }
-            for(let s=0;s<EPICS_NUM_SLOTS;s++) renderEpicsChips(s);
-        }
-        initEpicsSearch();
-        initEpicsDragDrop();
+        initEpics(data);  // epics.js: config + search + drag-drop
         updateTimeCutLabel();
         mode=data.mode||'file';
         const appTitle=mode==='online'?'PRad2 HyCal Monitor':'PRad2 HyCal Event Viewer';
