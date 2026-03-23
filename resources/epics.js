@@ -38,12 +38,21 @@ function fetchAndPlotEpicsSlot(slot){
                 name:data.name,
                 line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
                 marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
-                hovertemplate:`${data.name}: %{y:.3f} (evt %{x})<extra></extra>`,
+                hovertemplate:`${data.name}: %{y:.3f} (%{x:.1f}s)<extra></extra>`,
             });
         });
         Plotly.react('epics-plot-'+slot,traces,{...PL,
-            xaxis:{...PL.xaxis,title:'Event #'},
-            yaxis:{...PL.yaxis},
+            xaxis:{...PL.xaxis,title:'Time (s)'},
+            yaxis:{...PL.yaxis,autorange:true,automargin:true,
+                rangemode:'normal',constraintoward:'center',
+                range: (()=>{
+                    // add 10% padding to y range
+                    let ymin=Infinity,ymax=-Infinity;
+                    for(const t of traces) for(const v of t.y){if(v<ymin)ymin=v;if(v>ymax)ymax=v;}
+                    if(!isFinite(ymin)) return undefined;
+                    const pad=Math.max(Math.abs(ymax-ymin)*0.1,Math.abs(ymax)*0.01,1e-6);
+                    return [ymin-pad,ymax+pad];
+                })()},
             showlegend:traces.length>1,
             legend:{font:{size:9,color:'#aaa'},bgcolor:'rgba(0,0,0,0)',x:0,y:1},
         },PC_EPICS);

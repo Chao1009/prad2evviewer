@@ -846,11 +846,13 @@ json AppState::apiEpicsChannel(const std::string &name) const
     int nsnap = epics.GetSnapshotCount();
     json t_arr = json::array(), v_arr = json::array();
 
-    // use event_number as x-axis (reliable ordering for EPICS snapshots)
+    // time relative to first snapshot's timestamp
+    uint64_t t0 = (nsnap > 0) ? epics.GetSnapshot(0).timestamp : 0;
     for (int i = 0; i < nsnap; ++i) {
         auto &snap = epics.GetSnapshot(i);
+        double t_sec = static_cast<double>(snap.timestamp - t0) * TI_TICK_SEC;
         float val = (id < (int)snap.values.size()) ? snap.values[id] : 0.f;
-        t_arr.push_back(snap.event_number);
+        t_arr.push_back(std::round(t_sec * 100) / 100);
         v_arr.push_back(val);
     }
     return {{"name", name}, {"time", t_arr}, {"value", v_arr}, {"count", nsnap}};
