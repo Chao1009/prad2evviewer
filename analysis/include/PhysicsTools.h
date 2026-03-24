@@ -58,11 +58,41 @@ public:
 
     static float GetShowerDepth(int primex_id, const float &E);
 
+    //physics analysis helpers
+    //data structure for storing reconstructed Moller events used for analysis
+    struct DataPoint
+    {
+        float x;
+        float y;
+        float z;
+        float E;
+
+        DataPoint() {};
+        DataPoint(float xi, float yi, float zi, float Ei) : x(xi), y(yi), z(zi), E(Ei) {};
+    };
+    typedef std::pair<DataPoint, DataPoint> MollerEvent;
+    typedef std::vector<MollerEvent> MollerData;
+
+    // Get the center of the Moller distribution in x-y space
+    // enter two moller events, find the intersection of 2 lines
+    // output the x-y coordinates of the center for every 2 moller events
+    std::array<float, 2> GetMollerCenter( MollerEvent &event1, MollerEvent &event2);
+
+    //Get azimuthal angle difference(should be around 180 degrees) of the Moller event
+    float GetMollerPhiDiff(MollerEvent &event1);
+
+    float GetPhiAngle(float x, float y);
+
+    void FillMollerPhiDiff(float phi_diff) { if (moller_phi_diff_) moller_phi_diff_->Fill(phi_diff); }
+
+    TH1F *GetMollerPhiDiffHist() const { return moller_phi_diff_.get(); };
+
 private:
     fdec::HyCalSystem &hycal_;
     std::vector<std::unique_ptr<TH1F>> module_hists_;  // one per module
     std::unique_ptr<TH2F> h2_energy_module_;
     std::unique_ptr<TH2F> h2_energy_theta_;
+    std::unique_ptr<TH1F> moller_phi_diff_;
 };
 
 } // namespace analysis

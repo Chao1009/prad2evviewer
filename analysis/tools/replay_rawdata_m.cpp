@@ -1,7 +1,7 @@
 //=============================================================================
 // replay_rawdata — convert EVIO file to ROOT tree
 //Multithreaded version of replay_rawdata
-// Usage: replay_rawdata <input.evio> [-n max_events] [-p] [-j num_threads]
+// Usage: replay_rawdata <input.evio> [-f files_number] [-n max_events] [-p] [-j num_threads]
 //   -n  max events to process (default: all)
 //   -p  include peak analysis branches
 //   -j  number of threads to use (default: 1)
@@ -35,13 +35,15 @@ int main(int argc, char *argv[])
 {
     std::string input, daq_config;
     int max_events = -1;
+    int max_files = -1;
     bool peaks = false;
 
     int num_threads = 1;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:D:j:p")) != -1) {
+    while ((opt = getopt(argc, argv, "f:n:D:j:p")) != -1) {
         switch (opt) {
+            case 'f': max_files = std::atoi(optarg); break;
             case 'n': max_events = std::atoi(optarg); break;
             case 'D': daq_config = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
@@ -51,13 +53,16 @@ int main(int argc, char *argv[])
     if (optind < argc) input = argv[optind];
 
     if (input.empty()) {
-        std::cerr << "Usage: replay_rawdata <evio_dir> [-j <num_threads>] [-D daq_config.json] [-n N] [-p]\n";
+        std::cerr << "Usage: replay_rawdata <evio_dir> [-f <files_number>] [-j <num_threads>] [-D daq_config.json] [-n N] [-p]\n";
         return 1;
     }
 
     // Get list of EVIO files in the directory
     std::vector<std::string> evio_files = getFilesInDir(input);
     int num_files = evio_files.size();
+    if (max_files > 0) {
+        num_files = std::min(num_files, max_files);
+    }
     if(num_files == 0){
         std::cerr << "No files found in directory: " << input << "\n";
         return 1;

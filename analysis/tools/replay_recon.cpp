@@ -159,13 +159,26 @@ int main(int argc, char *argv[])
                 cl_energy[i]  = hits[i].energy;
                 cl_nblocks[i] = hits[i].nblocks;
                 cl_center[i]  = hits[i].center_id;
-                physics.FillModuleEnergy(hits[i].center_id, hits[i].energy);
+                
                 physics.FillEnergyVsModule(hits[i].center_id, hits[i].energy);
                 float theta = std::atan(std::sqrt(hits[i].x * hits[i].x + hits[i].y * hits[i].y) / 6225.f) * 180.f / 3.14159265f;
                 physics.FillEnergyVsTheta(theta, hits[i].energy);
             }
             tree->Fill();
             total++;
+
+            if(n_clusters == 1) physics.FillModuleEnergy(hits[0].center_id, hits[0].energy);
+            if(n_clusters == 2){
+                //try to find good Moller events with 2 clusters, fill phi difference histogram
+                if(std::abs(hits[0].energy + hits[1].energy - Ebeam) < 4.*Ebeam*0.025/sqrt(Ebeam/1000.f)){
+                    analysis::PhysicsTools::MollerEvent event1(
+                        {hits[0].x, hits[0].y, 0.f, hits[0].energy},
+                        {hits[1].x, hits[1].y, 0.f, hits[1].energy}
+                    );
+                    float phi_diff = physics.GetMollerPhiDiff(event1);
+                    physics.FillMollerPhiDiff(phi_diff);
+                }
+            }
 
             if (total % 1000 == 0)
                 std::cerr << "\r" << total << " events" << std::flush;
@@ -195,6 +208,8 @@ int main(int argc, char *argv[])
     if (h_ee) h_ee->Write();
     if (h_ep && h_ee && physics.GetYieldRatioHist(h_ep, h_ee))
         physics.GetYieldRatioHist(h_ep, h_ee)->Write();
+    if (physics.GetMollerPhiDiffHist())
+        physics.GetMollerPhiDiffHist()->Write();
     outfile.Close();
     return 0;
 }

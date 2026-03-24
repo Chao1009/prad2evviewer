@@ -4,6 +4,7 @@
 
 #include "PhysicsTools.h"
 #include <TF1.h>
+#include <TMath.h>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -224,6 +225,49 @@ float PhysicsTools::GetShowerDepth(int primex_id, const float &E)
     }
 
     return 0.;
+}
+
+std::array<float, 2> PhysicsTools::GetMollerCenter(MollerEvent &event1, MollerEvent &event2)
+{
+    double x1[2], y1[2];
+    double x2[2], y2[2];
+
+    x1[0] = event1.first.x; y1[0] = event1.first.y;
+    x1[1] = event1.second.x; y1[1] = event1.second.y;
+    x2[0] = event2.first.x; y2[0] = event2.first.y;
+    x2[1] = event2.second.x; y2[1] = event2.second.y;
+
+    //two lines: y = ax + b, y = cx + d
+    float a = (y1[0] - y1[1]) / (x1[0] - x1[1]);
+    float b = y1[0] - a * x1[0];
+    float c = (y2[0] - y2[1]) / (x2[0] - x2[1]);
+    float d = y2[0] - c * x2[0];
+    float x_cross = (d - b) / (a - c);
+    float y_cross = a * x_cross + b;
+
+    return {x_cross, y_cross};
+
+}
+
+float PhysicsTools::GetMollerPhiDiff(MollerEvent &event1)
+{
+    // Calculate the azimuthal angle difference (phi) for a Moller event
+    float x1 = event1.first.x, y1 = event1.first.y;
+    float x2 = event1.second.x, y2 = event1.second.y;
+    float phi1 = GetPhiAngle(x1, y1);
+    float phi2 = GetPhiAngle(x2, y2);
+    float phi_diff = fabs(phi1 - phi2) - 180.f; // Expecting back-to-back, so difference should be around 180 degrees
+    return phi_diff;
+}
+
+float PhysicsTools::GetPhiAngle(float x, float y)
+{
+    float phi = atan( fabs(y/x) ) * 180. / TMath::Pi();
+    if(y > 0 && x > 0) phi = phi;
+    if(y > 0 && x < 0) phi = 180. - phi;
+    if(y < 0 && x < 0) phi = 180. + phi;
+    if(y < 0 && x > 0) phi = 360. - phi;
+    return phi;
 }
 
 } // namespace analysis
