@@ -1,10 +1,10 @@
 //=============================================================================
 // replay_rawdata — convert EVIO file to ROOT tree
 //Multithreaded version of replay_rawdata
-// Usage: replay_rawdata <input.evio> [-o output.root] [-n max_events] [-p]
-//   -o  output ROOT file (default: input with .root extension)
+// Usage: replay_rawdata <input.evio> [-n max_events] [-p] [-j num_threads]
 //   -n  max events to process (default: all)
 //   -p  include peak analysis branches
+//   -j  number of threads to use (default: 1)
 //=============================================================================
 
 #include "Replay.h"
@@ -14,8 +14,8 @@
 #include <getopt.h>
 #include <filesystem>
 #include <algorithm>
+#include <vector>
 
-#include <thread>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -40,12 +40,12 @@ int main(int argc, char *argv[])
     int num_threads = 1;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:D:p:j:")) != -1) {
+    while ((opt = getopt(argc, argv, "n:D:j:p")) != -1) {
         switch (opt) {
             case 'n': max_events = std::atoi(optarg); break;
             case 'D': daq_config = optarg; break;
-            case 'p': peaks = true; break;
             case 'j': num_threads = std::atoi(optarg); break;
+            case 'p': peaks = true; break;
         }
     }
     if (optind < argc) input = argv[optind];
@@ -98,7 +98,7 @@ int main(int argc, char *argv[])
 
     // parent process waits for all child processes to finish
     for (int i = 0; i < num_threads; ++i)
-        waitpid(pids[i], nullptr, 0);
+        if(pids[i] > 0) waitpid(pids[i], nullptr, 0);
 
     return 0;
 }
