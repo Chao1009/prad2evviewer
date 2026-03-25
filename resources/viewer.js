@@ -1826,7 +1826,7 @@ function init(){
         initPhysics(data);
         updateTimeCutLabel();
         mode=data.mode||'file';
-        const appTitle=mode==='online'?'PRad2 HyCal Monitor':'PRad2 HyCal Event Viewer';
+        const appTitle=mode==='online'?'PRad-II HyCal Monitor':'PRad-II HyCal Event Viewer';
         document.title=appTitle;
         document.getElementById('app-title').textContent=appTitle;
         g_currentFile=data.current_file||'';

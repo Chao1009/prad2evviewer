@@ -104,7 +104,8 @@ function plotMollerXY(){
     const y=[];for(let i=0;i<d.xy_ny;i++) y.push(d.xy_y_min+(i+0.5)*d.xy_y_step);
 
     const cuts=d.cuts||{};
-    const cutTxt=`θ∈[${cuts.angle_min||'?'},${cuts.angle_max||'?'}]° Esum±${((cuts.energy_tolerance||0.1)*100).toFixed(0)}%`;
+    const fmtA=v=>v!=null?v.toFixed(2):'?';
+    const cutTxt=`θ∈[${fmtA(cuts.angle_min)},${fmtA(cuts.angle_max)}]° Esum±${((cuts.energy_tolerance||0.1)*100).toFixed(0)}%`;
 
     Plotly.react(div,[{
         z:z, x:x, y:y,

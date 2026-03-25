@@ -452,7 +452,7 @@ async function generateReport(reportBy,runNumber){
         const samples=mode==='online'?sampleCount:totalEvents;
         const runStr=runNumber?String(runNumber).padStart(6,'0'):'';
         const titleRun=runStr?`Run ${runStr}: `:'';
-        let header=`# ${titleRun}PRad2 HyCal Monitor Report\n\n`;
+        let header=`# ${titleRun}PRad-II HyCal Monitor Report\n\n`;
         header+=`- **Generated:** ${ts}\n`;
         header+=`- **Samples:** ${samples}\n`;
         if(runNumber) header+=`- **DAQ Run:** ${runNumber}\n`;
@@ -482,7 +482,7 @@ async function generateReport(reportBy,runNumber){
                 header+=`- **Gain Monitoring Warnings:** None\n`;
         }
         let md=header+`\n---\n\n`+sectionsMd;
-        md+=`---\n*PRad2 HyCal Online Monitor — Report generated ${ts}*\n`;
+        md+=`---\n*PRad-II HyCal Online Monitor — Report generated ${ts}*\n`;
         statusBar.textContent=prevStatus;
         return {md, attachments:reportAttachments};
     }catch(err){
