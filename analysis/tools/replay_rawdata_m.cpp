@@ -61,12 +61,12 @@ int main(int argc, char *argv[])
     // Get list of EVIO files in the directory
     std::vector<std::string> evio_files = getFilesInDir(input);
     int num_files = evio_files.size();
-    if (max_files > 0) {
-        num_files = std::min(num_files, max_files);
-    }
     if(num_files == 0){
         std::cerr << "No files found in directory: " << input << "\n";
         return 1;
+    }
+    if (max_files > 0) {
+        num_files = std::min(num_files, max_files);
     }
     // Limit number of threads to number of files
     num_threads = std::min(num_threads, num_files);

@@ -37,6 +37,23 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     h2_energy_theta_ = std::make_unique<TH2F>(
         "h2_energy_theta", "Energy vs Theta;Theta (deg);Energy (MeV)",
         80, 0, 8, 2000, 0, 4000);
+
+    h2_moller_pos_ = std::make_unique<TH2F>(
+        "h2_moller_pos", "Moller 2-arm Hit Position;X (mm);Y (mm)",
+        200, -500, 500, 200, -500, 500);
+
+    moller_phi_diff_ = std::make_unique<TH1F>(
+        "h_moller_phi_diff", "Moller Phi Difference;Phi_{e1} - Phi_{e2} (deg);Counts",
+        40, -20, 20);
+    moller_x_ = std::make_unique<TH1F>(
+        "h_moller_x", "Moller Center X Position (HyCal);X (mm);Counts",
+        100, -10, 10);
+    moller_y_ = std::make_unique<TH1F>(
+        "h_moller_y", "Moller Center Y Position (HyCal);Y (mm);Counts",
+        100, -10, 10);
+    moller_z_ = std::make_unique<TH1F>(
+        "h_moller_z", "Moller Z Position (HyCal);Z (mm);Counts",
+        1000, 5000, 8000);
 }
 
 PhysicsTools::~PhysicsTools() = default;
@@ -118,6 +135,12 @@ TH1F *PhysicsTools::GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist)
         }
     }
     return h_ratio;
+}
+
+void PhysicsTools::Fill2armMollerPosHist(float x, float y)
+{
+    if (h2_moller_pos_)
+        h2_moller_pos_->Fill(x, y);
 }
 
 std::array<float, 2> PhysicsTools::FitPeakResolution(int module_index) const
@@ -233,8 +256,8 @@ float PhysicsTools::GetShowerDepth(int primex_id, const float &E)
 
 std::array<float, 2> PhysicsTools::GetMollerCenter(MollerEvent &event1, MollerEvent &event2)
 {
-    double x1[2], y1[2];
-    double x2[2], y2[2];
+    float x1[2], y1[2];
+    float x2[2], y2[2];
 
     x1[0] = event1.first.x; y1[0] = event1.first.y;
     x1[1] = event1.second.x; y1[1] = event1.second.y;
@@ -251,6 +274,14 @@ std::array<float, 2> PhysicsTools::GetMollerCenter(MollerEvent &event1, MollerEv
 
     return {x_cross, y_cross};
 
+}
+
+float PhysicsTools::GetMollerZdistance(MollerEvent &event, float Ebeam)
+{
+    float R1 = sqrt(event.first.x*event.first.x + event.first.y*event.first.y);
+    float R2 = sqrt(event.second.x*event.second.x + event.second.y*event.second.y);
+    float z = sqrt( (Ebeam + M_ELECTRON) * R1 * R2 / (2.*M_ELECTRON) );
+    return z;
 }
 
 float PhysicsTools::GetMollerPhiDiff(MollerEvent &event1)

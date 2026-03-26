@@ -35,9 +35,14 @@ public:
     void FillEnergyVsTheta(float theta_deg, float energy);
     TH2F *GetEnergyVsThetaHist() const { return h2_energy_theta_.get(); }
 
+    // physics event yield histograms
     TH1F *GetEpYieldHist(TH2F *energy_theta, float Ebeam);
     TH1F *GetEeYieldHist(TH2F *energy_theta, float Ebeam);
     TH1F *GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist);
+
+    // --- Moller event Hist ------------------------------------------------
+    void Fill2armMollerPosHist(float x, float y);
+    TH2F *Get2armMollerPosHist() const { return h2_moller_pos_.get(); }
 
     // --- peak / resolution analysis ------------------------------------------
     // Returns {peak, resolution} from Gaussian fit. Resolution = sigma/mean.
@@ -78,21 +83,32 @@ public:
     // output the x-y coordinates of the center for every 2 moller events
     std::array<float, 2> GetMollerCenter( MollerEvent &event1, MollerEvent &event2);
 
+    float GetMollerZdistance(MollerEvent &event, float Ebeam);
+
     //Get azimuthal angle difference(should be around 180 degrees) of the Moller event
     float GetMollerPhiDiff(MollerEvent &event1);
 
     float GetPhiAngle(float x, float y);
 
     void FillMollerPhiDiff(float phi_diff) { if (moller_phi_diff_) moller_phi_diff_->Fill(phi_diff); }
+    void FillMollerXY(float x, float y) { if (moller_x_) moller_x_->Fill(x); if (moller_y_) moller_y_->Fill(y); }
+    void FillMollerZ(float z) { if (moller_z_) moller_z_->Fill(z); }
 
     TH1F *GetMollerPhiDiffHist() const { return moller_phi_diff_.get(); };
+    TH1F *GetMollerXHist() const { return moller_x_.get(); };
+    TH1F *GetMollerYHist() const { return moller_y_.get(); };
+    TH1F *GetMollerZHist() const { return moller_z_.get(); };
 
 private:
     fdec::HyCalSystem &hycal_;
     std::vector<std::unique_ptr<TH1F>> module_hists_;  // one per module
     std::unique_ptr<TH2F> h2_energy_module_;
     std::unique_ptr<TH2F> h2_energy_theta_;
+    std::unique_ptr<TH2F> h2_moller_pos_;
     std::unique_ptr<TH1F> moller_phi_diff_;
+    std::unique_ptr<TH1F> moller_x_;
+    std::unique_ptr<TH1F> moller_y_;
+    std::unique_ptr<TH1F> moller_z_;
 };
 
 } // namespace analysis
