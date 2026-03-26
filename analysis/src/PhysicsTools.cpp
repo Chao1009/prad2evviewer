@@ -83,17 +83,17 @@ void PhysicsTools::FillEnergyVsTheta(float theta_deg, float energy)
         h2_energy_theta_->Fill(theta_deg, energy);
 }
 
-TH1F *PhysicsTools::GetEpYieldHist(TH2F *energy_theta, float Ebeam)
+std::unique_ptr<TH1F> PhysicsTools::GetEpYieldHist(TH2F *energy_theta, float Ebeam)
 {
     if (!energy_theta) return nullptr;
 
-    TH1F *h_ep = new TH1F("ep_yield", "Elastic e-p Yield;Scattering Angle (deg);Counts", 80, 0, 8);
+    auto h_ep = std::make_unique<TH1F>("ep_yield", "Elastic e-p Yield;Scattering Angle (deg);Counts", 80, 0, 8);
     for (int i = 1; i <= energy_theta->GetNbinsX(); i++) {
         for (int j = 1; j <= energy_theta->GetNbinsY(); j++) {
             float theta = energy_theta->GetXaxis()->GetBinCenter(i);
             float E = energy_theta->GetYaxis()->GetBinCenter(j);
             float E_expected = ExpectedEnergy(theta, Ebeam, "ep");
-            if (std::abs(E - E_expected) < E_expected*0.026/std::sqrt(E_expected/1000.f)) {
+            if (std::abs(E - E_expected) < E_expected*0.026f/std::sqrt(E_expected/1000.f)) {
                 float count = energy_theta->GetBinContent(i, j);
                 h_ep->Fill(theta, count);
             }
@@ -102,17 +102,17 @@ TH1F *PhysicsTools::GetEpYieldHist(TH2F *energy_theta, float Ebeam)
     return h_ep;
 }
 
-TH1F *PhysicsTools::GetEeYieldHist(TH2F *energy_theta, float Ebeam)
+std::unique_ptr<TH1F> PhysicsTools::GetEeYieldHist(TH2F *energy_theta, float Ebeam)
 {
     if (!energy_theta) return nullptr;
 
-    TH1F *h_ee = new TH1F("ee_yield", "Elastic e-e Yield;Scattering Angle (deg);Counts", 80, 0, 8);
+    auto h_ee = std::make_unique<TH1F>("ee_yield", "Elastic e-e Yield;Scattering Angle (deg);Counts", 80, 0, 8);
     for (int i = 1; i <= energy_theta->GetNbinsX(); i++) {
         for (int j = 1; j <= energy_theta->GetNbinsY(); j++) {
             float theta = energy_theta->GetXaxis()->GetBinCenter(i);
             float E = energy_theta->GetYaxis()->GetBinCenter(j);
             float E_expected = ExpectedEnergy(theta, Ebeam, "ee");
-            if (std::abs(E - E_expected) < E_expected*0.026/std::sqrt(E_expected/1000.f)) {
+            if (std::abs(E - E_expected) < E_expected*0.026f/std::sqrt(E_expected/1000.f)) {
                 float count = energy_theta->GetBinContent(i, j);
                 h_ee->Fill(theta, count);
             }
@@ -121,11 +121,11 @@ TH1F *PhysicsTools::GetEeYieldHist(TH2F *energy_theta, float Ebeam)
     return h_ee;
 }
 
-TH1F *PhysicsTools::GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist)
+std::unique_ptr<TH1F> PhysicsTools::GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist)
 {
     if (!ep_hist || !ee_hist) return nullptr;
 
-    TH1F *h_ratio = new TH1F("yield_ratio", "Yield Ratio (e-p / e-e);Scattering Angle (deg);Ratio", 80, 0, 8);
+    auto h_ratio = std::make_unique<TH1F>("yield_ratio", "Yield Ratio (e-p / e-e);Scattering Angle (deg);Ratio", 80, 0, 8);
     for (int i = 1; i <= ep_hist->GetNbinsX(); i++) {
         float theta = ep_hist->GetXaxis()->GetBinCenter(i);
         float ep_count = ep_hist->GetBinContent(i);
@@ -265,10 +265,19 @@ std::array<float, 2> PhysicsTools::GetMollerCenter(MollerEvent &event1, MollerEv
     x2[1] = event2.second.x; y2[1] = event2.second.y;
 
     //two lines: y = ax + b, y = cx + d
-    float a = (y1[0] - y1[1]) / (x1[0] - x1[1]);
+    float dx1 = x1[0] - x1[1];
+    float dx2 = x2[0] - x2[1];
+    if (std::abs(dx1) < 1e-6f || std::abs(dx2) < 1e-6f)
+        return {0.f, 0.f};  // vertical line — degenerate
+
+    float a = (y1[0] - y1[1]) / dx1;
     float b = y1[0] - a * x1[0];
-    float c = (y2[0] - y2[1]) / (x2[0] - x2[1]);
+    float c = (y2[0] - y2[1]) / dx2;
     float d = y2[0] - c * x2[0];
+
+    if (std::abs(a - c) < 1e-6f)
+        return {0.f, 0.f};  // parallel lines — no intersection
+
     float x_cross = (d - b) / (a - c);
     float y_cross = a * x_cross + b;
 
@@ -297,11 +306,9 @@ float PhysicsTools::GetMollerPhiDiff(MollerEvent &event1)
 
 float PhysicsTools::GetPhiAngle(float x, float y)
 {
-    float phi = atan( fabs(y/x) ) * 180. / TMath::Pi();
-    if(y > 0 && x > 0) phi = phi;
-    if(y > 0 && x < 0) phi = 180. - phi;
-    if(y < 0 && x < 0) phi = 180. + phi;
-    if(y < 0 && x > 0) phi = 360. - phi;
+    // atan2 handles all quadrants and x==0 correctly
+    float phi = std::atan2(y, x) * 180.f / static_cast<float>(TMath::Pi());
+    if (phi < 0) phi += 360.f;
     return phi;
 }
 

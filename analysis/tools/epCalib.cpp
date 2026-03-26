@@ -133,18 +133,19 @@ int main(int argc, char *argv[])
     //loop over events, fill histograms
     int nentries = tree->GetEntries();
     nentries = (max_events > 0) ? std::min(nentries, max_events) : nentries;
+    fdec::HyCalCluster clusterer(hycal);
+    clusterer.SetConfig(cl_cfg);
     for(int i = 0; i < nentries; i++){
         tree->GetEntry(i);
         //reconstruct clusters, fill histograms
-        fdec::HyCalCluster clusterer(hycal);
-        clusterer.SetConfig(cl_cfg);
+        clusterer.Clear();
         for(int j = 0; j < ev->nch; j++){
             const auto *mod = hycal.module_by_daq(ev->crate[j], ev->slot[j], ev->channel[j]);
             if (!mod || !mod->is_hycal()) continue;
             if (ev->npeaks[j] <= 0) continue;
             float adc = ev->peak_integral[j][0];
             float energy = (mod->cal_factor > 0.) ?
-                static_cast<float>(mod->energize(adc)) : adc * 0.078f;
+                static_cast<float>(mod->energize(adc)) : adc;
             clusterer.AddHit(mod->index, energy);
         }
 

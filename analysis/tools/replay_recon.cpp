@@ -291,12 +291,12 @@ int main(int argc, char *argv[])
     outfile.cd();
     outfile.mkdir("physics_yields");
     outfile.cd("physics_yields");
-    TH1F *h_ep = physics.GetEpYieldHist(physics.GetEnergyVsThetaHist(), Ebeam);
-    TH1F *h_ee = physics.GetEeYieldHist(physics.GetEnergyVsThetaHist(), Ebeam);
-    TH1F *h_ratio = physics.GetYieldRatioHist(h_ep, h_ee);
+    auto h_ep = physics.GetEpYieldHist(physics.GetEnergyVsThetaHist(), Ebeam);
+    auto h_ee = physics.GetEeYieldHist(physics.GetEnergyVsThetaHist(), Ebeam);
+    auto h_ratio = physics.GetYieldRatioHist(h_ep.get(), h_ee.get());
     if (h_ep) h_ep->Write();
     if (h_ee) h_ee->Write();
-    if (h_ep && h_ee && h_ratio) h_ratio->Write();
+    if (h_ratio) h_ratio->Write();
 
     outfile.cd();
     outfile.mkdir("moller_analysis");

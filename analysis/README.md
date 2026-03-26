@@ -31,12 +31,12 @@ replay_rawdata <input.evio> [-o output.root] [-n max_events] [-p]
 | `-n` | Max events to process (default: all) |
 | `-p` | Include peak analysis branches (height, time, integral) |
 
-### replay_hycalRecon
+### replay_recon
 
 HyCal reconstruction replay — runs clustering and writes reconstructed hits to ROOT tree with per-module energy histograms.
 
 ```bash
-replay_hycalRecon <input.evio> [-o output.root] [-c config.json] [-D daq_config.json] [-n N]
+replay_recon <input.evio> [-o output.root] [-c config.json] [-D daq_config.json] [-n N]
 ```
 
 ## Shared Sources
@@ -64,7 +64,7 @@ analysis/
    add_analysis_tool(my_tool tools/my_tool.cpp)
    ```
 
-All shared sources (`Replay.cpp`, `PhysicsTools.cpp`) and dependencies (`prad2dec`, `prad2det`, ROOT) are linked automatically.
+All shared sources (`Replay.cpp`, `PhysicsTools.cpp`) and dependencies (`prad2dec`, `prad2ana`, ROOT) are linked automatically.
 
 ## Contributors
 Yuan Li — Shandong University

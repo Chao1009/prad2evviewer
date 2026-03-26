@@ -4,7 +4,7 @@
 //
 // Provides kinematic calculations, energy loss corrections, and
 // per-module energy histogram management with ROOT.
-// Depends on prad2det (HyCalSystem) and ROOT (TH1F/TH2F).
+// Depends on prad2ana (HyCalSystem) and ROOT (TH1F/TH2F).
 //=============================================================================
 
 #include "HyCalSystem.h"
@@ -35,10 +35,10 @@ public:
     void FillEnergyVsTheta(float theta_deg, float energy);
     TH2F *GetEnergyVsThetaHist() const { return h2_energy_theta_.get(); }
 
-    // physics event yield histograms
-    TH1F *GetEpYieldHist(TH2F *energy_theta, float Ebeam);
-    TH1F *GetEeYieldHist(TH2F *energy_theta, float Ebeam);
-    TH1F *GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist);
+    // physics event yield histograms (caller owns the returned histogram)
+    std::unique_ptr<TH1F> GetEpYieldHist(TH2F *energy_theta, float Ebeam);
+    std::unique_ptr<TH1F> GetEeYieldHist(TH2F *energy_theta, float Ebeam);
+    std::unique_ptr<TH1F> GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist);
 
     // --- Moller event Hist ------------------------------------------------
     void Fill2armMollerPosHist(float x, float y);

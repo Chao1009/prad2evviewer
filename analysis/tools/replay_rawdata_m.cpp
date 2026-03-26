@@ -1,10 +1,12 @@
 //=============================================================================
-// replay_rawdata — convert EVIO file to ROOT tree
-//Multithreaded version of replay_rawdata
-// Usage: replay_rawdata <input.evio> [-f files_number] [-n max_events] [-p] [-j num_threads]
-//   -n  max events to process (default: all)
+// replay_rawdata_m — convert multiple EVIO files to ROOT trees (multi-threaded)
+//
+// Usage: replay_rawdata_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num_threads]
+//   -f  max files to process (default: all)
+//   -n  max events per file (default: all)
 //   -p  include peak analysis branches
-//   -j  number of threads to use (default: 1)
+//   -j  number of threads (default: 4)
+//   -D  DAQ configuration file
 //=============================================================================
 
 #include "Replay.h"
@@ -15,11 +17,11 @@
 #include <filesystem>
 #include <algorithm>
 #include <vector>
+#include <thread>
+#include <atomic>
+#include <mutex>
 
-#include <unistd.h>
-#include <sys/wait.h>
-
-std::vector<std::string> getFilesInDir(const std::string &dir_path)
+static std::vector<std::string> getFilesInDir(const std::string &dir_path)
 {
     std::vector<std::string> files;
     for (auto &entry : std::filesystem::directory_iterator(dir_path)) {
@@ -32,14 +34,23 @@ std::vector<std::string> getFilesInDir(const std::string &dir_path)
     return files;
 }
 
+static std::string makeOutputPath(const std::string &evio_path)
+{
+    std::string out = evio_path;
+    auto pos = out.find(".evio");
+    if (pos != std::string::npos)
+        out = out.substr(0, pos) + out.substr(pos + 5);
+    out += ".root";
+    return out;
+}
+
 int main(int argc, char *argv[])
 {
     std::string input, daq_config;
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
-
-    int num_threads = 1;
+    int num_threads = 4;
 
     int opt;
     while ((opt = getopt(argc, argv, "f:n:D:j:p")) != -1) {
@@ -54,64 +65,61 @@ int main(int argc, char *argv[])
     if (optind < argc) input = argv[optind];
 
     if (input.empty()) {
-        std::cerr << "Usage: replay_rawdata <evio_dir> [-f <files_number>] [-j <num_threads>] [-D daq_config.json] [-n N] [-p]\n";
+        std::cerr << "Usage: replay_rawdata_m <evio_dir> [-f max_files] [-j threads]"
+                  << " [-D daq_config.json] [-n N] [-p]\n";
         return 1;
     }
 
-    // Get list of EVIO files in the directory
     std::vector<std::string> evio_files = getFilesInDir(input);
-    int num_files = evio_files.size();
-    if(num_files == 0){
-        std::cerr << "No files found in directory: " << input << "\n";
+    if (evio_files.empty()) {
+        std::cerr << "No EVIO files found in: " << input << "\n";
         return 1;
     }
-    if (max_files > 0) {
-        num_files = std::min(num_files, max_files);
-    }
-    // Limit number of threads to number of files
-    num_threads = std::min(num_threads, num_files);
-    std::vector<pid_t> pids(num_threads);
-    int files_per_process = (num_files + num_threads - 1) / num_threads; // round up
+    int num_files = static_cast<int>(evio_files.size());
+    if (max_files > 0) num_files = std::min(num_files, max_files);
+    num_threads = std::max(1, std::min(num_threads, num_files));
 
-    std::cout << "Processing " << num_files << " files with " << num_threads << " threads (" 
-              << files_per_process << " files/thread)\n";
+    std::cout << "Processing " << num_files << " files with "
+              << num_threads << " threads\n";
 
-    for (int i = 0; i < num_threads; ++i) {
-        int start = i * files_per_process;
-        int end   = std::min(start + files_per_process, num_files);
+    // shared work queue: atomic index into file list
+    std::atomic<int> next_file{0};
+    std::mutex io_mtx;
+    std::atomic<int> errors{0};
 
-        pid_t pid = fork();
-        if (pid < 0) {
-            std::cerr << "process " << i << " fork failed\n";
-            continue;
-        }
-        else if (pid == 0) {
-            // child process: handle files from start to end
-            analysis::Replay replay;
-            if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
+    auto worker = [&]() {
+        // each thread gets its own Replay instance (own EvChannel, own buffers)
+        analysis::Replay replay;
+        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
 
-            for (int f = start; f < end; ++f) {
-                // each child process writes to its own output file to avoid conflicts
-                std::string out = evio_files[f];
-                auto pos = out.find(".evio");
-                if (pos != std::string::npos) out = 
-                    out.substr(0, pos) + out.substr(pos + 5);
-                out += ".root";
-                if(replay.Process(evio_files[f], out, max_events, peaks))
-                    std::cout << "Processed " << evio_files[f] << " -> " << out << "\n";
-                else{
-                    std::cerr << "Failed to process " << evio_files[f] << "\n";
-                    std::exit(1);
-                }
+        while (true) {
+            int idx = next_file.fetch_add(1);
+            if (idx >= num_files) break;
+
+            std::string out = makeOutputPath(evio_files[idx]);
+            bool ok = replay.Process(evio_files[idx], out, max_events, peaks);
+
+            std::lock_guard<std::mutex> lk(io_mtx);
+            if (ok)
+                std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
+                          << evio_files[idx] << " -> " << out << "\n";
+            else {
+                std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
+                          << evio_files[idx] << "\n";
+                errors++;
             }
-            std::exit(0);
         }
-        else pids[i] = pid;
-    }
+    };
 
-    // parent process waits for all child processes to finish
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
     for (int i = 0; i < num_threads; ++i)
-        if(pids[i] > 0) waitpid(pids[i], nullptr, 0);
+        threads.emplace_back(worker);
+    for (auto &t : threads)
+        t.join();
 
-    return 0;
+    std::cout << "Done: " << num_files << " files"
+              << (errors > 0 ? ", " + std::to_string(errors.load()) + " errors" : "")
+              << "\n";
+    return errors > 0 ? 1 : 0;
 }
