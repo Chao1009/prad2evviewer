@@ -89,8 +89,28 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root,
-                     int max_events, bool write_peaks)
+                     int max_events, bool write_peaks , const std::string &daq_config_file)
 {
+    // build ROC tag → crate index mapping from DAQ config JSON
+    std::unordered_map<int, int> roc_to_crate;
+    if (!daq_config_file.empty()) {
+        std::cout << "Loading DAQ config from " << daq_config_file << "\n";
+        std::ifstream dcf(daq_config_file);
+        if (dcf.is_open()) {
+            auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
+            if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
+                for (auto &entry : dcj["roc_tags"]) {
+                    int tag   = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
+                    int crate = entry.at("crate").get<int>();
+                    roc_to_crate[tag] = crate;
+                }
+            }
+        }
+    }
+    else {
+        std::cerr << "No DAQ config file provided, ROC tag to crate mapping will be unavailable.\n";
+    }
+
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
 
@@ -130,6 +150,10 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             for (int r = 0; r < event.nrocs; ++r) {
                 auto &roc = event.rocs[r];
                 if (!roc.present) continue;
+                auto cit = roc_to_crate.find(roc.tag);
+                int crate;
+                if (cit == roc_to_crate.end()) crate = roc.tag;
+                else crate = cit->second;
                 for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
                     if (!roc.slots[s].present) continue;
                     for (int c = 0; c < 16; ++c) {
@@ -137,7 +161,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                         auto &cd = roc.slots[s].channels[c];
                         if (cd.nsamples <= 0 || nch >= kMaxCh) continue;
 
-                        ev->crate[nch]   = roc.tag;
+                        ev->crate[nch]   = crate;
                         ev->slot[nch]    = s;
                         ev->channel[nch] = c;
                         //ev->module_id[nch] = moduleID(roc.tag, s, c);

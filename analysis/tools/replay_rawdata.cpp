@@ -12,11 +12,18 @@
 #include <string>
 #include <getopt.h>
 
+#ifndef DATABASE_DIR
+#define DATABASE_DIR "."
+#endif
+
 int main(int argc, char *argv[])
 {
     std::string input, output, daq_config;
     int max_events = -1;
     bool peaks = false;
+
+    std::string db_dir = DATABASE_DIR;
+    daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
     while ((opt = getopt(argc, argv, "o:n:D:p")) != -1) {
@@ -45,7 +52,7 @@ int main(int argc, char *argv[])
     analysis::Replay replay;
     if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
 
-    if (!replay.Process(input, output, max_events, peaks))
+    if (!replay.Process(input, output, max_events, peaks, daq_config))
         return 1;
 
     return 0;

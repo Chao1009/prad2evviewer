@@ -21,6 +21,10 @@
 #include <atomic>
 #include <mutex>
 
+#ifndef DATABASE_DIR
+#define DATABASE_DIR "."
+#endif
+
 static std::vector<std::string> getFilesInDir(const std::string &dir_path)
 {
     std::vector<std::string> files;
@@ -51,6 +55,9 @@ int main(int argc, char *argv[])
     int max_files = -1;
     bool peaks = false;
     int num_threads = 4;
+
+    std::string db_dir = DATABASE_DIR;
+    daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
     while ((opt = getopt(argc, argv, "f:n:D:j:p")) != -1) {
@@ -97,7 +104,7 @@ int main(int argc, char *argv[])
             if (idx >= num_files) break;
 
             std::string out = makeOutputPath(evio_files[idx]);
-            bool ok = replay.Process(evio_files[idx], out, max_events, peaks);
+            bool ok = replay.Process(evio_files[idx], out, max_events, peaks, daq_config);
 
             std::lock_guard<std::mutex> lk(io_mtx);
             if (ok)
