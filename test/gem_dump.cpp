@@ -114,7 +114,8 @@ static bool apvMatchesFilter(const gem::ApvConfig &cfg, const EvdumpFilter &filt
 
 static bool checkEvdumpFilter(const EvdumpFilter &filt,
                                gem::GemSystem &sys,
-                               const ssp::SspEventData &ssp)
+                               const ssp::SspEventData &ssp,
+                               int phys_ev = 0)
 {
     std::set<int> matching_dets;
     for (int m = 0; m < ssp.nmpds; ++m) {
@@ -131,7 +132,18 @@ static bool checkEvdumpFilter(const EvdumpFilter &filt,
                 matching_dets.insert(cfg.det_id);
         }
     }
-    return static_cast<int>(matching_dets.size()) >= filt.min_dets;
+    bool pass = static_cast<int>(matching_dets.size()) >= filt.min_dets;
+    // periodic progress + all passing events
+    if (pass || (phys_ev > 0 && phys_ev % 200 == 0)) {
+        std::cerr << "  ev " << phys_ev << ": " << matching_dets.size() << " det(s) matched";
+        if (!matching_dets.empty()) {
+            std::cerr << " [";
+            for (auto d : matching_dets) std::cerr << " GEM" << d;
+            std::cerr << " ]";
+        }
+        std::cerr << (pass ? " PASS\n" : "\n");
+    }
+    return pass;
 }
 
 // -------------------------------------------------------------------------
@@ -898,7 +910,7 @@ int main(int argc, char *argv[])
                 // apply filter (unless -e targets a specific event)
                 if (target_event == 0) {
                     if (has_evdump_filter) {
-                        if (!checkEvdumpFilter(evdump_filter, *gem_sys, ssp_evt))
+                        if (!checkEvdumpFilter(evdump_filter, *gem_sys, ssp_evt, phys_count))
                             continue;
                     } else {
                         if (gem_sys->GetAllHits().empty())
