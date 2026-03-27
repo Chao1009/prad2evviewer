@@ -34,6 +34,7 @@
 #include <iomanip>
 #include <string>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -50,6 +51,87 @@ static std::string hex(uint32_t v)
     char buf[16];
     snprintf(buf, sizeof(buf), "0x%04X", v);
     return buf;
+}
+
+// -------------------------------------------------------------------------
+// Event filter for evdump: field=val[,val]:min_dets
+//   e.g.  pos=10,11:3   match=+Y,-Y:2   plane=X:4
+// -------------------------------------------------------------------------
+struct EvdumpFilter {
+    std::string field;
+    std::vector<std::string> values;
+    int min_dets = 1;
+};
+
+static bool parseEvdumpFilter(const std::string &expr, EvdumpFilter &filt)
+{
+    // split at ':'
+    auto colon = expr.rfind(':');
+    std::string lhs = (colon != std::string::npos) ? expr.substr(0, colon) : expr;
+    filt.min_dets = (colon != std::string::npos) ? std::atoi(expr.substr(colon + 1).c_str()) : 1;
+
+    // split at '='
+    auto eq = lhs.find('=');
+    if (eq == std::string::npos) {
+        std::cerr << "Error: filter must be field=val[,val]:min_dets\n";
+        return false;
+    }
+    filt.field = lhs.substr(0, eq);
+    std::string vals = lhs.substr(eq + 1);
+
+    // split values by ','
+    filt.values.clear();
+    size_t start = 0;
+    while (start < vals.size()) {
+        auto comma = vals.find(',', start);
+        if (comma == std::string::npos) comma = vals.size();
+        filt.values.push_back(vals.substr(start, comma - start));
+        start = comma + 1;
+    }
+    return !filt.values.empty();
+}
+
+static bool apvMatchesFilter(const gem::ApvConfig &cfg, const EvdumpFilter &filt)
+{
+    std::string val;
+    if (filt.field == "pos")
+        val = std::to_string(cfg.plane_index);
+    else if (filt.field == "plane")
+        val = (cfg.plane_type == 0) ? "X" : "Y";
+    else if (filt.field == "match")
+        val = cfg.match;
+    else if (filt.field == "orient")
+        val = std::to_string(cfg.orient);
+    else if (filt.field == "det")
+        val = std::to_string(cfg.det_id);
+    else
+        return false;
+
+    for (auto &v : filt.values)
+        if (v == val) return true;
+    return false;
+}
+
+static bool checkEvdumpFilter(const EvdumpFilter &filt,
+                               gem::GemSystem &sys,
+                               const ssp::SspEventData &ssp)
+{
+    std::set<int> matching_dets;
+    for (int m = 0; m < ssp.nmpds; ++m) {
+        auto &mpd = ssp.mpds[m];
+        if (!mpd.present) continue;
+        for (int a = 0; a < ssp::MAX_APVS_PER_MPD; ++a) {
+            if (!mpd.apvs[a].present) continue;
+            int idx = sys.FindApvIndex(mpd.crate_id, mpd.mpd_id, a);
+            if (idx < 0) continue;
+            if (!sys.HasApvZsHits(idx)) continue;
+
+            auto &cfg = sys.GetApvConfig(idx);
+            if (apvMatchesFilter(cfg, filt))
+                matching_dets.insert(cfg.det_id);
+        }
+    }
+    return static_cast<int>(matching_dets.size()) >= filt.min_dets;
 }
 
 // -------------------------------------------------------------------------
@@ -575,7 +657,10 @@ static void usage(const char *prog)
         << "  -n <N>        Max physics events (default: 10, 0=all for ped)\n"
         << "  -t <bit>      Trigger bit filter (-1=all, default)\n"
         << "  -e <N>        Dump only physics event N (1-based)\n"
-        << "  -z <sigma>    Override zero-suppression threshold (default: from gem_map)\n";
+        << "  -z <sigma>    Override zero-suppression threshold (default: from gem_map)\n"
+        << "  -f <filter>   Event filter for evdump: field=val[,val]:min_dets\n"
+        << "                Fields: pos, plane (X/Y), match (+Y/-Y), orient, det\n"
+        << "                Example: -f pos=10,11:3 (ZS hits from pos 10/11 in >=3 dets)\n";
 }
 
 int main(int argc, char *argv[])
@@ -587,13 +672,14 @@ int main(int argc, char *argv[])
     std::string gem_ped_file;
     std::string output_file = "gem_ped.json";
     std::string mode = "summary";
+    std::string filter_expr;
     int max_events  = 10;
     int trigger_bit = -1;   // -1 = accept all
     int target_event = 0;   // 0 = disabled
     float zerosup_override = -1.f;  // <0 = use gem_map default
 
     int opt;
-    while ((opt = getopt(argc, argv, "D:G:P:o:m:n:t:e:z:h")) != -1) {
+    while ((opt = getopt(argc, argv, "D:G:P:o:m:n:t:e:z:f:h")) != -1) {
         switch (opt) {
         case 'D': daq_config_file = optarg; break;
         case 'G': gem_map_file = optarg; break;
@@ -603,6 +689,7 @@ int main(int argc, char *argv[])
         case 'n': max_events = std::atoi(optarg); break;
         case 't': trigger_bit = std::atoi(optarg); break;
         case 'e': target_event = std::atoi(optarg); max_events = 0; break;
+        case 'f': filter_expr = optarg; break;
         case 'z': zerosup_override = std::atof(optarg); break;
         default:  usage(argv[0]); return 1;
         }
@@ -614,11 +701,14 @@ int main(int argc, char *argv[])
     if (mode == "ped" && max_events == 10)
         max_events = 0;
 
-    // evdump mode: dump first N events with 2D hits
-    //   default: 1 event;  -n K: K events;  -n 0: all events with hits
-    //   -e N overrides: dump that specific event regardless of 2D hits
+    // evdump mode: dump first N events passing filter
+    //   default: 1 event;  -n K: K events;  -n 0: all matching events
+    //   -e N overrides: dump that specific event regardless of filter
+    //   -f <filter>: custom APV-based filter (default: require 2D hits)
     int evdump_limit = 1;
     int evdump_count = 0;
+    EvdumpFilter evdump_filter;
+    bool has_evdump_filter = false;
     if (mode == "evdump") {
         if (target_event == 0) {
             evdump_limit = (max_events == 10) ? 1 : max_events;
@@ -626,6 +716,15 @@ int main(int argc, char *argv[])
         }
         if (output_file == "gem_ped.json")
             output_file = "gem_event.json";
+        if (!filter_expr.empty()) {
+            if (!parseEvdumpFilter(filter_expr, evdump_filter))
+                return 1;
+            has_evdump_filter = true;
+            std::cerr << "Filter   : " << evdump_filter.field << "=";
+            for (size_t i = 0; i < evdump_filter.values.size(); ++i)
+                std::cerr << (i ? "," : "") << evdump_filter.values[i];
+            std::cerr << " in >=" << evdump_filter.min_dets << " dets\n";
+        }
     }
 
     // validate mode
@@ -796,9 +895,16 @@ int main(int argc, char *argv[])
                 dumpClusters(*gem_sys, phys_count);
             }
             else if (mode == "evdump") {
-                // skip events without 2D hits (unless -e targets a specific event)
-                if (target_event == 0 && gem_sys->GetAllHits().empty())
-                    continue;
+                // apply filter (unless -e targets a specific event)
+                if (target_event == 0) {
+                    if (has_evdump_filter) {
+                        if (!checkEvdumpFilter(evdump_filter, *gem_sys, ssp_evt))
+                            continue;
+                    } else {
+                        if (gem_sys->GetAllHits().empty())
+                            continue;
+                    }
+                }
 
                 // multi-event: append event number to filename
                 std::string out = output_file;

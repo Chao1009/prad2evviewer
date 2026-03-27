@@ -150,6 +150,11 @@ public:
 
     // Per-APV zero-suppression results (valid after ProcessEvent)
     bool  IsChannelHit(int apv_idx, int ch) const { return apv_work_[apv_idx].hit_pos[ch]; }
+    bool  HasApvZsHits(int apv_idx) const {
+        for (int ch = 0; ch < APV_STRIP_SIZE; ++ch)
+            if (apv_work_[apv_idx].hit_pos[ch]) return true;
+        return false;
+    }
     float GetProcessedAdc(int apv_idx, int ch, int ts) const {
         return apv_work_[apv_idx].raw[ts * APV_STRIP_SIZE + ch];
     }
