@@ -11,7 +11,7 @@
 //   -m hits       Process through GemSystem → show strip hits per plane
 //   -m clusters   Full reconstruction → show clusters and 2D GEM hits
 //   -m summary    Statistics: MPDs, APVs, strips, hits, clusters per event
-//   -m evdump     Dump single event to JSON (raw + hits + clusters)
+//   -m evdump     Dump event(s) with 2D hits to JSON (-n K for first K)
 //
 // Options:
 //   -D <file>     DAQ configuration (auto-searches daq_config.json if omitted)
@@ -540,7 +540,7 @@ static void usage(const char *prog)
         << "  -m clusters   Full reconstruction: clusters + 2D hits\n"
         << "  -m summary    Per-event statistics table\n"
         << "  -m ped        Compute per-strip pedestals → output file\n"
-        << "  -m evdump     Dump single event to JSON (raw + hits + clusters)\n\n"
+        << "  -m evdump     Dump event(s) with 2D hits to JSON (-n K for first K)\n\n"
         << "Options:\n"
         << "  -D <file>     DAQ configuration (auto-searches daq_config.json if omitted)\n"
         << "  -G <file>     GEM map file (default: gem_map.json)\n"
@@ -588,10 +588,16 @@ int main(int argc, char *argv[])
     if (mode == "ped" && max_events == 10)
         max_events = 0;
 
-    // evdump mode defaults: one event, output to gem_event.json
+    // evdump mode: dump first N events with 2D hits
+    //   default: 1 event;  -n K: K events;  -n 0: all events with hits
+    //   -e N overrides: dump that specific event regardless of 2D hits
+    int evdump_limit = 1;
+    int evdump_count = 0;
     if (mode == "evdump") {
-        if (target_event == 0 && max_events == 10)
-            max_events = 1;
+        if (target_event == 0) {
+            evdump_limit = (max_events == 10) ? 1 : max_events;
+            max_events = 0;   // let evdump_limit control the loop
+        }
         if (output_file == "gem_ped.json")
             output_file = "gem_event.json";
     }
@@ -764,11 +770,28 @@ int main(int argc, char *argv[])
                 dumpClusters(*gem_sys, phys_count);
             }
             else if (mode == "evdump") {
+                // skip events without 2D hits (unless -e targets a specific event)
+                if (target_event == 0 && gem_sys->GetAllHits().empty())
+                    continue;
+
+                // multi-event: append event number to filename
+                std::string out = output_file;
+                if (target_event == 0 && evdump_limit != 1) {
+                    auto dot = output_file.rfind('.');
+                    std::string suffix = "_" + std::to_string(phys_count);
+                    if (dot != std::string::npos)
+                        out = output_file.substr(0, dot) + suffix + output_file.substr(dot);
+                    else
+                        out = output_file + suffix;
+                }
+
                 if (dumpEventJson(ssp_evt, *gem_sys, phys_count,
                                   event.info.trigger_number,
-                                  event.info.trigger_bits,
-                                  output_file) != 0)
+                                  event.info.trigger_bits, out) != 0)
                     return 1;
+
+                if (evdump_limit > 0 && ++evdump_count >= evdump_limit)
+                    goto done;
             }
             else { // summary
                 EventStats st;

@@ -24,6 +24,10 @@ compile_commands.json
 # Executables
 evc_test
 
+# Python
+__pycache__/
+*.pyc
+
 # IDE / editor
 .vscode/
 .idea/
