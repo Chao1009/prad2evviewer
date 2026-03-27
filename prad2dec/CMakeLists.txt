@@ -49,47 +49,62 @@ else()
     )
 endif()
 
-# --- et -------------------------------------------------------------------
-if(ET_SOURCE STREQUAL "fetch")
-    FetchContent_Declare(et
-        GIT_REPOSITORY https://github.com/JeffersonLab/et.git
-        GIT_TAG        main
-        GIT_PROGRESS   TRUE
-    )
-    FetchContent_MakeAvailable(et)
-    set(ET_INCLUDE_DIR "${et_SOURCE_DIR}/src/libsrc" CACHE INTERNAL "")
-elseif(ET_SOURCE STREQUAL "system")
-    find_package(coda_et REQUIRED)
-else()
-    find_library(ET_LIB NAMES et PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
-    add_library(et STATIC IMPORTED GLOBAL)
-    set_target_properties(et PROPERTIES
-        IMPORTED_LOCATION             "${ET_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
-    )
-    set(ET_INCLUDE_DIR "${CODA_INCLUDE_DIR}" CACHE INTERNAL "")
+# --- et (optional — only needed for live streaming, not file reading) -----
+option(WITH_ET "Build ET (Event Transfer) support for live data" ON)
+
+if(WITH_ET)
+    if(ET_SOURCE STREQUAL "fetch")
+        FetchContent_Declare(et
+            GIT_REPOSITORY https://github.com/JeffersonLab/et.git
+            GIT_TAG        main
+            GIT_PROGRESS   TRUE
+        )
+        FetchContent_MakeAvailable(et)
+        set(ET_INCLUDE_DIR "${et_SOURCE_DIR}/src/libsrc" CACHE INTERNAL "")
+    elseif(ET_SOURCE STREQUAL "system")
+        find_package(coda_et REQUIRED)
+    else()
+        find_library(ET_LIB NAMES et PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
+        add_library(et STATIC IMPORTED GLOBAL)
+        set_target_properties(et PROPERTIES
+            IMPORTED_LOCATION             "${ET_LIB}"
+            INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
+        )
+        set(ET_INCLUDE_DIR "${CODA_INCLUDE_DIR}" CACHE INTERNAL "")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
 # Library target
 # ---------------------------------------------------------------------------
-add_library(prad2dec STATIC
+set(PRAD2DEC_SOURCES
     src/EvChannel.cpp
-    src/EtChannel.cpp
     src/Fadc250Decoder.cpp
     src/Adc1881mDecoder.cpp
     src/SspDecoder.cpp
     src/WaveAnalyzer.cpp
 )
+if(WITH_ET)
+    list(APPEND PRAD2DEC_SOURCES src/EtChannel.cpp)
+endif()
+
+add_library(prad2dec STATIC ${PRAD2DEC_SOURCES})
 
 target_include_directories(prad2dec
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include/prad2dec>
-        $<BUILD_INTERFACE:${ET_INCLUDE_DIR}>
 )
 
-target_link_libraries(prad2dec PUBLIC evio et)
+target_link_libraries(prad2dec PUBLIC evio)
+
+if(WITH_ET)
+    target_include_directories(prad2dec PUBLIC $<BUILD_INTERFACE:${ET_INCLUDE_DIR}>)
+    target_link_libraries(prad2dec PUBLIC et)
+    target_compile_definitions(prad2dec PUBLIC USE_ET=1)
+else()
+    target_compile_definitions(prad2dec PUBLIC USE_ET=0)
+endif()
 
 # ---------------------------------------------------------------------------
 # Install

@@ -136,11 +136,24 @@ gem_dump <evio_file> -D <daq_config.json> [options]
 | `-t <bit>` | Trigger bit filter (-1=all, default) |
 | `-e <N>` | Dump only physics event N (1-based) |
 
+| `-o <file>` | Output file (ped/evdump modes) |
+| `-z <sigma>` | Override zero-suppression threshold |
+
 Modes:
 - `raw` — Dump raw SSP-decoded APV data (strips × time samples)
 - `hits` — Strip hits after pedestal subtraction, CM correction, zero suppression
 - `clusters` — Full reconstruction: 1D clusters + 2D GEM hits
 - `summary` (default) — Per-event statistics table
+- `ped` — Compute per-strip pedestals from raw data (output: `gem_ped.json`)
+- `evdump` — Dump single event to JSON for visualization (output: `gem_event.json`)
+
+The `evdump` mode outputs a JSON file containing three layers of data:
+- **raw_apvs** — Raw SSP-decoded ADC samples per APV/channel (before any processing)
+- **x_hits / y_hits** — Strip hits after pedestal subtraction, common mode correction, and zero suppression
+- **x_clusters / y_clusters** — 1D clusters with charge-weighted position and constituent strips
+- **hits_2d** — 2D reconstructed hits from X/Y cluster matching
+
+Use with `scripts/gem_cluster_view.py` to visualize clustering results (see [scripts/README.md](../scripts/README.md)).
 
 Examples:
 ```bash
@@ -151,8 +164,14 @@ gem_dump data.evio -D database/daq_config.json
 gem_dump data.evio -D database/daq_config.json -m raw -e 42
 
 # Full reconstruction with pedestals
-gem_dump data.evio -D database/daq_config.json -G database/gem_map.json -P gem_ped.dat -m clusters -n 50
+gem_dump data.evio -D database/daq_config.json -G database/gem_map.json -P gem_ped.json -m clusters -n 50
 
 # Summary with trigger filter (LMS events only)
 gem_dump data.evio -D database/daq_config.json -t 3 -n 0
+
+# Dump event 42 to JSON for cluster visualization
+gem_dump data.evio -P gem_ped.json -m evdump -e 42 -o event_42.json
+
+# Visualize the dump
+python scripts/gem_cluster_view.py event_42.json database/gem_map.json
 ```

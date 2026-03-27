@@ -4,10 +4,11 @@ FADC250 waveform decoder, event viewer, and online monitor for PRad-II at Jeffer
 
 ## Building
 
+### Linux (full build)
+
 ```bash
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
 
 CMake >= 3.14, C++17. Dependencies (`evio`, `et`, `nlohmann/json`, `websocketpp`, `asio`) fetched automatically. To speed up rebuilds, set a persistent fetch cache:
@@ -16,11 +17,42 @@ CMake >= 3.14, C++17. Dependencies (`evio`, `et`, `nlohmann/json`, `websocketpp`
 export FETCHCONTENT_BASE_DIR=$HOME/.cmake/fetchcontent
 ```
 
-For prebuilt CODA libraries: `cmake .. -DEVIO_SOURCE=prebuilt -DET_SOURCE=prebuilt`
+For prebuilt CODA libraries: `cmake -B build -DEVIO_SOURCE=prebuilt -DET_SOURCE=prebuilt`
 
-For offline analysis tools (requires ROOT 6.0+): `cmake .. -DBUILD_ANALYSIS=ON`
+For offline analysis tools (requires ROOT 6.0+): `cmake -B build -DBUILD_ANALYSIS=ON`
 
-For the Qt5 monitor client: `cmake .. -DBUILD_GUI=ON`
+For the Qt5 monitor client: `cmake -B build -DBUILD_GUI=ON`
+
+### Windows (file viewer & analysis tools)
+
+The file-based tools (`evc_viewer`, `gem_dump`, `evio_dump`, `ped_calc`) can be built on Windows without the ET (Event Transfer) system. The online monitor and ET-dependent test tools are skipped.
+
+**Prerequisites — MSYS2 with MinGW-w64 toolchain:**
+
+1. Install MSYS2 from https://www.msys2.org/
+2. From the **MSYS2 MINGW64** shell, install the toolchain:
+   ```bash
+   pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-expat
+   ```
+3. Add MinGW to your PowerShell PATH (or add permanently via System Environment Variables):
+   ```powershell
+   $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
+   ```
+
+**Build from PowerShell:**
+
+```powershell
+cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_ET=OFF
+cmake --build build
+```
+
+The key flag is `-DWITH_ET=OFF`, which disables the ET library and all targets that require it (live monitor, ET test tools). File-based targets build normally.
+
+| `-DWITH_ET=OFF` builds | Skipped |
+|------------------------|---------|
+| `evc_viewer`, `evio_dump`, `ped_calc`, `gem_dump` | `evc_monitor`, `evc_test`, `et_feeder`, `evchan_test` |
+
+**Alternative — WSL2:** build natively inside a Linux distribution with the full Linux instructions above.
 
 ## Event Viewer
 

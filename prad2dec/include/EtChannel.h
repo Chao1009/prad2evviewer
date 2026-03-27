@@ -8,8 +8,11 @@
 //=============================================================================
 #pragma once
 
-#include "EtConfigWrapper.h"
 #include "EvChannel.h"
+
+#if USE_ET
+
+#include "EtConfigWrapper.h"
 #include "EvStruct.h"
 #include <functional>
 #include <iostream>
@@ -58,3 +61,5 @@ private:
 };
 
 }   // namespace evc
+
+#endif // USE_ET
