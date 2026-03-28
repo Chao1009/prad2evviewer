@@ -8,6 +8,7 @@
 
 #include "EvChannel.h"
 #include "Fadc250Data.h"
+#include "SspData.h"
 #include "WaveAnalyzer.h"
 #include "DaqConfig.h"
 #include "load_daq_config.h"
@@ -39,6 +40,7 @@ public:
 private:
     // per-event data (sized to worst case, reused)
     static constexpr int kMaxCh = fdec::MAX_ROCS * fdec::MAX_SLOTS * 16;
+    static constexpr int GEMkMaxCH = ssp::MAX_MPDS * ssp::MAX_APVS_PER_MPD * ssp::APV_STRIP_SIZE;
 
     struct EventVars {
         int     event_num = 0;
@@ -58,6 +60,13 @@ private:
         float   peak_height[kMaxCh][fdec::MAX_PEAKS] = {};
         float   peak_time[kMaxCh][fdec::MAX_PEAKS] = {};
         float   peak_integral[kMaxCh][fdec::MAX_PEAKS] = {};
+        // GEM part
+        int     gem_nch = 0;
+        uint8_t mpd_crate[GEMkMaxCH] = {};
+        uint8_t mpd_fiber[GEMkMaxCH] = {};
+        uint8_t apv[GEMkMaxCH] = {};
+        uint8_t strip[GEMkMaxCH] = {};
+        float   ssp_samples[GEMkMaxCH][ssp::SSP_TIME_SAMPLES] = {};
     };
 
     void setupBranches(TTree *tree, EventVars &ev, bool write_peaks);

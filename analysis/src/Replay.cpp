@@ -64,6 +64,7 @@ void Replay::clearEvent(EventVars &ev)
     ev.trigger = 0;
     ev.timestamp = 0;
     ev.nch = 0;
+    ev.gem_nch = 0;
 }
 
 void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
@@ -71,21 +72,28 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
     tree->Branch("event_num", &ev.event_num, "event_num/i");
     tree->Branch("trigger",   &ev.trigger,   "trigger/i");
     tree->Branch("timestamp", &ev.timestamp, "timestamp/L");
-    tree->Branch("nch",       &ev.nch,       "nch/I");
-    tree->Branch("crate",     ev.crate,      "crate[nch]/b");
-    tree->Branch("slot",      ev.slot,       "slot[nch]/b");
-    tree->Branch("channel",   ev.channel,    "channel[nch]/b");
-    tree->Branch("module_id", ev.module_id,  "module_id[nch]/I");
-    tree->Branch("nsamples",  ev.nsamples,   "nsamples[nch]/b");
-    tree->Branch("ped_mean",  ev.ped_mean,   "ped_mean[nch]/F");
-    tree->Branch("ped_rms",   ev.ped_rms,    "ped_rms[nch]/F");
-    tree->Branch("integral",  ev.integral,   "integral[nch]/F");
+    tree->Branch("hycal.nch",       &ev.nch,       "nch/I");
+    tree->Branch("hycal.crate",     ev.crate,      "crate[nch]/b");
+    tree->Branch("hycal.slot",      ev.slot,       "slot[nch]/b");
+    tree->Branch("hycal.channel",   ev.channel,    "channel[nch]/b");
+    tree->Branch("hycal.module_id", ev.module_id,  "module_id[nch]/I");
+    tree->Branch("hycal.nsamples",  ev.nsamples,   "nsamples[nch]/b");
+    tree->Branch("hycal.ped_mean",  ev.ped_mean,   "ped_mean[nch]/F");
+    tree->Branch("hycal.ped_rms",   ev.ped_rms,    "ped_rms[nch]/F");
+    tree->Branch("hycal.integral",  ev.integral,   "integral[nch]/F");
     if (write_peaks) {
-        tree->Branch("npeaks",       ev.npeaks,       "npeaks[nch]/b");
-        tree->Branch("peak_height",  ev.peak_height,  Form("peak_height[nch][%d]/F", fdec::MAX_PEAKS));
-        tree->Branch("peak_time",    ev.peak_time,    Form("peak_time[nch][%d]/F", fdec::MAX_PEAKS));
-        tree->Branch("peak_integral",ev.peak_integral, Form("peak_integral[nch][%d]/F", fdec::MAX_PEAKS));
+        tree->Branch("hycal.npeaks",       ev.npeaks,       "npeaks[nch]/b");
+        tree->Branch("hycal.peak_height",  ev.peak_height,  Form("peak_height[nch][%d]/F", fdec::MAX_PEAKS));
+        tree->Branch("hycal.peak_time",    ev.peak_time,    Form("peak_time[nch][%d]/F", fdec::MAX_PEAKS));
+        tree->Branch("hycal.peak_integral",ev.peak_integral, Form("peak_integral[nch][%d]/F", fdec::MAX_PEAKS));
     }
+    //GEM part
+    tree->Branch("gem.nch",        &ev.gem_nch,   "gem_nch/I");
+    tree->Branch("gem.mpd_crate",  ev.mpd_crate,  "mpd_crate[gem_nch]/b");
+    tree->Branch("gem.mpd_fiber",  ev.mpd_fiber,  "mpd_fiber[gem_nch]/b");
+    tree->Branch("gem.apv",        ev.apv,        "apv[gem_nch]/b");
+    tree->Branch("gem.strip",      ev.strip,      "strip[gem_nch]/b");
+    tree->Branch("gem.ssp_samples",ev.ssp_samples,Form("ssp_samples[gem_nch][%d]/F", ssp::SSP_TIME_SAMPLES));
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root,
@@ -131,14 +139,19 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     setupBranches(tree, *ev, write_peaks);
 
     fdec::EventData event;
+    ssp::SspEventData ssp_evt;
     fdec::WaveAnalyzer ana;
     fdec::WaveResult wres;
     int total = 0;
 
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
+        if (ch.GetEventType() != evc::EventType::Physics) continue;
+
         for (int ie = 0; ie < ch.GetNEvents(); ++ie) {
-            if (!ch.DecodeEvent(ie, event)) continue;
+            event.clear();
+            ssp_evt.clear();
+            if (!ch.DecodeEvent(ie, event, &ssp_evt)) continue;
             if (max_events > 0 && total >= max_events) break;
 
             clearEvent(*ev);
@@ -146,6 +159,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             ev->trigger   = event.info.trigger_bits;
             ev->timestamp = event.info.timestamp;
 
+            // decode HyCal FADC250 data
             int nch = 0;
             for (int r = 0; r < event.nrocs; ++r) {
                 auto &roc = event.rocs[r];
@@ -185,6 +199,32 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                 }
             }
             ev->nch = nch;
+
+            // decode GEM SSP data
+            int gem_ch = 0;
+            for (int m = 0; m < ssp_evt.nmpds; ++m) {
+                auto &mpd = ssp_evt.mpds[m];
+                if (!mpd.present) continue;
+                for (int a = 0; a < ssp::MAX_APVS_PER_MPD; ++a) {
+                    auto &apv = mpd.apvs[a];
+                    if (!apv.present) continue;
+                    int idx = -1; // find APV index in GemSystem if needed
+                    for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s) {
+                        if (!apv.hasStrip(s)) continue;
+                        if (gem_ch >= GEMkMaxCH) continue;
+                        
+                        ev->mpd_crate[gem_ch] = mpd.crate_id;
+                        ev->mpd_fiber[gem_ch] = mpd.mpd_id;
+                        ev->apv[gem_ch]       = a;
+                        ev->strip[gem_ch]     = s;
+                        for (int t = 0; t < ssp::SSP_TIME_SAMPLES; t++)
+                            ev->ssp_samples[gem_ch][t] = apv.strips[s][t];
+
+                        gem_ch++;
+                    }
+                }
+            }
+            ev->gem_nch = gem_ch; // total channels = HyCal + GEM
             tree->Fill();
             total++;
 

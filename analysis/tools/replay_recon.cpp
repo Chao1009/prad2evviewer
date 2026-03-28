@@ -1,7 +1,7 @@
 //=============================================================================
-// replay_hycalRecon — HyCal reconstruction replay with physics analysis
+// replay_recon — HyCal and GEM reconstruction replay with physics analysis
 //
-// Usage: replay_hycalRecon <input.evio> [-o output.root] [-c config.json]
+// Usage: replay_recon <input.evio> [-o output.root] [-c config.json]
 //                          [-D daq_config.json] [-f max_files] [-p(read prad1)]
 //
 // Reads EVIO, runs HyCal clustering, fills per-module energy histograms

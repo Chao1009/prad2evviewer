@@ -5,7 +5,7 @@
 //
 // Usage: epCalib <input.root> [-o output_calib_file] [-D daq_config.json] [-n max_events]
 //
-// Reads rawdata.root (peak mode), runs HyCal clustering, fills per-module energy histograms
+// Reads rawdata(adc level).root (peak mode), runs HyCal clustering, fills per-module energy histograms
 //=============================================================================
 
 #include "Replay.h"
