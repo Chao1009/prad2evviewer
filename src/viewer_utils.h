@@ -1,6 +1,6 @@
 #pragma once
 //=============================================================================
-// viewer_utils.h — shared utilities for evc_viewer and evc_monitor
+// viewer_utils.h — shared utilities for prad2_viewer and prad2_monitor
 //=============================================================================
 
 #include "Fadc250Data.h"

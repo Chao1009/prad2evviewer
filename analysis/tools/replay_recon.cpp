@@ -21,6 +21,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <cstdlib>
 #include <getopt.h>
 #include <filesystem>
 #include <vector>
@@ -48,6 +49,7 @@ int main(int argc, char *argv[])
 {
     std::string input_dir, output, config_file, daq_config_file;
     std::string db_dir = DATABASE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir = env;
     int max_files = -1;
     bool prad1 = false; // set to true for PRad1-specific config
 

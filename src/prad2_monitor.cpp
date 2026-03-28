@@ -1,10 +1,10 @@
-// src/evc_monitor.cpp — HyCal online event monitor
+// src/prad2_monitor.cpp — HyCal online event monitor
 //
 // Connects to ET system, reads events in a background thread,
 // accumulates histograms + LMS data, stores latest N events in a ring buffer,
 // pushes WebSocket notifications to the viewer on new events.
 //
-// Usage: evc_monitor [-p port] [-c config.json] [-D daq_config.json]
+// Usage: prad2_monitor [-p port] [-c config.json] [-D daq_config.json]
 
 #include "EtChannel.h"
 #include "app_state.h"
@@ -434,6 +434,8 @@ int main(int argc, char *argv[])
 
     std::string db_dir  = DATABASE_DIR;
     std::string res_dir = RESOURCE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir  = env;
+    if (const char *env = std::getenv("PRAD2_RESOURCE_DIR"))  res_dir = env;
 
     // load ET config from config.json "online" section, or legacy online_config.json
     if (config_file.empty()) {

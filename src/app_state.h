@@ -1,6 +1,6 @@
 #pragma once
 //=============================================================================
-// app_state.h — shared application state for evc_viewer and evc_monitor
+// app_state.h — shared application state for prad2_viewer and prad2_monitor
 //
 // Owns all configuration, accumulated data (histograms, LMS), and HyCal system.
 // Both viewer and monitor create a single AppState instance and delegate to it.

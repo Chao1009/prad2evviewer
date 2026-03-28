@@ -6,7 +6,7 @@ message(STATUS "ROOT: ${ROOT_VERSION} at ${ROOT_DIR}")
 
 # shared sources + deps for all analysis tools
 set(ANA_SOURCES src/Replay.cpp src/PhysicsTools.cpp src/MatchingTools.cpp)
-set(ANA_DEPS prad2dec prad2ana nlohmann_json::nlohmann_json
+set(ANA_DEPS prad2dec prad2det nlohmann_json::nlohmann_json
     ROOT::Core ROOT::Tree ROOT::RIO ROOT::Hist ROOT::Graf ROOT::Gpad)
 
 # helper: add an analysis tool executable
@@ -22,3 +22,6 @@ add_analysis_tool(replay_rawdata tools/replay_rawdata.cpp)
 add_analysis_tool(replay_rawdata_m tools/replay_rawdata_m.cpp)
 add_analysis_tool(replay_recon tools/replay_recon.cpp)
 add_analysis_tool(epCalib tools/epCalib.cpp)
+
+install(TARGETS replay_rawdata replay_rawdata_m replay_recon epCalib
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

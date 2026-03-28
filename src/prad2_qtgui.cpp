@@ -1,10 +1,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// prad2_monitor – Lightweight Qt WebEngine client for PRad2 event viewer/monitor
+// prad2_qtgui – Lightweight Qt WebEngine client for PRad2 event viewer/monitor
 //
 // Usage:
-//   prad2_monitor                        # http://localhost:5051
-//   prad2_monitor -H clonpc19            # http://clonpc19:5051
-//   prad2_monitor -H clonpc19 -p 8080   # http://clonpc19:8080
+//   prad2_qtgui                        # http://localhost:5051
+//   prad2_qtgui -H clonpc19            # http://clonpc19:5051
+//   prad2_qtgui -H clonpc19 -p 8080   # http://clonpc19:8080
 // ─────────────────────────────────────────────────────────────────────────────
 
 #include <QApplication>

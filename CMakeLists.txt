@@ -30,7 +30,7 @@ add_subdirectory(prad2dec)
 # ---------------------------------------------------------------------------
 # Analysis library (clustering, reconstruction)
 # ---------------------------------------------------------------------------
-add_subdirectory(prad2ana)
+add_subdirectory(prad2det)
 
 # ---------------------------------------------------------------------------
 # Web server dependencies (json, websocketpp, asio)
@@ -93,44 +93,44 @@ target_link_libraries(ped_calc PRIVATE prad2dec nlohmann_json::nlohmann_json)
 set_target_properties(ped_calc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_executable(gem_dump test/gem_dump.cpp)
-target_link_libraries(gem_dump PRIVATE prad2dec prad2ana nlohmann_json::nlohmann_json)
+target_link_libraries(gem_dump PRIVATE prad2dec prad2det nlohmann_json::nlohmann_json)
 set_target_properties(gem_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
 # Event viewer
 # ---------------------------------------------------------------------------
-add_executable(evc_viewer src/evc_viewer.cpp src/app_state.cpp)
-target_compile_definitions(evc_viewer PRIVATE
+add_executable(prad2_viewer src/prad2_viewer.cpp src/app_state.cpp)
+target_compile_definitions(prad2_viewer PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"
 )
 find_package(Threads REQUIRED)
-target_link_libraries(evc_viewer PRIVATE
+target_link_libraries(prad2_viewer PRIVATE
     prad2dec
-    prad2ana
+    prad2det
     nlohmann_json::nlohmann_json
     websocketpp_lib
     Threads::Threads
 )
-set_target_properties(evc_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+set_target_properties(prad2_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
 # Online monitor (requires ET for live data streaming)
 # ---------------------------------------------------------------------------
 if(WITH_ET)
-    add_executable(evc_monitor src/evc_monitor.cpp src/app_state.cpp)
-    target_compile_definitions(evc_monitor PRIVATE
+    add_executable(prad2_monitor src/prad2_monitor.cpp src/app_state.cpp)
+    target_compile_definitions(prad2_monitor PRIVATE
         DATABASE_DIR="${DATABASE_DIR}"
         RESOURCE_DIR="${RESOURCE_DIR}"
     )
-    target_link_libraries(evc_monitor PRIVATE
+    target_link_libraries(prad2_monitor PRIVATE
         prad2dec
-        prad2ana
+        prad2det
         nlohmann_json::nlohmann_json
         websocketpp_lib
         Threads::Threads
     )
-    set_target_properties(evc_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    set_target_properties(prad2_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -146,8 +146,36 @@ endif()
 # ---------------------------------------------------------------------------
 option(BUILD_GUI "Build the Qt5 WebEngine monitor client" OFF)
 if(BUILD_GUI)
-    add_subdirectory(prad2qtmon)
+    find_package(Qt5 REQUIRED COMPONENTS Widgets WebEngineWidgets)
+    add_executable(prad2_qtgui src/prad2_qtgui.cpp)
+    target_link_libraries(prad2_qtgui PRIVATE Qt5::Widgets Qt5::WebEngineWidgets)
+    set_target_properties(prad2_qtgui PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+        AUTOMOC ON
+    )
 endif()
+
+# ---------------------------------------------------------------------------
+# Install
+# ---------------------------------------------------------------------------
+include(GNUInstallDirs)
+
+install(TARGETS prad2_viewer evio_dump ped_calc gem_dump
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(WITH_ET)
+    install(TARGETS prad2_monitor evc_test et_feeder evchan_test
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_GUI)
+    install(TARGETS prad2_qtgui RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+install(DIRECTORY database/   DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/database)
+install(DIRECTORY resources/  DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/resources)
+install(FILES scripts/setup.sh scripts/setup.csh
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
 # Summary

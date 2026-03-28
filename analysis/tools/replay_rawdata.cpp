@@ -10,6 +10,7 @@
 #include "Replay.h"
 #include <iostream>
 #include <string>
+#include <cstdlib>
 #include <getopt.h>
 
 #ifndef DATABASE_DIR
@@ -23,6 +24,7 @@ int main(int argc, char *argv[])
     bool peaks = false;
 
     std::string db_dir = DATABASE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir = env;
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;

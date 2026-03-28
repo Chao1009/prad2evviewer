@@ -22,6 +22,7 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <cstdlib>
 #include <getopt.h>
 
 #ifndef DATABASE_DIR
@@ -79,6 +80,7 @@ int main(int argc, char *argv[])
 {
     std::string input, output_calib_file, config_file, daq_config_file;
     std::string db_dir = DATABASE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir = env;
     int max_events = -1;
 
     //hardcoded beam energy for yield histograms, can be made configurable if needed

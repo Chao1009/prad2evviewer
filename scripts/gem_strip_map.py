@@ -1,7 +1,7 @@
 """
 Shared GEM strip mapping implementation.
 
-Matches GemSystem::buildStripMap in prad2ana. Configurable per-APV via
+Matches GemSystem::buildStripMap in prad2det. Configurable per-APV via
 the same parameters as gem_map.json.
 """
 

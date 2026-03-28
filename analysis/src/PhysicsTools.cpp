@@ -6,6 +6,7 @@
 #include <TF1.h>
 #include <TMath.h>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 
@@ -171,6 +172,7 @@ std::array<float, 2> PhysicsTools::FitPeakResolution(int module_index) const
 void PhysicsTools::Resolution2Database(int run_id)
 {
     std::string db_dir = DATABASE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir = env;
     std::string filename = db_dir + Form("/recon/run_%d.dat", run_id);
 
     std::ofstream out(filename);

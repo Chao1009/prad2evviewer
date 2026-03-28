@@ -1,12 +1,12 @@
-// src/evc_viewer.cpp — HyCal event viewer
+// src/prad2_viewer.cpp — HyCal event viewer
 //
 // Usage:
-//   evc_viewer [evio_file] [-p port] [-H] [-c config.json] [-d /path/to/data] [-D daq_config.json]
-//   evc_viewer -d /data/stage6 -H              # browse and pick from GUI
-//   evc_viewer data.evio -H                    # open file directly
-//   evc_viewer data.evio -H -d /data/stage6    # open file + enable browsing
-//   evc_viewer                                 # empty viewer, no file browser
-//   evc_viewer prad.evio -D prad_daq_config.json  # open PRad file with PRad DAQ config
+//   prad2_viewer [evio_file] [-p port] [-H] [-c config.json] [-d /path/to/data] [-D daq_config.json]
+//   prad2_viewer -d /data/stage6 -H              # browse and pick from GUI
+//   prad2_viewer data.evio -H                    # open file directly
+//   prad2_viewer data.evio -H -d /data/stage6    # open file + enable browsing
+//   prad2_viewer                                 # empty viewer, no file browser
+//   prad2_viewer prad.evio -D prad_daq_config.json  # open PRad file with PRad DAQ config
 //
 // -d enables file browsing: the viewer shows a file picker limited to
 // .evio files under that directory tree. Selecting a new file triggers
@@ -470,6 +470,8 @@ int main(int argc, char *argv[]) {
 
     std::string db_dir  = DATABASE_DIR;
     std::string res_dir = RESOURCE_DIR;
+    if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir  = env;
+    if (const char *env = std::getenv("PRAD2_RESOURCE_DIR"))  res_dir = env;
 
     // resolve default DAQ config path
     if (daq_config_file.empty())
