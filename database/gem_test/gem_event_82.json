@@ -1,0 +1,727 @@
+{
+  "detectors": [
+    {
+      "hits_2d": [
+        {
+          "x": 36.55,
+          "x_charge": 366.0,
+          "x_peak": 148.8,
+          "x_size": 3,
+          "y": 592.04,
+          "y_charge": 817.1,
+          "y_peak": 253.4,
+          "y_size": 5
+        }
+      ],
+      "id": 0,
+      "name": "GEM0",
+      "x_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            858,
+            859,
+            860
+          ],
+          "max_timebin": 1,
+          "peak_charge": 148.8,
+          "position": 36.55,
+          "size": 3,
+          "total_charge": 366.0
+        }
+      ],
+      "x_pitch": 0.4000000059604645,
+      "x_strips": 1536,
+      "y_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            3014,
+            3015,
+            3016,
+            3017,
+            3018
+          ],
+          "max_timebin": 1,
+          "peak_charge": 253.4,
+          "position": 592.04,
+          "size": 5,
+          "total_charge": 817.1
+        }
+      ],
+      "y_pitch": 0.4000000059604645,
+      "y_strips": 3072
+    },
+    {
+      "hits_2d": [
+        {
+          "x": -50.63,
+          "x_charge": 895.6,
+          "x_peak": 437.9,
+          "x_size": 3,
+          "y": 476.77,
+          "y_charge": 1616.8,
+          "y_peak": 646.6,
+          "y_size": 5
+        }
+      ],
+      "id": 1,
+      "name": "GEM1",
+      "x_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            640,
+            641,
+            642
+          ],
+          "max_timebin": 2,
+          "peak_charge": 437.9,
+          "position": -50.63,
+          "size": 3,
+          "total_charge": 895.6
+        }
+      ],
+      "x_pitch": 0.4000000059604645,
+      "x_strips": 1536,
+      "y_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            2726,
+            2727,
+            2728,
+            2729,
+            2730
+          ],
+          "max_timebin": 2,
+          "peak_charge": 646.6,
+          "position": 476.77,
+          "size": 5,
+          "total_charge": 1616.8
+        }
+      ],
+      "y_pitch": 0.4000000059604645,
+      "y_strips": 3072
+    },
+    {
+      "hits_2d": [
+        {
+          "x": -128.92,
+          "x_charge": 464.8,
+          "x_peak": 184.8,
+          "x_size": 3,
+          "y": 369.39,
+          "y_charge": 780.8,
+          "y_peak": 267.6,
+          "y_size": 5
+        }
+      ],
+      "id": 2,
+      "name": "GEM2",
+      "x_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            444,
+            445,
+            446
+          ],
+          "max_timebin": 2,
+          "peak_charge": 184.8,
+          "position": -128.92,
+          "size": 3,
+          "total_charge": 464.8
+        }
+      ],
+      "x_pitch": 0.4000000059604645,
+      "x_strips": 1536,
+      "y_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            2457,
+            2458,
+            2459,
+            2460,
+            2461
+          ],
+          "max_timebin": 2,
+          "peak_charge": 267.6,
+          "position": 369.39,
+          "size": 5,
+          "total_charge": 780.8
+        }
+      ],
+      "y_pitch": 0.4000000059604645,
+      "y_strips": 3072
+    },
+    {
+      "hits_2d": [
+        {
+          "x": -217.57,
+          "x_charge": 309.4,
+          "x_peak": 177.6,
+          "x_size": 2,
+          "y": 245.03,
+          "y_charge": 755.0,
+          "y_peak": 218.4,
+          "y_size": 5
+        }
+      ],
+      "id": 3,
+      "name": "GEM3",
+      "x_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            223,
+            224
+          ],
+          "max_timebin": 4,
+          "peak_charge": 177.6,
+          "position": -217.57,
+          "size": 2,
+          "total_charge": 309.4
+        }
+      ],
+      "x_pitch": 0.4000000059604645,
+      "x_strips": 1536,
+      "y_clusters": [
+        {
+          "cross_talk": false,
+          "hit_strips": [
+            2146,
+            2147,
+            2148,
+            2149,
+            2150
+          ],
+          "max_timebin": 2,
+          "peak_charge": 218.4,
+          "position": 245.03,
+          "size": 5,
+          "total_charge": 755.0
+        }
+      ],
+      "y_pitch": 0.4000000059604645,
+      "y_strips": 3072
+    }
+  ],
+  "event_number": 82,
+  "trigger_bits": 0,
+  "trigger_number": 82,
+  "zs_apvs": [
+    {
+      "adc": 0,
+      "channels": {
+        "101": {
+          "charge": 124.1,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            76.4,
+            124.1,
+            105.7,
+            91.5,
+            80.3,
+            89.7
+          ]
+        },
+        "105": {
+          "charge": 127.0,
+          "cross_talk": false,
+          "max_timebin": 0,
+          "ts_adc": [
+            127.0,
+            119.7,
+            102.3,
+            107.1,
+            82.9,
+            63.3
+          ]
+        },
+        "117": {
+          "charge": 143.7,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            118.4,
+            141.1,
+            143.7,
+            102.5,
+            90.3,
+            58.7
+          ]
+        },
+        "73": {
+          "charge": 178.3,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            155.5,
+            178.3,
+            156.9,
+            130.6,
+            119.5,
+            124.9
+          ]
+        },
+        "85": {
+          "charge": 117.5,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            76.1,
+            111.9,
+            117.5,
+            76.3,
+            49.1,
+            34.5
+          ]
+        },
+        "89": {
+          "charge": 253.4,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            228.7,
+            253.4,
+            223.0,
+            169.8,
+            135.6,
+            114.0
+          ]
+        }
+      },
+      "crate": 49,
+      "mpd": 10
+    },
+    {
+      "adc": 1,
+      "channels": {
+        "112": {
+          "charge": 107.5,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            90.6,
+            107.5,
+            100.0,
+            81.7,
+            63.1,
+            72.3
+          ]
+        },
+        "68": {
+          "charge": 109.8,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            100.9,
+            109.8,
+            102.3,
+            102.0,
+            81.4,
+            57.6
+          ]
+        },
+        "84": {
+          "charge": 148.8,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            141.9,
+            148.8,
+            133.3,
+            126.0,
+            92.4,
+            70.6
+          ]
+        }
+      },
+      "crate": 49,
+      "mpd": 11
+    },
+    {
+      "adc": 2,
+      "channels": {
+        "13": {
+          "charge": 93.0,
+          "cross_talk": true,
+          "max_timebin": 0,
+          "ts_adc": [
+            93.0,
+            83.9,
+            70.2,
+            72.2,
+            62.9,
+            79.3
+          ]
+        },
+        "29": {
+          "charge": 194.9,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            141.7,
+            185.6,
+            194.9,
+            165.9,
+            139.6,
+            125.0
+          ]
+        },
+        "45": {
+          "charge": 437.9,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            332.7,
+            423.6,
+            437.9,
+            429.9,
+            389.6,
+            327.0
+          ]
+        },
+        "61": {
+          "charge": 262.8,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            210.9,
+            262.8,
+            255.1,
+            211.2,
+            180.8,
+            177.2
+          ]
+        }
+      },
+      "crate": 49,
+      "mpd": 14
+    },
+    {
+      "adc": 2,
+      "channels": {
+        "103": {
+          "charge": 145.3,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            123.9,
+            145.3,
+            132.3,
+            113.8,
+            91.0,
+            93.4
+          ]
+        },
+        "107": {
+          "charge": 95.6,
+          "cross_talk": true,
+          "max_timebin": 0,
+          "ts_adc": [
+            95.6,
+            72.0,
+            74.0,
+            89.5,
+            62.7,
+            18.1
+          ]
+        },
+        "119": {
+          "charge": 382.5,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            305.1,
+            382.5,
+            375.6,
+            317.0,
+            274.2,
+            220.6
+          ]
+        },
+        "74": {
+          "charge": 82.7,
+          "cross_talk": true,
+          "max_timebin": 2,
+          "ts_adc": [
+            28.3,
+            61.6,
+            82.7,
+            81.1,
+            66.3,
+            25.8
+          ]
+        },
+        "75": {
+          "charge": 646.6,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            475.2,
+            627.6,
+            646.6,
+            580.1,
+            503.3,
+            402.7
+          ]
+        },
+        "87": {
+          "charge": 111.1,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            89.7,
+            111.1,
+            107.2,
+            108.6,
+            92.8,
+            88.2
+          ]
+        },
+        "91": {
+          "charge": 331.3,
+          "cross_talk": false,
+          "max_timebin": 1,
+          "ts_adc": [
+            278.9,
+            331.3,
+            330.3,
+            293.8,
+            238.0,
+            172.4
+          ]
+        }
+      },
+      "crate": 49,
+      "mpd": 23
+    },
+    {
+      "adc": 0,
+      "channels": {
+        "109": {
+          "charge": 184.8,
+          "cross_talk": false,
+          "max_timebin": 3,
+          "ts_adc": [
+            66.0,
+            135.3,
+            180.5,
+            184.8,
+            166.5,
+            125.9
+          ]
+        },
+        "77": {
+          "charge": 95.1,
+          "cross_talk": false,
+          "max_timebin": 3,
+          "ts_adc": [
+            62.3,
+            84.5,
+            87.8,
+            95.1,
+            89.8,
+            43.2
+          ]
+        },
+        "93": {
+          "charge": 184.8,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            63.3,
+            148.5,
+            184.8,
+            173.1,
+            150.8,
+            144.2
+          ]
+        }
+      },
+      "crate": 52,
+      "mpd": 1
+    },
+    {
+      "adc": 1,
+      "channels": {
+        "15": {
+          "charge": 184.6,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            101.1,
+            167.6,
+            184.6,
+            175.9,
+            171.2,
+            142.5
+          ]
+        },
+        "27": {
+          "charge": 83.5,
+          "cross_talk": true,
+          "max_timebin": 1,
+          "ts_adc": [
+            82.0,
+            83.5,
+            82.5,
+            72.8,
+            62.1,
+            72.4
+          ]
+        },
+        "31": {
+          "charge": 70.8,
+          "cross_talk": true,
+          "max_timebin": 2,
+          "ts_adc": [
+            63.3,
+            67.8,
+            70.8,
+            63.1,
+            64.3,
+            56.6
+          ]
+        },
+        "43": {
+          "charge": 174.2,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            116.7,
+            169.1,
+            174.2,
+            169.4,
+            143.7,
+            106.0
+          ]
+        },
+        "59": {
+          "charge": 267.6,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            181.1,
+            260.6,
+            267.6,
+            231.9,
+            204.1,
+            191.4
+          ]
+        }
+      },
+      "crate": 52,
+      "mpd": 9
+    },
+    {
+      "adc": 1,
+      "channels": {
+        "127": {
+          "charge": 131.8,
+          "cross_talk": false,
+          "max_timebin": 4,
+          "ts_adc": [
+            18.6,
+            59.1,
+            94.5,
+            117.6,
+            131.8,
+            113.5
+          ]
+        },
+        "63": {
+          "charge": 177.6,
+          "cross_talk": false,
+          "max_timebin": 4,
+          "ts_adc": [
+            6.4,
+            60.9,
+            132.3,
+            174.4,
+            177.6,
+            165.3
+          ]
+        }
+      },
+      "crate": 52,
+      "mpd": 15
+    },
+    {
+      "adc": 1,
+      "channels": {
+        "20": {
+          "charge": 218.4,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            71.7,
+            157.3,
+            218.4,
+            217.5,
+            185.9,
+            162.6
+          ]
+        },
+        "32": {
+          "charge": 102.6,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            62.8,
+            97.5,
+            102.6,
+            87.7,
+            54.1,
+            39.7
+          ]
+        },
+        "36": {
+          "charge": 95.6,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            60.8,
+            73.4,
+            95.6,
+            92.6,
+            63.1,
+            27.7
+          ]
+        },
+        "4": {
+          "charge": 189.7,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            70.0,
+            154.6,
+            189.7,
+            162.8,
+            118.2,
+            128.9
+          ]
+        },
+        "48": {
+          "charge": 148.8,
+          "cross_talk": false,
+          "max_timebin": 2,
+          "ts_adc": [
+            54.0,
+            126.7,
+            148.8,
+            105.9,
+            60.3,
+            34.9
+          ]
+        }
+      },
+      "crate": 52,
+      "mpd": 21
+    }
+  ]
+}
