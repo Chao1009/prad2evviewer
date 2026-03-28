@@ -136,8 +136,8 @@ struct DaqConfig
         // single-event tags
         for (auto t : physics_tags)
             if (tag == t) return true;
-        // built-trigger range (0xFF50-0xFF8F: PEB, SEB, streaming)
-        return (tag >= 0xFF50 && tag <= 0xFF8F);
+        // built-in trigger range for physics (0xFF50-0xFF8F, 0x00B0-0x00BF)
+        return (tag >= 0xFF50 && tag <= 0xFF8F) || ((tag & 0x00F0) == 0x00B0);
     }
 
     bool is_control(uint32_t tag) const
