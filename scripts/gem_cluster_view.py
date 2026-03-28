@@ -183,8 +183,8 @@ def plot_detector(ax, det_geom, det_data, det_hits, hole, norm):
     for h in det_data.get("hits_2d", []):
         hx = h["x"] + x_plane_size / 2 - x_pitch / 2
         hy = h["y"] + y_plane_size / 2 - y_pitch / 2
-        ax.plot(hx, hy, "+", color="darkgreen", markersize=12,
-                markeredgewidth=2, zorder=7)
+        ax.plot(hx, hy, "+", color="black", markersize=16,
+                markeredgewidth=3, zorder=7)
 
     # ── title and formatting ─────────────────────────────────────────
     n_xh = len(x_hits)
@@ -247,8 +247,8 @@ def add_legend(fig):
                    markersize=6, label="X cluster center"),
         plt.Line2D([], [], marker=">", color="red", linestyle="None",
                    markersize=6, label="Y cluster center"),
-        plt.Line2D([], [], marker="+", color="darkgreen", linestyle="None",
-                   markeredgewidth=2, markersize=10, label="2D hit"),
+        plt.Line2D([], [], marker="+", color="black", linestyle="None",
+                   markeredgewidth=3, markersize=12, label="2D hit"),
         plt.Line2D([], [], color="gray", linestyle="--", linewidth=0.6,
                    alpha=0.5, label="Cross-talk hit"),
     ]
