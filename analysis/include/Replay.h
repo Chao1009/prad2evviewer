@@ -37,10 +37,17 @@ public:
     bool Process(const std::string &input_evio, const std::string &output_root,
                  int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "");
 
+    bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root,
+                            const std::string &daq_config_file = "",
+                            const std::string &gem_ped_file = "", float zerosup_override = 0.f,
+                            bool prad1 = false);
+
 private:
     // per-event data (sized to worst case, reused)
     static constexpr int kMaxCh = fdec::MAX_ROCS * fdec::MAX_SLOTS * 16;
     static constexpr int GEMkMaxCH = ssp::MAX_MPDS * ssp::MAX_APVS_PER_MPD * ssp::APV_STRIP_SIZE;
+    static constexpr int kMaxCl = 100;
+    static constexpr int kMaxGEMHits = 400;
 
     struct EventVars {
         int     event_num = 0;
@@ -69,8 +76,35 @@ private:
         float   ssp_samples[GEMkMaxCH][ssp::SSP_TIME_SAMPLES] = {};
     };
 
+    struct EventVars_Recon {
+        int event_num = 0;
+        uint32_t trigger_bits = 0;
+        Long64_t timestamp = 0;
+        int n_clusters = 0;
+        float cl_x[kMaxCl];
+        float cl_y[kMaxCl];
+        float cl_energy[kMaxCl];
+        int cl_nblocks[kMaxCl];
+        int cl_center[kMaxCl];
+        // GEM part
+        int n_gem_hits = 0;
+        uint8_t det_id[kMaxGEMHits];
+        float gem_x[kMaxGEMHits];
+        float gem_y[kMaxGEMHits];
+        float gem_x_charge[kMaxGEMHits];
+        float gem_y_charge[kMaxGEMHits];
+        float gem_x_peak[kMaxGEMHits];
+        float gem_y_peak[kMaxGEMHits];
+        int gem_x_size[kMaxGEMHits];
+        int gem_y_size[kMaxGEMHits];
+
+    };
+
     void setupBranches(TTree *tree, EventVars &ev, bool write_peaks);
     void clearEvent(EventVars &ev);
+
+    void setupReconBranches(TTree *tree, EventVars_Recon &ev);
+    void clearReconEvent(EventVars_Recon &ev);
 
     std::string moduleName(int roc, int slot, int ch) const;
     int moduleID(int roc, int slot, int ch) const;
