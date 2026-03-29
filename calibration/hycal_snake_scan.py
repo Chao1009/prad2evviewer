@@ -995,7 +995,6 @@ class SnakeScanGUI:
         # Grey out / restore display-only modules on state transitions
         if running and not self._display_greyed:
             self._display_greyed = True
-            self._clear_path_preview()
             for m in self.all_modules:
                 if m.name not in self._scan_names and m.name in self._cell_ids:
                     self._canvas.itemconfigure(
@@ -1039,9 +1038,19 @@ class SnakeScanGUI:
                 colour = C.MOD_TODO
             self._canvas.itemconfigure(rid, fill=colour)
 
-        # Path preview line (only when idle / completed)
-        if idle and not self._canvas.find_withtag("path_preview"):
+        # Path preview line
+        self._canvas.delete("path_preview")
+        if idle:
             self._draw_path_preview()
+        elif running:
+            # Dashed future path from next module to end
+            coords = []
+            for i in range(eng.current_idx + 1, end_idx):
+                coords.extend(self._mod_to_canvas_center(eng.path[i]))
+            if len(coords) >= 4:
+                self._canvas.create_line(
+                    *coords, fill=C.PATH_LINE, width=1,
+                    dash=(3, 3), tags=("path_preview",))
 
         # Motor position marker (crosshair)
         self._canvas.delete("motor_pos")
@@ -1178,11 +1187,21 @@ class SnakeScanGUI:
                                     command=self._cmd_ack_error)
         self._btn_ack.pack(side="left", expand=True, fill="x", padx=2)
 
-        # progress
-        self._lbl_progress = tk.Label(sc, text="Progress: --/--",
+        # progress label + bar
+        r_prog = tk.Frame(sc, bg=C.BG)
+        r_prog.pack(fill="x", padx=6)
+        self._lbl_progress = tk.Label(r_prog, text="Progress: --/--",
                                        bg=C.BG, fg=C.TEXT,
                                        font=("Consolas", 9))
-        self._lbl_progress.pack(padx=6, anchor="w")
+        self._lbl_progress.pack(side="left")
+        style.configure("scan.Horizontal.TProgressbar",
+                         troughcolor=C.PANEL, background=C.ACCENT,
+                         bordercolor=C.BORDER, lightcolor=C.ACCENT,
+                         darkcolor=C.ACCENT)
+        self._progress_bar = ttk.Progressbar(
+            r_prog, length=120, mode="determinate",
+            style="scan.Horizontal.TProgressbar")
+        self._progress_bar.pack(side="right", padx=(4, 0))
         self._lbl_current = tk.Label(sc, text="Current: --",
                                       bg=C.BG, fg=C.TEXT,
                                       font=("Consolas", 9))
@@ -1534,6 +1553,13 @@ class SnakeScanGUI:
 
         # progress
         self._lbl_progress.configure(text=f"Progress: {eng.progress_text}")
+        done = len(eng.completed)
+        end = getattr(eng, '_end_idx', len(eng.path))
+        start = end - done - (1 if eng.state not in (ScanState.IDLE,
+                                                       ScanState.COMPLETED) else 0)
+        total = end - max(start, 0)
+        self._progress_bar["maximum"] = max(total, 1)
+        self._progress_bar["value"] = done
 
         mod = eng.current_module
         if mod:
