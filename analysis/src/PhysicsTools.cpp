@@ -59,6 +59,28 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
 
 PhysicsTools::~PhysicsTools() = default;
 
+// transfrom detector coordinates to target and beam center coordinates
+// only used for offline analysis
+void PhysicsTools::TransformDetData(std::vector<HCHit> &hc_hits, float beamX, float beamY, float ZfromTarget)
+{
+    // Transform HyCal hit coordinates from detector frame to target frame
+    for (auto &hc_hit : hc_hits) {
+        hc_hit.x -= beamX;
+        hc_hit.y -= beamY;
+        hc_hit.z += ZfromTarget;
+    }
+}
+
+void PhysicsTools::TransformDetData(std::vector<GEMHit> &gem_hits, float beamX, float beamY, float ZfromTarget)
+{
+    // Transform GEM hit coordinates from detector frame to target frame
+    for (auto &gem_hit : gem_hits) {
+        gem_hit.x -= beamX;
+        gem_hit.y -= beamY;
+        gem_hit.z += ZfromTarget;
+    }
+}
+
 void PhysicsTools::FillModuleEnergy(int module_index, float energy)
 {
     if (module_index >= 0 && module_index < (int)module_hists_.size())

@@ -39,6 +39,11 @@ public:
     explicit PhysicsTools(fdec::HyCalSystem &hycal);
     ~PhysicsTools();
 
+    //transfrom detector coordinates to target and beam center coordinates
+    // only used for offline analysis
+    void TransformDetData(std::vector<HCHit> &hc_hits,  float beamX, float beamY, float ZfromTarget);
+    void TransformDetData(std::vector<GEMHit> &gem_hits, float beamX, float beamY, float ZfromTarget);
+
     // --- per-module cluster energy histograms --------------------------------
     void FillModuleEnergy(int module_index, float energy);
     TH1F *GetModuleEnergyHist(int module_index) const;
