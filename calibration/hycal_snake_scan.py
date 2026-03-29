@@ -477,6 +477,7 @@ class ScanEngine:
         self._skip.clear()
         self._paused = False
         self.current_idx = start_idx
+        self._start_idx = start_idx
         self._end_idx = min(start_idx + count, len(self.path)) \
                         if count > 0 else len(self.path)
         self.completed.clear()
@@ -1553,12 +1554,11 @@ class SnakeScanGUI:
             fg=state_colours.get(eng.state, C.DIM))
 
         # progress
-        self._lbl_progress.configure(text=f"Progress: {eng.progress_text}")
         done = len(eng.completed)
+        start = getattr(eng, '_start_idx', 0)
         end = getattr(eng, '_end_idx', len(eng.path))
-        start = end - done - (1 if eng.state not in (ScanState.IDLE,
-                                                       ScanState.COMPLETED) else 0)
-        total = end - max(start, 0)
+        total = end - start
+        self._lbl_progress.configure(text=f"Progress: {done}/{total}")
         self._progress_bar["maximum"] = max(total, 1)
         self._progress_bar["value"] = done
 
