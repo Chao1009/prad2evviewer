@@ -27,13 +27,13 @@ Moves outside this boundary are blocked automatically.
 On **clonpc19**:
 
 ```bash
-cd ~/prad2_daq/prad2evviewer && ./scripts/hycal_snake_scan.py --real
+cd ~/prad2_daq/prad2evviewer && ./calibration/hycal_snake_scan.py --real
 ```
 
 For simulation (no EPICS, no hardware):
 
 ```bash
-python scripts/hycal_snake_scan.py
+python calibration/hycal_snake_scan.py
 ```
 
 ---
@@ -111,7 +111,7 @@ Scan auto-pauses. Click **Ack Error** to skip and continue, or **Stop** to abort
 
 ## Logging
 
-All events are logged to `scripts/logs/snake_scan_YYYYMMDD_HHMMSS.log`
+All events are logged to `calibration/logs/snake_scan_YYYYMMDD_HHMMSS.log`
 (one file per session, created on launch).
 
 **Upload log files when the scan or shift ends.**
