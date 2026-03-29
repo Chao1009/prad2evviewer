@@ -20,7 +20,7 @@ Usage
 Coordinate system
 -----------------
     ptrans_x, ptrans_y = (-126.75, 10.11)  -->  beam at HyCal centre (0,0)
-    ptrans_x = BEAM_CENTER_X - module_x
+    ptrans_x = BEAM_CENTER_X + module_x
     ptrans_y = BEAM_CENTER_Y - module_y
 
 Writable PVs (the ONLY PVs this tool writes to):
@@ -60,6 +60,14 @@ from typing import Dict, List, Optional, Tuple
 BEAM_CENTER_X: float = -126.75   # mm
 BEAM_CENTER_Y: float = 10.11     # mm
 
+# Transporter travel limits (symmetric about centre)
+_LIMIT_RB_X = -582.65             # right-bottom corner ptrans_x
+_LIMIT_RB_Y = -672.50             # right-bottom corner ptrans_y
+PTRANS_X_MIN = _LIMIT_RB_X                            # -582.65
+PTRANS_X_MAX = 2 * BEAM_CENTER_X - _LIMIT_RB_X        #  329.15
+PTRANS_Y_MIN = _LIMIT_RB_Y                            # -672.50
+PTRANS_Y_MAX = 2 * BEAM_CENTER_Y - _LIMIT_RB_Y        #  692.72
+
 DEFAULT_DWELL = 120.0    # seconds
 DEFAULT_POS_THRESHOLD = 0.5   # mm  -- alert if |RBV - target| exceeds this
 MOVE_TIMEOUT = 300.0     # seconds per single move
@@ -68,7 +76,7 @@ MOVE_TIMEOUT = 300.0     # seconds per single move
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "database", "hycal_modules.json")
 
-MAX_LG_LAYERS = 6
+MAX_LG_LAYERS = 2
 
 SPMG_LABELS = {0: "Stop", 1: "Pause", 2: "Move", 3: "Go"}
 
@@ -270,13 +278,18 @@ def build_scan_path(scan_modules: List[Module]) -> Tuple[List[Module], int]:
 
 
 def module_to_ptrans(mx: float, my: float) -> Tuple[float, float]:
-    """HyCal-frame module centre --> transporter set-point."""
-    return (BEAM_CENTER_X - mx, BEAM_CENTER_Y - my)
+    """HyCal-frame module centre --> transporter set-point.
+
+    ptrans_x moves in the same direction as HyCal-x (both increase rightward
+    in beam view), while ptrans_y is inverted (ptrans_y decreases when
+    beam moves up on HyCal).
+    """
+    return (BEAM_CENTER_X + mx, BEAM_CENTER_Y - my)
 
 
 def ptrans_to_module(px: float, py: float) -> Tuple[float, float]:
-    """Transporter position --> HyCal-frame coordinates."""
-    return (BEAM_CENTER_X - px, BEAM_CENTER_Y - py)
+    """Transporter position --> beam position on HyCal (HyCal-frame)."""
+    return (px - BEAM_CENTER_X, BEAM_CENTER_Y - py)
 
 
 # ============================================================================
@@ -456,12 +469,19 @@ class SimulatedEPICS:
 
 # -- helpers shared by both interfaces --------------------------------------
 
-def epics_move_to(ep, x: float, y: float):
-    """Command a move:  set VAL then ensure SPMG = Go."""
+def epics_move_to(ep, x: float, y: float) -> bool:
+    """Command a move, clamped to transporter limits.
+
+    Returns False (and does not move) if the target is outside limits.
+    """
+    if x < PTRANS_X_MIN or x > PTRANS_X_MAX \
+       or y < PTRANS_Y_MIN or y > PTRANS_Y_MAX:
+        return False
     ep.put("x_val", x)
     ep.put("y_val", y)
     ep.put("x_spmg", int(SPMG.GO))
     ep.put("y_spmg", int(SPMG.GO))
+    return True
 
 def epics_stop(ep):
     ep.put("x_spmg", int(SPMG.STOP))
@@ -610,7 +630,10 @@ class ScanEngine:
                 self.state = ScanState.MOVING
                 self.log(f"[{i+1}/{len(self.path)}] Moving to {mod.name} "
                          f"  ptrans({px:.3f}, {py:.3f})")
-                epics_move_to(self.ep, px, py)
+                if not epics_move_to(self.ep, px, py):
+                    self.log(f"SKIPPED {mod.name}: ptrans({px:.3f}, {py:.3f}) "
+                             f"outside travel limits", level="warn")
+                    continue
 
                 if not self._wait_move_done(px, py):
                     break
@@ -721,6 +744,12 @@ class SnakeScanGUI:
 
         self._log_lines: List[str] = []
         self._log_text = None   # set later by _build_ui
+
+        # Open log file (one per session, timestamped)
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_name = datetime.now().strftime("snake_scan_%Y%m%d_%H%M%S.log")
+        self._log_file = open(os.path.join(log_dir, log_name), "w")
 
         # Split into scan targets vs display-only
         self.scan_modules = self._filter_scan_modules(0)
@@ -970,6 +999,20 @@ class SnakeScanGUI:
                 x0, y0, x1, y1, fill=C.MOD_TODO, outline="", width=0,
                 tags=(f"mod_{m.name}", "scan"))
             self._cell_ids[m.name] = rid
+
+        # Draw transporter travel-limit boundary (red dashed)
+        # Convert ptrans limits to HyCal coordinates, then to canvas
+        lim_hx_min = PTRANS_X_MIN - BEAM_CENTER_X  # left-most beam x
+        lim_hx_max = PTRANS_X_MAX - BEAM_CENTER_X  # right-most beam x
+        lim_hy_min = BEAM_CENTER_Y - PTRANS_Y_MAX  # bottom-most beam y
+        lim_hy_max = BEAM_CENTER_Y - PTRANS_Y_MIN  # top-most beam y
+        bx0 = self._ox + (lim_hx_min - self._x_min) * self._scale
+        by0 = self._oy + (self._y_max - lim_hy_max) * self._scale
+        bx1 = self._ox + (lim_hx_max - self._x_min) * self._scale
+        by1 = self._oy + (self._y_max - lim_hy_min) * self._scale
+        self._canvas.create_rectangle(
+            bx0, by0, bx1, by1,
+            outline=C.RED, width=1, dash=(4, 4), tags=("limit_box",))
 
     def _draw_path_preview(self):
         """Draw the projected snake path line from start to end on the canvas."""
@@ -1396,7 +1439,9 @@ class SnakeScanGUI:
         mod = self.engine.path[self._selected_start_idx]
         px, py = module_to_ptrans(mod.x, mod.y)
         self._log(f"Direct move to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-        epics_move_to(self.ep, px, py)
+        if not epics_move_to(self.ep, px, py):
+            self._log(f"BLOCKED: ptrans({px:.3f}, {py:.3f}) outside travel limits",
+                      level="error")
 
     def _cmd_reset_center(self):
         self._log("Resetting to beam centre "
@@ -1412,6 +1457,9 @@ class SnakeScanGUI:
         tag = level.upper().ljust(5)
         line = f"[{ts}] {tag} {msg}"
         self._log_lines.append(line)
+        if self._log_file:
+            self._log_file.write(line + "\n")
+            self._log_file.flush()
         # schedule text widget update on the main thread
         self.root.after_idle(self._append_log, line, level)
 

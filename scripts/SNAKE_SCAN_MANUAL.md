@@ -1,176 +1,148 @@
 # HyCal Snake Scan -- Operator Manual
 
-**HyCal Module Scanner for PRad-II, Jefferson Lab Hall B**
+**PRad-II, Jefferson Lab Hall B**
 
 ---
 
 ## Overview
 
 Automates beam calibration of HyCal modules in a serpentine pattern.
-Module positions are loaded from `database/hycal_modules.json`
-(1152 PbWO4, 576 PbGlass). The scan always includes all PbWO4 modules; surrounding PbGlass layers
-(0--6) are configurable in the GUI. The map always shows both types.
+All 1152 PbWO4 modules are scanned first, then surrounding PbGlass
+sectors (0--2 layers, configurable). At each module the transporter
+dwells for a configurable time (default 120 s), then advances.
 
-At each module the transporter pauses for a configurable dwell time
-(default 120 s), then advances to the next.
-A full PbWO4 scan takes ~40 hours at default settings.
+The scan path is: **Center (PbWO4)** → **Bottom** → nearest **Side** →
+**Top** → other **Side**, minimising slow y-axis travel.
 
-**Safety:** The tool only writes to four EPICS PVs (`ptrans_{x,y}.VAL`
-and `ptrans_{x,y}.SPMG`). All other channels are read-only.
+A red dashed boundary on the map shows the transporter travel limits.
+Moves outside this boundary are blocked automatically.
 
----
-
-## Requirements
-
-| Component | Notes |
-|-----------|-------|
-| Python 3.8+ | Tkinter included on most platforms |
-| pyepics | Only for `--real` mode: `pip install pyepics` |
-| EPICS CA | `EPICS_CA_ADDR_LIST` must be set for real mode |
+**Safety:** Only four EPICS PVs are written: `ptrans_{x,y}.VAL` and
+`ptrans_{x,y}.SPMG`. All others are read-only.
 
 ---
 
 ## Launching
 
+On **clonpc19**:
+
 ```bash
-# Simulation (no EPICS needed, title bar shows [SIMULATION])
+cd ~/prad2_daq/prad2evviewer && ./scripts/hycal_snake_scan.py --real
+```
+
+For simulation (no EPICS, no hardware):
+
+```bash
 python scripts/hycal_snake_scan.py
-
-# Real EPICS
-export EPICS_CA_ADDR_LIST="129.57.255.255"
-export EPICS_CA_AUTO_ADDR_LIST="YES"
-python scripts/hycal_snake_scan.py --real
-
-# Custom database path
-python scripts/hycal_snake_scan.py --database /path/to/hycal_modules.json
 ```
 
 ---
 
 ## Coordinate System
 
-Beam-centre calibration offsets:
-
-| Beam at HyCal (0,0) | ptrans_x = **-126.75 mm** | ptrans_y = **10.11 mm** |
+| Beam at HyCal (0,0) | ptrans_x = **-126.75** | ptrans_y = **10.11** |
 |---|---|---|
 
-To place the beam on a module at (mx, my) in HyCal coordinates:
+```
+ptrans_x = -126.75 + module_x       (x same direction)
+ptrans_y =   10.11 - module_y       (y inverted)
+```
 
-```
-ptrans_x = -126.75 - mx
-ptrans_y =   10.11 - my
-```
+Travel limits (symmetric about centre):
+ptrans_x: **-582.65** to **329.15** mm,
+ptrans_y: **-672.50** to **692.72** mm.
 
 ---
 
-## Controls Quick Reference
+## Controls
 
-### Scan Controls
-
-| Control | What it does |
+| Control | Description |
 |---------|-------------|
-| **LG layers (0-6)** | Number of PbGlass layers around PbWO4 to include (0 = PbWO4 only, 6 = all). Locked during scan. |
-| **Dwell time** | Seconds at each module (default 120) |
-| **Pos. threshold** | Max allowed position error in mm (default 0.5) |
-| **Start module** | Pick via dropdown or click the module map |
-| **Start Scan** | Begin from selected module through end of snake path |
-| **Pause / Resume** | Pause motors (SPMG=1) and freeze dwell; Resume sets SPMG=3 |
-| **Stop** | Abort scan, stop motors (SPMG=0), return to IDLE |
-| **Skip Module** | During dwell only: skip remaining wait, advance to next module |
-| **Ack Error** | After a position error: acknowledge and continue to next module |
-
-### Direct Controls
-
-| Button | What it does |
-|--------|-------------|
-| **Move to Selected Module** | Move beam to the selected module without starting a scan |
-| **Reset to Beam Center** | Return transporter to (-126.75, 10.11) -- beam at HyCal centre |
-
-### Module Map Colors
-
-| Color | Meaning |
-|-------|---------|
-| Dark grey | Not visited | Yellow | Moving to |
-| Green | Dwelling | Blue | Completed |
-| Red | Position error | Orange | Selected start |
-
-### Scan States
-
-IDLE (grey) -- MOVING (yellow) -- DWELLING (green) -- PAUSED (orange) -- ERROR (red) -- COMPLETED (blue)
+| **LG layers (0-2)** | PbGlass layers to include (0 = PbWO4 only). Locked during scan. |
+| **Start** | Starting module (dropdown or click map) |
+| **Count** | Number of modules to scan (0 = all from start to end) |
+| **Dwell time** | Seconds per module (default 120) |
+| **Pos. threshold** | Max position error in mm (default 0.5) |
+| **Start Scan** | Begin scan |
+| **Pause / Resume** | Pause/resume motors and dwell countdown |
+| **Stop** | Abort scan, stop motors |
+| **Skip Module** | Skip current dwell, advance to next module |
+| **Ack Error** | Acknowledge position error, continue |
+| **Move to Starting Point** | Move beam to selected module without scanning |
+| **Reset to Beam Center** | Return to ptrans(-126.75, 10.11) |
 
 ---
 
-## Common Procedures
+## Running a Scan
 
-### Full Scan
-
-1. Set dwell time and position threshold.
-2. Ensure start module is **W1** (default).
-3. Click **Start Scan**.
+1. Set **LG layers** (0 for PbWO4 only, 1--2 to include PbGlass).
+2. Set **Start** module and **Count** (0 = scan all).
+3. Set **Dwell time** and **Pos. threshold**.
+4. Click **Start Scan**.
 
 ### Resume After Interruption
 
 1. Find the last completed module (blue on map or in event log).
-2. Select the **next** module via dropdown or map click.
+2. Select the next module as **Start**.
 3. Click **Start Scan**.
 
-### Handle Position Error
+### Position Error
 
-The scan auto-pauses when position error exceeds threshold.
-- **Ack Error** to skip and continue, or **Stop** to abort.
-- Frequent errors: check motor speed, backlash settings, encoder health.
+Scan auto-pauses. Click **Ack Error** to skip and continue, or **Stop** to abort.
+
+---
+
+## Module Map
+
+- Click a module to select it as start and see its info in the frame title.
+- Click again to deselect.
+- Path preview (blue line) shows the planned route from start to end.
+- Red crosshair tracks actual motor position.
+- Red dashed rectangle shows transporter travel limits.
+
+| Color | Meaning |
+|-------|---------|
+| Dark grey (Todo) | Pending | Yellow | Moving to |
+| Green | Dwelling | Blue | Done |
+| Red | Position error | Orange | Selected start |
+| Dim | Skipped (before start / after count) |
+
+---
+
+## Logging
+
+All events are logged to `scripts/logs/snake_scan_YYYYMMDD_HHMMSS.log`
+(one file per session, created on launch).
+
+**Upload log files when the scan or shift ends.**
+
+---
+
+## Shift Checklist
+
+During the scan, verify that:
+
+1. The **red crosshair** position on this GUI matches the **occupancy
+   plot** from the online event monitor — the current module should show
+   the highest occupancy.
+2. The **FADC scalers** are consistent with the beam being on the
+   expected module.
+
+If the occupancy does not match, **Stop** the scan, set **Start** to the
+last good module, and try again. Log the observation and action on
+**PRADLOG**. If the error persists, **contact the run coordinator**.
 
 ---
 
 ## Troubleshooting
 
-| Problem | Check |
-|---------|-------|
-| `ModuleNotFoundError: tkinter` | Install `python3-tk` or reinstall Python with Tk |
-| `ModuleNotFoundError: epics` | `pip install pyepics` (only needed for `--real`) |
-| PVs not connecting | Verify `EPICS_CA_ADDR_LIST`, IOC running, firewall (ports 5064/5065) |
-| Motors don't move | Check SPMG = 3 (Go), hardware interlocks, motor enable, limit switches |
-| Move timeout (>300 s) | Motor stall, limit switch, IOC down, or external SPMG change |
+If a problem occurs, **try again first**. If it persists, contact the
+run coordinator.
 
----
-
-## EPICS PV Reference
-
-### Written by this tool
-
-| PV | Purpose |
-|----|---------|
-| `ptrans_{x,y}.VAL` | Absolute position set-point (mm) |
-| `ptrans_{x,y}.SPMG` | Motor mode: Stop(0) Pause(1) Move(2) Go(3) |
-
-### Move sequence per module
-
-1. Write `.VAL` for both axes
-2. Write `.SPMG` = 3 (Go) for both axes
-3. Poll `.MOVN` until both = 0
-4. Verify `.RBV` against target
-
-### Key monitored PVs
-
-`.RBV` (readback), `.MOVN` (in motion), `.SPMG` (mode), `.VELO` (velocity),
-`.MSTA` (status word), `hallb_ptrans_{x,y}_encoder` (raw encoder)
-
----
-
-## Module Grid & Snake Path
-
-Module positions loaded from `database/hycal_modules.json`:
-
-| Type | Count | Size (mm) | Extent |
-|------|-------|-----------|--------|
-| PbWO4 | 1152 (34x34 minus beam hole) | 20.77 x 20.75 | +/-342.7 mm |
-| PbGlass | 576 (outer ring) | 38.15 x 38.15 | +/-562.9 mm |
-
-Even rows scan left-to-right, odd rows right-to-left (serpentine).
-
-```
-Row 0:  W1  -> W2  -> ... -> W34    (L->R)
-Row 1:  W68 -> W67 -> ... -> W35    (R->L)
-Row 2:  W69 -> W70 -> ... -> W102   (L->R)
-...
-```
+| Symptom | Likely cause |
+|---------|--------------|
+| PVs not connecting | IOC down, network / firewall |
+| Motors don't move | Interlocks, motor enable, SPMG not Go |
+| Move blocked | Target outside travel limits (see log) |
+| Frequent position errors | Motor speed, backlash, encoder |
+| Move timeout (>300 s) | Motor stall, limit switch, IOC |
