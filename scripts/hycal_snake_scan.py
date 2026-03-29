@@ -214,7 +214,7 @@ def build_scan_path(scan_modules: List[Module]) -> Tuple[List[Module], int]:
                 continue
             if not going_right and m.x >= last.x:
                 continue
-            if abs(m.y - last.y) >= 0.8 * min(last.sy, m.sy):
+            if abs(m.y - last.y) >= 0.8 * max(last.sy, m.sy):
                 continue
             d2 = (m.x - last.x) ** 2 + (m.y - last.y) ** 2
             if d2 > max_d2:
@@ -776,6 +776,9 @@ class SnakeScanGUI:
         self._lg_sx = glass[0].sx if glass else 38.15
         self._lg_sy = glass[0].sy if glass else 38.15
 
+        self._log_lines: List[str] = []
+        self._log_text = None   # set later by _build_ui
+
         # Split into scan targets vs display-only
         self.scan_modules = self._filter_scan_modules(0)
 
@@ -788,7 +791,6 @@ class SnakeScanGUI:
         self._scan_names: set = {m.name for m in self.scan_modules}
 
         self._selected_start_idx = 0
-        self._log_lines: List[str] = []
 
         # module name -> Module for tooltip lookup
         self._mod_by_name: Dict[str, Module] = {m.name: m for m in all_modules}
@@ -859,6 +861,14 @@ class SnakeScanGUI:
                          foreground="white")
         style.configure("Green.TButton", background="#238636",
                          foreground="white")
+        style.configure("TCombobox", fieldbackground=C.PANEL,
+                         background=C.BORDER, foreground=C.TEXT,
+                         selectbackground=C.BORDER,
+                         selectforeground=C.TEXT)
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", C.PANEL),
+                                   ("disabled", C.BG)],
+                  foreground=[("disabled", "#484f58")])
 
         # -- top status bar --------------------------------------------------
         top = tk.Frame(self.root, bg="#0d1520", height=32)
@@ -919,13 +929,7 @@ class SnakeScanGUI:
                                   bg="#0a0e14", highlightthickness=0)
         self._canvas.pack(padx=4, pady=4)
         self._canvas.bind("<Button-1>", self._on_canvas_click)
-
-        # click tooltip (shown on module click)
-        self._tooltip = tk.Label(
-            self._canvas, text="", bg="#1c2128", fg=C.TEXT,
-            font=("Consolas", 8), padx=4, pady=2,
-            borderwidth=1, relief="solid", highlightthickness=0)
-        self._tooltip_visible = False
+        self._selected_mod_name = None
 
         self._compute_canvas_mapping()
         self._draw_modules()
@@ -949,10 +953,18 @@ class SnakeScanGUI:
         n_pwo4 = sum(1 for m in self.scan_modules if m.mod_type == "PbWO4")
         n_lg = sum(1 for m in self.scan_modules if m.mod_type == "PbGlass")
         if n_lg:
-            text = f" Module Map ({n_pwo4} PbWO4 + {n_lg} PbGlass = {n_pwo4 + n_lg}) "
+            base = f"Module Map ({n_pwo4} PbWO4 + {n_lg} PbGlass)"
         else:
-            text = f" Module Map ({n_pwo4} PbWO4) "
-        self._canvas_frame.configure(text=text)
+            base = f"Module Map ({n_pwo4} PbWO4)"
+        sel_name = getattr(self, '_selected_mod_name', None)
+        if sel_name:
+            mod = self._mod_by_name.get(sel_name)
+            if mod:
+                px, py = module_to_ptrans(mod.x, mod.y)
+                base += (f" | {mod.name} ({mod.mod_type})"
+                         f"  HyCal({mod.x:.1f}, {mod.y:.1f})"
+                         f"  ptrans({px:.1f}, {py:.1f})")
+        self._canvas_frame.configure(text=f" {base} ")
 
     def _compute_canvas_mapping(self):
         """Compute scale and offset to map HyCal mm -> canvas pixels."""
@@ -1038,13 +1050,9 @@ class SnakeScanGUI:
         self._canvas.delete("path_preview")
 
     def _on_canvas_click(self, event):
-        # Clear previous highlight and tooltip
-        self._canvas.delete("mod_highlight")
-        self._tooltip.place_forget()
-        self._tooltip_visible = False
-
         items = self._canvas.find_closest(event.x, event.y)
         if not items:
+            self._clear_selection()
             return
         tags = self._canvas.gettags(items[0])
         name = None
@@ -1053,11 +1061,20 @@ class SnakeScanGUI:
                 name = tag[4:]
                 break
         if name is None:
+            self._clear_selection()
+            return
+
+        # Toggle: clicking the same module deselects
+        if self._selected_mod_name == name:
+            self._clear_selection()
             return
 
         mod = self._mod_by_name.get(name)
         if mod is None:
+            self._clear_selection()
             return
+
+        self._selected_mod_name = name
 
         # Set start module if it's a scan module
         if name in self._scan_name_to_idx:
@@ -1068,33 +1085,20 @@ class SnakeScanGUI:
             self._draw_path_preview()
 
         # Highlight border
+        self._canvas.delete("mod_highlight")
         x0, y0, x1, y1 = self._mod_to_canvas(mod)
         self._canvas.create_rectangle(
             x0, y0, x1, y1, outline=C.ACCENT, width=2,
             tags=("mod_highlight",))
         self._canvas.tag_raise("mod_highlight")
 
-        # Show tooltip near click
-        px, py = module_to_ptrans(mod.x, mod.y)
-        text = (f"{mod.name} ({mod.mod_type})\n"
-                f"HyCal: ({mod.x:.1f}, {mod.y:.1f})\n"
-                f"ptrans: ({px:.1f}, {py:.1f})")
-        tx = event.x + 12
-        ty = event.y - 10
-        # Keep tooltip within canvas bounds
-        self._tooltip.configure(text=text)
-        self._tooltip.update_idletasks()
-        tw = self._tooltip.winfo_reqwidth()
-        th = self._tooltip.winfo_reqheight()
-        if tx + tw > self.CANVAS_SIZE:
-            tx = event.x - tw - 8
-        if ty + th > self.CANVAS_SIZE:
-            ty = event.y - th - 8
-        if ty < 0:
-            ty = event.y + 16
-        self._tooltip.place(x=tx, y=ty)
-        self._tooltip.lift()
-        self._tooltip_visible = True
+        # Update frame label with selected module info
+        self._update_canvas_label()
+
+    def _clear_selection(self):
+        self._canvas.delete("mod_highlight")
+        self._selected_mod_name = None
+        self._update_canvas_label()
 
     def _update_canvas(self):
         eng = self.engine
@@ -1189,6 +1193,11 @@ class SnakeScanGUI:
                                           values=names, width=8,
                                           font=("Consolas", 9))
         self._start_combo.pack(side="right")
+        # Dark theme for dropdown listbox
+        self.root.option_add("*TCombobox*Listbox.background", C.PANEL)
+        self.root.option_add("*TCombobox*Listbox.foreground", C.TEXT)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", C.ACCENT)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "white")
         self._start_combo.bind("<<ComboboxSelected>>", self._on_start_selected)
 
         # dwell
@@ -1437,6 +1446,8 @@ class SnakeScanGUI:
         self.root.after_idle(self._append_log, line, level)
 
     def _append_log(self, line: str, level: str):
+        if self._log_text is None:
+            return
         self._log_text.configure(state="normal")
         self._log_text.insert("end", line + "\n", level)
         self._log_text.see("end")
