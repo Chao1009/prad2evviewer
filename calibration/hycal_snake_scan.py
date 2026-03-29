@@ -1194,10 +1194,11 @@ class SnakeScanGUI:
                                        bg=C.BG, fg=C.TEXT,
                                        font=("Consolas", 9))
         self._lbl_progress.pack(side="left")
-        style.configure("scan.Horizontal.TProgressbar",
-                         troughcolor=C.PANEL, background=C.ACCENT,
-                         bordercolor=C.BORDER, lightcolor=C.ACCENT,
-                         darkcolor=C.ACCENT)
+        s = ttk.Style()
+        s.configure("scan.Horizontal.TProgressbar",
+                     troughcolor=C.PANEL, background=C.ACCENT,
+                     bordercolor=C.BORDER, lightcolor=C.ACCENT,
+                     darkcolor=C.ACCENT)
         self._progress_bar = ttk.Progressbar(
             r_prog, length=120, mode="determinate",
             style="scan.Horizontal.TProgressbar")
