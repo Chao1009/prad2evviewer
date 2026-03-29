@@ -148,6 +148,9 @@ class Module:
     y: float           # centre y in HyCal frame (mm)
     sx: float          # module width  (mm)
     sy: float          # module height (mm)
+    sector: str = ""   # "Center", "Top", "Right", "Bottom", "Left", "LMS"
+    row: int = 0       # row within sector (1-indexed)
+    col: int = 0       # col within sector (1-indexed)
 
 
 def load_modules(json_path: str) -> List[Module]:
@@ -163,172 +166,107 @@ def load_modules(json_path: str) -> List[Module]:
             y=entry["y"],
             sx=entry["sx"],
             sy=entry["sy"],
+            sector=entry.get("sec", ""),
+            row=entry.get("row", 0),
+            col=entry.get("col", 0),
         ))
     return modules
 
 
+def _snake_sector(modules: List[Module], going_right: bool,
+                  top_to_bottom: bool) -> Tuple[List[Module], bool]:
+    """Snake-scan a sector row by row.
+
+    Rows are grouped by y (0.5 mm tolerance), ordered top-to-bottom or
+    bottom-to-top.  Within each row, modules are sorted by x, alternating
+    direction.  Returns (path, next_going_right).
+    """
+    if not modules:
+        return [], going_right
+    by_y = sorted(modules, key=lambda m: -m.y)
+    rows: List[List[Module]] = []
+    cur_row = [by_y[0]]
+    for m in by_y[1:]:
+        if abs(m.y - cur_row[0].y) < 0.5:
+            cur_row.append(m)
+        else:
+            rows.append(cur_row)
+            cur_row = [m]
+    rows.append(cur_row)          # rows sorted top-to-bottom
+    if not top_to_bottom:
+        rows.reverse()
+    path: List[Module] = []
+    for row in rows:
+        row.sort(key=lambda m: m.x, reverse=not going_right)
+        path.extend(row)
+        going_right = not going_right
+    return path, going_right
+
+
 def build_scan_path(scan_modules: List[Module]) -> Tuple[List[Module], int]:
-    """Build scan path using line search, sector change, and line change.
+    """Build scan path: PbWO4 centre first, then LG sectors.
 
-    Starting from the topmost-leftmost module, each 'line' collects all
-    unvisited modules of the same type at the exact y position.
+    Order: Center (top→bottom) → LG sectors visited by nearest corner,
+    with scan direction determined by the entry corner.
+    This minimises y-axis travel (the slower motor).
 
-    At the end of a line, a **sector change** searches for the nearest
-    unvisited module (any type) ahead in the scan direction whose
-    centre_y is within tolerance.  Success continues the line search in
-    the same direction.
-
-    If sector change fails, a **line change** searches for a same-type
-    module exactly below (same x column, lower y).  If that also fails,
-    a fallback sector change searches for any type below within x and y
-    tolerance.  Success flips the scan direction.
-
-    Tolerance = 0.8 * min(current.size, candidate.size) per axis.
-
-    Returns (path, n_unoptimized) where n_unoptimized counts modules
-    that could not be reached by the structured search and were appended
-    by distance at the end.
+    Returns (path, n_unoptimized).
     """
     if not scan_modules:
         return [], 0
 
-    modules = list(scan_modules)
-    start = max(modules, key=lambda m: (m.y, -m.x))
-    idx_map = {id(m): i for i, m in enumerate(modules)}
+    center = [m for m in scan_modules if m.sector == "Center"]
+    lg_sectors: Dict[str, List[Module]] = {}
+    for m in scan_modules:
+        if m.sector in ("Top", "Right", "Bottom", "Left"):
+            lg_sectors.setdefault(m.sector, []).append(m)
 
-    unvisited = set(range(len(modules)))
     path: List[Module] = []
-    going_right = True
-    starter_idx = idx_map[id(start)]
+    going = True                  # start going right
 
-    # -- helper closures -----------------------------------------------------
+    # 1. PbWO4 centre — top to bottom
+    if center:
+        seg, going = _snake_sector(center, going_right=going,
+                                   top_to_bottom=True)
+        path.extend(seg)
 
-    def _sector_change(last: Module, max_d2: float = float('inf')
-                       ) -> Optional[int]:
-        """Unvisited (any type) at similar y, ahead in direction.
-        Favors higher y, then nearest.  Optional distance² limit."""
-        best, best_y, best_d2 = None, -float('inf'), float('inf')
-        for i in unvisited:
-            m = modules[i]
-            if going_right and m.x <= last.x:
-                continue
-            if not going_right and m.x >= last.x:
-                continue
-            if abs(m.y - last.y) >= 0.8 * max(last.sy, m.sy):
-                continue
-            d2 = (m.x - last.x) ** 2 + (m.y - last.y) ** 2
-            if d2 > max_d2:
-                continue
-            if m.y > best_y or (abs(m.y - best_y) < 0.5 and d2 < best_d2):
-                best_y = m.y
-                best_d2 = d2
-                best = i
-        return best
+    # 2. LG sectors — visit by nearest corner each time
+    remaining = dict(lg_sectors)   # name -> module list
+    while remaining:
+        last = path[-1] if path else None
+        # Find nearest corner across all remaining sectors
+        best_name = None
+        best_dist = float('inf')
+        best_corner_right = True   # x-direction at entry
+        best_corner_down = True    # y-direction at entry
+        for name, mods in remaining.items():
+            xs = [m.x for m in mods]
+            ys = [m.y for m in mods]
+            corners = [
+                (min(xs), max(ys), True, True),    # top-left  → right, down
+                (max(xs), max(ys), False, True),   # top-right → left,  down
+                (min(xs), min(ys), True, False),   # bot-left  → right, up
+                (max(xs), min(ys), False, False),  # bot-right → left,  up
+            ]
+            for cx, cy, go_r, go_d in corners:
+                if last:
+                    d = abs(last.x - cx) + abs(last.y - cy)
+                else:
+                    d = 0
+                if d < best_dist:
+                    best_dist = d
+                    best_name = name
+                    best_corner_right = go_r
+                    best_corner_down = go_d
 
-    def _line_change_same_type(last: Module) -> Optional[int]:
-        """Same type, same x column (< 0.5 mm), nearest below."""
-        best, best_y = None, -float('inf')
-        for i in unvisited:
-            m = modules[i]
-            if m.mod_type != last.mod_type or m.y >= last.y:
-                continue
-            if abs(m.x - last.x) > 0.5:
-                continue
-            if m.y > best_y:
-                best_y = m.y
-                best = i
-        return best
+        mods = remaining.pop(best_name)
+        seg, going = _snake_sector(mods,
+                                   going_right=best_corner_right,
+                                   top_to_bottom=best_corner_down)
+        path.extend(seg)
 
-    def _line_change_any_type(last: Module) -> Optional[int]:
-        """Any type, below, within x and y tolerance."""
-        best, best_d2 = None, float('inf')
-        for i in unvisited:
-            m = modules[i]
-            if m.y >= last.y:
-                continue
-            if abs(m.x - last.x) >= 0.8 * min(last.sx, m.sx):
-                continue
-            if abs(m.y - last.y) >= 0.8 * min(last.sy, m.sy):
-                continue
-            d2 = (m.x - last.x) ** 2 + (m.y - last.y) ** 2
-            if d2 < best_d2:
-                best_d2 = d2
-                best = i
-        return best
-
-    # -- main loop -----------------------------------------------------------
-
-    while True:
-        # === LINE SEARCH: same type, exact y, contiguous in x ===
-        cur = modules[starter_idx]
-        cands = sorted(
-            [i for i in unvisited
-             if modules[i].mod_type == cur.mod_type
-             and abs(modules[i].y - cur.y) < 0.5],
-            key=lambda i: modules[i].x, reverse=not going_right)
-        line_idx: List[int] = []
-        for i in cands:
-            m = modules[i]
-            if line_idx:
-                prev = modules[line_idx[-1]]
-                if abs(m.x - prev.x) > 1.2 * max(prev.sx, m.sx):
-                    break
-            line_idx.append(i)
-        for i in line_idx:
-            unvisited.discard(i)
-        path.extend([modules[i] for i in line_idx])
-
-        if not unvisited:
-            break
-
-        last = path[-1]
-        # Max reverse distance²: line span + 2 module widths
-        line_xs = [modules[i].x for i in line_idx]
-        line_span = max(line_xs) - min(line_xs) if line_xs else 0
-        max_sx = max(modules[i].sx for i in line_idx) if line_idx else 0
-        rev_limit = (line_span + 2 * max_sx) ** 2
-
-        # === SECTOR CHANGE (forward) ===
-        sc = _sector_change(last)
-        if sc is not None:
-            starter_idx = sc
-            continue                    # same direction
-
-        # === SECTOR CHANGE (reverse) — check before going down ===
-        going_right = not going_right
-        sc_rev = _sector_change(last, max_d2=rev_limit)
-        if sc_rev is not None:
-            starter_idx = sc_rev
-            continue                    # direction already flipped
-        going_right = not going_right   # restore if nothing found
-
-        # === LINE CHANGE: same type exactly under ===
-        lc = _line_change_same_type(last)
-        if lc is not None:
-            starter_idx = lc
-            going_right = not going_right
-            continue
-
-        # === LINE CHANGE fallback: any type below with tolerance ===
-        lc2 = _line_change_any_type(last)
-        if lc2 is not None:
-            starter_idx = lc2
-            going_right = not going_right
-            continue
-
-        # === END OF STRUCTURED SCAN ===
-        break
-
-    # Append any remaining modules ordered by distance from last position
-    n_unoptimized = len(unvisited)
-    if unvisited:
-        last = path[-1]
-        for i in sorted(unvisited,
-                        key=lambda i: (modules[i].x - last.x) ** 2
-                                      + (modules[i].y - last.y) ** 2):
-            path.append(modules[i])
-
-    return path, n_unoptimized
+    n_unopt = len(scan_modules) - len(path)
+    return path, n_unopt
 
 
 def module_to_ptrans(mx: float, my: float) -> Tuple[float, float]:
@@ -598,22 +536,26 @@ class ScanEngine:
     @property
     def progress_text(self) -> str:
         done = len(self.completed)
-        total = len(self.path)
+        total = getattr(self, '_end_idx', len(self.path)) - self.current_idx \
+                + len(self.completed)
         return f"{done}/{total}"
 
     @property
     def eta_seconds(self) -> float:
-        remaining = len(self.path) - len(self.completed)
+        end = getattr(self, '_end_idx', len(self.path))
+        remaining = end - self.current_idx - 1 if self.state != ScanState.IDLE else 0
         avg_move = 4.0    # rough estimate seconds per move
-        return remaining * (avg_move + self.dwell_time)
+        return max(0, remaining) * (avg_move + self.dwell_time)
 
-    def start(self, start_idx: int = 0):
+    def start(self, start_idx: int = 0, count: int = 0):
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
         self._skip.clear()
         self._paused = False
         self.current_idx = start_idx
+        self._end_idx = min(start_idx + count, len(self.path)) \
+                        if count > 0 else len(self.path)
         self.completed.clear()
         self.error_modules.clear()
         self.state = ScanState.MOVING
@@ -653,10 +595,11 @@ class ScanEngine:
     # -- background thread ---------------------------------------------------
 
     def _run(self):
+        n_to_scan = self._end_idx - self.current_idx
         self.log(f"Scan started from {self.path[self.current_idx].name}, "
-                 f"dwell {self.dwell_time:.0f}s, {len(self.path)} modules")
+                 f"dwell {self.dwell_time:.0f}s, {n_to_scan} modules")
         try:
-            for i in range(self.current_idx, len(self.path)):
+            for i in range(self.current_idx, self._end_idx):
                 if self._stop.is_set():
                     break
                 self.current_idx = i
@@ -701,9 +644,9 @@ class ScanEngine:
             if self._stop.is_set():
                 self.state = ScanState.IDLE
                 self.log("Scan stopped by user")
-            elif self.current_idx >= len(self.path) - 1:
+            elif self.current_idx >= self._end_idx - 1:
                 self.state = ScanState.COMPLETED
-                self.log("Scan COMPLETE -- all modules visited!", level="warn")
+                self.log("Scan COMPLETE!", level="warn")
             else:
                 self.state = ScanState.IDLE
 
@@ -1035,9 +978,11 @@ class SnakeScanGUI:
         start = self._selected_start_idx
         if start >= len(path):
             return
+        count = self._count_var.get() if hasattr(self, '_count_var') else 0
+        end = min(start + count, len(path)) if count > 0 else len(path)
         # Build coordinate list for the active segment
         coords = []
-        for i in range(start, len(path)):
+        for i in range(start, end):
             coords.extend(self._mod_to_canvas_center(path[i]))
         if len(coords) >= 4:
             self._canvas.create_line(
@@ -1123,6 +1068,14 @@ class SnakeScanGUI:
 
         # Update scan module colours
         idle = eng.state in (ScanState.IDLE, ScanState.COMPLETED)
+        count = self._count_var.get() if hasattr(self, '_count_var') else 0
+        start_idx = self._selected_start_idx
+        end_idx = min(start_idx + count, len(eng.path)) \
+                  if count > 0 else len(eng.path)
+        # During scan, use the engine's range instead
+        if not idle:
+            start_idx = eng.current_idx  # already advancing
+            end_idx = getattr(eng, '_end_idx', len(eng.path))
         for i, mod in enumerate(eng.path):
             rid = self._cell_ids.get(mod.name)
             if rid is None:
@@ -1138,7 +1091,7 @@ class SnakeScanGUI:
                 colour = C.MOD_DONE
             elif idle and i == self._selected_start_idx:
                 colour = C.MOD_SELECTED
-            elif idle and i < self._selected_start_idx:
+            elif i < start_idx or i >= end_idx:
                 colour = C.MOD_SKIPPED
             else:
                 colour = C.MOD_TODO
@@ -1172,27 +1125,41 @@ class SnakeScanGUI:
         sc = ttk.LabelFrame(parent, text=" Scan Control ")
         sc.pack(fill="x", pady=(0, 4))
 
-        # LG layers + start module on one row
-        r_ls = tk.Frame(sc, bg=C.BG)
-        r_ls.pack(fill="x", padx=6, pady=2)
-        tk.Label(r_ls, text="LG layers:", bg=C.BG, fg=C.TEXT,
+        # LG layers (own row)
+        r_lg = tk.Frame(sc, bg=C.BG)
+        r_lg.pack(fill="x", padx=6, pady=2)
+        tk.Label(r_lg, text="LG layers (0-6):", bg=C.BG, fg=C.TEXT,
                  font=("Consolas", 9)).pack(side="left")
         self._lg_layers_var = tk.IntVar(value=self._lg_layers)
         self._lg_layers_spin = tk.Spinbox(
-            r_ls, from_=0, to=MAX_LG_LAYERS,
+            r_lg, from_=0, to=MAX_LG_LAYERS,
             textvariable=self._lg_layers_var,
-            width=3, bg=C.PANEL, fg=C.TEXT, font=("Consolas", 9),
+            width=4, bg=C.PANEL, fg=C.TEXT, font=("Consolas", 9),
             buttonbackground=C.BORDER, insertbackground=C.TEXT,
             command=self._on_lg_layers_changed)
-        self._lg_layers_spin.pack(side="left", padx=(2, 8))
-        tk.Label(r_ls, text="Start:", bg=C.BG, fg=C.TEXT,
+        self._lg_layers_spin.pack(side="right")
+
+        # Start module + count (same row)
+        r_sc = tk.Frame(sc, bg=C.BG)
+        r_sc.pack(fill="x", padx=6, pady=2)
+        tk.Label(r_sc, text="Start:", bg=C.BG, fg=C.TEXT,
                  font=("Consolas", 9)).pack(side="left")
         names = [m.name for m in self.engine.path]
         self._start_var = tk.StringVar(value=names[0] if names else "")
-        self._start_combo = ttk.Combobox(r_ls, textvariable=self._start_var,
+        self._start_combo = ttk.Combobox(r_sc, textvariable=self._start_var,
                                           values=names, width=8,
                                           font=("Consolas", 9))
-        self._start_combo.pack(side="right")
+        self._start_combo.pack(side="left", padx=(2, 8))
+        tk.Label(r_sc, text="Count:", bg=C.BG, fg=C.TEXT,
+                 font=("Consolas", 9)).pack(side="left")
+        self._count_var = tk.IntVar(value=0)
+        self._count_entry = tk.Spinbox(
+            r_sc, from_=0, to=len(names),
+            textvariable=self._count_var,
+            width=6, bg=C.PANEL, fg=C.TEXT, font=("Consolas", 9),
+            buttonbackground=C.BORDER, insertbackground=C.TEXT,
+            command=self._draw_path_preview)
+        self._count_entry.pack(side="right")
         # Dark theme for dropdown listbox
         self.root.option_add("*TCombobox*Listbox.background", C.PANEL)
         self.root.option_add("*TCombobox*Listbox.foreground", C.TEXT)
@@ -1279,7 +1246,7 @@ class SnakeScanGUI:
         dcb = tk.Frame(dc, bg=C.BG)
         dcb.pack(fill="x", padx=6, pady=6)
 
-        ttk.Button(dcb, text="Move to Selected Module",
+        ttk.Button(dcb, text="Move to Starting Point",
                    command=self._cmd_move_to_module
                    ).pack(fill="x", pady=1)
         ttk.Button(dcb, text="Reset to Beam Center",
@@ -1380,11 +1347,13 @@ class SnakeScanGUI:
         }
         self._selected_start_idx = 0
 
-        # update start module dropdown
+        # update start module dropdown and count max
         names = [m.name for m in self.engine.path]
         self._start_combo["values"] = names
         if names:
             self._start_var.set(names[0])
+        self._count_entry.configure(to=len(names))
+        self._count_var.set(0)
 
         # update canvas
         self._update_canvas_label()
@@ -1400,7 +1369,8 @@ class SnakeScanGUI:
         self._on_start_selected()
         self.engine.dwell_time = self._dwell_var.get()
         self.engine.pos_threshold = self._thresh_var.get()
-        self.engine.start(self._selected_start_idx)
+        count = self._count_var.get()
+        self.engine.start(self._selected_start_idx, count=count)
 
     def _cmd_pause(self):
         eng = self.engine
@@ -1574,6 +1544,8 @@ class SnakeScanGUI:
             state="normal" if eng.state == ScanState.ERROR else "disabled")
         self._start_combo.configure(
             state="readonly" if not running else "disabled")
+        self._count_entry.configure(
+            state="normal" if not running else "disabled")
         self._lg_layers_spin.configure(
             state="normal" if not running else "disabled")
 
