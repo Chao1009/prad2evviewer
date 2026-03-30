@@ -149,8 +149,9 @@ void ViewerServer::init(const Config &cfg)
     json base_cfg = {
         {"modules", modules_j}, {"daq", daq_j}, {"crate_roc", app_file_.crate_roc_json},
     };
-    app_file_.base_config = base_cfg;
-    app_online_.base_config = base_cfg;
+    base_config_str_ = base_cfg.dump();
+    app_file_.base_config = std::move(base_cfg);
+    app_online_.base_config = app_file_.base_config;
 
     // --- validate resources ---
     if (readFile(res_dir_ + "/viewer.html").empty())
@@ -894,6 +895,29 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         }
 #endif
         reply(decodeEvent(evnum).dump()); return;
+    }
+
+    // --- waveform/<n>/<key> (file mode only — on-demand single-channel samples) ---
+    if (uri.rfind("/api/waveform/", 0) == 0) {
+        // parse /api/waveform/<evnum>/<roc_slot_ch>
+        std::string rest = uri.substr(14);
+        auto slash = rest.find('/');
+        if (slash == std::string::npos) {
+            reply("{\"error\":\"usage: /api/waveform/<event>/<roc_slot_ch>\"}"); return;
+        }
+        int evnum = std::atoi(rest.substr(0, slash).c_str());
+        std::string chan_key = rest.substr(slash + 1);
+
+        auto event_ptr = std::make_unique<fdec::EventData>();
+        auto ssp_ptr = std::make_unique<ssp::SspEventData>();
+        std::string err = decodeRawEvent(evnum, *event_ptr, ssp_ptr.get());
+        if (!err.empty()) { reply(json({{"error", err}}).dump()); return; }
+
+        fdec::WaveAnalyzer ana;
+        ana.cfg.min_peak_ratio = activeApp().hist_cfg.min_peak_ratio;
+        fdec::WaveResult wres;
+        reply(activeApp().encodeWaveformJson(*event_ptr, chan_key, ana, wres).dump());
+        return;
     }
 
     // --- clusters/<n> (mode-dependent) ---

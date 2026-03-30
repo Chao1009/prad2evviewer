@@ -680,6 +680,23 @@ void AppState::processLms(fdec::EventData &event,
     lms_events++;
 }
 
+// Encode peak array for one channel.
+static json encodePeaks(const fdec::WaveResult &wres)
+{
+    json parr = json::array();
+    for (int p = 0; p < wres.npeaks; ++p) {
+        auto &pk = wres.peaks[p];
+        parr.push_back({
+            {"p", pk.pos}, {"t", std::round(pk.time * 10) / 10},
+            {"h", std::round(pk.height * 10) / 10},
+            {"i", std::round(pk.integral * 10) / 10},
+            {"l", pk.left}, {"r", pk.right},
+            {"o", pk.overflow ? 1 : 0},
+        });
+    }
+    return parr;
+}
+
 json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
                                fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
 {
@@ -699,25 +716,11 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
                 std::string key = std::to_string(roc.tag) + "_"
                                 + std::to_string(s) + "_" + std::to_string(c);
 
-                json sarr = json::array();
-                for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
-
-                json parr = json::array();
-                for (int p = 0; p < wres.npeaks; ++p) {
-                    auto &pk = wres.peaks[p];
-                    parr.push_back({
-                        {"p", pk.pos}, {"t", std::round(pk.time * 10) / 10},
-                        {"h", std::round(pk.height * 10) / 10},
-                        {"i", std::round(pk.integral * 10) / 10},
-                        {"l", pk.left}, {"r", pk.right},
-                        {"o", pk.overflow ? 1 : 0},
-                    });
-                }
+                // summary only — no raw samples (use /api/waveform for full waveform)
                 channels[key] = {
-                    {"s", sarr},
                     {"pm", std::round(wres.ped.mean * 10) / 10},
                     {"pr", std::round(wres.ped.rms * 10) / 10},
-                    {"pk", parr},
+                    {"pk", encodePeaks(wres)},
                 };
             }
         }
@@ -725,6 +728,36 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
     return {{"event", ev_id}, {"channels", channels},
             {"event_number", event.info.event_number},
             {"trigger_bits", event.info.trigger_bits}};
+}
+
+json AppState::encodeWaveformJson(fdec::EventData &event, const std::string &chan_key,
+                                  fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
+{
+    // parse "roc_slot_ch" key
+    int roc_tag = 0, sl = 0, ch = 0;
+    if (std::sscanf(chan_key.c_str(), "%d_%d_%d", &roc_tag, &sl, &ch) != 3)
+        return {{"error", "invalid channel key"}};
+
+    // find the channel in the event
+    for (int r = 0; r < event.nrocs; ++r) {
+        auto &roc = event.rocs[r];
+        if (!roc.present || roc.tag != roc_tag) continue;
+        if (!roc.slots[sl].present) break;
+        if (!(roc.slots[sl].channel_mask & (1ull << ch))) break;
+        auto &cd = roc.slots[sl].channels[ch];
+        if (cd.nsamples <= 0) break;
+
+        ana.Analyze(cd.samples, cd.nsamples, wres);
+
+        json sarr = json::array();
+        for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
+
+        return {{"key", chan_key}, {"s", sarr},
+                {"pm", std::round(wres.ped.mean * 10) / 10},
+                {"pr", std::round(wres.ped.rms * 10) / 10},
+                {"pk", encodePeaks(wres)}};
+    }
+    return {{"error", "channel not found"}};
 }
 
 json AppState::computeClustersJson(fdec::EventData &event, int ev_id,
@@ -1438,6 +1471,36 @@ json AppState::apiEpicsChannel(const std::string &name) const
     return {{"name", name}, {"time", t_arr}, {"value", v_arr}, {"count", nsnap}};
 }
 
+json AppState::apiEpicsBatch(const std::vector<std::string> &names) const
+{
+    std::lock_guard<std::mutex> lk(epics_mtx);
+    int nsnap = epics.GetSnapshotCount();
+    uint64_t t0 = (nsnap > 0) ? epics.GetSnapshot(0).timestamp : 0;
+
+    // build shared time array once
+    json t_arr = json::array();
+    for (int i = 0; i < nsnap; ++i) {
+        double t_sec = static_cast<double>(epics.GetSnapshot(i).timestamp - t0) * TI_TICK_SEC;
+        t_arr.push_back(std::round(t_sec * 100) / 100);
+    }
+
+    json channels = json::array();
+    for (auto &name : names) {
+        int id = epics.GetChannelId(name);
+        if (id < 0) {
+            channels.push_back({{"name", name}, {"value", json::array()}, {"count", 0}});
+            continue;
+        }
+        json v_arr = json::array();
+        for (int i = 0; i < nsnap; ++i) {
+            auto &snap = epics.GetSnapshot(i);
+            v_arr.push_back((id < (int)snap.values.size()) ? snap.values[id] : 0.f);
+        }
+        channels.push_back({{"name", name}, {"value", v_arr}, {"count", nsnap}});
+    }
+    return {{"time", t_arr}, {"channels", channels}};
+}
+
 json AppState::apiEpicsLatest() const
 {
     std::lock_guard<std::mutex> lk(epics_mtx);
@@ -1563,6 +1626,34 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
         if (path == "channels") return {true, apiEpicsChannels().dump()};
         if (path == "latest")   return {true, apiEpicsLatest().dump()};
         if (path == "clear")    return {false, ""};  // clear handled by caller
+        if (path.rfind("batch?", 0) == 0) {
+            // /api/epics/batch?ch=name1&ch=name2&...
+            std::string query = path.substr(6);
+            std::vector<std::string> names;
+            for (size_t pos = 0; pos < query.size();) {
+                size_t amp = query.find('&', pos);
+                if (amp == std::string::npos) amp = query.size();
+                std::string kv = query.substr(pos, amp - pos);
+                if (kv.rfind("ch=", 0) == 0) {
+                    // URL-decode
+                    std::string raw = kv.substr(3), name;
+                    for (size_t i = 0; i < raw.size(); ++i) {
+                        if (raw[i] == '%' && i + 2 < raw.size()) {
+                            int hi = 0, lo = 0;
+                            if (std::sscanf(raw.c_str() + i + 1, "%1x%1x", &hi, &lo) == 2) {
+                                name += static_cast<char>((hi << 4) | lo);
+                                i += 2; continue;
+                            }
+                        }
+                        if (raw[i] == '+') name += ' ';
+                        else name += raw[i];
+                    }
+                    names.push_back(name);
+                }
+                pos = amp + 1;
+            }
+            return {true, apiEpicsBatch(names).dump()};
+        }
         if (path.rfind("channel/", 0) == 0) {
             // URL-decode the channel name (e.g. %3A → :)
             std::string raw = path.substr(8), name;

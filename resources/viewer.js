@@ -6,6 +6,8 @@ let currentEventNumber=0, currentTriggerBits=0;  // DAQ event number + trigger f
 let eventChannels={};
 let selectedModule=null, hoveredModule=null;
 let geoCanvas, geoCtx, geoWrap, scale=1, offsetX=0, offsetY=0, canvasW, canvasH;
+let geoOutlineCanvas, geoOutlineCtx;  // static outline layer
+let geoOutlineDirty=true;             // redraw outlines on zoom/pan/select
 const PC=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
 const CRATE_NAME={0x80:'adchycal1',0x82:'adchycal2',0x84:'adchycal3',0x86:'adchycal4',0x88:'adchycal5',0x8a:'adchycal6',0x8c:'adchycal7',
     0x01:'PRadTS',0x04:'PRadROC_1',0x05:'PRadROC_2',0x06:'PRadROC_3',0x07:'PRadSRS_1',0x08:'PRadSRS_2'};
@@ -163,6 +165,8 @@ function initGeo(){
     geoWrap=document.getElementById('geo-wrap');
     geoCanvas=document.getElementById('geo-canvas');
     geoCtx=geoCanvas.getContext('2d');
+    geoOutlineCanvas=document.getElementById('geo-outline-canvas');
+    geoOutlineCtx=geoOutlineCanvas.getContext('2d');
     resizeGeo();
     new ResizeObserver(resizeGeo).observe(geoWrap);
 
@@ -175,7 +179,7 @@ function initGeo(){
         offsetX=cx-(cx-offsetX)*factor;
         offsetY=cy-(cy-offsetY)*factor;
         scale*=factor;
-        redrawGeo();
+        geoOutlineDirty=true; redrawGeo();
     },{passive:false});
 
     // pan with left-click drag (with threshold to distinguish from click)
@@ -195,7 +199,7 @@ function initGeo(){
         offsetX+=e.clientX-geoDragX;
         offsetY+=e.clientY-geoDragY;
         geoDragX=e.clientX; geoDragY=e.clientY;
-        redrawGeo();
+        geoOutlineDirty=true; redrawGeo();
     });
     window.addEventListener('mouseup',e=>{
         if(!geoDragging) return;
@@ -230,6 +234,8 @@ function resizeGeo(){
     canvasW=geoWrap.clientWidth; canvasH=geoWrap.clientHeight;
     if(canvasW<10||canvasH<10)return;
     geoCanvas.width=canvasW; geoCanvas.height=canvasH;
+    geoOutlineCanvas.width=canvasW; geoOutlineCanvas.height=canvasH;
+    geoOutlineDirty=true;
     if(modules.length && !geoViewInit){ fitView(); geoViewInit=true; }
     redrawGeo();
 }
@@ -352,6 +358,7 @@ function drawGeo(){
     const vmax=rangeMax!==null?rangeMax:100;
     const span=vmax-vmin||1;
 
+    // fills only (fast path — no strokes)
     for(let i=0;i<modules.length;i++){
         const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale,v=vals[i];
         let t=0;
@@ -362,10 +369,34 @@ function drawGeo(){
         }
         ctx.fillStyle=(v!==null)?colorScale(t):geoEmptyColor(m.t);
         ctx.fillRect(cx-w/2,cy-h/2,w,h);
-        const sel=selectedModule&&selectedModule.n===m.n,hov=hoveredModule&&hoveredModule.n===m.n;
-        ctx.strokeStyle=sel?'#fff':hov?'#00b4d8':geoStrokeColor();ctx.lineWidth=sel?2.5:hov?1.5:0.5;
-        ctx.strokeRect(cx-w/2,cy-h/2,w,h);
     }
+
+    // outlines on separate canvas (only when geometry/selection changed)
+    if(geoOutlineDirty) drawGeoOutlines();
+}
+function drawGeoOutlines(){
+    if(!geoOutlineCtx)return;
+    const ctx=geoOutlineCtx;
+    ctx.clearRect(0,0,canvasW,canvasH);
+    // batch default strokes (0.5px) in one path for performance
+    ctx.beginPath();
+    ctx.strokeStyle=geoStrokeColor(); ctx.lineWidth=0.5;
+    for(let i=0;i<modules.length;i++){
+        const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
+        const sel=selectedModule&&selectedModule.n===m.n;
+        const hov=hoveredModule&&hoveredModule.n===m.n;
+        if(!sel&&!hov) ctx.rect(cx-w/2,cy-h/2,w,h);
+    }
+    ctx.stroke();
+    // draw selected/hovered on top with distinct styles
+    for(let i=0;i<modules.length;i++){
+        const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
+        const sel=selectedModule&&selectedModule.n===m.n;
+        const hov=hoveredModule&&hoveredModule.n===m.n;
+        if(sel){ctx.strokeStyle='#fff';ctx.lineWidth=2.5;ctx.strokeRect(cx-w/2,cy-h/2,w,h);}
+        else if(hov){ctx.strokeStyle='#00b4d8';ctx.lineWidth=1.5;ctx.strokeRect(cx-w/2,cy-h/2,w,h);}
+    }
+    geoOutlineDirty=false;
 }
 function hitTest(cx,cy){
     const[dx,dy]=c2d(cx,cy);
@@ -393,21 +424,48 @@ function resizeAllPlots(){
 // Waveform
 // =========================================================================
 function showWaveform(mod){
-    selectedModule=mod;
+    selectedModule=mod; geoOutlineDirty=true;
     const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
     const d=eventChannels[key];
     const pedInfo=d?` &nbsp; Ped: ${d.pm.toFixed(1)} ± ${d.pr.toFixed(1)}`:'';
     document.getElementById('detail-header').innerHTML=
         `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
 
-    if(!d||!d.s){
+    if(!d){
         currentWaveform=null;
         Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
         document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
         showHistograms(mod); drawGeo(); return;
     }
 
-    const samples=d.s, peaks=d.pk||[], x=samples.map((_,i)=>i);
+    // if samples are already present (e.g. from ring buffer), use them directly;
+    // otherwise fetch on demand from /api/waveform/<event>/<key>
+    if(d.s){
+        renderWaveform(mod, key, d, d.s);
+    } else {
+        fetch(`/api/waveform/${currentEvent}/${key}`).then(r=>r.json()).then(wf=>{
+            if(wf.error){ renderWaveform(mod, key, d, null); return; }
+            // cache samples in eventChannels so re-clicking doesn't re-fetch
+            d.s=wf.s;
+            if(wf.pk) d.pk=wf.pk;
+            if(wf.pm!==undefined) d.pm=wf.pm;
+            if(wf.pr!==undefined) d.pr=wf.pr;
+            renderWaveform(mod, key, d, d.s);
+        }).catch(()=>renderWaveform(mod, key, d, null));
+    }
+
+    showHistograms(mod); drawGeo();
+}
+
+function renderWaveform(mod, key, d, samples){
+    if(!samples){
+        currentWaveform=null;
+        Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No samples`,font:{size:11,color:'#555'}}},PC2);
+        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No waveform data</td></tr>';
+        return;
+    }
+
+    const peaks=d.pk||[], x=samples.map((_,i)=>i);
     currentWaveform={x, y:Array.from(samples)};
 
     // --- stacking mode ---
@@ -444,7 +502,7 @@ function showWaveform(mod){
         // skip peaks table in stack mode
         document.getElementById('peaks-tbody').innerHTML=
             '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">Stack mode — peaks hidden</td></tr>';
-        showHistograms(mod); drawGeo(); return;
+        return;
     }
 
     // --- normal (single event) mode ---
@@ -483,9 +541,6 @@ function showWaveform(mod){
     });
     if(!peaks.length) rows='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No peaks</td></tr>';
     document.getElementById('peaks-tbody').innerHTML=rows;
-
-    showHistograms(mod);
-    drawGeo();
 }
 
 // =========================================================================
@@ -1845,6 +1900,7 @@ function init(){
         const r=geoCanvas.getBoundingClientRect(),m=hitTest(e.clientX-r.left,e.clientY-r.top);
         if(m!==hoveredModule){
             hoveredModule=m;
+            geoOutlineDirty=true;
             redrawGeo();
         }
         if(m){
@@ -1855,7 +1911,7 @@ function init(){
     // click is now handled via geoHandleClick (called from mouseup when drag threshold not exceeded)
     geoCanvas.addEventListener('mouseleave',()=>{
         hoveredModule=null;tip.style.display='none';
-        redrawGeo();
+        geoOutlineDirty=true; redrawGeo();
     });
     document.addEventListener('keydown',e=>{
         if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
