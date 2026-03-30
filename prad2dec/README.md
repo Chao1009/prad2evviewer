@@ -31,4 +31,4 @@ while (ch.Read() == evc::status::success) {
 - [evio](https://github.com/JeffersonLab/evio) (evio-6.0) — always required
 - [et](https://github.com/JeffersonLab/et) — optional, for EtChannel (`-DWITH_ET=ON`)
 
-Both fetched by CMake or linked from prebuilt CODA installation.
+By default both are resolved from the Hall-B CODA installation; if not found, CMake falls back to fetching from GitHub. Override with `-DEVIO_SOURCE=fetch` / `-DET_SOURCE=fetch` (always fetch) or `=system` (use `find_package`).

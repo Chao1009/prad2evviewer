@@ -15,12 +15,12 @@ endif()
 # ---------------------------------------------------------------------------
 # Dependencies: evio and et
 # ---------------------------------------------------------------------------
-set(EVIO_SOURCE "fetch" CACHE STRING "evio provider: prebuilt | fetch | system")
-set(ET_SOURCE   "fetch" CACHE STRING "et provider:   prebuilt | fetch | system")
+set(EVIO_SOURCE "hallb" CACHE STRING "evio provider: hallb | fetch | system")
+set(ET_SOURCE   "hallb" CACHE STRING "et provider:   hallb | fetch | system")
 
 set(CODA_ROOT "/usr/clas12/release/2.0.0/coda/Linux_x86_64_RHEL9"
-    CACHE PATH "Root of the prebuilt CODA installation")
-set(CODA_LIB_DIR     "${CODA_ROOT}/lib"     CACHE PATH "Prebuilt lib dir")
+    CACHE PATH "Root of the Hall-B CODA installation")
+set(CODA_LIB_DIR     "${CODA_ROOT}/lib"     CACHE PATH "Hall-B lib dir")
 set(CODA_INCLUDE_DIR "/usr/clas12/release/2.0.0/coda/common/include"
     CACHE PATH "CODA include dir")
 
@@ -28,6 +28,22 @@ include(FetchContent)
 set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
 
 # --- evio -----------------------------------------------------------------
+if(EVIO_SOURCE STREQUAL "hallb")
+    find_library(EVIO_LIB NAMES evio PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH)
+    if(EVIO_LIB)
+        find_library(EXPAT_LIB NAMES expat REQUIRED)
+        add_library(evio STATIC IMPORTED GLOBAL)
+        set_target_properties(evio PROPERTIES
+            IMPORTED_LOCATION             "${EVIO_LIB}"
+            INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
+            INTERFACE_LINK_LIBRARIES      "${EXPAT_LIB}"
+        )
+        message(STATUS "evio: using Hall-B installation at ${EVIO_LIB}")
+    else()
+        message(STATUS "evio: Hall-B library not found, falling back to fetch")
+        set(EVIO_SOURCE "fetch")
+    endif()
+endif()
 if(EVIO_SOURCE STREQUAL "fetch")
     set(MAKE_EXAMPLES OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(evio
@@ -38,21 +54,27 @@ if(EVIO_SOURCE STREQUAL "fetch")
     FetchContent_MakeAvailable(evio)
 elseif(EVIO_SOURCE STREQUAL "system")
     find_package(evio REQUIRED)
-else()
-    find_library(EVIO_LIB NAMES evio PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
-    find_library(EXPAT_LIB NAMES expat REQUIRED)
-    add_library(evio STATIC IMPORTED GLOBAL)
-    set_target_properties(evio PROPERTIES
-        IMPORTED_LOCATION             "${EVIO_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
-        INTERFACE_LINK_LIBRARIES      "${EXPAT_LIB}"
-    )
 endif()
 
 # --- et (optional — only needed for live streaming, not file reading) -----
 option(WITH_ET "Build ET (Event Transfer) support for live data" ON)
 
 if(WITH_ET)
+    if(ET_SOURCE STREQUAL "hallb")
+        find_library(ET_LIB NAMES et PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH)
+        if(ET_LIB)
+            add_library(et STATIC IMPORTED GLOBAL)
+            set_target_properties(et PROPERTIES
+                IMPORTED_LOCATION             "${ET_LIB}"
+                INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
+            )
+            set(ET_INCLUDE_DIR "${CODA_INCLUDE_DIR}" CACHE INTERNAL "")
+            message(STATUS "et: using Hall-B installation at ${ET_LIB}")
+        else()
+            message(STATUS "et: Hall-B library not found, falling back to fetch")
+            set(ET_SOURCE "fetch")
+        endif()
+    endif()
     if(ET_SOURCE STREQUAL "fetch")
         FetchContent_Declare(et
             GIT_REPOSITORY https://github.com/JeffersonLab/et.git
@@ -63,14 +85,6 @@ if(WITH_ET)
         set(ET_INCLUDE_DIR "${et_SOURCE_DIR}/src/libsrc" CACHE INTERNAL "")
     elseif(ET_SOURCE STREQUAL "system")
         find_package(coda_et REQUIRED)
-    else()
-        find_library(ET_LIB NAMES et PATHS ${CODA_LIB_DIR} NO_DEFAULT_PATH REQUIRED)
-        add_library(et STATIC IMPORTED GLOBAL)
-        set_target_properties(et PROPERTIES
-            IMPORTED_LOCATION             "${ET_LIB}"
-            INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
-        )
-        set(ET_INCLUDE_DIR "${CODA_INCLUDE_DIR}" CACHE INTERNAL "")
     endif()
 endif()
 

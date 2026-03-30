@@ -11,11 +11,11 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-CMake >= 3.14, C++17. Dependencies (`evio`, `et`, `nlohmann/json`, `websocketpp`, `asio`) fetched automatically.
+CMake >= 3.14, C++17. By default, `evio` and `et` are resolved from the Hall-B CODA installation (`EVIO_SOURCE=hallb`, `ET_SOURCE=hallb`). If the Hall-B libraries are not found, CMake automatically falls back to fetching them from GitHub. Other dependencies (`nlohmann/json`, `websocketpp`, `asio`) are always fetched automatically.
 
 Optional: `cmake -B build -DBUILD_ANALYSIS=ON` (ROOT 6.0+), `cmake -B build -DBUILD_GUI=ON` (Qt5).
 
-For prebuilt CODA libraries: `cmake -B build -DEVIO_SOURCE=prebuilt -DET_SOURCE=prebuilt`
+To force fetching from source: `cmake -B build -DEVIO_SOURCE=fetch -DET_SOURCE=fetch`
 
 ### Windows
 
