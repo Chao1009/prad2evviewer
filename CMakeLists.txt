@@ -138,7 +138,15 @@ endif()
 # ---------------------------------------------------------------------------
 option(BUILD_GUI "Build Qt GUI applications" OFF)
 if(BUILD_GUI)
-    find_package(Qt5 REQUIRED COMPONENTS Widgets WebEngineWidgets)
+    find_package(Qt6 QUIET COMPONENTS Widgets WebEngineWidgets)
+    if(Qt6_FOUND)
+        set(QT_VERSION_MAJOR 6)
+        message(STATUS "Qt: using Qt6")
+    else()
+        find_package(Qt5 REQUIRED COMPONENTS Widgets WebEngineWidgets)
+        set(QT_VERSION_MAJOR 5)
+        message(STATUS "Qt: Qt6 not found, falling back to Qt5")
+    endif()
 
     # Standalone viewer (embedded server + WebEngine)
     add_executable(prad2evviewer src/prad2evviewer.cpp)
@@ -146,7 +154,8 @@ if(BUILD_GUI)
         DATABASE_DIR="${DATABASE_DIR}"
         RESOURCE_DIR="${RESOURCE_DIR}"
     )
-    target_link_libraries(prad2evviewer PRIVATE prad2srv Qt5::Widgets Qt5::WebEngineWidgets)
+    target_link_libraries(prad2evviewer PRIVATE
+        prad2srv Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::WebEngineWidgets)
     set_target_properties(prad2evviewer PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
         AUTOMOC ON
@@ -154,7 +163,8 @@ if(BUILD_GUI)
 
     # Thin remote client
     add_executable(prad2_client src/prad2_client.cpp)
-    target_link_libraries(prad2_client PRIVATE Qt5::Widgets Qt5::WebEngineWidgets)
+    target_link_libraries(prad2_client PRIVATE
+        Qt${QT_VERSION_MAJOR}::Widgets Qt${QT_VERSION_MAJOR}::WebEngineWidgets)
     set_target_properties(prad2_client PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )

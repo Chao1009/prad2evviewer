@@ -759,7 +759,7 @@ json ViewerServer::buildConfig()
     cfg["current_file"] = data ? data->filepath : "";
     cfg["data_dir_enabled"] = !cfg_.data_dir.empty();
     cfg["data_dir"] = cfg_.data_dir;
-    cfg["hist_enabled"] = hist_enabled_;
+    cfg["hist_enabled"] = hist_enabled_.load();
     app.fillConfigJson(cfg);
     return cfg;
 }

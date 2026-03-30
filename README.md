@@ -15,7 +15,7 @@ CMake >= 3.14, C++17. By default, `evio` and `et` are resolved from the Hall-B C
 
 Optional flags:
 - `-DBUILD_ANALYSIS=ON` — ROOT-based replay tools (requires ROOT 6.0+)
-- `-DBUILD_GUI=ON` — Qt standalone viewer and remote client (requires Qt5 WebEngine)
+- `-DBUILD_GUI=ON` — Qt standalone viewer and remote client (requires Qt6 or Qt5 WebEngine)
 
 To force fetching from source: `cmake -B build -DEVIO_SOURCE=fetch -DET_SOURCE=fetch`
 
@@ -81,7 +81,7 @@ et_start -f /tmp/test_et -s 100000 -n 500
 
 ## Qt Standalone Viewer (optional)
 
-Build with `-DBUILD_GUI=ON` (requires Qt5 WebEngine).
+Build with `-DBUILD_GUI=ON` (uses Qt6 WebEngine by default, falls back to Qt5 if Qt6 is not found).
 
 `prad2evviewer` embeds the server and web frontend in a native Qt window. No separate server process needed -- updates to the web frontend or server API are automatically reflected.
 
