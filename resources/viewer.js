@@ -11,8 +11,9 @@ const CRATE_NAME={0x80:'adchycal1',0x82:'adchycal2',0x84:'adchycal3',0x86:'adchy
     0x01:'PRadTS',0x04:'PRadROC_1',0x05:'PRadROC_2',0x06:'PRadROC_3',0x07:'PRadSRS_1',0x08:'PRadSRS_2'};
 function crateName(r){return CRATE_NAME[r]||`ROC 0x${r.toString(16)}`;}
 let histEnabled=false, histConfig={};
-let mode='file';    // 'file' or 'online'
-let ws=null;        // WebSocket connection (online mode)
+let mode='idle';    // 'idle', 'file', or 'online'
+let etAvailable=false, fileAvailable=false;
+let ws=null;        // WebSocket connection (always connected)
 let autoFollow=true; // auto-load latest event
 let lastEventFetch=0, lastHistFetch=0, lastRingFetch=0, lastOccFetch=0, lastLmsFetch=0;
 let refreshEventMs=200, refreshRingMs=500, refreshHistMs=2000, refreshLmsMs=2000;
@@ -739,6 +740,11 @@ function connectWebSocket() {
                 }
             } else if (msg.type === 'epics_cleared') {
                 clearEpicsFrontend();
+            } else if (msg.type === 'mode_changed') {
+                if (msg.mode && msg.mode !== mode) {
+                    // switching to a different AppState — re-fetch everything
+                    fetchConfigAndApply();
+                }
             }
         } catch (e) {}
     };
@@ -1737,18 +1743,22 @@ function init(){
             document.getElementById('status-bar').textContent='All data cleared — ready for new run';
         }
 
+        // always clear server-side, then frontend
+        Promise.all([
+            fetch('/api/hist/clear').then(r=>r.json()),
+            fetch('/api/lms/clear').then(r=>r.json()),
+            fetch('/api/epics/clear').then(r=>r.json()),
+        ]).then(clearFrontend).catch(()=>{
+            document.getElementById('status-bar').textContent='Error clearing data';
+        });
+    };
+
+    // mode toggle button
+    document.getElementById('btn-mode-toggle').onclick=()=>{
         if(mode==='online'){
-            // clear server-side, then frontend
-            Promise.all([
-                fetch('/api/hist/clear').then(r=>r.json()),
-                fetch('/api/lms/clear').then(r=>r.json()),
-                fetch('/api/epics/clear').then(r=>r.json()),
-            ]).then(clearFrontend).catch(()=>{
-                document.getElementById('status-bar').textContent='Error clearing data';
-            });
+            fetch('/api/mode/file',{method:'POST'});
         } else {
-            // file mode: frontend-only clear
-            clearFrontend();
+            fetch('/api/mode/online',{method:'POST'});
         }
     };
 
@@ -1837,111 +1847,146 @@ function init(){
         }
     });
 
+    // always connect WebSocket (for mode_changed and clear notifications)
+    connectWebSocket();
+
     // load config and init mode
-    fetch('/api/config').then(r=>r.json()).then(data=>{
-        const crateRoc=data.crate_roc||{};
-        const rawMods=data.modules||[],rawDaq=data.daq||[];
-        if(rawMods.length&&rawMods[0].roc!==undefined){
-            modules=rawMods.map(m=>({...m,t:m.t==='PbGlass'?'G':(m.t==='G'?'G':'W')}));
-        }else{
-            const dm={};for(const d of rawDaq)dm[d.name]=d;modules=[];
-            for(const m of rawMods){const d=dm[m.n];if(!d)continue;
-                modules.push({n:m.n,t:m.t==='PbGlass'?'G':'W',x:m.x,y:m.y,sx:m.sx,sy:m.sy,
-                    roc:crateRoc[String(d.crate)]||0,sl:d.slot,ch:d.channel});}
-        }
-        totalEvents=data.total_events||0;
-        histEnabled=data.hist_enabled||false;
-        histConfig=data.hist||{};
-        // cluster histogram configs
-        if(data.cluster_hist){
-            clHistMin=data.cluster_hist.min||0;
-            clHistMax=data.cluster_hist.max||3000;
-            clHistStep=data.cluster_hist.step||10;
-        }
-        if(data.nclusters_hist){
-            nclustMin=data.nclusters_hist.min||0;
-            nclustMax=data.nclusters_hist.max||20;
-            nclustStep=data.nclusters_hist.step||1;
-        }
-        if(data.nblocks_hist){
-            nblocksMin=data.nblocks_hist.min||0;
-            nblocksMax=data.nblocks_hist.max||40;
-            nblocksStep=data.nblocks_hist.step||1;
-        }
-        initClHist();
-        if(data.lms){
-            g_lmsWarnThresh=data.lms.warn_threshold||0.1;
-            // populate ref channel dropdown
-            const sel=document.getElementById('lms-ref-select');
-            sel.innerHTML='<option value="-1">None</option>';
-            if(data.lms.ref_channels){
-                for(const rc of data.lms.ref_channels){
-                    const o=document.createElement('option');
-                    o.value=rc.index;
-                    o.textContent=rc.name;
-                    sel.appendChild(o);
-                }
-            }
-        }
-        // load color range defaults from server config
-        if(data.color_ranges){
-            for(const [k,v] of Object.entries(data.color_ranges)){
-                if(Array.isArray(v) && v.length===2 && !geoRangeOverrides[k])
-                    geoRangeOverrides[k]=v;
-            }
-        }
-        if(data.refresh_ms){
-            refreshEventMs=data.refresh_ms.event||200;
-            refreshRingMs=data.refresh_ms.ring||500;
-            refreshHistMs=data.refresh_ms.histogram||2000;
-            refreshLmsMs=data.refresh_ms.lms||2000;
-        }
-        initReport(data);  // report.js: wire buttons + load elog defaults
-        initEpics(data);
-        initPhysics(data);
-        updateTimeCutLabel();
-        mode=data.mode||'file';
-        const appTitle=mode==='online'?'PRad-II HyCal Monitor':'PRad-II HyCal Event Viewer';
-        document.title=appTitle;
-        document.getElementById('app-title').textContent=appTitle;
-        g_currentFile=data.current_file||'';
-        g_dataDirEnabled=data.data_dir_enabled||false;
-        g_dataDir=data.data_dir||'';
-        g_histCheckbox=histEnabled;
-
-        // init histogram checkbox
-        const hcb=document.getElementById('hist-checkbox');
-        if(hcb) hcb.checked=histEnabled;
-
-        // show/hide mode-specific UI
-        document.getElementById('nav-file').style.display   = mode==='file'?'flex':'none';
-        document.getElementById('nav-online').style.display = mode==='online'?'flex':'none';
-
-        // always show file browser button
-        document.getElementById('btn-open').style.display='';
-
-        if(mode==='file'){
-            document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
-            updateHeaderInfo(data);
-            updateHeaderStats();
-            if(histEnabled) { fetchOccupancy(); fetchClHist(); }
-            fetchEpicsChannels(); fetchEpicsLatest();
-            if(activeTab==='epics') fetchAllEpicsSlots();
-            if(activeTab==='physics') fetchPhysics();
-            syncDqRange();
-            geoViewInit=false; resizeGeo();
-            if(totalEvents>0)loadEvent(1);
-        } else {
-            setEtStatus(data.et_connected||false);
-            syncDqRange();
-            fetchOccupancy();
-            fetchEpicsChannels(); fetchEpicsLatest();
-            if(activeTab==='physics') fetchPhysics();
-            resizeGeo();
-            connectWebSocket();
-            updateRingSelector();
-            loadLatestEvent();
-        }
-    });
+    fetchConfigAndApply();
 }
 window.addEventListener('DOMContentLoaded',init);
+
+// clear frontend-only state (called before mode switch or Clear All)
+function clearFrontendState(){
+    occData={}; occTcutData={}; occTotal=0;
+    sampleCount=0;
+    initClHist(); plotClHist(); plotClStatHists();
+    lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
+    clearEpicsFrontend();
+    clearPhysicsFrontend();
+    updateHeaderStats();
+    redrawGeo();
+}
+
+// fetch /api/config and reconfigure the UI
+function fetchConfigAndApply(){
+    fetch('/api/config').then(r=>r.json()).then(applyConfig);
+}
+
+function applyConfig(data){
+    const crateRoc=data.crate_roc||{};
+    const rawMods=data.modules||[],rawDaq=data.daq||[];
+    if(rawMods.length&&rawMods[0].roc!==undefined){
+        modules=rawMods.map(m=>({...m,t:m.t==='PbGlass'?'G':(m.t==='G'?'G':'W')}));
+    }else{
+        const dm={};for(const d of rawDaq)dm[d.name]=d;modules=[];
+        for(const m of rawMods){const d=dm[m.n];if(!d)continue;
+            modules.push({n:m.n,t:m.t==='PbGlass'?'G':'W',x:m.x,y:m.y,sx:m.sx,sy:m.sy,
+                roc:crateRoc[String(d.crate)]||0,sl:d.slot,ch:d.channel});}
+    }
+    totalEvents=data.total_events||0;
+    histEnabled=data.hist_enabled||false;
+    histConfig=data.hist||{};
+    // cluster histogram configs
+    if(data.cluster_hist){
+        clHistMin=data.cluster_hist.min||0;
+        clHistMax=data.cluster_hist.max||3000;
+        clHistStep=data.cluster_hist.step||10;
+    }
+    if(data.nclusters_hist){
+        nclustMin=data.nclusters_hist.min||0;
+        nclustMax=data.nclusters_hist.max||20;
+        nclustStep=data.nclusters_hist.step||1;
+    }
+    if(data.nblocks_hist){
+        nblocksMin=data.nblocks_hist.min||0;
+        nblocksMax=data.nblocks_hist.max||40;
+        nblocksStep=data.nblocks_hist.step||1;
+    }
+    initClHist();
+    if(data.lms){
+        g_lmsWarnThresh=data.lms.warn_threshold||0.1;
+        const sel=document.getElementById('lms-ref-select');
+        sel.innerHTML='<option value="-1">None</option>';
+        if(data.lms.ref_channels){
+            for(const rc of data.lms.ref_channels){
+                const o=document.createElement('option');
+                o.value=rc.index;
+                o.textContent=rc.name;
+                sel.appendChild(o);
+            }
+        }
+    }
+    if(data.color_ranges){
+        for(const [k,v] of Object.entries(data.color_ranges)){
+            if(Array.isArray(v) && v.length===2 && !geoRangeOverrides[k])
+                geoRangeOverrides[k]=v;
+        }
+    }
+    if(data.refresh_ms){
+        refreshEventMs=data.refresh_ms.event||200;
+        refreshRingMs=data.refresh_ms.ring||500;
+        refreshHistMs=data.refresh_ms.histogram||2000;
+        refreshLmsMs=data.refresh_ms.lms||2000;
+    }
+    initReport(data);
+    initEpics(data);
+    initPhysics(data);
+    updateTimeCutLabel();
+    mode=data.mode||'file';
+    etAvailable=data.et_available||false;
+    fileAvailable=data.file_available||false;
+    const appTitle=mode==='online'?'PRad-II HyCal Monitor':'PRad-II HyCal Event Viewer';
+    document.title=appTitle;
+    document.getElementById('app-title').textContent=appTitle;
+    g_currentFile=data.current_file||'';
+    g_dataDirEnabled=data.data_dir_enabled||false;
+    g_dataDir=data.data_dir||'';
+    g_histCheckbox=histEnabled;
+
+    const hcb=document.getElementById('hist-checkbox');
+    if(hcb) hcb.checked=histEnabled;
+
+    // show/hide mode-specific UI
+    document.getElementById('nav-file').style.display   = mode==='file'?'flex':'none';
+    document.getElementById('nav-online').style.display = mode==='online'?'flex':'none';
+    document.getElementById('btn-open').style.display='';
+
+    // mode toggle button
+    const toggleBtn=document.getElementById('btn-mode-toggle');
+    if(etAvailable && fileAvailable){
+        toggleBtn.style.display='';
+        toggleBtn.textContent=mode==='online'?'View Files':'Go Online';
+    } else if(etAvailable && mode!=='online'){
+        toggleBtn.style.display='';
+        toggleBtn.textContent='Go Online';
+    } else {
+        toggleBtn.style.display='none';
+    }
+
+    if(mode==='file'){
+        document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
+        updateHeaderInfo(data);
+        updateHeaderStats();
+        if(histEnabled) { fetchOccupancy(); fetchClHist(); }
+        fetchEpicsChannels(); fetchEpicsLatest();
+        if(activeTab==='epics') fetchAllEpicsSlots();
+        if(activeTab==='physics') fetchPhysics();
+        syncDqRange();
+        geoViewInit=false; resizeGeo();
+        if(totalEvents>0)loadEvent(1);
+    } else if(mode==='online'){
+        setEtStatus(data.et_connected||false);
+        syncDqRange();
+        fetchOccupancy();
+        fetchEpicsChannels(); fetchEpicsLatest();
+        if(activeTab==='physics') fetchPhysics();
+        resizeGeo();
+        updateRingSelector();
+        loadLatestEvent();
+    } else {
+        // idle mode
+        syncDqRange();
+        resizeGeo();
+        updateHeaderStats();
+    }
+}
