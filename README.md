@@ -45,7 +45,7 @@ cmake --build build
 prad2_server [evio_file] [-p port] [-H] [-c config.json] [-d data_dir] [-D daq_config.json] [--et]
 ```
 
-Opens a web GUI at `http://localhost:5050` with tabs: Waveform Data, Clustering, Gain Monitoring (LMS), EPICS, Physics, GEM.
+Opens a web GUI at `http://localhost:5051` with tabs: Waveform Data, Clustering, Gain Monitoring (LMS), EPICS, Physics, GEM.
 
 ### File mode (default)
 
@@ -96,7 +96,7 @@ Features: native file dialogs (File > Open), drag-and-drop `.evio` files, View >
 `prad2_client` is a thin Qt WebEngine wrapper that connects to a remote `prad2_server` instance:
 
 ```bash
-prad2_client                            # connect to localhost:5050
+prad2_client                            # connect to localhost:5051
 prad2_client -H clonpc19 -p 8080       # connect to remote server
 ```
 

@@ -63,7 +63,7 @@ public:
         std::string daq_config_file;    // empty = auto-find in database_dir
         std::string config_file;        // empty = auto-find in database_dir
         std::string initial_file;       // .evio file to open on startup
-        int    port         = 5050;
+        int    port         = 5051;
         bool   hist_enabled = false;
         bool   start_online = false;    // connect ET on startup
     };
