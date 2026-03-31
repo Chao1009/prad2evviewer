@@ -79,6 +79,29 @@ et_start -f /tmp/test_et -s 100000 -n 500
 ./bin/et_feeder prad.evio -f /tmp/test_et -i 50 -n 5000
 ```
 
+### Remote access (JLab ifarm)
+
+To run the server on a JLab ifarm node and view in your local browser:
+
+**1. Start the server on ifarm** (pick a port, e.g. 5678):
+```bash
+ssh username@ifarm2402
+cd /path/to/prad2evviewer/build
+./bin/prad2_server data.evio -H -p 5678
+```
+
+**2. SSH tunnel from your local machine:**
+```bash
+ssh -L 5678:ifarm2402:5678 -J username@scilogin.jlab.org username@ifarm2402
+```
+
+**3. Open in your local browser:**
+```
+http://localhost:5678
+```
+
+This also works for online monitoring -- start `prad2_server --et -p 5678` on the ifarm node where the ET system is accessible.
+
 ## Qt Standalone Viewer (optional)
 
 Build with `-DBUILD_GUI=ON` (uses Qt6 WebEngine by default, falls back to Qt5 if Qt6 is not found).

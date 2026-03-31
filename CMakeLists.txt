@@ -86,18 +86,22 @@ endif()
 
 add_executable(evio_dump test/evio_dump.cpp)
 target_link_libraries(evio_dump PRIVATE prad2dec nlohmann_json::nlohmann_json)
+target_compile_definitions(evio_dump PRIVATE DATABASE_DIR="${DATABASE_DIR}")
 set_target_properties(evio_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_executable(ped_calc test/ped_calc.cpp)
 target_link_libraries(ped_calc PRIVATE prad2dec nlohmann_json::nlohmann_json)
+target_compile_definitions(ped_calc PRIVATE DATABASE_DIR="${DATABASE_DIR}")
 set_target_properties(ped_calc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_executable(gem_dump test/gem_dump.cpp)
 target_link_libraries(gem_dump PRIVATE prad2dec prad2det nlohmann_json::nlohmann_json)
+target_compile_definitions(gem_dump PRIVATE DATABASE_DIR="${DATABASE_DIR}")
 set_target_properties(gem_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 add_executable(ts_dump test/ts_dump.cpp)
 target_link_libraries(ts_dump PRIVATE prad2dec nlohmann_json::nlohmann_json)
+target_compile_definitions(ts_dump PRIVATE DATABASE_DIR="${DATABASE_DIR}")
 set_target_properties(ts_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
