@@ -96,6 +96,10 @@ add_executable(gem_dump test/gem_dump.cpp)
 target_link_libraries(gem_dump PRIVATE prad2dec prad2det nlohmann_json::nlohmann_json)
 set_target_properties(gem_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(ts_dump test/ts_dump.cpp)
+target_link_libraries(ts_dump PRIVATE prad2dec nlohmann_json::nlohmann_json)
+set_target_properties(ts_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ---------------------------------------------------------------------------
 # Server library (shared between prad2_server and prad2evviewer)
 # ---------------------------------------------------------------------------
