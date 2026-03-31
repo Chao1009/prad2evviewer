@@ -6,6 +6,7 @@ let wfStackTraces=[];      // [{x,y},...] accumulated waveforms
 let wfStackModKey='';      // module key for current stack (clear on module change)
 let currentHist={};  // {divId: {x:[], y:[]}} for histogram copy
 let lastHistModule = '';
+let wfRequestId = 0;  // sequence guard for async waveform fetches
 
 // =========================================================================
 // Waveform
@@ -19,9 +20,11 @@ function showWaveform(mod){
         `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
 
     if(!d){
-        currentWaveform=null;
-        Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
-        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+        if(!wfStackEnabled){
+            currentWaveform=null;
+            Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
+            document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+        }
         showHistograms(mod); redrawGeo(); return;
     }
 
@@ -31,14 +34,16 @@ function showWaveform(mod){
         renderWaveform(mod, key, d, d.s);
     } else {
         // don't clear the plot while fetching — avoids flash in stacking mode
+        const reqId = ++wfRequestId;
         fetch(`/api/waveform/${currentEvent}/${key}`).then(r=>r.json()).then(wf=>{
+            if(reqId !== wfRequestId) return;  // stale response, discard
             if(wf.error){ if(!wfStackEnabled) renderWaveform(mod, key, d, null); return; }
             d.s=wf.s;
             if(wf.pk) d.pk=wf.pk;
             if(wf.pm!==undefined) d.pm=wf.pm;
             if(wf.pr!==undefined) d.pr=wf.pr;
             renderWaveform(mod, key, d, d.s);
-        }).catch(()=>{ if(!wfStackEnabled) renderWaveform(mod, key, d, null); });
+        }).catch(()=>{ if(reqId === wfRequestId && !wfStackEnabled) renderWaveform(mod, key, d, null); });
     }
 
     showHistograms(mod); redrawGeo();
