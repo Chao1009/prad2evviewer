@@ -893,6 +893,7 @@ class SnakeScanGUI:
 
         self._compute_canvas_mapping()
         self._draw_modules()
+        self._draw_motor_marker()
 
         # legend
         leg = tk.Frame(self._canvas_frame, bg=C.BG)
@@ -1154,20 +1155,19 @@ class SnakeScanGUI:
     def _draw_motor_marker(self):
         """Draw the red crosshair at the current motor position."""
         self._canvas.delete("motor_pos")
-        rx = self.ep.get("x_rbv", None)
-        ry = self.ep.get("y_rbv", None)
-        if rx is not None and ry is not None:
-            hx, hy = ptrans_to_module(rx, ry)
-            cx = self._ox + (hx - self._x_min) * self._scale
-            cy = self._oy + (self._y_max - hy) * self._scale
-            r = 5
-            self._canvas.create_line(
-                cx - r, cy, cx + r, cy,
-                fill=C.RED, width=1.5, tags=("motor_pos",))
-            self._canvas.create_line(
-                cx, cy - r, cx, cy + r,
-                fill=C.RED, width=1.5, tags=("motor_pos",))
-            self._canvas.tag_raise("motor_pos")
+        rx = self.ep.get("x_rbv", BEAM_CENTER_X)
+        ry = self.ep.get("y_rbv", BEAM_CENTER_Y)
+        hx, hy = ptrans_to_module(rx, ry)
+        cx = self._ox + (hx - self._x_min) * self._scale
+        cy = self._oy + (self._y_max - hy) * self._scale
+        r = 5
+        self._canvas.create_line(
+            cx - r, cy, cx + r, cy,
+            fill=C.RED, width=1.5, tags=("motor_pos",))
+        self._canvas.create_line(
+            cx, cy - r, cx, cy + r,
+            fill=C.RED, width=1.5, tags=("motor_pos",))
+        self._canvas.tag_raise("motor_pos")
 
     # -- controls panel ------------------------------------------------------
 
@@ -1453,6 +1453,7 @@ class SnakeScanGUI:
         self._update_canvas_label()
         self._display_greyed = False
         self._draw_modules()
+        self._draw_motor_marker()
         self._log(f"Path profile: {name} ({len(path_mods)} modules)")
 
     def _on_lg_layers_changed(self, force: bool = False):
@@ -1483,6 +1484,7 @@ class SnakeScanGUI:
         self._update_canvas_label()
         self._display_greyed = False
         self._draw_modules()
+        self._draw_motor_marker()
 
         n_pwo4 = sum(1 for m in self.scan_modules if m.mod_type == "PbWO4")
         n_lg = sum(1 for m in self.scan_modules if m.mod_type == "PbGlass")
