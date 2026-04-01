@@ -31,11 +31,10 @@ function showWaveform(mod){
         `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
 
     if(!d){
-        if(!wfStackEnabled){
-            currentWaveform=null;
-            Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
-            document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
-        }
+        currentWaveform=null;
+        if(wfStackEnabled){ wfStackTraces=[]; wfStackModKey=''; document.getElementById('wf-stack-count').textContent='0/200'; }
+        Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
+        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
         showHistograms(mod); redrawGeo(); return;
     }
 
