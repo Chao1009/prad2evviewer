@@ -1,4 +1,16 @@
 {
+    "runinfo": {
+        "beam_energy": 1100.0,
+        "calibration": {
+            "file": "prad1/prad_calibration.json",
+            "default_adc2mev": 0.078
+        },
+        "target": [0.0, 0.0, 0.0],
+        "hycal": {
+            "position": [0.0, 0.0, 5800.0],
+            "tilting": [0.0, 0.0, 0.0]
+        }
+    },
     "online": {
         "et_host": "localhost",
         "et_port": 11111,
@@ -10,18 +22,6 @@
             "ring": 500,
             "histogram": 2000,
             "lms": 2000
-        }
-    },
-    "runinfo": {
-        "beam_energy": 1100.0,
-        "calibration": {
-            "file": "prad1/prad_calibration.json",
-            "default_adc2mev": 0.078
-        },
-        "target": [0.0, 0.0, 0.0],
-        "hycal": {
-            "position": [0.0, 0.0, 5800.0],
-            "tilting": [0.0, 0.0, 0.0]
         }
     },
     "waveform": {
@@ -54,17 +54,6 @@
         "warn_min_mean": 100,
         "max_history": 5000,
         "reference_channels": ["LMS1", "LMS2", "LMS3"]
-    },
-    "color_ranges": {
-        "dq:integral":  [0, 10000],
-        "dq:height":    [0, 1000],
-        "dq:count":     [0, 10],
-        "dq:time":      [0, 400],
-        "dq:pedestal":  [0, 500],
-        "dq:occupancy": [0, 100],
-        "cluster:energy": [0, 1000],
-        "lms:mean":     [0, 5000],
-        "lms:rms_frac": [0, 0.2]
     },
     "epics": {
         "max_history": 5000,
@@ -109,5 +98,16 @@
         "tags": ["AutoReport", "PRad"],
         "cert": "/usr/share/logbook-certs/logbook.cert",
         "key": "/usr/share/logbook-certs/logbook.key"
+    },
+    "color_ranges": {
+        "dq:integral":  [0, 10000],
+        "dq:height":    [0, 1000],
+        "dq:count":     [0, 10],
+        "dq:time":      [0, 400],
+        "dq:pedestal":  [0, 500],
+        "dq:occupancy": [0, 100],
+        "cluster:energy": [0, 1000],
+        "lms:mean":     [0, 5000],
+        "lms:rms_frac": [0, 0.2]
     }
 }

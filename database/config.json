@@ -1,4 +1,5 @@
 {
+    "runinfo": "runinfo/2p2_general.json",
     "online": {
         "et_host": "clondaq6",
         "et_port": 11111,
@@ -12,13 +13,13 @@
             "lms": 2000
         }
     },
-    "runinfo": "runinfo/2p2_general.json",
     "gem_histograms": {
         "nclusters": {"min": 0, "max": 50, "step": 1},
         "theta": {"min": 0.0, "max": 10.0, "step": 0.2}
     },
     "waveform": {
         "accept_trigger_bits": [],
+        "reject_trigger_bits": [],
         "time_cut": {"min": 160, "max": 220},
         "integral_hist": {"min": 0, "max": 20000, "step": 100},
         "time_hist": {"min": 0, "max": 400, "step": 4},
@@ -28,7 +29,8 @@
         }
     },
     "clustering": {
-        "accept_trigger_bits": [0, 1],
+        "accept_trigger_bits": [0, 1, 8],
+        "reject_trigger_bits": [24],
         "min_module_energy": 1.0,
         "min_center_energy": 10.0,
         "min_cluster_energy": 50.0,
@@ -59,17 +61,6 @@
         "warn_min_mean": 100,
         "max_history": 5000,
         "reference_channels": ["LMS1", "LMS2", "LMS3"]
-    },
-    "color_ranges": {
-        "dq:integral":  [0, 10000],
-        "dq:height":    [0, 1000],
-        "dq:count":     [0, 10],
-        "dq:time":      [0, 400],
-        "dq:pedestal":  [0, 500],
-        "dq:occupancy": [0, 100],
-        "cluster:energy": [0, 1000],
-        "lms:mean":     [0, 5000],
-        "lms:rms_frac": [0, 0.2]
     },
     "epics": {
         "max_history": 5000,
@@ -116,5 +107,16 @@
         "tags": ["AutoReport", "PRad2"],
         "cert": "/usr/share/logbook-certs/logbook.cert",
         "key": "/usr/share/logbook-certs/logbook.key"
+    },
+    "color_ranges": {
+        "dq:integral":  [0, 10000],
+        "dq:height":    [0, 1000],
+        "dq:count":     [0, 10],
+        "dq:time":      [0, 400],
+        "dq:pedestal":  [0, 500],
+        "dq:occupancy": [0, 100],
+        "cluster:energy": [0, 1000],
+        "lms:mean":     [0, 5000],
+        "lms:rms_frac": [0, 0.2]
     }
-}
+ }
