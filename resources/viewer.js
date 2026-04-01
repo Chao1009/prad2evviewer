@@ -666,7 +666,8 @@ function init(){
             try{Plotly.Plots.resize('cl-nblocks-hist');}catch(e){}
         });
 
-    // waveform stacking controls
+    // waveform stacking controls — reset checkbox to match JS state (browser may restore old form state)
+    document.getElementById('wf-stack').checked=false;
     document.getElementById('wf-stack').onchange=e=>{
         wfStackEnabled=e.target.checked;
         document.getElementById('wf-stack-count').style.display=wfStackEnabled?'':'none';

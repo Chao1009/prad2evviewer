@@ -30,11 +30,21 @@ function showWaveform(mod){
     document.getElementById('detail-header').innerHTML=
         `<span class="mod-name">${mod.n}</span> <span class="mod-daq">${crateName(mod.roc)} &middot; slot ${mod.sl} &middot; ch ${mod.ch}${pedInfo}</span>`;
 
+    // reset stack when switching to a different module
+    if(wfStackEnabled && key!==wfStackModKey){
+        wfStackTraces=[]; wfStackModKey=key;
+        document.getElementById('wf-stack-count').textContent='0/200';
+    }
+
     if(!d){
-        currentWaveform=null;
-        if(wfStackEnabled){ wfStackTraces=[]; wfStackModKey=''; document.getElementById('wf-stack-count').textContent='0/200'; }
-        Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
-        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+        if(!wfStackEnabled){
+            currentWaveform=null;
+            Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
+            document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+        } else {
+            // stacking mode, new module with empty event — show empty plot
+            Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — Stacked (0)`,font:{size:11,color:'#555'}}},PC2);
+        }
         showHistograms(mod); redrawGeo(); return;
     }
 
@@ -72,9 +82,6 @@ function renderWaveform(mod, key, d, samples){
 
     // --- stacking mode ---
     if(wfStackEnabled){
-        // reset stack if module changed
-        if(key!==wfStackModKey){ wfStackTraces=[]; wfStackModKey=key; }
-
         // add current waveform to stack
         wfStackTraces.push({x:Array.from(x), y:Array.from(samples)});
 
@@ -98,7 +105,7 @@ function renderWaveform(mod, key, d, samples){
         document.getElementById('wf-stack-count').textContent=`${wfStackTraces.length}/${maxStack}`;
         Plotly.react('waveform-div',traces,{...PL,
             title:{text:`${mod.n} — Stacked (${wfStackTraces.length})`,font:{size:11,color:'#ccc'}},
-            xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax]},
+            xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax],autorange:false},
         },PC2);
 
         // skip peaks table in stack mode
@@ -131,7 +138,7 @@ function renderWaveform(mod, key, d, samples){
 
     Plotly.react('waveform-div',traces,{...PL,
         title:{text:`${mod.n} — Event ${currentEvent}`,font:{size:11,color:'#ccc'}},
-        xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax]},
+        xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax],autorange:false},
         legend:{x:1,y:1,xanchor:'right',bgcolor:'rgba(0,0,0,0.6)',font:{size:9}},
     },PC2);
 
