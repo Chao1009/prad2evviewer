@@ -1562,8 +1562,10 @@ class SnakeScanGUI:
             self.engine.stop_scan()
             self._btn_pause.configure(text="Pause")
         else:
-            # No scan running — still send stop to halt any manual move
+            # No scan running — still send stop to halt any manual move,
+            # then restore Go so future moves aren't blocked
             epics_stop(self.ep)
+            epics_resume(self.ep)
             self._log("Motors stopped")
 
     def _cmd_skip(self):
@@ -1644,8 +1646,14 @@ class SnakeScanGUI:
             fg = C.TEXT
             if key.endswith("_movn") and int(val) == 1:
                 fg = C.YELLOW
-            elif key.endswith("_spmg") and int(val) != SPMG.GO:
-                fg = C.ORANGE if int(val) == SPMG.PAUSE else C.RED
+            elif key.endswith("_spmg"):
+                spmg_val = int(val)
+                if spmg_val == SPMG.STOP:
+                    fg = C.RED
+                elif spmg_val == SPMG.PAUSE:
+                    fg = C.ORANGE
+                else:  # MOVE or GO
+                    fg = C.GREEN
 
             lbl.configure(text=txt, fg=fg)
 
