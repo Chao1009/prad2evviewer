@@ -4,9 +4,6 @@ let currentWaveform=null;  // {x:[], y:[]} for copy button
 let wfStackEnabled=false;
 let wfStackTraces=[];      // [{x,y},...] accumulated waveforms
 let wfStackModKey='';      // module key for current stack (clear on module change)
-const wfYminSteps=[0,150], wfYmaxSteps=[500,1000,2000,4000];
-let wfYminIdx=1, wfYmaxIdx=0;
-let wfYmin=wfYminSteps[1], wfYmax=wfYmaxSteps[0];
 let currentHist={};  // {divId: {x:[], y:[]}} for histogram copy
 let lastHistModule = '';
 let wfRequestId = 0;  // sequence guard for async waveform fetches
@@ -102,10 +99,15 @@ function renderWaveform(mod, key, d, samples){
                 name:'Latest', line:{color:'#7777aa', width:1.5}, showlegend:false});
         }
 
+        // compute fixed y-range from all stacked traces
+        let ylo=Infinity, yhi=-Infinity;
+        for(const w of wfStackTraces) for(const v of w.y){ if(v<ylo) ylo=v; if(v>yhi) yhi=v; }
+        const pad=(yhi-ylo)*0.05||5;
+
         document.getElementById('wf-stack-count').textContent=`${wfStackTraces.length}/${maxStack}`;
         Plotly.react('waveform-div',traces,{...PL,
             title:{text:`${mod.n} — Stacked (${wfStackTraces.length})`,font:{size:11,color:'#ccc'}},
-            xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax],autorange:false},
+            xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[ylo-pad,yhi+pad],autorange:false},
         },PC2);
 
         // skip peaks table in stack mode
@@ -138,7 +140,7 @@ function renderWaveform(mod, key, d, samples){
 
     Plotly.react('waveform-div',traces,{...PL,
         title:{text:`${mod.n} — Event ${currentEvent}`,font:{size:11,color:'#ccc'}},
-        xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC',range:[wfYmin,wfYmax],autorange:false},
+        xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'},
         legend:{x:1,y:1,xanchor:'right',bgcolor:'rgba(0,0,0,0.6)',font:{size:9}},
     },PC2);
 
