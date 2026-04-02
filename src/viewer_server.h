@@ -21,6 +21,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 // ── Shared types ─────────────────────────────────────────────────────────
@@ -132,6 +133,10 @@ private:
     std::atomic<bool> hist_enabled_{false};
     std::thread load_thread_;
     std::mutex load_mtx_;
+
+    // On-demand histogram accumulation (when hist not pre-processed)
+    std::unordered_set<int> ondemand_processed_;
+    std::mutex ondemand_mtx_;
 
     void buildHistograms();
     void loadFileInternal(const std::string &filepath);

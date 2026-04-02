@@ -87,11 +87,8 @@ function loadClusterData(evnum){
         geoCluster();
         updateClusterUI();
         updateGeoTooltip();
-        // accumulate energy histogram from per-event cluster data
-        if(data.clusters && data.clusters.length>0){
-            fillClHist(data.clusters);
-            plotClHist(); plotClStatHists();
-        }
+        // refresh cluster histograms from server (accumulated there)
+        fetchClHist();
         updateStatusBar();
     }).catch(err=>{ document.getElementById('status-bar').textContent=`Error: ${err}`; });
 }

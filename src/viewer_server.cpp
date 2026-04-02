@@ -349,6 +349,9 @@ void ViewerServer::loadFileInternal(const std::string &filepath)
     auto data = std::make_shared<FileData>();
     data->filepath = filepath;
 
+    // reset on-demand accumulation tracking
+    { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
+
     std::cerr << "Loading: " << filepath << "\n";
 
     // create and open the appropriate data source
@@ -473,6 +476,14 @@ json ViewerServer::decodeEvent(int ev1)
     fdec::WaveAnalyzer ana;
     ana.cfg.min_peak_ratio = app_file_.hist_cfg.min_peak_ratio;
     fdec::WaveResult wres;
+
+    // on-demand histogram accumulation (only when not pre-processed)
+    if (!hist_enabled_) {
+        std::lock_guard<std::mutex> lk(ondemand_mtx_);
+        if (ondemand_processed_.insert(ev1).second)
+            app_file_.processEvent(event, ana, wres);
+    }
+
     return app_file_.encodeEventJson(event, ev1, ana, wres);
 }
 

@@ -181,6 +181,11 @@ function loadEventData(reqId, data) {
     }
     if (activeTab==='dq' && selectedModule) showWaveform(selectedModule);
     updateGeoTooltip();
+
+    // refresh histograms from server (on-demand accumulation in non-preprocessed mode)
+    if(mode==='file' && !histEnabled){
+        fetchOccupancy(); fetchClHist();
+    }
 }
 
 function loadEvent(evnum) {
