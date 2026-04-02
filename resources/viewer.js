@@ -1099,7 +1099,7 @@ function applyConfig(data){
     const toggleBtn=document.getElementById('btn-mode-toggle');
     if(etAvailable){
         toggleBtn.style.display='';
-        toggleBtn.textContent=mode==='online'?'View Files':'Go Online';
+        toggleBtn.textContent=mode==='online'?'Go Offline':'Go Online';
     } else {
         toggleBtn.style.display='none';
     }
@@ -1128,7 +1128,7 @@ function applyConfig(data){
         geoViewInit=false; resizeGeo();
         if(totalEvents>0)loadEvent(1);
     } else if(mode==='online'){
-        setEtStatus(data.et_connected||false);
+        setEtStatus(data.et_connected||false, !data.et_connected);
         syncDqRange();
         fetchOccupancy();
         fetchEpicsChannels(); fetchEpicsLatest();
