@@ -262,16 +262,18 @@ _PV_MAP: List[Tuple[str, str]] = [
 class RealEPICS:
     """Channel-access interface using pyepics."""
 
-    def __init__(self):
+    def __init__(self, writable: bool = False):
         import epics as _epics          # type: ignore
         self._epics = _epics
         self._pvs: Dict[str, object] = {}
+        self._writable = writable
 
     def connect(self) -> Tuple[int, int]:
         for key, pvname in _PV_MAP:
             self._pvs[key] = self._epics.PV(pvname, connection_timeout=5.0)
         time.sleep(2.0)
         n = sum(1 for p in self._pvs.values() if p.connected)
+        self._all_connected = (n == len(self._pvs))
         return n, len(self._pvs)
 
     def disconnected_pvs(self) -> List[str]:
@@ -287,6 +289,8 @@ class RealEPICS:
         return default
 
     def put(self, key: str, value) -> bool:
+        if not self._writable or not self._all_connected:
+            return False
         pv = self._pvs.get(key)
         if pv and pv.connected:
             pv.put(value)
@@ -307,8 +311,8 @@ class SimulatedEPICS:
         self._y_spmg = int(SPMG.GO)
         self._x_movn = 0
         self._y_movn = 0
-        self._x_speed = 50.0      # mm/s  x-axis (fast)
-        self._y_speed = 5.0       # mm/s  y-axis (~1/10 of x)
+        self._x_speed = 0.5       # mm/s  x-axis
+        self._y_speed = 0.2       # mm/s  y-axis
         self._moving = False
         self._thread: Optional[threading.Thread] = None
 
@@ -335,7 +339,7 @@ class SimulatedEPICS:
                 "y_spmg": self._y_spmg,
                 "x_velo": self._x_speed,
                 "y_velo": self._y_speed,
-                "x_accl": 2.0,  "y_accl": 2.0,
+                "x_accl": 0.2,  "y_accl": 1.0,
                 "x_tdir": 1 if self._tx >= self._x else 0,
                 "y_tdir": 1 if self._ty >= self._y else 0,
                 "x_msta": 0x10B, "y_msta": 0x10B,
@@ -762,6 +766,16 @@ class SnakeScanGUI:
         self._build_ui()
         if self.observer:
             self._disable_controls()
+        # Expert mode: if any PVs are disconnected, puts are already blocked
+        # in RealEPICS — disable the GUI controls and show which PVs failed.
+        if not self.simulation and not self.observer:
+            disconnected = self.ep.disconnected_pvs()
+            if disconnected:
+                self._disable_controls()
+                msg = "The following PVs are not connected:\n\n"
+                msg += "\n".join(f"  {pv}" for pv in disconnected)
+                msg += "\n\nAll controls are disabled until every PV connects."
+                messagebox.showerror("PV Connection Error", msg)
         self._poll()
 
     def _filter_scan_modules(self, lg_layers: int) -> List[Module]:
@@ -1820,7 +1834,7 @@ def main():
     elif simulation:
         ep = SimulatedEPICS()
     else:
-        ep = RealEPICS()
+        ep = RealEPICS(writable=True)
 
     n_ok, n_total = ep.connect()
     if not simulation:
