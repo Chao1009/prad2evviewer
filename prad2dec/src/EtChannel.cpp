@@ -45,9 +45,6 @@ status EtChannel::Connect(const std::string &ip, int port, const std::string &et
     conf.set_cast(ET_DIRECT);
     conf.set_host(ip.c_str());
     conf.set_serverport(port);
-    // try once and return immediately on failure — our own retry loop
-    // in etReaderThread handles backoff and checks the running_ flag
-    conf.set_wait(ET_OPEN_NOWAIT);
 
     char *fname = strdup(et_file.c_str());
     auto status = et_open(&et_id, fname, conf.configure().get());
