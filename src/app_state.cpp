@@ -136,6 +136,8 @@ void AppState::init(const std::string &db_dir,
             if (j.contains("waveform")) { loadWaveformConfig(j["waveform"]); waveform_loaded = true; }
             // legacy "hist" section
             else if (j.contains("hist")) { loadLegacyHistConfig(j); waveform_loaded = true; }
+            if (j.contains("ref_lines") && j["ref_lines"].is_object())
+                ref_lines = j["ref_lines"];
         }
     }
     if (!waveform_loaded) {
@@ -1455,6 +1457,7 @@ void AppState::fillConfigJson(json &cfg) const
         {"height_min", hist_cfg.height_min}, {"height_max", hist_cfg.height_max},
         {"height_step", hist_cfg.height_step},
     };
+    cfg["ref_lines"] = ref_lines;
     cfg["cluster_hist"] = {{"min", cl_hist_min}, {"max", cl_hist_max}, {"step", cl_hist_step}};
     cfg["nclusters_hist"] = {{"min", nclusters_hist_min}, {"max", nclusters_hist_max}, {"step", nclusters_hist_step}};
     cfg["nblocks_hist"] = {{"min", nblocks_hist_min}, {"max", nblocks_hist_max}, {"step", nblocks_hist_step}};

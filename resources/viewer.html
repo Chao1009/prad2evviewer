@@ -380,6 +380,22 @@
 
 <div class="status-bar" id="status-bar">Ready</div>
 
+<script>
+// shared reference-line config: populated from /api/config, keyed by plot name
+var refLines={};
+function linesToShapes(lines){
+    if(!lines||!lines.length) return [];
+    return lines.map(function(l){
+        var color=l.color||'#ff6', width=l.lw||1, dash=l.ls||'solid';
+        if(l.axis==='y')
+            return {type:'line',y0:l.pos,y1:l.pos,x0:0,x1:1,xref:'paper',
+                    line:{color:color,width:width,dash:dash}};
+        return {type:'line',x0:l.pos,x1:l.pos,y0:0,y1:1,yref:'paper',
+                line:{color:color,width:width,dash:dash}};
+    });
+}
+function refShapes(key){ return linesToShapes(refLines[key]); }
+</script>
 <script src="report.js"></script>
 <script src="epics.js"></script>
 <script src="physics.js"></script>

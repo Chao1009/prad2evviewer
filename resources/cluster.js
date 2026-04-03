@@ -242,12 +242,13 @@ function plotClHist(){
         yaxis:{...PL.yaxis,title:'Counts',
             type:document.getElementById('clhist-logy').checked?'log':'linear'},
         bargap:0.05,
+        shapes:refShapes('cluster_energy'),
     },PC2);
 }
 
 function plotClStatHists(){
     // number of clusters histogram
-    function plotStat(divId, bins, bmin, bstep, title, xTitle, color, copyVar){
+    function plotStat(divId, bins, bmin, bstep, title, xTitle, color, refKey){
         if(!bins||!bins.length){
             return null;
         }
@@ -262,11 +263,12 @@ function plotClStatHists(){
             title:{text:`${title}<br><span style="font-size:9px;color:#888">${entries} entries</span>`,font:{size:10,color:'#ccc'}},
             xaxis:{...PL.xaxis,title:xTitle,range:[bmin-0.5,bmin+bins.length*bstep-0.5]},
             yaxis:{...PL.yaxis,title:'Counts'},bargap:0.05,
+            shapes:refKey?refShapes(refKey):[],
         },PC2);
         return {x:cx,y:cy};
     }
     currentNclustHist=plotStat('cl-nclust-hist',nclustBins,nclustMin,nclustStep,
-        'Clusters per Event','# Clusters','#00b4d8');
+        'Clusters per Event','# Clusters','#00b4d8','cluster_number');
     currentNblocksHist=plotStat('cl-nblocks-hist',nblocksBins,nblocksMin,nblocksStep,
-        'Blocks per Cluster','# Blocks','#51cf66');
+        'Blocks per Cluster','# Blocks','#51cf66','cluster_size');
 }

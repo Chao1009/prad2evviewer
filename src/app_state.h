@@ -76,6 +76,10 @@ struct AppState {
     int pos_nbins    = 0;
     int height_nbins = 0;
 
+    // reference lines for plots (pass-through to frontend)
+    // key = plot name, value = array of {axis, pos, lw, ls, color}
+    nlohmann::json ref_lines = nlohmann::json::object();
+
     evc::DaqConfig daq_cfg;
     fdec::HyCalSystem hycal;
     fdec::ClusterConfig cluster_cfg;

@@ -101,6 +101,7 @@ function fetchLmsHistory(modIdx, modName){
             yaxis:{...PL.yaxis,title:g_lmsRefIndex>=0?'Corrected Integral':'Integral'},
             legend:{x:1,y:1,xanchor:'right',bgcolor:'rgba(0,0,0,0.6)',font:{size:9}},
             margin:{...PL.margin,t:28,b:36},
+            shapes:refShapes('lms'),
         },PC2);
 
         document.getElementById('lms-info-text').innerHTML=

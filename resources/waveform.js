@@ -143,6 +143,7 @@ function renderWaveform(mod, key, d, samples){
         title:{text:`${mod.n} — Event ${currentEvent}`,font:{size:11,color:'#ccc'}},
         xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'},
         legend:{x:1,y:1,xanchor:'right',bgcolor:'rgba(0,0,0,0.6)',font:{size:9}},
+        shapes:refShapes('waveform'),
     },PC2);
 
     // peaks table
@@ -158,7 +159,7 @@ function renderWaveform(mod, key, d, samples){
 // =========================================================================
 // Histograms
 // =========================================================================
-function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, logYId){
+function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, logYId, refKey){
     fetch(url).then(r=>r.json()).then(data=>{
         if(data.error||!data.bins||!data.bins.length){
             currentHist[divId]=null;
@@ -183,6 +184,7 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
             yaxis:{...PL.yaxis,title:'Counts',
                 type:logYId&&document.getElementById(logYId).checked?'log':'linear'},
             bargap:0.05,
+            shapes:refKey?refShapes(refKey):[],
         },PC2);
     }).catch(()=>{
         currentHist[divId]=null;
@@ -203,11 +205,11 @@ function showHistograms(mod){
     const h=histConfig;
     fetchAndPlotHist('heighthist-div',`/api/heighthist/${key}`,
         `${mod.n} Peak Height [${h.time_min||170}-${h.time_max||190} ns]`,
-        'Peak Height', h.height_min||0, h.height_step||10, '#e599f7', 'heighthist-logy');
+        'Peak Height', h.height_min||0, h.height_step||10, '#e599f7', 'heighthist-logy', 'height_hist');
     fetchAndPlotHist('inthist-div',`/api/hist/${key}`,
         `${mod.n} Integral [${h.time_min||170}-${h.time_max||190} ns]`,
-        'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8', 'inthist-logy');
+        'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8', 'inthist-logy', 'integral_hist');
     fetchAndPlotHist('poshist-div',`/api/poshist/${key}`,
         `${mod.n} Peak Position`,
-        'Time (ns)', h.pos_min||0, h.pos_step||4, '#51cf66');
+        'Time (ns)', h.pos_min||0, h.pos_step||4, '#51cf66', null, 'time_hist');
 }

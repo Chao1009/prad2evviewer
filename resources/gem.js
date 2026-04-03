@@ -208,7 +208,7 @@ let currentGemNclHist = null, currentGemThetaHist = null;
 function plotGemHist(data) {
     if (!data) { currentGemNclHist = currentGemThetaHist = null; return; }
 
-    function plotOne(divId, hdata, title, xlabel, color) {
+    function plotOne(divId, hdata, title, xlabel, color, refKey) {
         if (!hdata || !hdata.bins || hdata.bins.length === 0) {
             Plotly.react(divId, [], Object.assign({}, PL_GEM_OCC, {
                 title: { text: title, font: { size: 12, color: '#e0e0e0' } },
@@ -231,12 +231,13 @@ function plotGemHist(data) {
             xaxis: { title: xlabel, gridcolor: '#333', zerolinecolor: '#555' },
             yaxis: { title: 'Counts', gridcolor: '#333', zerolinecolor: '#555' },
             bargap: 0.05,
+            shapes: refKey ? refShapes(refKey) : [],
         }), { responsive: true, displayModeBar: false });
         return { x: cx, y: cy };
     }
 
-    currentGemNclHist = plotOne('gem-ncl-hist', data.nclusters, 'GEM Clusters / Event', 'N clusters', '#51cf66');
-    currentGemThetaHist = plotOne('gem-theta-hist', data.theta, 'GEM Hit Angle', 'θ (deg)', '#00b4d8');
+    currentGemNclHist = plotOne('gem-ncl-hist', data.nclusters, 'GEM Clusters / Event', 'N clusters', '#51cf66', 'gem_clusters');
+    currentGemThetaHist = plotOne('gem-theta-hist', data.theta, 'GEM Hit Angle', 'θ (deg)', '#00b4d8', 'gem_theta');
 }
 
 // --- resize -----------------------------------------------------------------

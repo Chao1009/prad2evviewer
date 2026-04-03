@@ -78,6 +78,7 @@ function plotEnergyAngle(){
         margin:{l:55,r:80,t:30,b:40},
         showlegend:showElastic,
         legend:{x:0.7,y:0.95,font:{size:10,color:'#aaa'},bgcolor:'rgba(0,0,0,0)'},
+        shapes:refShapes('energy_angle'),
     },PC_EPICS);
 
     // stats line
@@ -119,6 +120,7 @@ function plotMollerXY(){
         xaxis:{...PL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
         yaxis:{...PL.yaxis,title:'Y (mm)'},
         margin:{l:50,r:70,t:30,b:35},
+        shapes:refShapes('moller_xy'),
     },PC_EPICS);
 }
 
@@ -143,6 +145,7 @@ function plotMollerEnergy(){
         yaxis:{...PL.yaxis,title:'Counts'},
         margin:{l:50,r:20,t:28,b:35},
         bargap:0,
+        shapes:refShapes('moller_energy'),
     },PC_EPICS);
 }
 

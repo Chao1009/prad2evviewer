@@ -1001,6 +1001,7 @@ function applyConfig(data){
     totalEvents=data.total_events||0;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
+    refLines=data.ref_lines||{};
     // cluster histogram configs
     if(data.cluster_hist){
         clHistMin=data.cluster_hist.min||0;
