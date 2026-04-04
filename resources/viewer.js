@@ -5,6 +5,10 @@
 let modules=[], totalEvents=0, currentEvent=1;
 let currentEventNumber=0, currentTriggerBits=0;  // DAQ event number + trigger from last loaded event
 let triggerBitsDef=[];  // [{bit, mask, name, label}, ...]
+let triggerTypeDef=[];  // [{type, tag, name, label, primary_bit}, ...]
+// per-tab trigger filter masks: { tabName: {accept: mask, reject: mask} }
+const tabTrigFilter={};
+function trigFilter(){ return tabTrigFilter[activeTab]||(tabTrigFilter[activeTab]={accept:0,reject:0}); }
 let eventChannels={};
 let selectedModule=null, hoveredModule=null;
 const PC=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
@@ -168,14 +172,125 @@ function updateStatusBar(){
     }
 }
 
+// =========================================================================
+// Trigger filter — accept/reject events by trigger bits
+// =========================================================================
+// Each trigger bit has 3 states: unchecked (ignore), accept (green), reject (red).
+// Accept: event must have at least one accepted bit set.
+// Reject: event must NOT have any rejected bit set.
+// If no accept bits selected, accept-all (only reject mask applies).
+
+function buildTriggerFilterUI(){
+    const bar=document.getElementById('trigger-filter-bar');
+    const container=document.getElementById('trigger-filter-checks');
+    if(!container) return;
+    container.innerHTML='';
+    if(!triggerBitsDef.length && !triggerTypeDef.length){ bar.style.display='none'; return; }
+    bar.style.display='flex';
+
+    // use trigger_type if available (main triggers), else fall back to trigger_bits
+    const defs = triggerTypeDef.length ? triggerTypeDef : triggerBitsDef;
+    const useBit = !triggerTypeDef.length;
+
+    for(const d of defs){
+        const bit = useBit ? d.bit : d.primary_bit;
+        if(bit===undefined) continue;
+        const mask = 1 << bit;
+        const lbl=document.createElement('label');
+        lbl.title=`Bit ${bit}: ${d.label||d.name}`;
+        const cb=document.createElement('input');
+        cb.type='checkbox';
+        cb.dataset.bit=bit;
+        cb.dataset.mask=mask;
+        cb.dataset.state='0'; // 0=ignore, 1=accept, 2=reject
+        cb.indeterminate=false;
+        cb.checked=false;
+        cb.addEventListener('click', e=>{
+            e.preventDefault();
+            let st=parseInt(cb.dataset.state);
+            st=(st+1)%3;
+            cb.dataset.state=String(st);
+            if(st===0){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
+            else if(st===1){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
+            else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
+            saveTrigFilterToTab();
+        });
+        lbl.appendChild(cb);
+        lbl.appendChild(document.createTextNode(d.name||d.label));
+        container.appendChild(lbl);
+    }
+
+    document.getElementById('trig-filter-clear').onclick=()=>{
+        for(const cb of container.querySelectorAll('input[type="checkbox"]')){
+            cb.dataset.state='0'; cb.checked=false; cb.indeterminate=false;
+            cb.parentElement.className='';
+        }
+        saveTrigFilterToTab();
+    };
+}
+
+// save checkbox states → active tab's accept/reject masks
+function saveTrigFilterToTab(){
+    const tf=trigFilter();
+    tf.accept=0; tf.reject=0;
+    for(const cb of document.querySelectorAll('#trigger-filter-checks input[type="checkbox"]')){
+        const m=parseInt(cb.dataset.mask);
+        const st=cb.dataset.state;
+        if(st==='1') tf.accept|=m;
+        else if(st==='2') tf.reject|=m;
+    }
+    if(mode==='file' && totalEvents>0) loadEvent(currentEvent);
+}
+
+// restore checkboxes from active tab's masks
+function restoreTrigFilterFromTab(){
+    const tf=trigFilter();
+    for(const cb of document.querySelectorAll('#trigger-filter-checks input[type="checkbox"]')){
+        const m=parseInt(cb.dataset.mask);
+        let st='0';
+        if(tf.accept & m) st='1';
+        else if(tf.reject & m) st='2';
+        cb.dataset.state=st;
+        const lbl=cb.parentElement;
+        if(st==='0'){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
+        else if(st==='1'){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
+        else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
+    }
+}
+
+function passesTriggerFilter(triggerBits){
+    const tf=trigFilter();
+    if(tf.reject && (triggerBits & tf.reject)) return false;
+    if(tf.accept && !(triggerBits & tf.accept)) return false;
+    return true;
+}
+
+let navDirection=1;  // +1=forward, -1=backward (for trigger filter auto-skip)
+
 function loadEventData(reqId, data) {
     if (reqId !== eventRequestId) return;  // stale response, discard
     if (data.error) {
         document.getElementById('status-bar').textContent = data.error;
-        // refresh ring selector to remove stale entries
         if (mode === 'online') updateRingSelector();
         return;
     }
+
+    // trigger filter: if event doesn't pass, auto-skip in nav direction
+    const tf=trigFilter();
+    if (mode==='file' && (tf.accept||tf.reject)) {
+        const tb = data.trigger_bits || 0;
+        if (!passesTriggerFilter(tb)) {
+            const next = data.event + navDirection;
+            if (next >= 1 && next <= totalEvents) {
+                loadEvent(next);
+            } else {
+                document.getElementById('status-bar').textContent =
+                    `No matching event (trigger filter active)`;
+            }
+            return;
+        }
+    }
+
     currentEvent = data.event;
     currentEventNumber = data.event_number || 0;
     currentTriggerBits = data.trigger_bits || 0;
@@ -552,6 +667,7 @@ function switchTab(tab){
     if(tab===activeTab) return;
     activeTab=tab;
     selectedModule=null;
+    restoreTrigFilterFromTab();
     // clear notification dot on the tab being opened
     if(tab==='lms') document.getElementById('lms-dot').className='tab-dot';
     if(tab==='epics') document.getElementById('epics-dot').className='tab-dot';
@@ -764,8 +880,8 @@ function init(){
     };
 
     // --- file mode nav ---
-    document.getElementById('btn-prev').onclick=()=>{if(currentEvent>1)loadEvent(currentEvent-1);};
-    document.getElementById('btn-next').onclick=()=>{if(currentEvent<totalEvents)loadEvent(currentEvent+1);};
+    document.getElementById('btn-prev').onclick=()=>{if(currentEvent>1){navDirection=-1;loadEvent(currentEvent-1);}};
+    document.getElementById('btn-next').onclick=()=>{if(currentEvent<totalEvents){navDirection=1;loadEvent(currentEvent+1);}};
     document.getElementById('ev-input').onchange=e=>{const v=parseInt(e.target.value);if(v>=1&&v<=totalEvents)loadEvent(v);};
     document.getElementById('color-metric').onchange=()=>{syncDqRange();geoDq();};
     document.getElementById('log-scale').onchange=geoDq;
@@ -965,8 +1081,8 @@ function init(){
     document.addEventListener('keydown',e=>{
         if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
         if(mode==='file'){
-            if(e.key==='ArrowLeft'&&currentEvent>1)loadEvent(currentEvent-1);
-            if(e.key==='ArrowRight'&&currentEvent<totalEvents)loadEvent(currentEvent+1);
+            if(e.key==='ArrowLeft'&&currentEvent>1){navDirection=-1;loadEvent(currentEvent-1);}
+            if(e.key==='ArrowRight'&&currentEvent<totalEvents){navDirection=1;loadEvent(currentEvent+1);}
         } else {
             if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
                 // navigate ring buffer
@@ -1080,6 +1196,14 @@ function applyConfig(data){
     histConfig=data.hist||{};
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
+    triggerTypeDef=data.trigger_type||[];
+    // load per-tab trigger filters from server config
+    const tf=data.trigger_filter||{};
+    for(const [tab, filt] of Object.entries(tf)){
+        tabTrigFilter[tab]={accept:filt.trigger_accept||0, reject:filt.trigger_reject||0};
+    }
+    buildTriggerFilterUI();
+    restoreTrigFilterFromTab();
     // cluster histogram configs
     if(data.cluster_hist){
         clHistMin=data.cluster_hist.min||0;
