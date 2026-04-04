@@ -651,6 +651,23 @@ void ViewerServer::etReaderThread()
 {
     EtChannel ch;
     ch.SetConfig(app_online_.daq_cfg);
+
+    // ET-level event filter: reject monitoring/unwanted trigger types before decode.
+    // Uses the event tag (BankHeader.tag) which encodes trigger_type via
+    // tag = physics_base + trigger_type. This avoids decoding rejected events entirely.
+    {
+        TriggerFilter wf = app_online_.waveform_trigger;  // copy for lambda capture
+        uint32_t base = app_online_.daq_cfg.physics_base;
+        if (!wf.accept.empty() || !wf.reject.empty()) {
+            ch.AddEvFilter([wf, base](const BankHeader &h) {
+                // non-physics events always pass (control, EPICS, etc.)
+                if (h.tag < base) return true;
+                uint8_t tt = static_cast<uint8_t>(h.tag - base);
+                return wf(tt);
+            });
+        }
+    }
+
     auto event_ptr = std::make_unique<fdec::EventData>();
     auto &event = *event_ptr;
     auto ssp_ptr = std::make_unique<ssp::SspEventData>();
@@ -717,17 +734,53 @@ void ViewerServer::etReaderThread()
             auto last_lms_notify = last_ring_push;
             constexpr auto lms_notify_interval = std::chrono::milliseconds(200);
 
+            // --- performance counters ---
+            using hrc = std::chrono::high_resolution_clock;
+            auto bench_start = hrc::now();
+            int64_t n_read = 0, n_empty = 0, n_scan = 0, n_decode = 0, n_filtered = 0;
+            int64_t us_read = 0, us_scan = 0, us_decode = 0, us_process = 0, us_ring = 0;
+            auto last_bench = bench_start;
+            constexpr auto bench_interval = std::chrono::seconds(10);
+
             while (running_ && et_active_ && et_generation_.load() == gen) {
+                auto t0 = hrc::now();
                 auto st = ch.Read();
+                auto t1 = hrc::now();
+                us_read += std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
+
                 if (st == status::empty) {
+                    n_empty++;
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                    // periodic benchmark log even when idle
+                    auto now = hrc::now();
+                    if (now - last_bench >= bench_interval) {
+                        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_bench).count();
+                        std::cerr << "ET bench (" << elapsed_ms << "ms): "
+                                  << n_read << " read, " << n_empty << " empty, "
+                                  << n_scan << " scanned, " << n_decode << " decoded, "
+                                  << n_filtered << " filtered | "
+                                  << "read=" << us_read/1000 << "ms "
+                                  << "scan=" << us_scan/1000 << "ms "
+                                  << "decode=" << us_decode/1000 << "ms "
+                                  << "process=" << us_process/1000 << "ms "
+                                  << "ring=" << us_ring/1000 << "ms\n";
+                        n_read = n_empty = n_scan = n_decode = n_filtered = 0;
+                        us_read = us_scan = us_decode = us_process = us_ring = 0;
+                        last_bench = now;
+                    }
                     continue;
                 }
                 if (st != status::success) {
                     std::cerr << "ET: read error, reconnecting\n";
                     break;
                 }
+                n_read++;
+
+                auto t2 = hrc::now();
                 if (!ch.Scan()) continue;
+                auto t3 = hrc::now();
+                us_scan += std::chrono::duration_cast<std::chrono::microseconds>(t3 - t2).count();
+                n_scan++;
 
                 if (app_online_.sync_unix == 0) {
                     uint32_t ct = ch.GetControlTime();
@@ -746,11 +799,20 @@ void ViewerServer::etReaderThread()
 
                 for (int i = 0; i < ch.GetNEvents(); ++i) {
                     ssp_evt.clear();
-                    if (!ch.DecodeEvent(i, event, &ssp_evt)) continue;
+                    auto td0 = hrc::now();
+                    bool decoded = ch.DecodeEvent(i, event, &ssp_evt);
+                    auto td1 = hrc::now();
+                    us_decode += std::chrono::duration_cast<std::chrono::microseconds>(td1 - td0).count();
+
+                    if (!decoded) { n_filtered++; continue; }
+                    n_decode++;
                     last_ti_ts = event.info.timestamp;
 
+                    auto tp0 = hrc::now();
                     app_online_.processGemEvent(ssp_evt);
                     app_online_.processEvent(event, ana, wres);
+                    auto tp1 = hrc::now();
+                    us_process += std::chrono::duration_cast<std::chrono::microseconds>(tp1 - tp0).count();
 
                     int seq = app_online_.events_processed.load();
 
@@ -768,6 +830,7 @@ void ViewerServer::etReaderThread()
                     if (now - last_ring_push >= ring_interval) {
                         last_ring_push = now;
 
+                        auto tr0 = hrc::now();
                         std::string evjson = app_online_.encodeEventJson(
                             event, seq, ana, wres, true).dump();
                         std::string cljson = app_online_.computeClustersJson(
@@ -783,6 +846,8 @@ void ViewerServer::etReaderThread()
 
                         wsBroadcast("{\"type\":\"new_event\",\"seq\":" +
                                     std::to_string(seq) + "}");
+                        auto tr1 = hrc::now();
+                        us_ring += std::chrono::duration_cast<std::chrono::microseconds>(tr1 - tr0).count();
                     }
                 }
             }
