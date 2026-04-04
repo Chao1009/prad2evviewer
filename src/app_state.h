@@ -29,6 +29,7 @@ struct ReconEventData;
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <iostream>
 
 // Trigger filter based on trigger_type (uint8, from event tag).
 // Reject overrides accept. Empty accept = accept all.
