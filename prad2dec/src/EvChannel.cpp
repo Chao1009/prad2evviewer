@@ -336,11 +336,11 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
     evt.info.type = static_cast<uint8_t>(evtype);
 
     // Main trigger type: derived from event tag (see docs/rols/banktags.md).
-    // Physics event tags follow: tag = 0x80 + trigger_type.
+    // event_tag = physics_base + trigger_type (physics_base from daq_config.json).
     // trigger_type identifies WHICH trigger caused this event (single per event).
     // Maps to trigger name via database/trigger_bits.json "trigger_type" section.
-    if (evh.tag >= 0x00A0 && evh.tag <= 0x00BF)
-        evt.info.trigger_type = static_cast<uint8_t>(evh.tag - 0x80);
+    if (config.is_physics(evh.tag) && evh.tag >= config.physics_base)
+        evt.info.trigger_type = static_cast<uint8_t>(evh.tag - config.physics_base);
 
     // --- extract event info: scan all nodes for trigger/TI banks ------------
     // Works for both built (3-level), flat (2-level), and mixed structures.

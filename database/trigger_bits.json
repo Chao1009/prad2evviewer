@@ -1,5 +1,5 @@
 {
-    "_comment": "PRad-II trigger definitions (from prad_v0.trg and trig-debug analysis)",
+    "_comment": "PRad-II trigger definitions (from prad_v0.trg and trig-debug analysis). Event tag = physics_base + trigger_type (physics_base defined in daq_config.json).",
 
     "trigger_bits": [
         {"bit": 8,  "name": "SSP0",     "label": "Raw Sum"},
@@ -14,11 +14,11 @@
     ],
 
     "trigger_type": [
-        {"type": "0x29", "tag": "0x00A9", "name": "SSP_RawSum",  "label": "SSP Raw Sum",    "primary_bit": 8},
-        {"type": "0x30", "tag": "0x00B0", "name": "Pulser",      "label": "100Hz Pulser",   "primary_bit": 15},
-        {"type": "0x39", "tag": "0x00B9", "name": "LMS",         "label": "LMS",            "primary_bit": 24},
-        {"type": "0x3A", "tag": "0x00BA", "name": "Alpha",       "label": "Alpha",          "primary_bit": 25},
-        {"type": "0x3C", "tag": "0x00BC", "name": "MasterOR",    "label": "Master OR",      "primary_bit": 27},
-        {"type": "0x7A", "tag": "0x00FA", "name": "Cluster",     "label": "Cluster",        "primary_bit": 9}
+        {"type": "0x29", "name": "SSP_RawSum",  "label": "SSP Raw Sum",   "primary_bit": 8},
+        {"type": "0x30", "name": "Pulser",       "label": "100Hz Pulser",  "primary_bit": 15},
+        {"type": "0x39", "name": "LMS",          "label": "LMS",           "primary_bit": 24},
+        {"type": "0x3A", "name": "Alpha",        "label": "Alpha",         "primary_bit": 25},
+        {"type": "0x3C", "name": "MasterOR",     "label": "Master OR",     "primary_bit": 27},
+        {"type": "0x7A", "name": "Cluster",      "label": "Cluster",       "primary_bit": 9}
     ]
 }

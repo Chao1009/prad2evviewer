@@ -26,6 +26,9 @@ struct DaqConfig
     // Built-trigger mode: 0xFF50-0xFF8F (num = event count)
     std::vector<uint32_t> physics_tags;
 
+    // physics base offset: event_tag = physics_base + trigger_type
+    uint32_t physics_base = 0x80;
+
     // control event tags (CODA2/JLab legacy — confirmed in PRad-II data)
     // CODA3 uses 0xFFD0-0xFFD4, recognized via is_control() range check
     uint32_t prestart_tag;

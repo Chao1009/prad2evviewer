@@ -19,7 +19,7 @@
     },
     "waveform": {
         "accept_trigger_type": [],
-        "reject_trigger_type": ["Pulser", "Alpha", "MasterOR"],
+        "reject_trigger_type": ["Pulser", "Alpha"],
         "time_cut": {"min": 160, "max": 220},
         "height_hist": {"min": 0, "max": 4000, "step": 10},
         "integral_hist": {"min": 0, "max": 20000, "step": 100},
@@ -30,8 +30,8 @@
         }
     },
     "clustering": {
-        "accept_trigger_type": ["SSP_RawSum", "LMS"],
-        "reject_trigger_type": ["Pulser"],
+        "accept_trigger_type": [],
+        "reject_trigger_type": ["Pulser", "LMS", "Alpha"],
         "min_module_energy": 1.0,
         "min_center_energy": 10.0,
         "min_cluster_energy": 50.0,
@@ -79,7 +79,7 @@
         ]
     },
     "physics": {
-        "accept_trigger_type": ["SSP_RawSum", "LMS"],
+        "accept_trigger_type": ["SSP_RawSum", "Cluster"],
         "energy_angle_hist": {
             "angle_min": 0.0,
             "angle_max": 8.0,

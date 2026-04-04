@@ -192,7 +192,7 @@ function buildTriggerFilterUI(){
         const typeVal = parseInt(d.type, 16);
         const name = d.label || d.name;
         const lbl=document.createElement('label');
-        lbl.title=`Trigger type 0x${typeVal.toString(16)} → tag 0x${(0x80+typeVal).toString(16)}`;
+        lbl.title=`Trigger type 0x${typeVal.toString(16)}: ${name}`;
         const cb=document.createElement('input');
         cb.type='checkbox';
         cb.dataset.trigtype=typeVal;
