@@ -181,7 +181,7 @@ private:
     // ── HTTP / resource handling ─────────────────────────────────────────
     void setupServer(int port);
     bool serveResource(const std::string &uri, WsServer::connection_ptr con);
-    nlohmann::json listFiles();
+    nlohmann::json listFiles(const std::string &subdir = "");
     std::string resolveDataFile(const std::string &relpath);
     nlohmann::json buildConfig();
     nlohmann::json handleElogPost(const std::string &body);

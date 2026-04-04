@@ -823,27 +823,57 @@ bool ViewerServer::serveResource(const std::string &uri,
     return true;
 }
 
-json ViewerServer::listFiles()
+json ViewerServer::listFiles(const std::string &subdir)
 {
-    json files = json::array();
-    if (cfg_.data_dir.empty()) return files;
+    json entries = json::array();
+    if (cfg_.data_dir.empty()) return entries;
     try {
         fs::path root(cfg_.data_dir);
-        for (auto &entry : fs::recursive_directory_iterator(
-                 root, fs::directory_options::skip_permission_denied)) {
-            if (!entry.is_regular_file()) continue;
-            auto fn = entry.path().filename().string();
-            if (fn.find(".evio") == std::string::npos && fn.find(".root") == std::string::npos)
-                continue;
+        fs::path dir = subdir.empty() ? root : root / subdir;
+        // security: ensure dir is under root
+        auto canon_root = fs::canonical(root);
+        auto canon_dir  = fs::canonical(dir);
+        if (canon_dir.string().rfind(canon_root.string(), 0) != 0)
+            return entries;
+
+        for (auto &entry : fs::directory_iterator(
+                 canon_dir, fs::directory_options::skip_permission_denied)) {
             auto rel = fs::relative(entry.path(), root).string();
-            auto sz = entry.file_size();
-            files.push_back({{"path", rel}, {"size", sz},
-                             {"size_mb", std::round(sz / 1048576.0 * 10) / 10}});
+            if (entry.is_directory()) {
+                // count data files inside (non-recursive quick scan)
+                int count = 0;
+                try {
+                    for (auto &child : fs::recursive_directory_iterator(
+                             entry.path(), fs::directory_options::skip_permission_denied)) {
+                        if (!child.is_regular_file()) continue;
+                        auto fn = child.path().filename().string();
+                        if (fn.find(".evio") != std::string::npos ||
+                            fn.find(".root") != std::string::npos)
+                            count++;
+                    }
+                } catch (...) {}
+                if (count > 0)
+                    entries.push_back({{"type", "dir"}, {"name", rel}, {"count", count}});
+            } else if (entry.is_regular_file()) {
+                auto fn = entry.path().filename().string();
+                if (fn.find(".evio") == std::string::npos &&
+                    fn.find(".root") == std::string::npos)
+                    continue;
+                auto sz = entry.file_size();
+                entries.push_back({{"type", "file"}, {"name", rel},
+                                   {"size", sz},
+                                   {"size_mb", std::round(sz / 1048576.0 * 10) / 10}});
+            }
         }
     } catch (...) {}
-    std::sort(files.begin(), files.end(),
-              [](const json &a, const json &b) { return a["path"] < b["path"]; });
-    return files;
+    std::sort(entries.begin(), entries.end(),
+              [](const json &a, const json &b) {
+                  // dirs first, then by name
+                  bool da = a["type"] == "dir", db = b["type"] == "dir";
+                  if (da != db) return da > db;
+                  return a["name"] < b["name"];
+              });
+    return entries;
 }
 
 std::string ViewerServer::resolveDataFile(const std::string &relpath)
@@ -1137,8 +1167,26 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     if (result.handled) { reply(result.body); return; }
 
     // --- file browser ---
-    if (uri == "/api/files") {
-        reply(json({{"files", listFiles()}}).dump()); return;
+    if (uri == "/api/files" || uri.rfind("/api/files?", 0) == 0) {
+        std::string subdir;
+        auto qpos = uri.find('?');
+        if (qpos != std::string::npos) {
+            std::string q = uri.substr(qpos + 1);
+            if (q.rfind("dir=", 0) == 0) {
+                subdir = q.substr(4);
+                // URL-decode
+                std::string dec;
+                for (size_t i = 0; i < subdir.size(); ++i) {
+                    if (subdir[i] == '%' && i + 2 < subdir.size()) {
+                        dec += (char)std::stoi(subdir.substr(i + 1, 2), nullptr, 16);
+                        i += 2;
+                    } else if (subdir[i] == '+') dec += ' ';
+                    else dec += subdir[i];
+                }
+                subdir = dec;
+            }
+        }
+        reply(json({{"entries", listFiles(subdir)}}).dump()); return;
     }
 
     // --- load file (relative path from data_dir) ---
