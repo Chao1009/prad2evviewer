@@ -333,12 +333,15 @@ bool EvChannel::decodeTI(fdec::EventInfo &info) const
             static_cast<size_t>(config.ti_trigger_word) < nw)
             info.trigger_number = static_cast<int32_t>(d[config.ti_trigger_word]);
 
-        // TI event header d[0] always contains the TS input pattern
-        // (tiLoadTriggerTable(3) encodes which TS inputs fired).
+        // TI event header d[0] always contains the TS trigger decision.
         // Format: event_type(8) | 0x01(8) | nwords(16)
+        // event_type encodes trigger table output; event_tag = 0x80 + event_type.
         // This is the baseline trigger_bits — always available in every TI bank.
-        if (nw > 0)
-            info.trigger_bits = (d[0] >> 24) & 0xFF;
+        // TI master d[5] overrides with richer 32-bit FP trigger inputs (below).
+        if (nw > 0) {
+            info.trigger_type = static_cast<uint8_t>((d[0] >> 24) & 0xFF);
+            info.trigger_bits = info.trigger_type;
+        }
 
         int lo = config.ti_time_low_word;
         int hi = config.ti_time_high_word;

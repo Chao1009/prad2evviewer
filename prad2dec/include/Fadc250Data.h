@@ -67,6 +67,9 @@ struct RocData {
 // --- event-level information (extracted from TI bank + trigger bank) ---------
 struct EventInfo {
     uint8_t  type;              // evc::EventType cast to uint8_t
+    uint8_t  trigger_type;      // TI event_type from d[0] bits 31:24 (TS trigger decision)
+                                // Related to event_tag: tag = 0x80 + trigger_type
+                                // Maps to FP trigger source via tiLoadTriggerTable(3)
     uint32_t trigger_bits;      // 32 FP trigger input bits from TI master (word[5])
     uint32_t event_tag;         // top-level bank tag (raw)
     int32_t  event_number;      // from trigger bank (0xC000) or TI
@@ -78,6 +81,7 @@ struct EventInfo {
     void clear()
     {
         type = 0;
+        trigger_type = 0;
         trigger_bits = 0;
         event_tag = 0;
         event_number = 0;

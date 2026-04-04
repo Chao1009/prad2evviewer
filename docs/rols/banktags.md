@@ -88,14 +88,14 @@ depends on the trigger table mapping.
 
 ### Physics Events (tag = 0x80 + TI_event_type)
 
-| Tag    | TI type | Count | Size (words)  | Has FADC | Description                        |
-|--------|---------|-------|---------------|----------|------------------------------------|
-| 0x00A9 | 0x29    | 796   | 240 - 71046   | Yes      | Physics trigger — FADC waveforms   |
-| 0x00B0 | 0x30    | 16144 | 240 - 2105    | **No**   | Monitoring (100Hz pulser) — TI only |
-| 0x00B9 | 0x39    | 773   | 24660 - 54586 | Yes      | Physics + monitoring overlap        |
-| 0x00BA | 0x3A    | 2     | 240           | No       | Rare trigger                        |
-| 0x00BC | 0x3C    | 443   | 240 - 305     | No       | Light trigger                       |
-| 0x00FA | 0x7A    | 1     | 1063          | —        | Special / calibration               |
+| Tag    | TI type | FP source | Count | w/FADC | Size (words)  | Description                      |
+|--------|---------|-----------|-------|--------|---------------|----------------------------------|
+| 0x00A9 | 0x29    | bit 8: SSP TRGBIT0 | 796 | 795 | 240 - 71046 | **SSP raw sum > 1000** (÷2 prescale) |
+| 0x00B0 | 0x30    | bit 15: SSP TRGBIT7 | 16144 | 180 | 240 - 2105 | **100 Hz pulser** (monitoring) |
+| 0x00B9 | 0x39    | bit 24: v1495 LMS | 773 | 773 | 24660 - 54586 | **LMS trigger** (no prescale) |
+| 0x00BA | 0x3A    | bit 25: v1495 alpha | 2 | 0 | 240 | **alpha** (÷16385 prescale) |
+| 0x00BC | 0x3C    | bit 27: v1495 Master OR | 443 | 5 | 240 - 305 | **Master OR** (÷16385 prescale) |
+| 0x00FA | 0xFA    | bits 9+10: TRGBIT1+2 | 1 | 1 | 1063 | **cluster trigger** (special, tag≠0x80+type) |
 
 ### Control Events (CODA2 legacy)
 
@@ -216,28 +216,39 @@ Max size (~12K words) = physics events with full FADC waveforms.
 The raw TI block (from `tiReadBlock()`) includes block header/trailer.
 rol2.c strips these, outputting per-event data starting with the event header.
 
-**TI Slave (4 words):**
+**TI Slave (4 words, nwords=3):**
 
-| Word | Content                                    | Decoder config         |
-|------|--------------------------------------------|------------------------|
-| d[0] | Event header: `event_type(8) \| 0x01(8) \| nwords(8)` | trigger_bits baseline: `(d[0]>>24) & 0xFF` |
-| d[1] | Event number (32-bit)                      | `trigger_word = 1`     |
-| d[2] | Timestamp low (32-bit)                     | `time_low_word = 2`    |
-| d[3] | `evnum_high[19:16] \| ts_high[15:0]`       | `time_high_word = 3`, mask = 0xFFFF |
+| Word | Example      | Content                                    | Decoder config         |
+|------|--------------|-------------------------------------------|------------------------|
+| d[0] | `0x30010003` | Event header: `event_type(8) \| 0x01(8) \| nwords(16)` | baseline trigger_bits: `(d[0]>>24) & 0xFF` |
+| d[1] | `0x000046EC` | Event number (32-bit)                      | `trigger_word = 1`     |
+| d[2] | `0x100901FE` | Timestamp low (32-bit)                     | `time_low_word = 2`    |
+| d[3] | `0x0000000B` | `evnum_high[19:16] \| ts_high[15:0]`       | `time_high_word = 3`, mask = 0xFFFF |
 
-**TI Master (7 words) — additional words with tiSetFPInputReadout(1):**
+**TI Master (7 words, nwords=6):**
 
-| Word | Content                                    | Decoder config         |
-|------|--------------------------------------------|------------------------|
-| d[0] - d[3] | Same as slave                       |                        |
-| d[4] | 8-bit trigger type pattern (TS input state) |                        |
-| d[5] | **32-bit FP trigger inputs** (v1495 pattern, LMS, etc.) | `trigger_type_word = 5`, mask = 0xFFFFFFFF |
-| d[6] | Additional TI data                         |                        |
+| Word | Example      | Content                                    | Decoder config         |
+|------|--------------|-------------------------------------------|------------------------|
+| d[0]-d[3] | | Same as slave                              |                        |
+| d[4] | `0x00000000` | Trigger type byte (**always zero** in current config) | — (unused)   |
+| d[5] | `0x00008000` | **32-bit FP trigger inputs** (see bit map above) | `trigger_type_word = 5`, mask = 0xFFFFFFFF |
+| d[6] | `0x80000000` | Additional TI flags                        | —                      |
 
-The event header `event_type` (d[0] bits 31:24) and the FP trigger inputs (d[5])
-are **different signals**:
-- `event_type` = TS input pattern (which of 6 TS inputs fired) → determines event tag
-- `d[5]` = front panel input snapshot (32 signals from v1495 etc.) → detailed trigger info
+The `event_type` (d[0] bits 31:24) and FP trigger inputs (d[5]) are **related
+through the trigger table** (`tiLoadTriggerTable(3)`), not by direct bit encoding:
+- `event_type` = trigger table OUTPUT → determines event tag via `tag = 0x80 + event_type`
+- `d[5]` = raw FP input SNAPSHOT → which detector signals were active at trigger time
+
+**Confirmed mapping** (from trig-debug on run 023453):
+
+| FP bit | FP signal              | → event_type | → event_tag | Count |
+|--------|------------------------|-------------|-------------|-------|
+| 8      | SSP TRGBIT0 (RawSum)   | 0x29        | 0x00A9      | 796   |
+| 15     | SSP TRGBIT7 (Pulser)   | 0x30        | 0x00B0      | 16144 |
+| 24     | v1495 LMS              | 0x39        | 0x00B9      | 773   |
+| 25     | v1495 alpha            | 0x3A        | 0x00BA      | 2     |
+| 27     | v1495 Master OR        | 0x3C        | 0x00BC      | 443   |
+| 9+10   | TRGBIT1+2 (clusters)   | 0xFA        | 0x00FA      | 1     |
 
 ### Trigger Bank (0xC000)
 

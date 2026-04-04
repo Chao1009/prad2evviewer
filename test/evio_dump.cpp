@@ -294,7 +294,8 @@ static int doEvent(EvChannel &ch, int target)
                 std::cout << "  sub-event " << i
                           << ": event#=" << evt.info.event_number
                           << " trigger#=" << evt.info.trigger_number
-                          << " trigger_bits=0x" << std::hex
+                          << " type=0x" << std::hex << (int)evt.info.trigger_type
+                          << " trigger_bits=0x"
                           << evt.info.trigger_bits << std::dec
                           << " timestamp=" << evt.info.timestamp
                           << " run=" << evt.info.run_number

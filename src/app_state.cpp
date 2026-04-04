@@ -543,6 +543,7 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
     }
     return {{"event", ev_id}, {"channels", channels},
             {"event_number", event.info.event_number},
+            {"trigger_type", event.info.trigger_type},
             {"trigger_bits", event.info.trigger_bits}};
 }
 
