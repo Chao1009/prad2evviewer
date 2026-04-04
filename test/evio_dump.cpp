@@ -359,19 +359,21 @@ static int doEvent(EvChannel &ch, int target)
 }
 
 // --- mode: triggers ---------------------------------------------------------
-static int doTriggers(EvChannel &ch)
+static int doTriggers(EvChannel &ch, bool verbose)
 {
     fdec::EventData evt;
     int record = 0, decoded = 0;
     std::map<uint32_t, int> trig_counts;
 
-    std::cout << std::setw(8) << "event#"
-              << std::setw(10) << "trigger#"
-              << std::setw(14) << "trigger_bits"
-              << std::setw(18) << "timestamp"
-              << std::setw(8) << "rocs"
-              << "\n";
-    std::cout << std::string(58, '-') << "\n";
+    if (verbose) {
+        std::cout << std::setw(8) << "event#"
+                  << std::setw(10) << "trigger#"
+                  << std::setw(14) << "trigger_bits"
+                  << std::setw(18) << "timestamp"
+                  << std::setw(8) << "rocs"
+                  << "\n";
+        std::cout << std::string(58, '-') << "\n";
+    }
 
     while (ch.Read() == status::success) {
         record++;
@@ -379,22 +381,24 @@ static int doTriggers(EvChannel &ch)
         if (ch.GetNEvents() == 0) continue;
 
         for (int i = 0; i < ch.GetNEvents(); ++i) {
-            if (!ch.DecodeEvent(i, evt)) continue;
+            ch.DecodeEvent(i, evt);
             decoded++;
             trig_counts[evt.info.trigger_bits]++;
 
-            std::cout << std::setw(8) << evt.info.event_number
-                      << std::setw(10) << evt.info.trigger_number
-                      << "    0x" << std::hex << std::setw(8)
-                      << std::setfill('0') << evt.info.trigger_bits
-                      << std::dec << std::setfill(' ')
-                      << std::setw(18) << evt.info.timestamp
-                      << std::setw(8) << evt.nrocs
-                      << "\n";
+            if (verbose) {
+                std::cout << std::setw(8) << evt.info.event_number
+                          << std::setw(10) << evt.info.trigger_number
+                          << "    0x" << std::hex << std::setw(8)
+                          << std::setfill('0') << evt.info.trigger_bits
+                          << std::dec << std::setfill(' ')
+                          << std::setw(18) << evt.info.timestamp
+                          << std::setw(8) << evt.nrocs
+                          << "\n";
+            }
         }
     }
 
-    std::cout << "\n=== Trigger Bits Summary (" << decoded << " events) ===\n";
+    std::cout << "=== Trigger Bits Summary (" << decoded << " events) ===\n";
     for (auto &[bits, cnt] : trig_counts) {
         std::cout << "  0x" << std::hex << std::setw(8) << std::setfill('0')
                   << bits << std::dec << std::setfill(' ')
@@ -416,10 +420,11 @@ static void usage(const char *prog)
         << "  -m tags       List all unique bank tags with stats\n"
         << "  -m epics      Dump all EPICS event text\n"
         << "  -m event      Detailed dump of a single record\n"
-        << "  -m triggers   List trigger info for all events\n\n"
+        << "  -m triggers   List trigger bit counts (add -v for per-event detail)\n\n"
         << "Options:\n"
         << "  -D <file>     DAQ configuration (auto-searches daq_config.json if omitted)\n"
-        << "  -n <N>        Number of events (tree mode, default 5) or event number (event mode)\n";
+        << "  -n <N>        Number of events (tree mode, default 5) or event number (event mode)\n"
+        << "  -v            Verbose output (triggers mode: print every event)\n";
 }
 
 int main(int argc, char *argv[])
@@ -427,13 +432,15 @@ int main(int argc, char *argv[])
     std::string daq_config_file;
     std::string mode;
     int num = 5;
+    bool verbose = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "D:m:n:h")) != -1) {
+    while ((opt = getopt(argc, argv, "D:m:n:vh")) != -1) {
         switch (opt) {
         case 'D': daq_config_file = optarg; break;
         case 'm': mode = optarg; break;
         case 'n': num = std::atoi(optarg); break;
+        case 'v': verbose = true; break;
         default:  usage(argv[0]); return 1;
         }
     }
@@ -469,7 +476,7 @@ int main(int argc, char *argv[])
     if      (mode == "tree")     rc = doTree(ch, num);
     else if (mode == "tags")     rc = doTags(ch);
     else if (mode == "epics")    rc = doEpics(ch);
-    else if (mode == "triggers") rc = doTriggers(ch);
+    else if (mode == "triggers") rc = doTriggers(ch, verbose);
     else if (mode == "event")    rc = doEvent(ch, num);
     else                         rc = doSummary(ch);
 
