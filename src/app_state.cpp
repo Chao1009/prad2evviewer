@@ -1484,6 +1484,12 @@ void AppState::fillConfigJson(json &cfg) const
     cfg["ref_lines"] = ref_lines;
     cfg["trigger_bits"] = trigger_bits_def;
     cfg["trigger_type"] = trigger_type_def;
+    cfg["trigger_filter"] = {
+        {"dq",      waveform_trigger.toJson()},
+        {"cluster", cluster_trigger.toJson()},
+        {"lms",     lms_trigger.toJson()},
+        {"physics", physics_trigger.toJson()},
+    };
     cfg["cluster_hist"] = {{"min", cl_hist_min}, {"max", cl_hist_max}, {"step", cl_hist_step}};
     cfg["nclusters_hist"] = {{"min", nclusters_hist_min}, {"max", nclusters_hist_max}, {"step", nclusters_hist_step}};
     cfg["nblocks_hist"] = {{"min", nblocks_hist_min}, {"max", nblocks_hist_max}, {"step", nblocks_hist_step}};

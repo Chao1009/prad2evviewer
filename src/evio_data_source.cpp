@@ -28,6 +28,8 @@ std::string EvioDataSource::open(const std::string &path)
     while (ch.Read() == status::success) {
         ++buf;
         if (!ch.Scan()) continue;
+        // skip monitoring events (TI only, no waveforms) from file viewer index
+        if (cfg_.is_monitoring(ch.GetEvHeader().tag)) continue;
         for (int i = 0; i < ch.GetNEvents(); ++i)
             index_.push_back({buf, i});
     }
@@ -143,7 +145,8 @@ void EvioDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb*/,
                 epics_cb(text, 0, last_ti_ts);
         }
 
-        // physics events
+        // physics events (skip monitoring — no waveforms to process)
+        if (cfg_.is_monitoring(ch.GetEvHeader().tag)) continue;
         for (int i = 0; i < ch.GetNEvents(); ++i) {
             ssp_evt.clear();
             if (!ch.DecodeEvent(i, event, &ssp_evt)) continue;
