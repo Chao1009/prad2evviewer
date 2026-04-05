@@ -67,6 +67,7 @@ from scan_utils import (
 DEFAULT_DWELL = 120.0         # seconds
 DEFAULT_POS_THRESHOLD = 0.5   # mm
 DEFAULT_BEAM_THRESHOLD = 0.3  # nA
+ENCODER_DRIFT_WARN = 0.5     # mm -- warn if calibrated encoder drifts from RBV
 MOVE_TIMEOUT = 300.0          # seconds per single move
 MAX_LG_LAYERS = 2
 DEFAULT_VELO_X = 50.0         # mm/s
@@ -750,6 +751,10 @@ class SnakeScanWindow(QMainWindow):
         self._selected_mod_name = None
         self._status_labels = {}
 
+        # Encoder calibration: offset = encoder - RBV (computed once)
+        self._enc_offset_x: Optional[float] = None
+        self._enc_offset_y: Optional[float] = None
+
         self._logSignal.connect(self._appendLog)
         self._buildUI()
 
@@ -1032,6 +1037,8 @@ class SnakeScanWindow(QMainWindow):
         self._lbl_actual = QLabel("Actual:   --"); lo.addWidget(self._lbl_actual)
         self._lbl_error = QLabel("Diff:     --")
         self._lbl_error.setStyleSheet("font: bold 9pt 'Consolas';"); lo.addWidget(self._lbl_error)
+        self._lbl_enc_drift = QLabel("Encoder:  awaiting calibration")
+        self._lbl_enc_drift.setStyleSheet(f"color: {C.DIM};"); lo.addWidget(self._lbl_enc_drift)
         parent.addWidget(pe)
 
     def _disableControls(self):
@@ -1247,6 +1254,7 @@ class SnakeScanWindow(QMainWindow):
         self._updateScanInfo()
         self._updateButtons()
         self._updateBeamDisplay()
+        self._checkEncoder()
 
     def _updateBeamDisplay(self):
         bc = self.ep.get("beam_cur", None)
@@ -1271,6 +1279,40 @@ class SnakeScanWindow(QMainWindow):
             self._lbl_beam_val.setText(f"{bc:.2f} nA")
             self._lbl_beam_val.setStyleSheet(f"color: {C.GREEN}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("")
+
+    def _checkEncoder(self):
+        """Calibrate encoder offset on first read, then monitor drift."""
+        enc_x = self.ep.get("x_encoder", None)
+        enc_y = self.ep.get("y_encoder", None)
+        rbv_x = self.ep.get("x_rbv", None)
+        rbv_y = self.ep.get("y_rbv", None)
+        if enc_x is None or enc_y is None or rbv_x is None or rbv_y is None:
+            return
+
+        # First valid read: compute offsets
+        if self._enc_offset_x is None:
+            self._enc_offset_x = enc_x - rbv_x
+            self._enc_offset_y = enc_y - rbv_y
+            self._log(f"Encoder calibrated: offset X={self._enc_offset_x:+.4f}  "
+                      f"Y={self._enc_offset_y:+.4f} mm")
+            self._lbl_enc_drift.setText(
+                f"Encoder:  calibrated (dX={self._enc_offset_x:+.4f}  dY={self._enc_offset_y:+.4f})")
+            self._lbl_enc_drift.setStyleSheet(f"color: {C.GREEN};")
+            return
+
+        # Subsequent reads: check drift
+        drift_x = (enc_x - self._enc_offset_x) - rbv_x
+        drift_y = (enc_y - self._enc_offset_y) - rbv_y
+        drift = math.sqrt(drift_x**2 + drift_y**2)
+
+        if drift > ENCODER_DRIFT_WARN:
+            self._lbl_enc_drift.setText(
+                f"Encoder:  DRIFT {drift:.3f} mm  (X={drift_x:+.3f} Y={drift_y:+.3f})")
+            self._lbl_enc_drift.setStyleSheet(f"color: {C.RED}; font: bold 9pt 'Consolas';")
+        else:
+            self._lbl_enc_drift.setText(
+                f"Encoder:  OK  drift {drift:.4f} mm")
+            self._lbl_enc_drift.setStyleSheet(f"color: {C.GREEN};")
 
     def _updateStatus(self):
         for key, lbl in self._status_labels.items():
