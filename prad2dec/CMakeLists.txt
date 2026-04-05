@@ -45,13 +45,19 @@ if(EVIO_SOURCE STREQUAL "hallb")
     endif()
 endif()
 if(EVIO_SOURCE STREQUAL "fetch")
+    # We only need the C library; skip C++ eviocc (which requires Boost,
+    # LZ4, Disruptor).  evio-6.0 has a bug: find_package(Boost REQUIRED)
+    # runs unconditionally even with C_ONLY=ON, so suppress it.
+    set(C_ONLY ON CACHE BOOL "" FORCE)
     set(MAKE_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(CMAKE_DISABLE_FIND_PACKAGE_Boost TRUE)
     FetchContent_Declare(evio
         GIT_REPOSITORY https://github.com/JeffersonLab/evio.git
         GIT_TAG        evio-6.0
         GIT_PROGRESS   TRUE
     )
     FetchContent_MakeAvailable(evio)
+    unset(CMAKE_DISABLE_FIND_PACKAGE_Boost)
 elseif(EVIO_SOURCE STREQUAL "system")
     find_package(evio REQUIRED)
 endif()
