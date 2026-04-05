@@ -202,14 +202,15 @@ function buildTriggerFilterUI(){
         cb.dataset.state='0'; // 0=ignore, 1=accept, 2=reject
         cb.indeterminate=false;
         cb.checked=false;
-        cb.addEventListener('click', e=>{
-            e.preventDefault();
+        cb.addEventListener('click', ()=>{
             let st=parseInt(cb.dataset.state);
             st=(st+1)%3;
             cb.dataset.state=String(st);
-            if(st===0){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
-            else if(st===1){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
-            else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
+            setTimeout(()=>{
+                if(st===0){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
+                else if(st===1){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
+                else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
+            },0);
             saveTrigFilterToTab();
         });
         lbl.appendChild(cb);
