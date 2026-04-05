@@ -41,29 +41,47 @@ struct TriggerFilter {
     }
 
     // parse from JSON section containing accept_trigger_bits / reject_trigger_bits
-    void parse(const nlohmann::json &section) {
-        accept = maskFrom(section, "accept_trigger_bits");
-        reject = maskFrom(section, "reject_trigger_bits");
+    // values can be: bit numbers (8, 24), or names ("LMS", "Pulser") resolved
+    // against the trigger_bits_def lookup table from trigger_bits.json
+    void parse(const nlohmann::json &section,
+               const nlohmann::json &bits_defs = nlohmann::json::array()) {
+        accept = maskFrom(section, "accept_trigger_bits", bits_defs);
+        reject = maskFrom(section, "reject_trigger_bits", bits_defs);
     }
 
-    // emit to JSON
     nlohmann::json toJson() const {
         return {{"trigger_accept", accept}, {"trigger_reject", reject}};
     }
 
-    // log line fragment: "trigger accept=0x3 reject=0x0"
     friend std::ostream &operator<<(std::ostream &os, const TriggerFilter &f) {
         return os << "trigger accept=0x" << std::hex << f.accept
                   << " reject=0x" << f.reject << std::dec;
     }
 
 private:
-    static uint32_t maskFrom(const nlohmann::json &section, const char *key) {
+    static uint32_t maskFrom(const nlohmann::json &section, const char *key,
+                              const nlohmann::json &bits_defs) {
         if (!section.contains(key)) return 0;
         auto &arr = section[key];
         if (!arr.is_array() || arr.empty()) return 0;
         uint32_t m = 0;
-        for (auto &b : arr) m |= (1u << b.get<int>());
+        for (auto &item : arr) {
+            if (item.is_number()) {
+                m |= (1u << item.get<int>());
+            } else if (item.is_string()) {
+                auto s = item.get<std::string>();
+                bool found = false;
+                for (auto &def : bits_defs) {
+                    if (def.value("name", "") == s || def.value("label", "") == s) {
+                        m |= (1u << def.value("bit", 0));
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                    std::cerr << "TriggerFilter: unknown trigger bit name '" << s << "'\n";
+            }
+        }
         return m;
     }
 };

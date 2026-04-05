@@ -14,11 +14,11 @@
     ],
 
     "trigger_type": [
-        {"type": "0x29", "name": "SSP_RawSum",  "label": "SSP Raw Sum",   "primary_bit": 8},
+        {"type": "0x29", "name": "SSP_RawSum",   "label": "SSP Raw Sum",   "primary_bit": 8},
         {"type": "0x30", "name": "Pulser",       "label": "100Hz Pulser",  "primary_bit": 15},
         {"type": "0x39", "name": "LMS",          "label": "LMS",           "primary_bit": 24},
         {"type": "0x3A", "name": "Alpha",        "label": "Alpha",         "primary_bit": 25},
         {"type": "0x3C", "name": "MasterOR",     "label": "Master OR",     "primary_bit": 27},
-        {"type": "0x7A", "name": "Cluster",      "label": "Cluster",       "primary_bit": 9}
+        {"type": "0x7A", "name": "SSP_Cluster",  "label": "SSP Cluster",   "primary_bit": 9}
     ]
 }
