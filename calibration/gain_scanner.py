@@ -215,113 +215,95 @@ class ServerClient:
 
 
 # ============================================================================
-#  prad2hvd WebSocket Client
+#  prad2hvd HTTP Client
 # ============================================================================
 
 class HVClient:
-    """WebSocket client for prad2hvd voltage control.
+    """HTTP client for prad2hvd voltage control.
 
-    A background reader thread continuously drains broadcast messages
-    (hv_snapshot, board_snapshot, etc.) to keep the connection alive
-    during long data-collection pauses.  Command responses are routed
-    to a queue for synchronous retrieval.
+    Stateless HTTP — no WebSocket, no background threads, no broken pipes.
 
-    Intended to persist for the entire scan (one connect/close cycle).
+    API:
+        GET  /api/voltage?name=W1124           → read voltage (no auth)
+        POST /api/voltage  {name, value}        → set voltage (X-Auth header)
+        POST /api/auth     {password}           → test auth (returns granted level)
     """
 
-    def __init__(self, url: str = "ws://clonpc19:8765", log_fn=None,
+    def __init__(self, url: str = "http://clonpc19:8765", log_fn=None,
                  read_only: bool = False):
-        self.url = url
-        self._ws: Any = None
+        self.url = url.rstrip("/")
         self._log = log_fn or (lambda msg, **kw: None)
         self._read_only = read_only
-        self._queue: List[dict] = []      # response messages
-        self._queue_lock = threading.Lock()
-        self._queue_event = threading.Event()
-        self._reader: Optional[threading.Thread] = None
-        self._closing = False
+        self._password = ""
 
     def connect(self, password: str = ""):
-        try:
-            import websocket
-        except ImportError:
-            if self._read_only:
-                self._log("HV: websocket-client not installed — running without HV (read-only)", level="warn")
-                return
-            raise ImportError("pip install websocket-client  (required for HV control)")
+        """Verify connectivity and authenticate."""
+        import urllib.request, urllib.error
+        self._password = password
         self._log(f"HV: connecting to {self.url}")
-        self._ws = websocket.create_connection(self.url, timeout=10)
-        init_msg = json.loads(self._ws.recv())
-
-        # start background reader to drain broadcasts
-        self._closing = False
-        self._reader = threading.Thread(target=self._reader_loop, daemon=True)
-        self._reader.start()
-
-        auth_required = init_msg.get("auth_required", False)
-        if auth_required and password:
+        # test connectivity — 404 is OK (means server is up, module not found)
+        try:
+            self._http_get("/api/voltage?name=_test_")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                pass  # server is reachable, module just doesn't exist
+            elif self._read_only:
+                self._log(f"HV: not reachable (HTTP {e.code}) — running read-only", level="warn")
+                return
+            else:
+                raise
+        except Exception as e:
+            if self._read_only:
+                self._log(f"HV: not reachable ({e}) — running read-only", level="warn")
+                return
+            raise
+        # test auth if password given
+        if password:
             self._log("HV: authenticating (Expert)")
-            self._ws.send(json.dumps({"type": "auth", "password": password, "level": 2}))
-            resp = self._wait_response("auth_result", timeout=10)
-            if not resp or resp.get("granted", 0) < 2:
-                reason = resp.get("reason", "unknown") if resp else "no response"
-                raise RuntimeError(f"HV authentication failed: {reason}")
-            self._log(f"HV: authenticated OK (level {resp.get('granted')})")
+            resp = self._http_post("/api/auth", {"password": password})
+            granted = resp.get("granted", 0)
+            if granted < 2:
+                raise RuntimeError(f"HV authentication failed (granted={granted})")
+            self._log(f"HV: authenticated OK (level {granted})")
         self._log("HV: connected")
 
-    def _reader_loop(self):
-        """Background: read all messages, queue command responses."""
-        RESPONSE_TYPES = ("auth_result", "get_voltage_response")
-        while not self._closing:
-            try:
-                self._ws.settimeout(1.0)
-                raw = self._ws.recv()
-                msg = json.loads(raw)
-                if msg.get("type") in RESPONSE_TYPES:
-                    with self._queue_lock:
-                        self._queue.append(msg)
-                    self._queue_event.set()
-            except Exception:
-                if self._closing:
-                    break
-                # timeout — normal, keep looping
+    def _http_get(self, path: str) -> Any:
+        import urllib.request
+        with urllib.request.urlopen(f"{self.url}{path}", timeout=10) as r:
+            return json.loads(r.read())
 
-    def _wait_response(self, msg_type: str, timeout: float = 10) -> Optional[dict]:
-        """Wait for a queued response of the given type."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            with self._queue_lock:
-                for idx, msg in enumerate(self._queue):
-                    if msg.get("type") == msg_type:
-                        return self._queue.pop(idx)
-            self._queue_event.clear()
-            self._queue_event.wait(timeout=min(0.5, deadline - time.time()))
-        return None
+    def _http_post(self, path: str, data: dict) -> Any:
+        import urllib.request
+        body = json.dumps(data).encode()
+        req = urllib.request.Request(
+            f"{self.url}{path}", data=body, method="POST",
+            headers={"Content-Type": "application/json"})
+        if self._password:
+            req.add_header("X-Auth", self._password)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
 
     def get_voltage(self, name: str) -> Optional[dict]:
-        """Query current voltage info for a module by name."""
-        if self._ws is None:
-            self._log(f"HV: GET {name} → not connected", level="warn")
-            return None
-        # clear stale responses
-        with self._queue_lock:
-            self._queue = [m for m in self._queue if m.get("type") != "get_voltage_response"]
+        """Read voltage info for a module by name."""
+        import urllib.error
         try:
-            self._ws.send(json.dumps({"type": "get_voltage", "name": name}))
-        except Exception as e:
-            self._log(f"HV: GET {name} → send failed: {e}", level="error")
-            return None
-        resp = self._wait_response("get_voltage_response", timeout=10)
-        if resp:
+            resp = self._http_get(f"/api/voltage?name={name}")
             self._log(f"HV: GET {name} → vset={resp.get('vset'):.1f} "
                       f"vmon={resp.get('vmon'):.1f} limit={resp.get('limit'):.0f}")
-        else:
-            self._log(f"HV: GET {name} → no response", level="warn")
-        return resp
+            return resp
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                self._log(f"HV: GET {name} → not found", level="warn")
+            else:
+                self._log(f"HV: GET {name} → HTTP {e.code}", level="error")
+            return None
+        except Exception as e:
+            self._log(f"HV: GET {name} → failed: {e}", level="error")
+            return None
 
     def set_voltage(self, name: str, value: float,
                     old_value: float = 0.0) -> bool:
-        """Set voltage by module name. Returns True if command sent."""
+        """Set voltage by module name. Returns True on success."""
         dv = value - old_value
         direction = "increase" if dv > 0 else "decrease" if dv < 0 else "no change"
         if self._read_only:
@@ -329,24 +311,24 @@ class HVClient:
                       f"(ΔV={dv:+.1f}) [BLOCKED — read-only]", level="warn")
             return True
         self._log(f"HV: SET {name} {direction} {old_value:.1f} → {value:.1f} V (ΔV={dv:+.1f})")
+        import urllib.error
         try:
-            self._ws.send(json.dumps({"type": "set_voltage_by_name",
-                                       "name": name, "value": round(value, 2)}))
+            resp = self._http_post("/api/voltage",
+                                    {"name": name, "value": round(value, 2)})
+            self._log(f"HV: SET {name} → {resp.get('status', 'ok')}")
             return True
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                self._log(f"HV: SET {name} → forbidden (bad password?)", level="error")
+            else:
+                self._log(f"HV: SET {name} → HTTP {e.code}", level="error")
+            return False
         except Exception as e:
-            self._log(f"HV: SET {name} → send failed: {e}", level="error")
+            self._log(f"HV: SET {name} → failed: {e}", level="error")
             return False
 
     def close(self):
-        self._closing = True
-        if self._ws:
-            try:
-                self._ws.close()
-            except Exception:
-                pass
-            self._ws = None
-        if self._reader and self._reader.is_alive():
-            self._reader.join(timeout=2.0)
+        pass  # stateless — nothing to close
 
 
 # ============================================================================
@@ -375,7 +357,7 @@ class GainScanEngine:
 
     # defaults (configurable before start)
     target_adc: float = 3200.0
-    min_counts: int = 10000
+    min_counts: int = 5000
     max_iterations: int = 8
     convergence_tol: float = 50.0    # ADC units
     hv_settle_time: float = 10.0     # seconds
@@ -480,36 +462,20 @@ class GainScanEngine:
 
     # -- main loop ----------------------------------------------------------
 
-    def _connect_hv(self) -> bool:
-        """Create persistent HV connection for the whole scan."""
-        try:
-            self.hv = HVClient(self._hv_url,
-                               log_fn=self.log, read_only=self._read_only)
-            self.hv.connect(password=self._hv_password)
-            return True
-        except Exception as e:
-            self.log(f"HV connection failed: {e}", level="error")
-            return False
-
-    def _close_hv(self):
-        if self.hv:
-            try: self.hv.close()
-            except Exception: pass
-            self.hv = None
-
-    def _new_server(self) -> ServerClient:
-        """Create a fresh server client (stateless HTTP, per-module)."""
-        return ServerClient(self._server_url,
-                            log_fn=self.log, read_only=self._read_only)
-
     def _run(self):
         n = self._end_idx - self._start_idx
         self.log(f"Gain scan started: {n} modules, target ADC {self.target_adc:.0f}")
 
-        # one HV connection for the entire scan
-        if not self._connect_hv():
+        # both clients are stateless HTTP — create once, reuse for all modules
+        self.server = ServerClient(self._server_url,
+                                   log_fn=self.log, read_only=self._read_only)
+        self.hv = HVClient(self._hv_url,
+                           log_fn=self.log, read_only=self._read_only)
+        try:
+            self.hv.connect(password=self._hv_password)
+        except Exception as e:
+            self.log(f"HV connection failed: {e}", level="error")
             self.state = GainScanState.FAILED
-            self.log("Cannot start — HV connection failed", level="error")
             return
 
         try:
@@ -529,15 +495,11 @@ class GainScanEngine:
                 self.module_counts = 0
                 self.collect_rate = 0.0
                 self.iteration_history = []
-                # fresh server client per module (stateless HTTP)
-                self.server = self._new_server()
                 mod = self.path[i]
 
                 self.log(f"── [{i+1}/{len(self.path)}] {mod.name} ──")
 
                 self._process_module(i, mod)
-
-                self.server = None
                 self._skip.clear()
 
                 # if this module failed, pause the scan for user intervention
@@ -547,7 +509,6 @@ class GainScanEngine:
                     return
 
         finally:
-            self._close_hv()
             if self._stop.is_set():
                 self.state = GainScanState.IDLE
                 self.log("Gain scan stopped by user")

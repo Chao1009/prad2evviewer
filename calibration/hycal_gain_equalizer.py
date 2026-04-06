@@ -503,7 +503,7 @@ class GainEqualizerWindow(QMainWindow):
         r.addWidget(self._ge_server_edit); lo.addLayout(r)
 
         r = QHBoxLayout(); r.addWidget(QLabel("HV:"))
-        self._ge_hv_edit = QLineEdit("ws://clonpc19:8765")
+        self._ge_hv_edit = QLineEdit("http://clonpc19:8765")
         r.addWidget(self._ge_hv_edit); lo.addLayout(r)
 
         r = QHBoxLayout(); r.addWidget(QLabel("HV Password:"))
@@ -516,7 +516,7 @@ class GainEqualizerWindow(QMainWindow):
         self._ge_target.setValue(3200); r.addWidget(self._ge_target)
         r.addWidget(QLabel("Min counts:"))
         self._ge_counts = QSpinBox(); self._ge_counts.setRange(100, 1000000)
-        self._ge_counts.setValue(10000); self._ge_counts.setSingleStep(1000)
+        self._ge_counts.setValue(5000); self._ge_counts.setSingleStep(1000)
         r.addWidget(self._ge_counts); lo.addLayout(r)
 
         r = QHBoxLayout()
@@ -1079,16 +1079,10 @@ class GainEqualizerWindow(QMainWindow):
             t = getattr(self._gain_engine, '_thread', None)
             if t and t.is_alive():
                 t.join(timeout=2.0)
-            # close HV WebSocket if still open
-            if getattr(self._gain_engine, 'hv', None) is not None:
-                self._gain_engine.hv.close()
         if self._log_file and not self._log_file.closed:
             self._log_file.close()
         self._log_file = None
         super().closeEvent(e)
-        # force exit in case daemon threads are still blocked
-        import os
-        os._exit(0)
 
 
 # ============================================================================
