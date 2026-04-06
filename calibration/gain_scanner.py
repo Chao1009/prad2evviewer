@@ -367,6 +367,7 @@ class GainScanEngine:
     move_timeout: float = 300.0      # seconds
     edge_adc_min: float = 500.0      # reject edges below this
     edge_adc_max: float = 3900.0     # reject edges above this
+    use_log_y: bool = True           # log y scale for report snapshots
 
     def __init__(self, motor_ep,
                  server_url: str, hv_url: str, hv_password: str,
@@ -709,12 +710,19 @@ class GainScanEngine:
             p.drawLine(ax, ay, ax, ay + ph)
             p.drawLine(ax, ay + ph, ax + pw, ay + ph)
 
-            # bars
+            # bars (log or linear y)
+            import math as _rmath
+            use_log = self.use_log_y
+            log_vmax = _rmath.log10(max(vmax, 1)) if use_log else 0
             bar_w = pw / n
             p.setPen(Qt.PenStyle.NoPen)
             for bi, v in enumerate(bins):
                 if v <= 0: continue
-                bh = v / vmax * ph
+                if use_log:
+                    frac = _rmath.log10(v) / log_vmax if log_vmax > 0 else 0
+                else:
+                    frac = v / vmax
+                bh = frac * ph
                 bx = ax + bi * bar_w
                 by = ay + ph - bh
                 p.fillRect(QRectF(bx, by, max(bar_w - 0.3, 0.3), bh),
@@ -733,6 +741,31 @@ class GainScanEngine:
                 ex = ax + (edge_bin + 0.5) * bar_w
                 p.setPen(QPen(QColor("#3fb950"), 2))
                 p.drawLine(int(ex), ay, int(ex), ay + ph)
+
+            # y-axis grid
+            if use_log:
+                decade = 10
+                while decade < vmax:
+                    gf = _rmath.log10(decade) / log_vmax
+                    gy = ay + ph - gf * ph
+                    p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+                    p.drawLine(ax + 1, int(gy), ax + pw, int(gy))
+                    p.setPen(QColor("#8b949e"))
+                    p.setFont(QFont("Consolas", 7))
+                    p.drawText(QRectF(0, gy - 5, PAD_L - 4, 10),
+                               Qt.AlignmentFlag.AlignRight, f"{decade}")
+                    decade *= 10
+            else:
+                for gi in range(1, 5):
+                    gf = gi / 5
+                    gy = ay + ph - gf * ph
+                    gval = int(vmax * gf)
+                    p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+                    p.drawLine(ax + 1, int(gy), ax + pw, int(gy))
+                    p.setPen(QColor("#8b949e"))
+                    p.setFont(QFont("Consolas", 7))
+                    p.drawText(QRectF(0, gy - 5, PAD_L - 4, 10),
+                               Qt.AlignmentFlag.AlignRight, f"{gval}")
 
             # separator
             p.setPen(QPen(QColor("#30363d"), 1))

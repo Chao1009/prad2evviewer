@@ -70,12 +70,16 @@ class HistogramWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._bins: List[int] = []
-        self._target_bin: Optional[int] = None  # vertical target line
-        self._edge_bin: Optional[int] = None     # detected edge marker
+        self._target_bin: Optional[int] = None
+        self._edge_bin: Optional[int] = None
         self._title: str = ""
-        self._info: str = ""                     # e.g. "V=1525.0  edge=3200"
+        self._info: str = ""
+        self._log_y: bool = True  # log or linear y scale
         self.setMinimumHeight(140)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def setLogY(self, on: bool):
+        self._log_y = on; self.update()
 
     def setData(self, bins: List[int], target_bin: Optional[int] = None,
                 edge_bin: Optional[int] = None):
@@ -117,7 +121,13 @@ class HistogramWidget(QWidget):
         n = len(bins)
         vmax = max(bins) if bins else 1
         if vmax == 0: vmax = 1
-        log_vmax = _math.log10(max(vmax, 1))
+        use_log = self._log_y
+        log_vmax = _math.log10(max(vmax, 1)) if use_log else 0
+
+        def _bar_frac(v):
+            if use_log:
+                return _math.log10(v) / log_vmax if log_vmax > 0 else 0
+            return v / vmax
 
         # title + info
         p.setPen(QColor(C.ACCENT))
@@ -132,13 +142,12 @@ class HistogramWidget(QWidget):
         p.drawLine(L, T, L, T + ph)
         p.drawLine(L, T + ph, L + pw, T + ph)
 
-        # bars (log y scale)
+        # bars
         bar_w = pw / n
         p.setPen(Qt.PenStyle.NoPen)
         for i, v in enumerate(bins):
             if v <= 0: continue
-            frac = _math.log10(v) / log_vmax if log_vmax > 0 else 0
-            bh = frac * ph
+            bh = _bar_frac(v) * ph
             x = L + i * bar_w
             y = T + ph - bh
             p.fillRect(QRectF(x, y, max(bar_w - 0.5, 0.5), bh), QColor(C.ACCENT))
@@ -155,26 +164,37 @@ class HistogramWidget(QWidget):
             p.setPen(QPen(QColor(C.GREEN), 2))
             p.drawLine(int(ex), T, int(ex), T + ph)
 
-        # y-axis labels (log scale: 1, 10, 100, ...)
+        # y-axis labels + grid
         p.setPen(QColor(C.DIM))
         p.setFont(QFont("Consolas", 9))
         p.drawText(QRectF(0, T - 2, L - 4, 14),
                    Qt.AlignmentFlag.AlignRight, f"{vmax}")
         p.drawText(QRectF(0, T + ph - 7, L - 4, 14),
-                   Qt.AlignmentFlag.AlignRight, "1")
-        # grid lines at powers of 10
-        p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
-        decade = 10
-        while decade < vmax:
-            frac = _math.log10(decade) / log_vmax
-            gy = T + ph - frac * ph
-            p.drawLine(L + 1, int(gy), L + pw, int(gy))
-            p.setPen(QColor(C.DIM))
-            p.setFont(QFont("Consolas", 8))
-            p.drawText(QRectF(0, gy - 7, L - 4, 14),
-                       Qt.AlignmentFlag.AlignRight, f"{decade}")
-            p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
-            decade *= 10
+                   Qt.AlignmentFlag.AlignRight, "1" if use_log else "0")
+        if use_log:
+            decade = 10
+            while decade < vmax:
+                frac = _math.log10(decade) / log_vmax
+                gy = T + ph - frac * ph
+                p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+                p.drawLine(L + 1, int(gy), L + pw, int(gy))
+                p.setPen(QColor(C.DIM))
+                p.setFont(QFont("Consolas", 8))
+                p.drawText(QRectF(0, gy - 7, L - 4, 14),
+                           Qt.AlignmentFlag.AlignRight, f"{decade}")
+                decade *= 10
+        else:
+            n_grid = 4
+            for gi in range(1, n_grid + 1):
+                frac = gi / (n_grid + 1)
+                gy = T + ph - frac * ph
+                gval = int(vmax * frac)
+                p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+                p.drawLine(L + 1, int(gy), L + pw, int(gy))
+                p.setPen(QColor(C.DIM))
+                p.setFont(QFont("Consolas", 8))
+                p.drawText(QRectF(0, gy - 7, L - 4, 14),
+                           Qt.AlignmentFlag.AlignRight, f"{gval}")
 
         p.end()
 
@@ -532,10 +552,10 @@ class GainEqualizerWindow(QMainWindow):
         self._ge_edge_frac = QDoubleSpinBox(); self._ge_edge_frac.setRange(0.1, 20.0)
         self._ge_edge_frac.setValue(5.0); self._ge_edge_frac.setSingleStep(0.5)
         self._ge_edge_frac.setDecimals(1); r.addWidget(self._ge_edge_frac)
-        self._ge_log_cumul = QPushButton("Log: ON")
-        self._ge_log_cumul.setCheckable(True); self._ge_log_cumul.setChecked(True)
-        self._ge_log_cumul.clicked.connect(self._toggleLogCumul)
-        r.addWidget(self._ge_log_cumul); lo.addLayout(r)
+        self._ge_log_y = QPushButton("LogY: ON")
+        self._ge_log_y.setCheckable(True); self._ge_log_y.setChecked(True)
+        self._ge_log_y.clicked.connect(self._toggleLogY)
+        r.addWidget(self._ge_log_y); lo.addLayout(r)
 
         bf = QHBoxLayout()
         self._btn_start = QPushButton("Start")
@@ -580,9 +600,10 @@ class GainEqualizerWindow(QMainWindow):
 
     # -- commands -----------------------------------------------------------
 
-    def _toggleLogCumul(self):
-        on = self._ge_log_cumul.isChecked()
-        self._ge_log_cumul.setText("Log: ON" if on else "Log: OFF")
+    def _toggleLogY(self):
+        on = self._ge_log_y.isChecked()
+        self._ge_log_y.setText("LogY: ON" if on else "LogY: OFF")
+        self._histogram.setLogY(on)
 
     def _cmdStart(self):
         if self._gain_engine and self._gain_engine.state not in (
@@ -645,7 +666,8 @@ class GainEqualizerWindow(QMainWindow):
         eng.beam_threshold = self._beam_thresh_spin.value()
         eng.pos_threshold = self._thresh_spin.value()
         eng.analyzer.edge_fraction = self._ge_edge_frac.value() / 100.0
-        eng.analyzer.use_log_cumul = self._ge_log_cumul.isChecked()
+        eng.analyzer.use_log_cumul = self._ge_log_y.isChecked()
+        eng.use_log_y = self._ge_log_y.isChecked()
         self._gain_engine = eng
         eng.start(self._selected_start_idx, count=self._count_spin.value())
 
@@ -932,7 +954,7 @@ class GainEqualizerWindow(QMainWindow):
         self._btn_start.setEnabled(not running)
         for w in (self._ge_server_edit, self._ge_hv_edit, self._ge_hv_pw,
                   self._ge_target, self._ge_counts, self._ge_maxiter, self._ge_tol,
-                  self._ge_edge_frac, self._ge_log_cumul):
+                  self._ge_edge_frac, self._ge_log_y):
             w.setEnabled(not running)
         self._btn_pause.setEnabled(running)
         self._btn_stop.setEnabled(running)
