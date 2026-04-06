@@ -328,10 +328,6 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     // - We also run the GemSystem reconstruction to get GEM hits.
     // - We fill a different TTree with reconstructed quantities instead of raw data.
 
-    // ── trigger bits (database/trigger_bits.json) ───────────────────────────
-    static constexpr uint32_t TBIT_LMS   = (1u << 24);
-    static constexpr uint32_t TBIT_sum = (1u << 8);
-
     std::string db_dir = DATABASE_DIR;
     if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))  db_dir = env;
 
@@ -439,9 +435,11 @@ if(!prad1){
             ev->trigger_bits = event->info.trigger_bits;
             ev->timestamp    = event->info.timestamp;
 
-            bool total_sum = (ev->trigger_bits & TBIT_sum) != 0;
-            bool LMS = (ev->trigger_bits & TBIT_LMS) != 0;
-            if( !total_sum ) continue;
+            // TODO: use config-driven trigger filter (config.json "physics" section
+            // accept_trigger_bits/reject_trigger_bits) instead of hardcoded bit check.
+            // Currently drops all non-SSP_RawSum events, including LMS.
+            static constexpr uint32_t TBIT_sum = (1u << 8);
+            if (!(ev->trigger_bits & TBIT_sum)) continue;
 
             // decode and reconstruct HyCal data
             for (int r = 0; r < event->nrocs; ++r) {
@@ -466,6 +464,9 @@ if(!prad1){
                             if (wres.npeaks <= 0) continue;
                             adc = wres.peaks[0].integral;
                         }
+                        // TODO: use real calibration constants from database.
+                        // Currently using a flat 0.2 MeV/ADC for all modules as placeholder.
+                        // PbWO4 and lead-glass have different gains — load from hycal_calibration.json.
                         hycal.SetCalibConstant(mod->id, 0.2);
                         float energy = static_cast<float>(mod->energize(adc));
                         clusterer.AddHit(mod->index, energy);
