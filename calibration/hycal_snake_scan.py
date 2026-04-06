@@ -1079,13 +1079,24 @@ class SnakeScanWindow(QMainWindow):
             err = math.sqrt((rx - px)**2 + (ry - py)**2)
             name_html = f' <b style="color:{C.ACCENT}">{self._target_name}</b>' if self._target_name else ""
             self._lbl_expected.setText(f"Target:   ({px:.3f}, {py:.3f}){name_html}")
+            # ETA from distance and motor velocities
+            vx = self.ep.get("x_velo", DEFAULT_VELO_X) or DEFAULT_VELO_X
+            vy = self.ep.get("y_velo", DEFAULT_VELO_Y) or DEFAULT_VELO_Y
+            dx, dy = abs(rx - px), abs(ry - py)
+            eta_sec = max(dx / vx if vx > 0 else 0, dy / vy if vy > 0 else 0)
+            if eta_sec >= 60:
+                eta_str = f" ({int(eta_sec)//60}m {int(eta_sec)%60}s)"
+            elif eta_sec >= 1:
+                eta_str = f" ({eta_sec:.0f}s)"
+            else:
+                eta_str = ""
             scanning = self.engine.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
             if scanning:
                 ef = C.RED if err > self.engine.pos_threshold else C.GREEN
-                self._lbl_error.setText(f"Diff:     {err:.3f} mm")
+                self._lbl_error.setText(f"Diff:     {err:.3f} mm{eta_str}")
                 self._lbl_error.setStyleSheet(f"color: {ef}; font: bold 13pt 'Consolas';")
             else:
-                self._lbl_error.setText(f"Diff:     {err:.3f} mm")
+                self._lbl_error.setText(f"Diff:     {err:.3f} mm{eta_str}")
                 self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
         else:
             self._lbl_expected.setText("Target:   --")
