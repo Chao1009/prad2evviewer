@@ -2,25 +2,91 @@
 
 PRad-II, Jefferson Lab Hall B
 
-## Operation Manual
+---
+
+## Gain Equalizer — Operator Manual
 
 ### Quick Start
 
-On **clasrun@clonpc19**, or any other machine in the counting room:
+On a counting house machine, logged in as **clasrun**:
 
 ```bash
 cd ~/prad2_daq/prad2evviewer
-./calibration/hycal_snake_scan.py --expert
+python calibration/hycal_gain_equalizer.py --expert
+```
+
+The default settings (server, HV address, password, target ADC, min counts, etc.)
+should work out of the box. **Do not change settings unless instructed by the Run
+Coordinator (RC).**
+
+### Running a Gain Scan
+
+1. Select **Path**: use `snake-all-pwo-r` unless told otherwise by RC.
+2. Set **Start** module: ask RC for the starting point. Plan is to finish the
+   bottom part first, then return to the top.
+3. Click **Start**.
+
+### During the Scan
+
+Pay attention to:
+
+- **Red marker** (expected beam position) vs. **hot region** on the scaler map —
+  they should be at the same location.
+- **Histogram** in the right panel — it should show a clear spectrum building up.
+- **Event log** — watch for `WARN` and `ERROR` messages.
+
+### On ERROR (Scan Stops)
+
+An `ERROR` causes the scan to stop automatically.
+
+1. Note the module name and error message from the log.
+2. Click **Start** to resume from the next module.
+3. If the same error repeats, **contact the RC**.
+
+### After Each Row
+
+1. Find the screenshot files in `calibration/logs/`:
+   ```
+   GE_20260406_143025_W100_success.png
+   GE_20260406_143530_W101_failure.png
+   ```
+   Files are named `GE_{timestamp}_{module}_{status}.png`, sorted by time.
+2. Post a log entry to **PRADLOG** with all screenshots from the completed row.
+3. Failed modules need a redo or manual gain equalization — discuss with RC if
+   unsure.
+
+### Event Log Files
+
+Full event logs are saved to `calibration/logs/gain_eq_YYYYMMDD_HHMMSS.log`.
+Upload these with the PRADLOG entry.
+
+---
+
+## Snake Scan — Operator Manual
+
+### Quick Start
+
+```bash
+cd ~/prad2_daq/prad2evviewer
+python calibration/hycal_snake_scan.py --expert
 ```
 
 ### Running a Scan
 
 1. Select **Path** profile (`(autogen)` or a predefined path from `paths.json`).
 2. For autogen: set **LG layers** (0 = PbWO4 only, 1--2 to include PbGlass).
-3. It's very likely all PbWO4 scan or 2 LG Layers scan, talk to RC if you're not sure about the scan path.
+3. Talk to RC if you're not sure about the scan path.
 4. Set **Start** module and **Count** (0 = scan all from start to end).
 5. Set **Dwell time** and **Pos. threshold**.
 6. Click **Start Scan**.
+
+### During the Scan
+
+Verify that:
+
+1. The **red marker** position matches the **scaler hot spot** — the current
+   module should have the highest scaler reading.
+2. **WARN/ERROR** messages in the event log are addressed promptly.
 
 ### Resume After Interruption
 
@@ -28,68 +94,35 @@ cd ~/prad2_daq/prad2evviewer
 2. Select the next module as **Start**.
 3. Click **Start Scan**.
 
-### Shift Checklist
-
-During the scan, verify that:
-
-1. The **red crosshair** position matches the **occupancy plot** from the
-   online event monitor -- the current module should have the highest occupancy.
-2. The **FADC scalers** are consistent with the beam on the expected module.
-
-If the occupancy does not match, **Stop** the scan, set **Start** to the
-last good module, and try again. Log the observation and action on
-**PRADLOG**. If the error persists, **contact the run coordinator**.
-
-### Logging
-
-Events are logged to `calibration/logs/snake_scan_YYYYMMDD_HHMMSS.log`.
-**Upload log files when the scan or shift ends.**
-
-### Troubleshooting
-
-If a problem occurs, **try again first**. If it persists, contact the
-run coordinator.
-
-| Symptom | Likely cause |
-|---------|--------------|
-| PVs not connecting | IOC down, network / firewall |
-| Motors don't move | Interlocks, motor enable, SPMG not Go |
-| Move blocked | Target outside travel limits (see log) |
-| Position errors | Motor speed, backlash, encoder |
-| Move timeout (>300 s) | Motor stall, limit switch, IOC |
-
 ---
 
 ## Tools
 
 | Script | Purpose |
 |--------|---------|
-| `hycal_snake_scan.py` | Snake scan GUI (simulation, expert, or observer mode) |
+| `hycal_gain_equalizer.py` | Automatic gain equalization (expert/simulation/observer) |
+| `hycal_snake_scan.py` | Snake scan with dwell time (expert/simulation/observer) |
 | `scan_path_editor.py` | Manual path builder GUI |
-| `scan_utils.py` | Shared types, constants, coordinate transforms |
+| `gain_scanner.py` | Gain scan engine, spectrum analyzer, server/HV clients |
+| `scan_geoview.py` | HyCal map widget with scaler overlay |
+| `scan_epics.py` | EPICS PV utilities (motor, scaler) |
+| `scan_engine.py` | Scan engine, path builder |
+| `scan_utils.py` | Shared types, constants, coordinate transforms, theme |
 | `paths.json` | Predefined scan path profiles |
 
-### Snake Scan
+### Command-Line Modes
 
 ```bash
-python calibration/hycal_snake_scan.py              # simulation
-python calibration/hycal_snake_scan.py --expert      # expert operator (full control)
-python calibration/hycal_snake_scan.py --observer    # observer (read-only monitor)
-python calibration/hycal_snake_scan.py --paths calibration/paths.json
+python calibration/hycal_gain_equalizer.py              # simulation (read-only)
+python calibration/hycal_gain_equalizer.py --expert      # expert (full control)
+python calibration/hycal_gain_equalizer.py --observer    # observer (read-only)
+
+python calibration/hycal_snake_scan.py                   # simulation
+python calibration/hycal_snake_scan.py --expert          # expert
+python calibration/hycal_snake_scan.py --observer        # observer
+
+python calibration/scan_path_editor.py                   # path editor
 ```
-
-Auto-generated path order: **Center (PbWO4)** -> **Bottom** -> nearest
-**Side** -> **Top** -> other **Side**, minimising y-axis travel.
-
-### Path Editor
-
-```bash
-python calibration/scan_path_editor.py
-python calibration/scan_path_editor.py --paths calibration/paths.json
-```
-
-Click modules on the map to build a path. Intermediate modules on the
-connecting line are auto-inserted. Profiles are saved to `paths.json`.
 
 ## Coordinate System
 
@@ -104,6 +137,9 @@ ptrans_y =   10.11 - module_y       (y inverted)
 Travel limits: ptrans_x **-582.65** to **329.15** mm,
 ptrans_y **-672.50** to **692.72** mm.
 
-**Safety:** Only four EPICS PVs are written (in expert mode only):
-`ptrans_{x,y}.VAL` and `ptrans_{x,y}.SPMG`. All others are read-only.
-Observer mode (`--observer`) blocks all PV writes and disables scan controls.
+## Safety
+
+- **Expert mode** writes to four EPICS PVs: `ptrans_{x,y}.VAL` and `ptrans_{x,y}.SPMG`.
+- **Gain equalizer** additionally sends HTTP commands to `prad2hvd` (HV set) and
+  `prad2_server` (histogram clear). HV limits are enforced server-side.
+- **Observer/simulation** modes block all writes.

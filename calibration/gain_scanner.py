@@ -652,7 +652,7 @@ class GainScanEngine:
         """Save a vertically concatenated histogram screenshot for a module.
 
         Each iteration is drawn as a small histogram panel, stacked top to
-        bottom in time order.  Filename: GE_{name}_{status}_{time}.png
+        bottom in time order.  Filename: GE_{time}_{name}_{status}.png
         """
         history = self.iteration_history
         if not history:
@@ -775,7 +775,7 @@ class GainScanEngine:
 
         os.makedirs(self.report_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"GE_{mod.name}_{status}_{ts}.png"
+        fname = f"GE_{ts}_{mod.name}_{status}.png"
         path = os.path.join(self.report_dir, fname)
         img.save(path)
         self.log(f"Report saved: {fname}")

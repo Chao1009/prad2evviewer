@@ -527,7 +527,7 @@ class GainEqualizerWindow(QMainWindow):
         r.addWidget(self._ge_hv_edit); lo.addLayout(r)
 
         r = QHBoxLayout(); r.addWidget(QLabel("HV Password:"))
-        self._ge_hv_pw = QLineEdit(); self._ge_hv_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        self._ge_hv_pw = QLineEdit("prad2_admin"); self._ge_hv_pw.setEchoMode(QLineEdit.EchoMode.Password)
         r.addWidget(self._ge_hv_pw); lo.addLayout(r)
 
         r = QHBoxLayout()
