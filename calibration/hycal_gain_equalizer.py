@@ -559,14 +559,18 @@ class GainEqualizerWindow(QMainWindow):
             self._log("Select a path first", level="error"); return
 
         try:
-            server = ServerClient(self._ge_server_edit.text().strip(), log_fn=self._log)
+            ro = self.simulation
+            server = ServerClient(self._ge_server_edit.text().strip(),
+                                  log_fn=self._log, read_only=ro)
             key_map = server.build_key_map()
-            self._log(f"Server connected, {len(key_map)} DAQ channels")
+            mode = "read-only" if ro else "read-write"
+            self._log(f"Server connected ({mode}), {len(key_map)} DAQ channels")
         except Exception as e:
             self._log(f"Server error: {e}", level="error"); return
 
         try:
-            hv = HVClient(self._ge_hv_edit.text().strip(), log_fn=self._log)
+            hv = HVClient(self._ge_hv_edit.text().strip(),
+                          log_fn=self._log, read_only=ro)
             hv.connect(password=self._ge_hv_pw.text())
             self._log("HV connected")
         except Exception as e:

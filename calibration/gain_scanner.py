@@ -94,10 +94,12 @@ class SpectrumAnalyzer:
 class ServerClient:
     """HTTP client for prad2_server histogram and occupancy APIs."""
 
-    def __init__(self, url: str = "http://clondaq6:5051", log_fn=None):
+    def __init__(self, url: str = "http://clondaq6:5051", log_fn=None,
+                 read_only: bool = False):
         self.url = url.rstrip("/")
         self._key_map: Dict[str, str] = {}
         self._log = log_fn or (lambda msg, **kw: None)
+        self._read_only = read_only
 
     def _get(self, path: str) -> Any:
         import urllib.request
@@ -115,6 +117,9 @@ class ServerClient:
         return self._get("/api/config")
 
     def clear_histograms(self):
+        if self._read_only:
+            self._log("Server: POST /api/hist/clear [BLOCKED — read-only]", level="warn")
+            return {}
         self._log("Server: POST /api/hist/clear")
         return self._post("/api/hist/clear")
 
@@ -157,11 +162,13 @@ class ServerClient:
 class HVClient:
     """WebSocket client for prad2hvd voltage control."""
 
-    def __init__(self, url: str = "ws://clonpc19:8765", log_fn=None):
+    def __init__(self, url: str = "ws://clonpc19:8765", log_fn=None,
+                 read_only: bool = False):
         self.url = url
         self._ws: Any = None
         self._lock = threading.Lock()
         self._log = log_fn or (lambda msg, **kw: None)
+        self._read_only = read_only
 
     def connect(self, password: str = ""):
         import websocket
@@ -212,6 +219,9 @@ class HVClient:
 
     def set_voltage(self, name: str, value: float) -> bool:
         """Set voltage by module name. Returns True if command sent."""
+        if self._read_only:
+            self._log(f"HV: SET {name} = {value:.2f} V [BLOCKED — read-only]", level="warn")
+            return True  # pretend success so scan continues
         self._log(f"HV: SET {name} = {value:.2f} V")
         try:
             self._send({"type": "set_voltage_by_name",
