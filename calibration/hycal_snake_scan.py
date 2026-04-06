@@ -687,20 +687,12 @@ class SnakeScanWindow(QMainWindow):
 
     def _buildPositionCheck(self, parent):
         pe = QGroupBox("Position Check"); lo = QVBoxLayout(pe)
-        self._lbl_expected = QLabel("Target:   --"); lo.addWidget(self._lbl_expected)
-        self._lbl_actual = QLabel("Actual:   --"); lo.addWidget(self._lbl_actual)
-        self._lbl_error = QLabel("Diff:     --")
-        self._lbl_error.setStyleSheet("font: bold 13pt 'Consolas';"); lo.addWidget(self._lbl_error)
-        dr = QHBoxLayout()
-        dr.addWidget(QLabel("Drift:"))
-        self._lbl_drift_x = QLabel("X --")
-        self._lbl_drift_x.setStyleSheet(f"color: {C.DIM};")
-        dr.addWidget(self._lbl_drift_x)
-        self._lbl_drift_y = QLabel("Y --")
-        self._lbl_drift_y.setStyleSheet(f"color: {C.DIM};")
-        dr.addWidget(self._lbl_drift_y)
-        dr.addStretch()
-        lo.addLayout(dr)
+        self._lbl_expected = QLabel("Target: --"); lo.addWidget(self._lbl_expected)
+        self._lbl_actual = QLabel("Actual: --"); lo.addWidget(self._lbl_actual)
+        self._lbl_error = QLabel("Diff:   --")
+        self._lbl_error.setStyleSheet(f"font: bold 13pt 'Consolas';")
+        lo.addWidget(self._lbl_error)
+        self._lbl_drift = QLabel("Drift:   --"); lo.addWidget(self._lbl_drift)
         parent.addWidget(pe)
 
     def _buildScalerControl(self, parent):
@@ -1034,10 +1026,9 @@ class SnakeScanWindow(QMainWindow):
         dy = abs((enc_y - self._enc_offset_y) - rbv_y)
         fx = C.RED if dx > self.ENCODER_DRIFT_ERR else (C.YELLOW if dx > self.ENCODER_DRIFT_WARN else C.GREEN)
         fy = C.RED if dy > self.ENCODER_DRIFT_ERR else (C.YELLOW if dy > self.ENCODER_DRIFT_WARN else C.GREEN)
-        self._lbl_drift_x.setText(f"X {dx:.4f}")
-        self._lbl_drift_x.setStyleSheet(f"color: {fx};")
-        self._lbl_drift_y.setText(f"Y {dy:.4f}")
-        self._lbl_drift_y.setStyleSheet(f"color: {fy};")
+        self._lbl_drift.setText(
+            f'Drift:   X <span style="color:{fx}">{dx:.4f}</span>  '
+            f'Y <span style="color:{fy}">{dy:.4f}</span>')
 
     def _updateStatus(self):
         for key, lbl in self._status_labels.items():
@@ -1073,7 +1064,7 @@ class SnakeScanWindow(QMainWindow):
                              f"border-radius: 3px; padding: 1px 6px;")
         # position check — target is set when a move is commanded
         rx, ry = self.ep.get("x_rbv", 0.0), self.ep.get("y_rbv", 0.0)
-        self._lbl_actual.setText(f"Actual:   ({rx:.3f}, {ry:.3f})")
+        self._lbl_actual.setText(f"Actual: ({rx:.3f}, {ry:.3f})")
         px, py = self._target_px, self._target_py
         if px is not None and py is not None:
             err = math.sqrt((rx - px)**2 + (ry - py)**2)
@@ -1093,14 +1084,14 @@ class SnakeScanWindow(QMainWindow):
             scanning = self.engine.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
             if scanning:
                 ef = C.RED if err > self.engine.pos_threshold else C.GREEN
-                self._lbl_error.setText(f"Diff:     {err:.3f} mm{eta_str}")
+                self._lbl_error.setText(f"Diff:   {err:.3f} mm{eta_str}")
                 self._lbl_error.setStyleSheet(f"color: {ef}; font: bold 13pt 'Consolas';")
             else:
-                self._lbl_error.setText(f"Diff:     {err:.3f} mm{eta_str}")
+                self._lbl_error.setText(f"Diff:   {err:.3f} mm{eta_str}")
                 self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
         else:
-            self._lbl_expected.setText("Target:   --")
-            self._lbl_error.setText("Diff:     --")
+            self._lbl_expected.setText("Target: --")
+            self._lbl_error.setText("Diff:   --")
             self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
 
     def _updateScanInfo(self):
