@@ -241,7 +241,7 @@ int main(int argc, char *argv[])
             if (!first) json_out << ",\n";
             first = false;
             json_out << "  {\"name\":\"W" << (i+1)
-                     << "\",\"peak\":" << peak[i]
+                     << "\",\"integral_spec_peak\":" << peak[i]
                      << ",\"event_count\":" << event_num_module[i+1000+1] << "}";
         }
         // G modules (lead-glass, id = 1..1000)
