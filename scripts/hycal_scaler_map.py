@@ -21,6 +21,9 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+#local path for testing on farm
+sys.path.append('/home/wrightso/.local/bin/*')
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QSizePolicy,
@@ -493,11 +496,32 @@ class ScalerMapWindow(QMainWindow):
     # -- actions --
 
     def _refresh(self):
+        W_totalSum = 0
+        topSum = 0
+        botSum = 0
+        leftSum = 0
+        rightSum = 0
         for m in self._scalable:
             v = self._ep.get(m.name)
             if v is not None:
                 self._values[m.name] = float(v)
+                if "W" in m.name:
+                    W_totalSum += v
+                    if(int(m.name.strip("W"))<578):
+                        topSum += v
+                    else:
+                        botSum += v
+                    if(int(((float(m.name.strip("W"))/34.0)%1)*10)<=5):
+                        leftSum += v
+                    else:
+                        rightSum += v
+
+
         self._map.set_values(self._values)
+        
+        W_totalSum = W_totalSum/1000.0
+        y_asym = (topSum-botSum)/1000.0
+        x_asym = (rightSum-leftSum)/1000.0
 
         if self._auto_range_on and self._values:
             self._do_auto_range()
@@ -509,11 +533,14 @@ class ScalerMapWindow(QMainWindow):
         self._conn_lbl.setStyleSheet(f"color:{fg};font:10px Monospace;")
 
         if self._values:
-            lo = min(self._values.values())
-            hi = max(self._values.values())
+            lo = min(self._values.values())/1000.0
+            hi = max(self._values.values())/1000.0
             self.statusBar().showMessage(
-                f"Data: {lo:.0f} .. {hi:.0f}    "
-                f"Channels: {len(self._values)}")
+                f"Data: {lo:.0f}kHz .. {hi:.0f}kHz    "
+                f"Channels: {len(self._values)}    "
+                f"Crystal Total: {W_totalSum:.2f}kHz    "
+                f"X-Asym: {x_asym:.3f}kHz    "
+                f"Y-Asym: {y_asym:.3f}kHz")
 
     def _toggle_polling(self):
         self._polling = not self._polling
