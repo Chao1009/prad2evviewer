@@ -540,7 +540,7 @@ class SnakeScanWindow(QMainWindow):
         r = QHBoxLayout(); r.addWidget(QLabel("Path:"))
         self._profile_combo = QComboBox()
         self._profile_combo.addItems([self.NONE, self.AUTOGEN] + sorted(self._profiles.keys()))
-        self._profile_combo.setCurrentText(self.AUTOGEN)
+        self._profile_combo.setCurrentText(self.NONE)
         self._profile_combo.activated.connect(self._onPathProfileChanged)
         r.addWidget(self._profile_combo, stretch=1); lo.addLayout(r)
 
@@ -1144,6 +1144,9 @@ def main():
         scaler_ep = SimulatedScalerEPICS(all_modules)
     else:
         scaler_ep = ScalerPVGroup(all_modules)
+    s_ok, s_total = scaler_ep.connect()
+    if not simulation:
+        print(f"Scalers: {s_ok}/{s_total} PVs connected")
 
     app = QApplication(sys.argv)
     win = SnakeScanWindow(motor_ep, scaler_ep, simulation, all_modules,

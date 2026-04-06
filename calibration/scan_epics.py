@@ -428,6 +428,9 @@ class SimulatedScalerEPICS:
         ]
         self._rng = random.Random(0)
 
+    def connect(self) -> Tuple[int, int]:
+        return self.connection_count()
+
     def get(self, name: str) -> Optional[float]:
         if name in self._labels:
             return self._rng.uniform(0, 1000)
