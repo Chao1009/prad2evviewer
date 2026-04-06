@@ -80,25 +80,29 @@ static void saveModuleWaveforms(TTree *tree, fdec::HyCalSystem &hycal,
 
 int main(int argc, char *argv[])
 {
-    std::string input = "cosmic.root";
-    int view_module_id = -1;
+    std::string input;
+    int run_number = -1, file_number = -1;
     int opt;
-    while ((opt = getopt(argc, argv, "m:")) != -1) {
+    while ((opt = getopt(argc, argv, "r:n:")) != -1) {
         switch (opt) {
-            case 'm': view_module_id = std::atoi(optarg); break;
+            case 'r': run_number = std::atoi(optarg); break;
+            case 'n': file_number = std::atoi(optarg); break;
+            default:
+                std::cerr << "Usage: " << argv[0] << " [-r run_number] [-n file_number]\n";
+                return 1;
         }
     }
     if (optind < argc) input = argv[optind];
 
     TChain *cosmic_chain = new TChain("events");
-    for(int i = 0; i<=29; i++){
-        std::string filename = Form("/data/stage6/prad_023419/prad_023419.000%02d.root", i);
+    for(int i = 0; i<=file_number-1; i++){
+        std::string filename = Form("/data/stage6/prad_023%d/prad_023%d.000%02d.root",run_number, run_number, i);
         cosmic_chain->Add(filename.c_str());
     }
 
      TTree *tree = cosmic_chain;
     if (!tree) {
-        std::cerr << "Cannot find TTree 'events' in " << input << "\n";
+        std::cerr << "Cannot find TTree 'events' \n";
         return 1;
     }
     EventVars ev;
@@ -225,6 +229,35 @@ int main(int argc, char *argv[])
         rate_out << "G" << (i+1) << "  " << event_num_module[i+1] << "\n";
     }
     rate_out.close();
+
+    // ── JSON output: name, peak, event_count ─────────────────────────────
+    {
+        std::ofstream json_out(Form("cosmic_modules_%d.json", run_number));
+        json_out << "[\n";
+        bool first = true;
+        // W modules (PWO crystals, id = 1001..2156)
+        for (int i = 0; i < 1156; i++) {
+            if (!first) json_out << ",\n";
+            first = false;
+            json_out << "  {\"name\":\"W" << (i+1)
+                     << "\",\"peak\":" << peak[i]
+                     << ",\"event_count\":" << event_num_module[i+1000+1] << "}";
+        }
+        // G modules (lead-glass, id = 1..1000)
+        /*for (int i = 0; i < 1000; i++) {
+            if (!first) json_out << ",\n";
+            first = false;
+            float lg_peak = (peak_hist_LG_module[i]->GetEntries() > 0)
+                            ? peak_hist_LG_module[i]->GetMean() : 0.f;
+            json_out << "  {\"name\":\"G" << (i+1)
+                     << "\",\"peak\":" << lg_peak
+                     << ",\"event_count\":" << event_num_module[i+1] << "}";
+        }
+        json_out << "\n]\n";
+        */
+        json_out.close();
+        std::cerr << "JSON written to cosmic_modules_" << run_number << ".json\n";
+    }
 
     outfile.Close();
 
