@@ -72,20 +72,20 @@ class SpectrumAnalyzer:
 
         | ADC difference | Step  |
         |----------------|-------|
-        | > 1000         | 30 V  |
-        | 500 – 1000     | 20 V  |
-        | 200 – 500      | 10 V  |
+        | > 1000         | 50 V  |
+        | 500 – 1000     | 30 V  |
+        | 200 – 500      | 20 V  |
         | 100 – 200      |  5 V  |
-        | < 100           | diff/20 V |
+        | < 100          | diff/20 V |
 
         Sign: positive = edge too low → increase voltage.
         """
         diff = self.target_adc - edge_adc  # positive = need more gain
         sign = 1 if diff > 0 else -1
         ad = abs(diff)
-        if ad > 1000:    dv = 30.0
-        elif ad > 500:   dv = 20.0
-        elif ad > 200:   dv = 10.0
+        if ad > 1000:    dv = 50.0
+        elif ad > 500:   dv = 30.0
+        elif ad > 200:   dv = 20.0
         elif ad > 100:   dv = 5.0
         else:            dv = ad / 20.0
         return round(sign * dv, 1)
@@ -131,8 +131,6 @@ class ServerClient:
         return self._get("/api/occupancy")
 
     def get_height_histogram(self, key: str, quiet: bool = False) -> dict:
-        if not quiet:
-            self._log(f"Server: GET /api/heighthist/{key}")
         return self._get(f"/api/heighthist/{key}")
 
     def build_key_map(self) -> Dict[str, str]:
@@ -185,28 +183,39 @@ class HVClient:
         self._resp_event = threading.Event()
         self._reader_thread: Optional[threading.Thread] = None
         self._closing = False
+        self._connected = False
+        self._password = ""
+        self._websocket_mod: Any = None
 
     def connect(self, password: str = ""):
         try:
             import websocket
+            self._websocket_mod = websocket
         except ImportError:
             if self._read_only:
                 self._log("HV: websocket-client not installed — running without HV (read-only)", level="warn")
                 return
             raise ImportError("pip install websocket-client  (required for HV control)")
+        self._password = password
+        self._do_connect()
+
+    def _do_connect(self):
+        """Establish WebSocket connection and authenticate."""
         self._log(f"HV: connecting to {self.url}")
-        self._ws = websocket.create_connection(self.url, timeout=10)
+        self._ws = self._websocket_mod.create_connection(self.url, timeout=10)
+        self._connected = True
         init_msg = json.loads(self._ws.recv())
 
         # start background reader to drain broadcasts
         self._closing = False
-        self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-        self._reader_thread.start()
+        if self._reader_thread is None or not self._reader_thread.is_alive():
+            self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+            self._reader_thread.start()
 
         auth_required = init_msg.get("auth_required", False)
-        if auth_required and password:
+        if auth_required and self._password:
             self._log("HV: authenticating (Expert)")
-            self._send({"type": "auth", "password": password, "level": 2})
+            self._raw_send({"type": "auth", "password": self._password, "level": 2})
             resp = self._wait_response("auth_result", timeout=10)
             if not resp or resp.get("granted", 0) < 2:
                 reason = resp.get("reason", "unknown") if resp else "no response"
@@ -214,24 +223,40 @@ class HVClient:
             self._log(f"HV: authenticated OK (level {resp.get('granted')})")
         self._log("HV: connected")
 
+    def _reconnect(self) -> bool:
+        """Attempt to reconnect after a broken connection."""
+        self._log("HV: reconnecting...", level="warn")
+        try:
+            if self._ws:
+                try: self._ws.close()
+                except Exception: pass
+            self._do_connect()
+            return True
+        except Exception as e:
+            self._log(f"HV: reconnect failed: {e}", level="error")
+            self._connected = False
+            return False
+
     def _reader_loop(self):
         """Background thread: read all incoming messages, route responses."""
-        while not self._closing and self._ws:
+        while not self._closing:
+            if not self._ws or not self._connected:
+                time.sleep(0.5)
+                continue
             try:
                 self._ws.settimeout(1.0)
                 raw = self._ws.recv()
                 msg = json.loads(raw)
                 msg_type = msg.get("type", "")
-                # route command responses to the queue
                 if msg_type in ("auth_result", "get_voltage_response"):
                     with self._resp_lock:
                         self._responses.setdefault(msg_type, []).append(msg)
                     self._resp_event.set()
-                # else: broadcast (hv_snapshot etc.) — discard silently
             except Exception:
                 if self._closing:
                     break
-                # timeout or transient error — keep trying
+                # mark disconnected so _send can trigger reconnect
+                self._connected = False
 
     def _wait_response(self, msg_type: str, timeout: float = 10) -> Optional[dict]:
         """Wait for a specific response type from the reader thread."""
@@ -245,9 +270,27 @@ class HVClient:
             self._resp_event.wait(timeout=min(0.5, deadline - time.time()))
         return None
 
-    def _send(self, msg: dict):
+    def _raw_send(self, msg: dict):
+        """Send without reconnect (used during initial connect/auth)."""
         with self._send_lock:
             self._ws.send(json.dumps(msg))
+
+    def _send(self, msg: dict):
+        """Send with auto-reconnect on failure."""
+        with self._send_lock:
+            for attempt in range(2):
+                try:
+                    self._ws.send(json.dumps(msg))
+                    return
+                except Exception:
+                    if attempt == 0 and not self._closing:
+                        self._send_lock.release()
+                        ok = self._reconnect()
+                        self._send_lock.acquire()
+                        if not ok:
+                            raise
+                    else:
+                        raise
 
     def get_voltage(self, name: str) -> Optional[dict]:
         """Query current voltage info for a module by name."""
@@ -267,12 +310,16 @@ class HVClient:
             self._log(f"HV: GET {name} → no response", level="warn")
         return resp
 
-    def set_voltage(self, name: str, value: float) -> bool:
+    def set_voltage(self, name: str, value: float,
+                    old_value: float = 0.0) -> bool:
         """Set voltage by module name. Returns True if command sent."""
+        dv = value - old_value
+        direction = "increase" if dv > 0 else "decrease" if dv < 0 else "no change"
         if self._read_only:
-            self._log(f"HV: SET {name} = {value:.2f} V [BLOCKED — read-only]", level="warn")
+            self._log(f"HV: SET {name} {direction} {old_value:.1f} → {value:.1f} V "
+                      f"(ΔV={dv:+.1f}) [BLOCKED — read-only]", level="warn")
             return True
-        self._log(f"HV: SET {name} = {value:.2f} V")
+        self._log(f"HV: SET {name} {direction} {old_value:.1f} → {value:.1f} V (ΔV={dv:+.1f})")
         try:
             self._send({"type": "set_voltage_by_name",
                          "name": name, "value": round(value, 2)})
@@ -546,7 +593,7 @@ class GainScanEngine:
 
                     self.log(f"{mod.name} iter {iteration+1}: edge={edge_adc:.0f} "
                              f"ΔV={dv:+.0f} ({current_v:.1f}→{new_v:.1f})")
-                    if not self.hv.set_voltage(mod.name, new_v):
+                    if not self.hv.set_voltage(mod.name, new_v, old_value=current_v):
                         self.log(f"{mod.name}: HV set failed", level="error")
                         self._mark_failed(i, mod)
                         break
