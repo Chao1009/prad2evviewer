@@ -266,7 +266,7 @@ int main(int argc, char *argv[])
 
     // ── JSON output ───────────────────────────────────────────────────────
     if (run_number > 0) {
-        std::ofstream json_out(Form("cosmic_modules_%d.json", run_number));
+        std::ofstream json_out(Form("cosmic_modules_run%d.json", run_number));
         json_out << "{\n";
         for (int i = 0; i < 1156; i++) {
             json_out << "  \"W" << (i+1) << "\": [{";
