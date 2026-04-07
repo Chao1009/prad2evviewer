@@ -710,11 +710,21 @@ class GainEqualizerWindow(QMainWindow):
             eng.pause(); self._btn_pause.setText("Resume")
 
     def _cmdStop(self):
-        if self._gain_engine:
-            self._gain_engine.stop()
-            self._btn_pause.setText("Pause")
-        else:
+        eng = self._gain_engine
+        if not eng:
             epics_stop(self.ep); self._log("Motors stopped")
+            return
+        # if currently running → stop the scan (will be in resumable state)
+        running = eng.state not in (
+            GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED)
+        if running:
+            eng.stop()
+            self._btn_pause.setText("Pause")
+            return
+        # already stopped (FAILED / IDLE-with-has_run / COMPLETED) →
+        # discard engine, reset to clean state for a fresh start
+        self._gain_engine = None
+        self._log("Reset to fresh start")
 
     def _cmdRedo(self):
         if self._gain_engine:
@@ -980,16 +990,44 @@ class GainEqualizerWindow(QMainWindow):
 
     def _updateGainStatus(self):
         eng = self._gain_engine
-        if eng is None: return
-        running = eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED)
-        self._path_group.setVisible(not running)
-        self._gain_group.setVisible(not running)
-        # show histogram while running, or when it has data (after pause/stop/fail)
+        if eng is None:
+            # clean state: no engine
+            self._path_group.setVisible(True)
+            self._gain_group.setVisible(True)
+            self._hist_group.setVisible(False)
+            self._btn_start.setText("Start")
+            self._btn_start.setEnabled(True)
+            self._btn_pause.setEnabled(False)
+            self._btn_stop.setText("Stop")
+            self._btn_stop.setEnabled(False)
+            self._btn_redo.setEnabled(False)
+            self._btn_skip.setEnabled(False)
+            return
+
+        running = eng.state not in (
+            GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED)
+        # "resumable": scan was started, then stopped/failed mid-way
+        resumable = (not running) and eng._has_run and \
+                    eng.state != GainScanState.COMPLETED
+
+        # panel visibility
+        self._path_group.setVisible(not running and not resumable)
+        self._gain_group.setVisible(not running and not resumable)
         has_data = bool(eng.last_bins) or bool(eng.iteration_history)
         self._hist_group.setVisible(running or has_data)
+
+        # Start button: "Resume" while resumable, "Start" otherwise
+        self._btn_start.setText("Resume" if resumable else "Start")
         self._btn_start.setEnabled(not running)
-        # sync combo to current_idx when stopped/failed so operator sees resume point
-        if not running and eng._has_run and 0 <= eng.current_idx < len(eng.path):
+        # Stop button: "Reset" while resumable, "Stop" while running
+        self._btn_stop.setText("Reset" if resumable else "Stop")
+        self._btn_stop.setEnabled(running or resumable)
+        self._btn_pause.setEnabled(running)
+        self._btn_redo.setEnabled(running)
+        self._btn_skip.setEnabled(running)
+
+        # sync combo to current_idx so operator sees resume point
+        if resumable and 0 <= eng.current_idx < len(eng.path):
             name = eng.path[eng.current_idx].name
             if self._start_combo.currentText() != name:
                 idx = self._start_combo.findText(name)
@@ -1000,11 +1038,7 @@ class GainEqualizerWindow(QMainWindow):
         for w in (self._ge_server_edit, self._ge_hv_edit, self._ge_hv_pw,
                   self._ge_target, self._ge_counts, self._ge_maxiter, self._ge_tol,
                   self._ge_edge_frac, self._ge_log_y):
-            w.setEnabled(not running)
-        self._btn_pause.setEnabled(running)
-        self._btn_stop.setEnabled(running)
-        self._btn_redo.setEnabled(running)
-        self._btn_skip.setEnabled(running)
+            w.setEnabled(not running and not resumable)
         sc = {GainScanState.IDLE: C.DIM, GainScanState.MOVING: C.YELLOW,
               GainScanState.COLLECTING: C.ACCENT, GainScanState.ANALYZING: C.ACCENT,
               GainScanState.ADJUSTING: C.ORANGE, GainScanState.CONVERGED: C.GREEN,
