@@ -356,12 +356,15 @@ class GainScanEngine:
                  server_url: str, hv_url: str, hv_password: str,
                  read_only: bool,
                  modules: List[Module], log_fn,
-                 key_map: Dict[str, str]):
+                 key_map: Dict[str, str],
+                 report_prefix: str = ""):
         self.ep = motor_ep
         self._server_url = server_url
         self._hv_url = hv_url
         self._hv_password = hv_password
         self._read_only = read_only
+        # filename prefix for report PNGs (e.g. "SIM_" in simulation mode)
+        self.report_prefix = report_prefix
         # ``modules`` is already the ordered path (caller-prepared)
         self.path = list(modules)
         self.log = log_fn
@@ -615,12 +618,22 @@ class GainScanEngine:
             info = self.hv.get_voltage(mod.name)
             if info is None:
                 if self._read_only:
-                    info = {"vset": 1000.0, "vmon": 0.0, "limit": 2000.0}
+                    # synthetic placeholder for read-only / simulation mode;
+                    # vmon must mirror vset so the gain model can record it
+                    info = {"vset": 1000.0, "vmon": 1000.0, "limit": 2000.0}
                 else:
                     self.log(f"{mod.name}: HV read failed", level="error")
                     self._mark_failed(i, mod); return
             self.last_vset = info.get("vset")
             self.last_vmon = info.get("vmon")
+
+            current_v = info.get("vset", 0)
+            current_vmon = info.get("vmon", current_v)
+            # protect the gain model from a bogus HV read (None or non-positive
+            # vmon).  Fall back to vset, which equals vmon at steady state.
+            if current_vmon is None or current_vmon <= 0:
+                current_vmon = current_v
+            limit_v = info.get("limit", 99999)
 
             # record iteration snapshot
             self.iteration_history.append({
@@ -639,6 +652,11 @@ class GainScanEngine:
                          level="error")
                 self._mark_failed(i, mod); return
 
+            # record this measurement in the PMT response model.  Done before
+            # the convergence check so the converged point is also available
+            # to the report figure.
+            self._pmt_fit.add_point(current_vmon, edge_adc)
+
             # check convergence
             if abs(edge_adc - self.target_adc) <= self.convergence_tol:
                 self.converged.add(i)
@@ -649,13 +667,8 @@ class GainScanEngine:
 
             # adjust HV
             self.state = GainScanState.ADJUSTING
-            current_v = info.get("vset", 0)
-            current_vmon = info.get("vmon", current_v)
-            limit_v = info.get("limit", 99999)
-
-            # -- update PMT response model and compute ΔV --
-            self._pmt_fit.add_point(current_vmon, edge_adc)
-            dv, mode_tag = self._pmt_fit.delta_v_to_target(self.target_adc)
+            dv, mode_tag = self._pmt_fit.delta_v_to_target(
+                self.target_adc, current_vmon, edge_adc)
 
             self.last_dv = dv
             new_v = current_v + dv
@@ -820,7 +833,7 @@ class GainScanEngine:
 
         os.makedirs(self.report_dir, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"GE_{ts}_{mod.name}_{status}.png"
+        fname = f"{self.report_prefix}GE_{ts}_{mod.name}_{status}.png"
         path = os.path.join(self.report_dir, fname)
         img.save(path)
         self.log(f"Report saved: {fname}")

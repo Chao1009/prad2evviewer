@@ -231,15 +231,22 @@ class GainEqualizerWindow(QMainWindow):
         self._mod_by_name = {m.name: m for m in all_modules}
         self._log_lines: List[str] = []
 
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        self._log_file = open(os.path.join(log_dir,
-            datetime.now().strftime("gain_eq_%Y%m%d.log")), "a")
-        self._log_file.write(
-            "\n" + "=" * 70 + "\n"
-            f"=== Session start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
-            + "=" * 70 + "\n")
-        self._log_file.flush()
+        # observer mode is read-only and writes nothing to disk; simulation
+        # prefixes its logs/reports with SIM_ so they cannot be confused
+        # with real-data files.
+        if self.observer:
+            self._log_file = None
+        else:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_prefix = "SIM_" if self.simulation else ""
+            log_name = datetime.now().strftime(f"{log_prefix}gain_eq_%Y%m%d.log")
+            self._log_file = open(os.path.join(log_dir, log_name), "a")
+            self._log_file.write(
+                "\n" + "=" * 70 + "\n"
+                f"=== Session start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                + "=" * 70 + "\n")
+            self._log_file.flush()
 
         self.scan_modules: List[Module] = []
         self._scan_names: set = set()
@@ -693,7 +700,8 @@ class GainEqualizerWindow(QMainWindow):
             motor_ep=self.ep,
             server_url=server_url, hv_url=hv_url,
             hv_password=hv_pw, read_only=ro,
-            modules=self.scan_modules, log_fn=self._log, key_map=key_map)
+            modules=self.scan_modules, log_fn=self._log, key_map=key_map,
+            report_prefix="SIM_" if self.simulation else "")
         eng.target_adc = self._ge_target.value()
         eng.min_counts = self._ge_counts.value()
         eng.max_iterations = self._ge_maxiter.value()

@@ -189,15 +189,22 @@ class SnakeScanWindow(QMainWindow):
         self._mod_by_name = {m.name: m for m in all_modules}
         self._log_lines = []
 
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        self._log_file = open(os.path.join(log_dir,
-            datetime.now().strftime("snake_scan_%Y%m%d.log")), "a")
-        self._log_file.write(
-            "\n" + "=" * 70 + "\n"
-            f"=== Session start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
-            + "=" * 70 + "\n")
-        self._log_file.flush()
+        # observer mode is read-only and writes nothing to disk; simulation
+        # prefixes its log with SIM_ so it cannot be confused with real-data
+        # files.
+        if self.observer:
+            self._log_file = None
+        else:
+            log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_prefix = "SIM_" if self.simulation else ""
+            log_name = datetime.now().strftime(f"{log_prefix}snake_scan_%Y%m%d.log")
+            self._log_file = open(os.path.join(log_dir, log_name), "a")
+            self._log_file.write(
+                "\n" + "=" * 70 + "\n"
+                f"=== Session start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+                + "=" * 70 + "\n")
+            self._log_file.flush()
 
         self.scan_modules = []
         self.engine = ScanEngine(motor_ep, self.scan_modules, self._log)
