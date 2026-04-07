@@ -192,7 +192,12 @@ class SnakeScanWindow(QMainWindow):
         log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
         os.makedirs(log_dir, exist_ok=True)
         self._log_file = open(os.path.join(log_dir,
-            datetime.now().strftime("snake_scan_%Y%m%d_%H%M%S.log")), "w")
+            datetime.now().strftime("snake_scan_%Y%m%d.log")), "a")
+        self._log_file.write(
+            "\n" + "=" * 70 + "\n"
+            f"=== Session start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n"
+            + "=" * 70 + "\n")
+        self._log_file.flush()
 
         self.scan_modules = []
         self.engine = ScanEngine(motor_ep, self.scan_modules, self._log)

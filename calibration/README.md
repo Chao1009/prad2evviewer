@@ -61,7 +61,8 @@ An `ERROR` stops the scan automatically. The Start button changes to
 
 ### Event Log Files
 
-Full event logs are saved to `calibration/logs/gain_eq_YYYYMMDD_HHMMSS.log`.
+Full event logs are saved to `calibration/logs/gain_eq_YYYYMMDD.log` (one
+file per day, appended to across sessions).
 Upload these with the PRADLOG entry.
 
 ---
