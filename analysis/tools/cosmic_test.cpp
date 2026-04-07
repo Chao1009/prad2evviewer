@@ -81,14 +81,16 @@ static void saveModuleWaveforms(TTree *tree, fdec::HyCalSystem &hycal,
 int main(int argc, char *argv[])
 {
     std::string input;
+    std::string in_json;
     int run_number = -1, file_number = -1;
     int opt;
-    while ((opt = getopt(argc, argv, "r:n:")) != -1) {
+    while ((opt = getopt(argc, argv, "r:n:j:")) != -1) {
         switch (opt) {
-            case 'r': run_number = std::atoi(optarg); break;
+            case 'r': run_number  = std::atoi(optarg); break;
             case 'n': file_number = std::atoi(optarg); break;
+            case 'j': in_json    = optarg; break;
             default:
-                std::cerr << "Usage: " << argv[0] << " [-r run_number] [-n file_number]\n";
+                std::cerr << "Usage: " << argv[0] << " [-r run_number] [-n file_number] [-j existing_json]\n";
                 return 1;
         }
     }
@@ -266,24 +268,66 @@ int main(int argc, char *argv[])
 
     // ── JSON output ───────────────────────────────────────────────────────
     if (run_number > 0) {
-        std::ofstream json_out(Form("cosmic_modules_run%d.json", run_number));
-        json_out << "{\n";
-        for (int i = 0; i < 1156; i++) {
-            json_out << "  \"W" << (i+1) << "\": [{";
-            json_out << "\"peak_height_mean\": " << peak_height[i]
-                     << ", \"peak_height_sigma\": " << rms_height[i]
-                     << ", \"peak_height_diff\": " << (peak_height[i] -35.)
-                     << ", \"peak_integral_mean\": " << peak[i]
-                     << ", \"peak_integral_sigma\": " << rms[i]
-                     << ", \"peak_integral_diff\": " << (peak[i] - 250.)
-                     << ", \"count\": " << event_num_module[i+1000+1]
-                     << "}]";
-            if (i < 1155) json_out << ",";
-            json_out << "\n";
+        // Build the new entry string for each module
+        auto make_entry = [&](int i) -> std::string {
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "{\"run\": %d, \"peak_height_mean\": %g"
+                ", \"peak_height_sigma\": %g"
+                ", \"peak_height_diff\": %g"
+                ", \"peak_integral_mean\": %g"
+                ", \"peak_integral_sigma\": %g"
+                ", \"peak_integral_diff\": %g"
+                ", \"count\": %d}",
+                run_number,
+                peak_height[i], rms_height[i], peak_height[i] - 35.,
+                peak[i], rms[i], peak[i] - 250.,
+                event_num_module[i+1000+1]);
+            return std::string(buf);
+        };
+
+        if (!in_json.empty()) {
+            // ── Append mode: read existing JSON and insert new entry ──────
+            std::ifstream fin(in_json);
+            if (!fin) {
+                std::cerr << "Cannot open input JSON: " << in_json << "\n";
+            } else {
+                std::vector<std::string> lines;
+                std::string line;
+                while (std::getline(fin, line)) lines.push_back(line);
+                fin.close();
+
+                int mod_idx = 0;
+                for (auto &l : lines) {
+                    // Lines with module entries contain "}]" near the end
+                    auto pos = l.rfind("}");
+                    if (pos != std::string::npos && pos + 1 < l.size() && l[pos+1] == ']') {
+                        // insert ", {new_entry}" before the closing "]"
+                        std::string new_entry = ", " + make_entry(mod_idx);
+                        l.insert(pos + 1, new_entry);
+                        mod_idx++;
+                    }
+                }
+
+                std::ofstream fout(in_json);
+                for (auto &l : lines) fout << l << "\n";
+                fout.close();
+                std::cerr << "Appended run " << run_number << " to " << in_json << "\n";
+            }
+        } else {
+            // ── Create mode: write new JSON ───────────────────────────────
+            std::string out_path = Form("cosmic_modules_run%d.json", run_number);
+            std::ofstream json_out(out_path);
+            json_out << "{\n";
+            for (int i = 0; i < 1156; i++) {
+                json_out << "  \"W" << (i+1) << "\": [" << make_entry(i) << "]";
+                if (i < 1155) json_out << ",";
+                json_out << "\n";
+            }
+            json_out << "}\n";
+            json_out.close();
+            std::cerr << "JSON written to " << out_path << "\n";
         }
-        json_out << "}\n";
-        json_out.close();
-        std::cerr << "JSON written to cosmic_modules_" << run_number << ".json\n";
     }
 
     outfile.Close();
