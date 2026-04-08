@@ -287,7 +287,7 @@ class HyCalScanMapWidget(QWidget):
 
         # path lines (white, visible over heat map)
         for pts, style, lw in [(self._path_line, Qt.PenStyle.SolidLine, 1.8),
-                                (self._dash_line, Qt.PenStyle.DashLine, 1.5)]:
+                                (self._dash_line, Qt.PenStyle.DashLine, 1.0)]:
             if len(pts) >= 2:
                 p.setPen(QPen(QColor(C.PATH_LINE), lw, style))
                 for i in range(len(pts) - 1):

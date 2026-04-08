@@ -553,6 +553,9 @@ class GainScanEngine:
             self.log(f"SKIPPED {mod.name}: outside limits", level="warn")
             return
         if not self._wait_move_done(px, py, timeout=timeout):
+            if self._skip.is_set():
+                self._skip.clear()
+                self.log(f"Module {mod.name} skipped")
             return
 
         # check DAQ key
@@ -851,9 +854,9 @@ class GainScanEngine:
         if timeout is None:
             timeout = self.move_timeout
         t0 = time.time()
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._skip.is_set():
             self._check_paused()
-            if self._stop.is_set():
+            if self._stop.is_set() or self._skip.is_set():
                 return False
             if not epics_is_moving(self.ep):
                 rx, ry = epics_read_rbv(self.ep)

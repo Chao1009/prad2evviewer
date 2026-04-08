@@ -190,10 +190,15 @@ class ScanEngine:
                 self.log(f"[{i+1}/{len(self.path)}] Moving to {mod.name}  ptrans({px:.3f}, {py:.3f})")
                 if not epics_move_to(self.ep, px, py):
                     self.log(f"SKIPPED {mod.name}: outside limits", level="warn"); continue
-                if not self._wait_move_done(): break
-                rbv_x, rbv_y = epics_read_rbv(self.ep)
-                err = math.sqrt((rbv_x - px)**2 + (rbv_y - py)**2)
-                if err > self.pos_threshold:
+                if not self._wait_move_done(px, py):
+                    if self._stop.is_set(): break
+                    if self._skip.is_set():
+                        self._skip.clear()
+                        self.log(f"Module {mod.name} skipped during move")
+                        continue
+                    # timeout — didn't reach target in time; let the user decide
+                    rbv_x, rbv_y = epics_read_rbv(self.ep)
+                    err = math.sqrt((rbv_x - px)**2 + (rbv_y - py)**2)
                     self.error_modules.add(i); self.state = ScanState.ERROR
                     self.log(f"POSITION ERROR at {mod.name}: {err:.3f} mm", level="error")
                     self._ack_error.clear(); self._ack_error.wait()
@@ -211,14 +216,29 @@ class ScanEngine:
             else:
                 self.state = ScanState.IDLE
 
-    def _wait_move_done(self):
+    def _wait_move_done(self, target_x: float, target_y: float):
+        """Wait for the motor to stop and be at the target position.
+
+        "On position" requires BOTH MOVN=0 AND RBV within pos_threshold
+        of the target.  Checking only MOVN is unsafe because MOVN is
+        still 0 in the brief window after issuing a move command before
+        the IOC has processed it — a check in that window would declare
+        the move "done" before it started.
+
+        Returns False on stop, skip, or timeout; the caller decides
+        which happened by inspecting ``self._stop`` / ``self._skip``.
+        """
         t0 = time.time()
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._skip.is_set():
             while self._paused and not self._stop.is_set():
                 self.state = ScanState.PAUSED; time.sleep(0.1)
-            if self._stop.is_set(): return False
+            if self._stop.is_set() or self._skip.is_set(): return False
             self.state = ScanState.MOVING
-            if not epics_is_moving(self.ep): return True
+            if not epics_is_moving(self.ep):
+                rbv_x, rbv_y = epics_read_rbv(self.ep)
+                err = math.sqrt((rbv_x - target_x)**2 + (rbv_y - target_y)**2)
+                if err <= self.pos_threshold:
+                    return True
             if time.time() - t0 > MOVE_TIMEOUT:
                 self.log(f"MOVE TIMEOUT after {MOVE_TIMEOUT:.0f}s", level="error"); return False
             time.sleep(0.1)

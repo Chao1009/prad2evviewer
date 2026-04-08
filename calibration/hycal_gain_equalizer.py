@@ -883,7 +883,20 @@ class GainEqualizerWindow(QMainWindow):
                     else: colors[mod.name] = C.MOD_TODO
 
         self._map.setModuleColors(colors)
-        self._drawPathPreview()
+        # while running, show a dashed preview of modules still ahead;
+        # idle / completed / failed → solid preview of the planned path.
+        if eng and eng.state not in (GainScanState.IDLE,
+                                     GainScanState.COMPLETED,
+                                     GainScanState.FAILED):
+            ei = getattr(eng, '_end_idx', len(eng.path))
+            self._map.setPathPreview([])
+            self._map.setDashPreview([
+                self._map.modCenter(eng.path[i])
+                for i in range(eng.current_idx + 1, ei)
+            ])
+        else:
+            self._drawPathPreview()
+            self._map.setDashPreview([])
         rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
         self._map.setMarkerPosition(*ptrans_to_module(rx, ry))
         self._map.update()
@@ -1014,7 +1027,9 @@ class GainEqualizerWindow(QMainWindow):
             self._btn_stop.setText("Stop")
             self._btn_stop.setEnabled(False)
             self._btn_redo.setEnabled(False)
+            self._btn_redo.setText("Redo Current")
             self._btn_skip.setEnabled(False)
+            self._btn_skip.setText("Skip Current")
             return
 
         running = eng.state not in (
@@ -1038,6 +1053,12 @@ class GainEqualizerWindow(QMainWindow):
         self._btn_pause.setEnabled(running)
         self._btn_redo.setEnabled(running)
         self._btn_skip.setEnabled(running)
+
+        # show current module name on the per-module action buttons
+        cur = eng.current_module
+        cur_name = cur.name if (running and cur is not None) else ""
+        self._btn_redo.setText(f"Redo Current ({cur_name})" if cur_name else "Redo Current")
+        self._btn_skip.setText(f"Skip Current ({cur_name})" if cur_name else "Skip Current")
 
         # sync combo to current_idx so operator sees resume point
         if resumable and 0 <= eng.current_idx < len(eng.path):
