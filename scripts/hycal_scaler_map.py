@@ -505,7 +505,7 @@ class ScalerMapWindow(QMainWindow):
             v = self._ep.get(m.name)
             if v is not None:
                 self._values[m.name] = float(v)
-                if "W" in m.name:
+                if "W" in m.name and int(m.name.strip("W")!=1125):
                     W_totalSum += v
                     if(int(m.name.strip("W"))<578):
                         topSum += v
@@ -543,6 +543,7 @@ class ScalerMapWindow(QMainWindow):
                 f"Data: {lo:.0f}kHz .. {hi:.0f}kHz  "
                 f"Channels: {len(self._values)}  "
                 f"PbWO4 Total: {W_totalSum:.2f}kHz  "
+                f"Ave: {W_totalSum/1152:2f}kHz  "
                 f"Asym (kHz): [{x_asym:.3f}, {y_asym:.3f}]  "
                 f"CoR (mm): [{x_COM:.3f},{y_COM:.3f}]")
 
