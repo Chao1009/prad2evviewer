@@ -613,7 +613,7 @@ if(!prad1){
             }
             ev->veto_nch = veto_nch;
             ev->lms_nch = lms_nch;
-            
+
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;
             clusterer.ReconstructHits(hits);
@@ -669,6 +669,7 @@ if(!prad1){
             float gem_z[4] = {5407.+39.71/2., 5407.-39.71/2.,
                               5807.+39.71/2., 5807.-39.71/2.}; //mm, the center of the two GEMs
             TransformDetData(hc_hits, 0.f, 0.f, 6225.f);
+            GetProjection(hc_hits, 6225.f);
             for(int i = 0; i < 4; ++i)
                 TransformDetData(gem_hits[i], 0.f, 0.f, gem_z[i]);
 

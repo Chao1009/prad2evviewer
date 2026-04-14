@@ -306,7 +306,7 @@ int main (int argc, char *argv[])
         for (int i = 0; i < ev->n_gem_hits; ++i)
             gem_hits[ev->det_id[i]].push_back(GEMHit{ev->gem_x[i], ev->gem_y[i], gem_z[ev->det_id[i]], ev->det_id[i]});
 
-        TransformDetData(hc_hits, 0.f, 0.f, hycal_z);
+        GetProjection(hc_hits, 6225.f);
 
         matching.SetMatchRange(10.f); // matching radius in mm, 15mm default
         //matching.SetSquareSelection(true); // use square cut instead of circular cut

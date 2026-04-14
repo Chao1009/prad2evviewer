@@ -31,7 +31,9 @@ struct ProjectHit
 
 ProjectHit GetProjectionHits(float x, float y, float z, float projection_z);
 void GetProjection(HCHit &hc, float projection_z);
+void GetProjection(std::vector<HCHit> &hc, float projection_z);
 void GetProjection(GEMHit &gem, float projection_z);
+void GetProjection(std::vector<GEMHit> &gem, float projection_z);
 
 class MatchHit
 {

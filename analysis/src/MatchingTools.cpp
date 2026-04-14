@@ -41,12 +41,34 @@ void GetProjection(HCHit &hc, float projection_z)
     hc.z = proj.z_proj;
 }
 
+void GetProjection(std::vector<HCHit> &hc, float projection_z)
+{
+    for (auto &hit : hc) {
+        ProjectHit proj = GetProjectionHits(hit.x, hit.y, hit.z, projection_z);
+        hit.x = proj.x_proj;
+        hit.y = proj.y_proj;
+        hit.z = proj.z_proj;
+    }
+
+}
+
 void GetProjection(GEMHit &gem, float projection_z)
 {
     ProjectHit proj = GetProjectionHits(gem.x, gem.y, gem.z, projection_z);
     gem.x = proj.x_proj;
     gem.y = proj.y_proj;
     gem.z = proj.z_proj;
+}
+
+void GetProjection(std::vector<GEMHit> &gem, float projection_z)
+{
+    for (auto &hit : gem) {
+        ProjectHit proj = GetProjectionHits(hit.x, hit.y, hit.z, projection_z);
+        hit.x = proj.x_proj;
+        hit.y = proj.y_proj;
+        hit.z = proj.z_proj;
+    }
+
 }
 
 // Distance between HyCal cluster and GEM hit after projecting GEM to HyCal z
