@@ -56,6 +56,50 @@ from scan_gui_common import (
 
 
 # ============================================================================
+#  FOCUS-GUARDED INPUT WIDGETS
+# ============================================================================
+#  Wheel events change spin-box / combo-box values only when the widget is
+#  focused.  Unfocused wheel events are ignored so they propagate to the
+#  enclosing QScrollArea — scrolling the control panel no longer flips
+#  parameters by accident.
+
+class NoScrollSpinBox(QSpinBox):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class NoScrollDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class NoScrollComboBox(QComboBox):
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def wheelEvent(self, event):
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+# ============================================================================
 #  HISTOGRAM WIDGET
 # ============================================================================
 
@@ -528,27 +572,27 @@ class GainEqualizerWindow(QMainWindow):
 
         # Row 1: Path + LG layers
         r = QHBoxLayout(); r.addWidget(QLabel("Path:"))
-        self._profile_combo = QComboBox()
+        self._profile_combo = NoScrollComboBox()
         self._profile_combo.addItems([self.NONE, self.AUTOGEN] + sorted(self._profiles.keys()))
         self._profile_combo.setCurrentText(self.NONE)
         self._profile_combo.activated.connect(self._onPathProfileChanged)
         r.addWidget(self._profile_combo, stretch=1)
         r.addWidget(QLabel("LG:"))
-        self._lg_spin = QSpinBox(); self._lg_spin.setRange(0, MAX_LG_LAYERS)
+        self._lg_spin = NoScrollSpinBox(); self._lg_spin.setRange(0, MAX_LG_LAYERS)
         self._lg_spin.setMaximumWidth(60)
         self._lg_spin.valueChanged.connect(self._onLgLayersChanged)
         r.addWidget(self._lg_spin); lo.addLayout(r)
 
         # Row 2: Start + Count
         r = QHBoxLayout(); r.addWidget(QLabel("Start:"))
-        self._start_combo = QComboBox(); self._start_combo.setEditable(True)
+        self._start_combo = NoScrollComboBox(); self._start_combo.setEditable(True)
         self._start_combo.setMinimumWidth(70)
         self._start_combo.setMaximumWidth(100)
         self._start_combo.activated.connect(self._onStartSelected)
         r.addWidget(self._start_combo)
         r.addStretch()
         r.addWidget(QLabel("Count:"))
-        self._count_spin = QSpinBox(); self._count_spin.setRange(0, 0)
+        self._count_spin = NoScrollSpinBox(); self._count_spin.setRange(0, 0)
         self._count_spin.setSpecialValueText("all")
         self._count_spin.setMaximumWidth(110)
         self._count_spin.setMinimumWidth(100)
@@ -558,14 +602,14 @@ class GainEqualizerWindow(QMainWindow):
         # Row 3: Thresholds: Pos (mm) + Curr (nA) — Curr right-aligned
         r = QHBoxLayout()
         r.addWidget(QLabel("Thres.  Pos. (mm)"))
-        self._thresh_spin = QDoubleSpinBox(); self._thresh_spin.setRange(0.01, 10.0)
+        self._thresh_spin = NoScrollDoubleSpinBox(); self._thresh_spin.setRange(0.01, 10.0)
         self._thresh_spin.setValue(DEFAULT_POS_THRESHOLD)
         self._thresh_spin.setSingleStep(0.1); self._thresh_spin.setDecimals(2)
         self._thresh_spin.setMaximumWidth(100)
         r.addWidget(self._thresh_spin)
         r.addStretch()
         r.addWidget(QLabel("Curr. (nA)"))
-        self._beam_thresh_spin = QDoubleSpinBox(); self._beam_thresh_spin.setRange(0.0, 1000.0)
+        self._beam_thresh_spin = NoScrollDoubleSpinBox(); self._beam_thresh_spin.setRange(0.0, 1000.0)
         self._beam_thresh_spin.setValue(DEFAULT_BEAM_THRESHOLD)
         self._beam_thresh_spin.setSingleStep(0.1); self._beam_thresh_spin.setDecimals(2)
         self._beam_thresh_spin.setSpecialValueText("off")
@@ -593,24 +637,24 @@ class GainEqualizerWindow(QMainWindow):
 
         r = QHBoxLayout()
         r.addWidget(QLabel("Target ADC:"))
-        self._ge_target = QSpinBox(); self._ge_target.setRange(500, 4000)
+        self._ge_target = NoScrollSpinBox(); self._ge_target.setRange(500, 4000)
         self._ge_target.setValue(3200); r.addWidget(self._ge_target)
         r.addWidget(QLabel("Min counts:"))
-        self._ge_counts = QSpinBox(); self._ge_counts.setRange(100, 1000000)
+        self._ge_counts = NoScrollSpinBox(); self._ge_counts.setRange(100, 1000000)
         self._ge_counts.setValue(10000); self._ge_counts.setSingleStep(1000)
         r.addWidget(self._ge_counts); lo.addLayout(r)
 
         r = QHBoxLayout()
         r.addWidget(QLabel("Max iter:"))
-        self._ge_maxiter = QSpinBox(); self._ge_maxiter.setRange(1, 50)
+        self._ge_maxiter = NoScrollSpinBox(); self._ge_maxiter.setRange(1, 50)
         self._ge_maxiter.setValue(8); r.addWidget(self._ge_maxiter)
         r.addWidget(QLabel("Tolerance:"))
-        self._ge_tol = QSpinBox(); self._ge_tol.setRange(10, 500)
+        self._ge_tol = NoScrollSpinBox(); self._ge_tol.setRange(10, 500)
         self._ge_tol.setValue(50); r.addWidget(self._ge_tol); lo.addLayout(r)
 
         r = QHBoxLayout()
         r.addWidget(QLabel("Edge frac %:"))
-        self._ge_edge_frac = QDoubleSpinBox(); self._ge_edge_frac.setRange(0.1, 20.0)
+        self._ge_edge_frac = NoScrollDoubleSpinBox(); self._ge_edge_frac.setRange(0.1, 20.0)
         self._ge_edge_frac.setValue(5.0); self._ge_edge_frac.setSingleStep(0.5)
         self._ge_edge_frac.setDecimals(1); r.addWidget(self._ge_edge_frac)
         self._ge_log_y = QPushButton("LogY: ON")

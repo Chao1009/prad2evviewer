@@ -745,6 +745,7 @@ class GainScanEngine:
                          level="warn")
 
         fit = self._pmt_fit.linear_fit()
+        points = self._pmt_fit.points  # [(vmon, edge), ...]
         entry = {
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "iter": iteration,
@@ -754,10 +755,11 @@ class GainScanEngine:
                 "log": "on" if self.analyzer.use_log_cumul else "off",
                 "percentage": f"{self.analyzer.edge_fraction * 100:g}",
             },
+            "measurements": [[round(v, 2), round(e, 2)] for v, e in points],
             "fit": {
-                "npoints": fit.n_points,
                 "intercept": fit.log_a,
                 "slope": fit.k,
+                "r2": fit.r_squared,
             } if fit is not None else None,
         }
         data.setdefault(mod.name, []).append(entry)
@@ -779,7 +781,9 @@ class GainScanEngine:
         """Save a vertically concatenated histogram screenshot for a module.
 
         Each iteration is drawn as a small histogram panel, stacked top to
-        bottom in time order.  Filename: GE_{time}_{name}_{status}.png
+        bottom in time order.  A final panel shows the measured (VMon,
+        edge) points with the power-law fit line overlaid.
+        Filename: GE_{time}_{name}_{status}.png
         """
         history = self.iteration_history
         if not history:
@@ -793,7 +797,9 @@ class GainScanEngine:
 
         PANEL_W, PANEL_H = 600, 160
         PAD_L, PAD_R, PAD_T, PAD_B = 50, 12, 32, 20
-        img_h = PANEL_H * len(history)
+        fit_points = self._pmt_fit.points
+        FIT_PANEL_H = 240 if fit_points else 0
+        img_h = PANEL_H * len(history) + FIT_PANEL_H
         img = QImage(PANEL_W, img_h, QImage.Format.Format_RGB32)
         img.fill(QColor("#0d1117"))
 
@@ -901,6 +907,126 @@ class GainScanEngine:
             # separator
             p.setPen(QPen(QColor("#30363d"), 1))
             p.drawLine(0, y0 + PANEL_H - 1, PANEL_W, y0 + PANEL_H - 1)
+
+        # --- gain-fit panel: measured (VMon, edge) points + power-law line ---
+        if fit_points:
+            import math as _rmath
+            fp_y0 = PANEL_H * len(history)
+            fp_pw = PANEL_W - PAD_L - PAD_R
+            fp_ph = FIT_PANEL_H - PAD_T - PAD_B
+            fp_ax, fp_ay = PAD_L, fp_y0 + PAD_T
+
+            vs = [v for v, _ in fit_points]
+            es = [e for _, e in fit_points]
+            vmin, vmax = min(vs), max(vs)
+            emin, emax = min(es + [target_adc]), max(es + [target_adc])
+            if vmax == vmin:
+                vmin -= 1.0; vmax += 1.0
+            if emax == emin:
+                emin -= 1.0; emax += 1.0
+            vpad = (vmax - vmin) * 0.08
+            epad = (emax - emin) * 0.08
+            vmin -= vpad; vmax += vpad
+            emin -= epad; emax += epad
+
+            def x_of(v): return fp_ax + (v - vmin) / (vmax - vmin) * fp_pw
+            def y_of(e): return fp_ay + fp_ph - (e - emin) / (emax - emin) * fp_ph
+
+            fit = self._pmt_fit.linear_fit()
+
+            # header
+            p.setPen(QColor("#58a6ff"))
+            p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+            if fit is not None:
+                hdr = (f"{mod.name}  Gain fit  edge = A*V^k  "
+                       f"k={fit.k:.2f}  A={fit.a:.3g}  "
+                       f"R2={fit.r_squared:.3f}  N={fit.n_points}")
+            else:
+                hdr = f"{mod.name}  Gain fit (N={len(fit_points)} — fit unavailable)"
+            p.drawText(QRectF(PAD_L, fp_y0 + 4, fp_pw, PAD_T - 4),
+                       Qt.AlignmentFlag.AlignLeft, hdr)
+            p.setPen(QColor("#8b949e"))
+            p.setFont(QFont("Consolas", 9))
+            p.drawText(QRectF(PAD_L, fp_y0 + 4, fp_pw, PAD_T - 4),
+                       Qt.AlignmentFlag.AlignRight, f"target={int(target_adc)}")
+
+            # axes
+            p.setPen(QPen(QColor("#30363d"), 1))
+            p.drawLine(fp_ax, fp_ay, fp_ax, fp_ay + fp_ph)
+            p.drawLine(fp_ax, fp_ay + fp_ph, fp_ax + fp_pw, fp_ay + fp_ph)
+
+            # y-axis grid + labels (linear, 5 divisions)
+            for gi in range(1, 5):
+                gf = gi / 5
+                gy = fp_ay + fp_ph - gf * fp_ph
+                p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+                p.drawLine(fp_ax + 1, int(gy), fp_ax + fp_pw, int(gy))
+                gval = emin + gf * (emax - emin)
+                p.setPen(QColor("#8b949e"))
+                p.setFont(QFont("Consolas", 7))
+                p.drawText(QRectF(0, gy - 5, PAD_L - 4, 10),
+                           Qt.AlignmentFlag.AlignRight, f"{gval:.0f}")
+
+            # x-axis ticks + labels
+            for gi in range(0, 6):
+                gf = gi / 5
+                gx = fp_ax + gf * fp_pw
+                p.setPen(QPen(QColor("#30363d"), 1))
+                p.drawLine(int(gx), fp_ay + fp_ph, int(gx), fp_ay + fp_ph + 3)
+                vval = vmin + gf * (vmax - vmin)
+                p.setPen(QColor("#8b949e"))
+                p.setFont(QFont("Consolas", 7))
+                p.drawText(QRectF(int(gx) - 30, fp_ay + fp_ph + 4, 60, 10),
+                           Qt.AlignmentFlag.AlignCenter, f"{vval:.1f}")
+
+            # axis label
+            p.setPen(QColor("#8b949e"))
+            p.setFont(QFont("Consolas", 8))
+            p.drawText(QRectF(fp_ax, fp_y0 + FIT_PANEL_H - 14, fp_pw, 12),
+                       Qt.AlignmentFlag.AlignCenter, "VMon (V)")
+
+            # target line (red dashed horizontal)
+            if emin <= target_adc <= emax:
+                ty = y_of(target_adc)
+                p.setPen(QPen(QColor("#f85149"), 1.5, Qt.PenStyle.DashLine))
+                p.drawLine(fp_ax, int(ty), fp_ax + fp_pw, int(ty))
+
+            # fit line (green) — sampled along the visible V range
+            if fit is not None and fit.k != 0:
+                p.setPen(QPen(QColor("#3fb950"), 1.8))
+                steps = 60
+                prev = None
+                for si in range(steps + 1):
+                    vv = vmin + (vmax - vmin) * si / steps
+                    if vv <= 0:
+                        prev = None
+                        continue
+                    try:
+                        ee = fit.predict_edge(vv)
+                    except (ValueError, OverflowError):
+                        prev = None
+                        continue
+                    if not _rmath.isfinite(ee):
+                        prev = None
+                        continue
+                    xx, yy = x_of(vv), y_of(ee)
+                    if prev is not None:
+                        p.drawLine(int(prev[0]), int(prev[1]),
+                                   int(xx), int(yy))
+                    prev = (xx, yy)
+
+            # measured points — filled circles on top of the line
+            p.setPen(QPen(QColor("#0d1117"), 1))
+            p.setBrush(QColor("#f0b83f"))
+            r = 4
+            for v, e in fit_points:
+                xx, yy = x_of(v), y_of(e)
+                p.drawEllipse(QRectF(xx - r, yy - r, 2 * r, 2 * r))
+
+            # panel separator
+            p.setPen(QPen(QColor("#30363d"), 1))
+            p.drawLine(0, fp_y0 + FIT_PANEL_H - 1,
+                       PANEL_W, fp_y0 + FIT_PANEL_H - 1)
 
         p.end()
 
