@@ -757,6 +757,7 @@ class GainScanEngine:
             },
             "measurements": [[round(v, 2), round(e, 2)] for v, e in points],
             "fit": {
+                "npoints": fit.n_points,
                 "intercept": fit.log_a,
                 "slope": fit.k,
                 "r2": fit.r_squared,
