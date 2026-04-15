@@ -225,6 +225,73 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // --- config ---
     if (uri == "/api/config") { reply(buildConfig().dump()); return; }
 
+    // --- runtime hist_cfg updates (time_min/time_max/threshold) ---
+    // POST {time_min, time_max, threshold}.  Updates both file & online
+    // AppStates, then re-clusters every cached online ring entry from the
+    // stored raw EventData so the online tab refreshes instantly.  File
+    // mode has no cache and recomputes per request.
+    if (uri == "/api/hist_config") {
+        std::string body = con->get_request_body();
+        auto j = json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) {
+            reply("{\"error\":\"invalid JSON\"}"); return;
+        }
+        auto applyTo = [&](AppState &app) {
+            if (j.contains("time_min")  && j["time_min"].is_number())
+                app.hist_cfg.time_min  = j["time_min"].get<float>();
+            if (j.contains("time_max")  && j["time_max"].is_number())
+                app.hist_cfg.time_max  = j["time_max"].get<float>();
+            if (j.contains("threshold") && j["threshold"].is_number())
+                app.hist_cfg.threshold = j["threshold"].get<float>();
+        };
+        applyTo(app_file_);
+        applyTo(app_online_);
+#ifdef WITH_ET
+        // Re-cluster every cached ring entry under the new window so the
+        // online tab updates instantly instead of waiting for fresh events.
+        // json_str (raw peaks) is unaffected by hist_cfg, so we leave it.
+        // Snapshot shared_ptrs under the lock, recompute outside, write back
+        // under the lock — keeps the ET reader thread unblocked during the
+        // heavy WaveAnalyzer pass.
+        std::vector<std::pair<int, std::shared_ptr<fdec::EventData>>> snap;
+        {
+            std::lock_guard<std::mutex> lk(ring_mtx_);
+            snap.reserve(ring_.size());
+            for (auto &e : ring_) snap.emplace_back(e.seq, e.event_data);
+        }
+        std::vector<std::pair<int, std::string>> updated;
+        updated.reserve(snap.size());
+        {
+            fdec::WaveAnalyzer ana;
+            ana.cfg.min_peak_ratio = app_online_.hist_cfg.min_peak_ratio;
+            fdec::WaveResult wres;
+            for (auto &p : snap) {
+                if (!p.second) continue;
+                updated.emplace_back(p.first,
+                    app_online_.computeClustersJson(
+                        *p.second, p.first, ana, wres).dump());
+            }
+        }
+        {
+            std::lock_guard<std::mutex> lk(ring_mtx_);
+            for (auto &u : updated) {
+                for (auto &e : ring_) {
+                    if (e.seq == u.first) { e.cluster_str = std::move(u.second); break; }
+                }
+            }
+        }
+#endif
+        wsBroadcast(json({{"type", "hist_config_updated"},
+                          {"time_min",  app_file_.hist_cfg.time_min},
+                          {"time_max",  app_file_.hist_cfg.time_max},
+                          {"threshold", app_file_.hist_cfg.threshold}}).dump());
+        reply(json({{"ok", true},
+                    {"time_min",  app_file_.hist_cfg.time_min},
+                    {"time_max",  app_file_.hist_cfg.time_max},
+                    {"threshold", app_file_.hist_cfg.threshold}}).dump());
+        return;
+    }
+
     // --- mode switching ---
     if (uri == "/api/mode/online") {
 #ifdef WITH_ET
@@ -326,7 +393,18 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         if (mode_.load() == Mode::Online) {
             std::lock_guard<std::mutex> lk(ring_mtx_);
             for (auto &e : ring_) {
-                if (e.seq == evnum) { reply(e.cluster_str); return; }
+                if (e.seq == evnum) {
+                    if (e.cluster_str.empty()) {
+                        // Cache was invalidated by /api/hist_config; we can't
+                        // recompute here without the raw EventData, so report
+                        // pending and let the next live event refill.
+                        reply("{\"error\":\"clusters pending — config changed, "
+                              "wait for next event\"}");
+                    } else {
+                        reply(e.cluster_str);
+                    }
+                    return;
+                }
             }
             reply("{\"error\":\"event not in ring buffer\"}"); return;
         }

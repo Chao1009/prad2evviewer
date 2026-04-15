@@ -686,9 +686,26 @@ function init(){
         v=>{const r=getGeoRange('cluster','energy');setGeoRange('cluster','energy',r[0],v);},
         clRangeApply);
 
-    // Time cut range editors
+    // Time cut + threshold range editors — push to backend so clustering
+    // uses the same values, then reload current event for instant refresh.
     function tcutApply(){
-        geoDq();
+        const body={};
+        if(histConfig.time_min!==undefined && histConfig.time_min!==null)
+            body.time_min=histConfig.time_min;
+        if(histConfig.time_max!==undefined && histConfig.time_max!==null)
+            body.time_max=histConfig.time_max;
+        if(histConfig.threshold!==undefined && histConfig.threshold!==null)
+            body.threshold=histConfig.threshold;
+        fetch('/api/hist_config',{method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body:JSON.stringify(body)})
+            .then(r=>r.json()).then(()=>{
+                if(typeof clusterEvent!=='undefined') clusterEvent=-1;
+                if(currentEvent>0) loadEvent(currentEvent);
+                else { geoDq(); }
+            }).catch(()=>{
+                geoDq();
+            });
         if(selectedModule){
             lastHistModule=''; // force histogram refresh
             showWaveform(selectedModule);
@@ -699,11 +716,16 @@ function init(){
             histConfig.time_min!==undefined ? histConfig.time_min : '?';
         document.getElementById('tcut-max-show').textContent=
             histConfig.time_max!==undefined ? histConfig.time_max : '?';
+        const thrShow=document.getElementById('thr-show');
+        if(thrShow) thrShow.textContent=
+            histConfig.threshold!==undefined ? histConfig.threshold : '?';
     }
     setupRangeEdit('tcut-min-btn','tcut-min','tcut-min-show',
         ()=>histConfig.time_min, v=>{histConfig.time_min=v; updateTcutDisplay();}, tcutApply);
     setupRangeEdit('tcut-max-btn','tcut-max','tcut-max-show',
         ()=>histConfig.time_max, v=>{histConfig.time_max=v; updateTcutDisplay();}, tcutApply);
+    setupRangeEdit('thr-btn','thr-edit','thr-show',
+        ()=>histConfig.threshold, v=>{histConfig.threshold=v; updateTcutDisplay();}, tcutApply);
 
     // --- online mode nav ---
     document.getElementById('ring-select').onchange=e=>{

@@ -242,6 +242,22 @@ function modVal(m){
     const d=eventChannels[key];
     if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
+    // 'integral' mirrors the backend's bestPeakInWindow (clustering input):
+    // always restrict to histConfig.time_min/time_max, drop peaks below
+    // histConfig.threshold, pick the peak with the largest integral.
+    if(mt==='integral'){
+        if(!d.pk||!d.pk.length) return null;
+        const tmin=histConfig.time_min, tmax=histConfig.time_max;
+        const thr=(histConfig.threshold!==undefined)?histConfig.threshold:0;
+        let best=-1;
+        for(const p of d.pk){
+            if(p.h<thr) continue;
+            if(tmin!==undefined && p.t<tmin) continue;
+            if(tmax!==undefined && p.t>tmax) continue;
+            if(p.i>best) best=p.i;
+        }
+        return best>=0?best:null;
+    }
     const pks=peaksInCut(d.pk);
     if(mt==='count') return pks.length;
     const bp=tallest(pks);

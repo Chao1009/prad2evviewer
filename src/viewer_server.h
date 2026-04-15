@@ -8,6 +8,8 @@
 
 #include "data_source.h"
 #include "app_state.h"
+#include "Fadc250Data.h"
+#include "SspData.h"
 
 #include <nlohmann/json.hpp>
 
@@ -48,6 +50,12 @@ struct RingEntry {
     int seq;
     std::string json_str;       // pre-encoded event JSON
     std::string cluster_str;    // pre-encoded cluster JSON
+
+    // Raw event copies kept so /api/hist_config can recompute cluster_str
+    // (and re-encode json_str) under a new time/threshold window without
+    // waiting for new events to arrive.  ~8MB per entry — bounded by ring_size_.
+    std::shared_ptr<fdec::EventData>    event_data;
+    std::shared_ptr<ssp::SspEventData>  ssp_data;
 };
 
 // ── ViewerServer ─────────────────────────────────────────────────────────

@@ -86,13 +86,16 @@ function applyConfig(data){
     filteredCount=data.filtered_count||totalEvents;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
-    // populate time cut display
+    // populate time cut + threshold display
     if(document.getElementById('tcut-min-show'))
         document.getElementById('tcut-min-show').textContent=
             histConfig.time_min!==undefined ? histConfig.time_min : '?';
     if(document.getElementById('tcut-max-show'))
         document.getElementById('tcut-max-show').textContent=
             histConfig.time_max!==undefined ? histConfig.time_max : '?';
+    if(document.getElementById('thr-show'))
+        document.getElementById('thr-show').textContent=
+            histConfig.threshold!==undefined ? histConfig.threshold : '?';
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
     triggerTypeDef=data.trigger_type||[];

@@ -146,10 +146,18 @@ void ViewerServer::etReaderThread()
                         std::string cljson = app_online_.computeClustersJson(
                             event, seq, ana, wres).dump();
 
+                        // Snapshot raw event data so /api/hist_config can
+                        // recompute clusters under a new window without
+                        // waiting for the next live event.
+                        auto ev_copy  = std::make_shared<fdec::EventData>(event);
+                        auto ssp_copy = std::make_shared<ssp::SspEventData>(ssp_evt);
+
                         {
                             std::lock_guard<std::mutex> lk(ring_mtx_);
                             ring_.push_back({seq, std::move(evjson),
-                                             std::move(cljson)});
+                                             std::move(cljson),
+                                             std::move(ev_copy),
+                                             std::move(ssp_copy)});
                             while ((int)ring_.size() > ring_size_)
                                 ring_.pop_front();
                         }
