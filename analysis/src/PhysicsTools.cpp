@@ -198,27 +198,28 @@ void PhysicsTools::Fill2armMollerPosHist(float x, float y)
         h2_moller_pos_->Fill(x, y);
 }
 
-std::array<float, 2> PhysicsTools::FitPeakResolution(int module_id) const
+std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
 {
     int module_index = hycal_.id_to_index(module_id);
     if (module_index < 0 || module_index >= (int)module_hists_.size())
-        return {0.f, 0.f};
+        return {0.f, 0.f, 0.f};
 
     TH1F *h = module_hists_[module_index].get();
-    if (!h || h->GetEntries() < 50) return {0.f, 0.f};
+    if (!h) return {0.f, 0.f, 0.f};
 
     // find peak bin, fit Gaussian around it
-    int maxbin = h->GetMaximumBin();
-    float peak = h->GetBinCenter(maxbin);
-    float rms  = h->GetRMS();
+    double peak0 = h->GetBinCenter(h->GetMaximumBin());
+    double rms0  = h->GetRMS();
+    double lo = peak0 - 2.0 * rms0, hi = peak0 + 2.0 * rms0;
 
-    TF1 gaus("gfit", "gaus", peak - 2 * rms, peak + 2 * rms);
-    h->Fit(&gaus, "QNR");
+    TF1 gaus("gfit", "gaus", lo, hi);
+    gaus.SetParameters(h->GetMaximum(), peak0, rms0);
+    h->Fit(&gaus, "RQ");
 
     float mean  = gaus.GetParameter(1);
     float sigma = gaus.GetParameter(2);
-    float resolution = (mean > 0) ? sigma / mean : 0.f;
-    return {mean, resolution};
+    float chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.f;
+    return {mean, sigma, chi2};
 }
 
 void PhysicsTools::Resolution2Database(int run_id)
@@ -238,10 +239,10 @@ void PhysicsTools::Resolution2Database(int run_id)
     int module_count = hycal_.module_count();
     for (int m = 0; m < module_count; m++) {
         int module_id = hycal_.module(m).id;
-        auto [peak, sigma] = FitPeakResolution(module_id);
+        auto [peak, sigma, chi2] = FitPeakResolution(module_id);
         if (peak > 0 && sigma > 0) {
             std::string name = hycal_.module(m).name;
-            out << name << " " << peak << " " << sigma << "\n";
+            out << name << " " << peak << " " << sigma << " " << chi2 << "\n";
         }
     }
 }

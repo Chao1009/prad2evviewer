@@ -67,8 +67,8 @@ public:
     TH2F *Get2armMollerPosHist() const { return h2_moller_pos_.get(); }
 
     // --- peak / resolution analysis ------------------------------------------
-    // Returns {peak, resolution} from Gaussian fit. Resolution = sigma/mean.
-    std::array<float, 2> FitPeakResolution(int module_id) const;
+    // Returns {peak, sigma, chi2} from Gaussian fit.
+    std::array<float, 3> FitPeakResolution(int module_id) const;
     void Resolution2Database(int run_id);
 
     // --- kinematics ----------------------------------------------------------

@@ -163,8 +163,8 @@ int main(int argc, char *argv[])
     }
     //calculate calibration constants for each module, output calibration file to database
     for (int m = 0; m < hycal.module_count(); m++) {
-        auto [peak, resolution] = physics.FitPeakResolution(m);
-        if (peak > 0 && resolution > 0) {
+        auto [peak, sigma, chi2] = physics.FitPeakResolution(m);
+        if (peak > 0 && sigma > 0) {
             std::string name = hycal.module(m).name;
             if(name[0] != 'W') continue; // only calibrate PbWO4
             float expected_peak = physics.ExpectedPeakPosition(name);

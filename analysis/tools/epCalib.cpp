@@ -178,8 +178,8 @@ int main(int argc, char *argv[])
     TCanvas *c = new TCanvas("c", "Calibration", 1200, 1200);
     c->cd();
     for (int m = 0; m < nmod; m++) {
-        auto [peak, resolution] = physics.FitPeakResolution(m);
-        if (peak > 0 && resolution > 0) {
+        auto [peak, sigma, chi2] = physics.FitPeakResolution(m);
+        if (peak > 0 && sigma > 0) {
             std::string name = hycal.module(m).name;
             if(name[0] != 'W') continue; 
             float theta_deg = atan(sqrt(pow(hycal.module(m).x, 2) + pow(hycal.module(m).y, 2)) / hycal_z) * 180.f / 3.14159265f;
