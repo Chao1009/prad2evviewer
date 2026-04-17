@@ -1,13 +1,15 @@
-// prad2py.cpp — pybind11 bindings for prad2dec
+// prad2py.cpp — main module glue.
 //
-// Exposes a minimal Python interface for reading evio files:
+// The actual binding code lives in per-area translation units:
+//   bind_dec.cpp   → prad2py.dec (evio reader, event data, TDC/SSP/VTP)
+//   (future)       → prad2py.det (HyCal / GEM reconstruction)
 //
-//   hits = prad2py.load_tdc_hits(path, daq_config=..., max_events=0, roc_filter=-1)
-//     -> numpy structured array (event_num, trigger_bits, roc_tag,
-//                                slot, channel, edge, tdc)
+// Each of those files defines a ``register_XXX(py::module_ &m)`` entry
+// point that adds a submodule to the top-level module.
 //
-// Keeping the surface area small for now; more of the decoder can be
-// wrapped later without breaking callers.
+// Convenience helpers that span multiple areas (e.g. ``load_tdc_hits``)
+// stay here at module root so user code can write
+// ``prad2py.load_tdc_hits(...)`` without digging into submodules.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -146,16 +148,21 @@ py::array load_tdc_hits(
 
 } // anonymous namespace
 
+// Defined in bind_dec.cpp — registers the ``prad2py.dec`` submodule.
+void register_dec(py::module_ &m);
+
 PYBIND11_MODULE(prad2py, m)
 {
-    m.doc() = "PRad-II decoder (prad2dec) Python bindings.\n"
-              "Currently exposes tagger TDC (0xE107) readout.";
+    m.doc() = "PRad-II (prad2dec + prad2det) Python bindings.";
 
-    m.attr("__version__")    = "0.1.0";
+    m.attr("__version__")    = "0.2.0";
     m.attr("DATABASE_DIR")   = DATABASE_DIR;
 
     m.def("default_daq_config", &default_daq_config_path,
           "Return the default daq_config.json path used by load_tdc_hits.");
+
+    // Per-area submodules.  Phase 1: decoder.  Phase 2+: detector.
+    register_dec(m);
 
     m.def(
         "load_tdc_hits",

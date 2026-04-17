@@ -31,10 +31,14 @@ FetchContent_Declare(pybind11
 set(PYBIND11_FINDPYTHON ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(pybind11)
 
-pybind11_add_module(prad2py MODULE prad2py.cpp)
+pybind11_add_module(prad2py MODULE
+    prad2py.cpp
+    bind_dec.cpp
+)
 
 target_link_libraries(prad2py PRIVATE
     prad2dec
+    prad2det
     nlohmann_json::nlohmann_json
 )
 

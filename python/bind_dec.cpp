@@ -1,0 +1,512 @@
+// bind_dec.cpp — pybind11 bindings for prad2dec (prad2py.dec submodule)
+//
+// Exposes:
+//   prad2py.dec.EventType            (enum)
+//   prad2py.dec.Status               (enum)
+//   prad2py.dec.DaqConfig            (config struct)
+//   prad2py.dec.EventInfo            (per-event metadata)
+//   prad2py.dec.ChannelData / SlotData / RocData / EventData  (fdec)
+//   prad2py.dec.ApvAddress / ApvData / MpdData / SspEventData (ssp)
+//   prad2py.dec.EcPeak / EcCluster / VtpBlock / VtpEventData  (vtp)
+//   prad2py.dec.TdcHit / TdcEventData                         (tdc)
+//   prad2py.dec.EvChannel            (evio reader)
+//   prad2py.dec.load_daq_config(path) -> DaqConfig
+//
+// The bulk per-channel arrays (ChannelData.samples, ApvData.strips, etc.)
+// are returned as numpy arrays — copies by default so the buffer stays
+// valid after the next DecodeEvent call.
+
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
+#include <pybind11/stl.h>
+
+#include "EvChannel.h"
+#include "DaqConfig.h"
+#include "load_daq_config.h"
+#include "Fadc250Data.h"
+#include "SspData.h"
+#include "VtpData.h"
+#include "TdcData.h"
+
+#include <cstdlib>
+#include <memory>
+#include <string>
+
+namespace py = pybind11;
+
+#ifndef DATABASE_DIR
+#define DATABASE_DIR "."
+#endif
+
+namespace {
+
+std::string default_daq_config_path()
+{
+    const char *env = std::getenv("PRAD2_DATABASE_DIR");
+    std::string dir = env ? env : DATABASE_DIR;
+    return dir + "/daq_config.json";
+}
+
+// -------------------------------------------------------------------------
+// FADC250 data types (fdec::)
+// -------------------------------------------------------------------------
+void bind_fadc(py::module_ &m)
+{
+    // ChannelData — bulk samples are exposed as a numpy view over the
+    // first `nsamples` elements.  The buffer belongs to the owning event,
+    // so callers must copy (default) to keep data across DecodeEvent calls.
+    py::class_<fdec::ChannelData>(m, "ChannelData",
+        "Per-channel FADC250 samples (nsamples uint16 values).")
+        .def_readonly("nsamples", &fdec::ChannelData::nsamples)
+        .def_property_readonly("samples",
+            [](const fdec::ChannelData &c) {
+                // Always copy — the owning EventData may be reused/overwritten.
+                return py::array_t<uint16_t>(
+                    {c.nsamples},
+                    {static_cast<py::ssize_t>(sizeof(uint16_t))},
+                    c.samples);
+            },
+            "16-bit ADC samples as a fresh numpy array (copy of nsamples values).");
+
+    py::class_<fdec::SlotData>(m, "SlotData",
+        "One FADC250 slot: trigger info plus per-channel samples.")
+        .def_readonly("present",      &fdec::SlotData::present)
+        .def_readonly("trigger",      &fdec::SlotData::trigger)
+        .def_readonly("timestamp",    &fdec::SlotData::timestamp)
+        .def_readonly("nchannels",    &fdec::SlotData::nchannels)
+        .def_readonly("channel_mask", &fdec::SlotData::channel_mask)
+        .def("channel",
+            [](const fdec::SlotData &s, int ch) -> const fdec::ChannelData& {
+                if (ch < 0 || ch >= fdec::MAX_CHANNELS)
+                    throw py::index_error("channel out of range");
+                return s.channels[ch];
+            },
+            py::arg("channel"),
+            py::return_value_policy::reference_internal,
+            "Access ChannelData by channel index (no presence check — use channel_mask).")
+        .def("present_channels",
+            [](const fdec::SlotData &s) {
+                std::vector<int> out;
+                out.reserve(s.nchannels);
+                for (int c = 0; c < fdec::MAX_CHANNELS; ++c)
+                    if (s.channel_mask & (1ULL << c)) out.push_back(c);
+                return out;
+            },
+            "List of channel indices with nsamples > 0 this event.");
+
+    py::class_<fdec::RocData>(m, "RocData",
+        "One ROC crate worth of FADC data.")
+        .def_readonly("present", &fdec::RocData::present)
+        .def_readonly("tag",     &fdec::RocData::tag)
+        .def_readonly("nslots",  &fdec::RocData::nslots)
+        .def("slot",
+            [](const fdec::RocData &r, int sl) -> const fdec::SlotData& {
+                if (sl < 0 || sl >= fdec::MAX_SLOTS)
+                    throw py::index_error("slot out of range");
+                return r.slots[sl];
+            },
+            py::arg("slot"),
+            py::return_value_policy::reference_internal)
+        .def("present_slots",
+            [](const fdec::RocData &r) {
+                std::vector<int> out;
+                for (int s = 0; s < fdec::MAX_SLOTS; ++s)
+                    if (r.slots[s].present) out.push_back(s);
+                return out;
+            });
+
+    py::class_<fdec::EventInfo>(m, "EventInfo",
+        "Event-level metadata (TI + trigger bank).")
+        .def_readwrite("type",            &fdec::EventInfo::type)
+        .def_readwrite("trigger_type",    &fdec::EventInfo::trigger_type)
+        .def_readwrite("trigger_bits",    &fdec::EventInfo::trigger_bits)
+        .def_readwrite("event_tag",       &fdec::EventInfo::event_tag)
+        .def_readwrite("event_number",    &fdec::EventInfo::event_number)
+        .def_readwrite("trigger_number",  &fdec::EventInfo::trigger_number)
+        .def_readwrite("timestamp",       &fdec::EventInfo::timestamp)
+        .def_readwrite("run_number",      &fdec::EventInfo::run_number)
+        .def_readwrite("unix_time",       &fdec::EventInfo::unix_time)
+        .def("__repr__", [](const fdec::EventInfo &i) {
+            char buf[256];
+            std::snprintf(buf, sizeof(buf),
+                "<EventInfo evt=%d trig=%d tag=0x%x bits=0x%x ts=%llu>",
+                i.event_number, i.trigger_number, i.event_tag, i.trigger_bits,
+                (unsigned long long)i.timestamp);
+            return std::string(buf);
+        });
+
+    py::class_<fdec::EventData, std::shared_ptr<fdec::EventData>>(m, "EventData",
+        "Full decoded event: EventInfo + FADC ROCs.")
+        .def(py::init<>())
+        .def_readonly("info",   &fdec::EventData::info)
+        .def_readonly("nrocs",  &fdec::EventData::nrocs)
+        .def("roc",
+            [](const fdec::EventData &e, int i) -> const fdec::RocData& {
+                if (i < 0 || i >= e.nrocs)
+                    throw py::index_error("ROC index out of range");
+                return e.rocs[e.roc_index[i]];
+            },
+            py::arg("index"),
+            py::return_value_policy::reference_internal,
+            "Access the i-th active ROC by slot in roc_index[].")
+        .def("find_roc",
+            [](const fdec::EventData &e, uint32_t tag) -> py::object {
+                const auto *r = e.findRoc(tag);
+                if (!r) return py::none();
+                return py::cast(r, py::return_value_policy::reference_internal);
+            },
+            py::arg("tag"),
+            "Locate a ROC by its bank tag (e.g. 0x80). Returns None if absent.")
+        .def("clear", &fdec::EventData::clear);
+}
+
+// -------------------------------------------------------------------------
+// SSP / MPD / APV (ssp::)
+// -------------------------------------------------------------------------
+void bind_ssp(py::module_ &m)
+{
+    py::class_<ssp::ApvAddress>(m, "ApvAddress",
+        "APV hardware identifier (crate, MPD/fiber, ADC channel).")
+        .def(py::init<>())
+        .def_readwrite("crate_id", &ssp::ApvAddress::crate_id)
+        .def_readwrite("mpd_id",   &ssp::ApvAddress::mpd_id)
+        .def_readwrite("adc_ch",   &ssp::ApvAddress::adc_ch)
+        .def("__repr__", [](const ssp::ApvAddress &a) {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf),
+                "<ApvAddress crate=%d mpd=%d adc=%d>",
+                a.crate_id, a.mpd_id, a.adc_ch);
+            return std::string(buf);
+        });
+
+    py::class_<ssp::ApvData>(m, "ApvData",
+        "One APV chip's strip/time-sample matrix.")
+        .def_readonly("addr",          &ssp::ApvData::addr)
+        .def_readonly("present",       &ssp::ApvData::present)
+        .def_readonly("nstrips",       &ssp::ApvData::nstrips)
+        .def_readonly("flags",         &ssp::ApvData::flags)
+        .def_readonly("has_online_cm", &ssp::ApvData::has_online_cm)
+        .def_property_readonly("strips",
+            [](const ssp::ApvData &a) {
+                // [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 — fresh copy.
+                return py::array_t<int16_t>(
+                    {static_cast<py::ssize_t>(ssp::APV_STRIP_SIZE),
+                     static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)},
+                    {static_cast<py::ssize_t>(sizeof(int16_t) * ssp::SSP_TIME_SAMPLES),
+                     static_cast<py::ssize_t>(sizeof(int16_t))},
+                    &a.strips[0][0]);
+            },
+            "(128, 6) int16 numpy array of raw ADC samples (fresh copy).")
+        .def_property_readonly("online_cm",
+            [](const ssp::ApvData &a) {
+                return py::array_t<int16_t>(
+                    {static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)},
+                    {static_cast<py::ssize_t>(sizeof(int16_t))},
+                    a.online_cm);
+            },
+            "6-element online common-mode values (fresh copy).")
+        .def("has_strip", &ssp::ApvData::hasStrip);
+
+    py::class_<ssp::MpdData>(m, "MpdData",
+        "One MPD card: a vector of APVs.")
+        .def_readonly("crate_id", &ssp::MpdData::crate_id)
+        .def_readonly("mpd_id",   &ssp::MpdData::mpd_id)
+        .def_readonly("present",  &ssp::MpdData::present)
+        .def_readonly("napvs",    &ssp::MpdData::napvs)
+        .def("apv",
+            [](const ssp::MpdData &m, int adc) -> const ssp::ApvData& {
+                if (adc < 0 || adc >= ssp::MAX_APVS_PER_MPD)
+                    throw py::index_error("APV index out of range");
+                return m.apvs[adc];
+            },
+            py::return_value_policy::reference_internal);
+
+    py::class_<ssp::SspEventData, std::shared_ptr<ssp::SspEventData>>(m, "SspEventData",
+        "Per-event GEM strip data grouped by (crate, MPD).")
+        .def(py::init<>())
+        .def_readonly("nmpds", &ssp::SspEventData::nmpds)
+        .def("mpd",
+            [](const ssp::SspEventData &e, int i) -> const ssp::MpdData& {
+                if (i < 0 || i >= e.nmpds)
+                    throw py::index_error("MPD index out of range");
+                return e.mpds[i];
+            },
+            py::return_value_policy::reference_internal)
+        .def("find_apv",
+            [](const ssp::SspEventData &e, int crate, int mpd, int adc) -> py::object {
+                const auto *a = e.findApv(crate, mpd, adc);
+                if (!a) return py::none();
+                return py::cast(a, py::return_value_policy::reference_internal);
+            },
+            py::arg("crate"), py::arg("mpd"), py::arg("adc"))
+        .def("clear", &ssp::SspEventData::clear);
+}
+
+// -------------------------------------------------------------------------
+// VTP (vtp::)
+// -------------------------------------------------------------------------
+void bind_vtp(py::module_ &m)
+{
+    py::class_<vtp::EcPeak>(m, "EcPeak")
+        .def_readonly("roc_tag", &vtp::EcPeak::roc_tag)
+        .def_readonly("inst",    &vtp::EcPeak::inst)
+        .def_readonly("view",    &vtp::EcPeak::view)
+        .def_readonly("time",    &vtp::EcPeak::time)
+        .def_readonly("coord",   &vtp::EcPeak::coord)
+        .def_readonly("energy",  &vtp::EcPeak::energy);
+
+    py::class_<vtp::EcCluster>(m, "EcCluster")
+        .def_readonly("roc_tag", &vtp::EcCluster::roc_tag)
+        .def_readonly("inst",    &vtp::EcCluster::inst)
+        .def_readonly("time",    &vtp::EcCluster::time)
+        .def_readonly("energy",  &vtp::EcCluster::energy)
+        .def_readonly("coordU",  &vtp::EcCluster::coordU)
+        .def_readonly("coordV",  &vtp::EcCluster::coordV)
+        .def_readonly("coordW",  &vtp::EcCluster::coordW);
+
+    py::class_<vtp::VtpBlock>(m, "VtpBlock")
+        .def_readonly("roc_tag",          &vtp::VtpBlock::roc_tag)
+        .def_readonly("slot",             &vtp::VtpBlock::slot)
+        .def_readonly("module_id",        &vtp::VtpBlock::module_id)
+        .def_readonly("block_number",     &vtp::VtpBlock::block_number)
+        .def_readonly("block_level",      &vtp::VtpBlock::block_level)
+        .def_readonly("nwords",           &vtp::VtpBlock::nwords)
+        .def_readonly("event_number",     &vtp::VtpBlock::event_number)
+        .def_readonly("trigger_time",     &vtp::VtpBlock::trigger_time)
+        .def_readonly("has_trailer",      &vtp::VtpBlock::has_trailer)
+        .def_readonly("trailer_mismatch", &vtp::VtpBlock::trailer_mismatch);
+
+    py::class_<vtp::VtpEventData, std::shared_ptr<vtp::VtpEventData>>(m, "VtpEventData")
+        .def(py::init<>())
+        .def_readonly("n_peaks",    &vtp::VtpEventData::n_peaks)
+        .def_readonly("n_clusters", &vtp::VtpEventData::n_clusters)
+        .def_readonly("n_blocks",   &vtp::VtpEventData::n_blocks)
+        .def("peak",
+            [](const vtp::VtpEventData &e, int i) -> const vtp::EcPeak& {
+                if (i < 0 || i >= e.n_peaks)
+                    throw py::index_error("peak index out of range");
+                return e.peaks[i];
+            },
+            py::return_value_policy::reference_internal)
+        .def("cluster",
+            [](const vtp::VtpEventData &e, int i) -> const vtp::EcCluster& {
+                if (i < 0 || i >= e.n_clusters)
+                    throw py::index_error("cluster index out of range");
+                return e.clusters[i];
+            },
+            py::return_value_policy::reference_internal)
+        .def("block",
+            [](const vtp::VtpEventData &e, int i) -> const vtp::VtpBlock& {
+                if (i < 0 || i >= e.n_blocks)
+                    throw py::index_error("block index out of range");
+                return e.blocks[i];
+            },
+            py::return_value_policy::reference_internal)
+        .def("clear", &vtp::VtpEventData::clear);
+}
+
+// -------------------------------------------------------------------------
+// TDC (tdc::)
+// -------------------------------------------------------------------------
+void bind_tdc(py::module_ &m)
+{
+    py::class_<tdc::TdcHit>(m, "TdcHit")
+        .def_readonly("roc_tag", &tdc::TdcHit::roc_tag)
+        .def_readonly("slot",    &tdc::TdcHit::slot)
+        .def_readonly("channel", &tdc::TdcHit::channel)
+        .def_readonly("edge",    &tdc::TdcHit::edge)
+        .def_readonly("value",   &tdc::TdcHit::value)
+        .def("__repr__", [](const tdc::TdcHit &h) {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf),
+                "<TdcHit roc=0x%x slot=%u ch=%u edge=%u value=%u>",
+                h.roc_tag, h.slot, h.channel, h.edge, h.value);
+            return std::string(buf);
+        });
+
+    py::class_<tdc::TdcEventData, std::shared_ptr<tdc::TdcEventData>>(m, "TdcEventData")
+        .def(py::init<>())
+        .def_readonly("n_hits", &tdc::TdcEventData::n_hits)
+        .def("hit",
+            [](const tdc::TdcEventData &e, int i) -> const tdc::TdcHit& {
+                if (i < 0 || i >= e.n_hits)
+                    throw py::index_error("hit index out of range");
+                return e.hits[i];
+            },
+            py::return_value_policy::reference_internal)
+        .def("clear", &tdc::TdcEventData::clear);
+}
+
+// -------------------------------------------------------------------------
+// DaqConfig + helpers
+// -------------------------------------------------------------------------
+void bind_config(py::module_ &m)
+{
+    py::class_<evc::DaqConfig::RocEntry>(m, "RocEntry")
+        .def_readwrite("tag",   &evc::DaqConfig::RocEntry::tag)
+        .def_readwrite("name",  &evc::DaqConfig::RocEntry::name)
+        .def_readwrite("crate", &evc::DaqConfig::RocEntry::crate)
+        .def_readwrite("type",  &evc::DaqConfig::RocEntry::type);
+
+    py::class_<evc::DaqConfig>(m, "DaqConfig",
+        "DAQ configuration (bank tags, ROC map, TI layout, ...)")
+        .def(py::init<>())
+        .def_readwrite("physics_tags",      &evc::DaqConfig::physics_tags)
+        .def_readwrite("physics_base",      &evc::DaqConfig::physics_base)
+        .def_readwrite("monitoring_tags",   &evc::DaqConfig::monitoring_tags)
+        .def_readwrite("prestart_tag",      &evc::DaqConfig::prestart_tag)
+        .def_readwrite("go_tag",            &evc::DaqConfig::go_tag)
+        .def_readwrite("end_tag",           &evc::DaqConfig::end_tag)
+        .def_readwrite("sync_tag",          &evc::DaqConfig::sync_tag)
+        .def_readwrite("epics_tag",         &evc::DaqConfig::epics_tag)
+        .def_readwrite("adc_format",        &evc::DaqConfig::adc_format)
+        .def_readwrite("sparsify_sigma",    &evc::DaqConfig::sparsify_sigma)
+        .def_readwrite("fadc_composite_tag",&evc::DaqConfig::fadc_composite_tag)
+        .def_readwrite("adc1881m_bank_tag", &evc::DaqConfig::adc1881m_bank_tag)
+        .def_readwrite("ti_bank_tag",       &evc::DaqConfig::ti_bank_tag)
+        .def_readwrite("trigger_bank_tag",  &evc::DaqConfig::trigger_bank_tag)
+        .def_readwrite("run_info_tag",      &evc::DaqConfig::run_info_tag)
+        .def_readwrite("daq_config_tag",    &evc::DaqConfig::daq_config_tag)
+        .def_readwrite("epics_bank_tag",    &evc::DaqConfig::epics_bank_tag)
+        .def_readwrite("ssp_bank_tags",     &evc::DaqConfig::ssp_bank_tags)
+        .def_readwrite("fadc_raw_tag",      &evc::DaqConfig::fadc_raw_tag)
+        .def_readwrite("tdc_bank_tag",      &evc::DaqConfig::tdc_bank_tag)
+        .def_readwrite("roc_tags",          &evc::DaqConfig::roc_tags)
+        .def_readwrite("ti_master_tag",     &evc::DaqConfig::ti_master_tag)
+        .def_readwrite("verbose_decode",    &evc::DaqConfig::verbose_decode)
+        .def("is_physics",    &evc::DaqConfig::is_physics)
+        .def("is_monitoring", &evc::DaqConfig::is_monitoring)
+        .def("is_control",    &evc::DaqConfig::is_control)
+        .def("is_sync",       &evc::DaqConfig::is_sync)
+        .def("is_epics",      &evc::DaqConfig::is_epics)
+        .def("is_ssp_bank",   &evc::DaqConfig::is_ssp_bank);
+
+    m.def("load_daq_config",
+        [](const std::string &path) {
+            evc::DaqConfig cfg;
+            std::string p = path.empty() ? default_daq_config_path() : path;
+            if (!evc::load_daq_config(p, cfg))
+                throw std::runtime_error("Failed to load DAQ config: " + p);
+            return cfg;
+        },
+        py::arg("path") = std::string(""),
+        "Load a DaqConfig from JSON. Empty path uses the installed default.");
+}
+
+// -------------------------------------------------------------------------
+// EventType / Status enums
+// -------------------------------------------------------------------------
+void bind_enums(py::module_ &m)
+{
+    py::enum_<evc::EventType>(m, "EventType")
+        .value("Unknown",  evc::EventType::Unknown)
+        .value("Physics",  evc::EventType::Physics)
+        .value("Sync",     evc::EventType::Sync)
+        .value("Epics",    evc::EventType::Epics)
+        .value("Prestart", evc::EventType::Prestart)
+        .value("Go",       evc::EventType::Go)
+        .value("End",      evc::EventType::End)
+        .value("Control",  evc::EventType::Control);
+
+    py::enum_<evc::status>(m, "Status")
+        .value("failure",    evc::status::failure)
+        .value("success",    evc::status::success)
+        .value("incomplete", evc::status::incomplete)
+        .value("empty",      evc::status::empty)
+        .value("eof",        evc::status::eof);
+}
+
+// -------------------------------------------------------------------------
+// EvChannel
+// -------------------------------------------------------------------------
+void bind_channel(py::module_ &m)
+{
+    py::class_<evc::EvChannel>(m, "EvChannel",
+        "Evio event reader and scanner.")
+        .def(py::init<size_t>(),
+            py::arg("buflen") = 1024u * 2000u,
+            "Construct with an internal buffer of `buflen` uint32 words.")
+        .def("set_config", &evc::EvChannel::SetConfig, py::arg("cfg"))
+        .def("get_config", &evc::EvChannel::GetConfig,
+             py::return_value_policy::reference_internal)
+        .def("open",
+            [](evc::EvChannel &self, const std::string &path) {
+                py::gil_scoped_release rel;
+                return self.Open(path);
+            },
+            py::arg("path"),
+            "Open an evio file. Returns a Status enum.")
+        .def("close", &evc::EvChannel::Close)
+        .def("read",
+            [](evc::EvChannel &self) {
+                py::gil_scoped_release rel;
+                return self.Read();
+            },
+            "Read the next record into the internal buffer. Returns Status.")
+        .def("scan", &evc::EvChannel::Scan,
+            "Scan the currently-held record. Call after a successful Read().")
+        .def("get_event_type", &evc::EvChannel::GetEventType)
+        .def("get_n_events",   &evc::EvChannel::GetNEvents)
+        .def("decode_event_info",
+            [](const evc::EvChannel &self, int i) -> py::object {
+                fdec::EventInfo info;
+                if (!self.DecodeEventInfo(i, info)) return py::none();
+                return py::cast(info);
+            },
+            py::arg("i") = 0,
+            "Fast-path: return EventInfo without decoding detector data, or None.")
+        .def("decode_event",
+            [](const evc::EvChannel &self, int i,
+               bool with_ssp, bool with_vtp, bool with_tdc) -> py::dict {
+                auto evt = std::make_shared<fdec::EventData>();
+                std::shared_ptr<ssp::SspEventData> ssp_ptr;
+                std::shared_ptr<vtp::VtpEventData> vtp_ptr;
+                std::shared_ptr<tdc::TdcEventData> tdc_ptr;
+                if (with_ssp) ssp_ptr = std::make_shared<ssp::SspEventData>();
+                if (with_vtp) vtp_ptr = std::make_shared<vtp::VtpEventData>();
+                if (with_tdc) tdc_ptr = std::make_shared<tdc::TdcEventData>();
+                bool ok;
+                {
+                    py::gil_scoped_release rel;
+                    ok = self.DecodeEvent(i, *evt,
+                                          ssp_ptr.get(), vtp_ptr.get(), tdc_ptr.get());
+                }
+                py::dict out;
+                out["ok"]    = ok;
+                out["event"] = py::cast(evt);
+                out["ssp"]   = ssp_ptr ? py::cast(ssp_ptr) : py::none();
+                out["vtp"]   = vtp_ptr ? py::cast(vtp_ptr) : py::none();
+                out["tdc"]   = tdc_ptr ? py::cast(tdc_ptr) : py::none();
+                return out;
+            },
+            py::arg("i") = 0,
+            py::kw_only(),
+            py::arg("with_ssp") = false,
+            py::arg("with_vtp") = false,
+            py::arg("with_tdc") = false,
+            "Full decode. Returns {'ok': bool, 'event': EventData, "
+            "'ssp': SspEventData|None, 'vtp': ..., 'tdc': ...}.")
+        .def("get_control_time", &evc::EvChannel::GetControlTime,
+            "Unix timestamp from the current Prestart/Go/End event (0 if N/A).")
+        .def("extract_epics_text", &evc::EvChannel::ExtractEpicsText,
+            "Raw EPICS payload for the current event (empty if not EPICS).");
+}
+
+} // anonymous namespace
+
+// -------------------------------------------------------------------------
+// Entry point for the main module (prad2py.cpp calls this).
+// -------------------------------------------------------------------------
+void register_dec(py::module_ &m)
+{
+    auto dec = m.def_submodule("dec",
+        "prad2dec bindings: evio reader, event data types, TDC/SSP/VTP accessors.");
+
+    bind_enums(dec);
+    bind_config(dec);
+    bind_fadc(dec);
+    bind_ssp(dec);
+    bind_vtp(dec);
+    bind_tdc(dec);
+    bind_channel(dec);
+}
