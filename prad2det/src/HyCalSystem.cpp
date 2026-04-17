@@ -158,12 +158,13 @@ bool HyCalSystem::Init(const std::string &modules_path, const std::string &daq_p
         }
     }
 
-    // --- compute sectors, layout, and neighbors -----------------------------
+    // --- compute sectors, layout, grids, and neighbors ----------------------
     compute_sectors();
 
     for (auto &m : modules_)
         assign_layout(m);
 
+    build_sector_grids();
     build_neighbors();
 
     return true;
@@ -385,21 +386,65 @@ void HyCalSystem::qdist(double x1, double y1, int s1,
 }
 
 //=============================================================================
-// Build neighbors — O(N^2) init, runs once
+// Build sector grids — map (row, col) → module index per sector
+//=============================================================================
+
+void HyCalSystem::build_sector_grids()
+{
+    // Grid dimensions per sector (must match assign_layout row/col ranges)
+    static constexpr int dims[][2] = {
+        {34, 34},   // Center (PbWO4)
+        { 6, 24},   // Top
+        {24,  6},   // Right
+        { 6, 24},   // Bottom
+        {24,  6},   // Left
+    };
+
+    for (int s = 0; s < static_cast<int>(Sector::Max); ++s)
+        sector_grids_[s].init(dims[s][0], dims[s][1]);
+
+    for (int i = 0; i < n_modules_; ++i) {
+        auto &m = modules_[i];
+        if (m.sector < 0) continue;
+        auto &grid = sector_grids_[m.sector];
+        if (grid.valid(m.row, m.column))
+            grid.at(m.row, m.column) = i;
+    }
+}
+
+//=============================================================================
+// Build cross-sector neighbors — only edge modules need qdist
 //=============================================================================
 
 void HyCalSystem::build_neighbors()
 {
-    // clear all neighbor lists
     for (auto &m : modules_) m.neighbor_count = 0;
 
-    for (int i = 0; i < n_modules_; ++i) {
-        auto &m1 = modules_[i];
-        if (!m1.is_hycal() || m1.sector < 0) continue;
+    // Identify edge modules: any HyCal module with a missing/empty grid neighbor
+    std::vector<int> edge_mods;
+    edge_mods.reserve(300);
 
-        for (int j = i + 1; j < n_modules_; ++j) {
-            auto &m2 = modules_[j];
-            if (!m2.is_hycal() || m2.sector < 0) continue;
+    for (int i = 0; i < n_modules_; ++i) {
+        auto &m = modules_[i];
+        if (!m.is_hycal() || m.sector < 0) continue;
+        const auto &grid = sector_grids_[m.sector];
+        bool edge = false;
+        for (int dr = -1; dr <= 1 && !edge; ++dr)
+            for (int dc = -1; dc <= 1 && !edge; ++dc) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = m.row + dr, nc = m.column + dc;
+                if (!grid.valid(nr, nc) || grid.at(nr, nc) < 0)
+                    edge = true;
+            }
+        if (edge) edge_mods.push_back(i);
+    }
+
+    // Compute cross-sector neighbors among edge module pairs
+    for (size_t a = 0; a < edge_mods.size(); ++a) {
+        auto &m1 = modules_[edge_mods[a]];
+        for (size_t b = a + 1; b < edge_mods.size(); ++b) {
+            auto &m2 = modules_[edge_mods[b]];
+            if (m1.sector == m2.sector) continue;
 
             double dx, dy;
             qdist(m1.x, m1.y, m1.sector, m2.x, m2.y, m2.sector, dx, dy);
@@ -409,6 +454,7 @@ void HyCalSystem::build_neighbors()
                 float fdy = static_cast<float>(dy);
                 float dist = std::sqrt(fdx * fdx + fdy * fdy);
 
+                int i = edge_mods[a], j = edge_mods[b];
                 if (m1.neighbor_count < MAX_NEIGHBORS)
                     m1.neighbors[m1.neighbor_count++] = {j, fdx, fdy, dist};
                 if (m2.neighbor_count < MAX_NEIGHBORS)

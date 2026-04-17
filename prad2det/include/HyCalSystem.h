@@ -84,6 +84,22 @@ struct NeighborInfo {
     float dist;         // sqrt(dx*dx + dy*dy)
 };
 
+// --- sector grid for O(1) neighbor lookup -----------------------------------
+static constexpr int SECTOR_GRID_MAX_CELLS = 34 * 34;  // Center is largest
+
+struct SectorGrid {
+    int nrows = 0, ncols = 0;
+    int cells[SECTOR_GRID_MAX_CELLS];
+
+    void init(int r, int c) {
+        nrows = r; ncols = c;
+        for (int i = 0; i < r * c; ++i) cells[i] = -1;
+    }
+    bool valid(int r, int c) const { return r >= 0 && r < nrows && c >= 0 && c < ncols; }
+    int  at(int r, int c) const    { return cells[r * ncols + c]; }
+    int& at(int r, int c)          { return cells[r * ncols + c]; }
+};
+
 // --- DAQ address ------------------------------------------------------------
 struct DaqAddr {
     int crate   = -1;
@@ -127,8 +143,8 @@ struct Module {
         return E + cal_non_linear * (E - cal_base_energy) / 1000.;
     }
 
-    // pre-computed neighbors (filled by InitLayout)
-    int         neighbor_count = 0;
+    // pre-computed cross-sector neighbors (same-sector uses grid lookup)
+    int          neighbor_count = 0;
     NeighborInfo neighbors[MAX_NEIGHBORS];
 
     // helpers
@@ -136,16 +152,19 @@ struct Module {
     bool is_glass()  const { return type == ModuleType::PbGlass; }
     bool is_hycal()  const { return is_pwo4() || is_glass(); }
 
-    bool is_neighbor(int other_index, bool include_corners = true) const
+    bool is_neighbor(const Module &other, bool include_corners = true) const
     {
+        // O(1) same-sector: row/col adjacency on uniform grid
+        if (sector >= 0 && sector == other.sector) {
+            int dr = std::abs(row - other.row);
+            int dc = std::abs(column - other.column);
+            if (dr > 1 || dc > 1 || (dr == 0 && dc == 0)) return false;
+            return include_corners || (dr + dc <= 1);
+        }
+        // cross-sector: scan pre-computed list
         for (int i = 0; i < neighbor_count; ++i) {
-            if (neighbors[i].index == other_index) {
-                if (include_corners)
-                    return (std::abs(neighbors[i].dx) < 1.01f &&
-                            std::abs(neighbors[i].dy) < 1.01f);
-                else
-                    return neighbors[i].dist < 1.2f;
-            }
+            if (neighbors[i].index == other.index)
+                return include_corners || neighbors[i].dist < 1.2f;
         }
         return false;
     }
@@ -196,6 +215,33 @@ public:
         qdist(m1.x, m1.y, m1.sector, m2.x, m2.y, m2.sector, dx, dy);
     }
 
+    // --- neighbor enumeration (grid + cross-sector) --------------------------
+    // Calls fn(neighbor_module_index) for each neighbor of the given module.
+    // Same-sector: walks ±1 in the sector grid (O(8)).
+    // Cross-sector: iterates pre-computed list (typically 0-3 entries).
+    template<typename Fn>
+    void for_each_neighbor(int module_index, bool include_corners, Fn &&fn) const
+    {
+        const auto &m = modules_[module_index];
+        if (m.sector < 0) return;
+        const auto &grid = sector_grids_[m.sector];
+        for (int dr = -1; dr <= 1; ++dr) {
+            for (int dc = -1; dc <= 1; ++dc) {
+                if (dr == 0 && dc == 0) continue;
+                if (!include_corners && dr != 0 && dc != 0) continue;
+                int nr = m.row + dr, nc = m.column + dc;
+                if (grid.valid(nr, nc)) {
+                    int ni = grid.at(nr, nc);
+                    if (ni >= 0) fn(ni);
+                }
+            }
+        }
+        for (int i = 0; i < m.neighbor_count; ++i) {
+            if (!include_corners && m.neighbors[i].dist >= 1.2f) continue;
+            fn(m.neighbors[i].index);
+        }
+    }
+
     // --- static helpers -----------------------------------------------------
     static int          name_to_id(const std::string &name);
     static std::string  id_to_name(int id);
@@ -204,6 +250,7 @@ public:
 private:
     void  compute_sectors();
     void  assign_layout(Module &m) const;
+    void  build_sector_grids();
     void  build_neighbors();
 
     // line-segment intersection (ported from cana::intersection)
@@ -221,6 +268,9 @@ private:
 
     // sector info
     std::array<SectorInfo, static_cast<int>(Sector::Max)> sectors_;
+
+    // sector grids for O(1) same-sector neighbor lookup
+    std::array<SectorGrid, static_cast<int>(Sector::Max)> sector_grids_;
 
     // pack DAQ address into a single key
     static uint64_t pack_daq(int crate, int slot, int ch)

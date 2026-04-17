@@ -101,31 +101,35 @@ void HyCalCluster::ReconstructMatched(std::vector<RecoResult> &out) const
 
 void HyCalCluster::group_hits()
 {
+    // Build reverse map: module index → hit index
+    mod_to_hit_.assign(sys_.module_count(), -1);
+    for (size_t i = 0; i < hits_.size(); ++i)
+        mod_to_hit_[hits_[i].index] = static_cast<int>(i);
+
+    hit_group_id_.assign(hits_.size(), -1);
     std::vector<bool> visited(hits_.size(), false);
 
     for (size_t i = 0; i < hits_.size(); ++i) {
         if (visited[i]) continue;
-
+        int gid = static_cast<int>(groups_.size());
         groups_.emplace_back();
         groups_.back().reserve(ISLAND_GROUP_RESERVE);
-        dfs_group(groups_.back(), static_cast<int>(i), visited);
+        dfs_group(groups_.back(), gid, static_cast<int>(i), visited);
     }
 }
 
-void HyCalCluster::dfs_group(std::vector<int> &group, int hit_idx,
-                              std::vector<bool> &visited) const
+void HyCalCluster::dfs_group(std::vector<int> &group, int group_id, int hit_idx,
+                              std::vector<bool> &visited)
 {
     group.push_back(hit_idx);
     visited[hit_idx] = true;
+    hit_group_id_[hit_idx] = group_id;
 
-    const auto &hit = hits_[hit_idx];
-    const auto &mod = sys_.module(hit.index);
-
-    for (size_t i = 0; i < hits_.size(); ++i) {
-        if (visited[i]) continue;
-        if (mod.is_neighbor(hits_[i].index, config_.corner_conn))
-            dfs_group(group, static_cast<int>(i), visited);
-    }
+    sys_.for_each_neighbor(hits_[hit_idx].index, config_.corner_conn, [&](int ni) {
+        int hi = mod_to_hit_[ni];
+        if (hi >= 0 && !visited[hi])
+            dfs_group(group, group_id, hi, visited);
+    });
 }
 
 //=============================================================================
@@ -160,6 +164,9 @@ std::vector<int> HyCalCluster::find_maxima(const std::vector<int> &group) const
 {
     std::vector<int> local_max;
     local_max.reserve(20);
+    if (group.empty()) return local_max;
+
+    const int gid = hit_group_id_[group[0]];
 
     for (int hi : group) {
         auto &hit = hits_[hi];
@@ -167,16 +174,13 @@ std::vector<int> HyCalCluster::find_maxima(const std::vector<int> &group) const
             continue;
 
         bool is_max = true;
-        for (int hj : group) {
-            if (hi == hj) continue;
-            // include corners when checking for maxima (same as old code)
-            if (sys_.module(hit.index).is_neighbor(hits_[hj].index, true) &&
-                hits_[hj].energy > hit.energy)
-            {
+        // include corners when checking for maxima (same as old code)
+        sys_.for_each_neighbor(hit.index, true, [&](int ni) {
+            if (!is_max) return;
+            int hj = mod_to_hit_[ni];
+            if (hj >= 0 && hit_group_id_[hj] == gid && hits_[hj].energy > hit.energy)
                 is_max = false;
-                break;
-            }
-        }
+        });
 
         if (is_max)
             local_max.push_back(hi);

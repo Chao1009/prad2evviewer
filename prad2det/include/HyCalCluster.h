@@ -155,8 +155,8 @@ public:
 private:
     // island algorithm steps
     void group_hits();
-    void dfs_group(std::vector<int> &group, int hit_idx,
-                   std::vector<bool> &visited) const;
+    void dfs_group(std::vector<int> &group, int group_id, int hit_idx,
+                   std::vector<bool> &visited);
     void split_cluster(const std::vector<int> &group);
     std::vector<int> find_maxima(const std::vector<int> &group) const;
     void split_hits(const std::vector<int> &maxima,
@@ -181,8 +181,10 @@ private:
 
     // per-event data
     std::vector<ModuleHit>              hits_;
-    std::vector<std::vector<int>>       groups_;     // groups of hit indices
+    std::vector<std::vector<int>>       groups_;        // groups of hit indices
     std::vector<ModuleCluster>          clusters_;
+    std::vector<int>                    mod_to_hit_;    // module_index → hit_index (-1 if not hit)
+    std::vector<int>                    hit_group_id_;  // hit_index → group_id
 };
 
 } // namespace fdec
