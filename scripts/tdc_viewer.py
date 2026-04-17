@@ -47,11 +47,15 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from PyQt6.QtCore import QObject, Qt, QRectF, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QObject, Qt, QRectF, QThread, QTimer, QUrl, pyqtSignal,
+)
 from PyQt6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QHBoxLayout,
@@ -59,6 +63,8 @@ from PyQt6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressDialog,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -603,6 +609,45 @@ class Heatmap2D(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Offline file loader (runs in a QThread so the UI stays responsive)
+# ---------------------------------------------------------------------------
+
+
+class LoadWorker(QObject):
+    """Calls ``load_hits_from_evio`` on a worker thread and signals back.
+
+    We can't drive real progress percentage through this path — ``prad2py``'s
+    ``load_tdc_hits`` is a single blocking C++ call — so the accompanying UI
+    shows an indeterminate busy indicator.  The worker simply emits once
+    when the load succeeds or fails.
+    """
+
+    finished = pyqtSignal(object)   # numpy ndarray
+    failed   = pyqtSignal(str)
+
+    def __init__(self, path: str, max_events: int,
+                 daq_config: str, roc_filter: int):
+        super().__init__()
+        self._path = path
+        self._max = max_events
+        self._daq = daq_config
+        self._roc = roc_filter
+
+    def run(self):
+        try:
+            hits = load_hits_from_evio(
+                self._path,
+                max_events=self._max,
+                daq_config=self._daq,
+                roc_filter=self._roc,
+            )
+        except Exception as exc:                  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        self.finished.emit(hits)
+
+
+# ---------------------------------------------------------------------------
 # Live WebSocket stream (prad2_server)
 # ---------------------------------------------------------------------------
 
@@ -764,6 +809,49 @@ def _match_pair(hits: np.ndarray,
         ha["event_num"], hb["event_num"], return_indices=True, assume_unique=True
     )
     return ha["tdc"][ia].astype(np.int64), hb["tdc"][ib].astype(np.int64)
+
+
+# ---------------------------------------------------------------------------
+# Resizable error dialog (replaces QMessageBox.critical for long messages)
+# ---------------------------------------------------------------------------
+
+
+def show_error_dialog(parent, title: str, heading: str, details: str,
+                      width: int = 720, height: int = 420) -> None:
+    """Modal error dialog with a read-only, monospace, scrollable text area.
+
+    Unlike ``QMessageBox.critical``, this dialog is resizable by the user so
+    long tracebacks / multi-line messages are actually readable.
+    """
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.resize(width, height)
+    dlg.setSizeGripEnabled(True)
+
+    lay = QVBoxLayout(dlg)
+
+    if heading:
+        lbl = QLabel(heading)
+        lbl.setWordWrap(True)
+        lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(lbl)
+
+    text = QPlainTextEdit()
+    text.setReadOnly(True)
+    text.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+    # Monospace so file paths / tracebacks align.
+    mono = QFont("Monospace")
+    mono.setStyleHint(QFont.StyleHint.TypeWriter)
+    mono.setPointSize(10)
+    text.setFont(mono)
+    text.setPlainText(details)
+    lay.addWidget(text, 1)
+
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok, parent=dlg)
+    buttons.accepted.connect(dlg.accept)
+    lay.addWidget(buttons)
+
+    dlg.exec()
 
 
 # ---------------------------------------------------------------------------
@@ -982,22 +1070,82 @@ class TdcViewer(QMainWindow):
         # Loading a static file is mutually exclusive with the live stream.
         if self._live_timer.isActive():
             self._disconnect_live()
+
+        # A second load while one is already in-flight: cancel the first by
+        # dropping our references (we can't stop the C++ call, but we'll
+        # ignore its result when it eventually finishes).
+        self._cancel_load()
+
         self.statusBar().showMessage(f"Loading {path}…")
-        QApplication.processEvents()
-        try:
-            hits = load_hits_from_evio(
-                path,
-                max_events=self._load_max_events,
-                daq_config=self._load_daq_config,
-                roc_filter=self._load_roc_filter,
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Load failed", f"{path}\n\n{exc}")
-            self.statusBar().showMessage("")
-            return
+
+        # Indeterminate busy dialog (min=max=0 renders a "working" bar).
+        # Shown after 400 ms so instant-loaded files don't flash it.
+        dlg = QProgressDialog(
+            f"Decoding {os.path.basename(path)} …", None, 0, 0, self,
+        )
+        dlg.setWindowTitle("Loading")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(400)
+        dlg.setCancelButton(None)          # load_tdc_hits can't be interrupted
+        dlg.setAutoClose(True)
+        dlg.setValue(0)
+
+        worker = LoadWorker(
+            path, self._load_max_events,
+            self._load_daq_config, self._load_roc_filter,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(
+            lambda hits: self._on_load_finished(path, hits))
+        worker.failed.connect(
+            lambda msg: self._on_load_failed(path, msg))
+        # Tear down the thread whichever way the worker exits.
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(dlg.close)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._load_dialog = dlg
+        self._load_thread = thread
+        self._load_worker = worker
+        self._load_token = path            # cancel-check: must match on finish
+
+        thread.start()
+
+    # --- load callbacks / cancellation -----------------------------------
+
+    def _cancel_load(self):
+        """Invalidate any load in flight. We can't stop the C++ call, but we
+        won't apply its result when it eventually returns."""
+        self._load_token = None
+        if getattr(self, "_load_dialog", None) is not None:
+            try: self._load_dialog.close()
+            except Exception: pass
+            self._load_dialog = None
+
+    def _on_load_finished(self, path: str, hits: np.ndarray):
+        if self._load_token != path:
+            return                          # superseded by a later load()
         self._hits = hits
         self._path = path
+        self._load_token = None
         self._rebuild_index()
+        self.statusBar().showMessage(f"Loaded {hits.size:,} hits from {path}")
+
+    def _on_load_failed(self, path: str, msg: str):
+        if self._load_token != path:
+            return
+        self._load_token = None
+        show_error_dialog(
+            self,
+            title="Load failed",
+            heading=f"Could not load:  {path}",
+            details=msg,
+        )
+        self.statusBar().showMessage("")
 
     # --- indexing --------------------------------------------------------
 
@@ -1510,6 +1658,11 @@ class TdcViewer(QMainWindow):
                 self._disconnect_live()
         except Exception:
             pass
+        # Invalidate any in-flight file load — the worker thread may still
+        # be inside load_tdc_hits and can't be interrupted, but this makes
+        # its eventual completion signal a no-op instead of touching a
+        # destroyed viewer.
+        self._cancel_load()
         super().closeEvent(ev)
 
 
@@ -1637,36 +1790,28 @@ def main(argv):
         err = smoke_test_live(args.live)
         if err:
             sys.stderr.write(f"tdc_viewer: cannot connect to {args.live}: {err}\n")
-            QMessageBox.critical(None, "Live stream unreachable",
-                                 f"{args.live}\n\n{err}")
-            return 1
-
-    hits = None
-    path = ""
-    if args.path:
-        path = args.path
-        try:
-            hits = load_hits_from_evio(
-                path,
-                max_events=args.max_events,
-                daq_config=args.daq_config,
-                roc_filter=roc,
+            show_error_dialog(
+                None,
+                title="Live stream unreachable",
+                heading=f"Cannot connect to:  {args.live}",
+                details=err,
             )
-        except Exception as exc:
-            QMessageBox.critical(None, "Load failed", f"{path}\n\n{exc}")
             return 1
 
     win = TdcViewer(
-        hits=hits,
-        path=path,
+        hits=None,
+        path="",
         max_events=args.max_events,
         daq_config=args.daq_config,
         roc_filter=roc,
     )
+    # Kick off file / live connection after the event loop is actually
+    # running — that way both use the async load path with the progress
+    # dialog rather than freezing the GUI on startup.
+    if args.path:
+        QTimer.singleShot(0, lambda: win.load(args.path))
     if args.live:
         win._last_live_url = args.live
-        # Defer the connection until the event loop is running so QWebSocket
-        # is properly parented and the window is realised first.
         QTimer.singleShot(0, win._connect_live_dialog_auto)
     win.show()
     return app.exec()
