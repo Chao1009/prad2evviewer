@@ -5,6 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Position-independent code is required for the static libraries (prad2dec,
+# prad2det, prad2srv) to be linkable into shared objects — ACLiC macros
+# (analysis/scripts/*.C+) and the pybind11 module both produce .so files.
+# Enabling it globally is cheap and removes a class of build failures.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
