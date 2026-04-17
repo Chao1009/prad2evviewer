@@ -60,13 +60,13 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     // histograms for gain monitoring replay
     for (int ch = 0; ch < 4; ++ch) {
         h_lmsCH_lmsHeight_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_lmsHeight", ch), Form("LMS%d Peak Height;Height (ADC);Counts", ch), 500, 0, 4000);
+            Form("h_lmsCH%d_lmsHeight", ch), Form("LMS%d Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
         h_lmsCH_lmsIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 500, 0, 40000);
+            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 40000);
         h_lmsCH_alphaHeight_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_alphaHeight", ch), Form("LMS%d Alpha Peak Height;Height (ADC);Counts", ch), 500, 0, 4000);
+            Form("h_lmsCH%d_alphaHeight", ch), Form("LMS%d Alpha Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
         h_lmsCH_alphaIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 500, 0, 400000);
+            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 400000);
     }
     h_modCH_lmsHeight_.resize(nmod);
     h_modCH_lmsIntegral_.resize(nmod);
@@ -74,10 +74,10 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         auto &mod = hycal_.module(i);
         std::string name_height = "h_mod" + mod.name + "_lmsHeight";
         std::string title_height = mod.name + " LMS Peak Height;Height (ADC);Counts";
-        h_modCH_lmsHeight_[i] = std::make_unique<TH1F>(name_height.c_str(), title_height.c_str(), 500, 0, 4000);
+        h_modCH_lmsHeight_[i] = std::make_unique<TH1F>(name_height.c_str(), title_height.c_str(), 1000, 0, 4000);
         std::string name_integral = "h_mod" + mod.name + "_lmsIntegral";
         std::string title_integral = mod.name + " LMS Peak Integral;Integral (ADC*ns);Counts";
-        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 500, 0, 40000);
+        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 1000, 0, 40000);
     }
 }
 
