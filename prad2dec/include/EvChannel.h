@@ -30,6 +30,7 @@
 #include "Fadc250Data.h"
 #include "SspData.h"
 #include "VtpData.h"
+#include "TdcData.h"
 #include "DaqConfig.h"
 #include <string>
 #include <vector>
@@ -89,10 +90,13 @@ public:
     // If ssp_evt is non-null, also decodes SSP/MPD banks for GEM readout.
     // If vtp_evt is non-null, also decodes 0xE122 VTP Hardware Data banks
     // (ECAL peaks/clusters, block metadata).
+    // If tdc_evt is non-null, also decodes 0xE107 V1190 TDC Data banks
+    // (tagger timing hits under ROC 0x008E).
     // Returns true on success (at least one ROC or SSP bank decoded).
     bool DecodeEvent(int i, fdec::EventData &evt,
                      ssp::SspEventData *ssp_evt = nullptr,
-                     vtp::VtpEventData *vtp_evt = nullptr) const;
+                     vtp::VtpEventData *vtp_evt = nullptr,
+                     tdc::TdcEventData *tdc_evt = nullptr) const;
 
     // --- Control event extraction (Prestart/Go/End) -------------------------
 

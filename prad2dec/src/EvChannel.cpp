@@ -4,6 +4,7 @@
 #include "Adc1881mDecoder.h"
 #include "SspDecoder.h"
 #include "VtpDecoder.h"
+#include "TdcDecoder.h"
 #include "evio.h"
 #include <cstring>
 #include <iostream>
@@ -303,6 +304,8 @@ static const KnownBankTag known_bank_tags[] = {
     { 0xE10F, "HEAD bank",                    true  },
     { 0xE10E, "Run Config File",              true  },
     { 0xC000, "CODA trigger bank",            true  },
+    { 0xE107, "V1190 TDC Data",               true  },
+    { 0xE122, "VTP Hardware Data",            true  },
     // Tags listed in the dictionary but without a prad2dec decoder
     { 0xE10B, "V1190/V1290 Hardware Data",    false },
     { 0xE141, "FAV3 Hardware Data",           false },
@@ -310,7 +313,6 @@ static const KnownBankTag known_bank_tags[] = {
     { 0xE105, "DCRB Hardware Data",           false },
     { 0xE115, "DSC2 Scalers raw format",      false },
     { 0xE112, "HEAD bank raw format",         false },
-    { 0xE122, "VTP Hardware Data",            true  },
     { 0xE123, "SSP-RICH Hardware Data",       false },
     { 0xE125, "SIS3801 Scalers raw format",   false },
     { 0xE131, "VFTDC Hardware Data",          false },
@@ -328,11 +330,13 @@ static const KnownBankTag *lookupKnownTag(uint32_t tag)
 
 bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
                             ssp::SspEventData *ssp_evt,
-                            vtp::VtpEventData *vtp_evt) const
+                            vtp::VtpEventData *vtp_evt,
+                            tdc::TdcEventData *tdc_evt) const
 {
     evt.clear();
     if (ssp_evt) ssp_evt->clear();
     if (vtp_evt) vtp_evt->clear();
+    if (tdc_evt) tdc_evt->clear();
     if (i < 0 || i >= nevents) return false;
     if (nodes.empty()) return false;
 
@@ -463,6 +467,17 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
             if (vtp_evt)
                 vtp::VtpDecoder::DecodeRoc(GetData(n), n.data_words,
                                             roc_tag, *vtp_evt);
+            continue;
+        }
+
+        // V1190 TDC Data (0xE107) — tagger timing hits.
+        // Each word is a single hit; payload can be empty between triggers.
+        if (n.tag == config.tdc_bank_tag && config.tdc_bank_tag != 0
+            && n.type == DATA_UINT32)
+        {
+            if (tdc_evt)
+                tdc::TdcDecoder::DecodeRoc(GetData(n), n.data_words,
+                                            roc_tag, *tdc_evt);
             continue;
         }
 

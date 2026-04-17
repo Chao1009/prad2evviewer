@@ -85,6 +85,9 @@ struct DaqConfig
     // FADC250 hardware-format raw data bank tag (0xE109, used when rol2 is skipped)
     uint32_t fadc_raw_tag = 0;
 
+    // V1190 TDC data bank tag (0xE107, tagger crate — flat array of hits)
+    uint32_t tdc_bank_tag = 0;
+
     // --- TI data format (fallback for single-event / non-CODA3 data) --------
     // TI bank layout: word[0]=header, word[1]=trigger#, word[2]=ts_low, word[3]=ts_high
     int ti_trigger_word;

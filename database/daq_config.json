@@ -26,7 +26,8 @@
         "daq_config":      "0xE10E",
         "epics_data":      "0xE114",
         "ssp_raw":         ["0xE10C", "0x0DEA"],
-        "fadc_raw":        "0xE109"
+        "fadc_raw":        "0xE109",
+        "tdc":             "0xE107"
     },
 
     "ti_format": {
@@ -69,6 +70,7 @@
         {"tag": "0x8B", "name": "tihycal6",  "crate": 5,  "type": "ti_slave"},
         {"tag": "0x8C", "name": "adchycal7", "crate": 6,  "type": "roc"},
         {"tag": "0x8D", "name": "tihycal7",  "crate": 6,  "type": "ti_slave"},
+        {"tag": "0x8E", "name": "tagger",    "crate": 7,  "type": "tdc"},
         {"tag": "0x31", "name": "gemroc1",   "crate": 49, "type": "gem"},
         {"tag": "0x34", "name": "gemroc2",   "crate": 52, "type": "gem"}
     ],

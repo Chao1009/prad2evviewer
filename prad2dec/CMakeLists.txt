@@ -112,6 +112,7 @@ set(PRAD2DEC_SOURCES
     src/Adc1881mDecoder.cpp
     src/SspDecoder.cpp
     src/VtpDecoder.cpp
+    src/TdcDecoder.cpp
     src/WaveAnalyzer.cpp
 )
 if(WITH_ET)

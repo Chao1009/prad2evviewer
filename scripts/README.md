@@ -62,3 +62,22 @@ Visualize GEM clustering from `gem_dump -m evdump` JSON output.
 ```bash
 python scripts/gem_cluster_view.py <event.json> [gem_map.json] [--det N] [-o file.png]
 ```
+
+## tdc_viewer.py
+
+PyQt6 viewer for V1190 TDC hits from the tagger crate (ROC `0x008E`, bank
+`0xE107`). Shows a per-slot bar chart of hits/channel plus the TDC-value
+histogram for any selected channel. No matplotlib; plots are drawn with
+QPainter (numpy is the only scientific dep).
+
+```bash
+# Extract hits from an evio file (produces a 16-byte/hit binary)
+./build/bin/tdc_dump /data/stage6/prad_023667/prad_023667.evio.00000 \
+    -b /tmp/tagger_hits.bin           # add "-n 100000" to cap events
+
+# Visualise
+python scripts/tdc_viewer.py /tmp/tagger_hits.bin
+```
+
+`tdc_dump` also writes a CSV (`event_num,trigger_bits,roc_tag,slot,channel,edge,tdc`)
+to stdout when no `-o` / `-b` is given, which is handy for `awk`/`head` checks.

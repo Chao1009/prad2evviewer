@@ -166,6 +166,12 @@ Max size (~12K words) = physics events with full FADC waveforms.
 | 0x008B | BANK | 139    | tihycal6  | 5     | 6 - 90  |
 | 0x008D | BANK | 141    | tihycal7  | 6     | 6 - 90  |
 
+### Tagger V1190 TDC Crate
+
+| Tag    | Type | ROC ID | Name    | Crate | Words     | Description                                        |
+|--------|------|--------|---------|-------|-----------|----------------------------------------------------|
+| 0x008E | BANK | 142    | tagger  | 7     | 8 - 300   | One VME crate with three V1190 TDC boards. Carries `0xE10A` TI data and `0xE107` TDC hits. |
+
 ### GEM VTP/MPD Crates (not in run 023453)
 
 | Tag    | Type | ROC ID | Name    | Crate | ROL source  |
@@ -246,7 +252,7 @@ tags can be looked up quickly.
 | 0xE103 | COMPOSITE | FADC250 Pulse Integral Data (mode 3)          | (mode 3, not used)                                                 |
 | 0xE104 | UINT32    | VSCM Hardware Data / VSCM Raw Data            | reserved in rol1.c, not used in PRad-II                            |
 | 0xE105 | UINT32    | DCRB Hardware Data                            | reserved in rol1.c, not used in PRad-II (was misnamed "DCRB/DC/Vetroc") |
-| 0xE107 | UINT32    | V1190 TDC Data                                | not used                                                           |
+| 0xE107 | UINT32    | V1190 TDC Data                                | **observed** — tagger crate `0x008E` emits 0-22 words/event. Each word is one hit: `slot[31:27] \| edge[26] \| ch[25:19] \| tdc[18:0]`. Decoded by `prad2dec/src/TdcDecoder.cpp`. |
 | 0xE108 | UINT32    | DCRBGTP Hardware Data                         | not used                                                           |
 | 0xE109 | UINT32    | FADC250 Hardware Data (raw)                   | **observed in some configs** — pre-rol2.c reformatting; rol2.c converts → 0xE101 |
 | 0xE10A | UINT32    | TI/TS Hardware Data                           | **observed** — TI master/slave timing, FP trigger pattern in d[5]  |
@@ -394,6 +400,26 @@ Self-describing 32-bit words with type code in bits[31:27]:
 Sample data words (continuation after type 0x04 header):
 - Bits 28:16 = ADC sample i (13 bits)
 - Bits 12:0 = ADC sample i+1 (13 bits)
+
+### V1190 TDC Format (0xE107)
+
+rol2.c reformats the raw `0xE10B` v1190/v1290 hardware stream (block/global
+headers, TDC headers, EOB markers, global trailer) into a flat array of hits.
+Each 32-bit word is one TDC hit:
+
+| Bits   | Width | Field | Notes                                                |
+|--------|-------|-------|------------------------------------------------------|
+| 31:27  | 5     | SLOT  | V1190 board slot in the VME crate (0-31)             |
+| 26     | 1     | EDGE  | 0 = leading, 1 = trailing                            |
+| 25:19  | 7     | CH    | Channel within the board (0-127)                     |
+| 18:00  | 19    | TDC   | Timing value. For v1190, rol2.c left-shifts the native 100 ps count by 2 to match the v1290 25 ps LSB before truncating to 19 bits. |
+
+No framing words are present in the payload — `nwords == 0` simply means no
+hits for this event. PRad-II tagger observed range: 0-22 words per event.
+
+**Decoder:** `prad2dec/src/TdcDecoder.cpp` — appends hits to `tdc::TdcEventData`
+when the caller passes a `TdcEventData*` as the 4th optional argument to
+`EvChannel::DecodeEvent`.
 
 ### SSP/MPD Bitfield Format (0xE10C, 0x0DEA)
 

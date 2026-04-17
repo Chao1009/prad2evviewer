@@ -88,6 +88,7 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             }
         }
         if (bt.contains("fadc_raw"))       cfg.fadc_raw_tag       = parse_hex(bt["fadc_raw"]);
+        if (bt.contains("tdc"))            cfg.tdc_bank_tag       = parse_hex(bt["tdc"]);
     }
 
     // TI format
