@@ -15,7 +15,8 @@
 std::unique_ptr<DataSource> createDataSource(
     const std::string &path,
     const evc::DaqConfig &daq_cfg,
-    const std::unordered_map<int, uint32_t> &crate_to_roc)
+    const std::unordered_map<int, uint32_t> &crate_to_roc,
+    const fdec::HyCalSystem *hycal)
 {
     // detect file type by extension
     std::string lower = path;
@@ -23,8 +24,9 @@ std::unique_ptr<DataSource> createDataSource(
 
     if (lower.find(".root") != std::string::npos) {
 #ifdef WITH_ROOT
-        return createRootDataSource(path, crate_to_roc);
+        return createRootDataSource(path, crate_to_roc, hycal);
 #else
+        (void)crate_to_roc; (void)hycal;
         return nullptr;  // ROOT support not compiled
 #endif
     }

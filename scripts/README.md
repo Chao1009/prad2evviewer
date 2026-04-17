@@ -122,3 +122,65 @@ records      n_hits × 16-byte packed BinHit
                u8 slot, u8 channel_edge (bit 7 = edge, bits 6:0 = channel),
                u32 tdc
 ```
+
+## Using prad2py directly (Phase 1 bindings)
+
+`prad2py` exposes the decoder through a `dec` submodule — useful for custom
+offline analysis that goes beyond what the tdc_viewer does. Build it with
+`-DBUILD_PYTHON=ON` once, then:
+
+```python
+import prad2py
+from prad2py import dec                         # evio reader + event types
+
+cfg = dec.load_daq_config()                     # installed daq_config.json
+ch  = dec.EvChannel()
+ch.set_config(cfg)
+st = ch.open("/data/.../prad_023671.evio.00000")
+assert st == dec.Status.success
+
+while ch.read() == dec.Status.success:
+    if not ch.scan() or ch.get_event_type() != dec.EventType.Physics:
+        continue
+    for i in range(ch.get_n_events()):
+        # Fast path — TI/trigger only (no FADC waveform decode):
+        info = ch.decode_event_info(i)
+        if info is None: continue
+        # …do something with info.event_number / .trigger_bits / .timestamp …
+
+        # Full decode when you actually need waveforms / TDC hits:
+        evt = ch.decode_event(i, with_tdc=True)
+        if not evt["ok"]: continue
+        for roc_idx in range(evt["event"].nrocs):
+            roc = evt["event"].roc(roc_idx)
+            for s in roc.present_slots():
+                slot = roc.slot(s)
+                for c in slot.present_channels():
+                    samples = slot.channel(c).samples   # numpy uint16 array
+                    …
+        for j in range(evt["tdc"].n_hits):
+            h = evt["tdc"].hit(j)                       # TdcHit
+            …
+```
+
+The helper `prad2py.load_tdc_hits(path, ...)` is still available for the
+common "one-shot flat table of hits" workflow and lives on top of the
+`dec` submodule. Phase 2 will add `prad2py.det` (HyCal / GEM).
+
+## tagger_hycal_correlation.py
+
+Example analysis built on top of `prad2py` + PyROOT. For each pair
+(T10R, Eₓ) with x ∈ {49…53} it fills the event-wise ΔT histogram,
+Gaussian-fits the coincidence peak, applies a ±Nσ timing cut, and
+plots the W1156 (ROC 0x8C slot 7 ch 3) peak height/integral for the
+selected events. Single-pass reader, no intermediate ROOT file.
+
+```bash
+python scripts/tagger_hycal_correlation.py \
+    /data/stage6/prad_023671/prad_023671.evio.00000 \
+    -o tagger_w1156_corr.root -n 500000
+```
+
+Outputs `tagger_w1156_corr.root` with 3×5 histograms (ΔT, height, integral
+for each Eₓ) plus a summary canvas. Channel mapping is hard-coded at the
+top of the script — edit it there if the DAQ layout changes.

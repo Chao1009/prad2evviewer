@@ -19,13 +19,14 @@
 
 std::unique_ptr<DataSource> createRootDataSource(
     const std::string &path,
-    const std::unordered_map<int, uint32_t> &crate_to_roc)
+    const std::unordered_map<int, uint32_t> &crate_to_roc,
+    const fdec::HyCalSystem *hycal)
 {
     std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
     if (!f || f->IsZombie()) return nullptr;
 
     if (f->Get<TTree>("events"))
-        return std::make_unique<RootRawDataSource>(crate_to_roc);
+        return std::make_unique<RootRawDataSource>(crate_to_roc, hycal);
     if (f->Get<TTree>("recon"))
         return std::make_unique<RootReconDataSource>();
 
@@ -49,21 +50,22 @@ std::string RootRawDataSource::open(const std::string &path)
 
     n_entries_ = static_cast<int>(tree_->GetEntries());
 
-    // set branch addresses into the shared RawEventData struct
+    // event-level branches (shared RawEventData struct)
     tree_->SetBranchAddress("event_num",    &ev_.event_num);
     if (tree_->GetBranch("trigger_type"))
         tree_->SetBranchAddress("trigger_type", &ev_.trigger_type);
-    tree_->SetBranchAddress("trigger",       &ev_.trigger);
+    if (tree_->GetBranch("trigger_bits"))
+        tree_->SetBranchAddress("trigger_bits", &ev_.trigger_bits);
     tree_->SetBranchAddress("timestamp",     &ev_.timestamp);
-    tree_->SetBranchAddress("hycal.nch",       &ev_.nch);
-    tree_->SetBranchAddress("hycal.crate",     ev_.crate);
-    tree_->SetBranchAddress("hycal.slot",      ev_.slot);
-    tree_->SetBranchAddress("hycal.channel",   ev_.channel);
-    tree_->SetBranchAddress("hycal.nsamples",  ev_.nsamples);
-    tree_->SetBranchAddress("hycal.samples",   ev_.samples);
-    tree_->SetBranchAddress("hycal.ped_mean",  ev_.ped_mean);
-    tree_->SetBranchAddress("hycal.ped_rms",   ev_.ped_rms);
-    tree_->SetBranchAddress("hycal.integral",  ev_.integral);
+
+    // HyCal per-channel data (indexed by module_id, not crate/slot/channel)
+    tree_->SetBranchAddress("hycal.nch",        &ev_.nch);
+    tree_->SetBranchAddress("hycal.module_id",  ev_.module_id);
+    tree_->SetBranchAddress("hycal.nsamples",   ev_.nsamples);
+    tree_->SetBranchAddress("hycal.samples",    ev_.samples);
+    tree_->SetBranchAddress("hycal.ped_mean",   ev_.ped_mean);
+    tree_->SetBranchAddress("hycal.ped_rms",    ev_.ped_rms);
+    tree_->SetBranchAddress("hycal.integral",   ev_.integral);
 
     has_peaks_ = (tree_->GetBranch("hycal.npeaks") != nullptr);
     if (has_peaks_) {
@@ -73,7 +75,8 @@ std::string RootRawDataSource::open(const std::string &path)
         tree_->SetBranchAddress("hycal.peak_integral", ev_.peak_integral);
     }
 
-    if (tree_->GetBranch("gem.nch")) {
+    has_gem_ = (tree_->GetBranch("gem.nch") != nullptr);
+    if (has_gem_) {
         tree_->SetBranchAddress("gem.nch",         &ev_.gem_nch);
         tree_->SetBranchAddress("gem.mpd_crate",   ev_.mpd_crate);
         tree_->SetBranchAddress("gem.mpd_fiber",   ev_.mpd_fiber);
@@ -82,8 +85,14 @@ std::string RootRawDataSource::open(const std::string &path)
         tree_->SetBranchAddress("gem.ssp_samples", ev_.ssp_samples);
     }
 
+    if (!hycal_) {
+        std::cerr << "ROOT raw: warning — no HyCalSystem provided; "
+                     "module_id → DAQ mapping unavailable, HyCal channels will be skipped\n";
+    }
+
     std::cerr << "ROOT raw: " << n_entries_ << " events"
-              << (has_peaks_ ? ", peaks" : "") << "\n";
+              << (has_peaks_ ? ", peaks" : "")
+              << (has_gem_   ? ", GEM"   : "") << "\n";
     return "";
 }
 
@@ -93,6 +102,7 @@ void RootRawDataSource::close()
     file_.reset();
     n_entries_ = 0;
     has_peaks_ = false;
+    has_gem_ = false;
 }
 
 DataSourceCaps RootRawDataSource::capabilities() const
@@ -102,8 +112,8 @@ DataSourceCaps RootRawDataSource::capabilities() const
         has_peaks_, // has_peaks
         true,       // has_pedestals
         true,       // has_clusters (computed)
-        true,       // has_gem_raw
-        true,       // has_gem_hits (computed)
+        has_gem_,   // has_gem_raw
+        has_gem_,   // has_gem_hits (computed)
         false,      // has_epics
         false,      // has_sync
         "root_raw"
@@ -115,18 +125,30 @@ void RootRawDataSource::fillEventData(fdec::EventData &evt) const
     evt.clear();
     evt.info.event_number = ev_.event_num;
     evt.info.trigger_type = ev_.trigger_type;
-    evt.info.trigger_bits = ev_.trigger;
+    evt.info.trigger_bits = ev_.trigger_bits;
     evt.info.timestamp = static_cast<uint64_t>(ev_.timestamp);
 
+    // Without the HyCalSystem we cannot reverse module_id → (crate, slot, ch).
+    // Downstream code indexes by ROC/slot/channel, so skip HyCal channels.
+    if (!hycal_) return;
+
     for (int i = 0; i < ev_.nch && i < prad2::kMaxChannels; ++i) {
+        const fdec::Module *mod = hycal_->module_by_id(ev_.module_id[i]);
+        if (!mod) continue;
+
+        int crate = mod->daq.crate;
+        int sl    = mod->daq.slot;
+        int ch    = mod->daq.channel;
+        if (sl < 0 || sl >= fdec::MAX_SLOTS || ch < 0 || ch >= fdec::MAX_CHANNELS) continue;
+
         // translate crate ID → ROC tag
-        uint32_t roc_tag = ev_.crate[i];
-        auto it = crate_to_roc_.find(ev_.crate[i]);
+        uint32_t roc_tag = static_cast<uint32_t>(crate);
+        auto it = crate_to_roc_.find(crate);
         if (it != crate_to_roc_.end()) roc_tag = it->second;
 
         int roc_idx = -1;
         for (int r = 0; r < evt.nrocs; ++r) {
-            if (evt.rocs[r].tag == static_cast<int>(roc_tag)) { roc_idx = r; break; }
+            if (evt.rocs[r].tag == roc_tag) { roc_idx = r; break; }
         }
         if (roc_idx < 0) {
             if (evt.nrocs >= fdec::MAX_ROCS) continue;
@@ -135,17 +157,13 @@ void RootRawDataSource::fillEventData(fdec::EventData &evt) const
             evt.rocs[roc_idx].tag = roc_tag;
         }
 
-        int sl = ev_.slot[i];
-        int ch = ev_.channel[i];
-        if (sl >= fdec::MAX_SLOTS || ch >= fdec::MAX_CHANNELS) continue;
-
         auto &slot = evt.rocs[roc_idx].slots[sl];
         slot.present = true;
         slot.channel_mask |= (1ull << ch);
         auto &cd = slot.channels[ch];
         cd.nsamples = std::min((int)ev_.nsamples[i], fdec::MAX_SAMPLES);
         for (int s = 0; s < cd.nsamples; ++s)
-            cd.samples[s] = static_cast<uint16_t>(ev_.samples[i][s]);
+            cd.samples[s] = ev_.samples[i][s];
     }
 }
 
@@ -194,14 +212,19 @@ std::string RootReconDataSource::open(const std::string &path)
     tree_->SetBranchAddress("event_num",    &ev_.event_num);
     if (tree_->GetBranch("trigger_type"))
         tree_->SetBranchAddress("trigger_type", &ev_.trigger_type);
-    tree_->SetBranchAddress("trigger_bits", &ev_.trigger_bits);
+    if (tree_->GetBranch("trigger_bits"))
+        tree_->SetBranchAddress("trigger_bits", &ev_.trigger_bits);
     tree_->SetBranchAddress("timestamp",    &ev_.timestamp);
+
+    // HyCal clusters
     tree_->SetBranchAddress("n_clusters",   &ev_.n_clusters);
     tree_->SetBranchAddress("cl_x",         ev_.cl_x);
     tree_->SetBranchAddress("cl_y",         ev_.cl_y);
     tree_->SetBranchAddress("cl_energy",    ev_.cl_energy);
     tree_->SetBranchAddress("cl_nblocks",   ev_.cl_nblocks);
     tree_->SetBranchAddress("cl_center",    ev_.cl_center);
+
+    // GEM hits
     tree_->SetBranchAddress("n_gem_hits",   &ev_.n_gem_hits);
     tree_->SetBranchAddress("det_id",       ev_.det_id);
     tree_->SetBranchAddress("gem_x",        ev_.gem_x);
@@ -263,13 +286,16 @@ void RootReconDataSource::fillRecon(ReconEventData &recon) const
     recon.clusters.clear();
     for (int i = 0; i < ev_.n_clusters && i < prad2::kMaxClusters; ++i)
         recon.clusters.push_back({ev_.cl_x[i], ev_.cl_y[i], ev_.cl_energy[i],
-                                   ev_.cl_nblocks[i], ev_.cl_center[i]});
+                                   static_cast<int>(ev_.cl_nblocks[i]),
+                                   static_cast<int>(ev_.cl_center[i])});
     recon.gem_hits.clear();
     for (int i = 0; i < ev_.n_gem_hits && i < prad2::kMaxGemHits; ++i)
-        recon.gem_hits.push_back({(int)ev_.det_id[i], ev_.gem_x[i], ev_.gem_y[i],
+        recon.gem_hits.push_back({static_cast<int>(ev_.det_id[i]),
+                                   ev_.gem_x[i], ev_.gem_y[i],
                                    ev_.gem_x_charge[i], ev_.gem_y_charge[i],
                                    ev_.gem_x_peak[i], ev_.gem_y_peak[i],
-                                   ev_.gem_x_size[i], ev_.gem_y_size[i]});
+                                   static_cast<int>(ev_.gem_x_size[i]),
+                                   static_cast<int>(ev_.gem_y_size[i])});
 }
 
 bool RootReconDataSource::decodeReconEvent(int index, ReconEventData &recon)

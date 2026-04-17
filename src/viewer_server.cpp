@@ -449,7 +449,7 @@ void ViewerServer::loadFileInternal(const std::string &filepath)
 
     // create and open the appropriate data source
     progress_.phase = 1;
-    auto source = createDataSource(filepath, app_file_.daq_cfg, crate_to_roc_);
+    auto source = createDataSource(filepath, app_file_.daq_cfg, crate_to_roc_, &app_file_.hycal);
     if (!source) {
         std::cerr << "  Error: unsupported file type\n";
         progress_.loading = false; return;

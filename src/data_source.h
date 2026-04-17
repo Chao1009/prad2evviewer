@@ -17,6 +17,7 @@
 
 // Forward declarations (avoid pulling in EvChannel.h for non-EVIO sources)
 namespace evc { struct DaqConfig; }
+namespace fdec { class HyCalSystem; }
 
 // ── Capabilities ─────────────────────────────────────────────────────────
 
@@ -105,8 +106,11 @@ public:
 // Auto-detects by extension (.evio → EVIO, .root → ROOT) and tree name.
 // crate_to_roc maps crate IDs (0,1,...) to ROC tags (0x80,0x82,...) for
 // ROOT files where the replay stores crate IDs.
+// hycal is required for ROOT raw files to reverse module_id back to DAQ
+// (crate, slot, channel) addressing. Pass nullptr for EVIO-only usage.
 // Returns nullptr if the file type is unrecognized or support not compiled in.
 std::unique_ptr<DataSource> createDataSource(
     const std::string &path,
     const evc::DaqConfig &daq_cfg,
-    const std::unordered_map<int, uint32_t> &crate_to_roc);
+    const std::unordered_map<int, uint32_t> &crate_to_roc,
+    const fdec::HyCalSystem *hycal = nullptr);
