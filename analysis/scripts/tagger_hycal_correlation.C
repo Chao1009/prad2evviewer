@@ -45,6 +45,7 @@
 #include <TSystem.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -241,6 +242,38 @@ int tagger_hycal_correlation(const char *evio_path,
 
     std::cout << "reading " << evio_path << std::endl;
 
+    // --- progress reporter -------------------------------------------------
+    // One-line overwrite via '\r' every ~300 ms so the terminal doesn't
+    // scroll.  Shows count, rate, and ETA when max_events is set.
+    using clock = std::chrono::steady_clock;
+    auto t_start = clock::now();
+    auto t_last  = t_start;
+    constexpr auto progress_interval = std::chrono::milliseconds(300);
+    auto report_progress = [&](bool final_line) {
+        auto now = clock::now();
+        double elapsed = std::chrono::duration<double>(now - t_start).count();
+        double rate    = elapsed > 0 ? (double)n_physics / elapsed : 0.0;
+        std::cout << "\r  " << std::setw(10) << n_physics << " events";
+        if (max_events > 0) {
+            double pct = 100.0 * (double)n_physics / (double)max_events;
+            double eta = rate > 0
+                ? ((double)max_events - (double)n_physics) / rate : 0.0;
+            std::cout << " / " << max_events
+                      << "  (" << std::fixed << std::setprecision(1) << pct << "%)"
+                      << std::defaultfloat
+                      << "  " << std::setprecision(3) << rate / 1e3 << "k/s"
+                      << "  ETA " << std::setprecision(0) << std::fixed
+                      << (int)eta << "s"
+                      << std::defaultfloat;
+        } else {
+            std::cout << "  " << std::setprecision(3) << rate / 1e3 << "k/s";
+        }
+        std::cout << "  W1156: " << std::setw(8) << n_w1156_events
+                  << "     "           // clear any leftover from longer lines
+                  << std::flush;
+        if (final_line) std::cout << "\n";
+    };
+
     while (ch.Read() == status::success) {
         if (!ch.Scan() || ch.GetEventType() != EventType::Physics) continue;
 
@@ -274,16 +307,26 @@ int tagger_hycal_correlation(const char *evio_path,
             }
 
             ++n_physics;
-            if (n_physics % 100000 == 0)
-                std::cout << "  " << n_physics << " physics events processed"
-                          << " (W1156 seen so far: " << n_w1156_events << ")\n";
+
+            auto now = clock::now();
+            if (now - t_last >= progress_interval) {
+                t_last = now;
+                report_progress(false);
+            }
+
             if (max_events > 0 && n_physics >= max_events) goto done;
         }
     }
 done:
+    report_progress(true);                    // final line + newline
     ch.Close();
-    std::cout << "done: " << n_physics << " physics events"
-              << " (W1156 present in " << n_w1156_events << ")\n";
+    double elapsed = std::chrono::duration<double>(
+        clock::now() - t_start).count();
+    std::cout << "done: " << n_physics << " physics events in "
+              << std::fixed << std::setprecision(1) << elapsed << " s"
+              << " (" << (int)(n_physics / std::max(elapsed, 1e-6)) << " ev/s,"
+              << " W1156 present in " << n_w1156_events << ")\n"
+              << std::defaultfloat;
 
     //---- write ΔT + W1156 histograms, build the summary canvas --------------
     TCanvas *canvas = new TCanvas("summary", "tagger-W1156 correlations",
