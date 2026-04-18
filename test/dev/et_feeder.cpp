@@ -1,4 +1,7 @@
-// test/et_feeder.cpp — Feed an evio file to an ET system event-by-event
+// test/dev/et_feeder.cpp — Feed an evio file to an ET system event-by-event
+//
+// Pairs with evet_diff (which reads both the evio file and the ET ring
+// and diffs their raw buffers).
 //
 // Usage: et_feeder <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms] [-s start] [-n num]
 

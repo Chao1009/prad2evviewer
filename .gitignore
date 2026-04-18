@@ -21,9 +21,6 @@ compile_commands.json
 *.o
 *.obj
 
-# Executables
-evc_test
-
 # Python
 __pycache__/
 *.pyc

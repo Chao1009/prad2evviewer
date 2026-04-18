@@ -12,6 +12,8 @@
 #include "EvStruct.h"
 #include "Fadc250Data.h"
 #include "load_daq_config.h"
+#include "InstallPaths.h"
+#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -1206,7 +1208,20 @@ int main(int argc, char *argv[])
     if (optind >= argc) { usage(argv[0]); return 1; }
     std::string path = argv[optind];
 
-    // auto-search for daq_config.json if not specified
+    // auto-search for daq_config.json if not specified.  Prefer the
+    // install-aware resolver (env var → exe-relative → compile default),
+    // then fall back to CWD-relative paths for dev-in-tree runs.
+    if (daq_config_file.empty()) {
+        std::string db_dir = prad2::resolve_data_dir(
+            "PRAD2_DATABASE_DIR",
+            {"../share/prad2evviewer/database"},
+            DATABASE_DIR);
+        if (!db_dir.empty()) {
+            std::string cand = db_dir + "/daq_config.json";
+            std::ifstream f(cand);
+            if (f.good()) daq_config_file = std::move(cand);
+        }
+    }
     if (daq_config_file.empty()) {
         for (auto p : {"daq_config.json", "database/daq_config.json", "../database/daq_config.json"}) {
             std::ifstream f(p);

@@ -1,10 +1,11 @@
-// test/test_main.cpp
-// Basic smoke-test for the evc library.
+// test/dev/evc_scan.cpp
+// Basic smoke-test for the evc library — reads events from an evio file
+// or ET ring and prints summary info.  Three modes; see Usage below.
 //
 // Usage:
-//   evc_test <evio_file>                          read buffers
-//   evc_test <evio_file> -m scan [-s N] [-n N]    per-event details
-//   evc_test -m et -H <host> -P <port> -f <et_file> -S <station>
+//   evc_scan <evio_file>                          read buffers
+//   evc_scan <evio_file> -m scan [-s N] [-n N]    per-event details
+//   evc_scan -m et -H <host> -P <port> -f <et_file> -S <station>
 
 #include "EvChannel.h"
 #include "EtChannel.h"

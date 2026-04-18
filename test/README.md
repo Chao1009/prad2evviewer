@@ -68,10 +68,16 @@ The `evdump` mode outputs JSON with three pipeline layers: `raw_apvs`, `zs_apvs`
 
 Filter syntax: `-f field=val[,val]:min_dets` (fields: `pos`, `plane`, `match`, `orient`, `det`).
 
-## ET tools (requires `-DWITH_ET=ON`)
+## Dev-only tools (not installed) — sources under `test/dev/`
 
-**evc_test** — Smoke-test: read EVIO buffers, scan events, or connect to ET.
+**ts_dump** — dump trigger timestamps from an EVIO file.
+
+**livetime** — compute DAQ livetime from pulser events.
+
+### ET-specific (requires `-DWITH_ET=ON`)
+
+**evc_scan** — Smoke-test: read EVIO buffers, scan events, or connect to ET.
 
 **et_feeder** — Replay EVIO into ET at configurable rate: `et_feeder data.evio -f /tmp/et -i 50`
 
-**evchan_test** — Compare ET-streamed vs disk-read events word-by-word.
+**evet_diff** — Compare ET-streamed vs disk-read events word-by-word (pairs with `et_feeder`).

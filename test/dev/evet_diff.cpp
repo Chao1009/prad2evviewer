@@ -1,10 +1,12 @@
-// test/evchan_test.cpp — Test consistency between EvChannel and EtChannel
+// test/dev/evet_diff.cpp — diff raw buffers between EvChannel (evio file)
+// and EtChannel (ET ring) for the same events, to validate that the two
+// decoder paths produce identical data.
 //
 // Start this program first (connects to ET), then use et_feeder to feed
-// the same evio file to the same ET system. Set interval large enough
+// the same evio file to the same ET system.  Set interval large enough
 // to keep the two channels synchronized.
 //
-// Usage: evchan_test <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms]
+// Usage: evet_diff <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms]
 
 #include "EtConfigWrapper.h"
 #include "EvChannel.h"

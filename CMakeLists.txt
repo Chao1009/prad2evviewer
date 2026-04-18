@@ -196,10 +196,6 @@ include(GNUInstallDirs)
 
 install(TARGETS prad2_server evio_dump ped_calc gem_dump
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-if(WITH_ET)
-    install(TARGETS evc_test et_feeder evchan_test
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
 if(BUILD_GUI)
     install(TARGETS prad2evviewer prad2_client
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
