@@ -2,7 +2,8 @@
 //
 // The actual binding code lives in per-area translation units:
 //   bind_dec.cpp   → prad2py.dec (evio reader, event data, TDC/SSP/VTP)
-//   (future)       → prad2py.det (HyCal / GEM reconstruction)
+//   bind_det.cpp   → prad2py.det (detector systems + reconstruction;
+//                                   Phase 2a: GEM; 2b HyCal; 2c helpers)
 //
 // Each of those files defines a ``register_XXX(py::module_ &m)`` entry
 // point that adds a submodule to the top-level module.
@@ -34,19 +35,21 @@ std::string default_daq_config_path()
 
 } // anonymous namespace
 
-// Defined in bind_dec.cpp — registers the ``prad2py.dec`` submodule.
+// Defined in bind_dec.cpp / bind_det.cpp — register the submodules.
 void register_dec(py::module_ &m);
+void register_det(py::module_ &m);
 
 PYBIND11_MODULE(prad2py, m)
 {
     m.doc() = "PRad-II (prad2dec + prad2det) Python bindings.";
 
-    m.attr("__version__")    = "0.3.0";
+    m.attr("__version__")    = "0.4.0";
     m.attr("DATABASE_DIR")   = DATABASE_DIR;
 
     m.def("default_daq_config", &default_daq_config_path,
           "Return the default daq_config.json path used by analyses.");
 
-    // Per-area submodules.  Phase 1: decoder.  Phase 2+: detector.
-    register_dec(m);
+    // Per-area submodules.
+    register_dec(m);    // prad2py.dec
+    register_det(m);    // prad2py.det
 }

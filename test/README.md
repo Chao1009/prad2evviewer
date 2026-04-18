@@ -64,7 +64,7 @@ gem_dump <evio_file> [options]
 | `-z <sigma>` | Override zero-suppression threshold |
 | `-f <filter>` | APV filter for `evdump` (see below) |
 
-The `evdump` mode outputs JSON with three pipeline layers: `raw_apvs`, `zs_apvs`, and per-detector `clusters` + `hits_2d`. Use with `scripts/gem_cluster_view.py`.
+The `evdump` mode outputs JSON with three pipeline layers: `raw_apvs`, `zs_apvs`, and per-detector `clusters` + `hits_2d`. Use with `scripts/gem/gem_cluster_view.py`.
 
 Filter syntax: `-f field=val[,val]:min_dets` (fields: `pos`, `plane`, `match`, `orient`, `det`).
 
