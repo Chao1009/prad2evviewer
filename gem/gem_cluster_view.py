@@ -107,8 +107,17 @@ def main():
 
     gem_map_path = args.gem_map
     if not gem_map_path:
-        for c in ["database/gem_map.json", "../database/gem_map.json",
-                  "../../database/gem_map.json", "gem_map.json"]:
+        # Env var (set by setup.sh / setup.csh) wins, then common source-tree
+        # and CWD-relative fallbacks for dev use.
+        env_db = os.environ.get("PRAD2_DATABASE_DIR")
+        cands = []
+        if env_db:
+            cands.append(os.path.join(env_db, "gem_map.json"))
+        here = os.path.dirname(os.path.abspath(__file__))
+        cands.append(os.path.join(here, "..", "database", "gem_map.json"))
+        cands += ["database/gem_map.json", "../database/gem_map.json",
+                  "../../database/gem_map.json", "gem_map.json"]
+        for c in cands:
             if os.path.exists(c):
                 gem_map_path = c; break
     if not gem_map_path:

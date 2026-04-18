@@ -126,10 +126,17 @@ def main():
 
     gem_map_path = args.gem_map
     if not gem_map_path:
-        for candidate in ["database/gem_map.json",
-                          "../database/gem_map.json",
-                          "../../database/gem_map.json",
-                          "gem_map.json"]:
+        env_db = os.environ.get("PRAD2_DATABASE_DIR")
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates = []
+        if env_db:
+            candidates.append(os.path.join(env_db, "gem_map.json"))
+        candidates.append(os.path.join(here, "..", "database", "gem_map.json"))
+        candidates += ["database/gem_map.json",
+                       "../database/gem_map.json",
+                       "../../database/gem_map.json",
+                       "gem_map.json"]
+        for candidate in candidates:
             if os.path.exists(candidate):
                 gem_map_path = candidate
                 break

@@ -400,22 +400,34 @@ def _find_first(candidates: List[Path]) -> Optional[Path]:
     return None
 
 
+def _search_candidates(filename: str) -> List[Path]:
+    """Ordered list of locations to try for a config JSON.
+
+    Priority:
+      1. ``$PRAD2_DATABASE_DIR/<filename>`` — set by setup.sh / setup.csh,
+         always canonical for an installed environment.
+      2. ``<script-dir>/../database/<filename>`` — works when the script
+         is run from its source checkout (``<repo>/gem/``) or from the
+         installed layout (``<prefix>/share/prad2evviewer/gem/``).
+      3. ``<cwd>/database/<filename>`` / ``<cwd>/<filename>`` —
+         dev-friendly fallback when running from the repo root.
+    """
+    cands: List[Path] = []
+    env = os.environ.get("PRAD2_DATABASE_DIR")
+    if env:
+        cands.append(Path(env) / filename)
+    cands.append(_SCRIPT_DIR.parent / "database" / filename)
+    cands.append(Path.cwd() / "database" / filename)
+    cands.append(Path.cwd() / filename)
+    return cands
+
+
 def default_daq_config() -> Optional[Path]:
-    root = _SCRIPT_DIR.parent.parent
-    return _find_first([
-        root / "database" / "daq_config.json",
-        Path.cwd() / "database" / "daq_config.json",
-        Path.cwd() / "daq_config.json",
-    ])
+    return _find_first(_search_candidates("daq_config.json"))
 
 
 def default_gem_map() -> Optional[Path]:
-    root = _SCRIPT_DIR.parent.parent
-    return _find_first([
-        root / "database" / "gem_map.json",
-        Path.cwd() / "database" / "gem_map.json",
-        Path.cwd() / "gem_map.json",
-    ])
+    return _find_first(_search_candidates("gem_map.json"))
 
 
 # NOTE: no default_gem_ped() auto-discovery.  Pedestals are per-run
