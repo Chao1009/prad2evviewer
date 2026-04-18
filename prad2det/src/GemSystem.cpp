@@ -67,7 +67,6 @@ void GemSystem::Init(const std::string &map_file)
     common_thres_    = j.value("common_mode_threshold", 20.f);
     zerosup_thres_   = j.value("zero_suppression_threshold", 5.f);
     crosstalk_thres_ = j.value("cross_talk_threshold", 8.f);
-    online_zero_sup_ = j.value("online_zero_suppression", false);
     position_res_    = j.value("position_resolution", 0.08f);
 
     // strip-level cuts
@@ -323,17 +322,50 @@ const std::vector<GEMHit>& GemSystem::GetHits(int det) const
 
 //=============================================================================
 // processApv — per-APV: pedestal subtraction, common mode, zero suppression
+//
+// Two paths, picked per-APV from the data itself:
+//
+//   data.has_online_cm == true  → production online-ZS run.  The MPD firmware
+//     has already applied pedestal subtraction, common-mode correction, and
+//     zero-suppression; the only strips in the bank are the surviving ones.
+//     We just copy those values and mark every present strip as a hit.  No
+//     offline pedestal file is needed.
+//
+//   data.has_online_cm == false → full-readout run (pedestal calibration).
+//     Run the full offline pipeline: pedestal subtract → sorting common-mode
+//     → per-strip ZS with pedestal.noise × zerosup_thres_.
+//
+// The per-APV `has_online_cm` flag is set by SspDecoder.cpp whenever the
+// MPD emits its type-0xD debug-header words, which only happens when the
+// firmware is running online CM — and online CM is paired with online ZS
+// in the current MPD configuration.
 //=============================================================================
 
-// Macro to compute data index: raw[ch + ts * (APV_STRIP_SIZE + 1)]
-// The +1 accounts for the APV header word per time sample (MPD_APV_TS_LEN = 129)
-// For our flat buffer, we use a simpler layout: raw[ts * APV_STRIP_SIZE + ch]
+// Flat-buffer index: raw[ts * APV_STRIP_SIZE + ch].
 #define RAW_IDX(ch, ts) ((ts) * APV_STRIP_SIZE + (ch))
 
 void GemSystem::processApv(int apv_idx, const ssp::ApvData &data)
 {
     auto &cfg = apvs_[apv_idx];
     auto &work = apv_work_[apv_idx];
+
+    if (data.has_online_cm) {
+        // Online-ZS path: every strip present in the bank is a surviving hit.
+        // Values are already pedestal + CM subtracted by firmware.
+        for (int ch = 0; ch < APV_STRIP_SIZE; ++ch) {
+            if (data.hasStrip(ch)) {
+                work.hit_pos[ch] = true;
+                for (int ts = 0; ts < SSP_TIME_SAMPLES; ++ts)
+                    work.raw[RAW_IDX(ch, ts)] = static_cast<float>(data.strips[ch][ts]);
+            } else {
+                work.hit_pos[ch] = false;
+            }
+        }
+        collectHits(apv_idx);
+        return;
+    }
+
+    // --- offline pipeline for full-readout (pedestal-calibration) runs ---
 
     // --- copy raw data into working buffer ---
     for (int ch = 0; ch < APV_STRIP_SIZE; ++ch) {
@@ -347,10 +379,8 @@ void GemSystem::processApv(int apv_idx, const ssp::ApvData &data)
         float *buf = &work.raw[ts * APV_STRIP_SIZE];
 
         // subtract pedestal offset
-        if (!online_zero_sup_) {
-            for (int ch = 0; ch < APV_STRIP_SIZE; ++ch)
-                buf[ch] -= cfg.pedestal[ch].offset;
-        }
+        for (int ch = 0; ch < APV_STRIP_SIZE; ++ch)
+            buf[ch] -= cfg.pedestal[ch].offset;
 
         // compute and subtract common mode (sorting algorithm)
         float cm = commonModeSorting(buf, APV_STRIP_SIZE, apv_idx);

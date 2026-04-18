@@ -17,8 +17,7 @@ foreach(_t evio_dump ped_calc)
     add_prad_tool(${_t} LINKS nlohmann_json::nlohmann_json)
 endforeach()
 
-# gem_dump additionally needs prad2det for clustering.
-add_prad_tool(gem_dump LINKS prad2det nlohmann_json::nlohmann_json)
+# gem_dump lives in gem/ (see gem/CMakeLists.txt).
 
 # ---------------------------------------------------------------------------
 # Dev-only tools (not installed) — sources under test/dev/

@@ -254,11 +254,11 @@ private:
     int   apv_channels_     = 128;     // channels per APV chip
     int   readout_center_   = 32;      // default readout mapping center
 
-    // --- thresholds ---------------------------------------------------------
+    // --- thresholds (only used by the offline full-readout path; the
+    // online-ZS path trusts the firmware's own thresholds) ------------------
     float common_thres_     = 20.f;
     float zerosup_thres_    = 5.f;
     float crosstalk_thres_  = 8.f;
-    bool  online_zero_sup_  = false;
     float position_res_     = 0.08f;   // mm
 
     // --- strip-level cuts (from mpd_gem_view_ssp) -------------------------

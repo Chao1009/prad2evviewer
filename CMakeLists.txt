@@ -55,9 +55,10 @@ add_subdirectory(prad2det)                    # libprad2det.a
 include(WebDeps)
 
 # ---------------------------------------------------------------------------
-# Diagnostic command-line tools (evio_dump, gem_dump, …)
+# Diagnostic command-line tools
 # ---------------------------------------------------------------------------
-add_subdirectory(test)
+add_subdirectory(test)    # evio_dump, ped_calc + test/dev tools
+add_subdirectory(gem)     # gem_dump + Python GEM tools
 
 # ---------------------------------------------------------------------------
 # Optional feature: ROOT-based analysis tools + viewer data source
@@ -194,7 +195,7 @@ endif()
 # ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 
-install(TARGETS prad2_server evio_dump ped_calc gem_dump
+install(TARGETS prad2_server evio_dump ped_calc
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(BUILD_GUI)
     install(TARGETS prad2evviewer prad2_client
@@ -215,9 +216,11 @@ install(FILES scripts/setup.sh ${CMAKE_BINARY_DIR}/bin/setup.csh
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
-# Install the scripts/ tree (Python utilities + auxiliary data files) under
-# share/prad2evviewer/scripts/.  Sibling imports still work because each
-# tool runs from inside its own directory, which Python puts on sys.path.
+# Install the scripts/ tree (non-GEM Python tools + auxiliary data files)
+# under share/prad2evviewer/scripts/.  GEM tools live in gem/ and get their
+# own install rule in gem/CMakeLists.txt.  Sibling imports still work
+# because each tool runs from inside its own directory, which Python puts
+# on sys.path.
 # ---------------------------------------------------------------------------
 install(DIRECTORY scripts/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/scripts
@@ -229,13 +232,16 @@ install(DIRECTORY scripts/
         PATTERN "README.md"
         PATTERN "__pycache__" EXCLUDE
         PATTERN "setup.sh"    EXCLUDE   # already in <prefix>/bin/
-        PATTERN "setup.csh"   EXCLUDE
+        PATTERN "setup.csh.in" EXCLUDE
 )
 
 # ---------------------------------------------------------------------------
 # Generate + install thin bin/ wrappers for each user-facing Python tool so
 # they can be launched without needing a sourced setup.sh (the wrappers set
 # PRAD2_DATABASE_DIR / PRAD2_RESOURCE_DIR / PYTHONPATH on their own).
+#
+# The script path is relative to <prefix>/share/prad2evviewer/ — GEM tools
+# live directly under gem/, the rest under scripts/.
 # ---------------------------------------------------------------------------
 if(BUILD_PYTHON)
     set(_PRAD2_PY_WRAPPERS
@@ -243,11 +249,11 @@ if(BUILD_PYTHON)
         "gem_event_viewer:gem/gem_event_viewer.py"
         "gem_cluster_view:gem/gem_cluster_view.py"
         "gem_layout:gem/gem_layout.py"
-        "tagger_viewer:tagger_viewer.py"
-        "hycal_scaler_map:hycal_scaler_map.py"
-        "hycal_pedestal_monitor:hycal_pedestal_monitor.py"
-        "hycal_gain_monitor:hycal_gain_monitor.py"
-        "trigger_mask_editor:trigger_mask_editor.py"
+        "tagger_viewer:scripts/tagger_viewer.py"
+        "hycal_scaler_map:scripts/hycal_scaler_map.py"
+        "hycal_pedestal_monitor:scripts/hycal_pedestal_monitor.py"
+        "hycal_gain_monitor:scripts/hycal_gain_monitor.py"
+        "trigger_mask_editor:scripts/trigger_mask_editor.py"
     )
     foreach(_entry ${_PRAD2_PY_WRAPPERS})
         string(REPLACE ":" ";" _parts "${_entry}")

@@ -935,6 +935,13 @@ int main(int argc, char *argv[])
     // pedestal accumulator
     std::map<uint64_t, StripAccum> ped_accum;
 
+    // Emit a single loud warning the first time we see full-readout data
+    // without a pedestal file.  Only meaningful in modes that rely on
+    // zero-suppressed hits (i.e. not ``ped`` and not ``raw``).
+    bool ped_warning_emitted = false;
+    bool ped_warning_applies = gem_ped_file.empty()
+                               && mode != "ped" && mode != "raw";
+
     while (ch.Read() == status::success) {
         if (!ch.Scan()) continue;
         if (ch.GetEventType() != EventType::Physics) continue;
@@ -943,6 +950,36 @@ int main(int argc, char *argv[])
             ssp_evt.clear();
             if (!ch.DecodeEvent(i, event, &ssp_evt)) continue;
             phys_count++;
+
+            // Loudly warn if we're processing full-readout data without
+            // pedestals — downstream modes (hits/clusters/summary/evdump)
+            // will produce zero hits and the user deserves to know why.
+            if (ped_warning_applies && !ped_warning_emitted && ssp_evt.nmpds > 0) {
+                bool full_readout = false;
+                for (int m = 0; m < ssp_evt.nmpds && !full_readout; ++m) {
+                    auto &mpd = ssp_evt.mpds[m];
+                    if (!mpd.present) continue;
+                    for (int a = 0; a < ssp::MAX_APVS_PER_MPD; ++a) {
+                        if (mpd.apvs[a].present && !mpd.apvs[a].has_online_cm) {
+                            full_readout = true; break;
+                        }
+                    }
+                }
+                if (full_readout) {
+                    std::cerr
+                        << "\n"
+                        << "*** WARNING: full-readout GEM data detected, no pedestal file loaded. ***\n"
+                        << "    Zero suppression will use the default noise value and produce\n"
+                        << "    no hits.  Downstream output will appear empty.  Fix:\n"
+                        << "      gem_dump -m ped <run.evio> -o gem_ped.json\n"
+                        << "      gem_dump -m " << mode << " <file.evio> -P gem_ped.json ...\n\n";
+                    ped_warning_emitted = true;
+                }
+                // Mark as emitted either way — we only check until we've
+                // either warned or confirmed the data is online-ZS.  Once
+                // we've seen has_online_cm=true on any event, don't warn.
+                if (!full_readout) ped_warning_emitted = true;
+            }
 
             // trigger filter
             if (trigger_mask && !(event.info.trigger_bits & trigger_mask))

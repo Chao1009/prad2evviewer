@@ -22,4 +22,4 @@ export PRAD2_DATABASE_DIR PRAD2_RESOURCE_DIR
 export PYTHONPATH="${_wrap_dir}/lib64/prad2py:${_wrap_dir}/lib/prad2py${PYTHONPATH:+:$PYTHONPATH}"
 export LD_LIBRARY_PATH="${_wrap_dir}/lib64:${_wrap_dir}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-exec python3 "${_wrap_dir}/share/prad2evviewer/scripts/@PRAD2_WRAPPER_SCRIPT_REL@" "$@"
+exec python3 "${_wrap_dir}/share/prad2evviewer/@PRAD2_WRAPPER_SCRIPT_REL@" "$@"

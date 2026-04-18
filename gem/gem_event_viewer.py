@@ -13,7 +13,7 @@ Features:
     reconstruction on cached SSP data (no EVIO I/O).
 
 Usage:
-    python scripts/gem/gem_event_viewer.py [file.evio.00000]
+    python gem/gem_event_viewer.py [file.evio.00000]
 
 If an EVIO path is given on the command line the viewer starts scanning
 it immediately; otherwise use File → Open EVIO.
@@ -84,7 +84,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg  # noqa: E402
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT  # noqa: E402
 from matplotlib.figure import Figure  # noqa: E402
 
-# Sibling imports — this file lives in scripts/gem/ alongside the helpers.
+# Sibling imports — this file lives in gem/ alongside the helpers.
 # These modules in turn import gem_strip_map which requires prad2py.det, so
 # wrap the whole block so the GUI can still *start* and show an error
 # dialog when the module is missing.
@@ -418,13 +418,9 @@ def default_gem_map() -> Optional[Path]:
     ])
 
 
-def default_gem_ped() -> Optional[Path]:
-    root = _SCRIPT_DIR.parent.parent
-    return _find_first([
-        root / "database" / "gem_ped.json",
-        Path.cwd() / "database" / "gem_ped.json",
-        Path.cwd() / "gem_ped.json",
-    ])
+# NOTE: no default_gem_ped() auto-discovery.  Pedestals are per-run
+# calibration products and a wrong file is worse than none — we require
+# the caller to pick the ped file explicitly via --gem-ped / the File menu.
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +442,14 @@ class GemEventViewer(QMainWindow):
 
         self._daq_config_path = str(daq_config_path or default_daq_config() or "")
         self._gem_map_path    = str(gem_map_path or default_gem_map() or "")
-        self._gem_ped_path    = str(gem_ped_path or default_gem_ped() or "")
+        # Pedestals: no auto-discovery — loaded only if the user passes
+        # --gem-ped or picks one via File → Choose gem_ped.json.
+        self._gem_ped_path    = str(gem_ped_path or "")
+
+        # Latched after a full-readout event is seen without a ped file;
+        # used to show a persistent banner in the status bar and to avoid
+        # re-showing the warning dialog on every event.
+        self._ped_warning_shown = False
 
         # Geometry (loaded once per gem_map change)
         self._detectors: Dict[int, dict] = {}
@@ -567,6 +570,13 @@ class GemEventViewer(QMainWindow):
         self.setStatusBar(QStatusBar(self))
         self._status = QLabel("")
         self.statusBar().addPermanentWidget(self._status, 1)
+        # Red warning badge — only visible when full-readout data is loaded
+        # without a pedestal file.  Right-aligned, fixed width.
+        self._ped_badge = QLabel("")
+        self._ped_badge.setStyleSheet(
+            "color: #b00020; font-weight: bold; padding: 0 8px;")
+        self._ped_badge.hide()
+        self.statusBar().addPermanentWidget(self._ped_badge)
         self._set_status("Open an EVIO file via File → Open EVIO… (Ctrl+O).")
 
         # --- Advanced dock (hidden by default) ---
@@ -709,10 +719,15 @@ class GemEventViewer(QMainWindow):
 
         ped_status = ("ped: " + os.path.basename(self._gem_ped_path)
                       if self._gem_ped_path and os.path.isfile(self._gem_ped_path)
-                      else "no pedestals loaded (hits will be suppressed)")
+                      else "no pedestals loaded (required for full-readout data)")
         self._set_status(
             f"GEM system ready — {self._gsys.get_n_detectors()} detectors, "
             f"{self._gsys.get_n_apvs()} APVs, {ped_status}.")
+
+        # Ped-loaded state changed — reset the "already warned" latch so the
+        # next full-readout event can warn again if still missing peds.
+        self._ped_warning_shown = bool(
+            self._gem_ped_path and os.path.isfile(self._gem_ped_path))
 
     # -----------------------------------------------------------------
     # File picker / pre-scan
@@ -906,7 +921,58 @@ class GemEventViewer(QMainWindow):
         self.slider.blockSignals(True); self.slider.setValue(event_idx); self.slider.blockSignals(False)
         self.goto_spin.blockSignals(True); self.goto_spin.setValue(evmeta.event_number); self.goto_spin.blockSignals(False)
 
+        self._check_pedestal_requirement(ssp)
         self._re_reconstruct_current()
+
+    def _check_pedestal_requirement(self, ssp) -> None:
+        """If this event is full-readout (firmware did not run online ZS)
+        and we have no pedestal file, warn the user — loudly once, and via
+        a persistent status-bar indicator afterwards.
+
+        Full-readout data without pedestals cannot produce meaningful hits:
+        the default noise is 5000 ADC, nothing clears the ZS threshold, and
+        every event looks empty.  Better to say so explicitly than leave
+        the user staring at a silent canvas.
+        """
+        have_ped = bool(self._gem_ped_path and os.path.isfile(self._gem_ped_path))
+        if have_ped:
+            self._ped_badge.hide()
+            return
+        # Scan APVs for any in full-readout mode (has_online_cm == False).
+        full_readout = False
+        for m in range(ssp.nmpds):
+            mpd = ssp.mpd(m)
+            if not mpd.present:
+                continue
+            for a in range(16):  # ssp::MAX_APVS_PER_MPD
+                apv = mpd.apv(a)
+                if apv.present and not apv.has_online_cm:
+                    full_readout = True
+                    break
+            if full_readout:
+                break
+        if not full_readout:
+            # Data is online-ZS; peds not needed.
+            self._ped_badge.hide()
+            return
+
+        # Full-readout + no pedestal = every event will look empty.
+        self._ped_badge.setText("⚠ NO PEDESTAL FILE — full-readout data will reconstruct empty")
+        self._ped_badge.show()
+        if not self._ped_warning_shown:
+            self._ped_warning_shown = True
+            QMessageBox.warning(
+                self, "Pedestal file required",
+                "This file contains <b>full-readout</b> GEM data "
+                "(no online zero-suppression), but no pedestal file is "
+                "loaded.<br><br>"
+                "Without pedestals, zero-suppression uses a default noise "
+                "value and nothing will survive → every event will appear "
+                "empty.<br><br>"
+                "Either:<br>"
+                "• Generate pedestals:  "
+                "<code>gem_dump -m ped &lt;file.evio&gt; -o gem_ped.json</code><br>"
+                "• Then load them via File → Choose gem_ped.json…")
 
     # -----------------------------------------------------------------
     # Reconstruction + drawing

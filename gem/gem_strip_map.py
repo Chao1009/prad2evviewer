@@ -35,7 +35,8 @@ def _resolve_prad2py():
         pass
 
     # Repo-local fallback: walk up from this file looking for build/python/.
-    # Depth-tolerant so the script can live in scripts/, scripts/gem/, etc.
+    # Depth-tolerant so the script can live in gem/, scripts/, scripts/gem/,
+    # or inside an installed share/prad2evviewer/gem/ tree.
     here = _os.path.dirname(_os.path.abspath(__file__))
     probe = here
     for _ in range(5):

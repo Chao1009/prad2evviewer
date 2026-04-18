@@ -47,45 +47,11 @@ python scripts/trigger_mask_editor.py -i existing.cnf     # load existing mask
 python scripts/trigger_mask_editor.py -o output.cnf       # set default save path
 ```
 
-## GEM scripts (`scripts/gem/`)
+## GEM tools
 
-GEM-specific utilities live in `scripts/gem/`:
-
-* `gem_strip_map.py` — thin wrapper over `prad2py.det.map_strip` / `map_apv_strips`
-  so the geometry scripts use the same C++ 6-step pipeline as online reconstruction.
-* `check_strip_map.py` — cross-check the pipeline against PRadAnalyzer (SRS) and
-  mpd_gem_view_ssp (MPD hybrid board) reference implementations.
-
-```bash
-python scripts/gem/check_strip_map.py [gem_map.json]
-```
-
-### gem_layout.py
-
-Visualize GEM strip layout from `gem_map.json`.
-
-```bash
-python scripts/gem/gem_layout.py [gem_map.json]
-```
-
-### gem_cluster_view.py
-
-Visualize GEM clustering from `gem_dump -m evdump` JSON output.
-
-```bash
-python scripts/gem/gem_cluster_view.py <event.json> [gem_map.json] [--det N] [-o file.png]
-```
-
-### gem_event_viewer.py
-
-PyQt6 event-by-event GUI that opens an EVIO file directly (via `prad2py`),
-runs GEM reconstruction in-process, and renders the same cluster view as
-`gem_cluster_view.py`. Threshold sliders re-run clustering on cached SSP
-data so tuning is instant.
-
-```bash
-python scripts/gem/gem_event_viewer.py /data/.../prad_023671.evio.00000
-```
+GEM-specific scripts and the `gem_dump` C++ binary live in the top-level
+[`gem/`](../gem/README.md) directory — see [gem/README.md](../gem/README.md)
+for details and GEM detector reference facts.
 
 ## tagger_viewer.py
 
