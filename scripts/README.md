@@ -125,7 +125,7 @@ records      n_hits × 16-byte packed BinHit
                u32 tdc
 ```
 
-## Using prad2py directly (Phase 1 bindings)
+## Using prad2py directly
 
 `prad2py` exposes the decoder through a `dec` submodule — useful for custom
 offline analysis that goes beyond what the tagger_viewer does. Build it with
@@ -172,7 +172,50 @@ while ch.read() == dec.Status.success:
 
 The helper `prad2py.load_tdc_hits(path, ...)` is still available for the
 common "one-shot flat table of hits" workflow and lives on top of the
-`dec` submodule. Phase 2 will add `prad2py.det` (HyCal / GEM).
+`dec` submodule (decoder) and the `det` submodule (reconstruction: GEM
++ HyCal + DetectorTransform + EpicsStore).
+
+```python
+from prad2py import dec, det
+
+# --- decoder -----------------------------------------------------------
+cfg = dec.load_daq_config()
+ch  = dec.EvChannel(); ch.set_config(cfg); ch.open("run.evio.00000")
+
+# --- GEM reconstruction -----------------------------------------------
+gsys = det.GemSystem()
+gsys.init("database/gem_map.json")
+gsys.load_pedestals("database/gem_ped.json")    # optional
+gcl  = det.GemCluster()
+
+# --- HyCal reconstruction ---------------------------------------------
+hsys = det.HyCalSystem()
+hsys.init("database/hycal_modules.json", "database/daq_map.json")
+hsys.load_calibration("database/hycal_calib.json")
+hcl  = det.HyCalCluster(hsys)
+
+while ch.read() == dec.Status.success:
+    if not ch.scan() or ch.get_event_type() != dec.EventType.Physics:
+        continue
+    for i in range(ch.get_n_events()):
+        ch.select_event(i)
+
+        # GEM 2-D hits
+        gsys.clear()
+        gsys.process_event(ch.gem())
+        gsys.reconstruct(gcl)
+        for h in gsys.get_all_hits():
+            print("GEM", h.det_id, h.x, h.y, h.x_charge, h.y_charge)
+
+        # HyCal clusters — feed per-module energies yourself (e.g. from
+        # ch.fadc() + your calibration), then cluster:
+        # hcl.clear()
+        # for module_idx, energy_mev in my_hycal_hits(ch.fadc()):
+        #     hcl.add_hit(module_idx, energy_mev)
+        # hcl.form_clusters()
+        # for c in hcl.reconstruct_hits():
+        #     print("HyCal", c.center_id, c.x, c.y, c.energy)
+```
 
 ### Tagger ↔ HyCal coincidence
 

@@ -34,6 +34,7 @@ FetchContent_MakeAvailable(pybind11)
 pybind11_add_module(prad2py MODULE
     prad2py.cpp
     bind_dec.cpp
+    bind_det.cpp
 )
 
 target_link_libraries(prad2py PRIVATE
