@@ -32,15 +32,19 @@ if ( $?PRAD2_DIR ) then
     else
         setenv PATH "${PRAD2_DIR}/bin"
     endif
+    # Prepend both lib64 and lib — evio + prad2py land in lib64 on RHEL-
+    # family systems (GNUInstallDirs default), our static libs land in
+    # lib.  Listing both keeps the install layout tolerant of either
+    # convention.
     if ( $?LD_LIBRARY_PATH ) then
-        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib:${LD_LIBRARY_PATH}"
+        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib64:${PRAD2_DIR}/lib:${LD_LIBRARY_PATH}"
     else
-        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib"
+        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib64:${PRAD2_DIR}/lib"
     endif
     if ( $?PYTHONPATH ) then
-        setenv PYTHONPATH "${PRAD2_DIR}/lib/prad2py:${PYTHONPATH}"
+        setenv PYTHONPATH "${PRAD2_DIR}/lib64/prad2py:${PRAD2_DIR}/lib/prad2py:${PYTHONPATH}"
     else
-        setenv PYTHONPATH "${PRAD2_DIR}/lib/prad2py"
+        setenv PYTHONPATH "${PRAD2_DIR}/lib64/prad2py:${PRAD2_DIR}/lib/prad2py"
     endif
     setenv PRAD2_DATABASE_DIR "${PRAD2_DIR}/share/prad2evviewer/database"
     setenv PRAD2_RESOURCE_DIR "${PRAD2_DIR}/share/prad2evviewer/resources"

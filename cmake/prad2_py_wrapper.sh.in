@@ -17,6 +17,9 @@ unset _self
 : "${PRAD2_RESOURCE_DIR:=${_wrap_dir}/share/prad2evviewer/resources}"
 export PRAD2_DATABASE_DIR PRAD2_RESOURCE_DIR
 
-export PYTHONPATH="${_wrap_dir}/lib/prad2py${PYTHONPATH:+:$PYTHONPATH}"
+# Prepend both lib64 and lib — prad2py lands in lib64 on RHEL-family
+# systems (GNUInstallDirs default), lib elsewhere.
+export PYTHONPATH="${_wrap_dir}/lib64/prad2py:${_wrap_dir}/lib/prad2py${PYTHONPATH:+:$PYTHONPATH}"
+export LD_LIBRARY_PATH="${_wrap_dir}/lib64:${_wrap_dir}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 exec python3 "${_wrap_dir}/share/prad2evviewer/scripts/@PRAD2_WRAPPER_SCRIPT_REL@" "$@"
