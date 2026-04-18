@@ -58,8 +58,8 @@ static void bind_gem(py::module_ &m)
 {
     // --- stateless strip-mapping (shared with GemSystem::buildStripMap) -----
     // Exposed at module level so Python layout / diagnostic scripts
-    // (scripts/gem_strip_map.py, scripts/gem_layout.py) hit the same C++
-    // implementation the reconstruction uses — no more drifting duplicates.
+    // (scripts/gem/gem_strip_map.py, scripts/gem/gem_layout.py) hit the same
+    // C++ implementation the reconstruction uses — no more drifting duplicates.
 
     m.def("map_strip", &gem::MapStrip,
           py::arg("ch"), py::arg("plane_index"), py::arg("orient"),

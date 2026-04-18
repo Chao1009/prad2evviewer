@@ -34,16 +34,22 @@ def _resolve_prad2py():
     except ImportError:
         pass
 
-    # Repo-local fallback: add ../build/python to sys.path and retry once.
+    # Repo-local fallback: walk up from this file looking for build/python/.
+    # Depth-tolerant so the script can live in scripts/, scripts/gem/, etc.
     here = _os.path.dirname(_os.path.abspath(__file__))
-    candidate = _os.path.abspath(_os.path.join(here, "..", "build", "python"))
-    if _os.path.isdir(candidate) and candidate not in _sys.path:
-        _sys.path.insert(0, candidate)
-        try:
-            from prad2py import det
-            return det
-        except ImportError:
-            pass
+    probe = here
+    for _ in range(5):
+        probe = _os.path.dirname(probe)
+        for sub in ("build/python", "build-release/python", "build/Release/python"):
+            candidate = _os.path.join(probe, *sub.split("/"))
+            if _os.path.isdir(candidate):
+                if candidate not in _sys.path:
+                    _sys.path.insert(0, candidate)
+                try:
+                    from prad2py import det
+                    return det
+                except ImportError:
+                    pass
 
     raise ImportError(
         "gem_strip_map requires the prad2py pybind11 module (prad2py.det).\n"
