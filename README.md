@@ -143,11 +143,11 @@ cmake --install build
 Set up the environment (sets `PATH`, `LD_LIBRARY_PATH`, `PYTHONPATH`, `PRAD2_DATABASE_DIR`, `PRAD2_RESOURCE_DIR`):
 
 ```bash
-source /opt/prad2/bin/setup.sh    # bash/zsh
-source /opt/prad2/bin/setup.csh   # csh/tcsh
+source /opt/prad2/bin/prad2_setup.sh    # bash/zsh
+source /opt/prad2/bin/prad2_setup.csh   # csh/tcsh
 ```
 
-`setup.csh` bakes the install prefix in at configure time, so sourcing it from inside another script (e.g. a JLab farm wrapper that also `module load`s ROOT) works correctly. If you later move the install tree, `setenv PRAD2_DIR <new-prefix>` before sourcing to override.
+`prad2_setup.csh` bakes the install prefix in at configure time, so sourcing it from inside another script (e.g. a JLab farm wrapper that also `module load`s ROOT) works correctly. If you later move the install tree, `setenv PRAD2_DIR <new-prefix>` before sourcing to override.
 
 ### Python tools (optional)
 
@@ -159,7 +159,7 @@ source /opt/prad2/venv/bin/activate     # or activate.csh for tcsh
 pip install -r /path/to/prad2evviewer/scripts/requirements.txt
 ```
 
-Then source the venv's `activate` *before* sourcing `setup.csh` in your personal wrapper script.
+Then source the venv's `activate` *before* sourcing `prad2_setup.csh` in your personal wrapper script.
 
 **Watch out on RHEL 9** — CMake's `find_package(Python)` may pick up `/usr/bin/python3.12` over the venv's 3.9. Pass `-DPython_EXECUTABLE=$(which python3)` at configure time to pin the interpreter explicitly, otherwise `prad2py.cpython-312-*.so` won't be importable from your 3.9 venv.
 

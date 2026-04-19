@@ -28,7 +28,7 @@ the config files:
 | `-o` | `--output` | output file (gem_dump, gem_cluster_view) |
 
 If a flag is omitted, the Python tools look in `$PRAD2_DATABASE_DIR`
-first (set by `setup.sh` / `setup.csh`), then next to the script, then
+first (set by `prad2_setup.sh` / `prad2_setup.csh`), then next to the script, then
 CWD-relative fallbacks.  `gem_dump`'s C++ resolver has the same policy
 via `prad2::resolve_data_dir()`.
 

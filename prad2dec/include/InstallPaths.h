@@ -7,7 +7,7 @@
 // at run time.  The preference order is:
 //
 //     1. The ``PRAD2_DATABASE_DIR`` / ``PRAD2_RESOURCE_DIR`` env var,
-//        set verbatim (what setup.sh + the bin/ wrappers configure).
+//        set verbatim (what prad2_setup.sh + the bin/ wrappers configure).
 //     2. A path relative to *this module*, resolved via readlink
 //        ``/proc/self/exe`` / ``_NSGetExecutablePath`` / dladdr on POSIX
 //        and ``GetModuleHandleExW`` on Windows.  Makes installed binaries

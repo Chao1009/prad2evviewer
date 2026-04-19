@@ -1,5 +1,5 @@
 # Source this file to set up the PRad2 environment (csh/tcsh).
-#   source <prefix>/bin/setup.csh
+#   source <prefix>/bin/prad2_setup.csh
 #
 # PRAD2_DIR is resolved in this order:
 #   1. $PRAD2_DIR already set by the caller (explicit override — e.g. a
@@ -7,9 +7,9 @@
 #   2. tcsh $_ self-detection — works when this file is sourced directly
 #      from the shell prompt, but not under nested `source`, because csh
 #      has no equivalent of bash's BASH_SOURCE[0].  We verify the last
-#      word of $_ actually refers to a file called "setup.csh" before
-#      trusting it, so a wrapper that sources us doesn't accidentally
-#      give us its own path.
+#      word of $_ actually refers to a file called "prad2_setup.csh"
+#      before trusting it, so a wrapper that sources us doesn't
+#      accidentally give us its own path.
 #   3. Install-time prefix baked in by CMake — picked up from
 #      @CMAKE_INSTALL_PREFIX@, substituted at install time.
 #
@@ -20,12 +20,13 @@
 if ( ! $?PRAD2_DIR ) then
     set _src = ( $_ )
     set _setup_path = ""
-    # Try $_ only if the tail of its last word is literally "setup.csh".
-    # This filters out the nested-source case where $_ holds the command
-    # that started the outer wrapper (e.g. "source prad2_setup.csh").
+    # Try $_ only if the tail of its last word is literally
+    # "prad2_setup.csh".  This filters out the nested-source case where
+    # $_ holds the command that started the outer wrapper (e.g.
+    # "source site_env.csh").
     if ( $#_src > 1 ) then
         set _cand = "$_src[$#_src]"
-        if ( "$_cand:t" == "setup.csh" ) then
+        if ( "$_cand:t" == "prad2_setup.csh" ) then
             set _setup_path = "$_cand"
         endif
         unset _cand

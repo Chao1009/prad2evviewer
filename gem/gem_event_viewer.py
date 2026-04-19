@@ -404,7 +404,7 @@ def _search_candidates(filename: str) -> List[Path]:
     """Ordered list of locations to try for a config JSON.
 
     Priority:
-      1. ``$PRAD2_DATABASE_DIR/<filename>`` — set by setup.sh / setup.csh,
+      1. ``$PRAD2_DATABASE_DIR/<filename>`` — set by prad2_setup.sh / prad2_setup.csh,
          always canonical for an installed environment.
       2. ``<script-dir>/../database/<filename>`` — works when the script
          is run from its source checkout (``<repo>/gem/``) or from the

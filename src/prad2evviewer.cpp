@@ -193,7 +193,7 @@ int main(int argc, char *argv[])
     ViewerServer::Config cfg;
     // Runtime resolution: env var → <exe_dir>/../share/… → compile-time
     // fallback.  Makes installed binaries relocatable without requiring a
-    // sourced setup.sh.
+    // sourced prad2_setup.sh.
     cfg.database_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
         {"../share/prad2evviewer/database"},

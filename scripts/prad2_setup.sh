@@ -1,5 +1,5 @@
 # Source this file to set up the PRad2 environment (bash/zsh).
-#   source <prefix>/bin/setup.sh
+#   source <prefix>/bin/prad2_setup.sh
 
 PRAD2_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

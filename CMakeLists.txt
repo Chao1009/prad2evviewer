@@ -210,14 +210,14 @@ endif()
 install(DIRECTORY database/  DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/database)
 install(DIRECTORY resources/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/resources)
 
-# setup.csh is generated from scripts/setup.csh.in so @CMAKE_INSTALL_PREFIX@
-# can be substituted — csh lacks a BASH_SOURCE equivalent, so the script
-# can't reliably find itself under nested `source`; the baked-in prefix
-# is the fallback when self-detection fails.  setup.sh uses BASH_SOURCE
-# and doesn't need this treatment.
-configure_file(${CMAKE_SOURCE_DIR}/scripts/setup.csh.in
-    ${CMAKE_BINARY_DIR}/bin/setup.csh @ONLY)
-install(FILES scripts/setup.sh ${CMAKE_BINARY_DIR}/bin/setup.csh
+# prad2_setup.csh is generated from scripts/prad2_setup.csh.in so
+# @CMAKE_INSTALL_PREFIX@ can be substituted — csh lacks a BASH_SOURCE
+# equivalent, so the script can't reliably find itself under nested
+# `source`; the baked-in prefix is the fallback when self-detection
+# fails.  prad2_setup.sh uses BASH_SOURCE and doesn't need this treatment.
+configure_file(${CMAKE_SOURCE_DIR}/scripts/prad2_setup.csh.in
+    ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh @ONLY)
+install(FILES scripts/prad2_setup.sh ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
@@ -236,13 +236,13 @@ install(DIRECTORY scripts/
         PATTERN "*.txt"
         PATTERN "README.md"
         PATTERN "__pycache__" EXCLUDE
-        PATTERN "setup.sh"    EXCLUDE   # already in <prefix>/bin/
-        PATTERN "setup.csh.in" EXCLUDE
+        PATTERN "prad2_setup.sh"    EXCLUDE   # already in <prefix>/bin/
+        PATTERN "prad2_setup.csh.in" EXCLUDE
 )
 
 # ---------------------------------------------------------------------------
 # Generate + install thin bin/ wrappers for each user-facing Python tool so
-# they can be launched without needing a sourced setup.sh (the wrappers set
+# they can be launched without needing a sourced prad2_setup.sh (the wrappers set
 # PRAD2_DATABASE_DIR / PRAD2_RESOURCE_DIR / PYTHONPATH on their own).
 #
 # The script path is relative to <prefix>/share/prad2evviewer/ — GEM tools

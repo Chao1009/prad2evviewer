@@ -108,7 +108,7 @@ def main():
 
     gem_map_path = args.gem_map
     if not gem_map_path:
-        # Env var (set by setup.sh / setup.csh) wins, then common source-tree
+        # Env var (set by prad2_setup.sh / prad2_setup.csh) wins, then common source-tree
         # and CWD-relative fallbacks for dev use.
         env_db = os.environ.get("PRAD2_DATABASE_DIR")
         cands = []

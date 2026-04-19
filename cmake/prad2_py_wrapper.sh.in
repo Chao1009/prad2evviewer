@@ -3,7 +3,7 @@
 #
 # Resolves <prefix> from the wrapper's own location and sets the env
 # needed to import prad2py + locate database/resources before running
-# the target Python script.  Sourcing setup.sh is NOT required.
+# the target Python script.  Sourcing prad2_setup.sh is NOT required.
 
 case "$0" in
     /*)   _self="$0" ;;
