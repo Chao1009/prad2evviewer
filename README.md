@@ -129,6 +129,7 @@ prad2_client -H clonpc19 -p 8080       # connect to remote server
 - [test/README.md](test/README.md) — generic EVIO diagnostics (`evio_dump`, `ped_calc`, plus dev tools in `test/dev/`).
 - [gem/README.md](gem/README.md) — GEM tracker tools (`gem_dump`, `gem_event_viewer`, `gem_cluster_view`, `gem_layout`, …) plus detector reference notes.
 - [analysis/README.md](analysis/README.md) — ROOT-based replay and physics analysis.
+- [calibration/README.md](calibration/README.md) — HyCal gain-equalizer and operator calibration scan procedures.
 - [scripts/README.md](scripts/README.md) — HyCal scaler map, pedestal monitor, trigger-mask editor, tagger viewer.
 
 ## Installation
@@ -182,6 +183,7 @@ gem/                GEM tracker: gem_dump binary + Python tools + README
 analysis/           ROOT-based replay and physics analysis (optional)
 calibration/        HyCal calibration scan tools
 scripts/            HyCal / tagger / trigger Python utilities
+cmake/              Build helpers (PradHelpers, WebDeps, bin-wrapper template)
 docs/               ROL references, API documentation
 ```
 
