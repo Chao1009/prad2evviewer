@@ -1206,12 +1206,16 @@ class TdcViewer(QMainWindow):
         worker.moveToThread(thread)
 
         # Live progress → dialog value + label text.
-        # Grow the max proactively at 80 % so the bar doesn't visibly snap
-        # from 100 % back to ~50 % when it catches up on the next tick.
+        # When the user passed an explicit cap, the dialog max is the real
+        # limit — don't grow it. In unlimited mode (cap==0, dialog seeded
+        # with a 1 M placeholder), grow proactively at 80 % so the bar
+        # doesn't visibly snap from 100 % back to ~50 % on the next tick.
+        unlimited = (self._load_max_events == 0)
         def _on_progress(events: int, hits: int):
-            m = dlg.maximum()
-            if m > 0 and events * 5 >= m * 4:
-                dlg.setMaximum(max(events * 2, m * 2))
+            if unlimited:
+                m = dlg.maximum()
+                if m > 0 and events * 5 >= m * 4:
+                    dlg.setMaximum(max(events * 2, m * 2))
             dlg.setValue(events)
             dlg.setLabelText(
                 f"Decoding {os.path.basename(path)}\n"
