@@ -57,6 +57,8 @@ int main(int argc, char *argv[])
 
     analysis::Replay replay;
     if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
+    replay.LoadDaqMap(db_dir + "/daq_map.json");
+    std::cerr << "Using DAQ map: " << db_dir + "/daq_map.json" << "\n";
 
     if (!replay.ProcessWithRecon(input, output, daq_config, gem_ped_file, zerosup_override, prad1))
         return 1;
