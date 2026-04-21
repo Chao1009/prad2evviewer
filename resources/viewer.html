@@ -5,13 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PRad-II HyCal</title>
 <script>
-/* Apply saved theme before first paint to avoid a dark→light flash. */
+/* Apply saved theme before first paint to avoid a theme-switch flash. */
 (function(){
+    var valid = ['dark', 'light', 'classic'];
     try {
         var saved = localStorage.getItem('prad2.theme');
         document.documentElement.dataset.theme =
-            (saved === 'light' || saved === 'dark') ? saved : 'dark';
-    } catch(e) { document.documentElement.dataset.theme = 'dark'; }
+            valid.indexOf(saved) >= 0 ? saved : 'classic';
+    } catch(e) { document.documentElement.dataset.theme = 'classic'; }
 })();
 </script>
 <!-- CSS must load BEFORE theme.js so that getComputedStyle() in

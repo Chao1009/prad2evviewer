@@ -734,18 +734,23 @@ function init(){
     document.getElementById('follow-status').onclick=()=>{ autoFollow=true; updateFollowStatus(); loadLatestEvent(); };
     // per-tab clear buttons
 
-    // Theme toggle — flips dark ↔ light and retheme every registered plot
+    // Theme toggle — cycles dark → light → classic → dark
     const themeBtn = document.getElementById('btn-theme');
+    const THEME_GLYPH = { dark: '☀', light: '☾', classic: '◉' };
     function updateThemeBtn(){
-        themeBtn.textContent = currentTheme() === 'light' ? '☾' : '☀';
-        themeBtn.title = `Theme: ${currentTheme()} — click to switch`;
+        const t = currentTheme();
+        themeBtn.textContent = THEME_GLYPH[t] || '◐';
+        themeBtn.title = `Theme: ${t} — click to cycle`;
     }
     updateThemeBtn();
     themeBtn.onclick = () => toggleTheme();
     onThemeChange(() => {
         updateThemeBtn();
-        // Re-apply chrome to every previously-drawn plot.
+        // Re-apply chrome to every previously-drawn Plotly plot.
         for(const p of plotRegistry) plotlyRelayout(p.id);
+        // Canvas widgets read THEME at draw time, so force a full repaint.
+        drawColorBar();
+        redrawGeo();
     });
 
     // Clear All — resets all tabs' data for new run

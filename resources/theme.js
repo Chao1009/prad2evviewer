@@ -17,35 +17,36 @@
 'use strict';
 
 const THEME_STORAGE_KEY = 'prad2.theme';
+const THEME_NAMES = ['dark', 'light', 'classic'];
 const THEME = {};
 const _themeListeners = [];
 
-// Fallbacks matching the dark palette in viewer.css — used only if the CSS
-// hasn't finished loading yet when this script runs. Once the stylesheet
-// applies, refreshTheme() picks up the real values.
+// Fallbacks matching the "classic" palette in viewer.css (the default) —
+// used only if the CSS hasn't finished loading yet when this script runs.
+// Once the stylesheet applies, refreshTheme() picks up the real values.
 const _FALLBACK = {
-    '--theme-bg':            '#000000',
-    '--theme-canvas':        '#000000',
-    '--theme-panel':         '#1d1d1f',
-    '--theme-button':        '#1d1d1f',
-    '--theme-button-hover':  '#28282a',
-    '--theme-alt-base':      '#242426',
-    '--theme-tooltip':       '#2a2a2d',
-    '--theme-border':        '#424245',
-    '--theme-grid':          '#1d1d1f',
-    '--theme-text':          '#ffffff',
+    '--theme-bg':            '#1a1a2e',
+    '--theme-canvas':        '#11112a',
+    '--theme-panel':         '#16213e',
+    '--theme-button':        '#0f3460',
+    '--theme-button-hover':  '#1f2d4f',
+    '--theme-alt-base':      '#0a0a18',
+    '--theme-tooltip':       'rgba(0,0,0,0.92)',
+    '--theme-border':        '#0f3460',
+    '--theme-grid':          '#333333',
+    '--theme-text':          '#e0e0e0',
     '--theme-text-strong':   '#ffffff',
-    '--theme-text-dim':      '#86868b',
-    '--theme-text-muted':    '#6e6e73',
-    '--theme-accent':        '#2997ff',
-    '--theme-accent-strong': '#0071e3',
-    '--theme-accent-border': '#0071e3',
-    '--theme-on-accent':     '#ffffff',
-    '--theme-success':       '#30d158',
-    '--theme-warn':          '#ff9f0a',
-    '--theme-danger':        '#ff453a',
-    '--theme-highlight':     '#ff9f0a',
-    '--theme-no-data':       '#1d1d1f',
+    '--theme-text-dim':      '#888888',
+    '--theme-text-muted':    '#555555',
+    '--theme-accent':        '#00b4d8',
+    '--theme-accent-strong': '#0074d9',
+    '--theme-accent-border': '#00b4d8',
+    '--theme-on-accent':     '#000000',
+    '--theme-success':       '#51cf66',
+    '--theme-warn':          '#ffa500',
+    '--theme-danger':        '#ff6b6b',
+    '--theme-highlight':     '#ff922b',
+    '--theme-no-data':       '#1a1a2e',
     '--theme-select-border': '#ffffff',
     '--theme-overlay':       'rgba(0,0,0,0.7)',
     '--theme-overlay-light': 'rgba(0,0,0,0.35)',
@@ -90,12 +91,14 @@ function refreshTheme(){
     for(const [k, css] of keys) THEME[k] = _readCssVar(css);
 }
 
+function availableThemes(){ return THEME_NAMES.slice(); }
+
 function currentTheme(){
-    return document.documentElement.dataset.theme || 'dark';
+    return document.documentElement.dataset.theme || 'classic';
 }
 
 function setTheme(name){
-    if(name !== 'dark' && name !== 'light') return;
+    if(!THEME_NAMES.includes(name)) return;
     if(currentTheme() === name) return;
     document.documentElement.dataset.theme = name;
     try { localStorage.setItem(THEME_STORAGE_KEY, name); } catch(e){}
@@ -103,7 +106,12 @@ function setTheme(name){
     for(const fn of _themeListeners) { try { fn(name); } catch(e){ console.error(e); } }
 }
 
-function toggleTheme(){ setTheme(currentTheme() === 'dark' ? 'light' : 'dark'); }
+// Cycle dark → light → classic → dark …
+function toggleTheme(){
+    const i = THEME_NAMES.indexOf(currentTheme());
+    const next = THEME_NAMES[(i + 1 + THEME_NAMES.length) % THEME_NAMES.length];
+    setTheme(next);
+}
 
 function onThemeChange(fn){ _themeListeners.push(fn); }
 
@@ -112,7 +120,7 @@ function onThemeChange(fn){ _themeListeners.push(fn); }
     let saved = null;
     try { saved = localStorage.getItem(THEME_STORAGE_KEY); } catch(e){}
     document.documentElement.dataset.theme =
-        (saved === 'light' || saved === 'dark') ? saved : 'dark';
+        THEME_NAMES.includes(saved) ? saved : 'classic';
     refreshTheme();
 })();
 
@@ -166,12 +174,13 @@ function plotlyRelayout(divId){
 }
 
 // Expose everything on the global window so non-module scripts can use it.
-window.THEME          = THEME;
-window.refreshTheme   = refreshTheme;
-window.currentTheme   = currentTheme;
-window.setTheme       = setTheme;
-window.toggleTheme    = toggleTheme;
-window.onThemeChange  = onThemeChange;
-window.plotlyLayout   = plotlyLayout;
+window.THEME            = THEME;
+window.availableThemes  = availableThemes;
+window.refreshTheme     = refreshTheme;
+window.currentTheme     = currentTheme;
+window.setTheme         = setTheme;
+window.toggleTheme      = toggleTheme;
+window.onThemeChange    = onThemeChange;
+window.plotlyLayout     = plotlyLayout;
 window.plotlyThemePatch = plotlyThemePatch;
-window.plotlyRelayout = plotlyRelayout;
+window.plotlyRelayout   = plotlyRelayout;

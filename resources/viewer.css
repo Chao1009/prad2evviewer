@@ -1,14 +1,61 @@
 /* =========================================================================
- *  Theme tokens (Apple-inspired; see DESIGN-apple.md)
+ *  Theme tokens
  *
- *  Default scope (no data-theme attribute) = dark. Set
- *  ``document.documentElement.dataset.theme = 'light'`` to flip.
- *  Every theme must define every token; keep the two lists in sync.
+ *  Default scope (no data-theme attribute) = classic (navy + cyan, the
+ *  original palette the monitor GUI shipped with). Set
+ *  ``document.documentElement.dataset.theme = 'dark' | 'light'`` to flip
+ *  to the Apple-inspired palettes (see DESIGN-apple.md).
+ *
+ *  Every theme must define every token; keep the three lists in sync.
  *
  *  Legacy short aliases (--bg, --panel, --border, --text, --accent, --dim)
  *  point at the new tokens so existing rules and inline styles keep working.
  * ========================================================================= */
 :root,
+:root[data-theme="classic"] {
+    --theme-bg:            #1a1a2e;
+    --theme-canvas:        #11112a;
+    --theme-panel:         #16213e;
+    --theme-button:        #0f3460;
+    --theme-button-hover:  #1f2d4f;
+    --theme-alt-base:      #0a0a18;
+    --theme-tooltip:       rgba(0,0,0,0.92);
+    --theme-border:        #0f3460;
+    --theme-grid:          #333333;
+
+    --theme-text:          #e0e0e0;
+    --theme-text-strong:   #ffffff;
+    --theme-text-dim:      #888888;
+    --theme-text-muted:    #555555;
+
+    --theme-accent:        #00b4d8;
+    --theme-accent-strong: #0074d9;
+    --theme-accent-border: #00b4d8;
+    --theme-on-accent:     #000000;
+
+    --theme-success:       #51cf66;
+    --theme-warn:          #ffa500;
+    --theme-danger:        #ff6b6b;
+    --theme-highlight:     #ff922b;
+    --theme-no-data:       #1a1a2e;
+    --theme-select-border: #ffffff;
+
+    --theme-accent-tint-1: rgba(0,180,216,0.06);
+    --theme-accent-tint-2: rgba(0,180,216,0.10);
+    --theme-accent-tint-3: rgba(0,180,216,0.15);
+    --theme-overlay:       rgba(0,0,0,0.7);
+    --theme-overlay-light: rgba(0,0,0,0.35);
+    --theme-shadow:        rgba(0,0,0,0.5);
+
+    /* Legacy aliases — keep existing rules and inline styles working. */
+    --bg:      var(--theme-bg);
+    --panel:   var(--theme-panel);
+    --border:  var(--theme-border);
+    --text:    var(--theme-text);
+    --accent:  var(--theme-accent);
+    --dim:     var(--theme-text-dim);
+}
+
 :root[data-theme="dark"] {
     --theme-bg:            #000000;
     --theme-canvas:        #000000;
@@ -43,14 +90,6 @@
     --theme-overlay:       rgba(0,0,0,0.7);
     --theme-overlay-light: rgba(0,0,0,0.35);
     --theme-shadow:        rgba(0,0,0,0.5);
-
-    /* Legacy aliases — keep existing rules and inline styles working. */
-    --bg:      var(--theme-bg);
-    --panel:   var(--theme-panel);
-    --border:  var(--theme-border);
-    --text:    var(--theme-text);
-    --accent:  var(--theme-accent);
-    --dim:     var(--theme-text-dim);
 }
 
 :root[data-theme="light"] {
@@ -88,6 +127,7 @@
     --theme-overlay-light: rgba(0,0,0,0.18);
     --theme-shadow:        rgba(0,0,0,0.2);
 }
+
 * { margin:0; padding:0; box-sizing:border-box; }
 body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:var(--text); overflow:hidden; }
 
