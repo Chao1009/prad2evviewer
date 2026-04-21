@@ -958,6 +958,7 @@ class WaveformPlotWidget(QWidget):
     # ------------------------------------------------------------------
 
     def _on_stack_toggled(self, on: bool):
+        self._stack_enabled = on
         self._stack_clear_btn.setVisible(on)
         self._stack_count_lbl.setVisible(on)
         if not on:
