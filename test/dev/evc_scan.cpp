@@ -30,7 +30,7 @@ static void usage(const char *prog)
 static int scanFile(const std::string &path, int start_ev, int num_ev)
 {
     evc::EvChannel ch;
-    if (ch.Open(path) != evc::status::success) {
+    if (ch.OpenAuto(path) != evc::status::success) {
         std::cerr << "Failed to open: " << path << "\n"; return 1;
     }
 
@@ -103,7 +103,7 @@ static int testFile(const std::string &path)
 {
     evc::EvChannel ch;
 
-    if (ch.Open(path) != evc::status::success) {
+    if (ch.OpenAuto(path) != evc::status::success) {
         std::cerr << "Failed to open: " << path << "\n";
         return 1;
     }

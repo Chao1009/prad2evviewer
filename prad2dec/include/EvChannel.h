@@ -5,7 +5,7 @@
 // New (lazy) API:
 //   EvChannel ch;
 //   ch.SetConfig(cfg);             // builds per-product tag lists
-//   ch.Open("file.evio");
+//   ch.OpenAuto("file.evio");      // RA when supported, sequential otherwise
 //   while (ch.Read() == status::success) {
 //       if (!ch.Scan()) continue;
 //       if (ch.GetEventType() != EventType::Physics) continue;
@@ -56,7 +56,10 @@ public:
     void SetConfig(const DaqConfig &cfg);
     const DaqConfig &GetConfig() const   { return config; }
 
-    virtual status Open(const std::string &path);
+    // Explicit sequential evio open (evio "r" mode).  Pairs symmetrically
+    // with OpenRandomAccess().  For most callers OpenAuto() below is the
+    // right choice — it tries random-access first and falls back to this.
+    virtual status OpenSequential(const std::string &path);
     virtual void   Close();
     virtual status Read();
 
@@ -79,6 +82,17 @@ public:
     // sequential path.  Returns status::failure if the index is out of range
     // or the handle wasn't opened in random-access mode.
     status ReadEventByIndex(int evio_event_index);
+
+    // --- convenience: open with RA when possible, else sequential ---------
+    // Tries OpenRandomAccess first; if that fails (e.g. evio-4 files whose
+    // blocks lack the optional index array), falls back to the sequential
+    // Open().  After success, IsRandomAccess() tells the caller which mode
+    // was actually selected so they can dispatch between ReadEventByIndex()
+    // and Read().
+    virtual status OpenAuto(const std::string &path);
+
+    // True iff the current handle was opened in random-access mode.
+    bool IsRandomAccess() const { return ra_count > 0; }
 
     // --- scan the current event into a flat tree ----------------------------
     // Rebuilds nodes[] and the tag index; invalidates the per-product cache.
@@ -168,6 +182,7 @@ protected:
     int nevents = 0;
     EventType evtype = EventType::Unknown;
     int ra_count = 0;   // event count from evGetRandomAccessTable, 0 if sequential
+    int ra_pos   = 0;   // next event index consumed by Read() in RA mode
 
     // tag → every node index in the current event that carries it.
     // Rebuilt by Scan(); consulted by the lazy accessors to avoid re-scanning.

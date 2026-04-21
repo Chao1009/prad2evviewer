@@ -485,13 +485,15 @@ void bind_channel(py::module_ &m)
         .def("set_config", &evc::EvChannel::SetConfig, py::arg("cfg"))
         .def("get_config", &evc::EvChannel::GetConfig,
              py::return_value_policy::reference_internal)
-        .def("open",
+        .def("open_sequential",
             [](evc::EvChannel &self, const std::string &path) {
                 py::gil_scoped_release rel;
-                return self.Open(path);
+                return self.OpenSequential(path);
             },
             py::arg("path"),
-            "Open an evio file. Returns a Status enum.")
+            "Open an evio file in sequential mode.  Pairs with "
+            "open_random_access() and open_auto() — most callers should "
+            "prefer open_auto() which picks the best mode automatically.")
         .def("close", &evc::EvChannel::Close)
         .def("read",
             [](evc::EvChannel &self) {
@@ -523,6 +525,20 @@ void bind_channel(py::module_ &m)
             "Read the event at 0-based evio index `i` into the internal "
             "buffer.  scan() / select_event() / info() / fadc() / ... then "
             "work identically to the sequential path.  Returns Status.")
+        .def("open_auto",
+            [](evc::EvChannel &self, const std::string &path) {
+                py::gil_scoped_release rel;
+                return self.OpenAuto(path);
+            },
+            py::arg("path"),
+            "Open ``path`` with random-access mode if the file supports it, "
+            "otherwise fall back to the sequential mode.  After success, "
+            "``is_random_access()`` reports which mode was selected; callers "
+            "dispatch between ``read_event_by_index()`` (RA) and ``read()`` "
+            "(sequential).  Recommended default when you don't care which "
+            "mode you get.")
+        .def("is_random_access", &evc::EvChannel::IsRandomAccess,
+            "True iff the current handle was opened in random-access mode.")
         .def("scan", &evc::EvChannel::Scan,
             "Scan the currently-held record. Call after a successful Read().")
         .def("get_event_type", &evc::EvChannel::GetEventType)

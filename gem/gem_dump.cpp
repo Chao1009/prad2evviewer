@@ -924,7 +924,7 @@ int main(int argc, char *argv[])
     // open EVIO file
     EvChannel ch;
     ch.SetConfig(daq_cfg);
-    if (ch.Open(evio_file) != status::success) {
+    if (ch.OpenAuto(evio_file) != status::success) {
         std::cerr << "Error: cannot open " << evio_file << "\n";
         return 1;
     }

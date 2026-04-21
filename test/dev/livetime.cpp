@@ -353,7 +353,7 @@ int main(int argc, char *argv[])
 
     for (auto &file : files) {
         current_file = file;
-        if (ch.Open(file) != status::success) {
+        if (ch.OpenAuto(file) != status::success) {
             std::cerr << "Warning: cannot open " << file << ", skipping\n";
             continue;
         }

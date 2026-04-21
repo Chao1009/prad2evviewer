@@ -119,7 +119,7 @@ int main(int argc, char *argv[])
     int total = 0;
 
     for (const auto &input_evio : evio_files) {
-        if (ch.Open(input_evio) != evc::status::success) {
+        if (ch.OpenAuto(input_evio) != evc::status::success) {
             std::cerr << "Replay: cannot open " << input_evio << "\n";
             return 1;
         }

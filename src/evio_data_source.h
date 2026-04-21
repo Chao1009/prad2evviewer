@@ -35,12 +35,14 @@ private:
     struct EvioIndex { int evio_event, sub_event; };
     std::vector<EvioIndex> index_;
 
-    // Persistent random-access reader.  Opened once during open() via evio's
-    // "ra" mode (mmap + native event-pointer table) and kept alive for the
-    // lifetime of the data source; decodeEvent() jumps directly to the
-    // requested event via reader_.ReadEventByIndex().
+    // Persistent reader.  Opened during open() via EvChannel::OpenAuto so
+    // we get random-access mode when the file supports it, sequential
+    // otherwise.  decodeEvent() dispatches on reader_.IsRandomAccess():
+    //   * RA mode  → reader_.ReadEventByIndex(ei.evio_event) — O(1).
+    //   * seq mode → close/reopen on backward jumps, walk forward to target.
     evc::EvChannel reader_;
     std::string reader_path_;
+    int reader_pos_ = -1;   // sequential-mode read cursor (-1 = pre-first)
     // Index of the event currently decoded in reader_'s lazy cache, or -1 if
     // the cache is invalid.  When decodeEvent() is called with the same index
     // a second time (common for viewer_server's decodeEvent + computeClusters
@@ -49,5 +51,9 @@ private:
     int last_decoded_index_ = -1;
     std::mutex reader_mtx_;
 
+    // Walk the sequential reader forward (or close/reopen on backward jumps)
+    // until it's positioned on evio_target.  Returns an error string on
+    // failure, empty on success.
+    std::string seekTo(int evio_target);
     void invalidateReader();
 };

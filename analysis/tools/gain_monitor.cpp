@@ -191,7 +191,7 @@ int main(int argc, char *argv[])
     for (size_t fi = 0; fi < InputFiles.size(); fi++) {
         printf("[%zu/%zu] %s\n", fi + 1, InputFiles.size(), InputFiles[fi].c_str());
 
-        if (reader.Open(InputFiles[fi]) != evc::status::success) {
+        if (reader.OpenAuto(InputFiles[fi]) != evc::status::success) {
             printf("  WARNING: cannot open, skipping\n");
             continue;
         }

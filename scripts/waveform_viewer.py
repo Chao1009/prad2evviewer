@@ -76,15 +76,16 @@ except Exception as _exc:
     _PRAD2PY_ERR  = f"{type(_exc).__name__}: {_exc}"
 
 
-def _check_random_access_support() -> Optional[str]:
-    """Return None if the loaded prad2py supports random-access, else an error."""
+def _check_evchannel_support() -> Optional[str]:
+    """Return None if the loaded prad2py has the expected EvChannel API,
+    else an error string suitable for showing to the user."""
     if not _HAVE_PRAD2PY:
         return _PRAD2PY_ERR
     try:
         ch = prad2py.dec.EvChannel()
-        if not hasattr(ch, "open_random_access"):
-            return ("prad2py is missing open_random_access — rebuild prad2py "
-                    "after the EvChannel.cpp changes:\n"
+        if not hasattr(ch, "open_auto"):
+            return ("prad2py is missing open_auto — rebuild prad2py after "
+                    "the EvChannel.cpp changes:\n"
                     "  cmake -DBUILD_PYTHON=ON -S . -B build && "
                     "cmake --build build --target prad2py")
     except Exception as e:
@@ -442,33 +443,33 @@ class IndexerWorker(QObject):
                else dec.load_daq_config())
         ch  = dec.EvChannel()
         ch.set_config(cfg)
-        st = ch.open_random_access(self._path)
+        st = ch.open_auto(self._path)
         if st != dec.Status.success:
-            raise RuntimeError(f"cannot open {self._path} in RA mode: {st}")
+            raise RuntimeError(f"cannot open {self._path}: {st}")
+        is_ra = ch.is_random_access()
 
-        total_evio = ch.get_random_access_event_count()
+        # In RA mode we know the total upfront; sequential mode walks to EOF
+        # so we just report a rolling count.
+        total_evio = ch.get_random_access_event_count() if is_ra else 0
         index: List[Tuple[int, int]] = []
 
-        progress_every = max(1, total_evio // 200)
-        for ei in range(total_evio):
+        progress_every = max(1, total_evio // 200) if total_evio else 500
+        ei = 0
+        while ch.read() == dec.Status.success:
             if self._cancel:
                 break
-            if ch.read_event_by_index(ei) != dec.Status.success:
-                continue
-            if not ch.scan():
-                continue
-            if ch.get_event_type() != dec.EventType.Physics:
-                continue
-            n_sub = ch.get_n_events()
-            for si in range(n_sub):
-                index.append((ei, si))
+            if ch.scan() and ch.get_event_type() == dec.EventType.Physics:
+                for si in range(ch.get_n_events()):
+                    index.append((ei, si))
+            ei += 1
             if (ei % progress_every) == 0:
-                self.progressed.emit(ei + 1, total_evio)
+                self.progressed.emit(ei, total_evio or ei)
 
         ch.close()
-        self.progressed.emit(total_evio, total_evio)
+        self.progressed.emit(ei, total_evio or ei)
         return {"path": self._path, "index": index,
-                "total_evio": total_evio, "cancelled": self._cancel}
+                "total_evio": ei, "cancelled": self._cancel,
+                "random_access": is_ra}
 
 
 # ===========================================================================
@@ -525,9 +526,10 @@ class BatchWorker(QObject):
                else dec.load_daq_config())
         ch  = dec.EvChannel()
         ch.set_config(cfg)
-        st = ch.open_random_access(self._path)
+        st = ch.open_auto(self._path)
         if st != dec.Status.success:
-            raise RuntimeError(f"cannot open {self._path} in RA mode: {st}")
+            raise RuntimeError(f"cannot open {self._path}: {st}")
+        is_ra = ch.is_random_access()
 
         n_done = 0
         peaks_found = 0
@@ -538,69 +540,96 @@ class BatchWorker(QObject):
         accum_all = self._accum_all
         tgt_key = self._target_key
 
-        try:
-            for i in range(self._count):
-                if self._cancel:
-                    break
-                phys_idx = self._start + i
-                if phys_idx >= len(self._index):
-                    break
-                # Dedup: skip events already folded in by browsing.
-                if (self._accumulated is not None
-                        and 0 <= phys_idx < self._accumulated.size
-                        and self._accumulated[phys_idx]):
-                    n_done += 1
-                    continue
-                ev_idx, sub_idx = self._index[phys_idx]
-                if ch.read_event_by_index(ev_idx) != dec.Status.success:
-                    continue
-                if not ch.scan():
-                    continue
-                ch.select_event(sub_idx)
-                info = ch.info()
-                tb = int(info.trigger_bits)
-                if self._accept and (tb & self._accept) == 0:
-                    n_done += 1
-                    continue
-                if self._reject and (tb & self._reject):
-                    n_done += 1
-                    continue
-
-                fadc_evt = ch.fadc()
-                for r in range(fadc_evt.nrocs):
-                    roc = fadc_evt.roc(r)
-                    roc_tag = int(roc.tag)
-                    for s in roc.present_slots():
-                        slot = roc.slot(s)
-                        for c in slot.present_channels():
-                            key = (roc_tag, s, c)
-                            if not accum_all and key != tgt_key:
-                                continue
-                            hits = channels.get(key)
-                            if hits is None:
-                                continue
-                            samples = slot.channel(c).samples
-                            if samples.size < 10:
-                                continue
-                            _, _, peaks = analyze(samples, wcfg)
-                            np_kept = 0
-                            for p in peaks:
-                                if p.height >= thr:
-                                    hits.height.fill(p.height)
-                                    hits.integral.fill(p.integral)
-                                    hits.position.fill(p.time)
-                                    np_kept += 1
-                                    peaks_found += 1
-                            hits.npeaks.fill(np_kept)
-                            hits.events += 1
-                            if np_kept > 0:
-                                hits.peak_events += 1
-                if self._accumulated is not None and 0 <= phys_idx < self._accumulated.size:
-                    self._accumulated[phys_idx] = True
+        def _fold_event(phys_idx: int, sub_idx: int) -> int:
+            """Scan + select current event, accumulate hists, return peaks
+            found this event (or -1 if the event is rejected by trigger mask
+            or dedup)."""
+            nonlocal n_done
+            if (self._accumulated is not None
+                    and 0 <= phys_idx < self._accumulated.size
+                    and self._accumulated[phys_idx]):
                 n_done += 1
+                return -1
+            if not ch.scan():
+                return -1
+            ch.select_event(sub_idx)
+            info = ch.info()
+            tb = int(info.trigger_bits)
+            if self._accept and (tb & self._accept) == 0:
+                n_done += 1
+                return -1
+            if self._reject and (tb & self._reject):
+                n_done += 1
+                return -1
+            fadc_evt = ch.fadc()
+            pfound = 0
+            for r in range(fadc_evt.nrocs):
+                roc = fadc_evt.roc(r)
+                roc_tag = int(roc.tag)
+                for s in roc.present_slots():
+                    slot = roc.slot(s)
+                    for c in slot.present_channels():
+                        key = (roc_tag, s, c)
+                        if not accum_all and key != tgt_key:
+                            continue
+                        hits = channels.get(key)
+                        if hits is None:
+                            continue
+                        samples = slot.channel(c).samples
+                        if samples.size < 10:
+                            continue
+                        _, _, peaks = analyze(samples, wcfg)
+                        np_kept = 0
+                        for p in peaks:
+                            if p.height >= thr:
+                                hits.height.fill(p.height)
+                                hits.integral.fill(p.integral)
+                                hits.position.fill(p.time)
+                                np_kept += 1
+                                pfound += 1
+                        hits.npeaks.fill(np_kept)
+                        hits.events += 1
+                        if np_kept > 0:
+                            hits.peak_events += 1
+            if self._accumulated is not None and 0 <= phys_idx < self._accumulated.size:
+                self._accumulated[phys_idx] = True
+            n_done += 1
+            return pfound
 
-                if (i % progress_every) == 0:
-                    self.progressed.emit(n_done, self._count, peaks_found)
+        try:
+            if is_ra:
+                # RA: jump directly to each phys event's evio block.
+                for i in range(self._count):
+                    if self._cancel: break
+                    phys_idx = self._start + i
+                    if phys_idx >= len(self._index): break
+                    ev_idx, sub_idx = self._index[phys_idx]
+                    if ch.read_event_by_index(ev_idx) != dec.Status.success:
+                        continue
+                    pf = _fold_event(phys_idx, sub_idx)
+                    if pf > 0: peaks_found += pf
+                    if (i % progress_every) == 0:
+                        self.progressed.emit(n_done, self._count, peaks_found)
+            else:
+                # Sequential: walk forward through the file, processing the
+                # index entries in order.  self._index is already in
+                # evio-order so consecutive phys entries only ever require
+                # more Read()s, never a rewind.
+                cur_evio = -1
+                for i in range(self._count):
+                    if self._cancel: break
+                    phys_idx = self._start + i
+                    if phys_idx >= len(self._index): break
+                    need_evio, sub_idx = self._index[phys_idx]
+                    while cur_evio < need_evio:
+                        if ch.read() != dec.Status.success:
+                            raise RuntimeError(
+                                f"EOF before reaching evio event {need_evio}")
+                        cur_evio += 1
+                    pf = _fold_event(phys_idx, sub_idx)
+                    if pf > 0: peaks_found += pf
+                    if (i % progress_every) == 0:
+                        self.progressed.emit(n_done, self._count, peaks_found)
         finally:
             ch.close()
 
@@ -1427,6 +1456,8 @@ class WaveformViewerWindow(QMainWindow):
         # Reader state — open EvChannel in RA mode, kept alive across browse
         self._ch: Optional["prad2py.dec.EvChannel"] = None
         self._reader_path: Optional[str] = None
+        self._reader_is_ra: bool = False
+        self._reader_pos: int = -1
 
         # Worker threads
         self._idx_worker: Optional[IndexerWorker] = None
@@ -1639,7 +1670,7 @@ class WaveformViewerWindow(QMainWindow):
             self.open_path(Path(path_str))
 
     def open_path(self, path: Path):
-        err = _check_random_access_support()
+        err = _check_evchannel_support()
         if err:
             QMessageBox.critical(self, "prad2py issue", err)
             return
@@ -1708,9 +1739,12 @@ class WaveformViewerWindow(QMainWindow):
                                  f"Indexing finished but reader open failed:\n{err}")
             return
 
+        mode_note = ("" if self._reader_is_ra
+                     else "   [sequential mode — Prev is slow]")
         self._file_lbl.setText(
             f"{path.name}   physics events: {n_phys:,}   "
             f"(evio blocks: {res['total_evio']:,})"
+            + mode_note
             + ("   [indexing cancelled]" if cancelled else ""))
         self._info.setText(
             f"threshold={self._hist_threshold:g}   "
@@ -1743,11 +1777,13 @@ class WaveformViewerWindow(QMainWindow):
                    else dec.load_daq_config())
             ch  = dec.EvChannel()
             ch.set_config(cfg)
-            st = ch.open_random_access(path)
+            st = ch.open_auto(path)
             if st != dec.Status.success:
                 return False, f"status = {st}"
             self._ch = ch
             self._reader_path = path
+            self._reader_is_ra = bool(ch.is_random_access())
+            self._reader_pos = -1     # sequential-mode cursor
             return True, ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
@@ -1760,6 +1796,8 @@ class WaveformViewerWindow(QMainWindow):
                 pass
         self._ch = None
         self._reader_path = None
+        self._reader_is_ra = False
+        self._reader_pos = -1
 
     # -- navigation --
 
@@ -1783,11 +1821,29 @@ class WaveformViewerWindow(QMainWindow):
             return
         ev_idx, sub_idx = self._index[phys_idx]
         dec = prad2py.dec
-        st = self._ch.read_event_by_index(ev_idx)
-        if st != dec.Status.success:
-            self.statusBar().showMessage(
-                f"read_event_by_index({ev_idx}) → {st}")
-            return
+        # RA: jump in O(1).  Sequential: close/reopen on backward jumps,
+        # walk forward to the target.
+        if self._reader_is_ra:
+            st = self._ch.read_event_by_index(ev_idx)
+            if st != dec.Status.success:
+                self.statusBar().showMessage(
+                    f"read_event_by_index({ev_idx}) → {st}")
+                return
+        else:
+            if self._reader_pos > ev_idx:
+                # Backward seek — reopen and walk forward from start.
+                self._close_reader()
+                ok, err = self._open_reader(str(self._evio_path))
+                if not ok:
+                    self.statusBar().showMessage(
+                        f"reopen for backward seek failed: {err}")
+                    return
+            while self._reader_pos < ev_idx:
+                if self._ch.read() != dec.Status.success:
+                    self.statusBar().showMessage(
+                        f"EOF before evio event {ev_idx}")
+                    return
+                self._reader_pos += 1
         if not self._ch.scan():
             self.statusBar().showMessage(f"scan() failed at physics #{phys_idx}")
             return

@@ -14,26 +14,29 @@ const GEM_PLANES = [
     { name: 'Plane 2 (downstream)', dets: [2, 3], hitId: 'gem-plane-1' },
 ];
 
-const PL_GEM = {
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: '#1a1a2e',
-    font: { color: '#e0e0e0', size: 11 },
-    margin: { l: 50, r: 20, t: 30, b: 40 },
-    hovermode: 'closest',
-    xaxis: { gridcolor: '#333', zerolinecolor: '#555' },
-    yaxis: { gridcolor: '#333', zerolinecolor: '#555' },
-};
+// Theme-aware layout factories (read from the active THEME at call time).
+function PL_GEM() {
+    return {
+        ...plotlyLayout(),
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor:  THEME.canvas,
+        font: { color: THEME.text, size: 11 },
+        margin: { l: 50, r: 20, t: 30, b: 40 },
+        hovermode: 'closest',
+    };
+}
 
-const PL_GEM_OCC = {
-    paper_bgcolor: 'rgba(0,0,0,0)',
-    plot_bgcolor: '#1a1a2e',
-    font: { color: '#e0e0e0', size: 10 },
-    margin: { l: 45, r: 10, t: 28, b: 32 },
-    hovermode: 'closest',
-    showlegend: false,
-    xaxis: { gridcolor: '#333', zerolinecolor: '#555' },
-    yaxis: { gridcolor: '#333', zerolinecolor: '#555' },
-};
+function PL_GEM_OCC() {
+    return {
+        ...plotlyLayout(),
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor:  THEME.canvas,
+        font: { color: THEME.text, size: 10 },
+        margin: { l: 45, r: 10, t: 28, b: 32 },
+        hovermode: 'closest',
+        showlegend: false,
+    };
+}
 
 let gemConfig = null;
 
@@ -92,7 +95,7 @@ function plotGemHits(data) {
             if (!det) return;
 
             const hits = det.hits_2d || [];
-            const color = GEM_COLORS[detId] || '#888';
+            const color = GEM_COLORS[detId] || THEME.textDim;
             const detName = det.name || ('GEM' + detId);
 
             traces.push({
@@ -103,7 +106,7 @@ function plotGemHits(data) {
                 name: detName,
                 marker: {
                     color: color, size: 6, opacity: 0.8,
-                    line: { width: 0.5, color: '#fff' },
+                    line: { width: 0.5, color: THEME.selectBorder },
                 },
                 hovertemplate: detName + '<br>x=%{x:.1f} mm<br>y=%{y:.1f} mm<extra></extra>',
             });
@@ -124,13 +127,11 @@ function plotGemHits(data) {
                           name: 'No data', marker: { size: 0 } });
         }
 
-        const layout = Object.assign({}, PL_GEM, {
-            title: { text: plane.name, font: { size: 13, color: '#e0e0e0' } },
-            xaxis: {
-                title: 'X (mm)', gridcolor: '#333', zerolinecolor: '#555',
-                scaleanchor: 'y', scaleratio: 1,
-            },
-            yaxis: { title: 'Y (mm)', gridcolor: '#333', zerolinecolor: '#555' },
+        const layout = Object.assign({}, PL_GEM(), {
+            title: { text: plane.name, font: { size: 13, color: THEME.text } },
+            xaxis: { title: 'X (mm)', scaleanchor: 'y', scaleratio: 1,
+                     gridcolor: THEME.grid, zerolinecolor: THEME.border },
+            yaxis: { title: 'Y (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border },
             shapes: shapes,
             showlegend: true,
             legend: { x: 0.01, y: 0.99, bgcolor: 'rgba(0,0,0,0.3)', font: { size: 10 } },
@@ -161,7 +162,7 @@ function plotGemOccupancy(data) {
         if (!det) {
             Plotly.react(divId,
                 [{ x: [], y: [], z: [[]], type: 'heatmap' }],
-                Object.assign({}, PL_GEM_OCC, { title: { text: 'GEM' + detId, font: { size: 12, color: '#e0e0e0' } } }),
+                Object.assign({}, PL_GEM_OCC(), { title: { text: 'GEM' + detId, font: { size: 12, color: THEME.text } } }),
                 { responsive: true, displayModeBar: false });
             return;
         }
@@ -193,11 +194,11 @@ function plotGemOccupancy(data) {
             colorbar: { thickness: 10, tickfont: { size: 9 }, tickformat: '.3f' },
         }];
 
-        const layout = Object.assign({}, PL_GEM_OCC, {
+        const layout = Object.assign({}, PL_GEM_OCC(), {
             title: { text: det.name + (total > 0 ? ' (' + total + ' evts)' : ''),
-                     font: { size: 12, color: '#e0e0e0' } },
-            xaxis: { title: 'X (mm)', gridcolor: '#333', zerolinecolor: '#555' },
-            yaxis: { title: 'Y (mm)', gridcolor: '#333', zerolinecolor: '#555' },
+                     font: { size: 12, color: THEME.text } },
+            xaxis: { title: 'X (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border },
+            yaxis: { title: 'Y (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border },
         });
 
         Plotly.react(divId, traces, layout, { responsive: true, displayModeBar: false });
@@ -214,8 +215,8 @@ function plotGemHist(data) {
 
     function plotOne(divId, hdata, title, xlabel, color, refKey) {
         if (!hdata || !hdata.bins || hdata.bins.length === 0) {
-            Plotly.react(divId, [], Object.assign({}, PL_GEM_OCC, {
-                title: { text: title, font: { size: 12, color: '#e0e0e0' } },
+            Plotly.react(divId, [], Object.assign({}, PL_GEM_OCC(), {
+                title: { text: title, font: { size: 12, color: THEME.text } },
             }), { responsive: true, displayModeBar: false });
             return null;
         }
@@ -229,11 +230,11 @@ function plotGemHist(data) {
             x: x, y: hdata.bins, type: 'bar',
             marker: { color: color, line: { width: 0 } },
             hovertemplate: xlabel + '=%{x:.1f}<br>count=%{y}<extra></extra>',
-        }], Object.assign({}, PL_GEM_OCC, {
-            title: { text: title + '<br><span style="font-size:9px;color:#888">' + entries + ' entries</span>',
-                     font: { size: 12, color: '#e0e0e0' } },
-            xaxis: { title: xlabel, gridcolor: '#333', zerolinecolor: '#555' },
-            yaxis: { title: 'Counts', gridcolor: '#333', zerolinecolor: '#555' },
+        }], Object.assign({}, PL_GEM_OCC(), {
+            title: { text: title + '<br><span style="font-size:9px;color:var(--theme-text-dim)">' + entries + ' entries</span>',
+                     font: { size: 12, color: THEME.text } },
+            xaxis: { title: xlabel, gridcolor: THEME.grid, zerolinecolor: THEME.border },
+            yaxis: { title: 'Counts', gridcolor: THEME.grid, zerolinecolor: THEME.border },
             bargap: 0.05,
             shapes: refKey ? refShapes(refKey) : [],
         }), { responsive: true, displayModeBar: false });

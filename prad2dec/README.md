@@ -22,7 +22,10 @@ Static library for reading CODA EVIO data and decoding detector electronics.
 
 evc::EvChannel ch;
 ch.SetConfig(cfg);                    // evc::DaqConfig
-ch.Open("data.evio");
+ch.OpenAuto("data.evio");             // RA when the file supports it,
+                                      // sequential otherwise.  Read() and
+                                      // the Scan()/Info()/Fadc() accessors
+                                      // work identically in either mode.
 
 while (ch.Read() == evc::status::success) {
     if (!ch.Scan()) continue;

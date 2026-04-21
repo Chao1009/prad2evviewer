@@ -235,7 +235,7 @@ def load_hits_from_evio(
     cfg = dec.load_daq_config(daq_config)
     ch  = dec.EvChannel()
     ch.set_config(cfg)
-    st = ch.open(path)
+    st = ch.open_auto(path)
     if st != dec.Status.success:
         raise RuntimeError(f"cannot open {path}: {st}")
 

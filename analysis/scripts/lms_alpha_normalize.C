@@ -231,7 +231,7 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
     for (size_t fi = 0; fi < files.size(); fi++) {
         printf("[%zu/%zu] %s\n", fi + 1, files.size(), files[fi].c_str());
 
-        if (reader.Open(files[fi]) != evc::status::success) {
+        if (reader.OpenAuto(files[fi]) != evc::status::success) {
             printf("  WARNING: cannot open, skipping\n");
             continue;
         }

@@ -296,7 +296,7 @@ int tagger_hycal_correlation(const char *evio_path,
     //---- open evio ----------------------------------------------------------
     EvChannel ch;
     ch.SetConfig(cfg);
-    if (ch.Open(evio_path) != status::success) {
+    if (ch.OpenAuto(evio_path) != status::success) {
         std::cerr << "ERROR: cannot open " << evio_path << "\n";
         return 1;
     }

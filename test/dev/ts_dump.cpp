@@ -58,7 +58,7 @@ int main(int argc, char *argv[])
 
     EvChannel ch;
     ch.SetConfig(cfg);
-    if (ch.Open(input) != status::success) {
+    if (ch.OpenAuto(input) != status::success) {
         std::cerr << "Cannot open: " << input << "\n";
         return 1;
     }
@@ -169,7 +169,7 @@ done:
 
     // also dump per-slot timestamps from the first event for comparison
     std::cout << "\n--- First event per-slot timestamps ---\n";
-    ch.Open(input);
+    ch.OpenAuto(input);
     while (ch.Read() == status::success) {
         if (!ch.Scan()) continue;
         if (ch.GetEventType() != EventType::Physics) continue;

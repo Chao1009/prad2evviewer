@@ -28,7 +28,7 @@ static inline status evio_status(int code)
 // --- open / close / read ----------------------------------------------------
 EvChannel::EvChannel(size_t buflen) : fHandle(-1) { buffer.resize(buflen); }
 
-status EvChannel::Open(const std::string &path)
+status EvChannel::OpenSequential(const std::string &path)
 {
     if (fHandle > 0) Close();
     char *cp = strdup(path.c_str()), *cm = strdup("r");
@@ -37,14 +37,34 @@ status EvChannel::Open(const std::string &path)
     return evio_status(st);
 }
 
-void EvChannel::Close() { evClose(fHandle); fHandle = -1; ra_count = 0; }
-status EvChannel::Read() { return evio_status(evRead(fHandle, buffer.data(), buffer.size())); }
+void EvChannel::Close()
+{
+    evClose(fHandle);
+    fHandle = -1;
+    ra_count = 0;
+    ra_pos   = 0;
+}
+
+// Unified sequential-style read: in RA mode advances an internal cursor
+// via ReadEventByIndex, in sequential mode falls through to evRead.  This
+// lets legacy callers (e.g. iterateAll, analysis tools) that follow an
+// Open() with a `while (Read() == success)` loop keep working regardless
+// of which mode the handle was opened in.
+status EvChannel::Read()
+{
+    if (ra_count > 0) {
+        if (ra_pos >= ra_count) return status::eof;
+        return ReadEventByIndex(ra_pos);   // bumps ra_pos on success
+    }
+    return evio_status(evRead(fHandle, buffer.data(), buffer.size()));
+}
 
 // --- random-access open (evio "ra" mode) ------------------------------------
 status EvChannel::OpenRandomAccess(const std::string &path)
 {
     if (fHandle > 0) Close();
     ra_count = 0;
+    ra_pos   = 0;
     char *cp = strdup(path.c_str()), *cm = strdup("ra");
     int st = evOpen(cp, cm, &fHandle);
     free(cp); free(cm);
@@ -87,7 +107,19 @@ status EvChannel::ReadEventByIndex(int evio_event_index)
 
     if (buflen > buffer.size()) buffer.resize(buflen);
     std::memcpy(buffer.data(), pEvent, buflen * sizeof(uint32_t));
+    ra_pos = evio_event_index + 1;   // so Read() picks up from the next one
     return status::success;
+}
+
+// --- auto-detect open: RA first, sequential fallback -----------------------
+status EvChannel::OpenAuto(const std::string &path)
+{
+    status s = OpenRandomAccess(path);
+    if (s == status::success) return s;
+    // RA failed (e.g. file missing the optional block-index arrays).  Clean
+    // up any half-open handle before trying the sequential mode.
+    if (fHandle > 0) Close();
+    return OpenSequential(path);
 }
 
 // === SetConfig ==============================================================

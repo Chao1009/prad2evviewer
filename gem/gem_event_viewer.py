@@ -142,18 +142,13 @@ class EventMeta:
     trigger_bits: int
 
 
-def _open_any(ch, path: str) -> bool:
-    """Open ``path`` in evio random-access mode if possible, otherwise
-    sequential.  Returns True iff RA was used (i.e. ``read_event_by_index``
-    is supported on this handle).  Raises on outright open failure.
+def _open_channel(ch, path: str) -> bool:
+    """Open ``path`` via EvChannel::OpenAuto (RA → sequential fallback).
+    Returns True iff random-access mode was selected.  Raises on failure.
     """
-    if ch.open_random_access(path) == dec.Status.success:
-        return True
-    # Some evio-4 files lack the optional block-index arrays RA needs.
-    # Try the plain sequential mode as a fallback.
-    if ch.open(path) == dec.Status.success:
-        return False
-    raise RuntimeError(f"cannot open {path} (neither ra nor sequential)")
+    if ch.open_auto(path) != dec.Status.success:
+        raise RuntimeError(f"cannot open {path}")
+    return bool(ch.is_random_access())
 
 
 class ScanWorker(QObject):
@@ -184,7 +179,7 @@ class ScanWorker(QObject):
             cfg = dec.load_daq_config(self._daq)
             ch = dec.EvChannel()
             ch.set_config(cfg)
-            is_ra = _open_any(ch, self._path)
+            is_ra = _open_channel(ch, self._path)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
@@ -358,7 +353,7 @@ class PedestalWorker(QObject):
         try:
             cfg = dec.load_daq_config(self._daq)
             ch = dec.EvChannel(); ch.set_config(cfg)
-            is_ra = _open_any(ch, self._path)
+            is_ra = _open_channel(ch, self._path)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
@@ -470,7 +465,7 @@ class Stepper:
         cfg = dec.load_daq_config(self._daq)
         self._ch = dec.EvChannel()
         self._ch.set_config(cfg)
-        self._is_ra = _open_any(self._ch, self._path)
+        self._is_ra = _open_channel(self._ch, self._path)
         self._position = -1
 
     def close(self):

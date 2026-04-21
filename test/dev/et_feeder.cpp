@@ -85,7 +85,7 @@ int main(int argc, char* argv[])
 
     // evio file reader
     evc::EvChannel chan;
-    if (chan.Open(evio_file) != evc::status::success) {
+    if (chan.OpenAuto(evio_file) != evc::status::success) {
         std::cerr << "Failed to open coda file \"" << evio_file << "\"\n";
         return -1;
     }

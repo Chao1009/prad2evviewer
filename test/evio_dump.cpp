@@ -1241,7 +1241,7 @@ int main(int argc, char *argv[])
 
     EvChannel ch;
     ch.SetConfig(daq_cfg);
-    if (ch.Open(path) != status::success) {
+    if (ch.OpenAuto(path) != status::success) {
         std::cerr << "Failed to open: " << path << "\n";
         return 1;
     }

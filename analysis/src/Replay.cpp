@@ -239,7 +239,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
 
-    if (ch.Open(input_evio) != evc::status::success) {
+    if (ch.OpenAuto(input_evio) != evc::status::success) {
         std::cerr << "Replay: cannot open " << input_evio << "\n";
         return false;
     }
@@ -497,7 +497,7 @@ if(!prad1){
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
 
-    if (ch.Open(input_evio) != evc::status::success) {
+    if (ch.OpenAuto(input_evio) != evc::status::success) {
         std::cerr << "Replay: cannot open " << input_evio << "\n";
         return false;
     }
