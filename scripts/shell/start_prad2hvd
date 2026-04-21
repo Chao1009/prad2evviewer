@@ -1,22 +1,22 @@
 #!/bin/tcsh -f
 # ───────────────────────────────────────────────────────────────────────
-# prad2_server_tmux_template — launch prad2_server inside a detached
-# tmux session with stdout/stderr tee'd to a console log so crashes
-# leave a trail.
+# prad2hvd_tmux_template — launch prad2hvd inside a detached tmux session
+# with stdout/stderr tee'd to a console log so crashes leave a trail.
 #
 # Template — NOT installed by `make install`.  Copy it to a convenient
-# location (e.g. ~/bin/prad2_server_tmux.csh), tweak the config block
-# for your site, and `chmod +x` the copy.
+# location (e.g. ~/bin/prad2hvd_tmux.csh), tweak the config block for
+# your site, and `chmod +x` the copy.
 #
-# Prerequisite: source prad2_setup.csh first so prad2_server is on PATH
-# and LD_LIBRARY_PATH picks up the installed shared libraries (evio, …).
+# Prerequisite: source prad2hv_setup.csh first so prad2hvd is on PATH
+# and LD_LIBRARY_PATH picks up libcaenhvwrapper.so.
 # ───────────────────────────────────────────────────────────────────────
 
 # ── Site-specific config — edit these for your setup ───────────────────
-set SESSION     = "prad2_server"
-set LOG_DIR     = "/home/clasrun/prad2_daq/monitor"
+set SESSION     = "prad2hvd"
+set LOG_DIR     = "/home/clasrun/prad2_daq/monitor/high_voltage"
+set DATA_DIR    = "/data/prad2/hv_data"
 set LOG         = "$LOG_DIR/console.log"
-set SERVER_ARGS = "--et -d /data/stage6"
+set DAEMON_ARGS = "-v 1 -U prad2_user -E prad2_admin -d $LOG_DIR -R $DATA_DIR"
 
 # ── Pre-flight checks ──────────────────────────────────────────────────
 tmux has-session -t $SESSION >& /dev/null
@@ -27,27 +27,28 @@ if ( $status == 0 ) then
     exit 1
 endif
 
-which prad2_server >& /dev/null
+which prad2hvd >& /dev/null
 if ( $status != 0 ) then
-    echo "prad2_server not on PATH — source prad2_setup.csh first." >& /dev/stderr
+    echo "prad2hvd not on PATH — source prad2hv_setup.csh first." >& /dev/stderr
     exit 1
 endif
 
 mkdir -p "$LOG_DIR"
+mkdir -p "$DATA_DIR"
 
 # ── Build the sh command that will run inside tmux ─────────────────────
 # Single-quoted pieces are passed literally to sh (so it evaluates
-# $(date)); double-quoted pieces are expanded by tcsh so $LOG_DIR etc.
+# $(date)); double-quoted pieces are expanded by tcsh so $DATA_DIR etc.
 # substitute at launch time.
 #
 #   stdbuf -oL -eL   line-buffer stdout/stderr so tee flushes every line,
-#                    even if the server crashes mid-buffer.
+#                    even if the daemon crashes mid-buffer.
 #   2>&1 | tee -a    merge stderr, persist to $LOG, still visible in pane.
 #   echo '--- ...'   stamp a clean exit or crash in the log with a date.
-#   exec bash        keep the pane alive after the server dies so you can
+#   exec bash        keep the pane alive after the daemon dies so you can
 #                    `tmux attach` and see the last output before it goes.
-set SH_CMD = "stdbuf -oL -eL prad2_server ${SERVER_ARGS} 2>&1 | tee -a ${LOG}"
-set SH_CMD = "${SH_CMD}"'; echo "--- prad2_server exited at $(date) ---" >> '"${LOG}"
+set SH_CMD = "stdbuf -oL -eL prad2hvd ${DAEMON_ARGS} 2>&1 | tee -a ${LOG}"
+set SH_CMD = "${SH_CMD}"'; echo "--- prad2hvd exited at $(date) ---" >> '"${LOG}"
 set SH_CMD = "${SH_CMD}"'; exec bash'
 
 tmux new-session -d -s $SESSION sh -c "$SH_CMD"
@@ -65,9 +66,9 @@ endif
 # ───────────────────────────────────────────────────────────────────────
 # Log rotation (optional — run via cron, or drop into /etc/logrotate.d/)
 #
-# Root-owned install (as /etc/logrotate.d/prad2_server):
+# Root-owned install (as /etc/logrotate.d/prad2hvd):
 #
-#   /home/clasrun/prad2_daq/monitor/console.log {
+#   /home/clasrun/prad2_daq/monitor/hv_data/console.log {
 #       daily
 #       rotate 14
 #       missingok
@@ -78,9 +79,9 @@ endif
 #       su clasrun clasrun
 #   }
 #
-# User-level (~/logrotate.prad2_server.conf, driven by a crontab entry):
+# User-level (~/logrotate.prad2hvd.conf, driven by a crontab entry):
 #
-#   /home/clasrun/prad2_daq/monitor/console.log {
+#   /home/clasrun/prad2_daq/monitor/hv_data/console.log {
 #       daily
 #       rotate 14
 #       missingok
@@ -92,8 +93,8 @@ endif
 #
 # Crontab:
 #   5 0 * * * /usr/sbin/logrotate --state $HOME/.logrotate.state \
-#             $HOME/logrotate.prad2_server.conf
+#             $HOME/logrotate.prad2hvd.conf
 #
 # copytruncate keeps the file descriptor tee is holding valid, so no
-# server restart is needed when rotation happens.
+# daemon restart is needed when rotation happens.
 # ───────────────────────────────────────────────────────────────────────
