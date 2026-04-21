@@ -26,7 +26,8 @@ add_analysis_tool(replay_rawdata tools/replay_rawdata.cpp)
 add_analysis_tool(replay_rawdata_m tools/replay_rawdata_m.cpp)
 add_analysis_tool(replay_recon tools/replay_recon.cpp)
 add_analysis_tool(replay_recon_m tools/replay_recon_m.cpp)
-add_analysis_tool(epCalib tools/epCalib.cpp)
+add_analysis_tool(epCalib   tools/epCalib.cpp)
+add_analysis_tool(epCalib_m tools/epCalib_m.cpp)
 add_analysis_tool(cosmic_test tools/cosmic_test.cpp)
 add_analysis_tool(quick_check tools/quick_check.cpp)
 add_analysis_tool(matching tools/matching.cpp)
@@ -35,8 +36,9 @@ add_analysis_tool(gain_monitor tools/gain_monitor.cpp)
 add_analysis_tool(gain_fitter tools/gain_fitter.cpp)
 add_analysis_tool(sim2replay tools/sim2replay.cpp)
 add_analysis_tool(cosmic_lg tools/cosmic_lg.cpp)
+add_analysis_tool(gain_replay tools/gain_replay.cpp)
 
-install(TARGETS replay_rawdata replay_rawdata_m replay_recon replay_recon_m epCalib
-                cosmic_test quick_check matching det_calib gain_monitor gain_fitter
-                sim2replay cosmic_lg
+install(TARGETS replay_rawdata replay_rawdata_m replay_recon replay_recon_m epCalib epCalib_m
+                cosmic_test quick_check matching det_calib cosmic_lg sim2replay gain_replay
+                gain_monitor gain_fitter
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

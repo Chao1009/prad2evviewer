@@ -31,7 +31,7 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         auto &mod = hycal_.module(i);
         std::string name = "h_" + mod.name;
         std::string title = mod.name + " cluster energy;Energy (MeV);Counts";
-        module_hists_[i] = std::make_unique<TH1F>(name.c_str(), title.c_str(), 300, 0, 3000);
+        module_hists_[i] = std::make_unique<TH1F>(name.c_str(), title.c_str(), 250, 0, 5000);
     }
     h2_energy_module_ = std::make_unique<TH2F>(
         "h2_energy_module", "Energy vs Module;Module Index;Energy (MeV)",
@@ -39,6 +39,9 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     h2_energy_theta_ = std::make_unique<TH2F>(
         "h2_energy_theta", "Energy vs Theta;Theta (deg);Energy (MeV)",
         80, 0, 8, 2000, 0, 4000);
+    h2_Nevents_moduleMap_ = std::make_unique<TH2F>(
+        "h2_Nevents_moduleMap", "Number of Events per Module;Column;Row",
+        34, 0.5, 34.5, 34, -34.5, -0.5);
 
     h2_moller_pos_ = std::make_unique<TH2F>(
         "h2_moller_pos", "Moller 2-arm Hit Position;X (mm);Y (mm)",
@@ -56,6 +59,38 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     moller_z_ = std::make_unique<TH1F>(
         "h_moller_z", "Moller Z Position (HyCal);Z (mm);Counts",
         1000, 5000, 8000);
+
+    // histograms for gain monitoring replay
+    for (int ch = 0; ch < 4; ++ch) {
+        h_lmsCH_lmsHeight_[ch] = std::make_unique<TH1F>(
+            Form("h_lmsCH%d_lmsHeight", ch), Form("LMS%d Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
+        h_lmsCH_lmsIntegral_[ch] = std::make_unique<TH1F>(
+            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 40000);
+        h_lmsCH_alphaHeight_[ch] = std::make_unique<TH1F>(
+            Form("h_lmsCH%d_alphaHeight", ch), Form("LMS%d Alpha Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
+        h_lmsCH_alphaIntegral_[ch] = std::make_unique<TH1F>(
+            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 400000);
+    }
+    h_modCH_lmsHeight_.resize(nmod);
+    h_modCH_lmsIntegral_.resize(nmod);
+    for (int i = 0; i < nmod; ++i) {
+        auto &mod = hycal_.module(i);
+        std::string name_height = "h_mod" + mod.name + "_lmsHeight";
+        std::string title_height = mod.name + " LMS Peak Height;Height (ADC);Counts";
+        h_modCH_lmsHeight_[i] = std::make_unique<TH1F>(name_height.c_str(), title_height.c_str(), 1000, 0, 4000);
+        std::string name_integral = "h_mod" + mod.name + "_lmsIntegral";
+        std::string title_integral = mod.name + " LMS Peak Integral;Integral (ADC*ns);Counts";
+        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 1000, 0, 40000);
+    }
+
+    nonLinearity_func_ = TF1("nonLinearity_func_",
+        [](double *x, double *p) {
+            // E_true = E_meas * (1 + nl * (E_meas - E_base) / 1000)
+            double E_meas = x[0];
+            double nl     = p[0];
+            double E_base = p[1]; // calibration energy in MeV, will be fixed in fit
+            return E_meas * (1.0 + nl * (E_meas - E_base) / 1000.0);
+        }, 0, 5000, 2);
 }
 
 PhysicsTools::~PhysicsTools() = default;
@@ -82,22 +117,27 @@ void TransformDetData(std::vector<GEMHit> &gem_hits, float beamX, float beamY, f
     }
 }
 
-void PhysicsTools::FillModuleEnergy(int module_index, float energy)
-{
-    if (module_index >= 0 && module_index < (int)module_hists_.size())
-        module_hists_[module_index]->Fill(energy);
+void PhysicsTools::FillModuleEnergy(int module_id, float energy)
+{   
+    if (module_id >= 0){
+        int module_index = hycal_.id_to_index(module_id);
+        if (module_index >= 0 && module_index < (int)module_hists_.size())
+            module_hists_[module_index]->Fill(energy);
+    }
 }
 
-TH1F *PhysicsTools::GetModuleEnergyHist(int module_index) const
+TH1F *PhysicsTools::GetModuleEnergyHist(int module_id) const
 {
+    int module_index = hycal_.id_to_index(module_id);
     if (module_index >= 0 && module_index < (int)module_hists_.size())
         return module_hists_[module_index].get();
     return nullptr;
 }
 
-void PhysicsTools::FillEnergyVsModule(int module_index, float energy)
+void PhysicsTools::FillEnergyVsModule(int module_id, float energy)
 {
-    if (h2_energy_module_)
+    int module_index = hycal_.id_to_index(module_id);
+    if (module_index >= 0 && module_index < (int)module_hists_.size())
         h2_energy_module_->Fill(module_index, energy);
 }
 
@@ -170,26 +210,28 @@ void PhysicsTools::Fill2armMollerPosHist(float x, float y)
         h2_moller_pos_->Fill(x, y);
 }
 
-std::array<float, 2> PhysicsTools::FitPeakResolution(int module_index) const
+std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
 {
+    int module_index = hycal_.id_to_index(module_id);
     if (module_index < 0 || module_index >= (int)module_hists_.size())
-        return {0.f, 0.f};
+        return {0.f, 0.f, 0.f};
 
     TH1F *h = module_hists_[module_index].get();
-    if (!h || h->GetEntries() < 50) return {0.f, 0.f};
+    if (!h || h->GetEntries() < 100) return {0.f, 0.f, 100.f};
 
     // find peak bin, fit Gaussian around it
-    int maxbin = h->GetMaximumBin();
-    float peak = h->GetBinCenter(maxbin);
-    float rms  = h->GetRMS();
+    double peak0 = h->GetBinCenter(h->GetMaximumBin());
+    double rms0  = h->GetRMS();
+    double lo = peak0 - 2.0 * rms0, hi = peak0 + 2.0 * rms0;
 
-    TF1 gaus("gfit", "gaus", peak - 2 * rms, peak + 2 * rms);
-    h->Fit(&gaus, "QNR");
+    TF1 gaus("gfit", "gaus", lo, hi);
+    gaus.SetParameters(h->GetMaximum(), peak0, rms0);
+    h->Fit(&gaus, "RQ");
 
     float mean  = gaus.GetParameter(1);
     float sigma = gaus.GetParameter(2);
-    float resolution = (mean > 0) ? sigma / mean : 0.f;
-    return {mean, resolution};
+    float chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.f;
+    return {mean, sigma, chi2};
 }
 
 void PhysicsTools::Resolution2Database(int run_id)
@@ -208,10 +250,11 @@ void PhysicsTools::Resolution2Database(int run_id)
 
     int module_count = hycal_.module_count();
     for (int m = 0; m < module_count; m++) {
-        auto [peak, sigma] = FitPeakResolution(m);
+        int module_id = hycal_.module(m).id;
+        auto [peak, sigma, chi2] = FitPeakResolution(module_id);
         if (peak > 0 && sigma > 0) {
             std::string name = hycal_.module(m).name;
-            out << name << " " << peak << " " << sigma << "\n";
+            out << name << " " << peak << " " << sigma << " " << chi2 << "\n";
         }
     }
 }
@@ -230,10 +273,10 @@ float PhysicsTools::ExpectedEnergy(float theta_deg, float Ebeam, const std::stri
         return expectE - eloss;
     }
     if (type == "ee") {
-        // Moller scattering: E' = E * cos^2(theta) / (1 + (E/m)(sin^2(theta)))
-        // simplified from CM frame kinematics
+        // Moller scattering: exact lab-frame formula from 4-momentum conservation
+        // E' = m * [(gamma+1) + (gamma-1)*cos^2(theta)] / [(gamma+1) - (gamma-1)*cos^2(theta)]
         float gamma = Ebeam / M_ELECTRON;
-        float num = (gamma + 1.f) * cos_t * cos_t;
+        float num = (gamma + 1.f) + (gamma - 1.f) * cos_t * cos_t;
         float den = (gamma + 1.f) - (gamma - 1.f) * cos_t * cos_t;
         if (den <= 0) return 0.f;
         float expectE = M_ELECTRON * num / den;
@@ -251,13 +294,15 @@ float PhysicsTools::EnergyLoss(float theta_deg, float E)
     float sec = (std::cos(theta) > 0.01f) ? (1.f / std::cos(theta)) : 100.f;
 
     // material thicknesses (mm) and dE/dx (MeV/mm) — approximate values
-    // aluminum window: 0.025 mm, dE/dx ~ 1.6 MeV/mm
-    // GEM foils: ~0.05 mm effective, dE/dx ~ 2.0 MeV/mm
-    // kapton window: ~0.05 mm, dE/dx ~ 1.8 MeV/mm
+    // aluminum window: 0.5 mm, dE/dx ~ 1.6 MeV/mm, vacuum window
+    // GEM foils: ~0.05 mm effective per GEM, dE/dx ~ 2.0 MeV/mm
+    // GEM win Al foils: ~0.06 mm effective per GEM, dE/dx ~ 1.6 MeV/mm
+    // kapton window: ~0.24 mm per GEM, dE/dx ~ 1.8 MeV/mm,
     float eloss = 0.f;
-    eloss += 0.025f * 1.6f * sec;  // Al window
-    eloss += 0.050f * 2.0f * sec;  // GEM
-    eloss += 0.050f * 1.8f * sec;  // kapton cover
+    eloss += 0.500f * 1.6f * sec;  // Al window
+    eloss += 0.120f * 1.6f * sec;  // GEM win Al foils (2 GEMs)
+    eloss += 0.100f * 2.0f * sec;  // GEM foils (2 GEMs)
+    eloss += 0.480f * 1.8f * sec;  // kapton cover
 
     return eloss;  // total energy loss in MeV
 }

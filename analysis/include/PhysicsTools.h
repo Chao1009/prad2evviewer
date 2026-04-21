@@ -8,6 +8,7 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
+#include <TF1.h>
 #include <TH1F.h>
 #include <TH2F.h>
 #include <array>
@@ -46,16 +47,36 @@ public:
     ~PhysicsTools();
 
     // --- per-module cluster energy histograms --------------------------------
-    void FillModuleEnergy(int module_index, float energy);
-    TH1F *GetModuleEnergyHist(int module_index) const;
+    void FillModuleEnergy(int module_id, float energy);
+    TH1F *GetModuleEnergyHist(int module_id) const;
 
     // --- 2D energy vs module index -------------------------------------------
-    void FillEnergyVsModule(int module_index, float energy);
+    void FillEnergyVsModule(int module_id, float energy);
     TH2F *GetEnergyVsModuleHist() const { return h2_energy_module_.get(); }
 
     // --- energy vs scattering angle -------------------------------------------
     void FillEnergyVsTheta(float theta_deg, float energy);
     TH2F *GetEnergyVsThetaHist() const { return h2_energy_theta_.get(); }
+
+    // --- Number of events per module map --------------------------------------
+    void FillNeventsModuleMap(int module_id) {
+        const auto *mod = hycal_.module_by_id(module_id);
+        if (!mod || !mod->is_pwo4()) return;
+        h2_Nevents_moduleMap_->Fill(mod->column + 1, -mod->row - 1);
+    }
+    // must be called after all events are processed
+    // and also need to call FillModuleEnergy for every event first
+    void FillNeventsModuleMap() {
+        for (int module_id = 1; module_id <= 1156; module_id++) {
+            const auto *mod = hycal_.module_by_id(module_id + 1000);
+            if (!mod || !mod->is_pwo4()) continue;
+            TH1F *h = GetModuleEnergyHist(module_id + 1000);
+            if (!h) continue;
+            int count = h->GetEntries();
+            h2_Nevents_moduleMap_->SetBinContent(mod->column + 1, 34 - mod->row, count);
+        }
+    }
+    TH2F *GetNeventsModuleMapHist() const { return h2_Nevents_moduleMap_.get(); }
 
     // physics event yield histograms (caller owns the returned histogram)
     std::unique_ptr<TH1F> GetEpYieldHist(TH2F *energy_theta, float Ebeam);
@@ -67,8 +88,8 @@ public:
     TH2F *Get2armMollerPosHist() const { return h2_moller_pos_.get(); }
 
     // --- peak / resolution analysis ------------------------------------------
-    // Returns {peak, resolution} from Gaussian fit. Resolution = sigma/mean.
-    std::array<float, 2> FitPeakResolution(int module_index) const;
+    // Returns {peak, sigma, chi2} from Gaussian fit.
+    std::array<float, 3> FitPeakResolution(int module_id) const;
     void Resolution2Database(int run_id);
 
     // --- kinematics ----------------------------------------------------------
@@ -84,6 +105,9 @@ public:
     static float EnergyLoss(float theta_deg, float E);
 
     static float GetShowerDepth(int primex_id, const float &E);
+
+    //calibration helpers
+    TF1 nonLinearity_func_;
 
     //physics analysis helpers
     //data structure for storing reconstructed Moller events used for analysis
@@ -121,16 +145,60 @@ public:
     TH1F *GetMollerYHist() const { return moller_y_.get(); };
     TH1F *GetMollerZHist() const { return moller_z_.get(); };
 
+    //fill and get gain monitoring replay histograms
+    void Fill_lmsCH_lmsHeight(int lms_id, float height)
+        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_lmsHeight_[lms_id]) h_lmsCH_lmsHeight_[lms_id]->Fill(height); }
+    void Fill_lmsCH_lmsIntegral(int lms_id, float integral)
+        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_lmsIntegral_[lms_id]) h_lmsCH_lmsIntegral_[lms_id]->Fill(integral); }
+    void Fill_lmsCH_alphaHeight(int lms_id, float height)
+        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_alphaHeight_[lms_id]) h_lmsCH_alphaHeight_[lms_id]->Fill(height); }
+    void Fill_lmsCH_alphaIntegral(int lms_id, float integral)
+        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_alphaIntegral_[lms_id]) h_lmsCH_alphaIntegral_[lms_id]->Fill(integral); }
+    void Fill_modCH_lmsHeight(int module_id, float height)
+        { int module_index = hycal_.id_to_index(module_id); 
+          if (module_index >= 0 && module_index < (int)h_modCH_lmsHeight_.size()) h_modCH_lmsHeight_[module_index]->Fill(height); }
+    void Fill_modCH_lmsIntegral(int module_id, float integral)
+        { int module_index = hycal_.id_to_index(module_id);
+          if (module_index >= 0 && module_index < (int)h_modCH_lmsIntegral_.size()) h_modCH_lmsIntegral_[module_index]->Fill(integral); }
+
+    TH1F *Get_lmsCH_lmsHeightHist(int lms_id) const 
+        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_lmsHeight_[lms_id].get() : nullptr; };
+    TH1F *Get_lmsCH_lmsIntegralHist(int lms_id) const 
+        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_lmsIntegral_[lms_id].get() : nullptr; };
+    TH1F *Get_lmsCH_alphaHeightHist(int lms_id) const 
+        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_alphaHeight_[lms_id].get() : nullptr; };
+    TH1F *Get_lmsCH_alphaIntegralHist(int lms_id) const 
+        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_alphaIntegral_[lms_id].get() : nullptr; };
+    TH1F *Get_modCH_lmsHeightHist(int module_id) const
+        { 
+            int module_index = hycal_.id_to_index(module_id);
+            return (module_index >= 0 && module_index < (int)h_modCH_lmsHeight_.size()) ? h_modCH_lmsHeight_[module_index].get() : nullptr; 
+        };
+    TH1F *Get_modCH_lmsIntegralHist(int module_id) const
+        { 
+            int module_index = hycal_.id_to_index(module_id);
+            return (module_index >= 0 && module_index < (int)h_modCH_lmsIntegral_.size()) ? h_modCH_lmsIntegral_[module_index].get() : nullptr; 
+        };
+
 private:
     fdec::HyCalSystem &hycal_;
     std::vector<std::unique_ptr<TH1F>> module_hists_;  // one per module
     std::unique_ptr<TH2F> h2_energy_module_;
     std::unique_ptr<TH2F> h2_energy_theta_;
+    std::unique_ptr<TH2F> h2_Nevents_moduleMap_;
     std::unique_ptr<TH2F> h2_moller_pos_;
     std::unique_ptr<TH1F> moller_phi_diff_;
     std::unique_ptr<TH1F> moller_x_;
     std::unique_ptr<TH1F> moller_y_;
     std::unique_ptr<TH1F> moller_z_;
+
+    //histograms for gain monitoring replay
+    std::unique_ptr<TH1F> h_lmsCH_lmsHeight_[4];
+    std::unique_ptr<TH1F> h_lmsCH_lmsIntegral_[4];
+    std::unique_ptr<TH1F> h_lmsCH_alphaHeight_[4];
+    std::unique_ptr<TH1F> h_lmsCH_alphaIntegral_[4];
+    std::vector<std::unique_ptr<TH1F>> h_modCH_lmsHeight_; //per module
+    std::vector<std::unique_ptr<TH1F>> h_modCH_lmsIntegral_;
 };
 
 } // namespace analysis
