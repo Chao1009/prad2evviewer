@@ -45,7 +45,7 @@ import numpy as np
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QComboBox, QSlider,
+    QPushButton, QLabel, QLineEdit, QComboBox, QSlider, QCheckBox,
     QFileDialog, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QRectF
@@ -216,19 +216,65 @@ def _fmt(v) -> str:
 
 
 class MapBuilderWidget(HyCalMapWidget):
-    """HyCal map with adjustable PbGlass transparency and field-name colourbar."""
+    """HyCal map with adjustable PbGlass transparency and field-name colourbar.
+
+    LMS and SCINT modules are partitioned from the loaded module list and can
+    be toggled independently via :meth:`set_lms_visible` /
+    :meth:`set_scint_visible`. The canvas is always centred on geometric
+    origin ``(0, 0)``, so toggling those modules does not shift the view.
+    """
+
+    _BOUNDS_TYPES = ("PbWO4", "PbGlass")   # modules that define the HyCal footprint
 
     def __init__(self, parent=None):
         super().__init__(parent, margin_top=8, enable_zoom_pan=True,
                          min_size=(500, 500))
+        self._hycal: List[Module] = []
+        self._lms: List[Module] = []
+        self._scint: List[Module] = []
+        self._show_lms = False
+        self._show_scint = False
         self._pbglass_names: set = set()
         self._pbglass_alpha: float = 1.0
         self._field_label = ""
 
     def set_modules(self, modules: List[Module]):
-        super().set_modules(modules)
-        self._pbglass_names = {m.name for m in self._modules
+        self._hycal = [m for m in modules if m.mod_type in self._BOUNDS_TYPES]
+        self._lms   = [m for m in modules if m.mod_type == "LMS"]
+        self._scint = [m for m in modules if m.mod_type == "SCINT"]
+        self._pbglass_names = {m.name for m in self._hycal
                                if m.mod_type == "PbGlass"}
+        self._rebuild_layout()
+
+    def set_lms_visible(self, on: bool):
+        if bool(on) == self._show_lms:
+            return
+        self._show_lms = bool(on)
+        self._rebuild_layout()
+
+    def set_scint_visible(self, on: bool):
+        if bool(on) == self._show_scint:
+            return
+        self._show_scint = bool(on)
+        self._rebuild_layout()
+
+    def _rebuild_layout(self):
+        display = list(self._hycal)
+        if self._show_lms:
+            display.extend(self._lms)
+        if self._show_scint:
+            display.extend(self._scint)
+        self._modules = display
+        # Symmetric bounds around origin so the canvas stays centred on
+        # (0, 0) even when LMS/SCINT sit off to the side.
+        if display:
+            rx = max(max(abs(m.x - m.sx / 2), abs(m.x + m.sx / 2))
+                     for m in display)
+            ry = max(max(abs(m.y - m.sy / 2), abs(m.y + m.sy / 2))
+                     for m in display)
+            self._geo_bounds = (-rx, rx, -ry, ry)
+        self._layout_dirty = True
+        self.update()
 
     def set_values(self, values: Dict[str, float], label: str = ""):
         self._field_label = label
@@ -413,6 +459,12 @@ class MapBuilderWindow(QMainWindow):
         self._alpha_lbl.setFixedWidth(40)
         ctrl.addWidget(self._alpha_lbl)
 
+        ctrl.addSpacing(12)
+        self._lms_chk = self._styled_checkbox("LMS", self._on_lms_toggled)
+        self._scint_chk = self._styled_checkbox("SCINT", self._on_scint_toggled)
+        ctrl.addWidget(self._lms_chk)
+        ctrl.addWidget(self._scint_chk)
+
         ctrl.addStretch()
         root.addLayout(ctrl)
 
@@ -463,6 +515,20 @@ class MapBuilderWindow(QMainWindow):
             f"border:1px solid {THEME.BORDER};border-radius:8px;padding:2px 6px;}}")
         e.returnPressed.connect(self._apply_range)
         return e
+
+    def _styled_checkbox(self, text: str, slot) -> QCheckBox:
+        cb = QCheckBox(text)
+        cb.setChecked(False)
+        cb.setFont(QFont("Monospace", 11))
+        cb.setStyleSheet(
+            f"QCheckBox{{color:{THEME.TEXT};spacing:6px;}}"
+            f"QCheckBox::indicator{{width:13px;height:13px;border-radius:3px;"
+            f"border:1px solid {THEME.BORDER};background:{THEME.PANEL};}}"
+            f"QCheckBox::indicator:hover{{border:1px solid {THEME.ACCENT};}}"
+            f"QCheckBox::indicator:checked{{background:{THEME.ACCENT};"
+            f"border:1px solid {THEME.ACCENT};}}")
+        cb.toggled.connect(slot)
+        return cb
 
     # -- actions --
 
@@ -596,6 +662,12 @@ class MapBuilderWindow(QMainWindow):
     def _on_alpha_changed(self, v: int):
         self._map.set_pbglass_alpha(v / 100.0)
         self._alpha_lbl.setText(f"{v}%")
+
+    def _on_lms_toggled(self, on: bool):
+        self._map.set_lms_visible(on)
+
+    def _on_scint_toggled(self, on: bool):
+        self._map.set_scint_visible(on)
 
     def _toggle_log(self):
         on = not self._map.is_log_scale()
