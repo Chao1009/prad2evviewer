@@ -37,10 +37,10 @@ from PyQt6.QtWidgets import (
     QSplitter,
 )
 from PyQt6.QtCore import (
-    Qt, QObject, QRectF, QSize, QThread, pyqtSignal, QTimer,
+    Qt, QObject, QPointF, QRectF, QSize, QThread, pyqtSignal, QTimer,
 )
 from PyQt6.QtGui import (
-    QAction, QPainter, QColor, QPen, QBrush, QFont,
+    QAction, QPainter, QColor, QPen, QBrush, QFont, QPolygonF,
 )
 
 from hycal_geoview import (
@@ -593,6 +593,39 @@ def _find_channel_samples(fadc_evt, roc_tag: int, slot: int, channel: int):
 
 
 # ===========================================================================
+#  Small themed overlay controls for plot widgets
+# ===========================================================================
+
+def _overlay_checkbox_qss() -> str:
+    """QSS for a compact checkbox drawn on top of a plot canvas."""
+    return (
+        f"QCheckBox{{color:{THEME.TEXT_DIM};background:{THEME.PANEL};"
+        f"padding:2px 6px;border:1px solid {THEME.BORDER};border-radius:6px;}}"
+        f"QCheckBox:hover{{color:{THEME.TEXT};"
+        f"border:1px solid {THEME.ACCENT};}}"
+        f"QCheckBox:checked{{color:{THEME.TEXT};}}"
+        f"QCheckBox::indicator{{width:12px;height:12px;"
+        f"border:1px solid {THEME.BORDER};border-radius:3px;"
+        f"background:{THEME.BG};}}"
+        f"QCheckBox::indicator:hover{{border:1px solid {THEME.ACCENT};}}"
+        f"QCheckBox::indicator:checked{{background:{THEME.ACCENT};"
+        f"border:1px solid {THEME.ACCENT};}}"
+    )
+
+
+def _overlay_button_qss() -> str:
+    """QSS for a compact pushbutton drawn on top of a plot canvas."""
+    return (
+        f"QPushButton{{color:{THEME.TEXT_DIM};background:{THEME.PANEL};"
+        f"padding:2px 8px;border:1px solid {THEME.BORDER};border-radius:6px;"
+        f"font:bold 9pt Monospace;}}"
+        f"QPushButton:hover{{color:{THEME.TEXT};"
+        f"border:1px solid {THEME.ACCENT};}}"
+        f"QPushButton:disabled{{color:{THEME.TEXT_MUTED};}}"
+    )
+
+
+# ===========================================================================
 #  Hist1DWidget — QPainter bar chart with optional log Y
 # ===========================================================================
 
@@ -618,16 +651,7 @@ class Hist1DWidget(QWidget):
 
         self._logy_cb = QCheckBox("log Y", self)
         self._logy_cb.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
-        self._logy_cb.setStyleSheet(themed(
-            "QCheckBox{color:#c9d1d9;background:rgba(22,27,34,180);"
-            "padding:2px 6px;border:1px solid #30363d;border-radius:3px;}"
-            "QCheckBox:hover{color:#ffffff;border:1px solid #58a6ff;}"
-            "QCheckBox::indicator{width:12px;height:12px;"
-            "border:1px solid #8b949e;border-radius:2px;"
-            "background:#0d1117;}"
-            "QCheckBox::indicator:hover{border:1px solid #58a6ff;}"
-            "QCheckBox::indicator:checked{background:#58a6ff;"
-            "border:1px solid #58a6ff;}"))
+        self._logy_cb.setStyleSheet(_overlay_checkbox_qss())
         self._logy_cb.toggled.connect(self.set_log_y)
         self._logy_cb.adjustSize()
         self._logy_cb.raise_()
@@ -804,6 +828,13 @@ def _fmt_count(v: float) -> str:
 
 class WaveformPlotWidget(QWidget):
     PAD_L, PAD_R, PAD_T, PAD_B = 52, 14, 22, 30
+    MAX_STACK = 200
+
+    # Same peak colour palette the web frontend uses (resources/viewer.js PC).
+    _PEAK_PALETTE = (
+        "#00b4d8", "#ff6b6b", "#51cf66", "#ffd43b",
+        "#cc5de8", "#ff922b", "#20c997", "#f06595",
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -817,15 +848,62 @@ class WaveformPlotWidget(QWidget):
         self._title: str = ""
         self._clk_mhz: float = 250.0
 
+        # --- stack mode state ---
+        self._stack_enabled: bool = False
+        self._stack_traces: List[np.ndarray] = []   # bounded by MAX_STACK
+        self._stack_key: str = ""                   # (module,roc,slot,ch) key
+
+        # --- overlay controls (top-right) ---
+        self._stack_cb = QCheckBox("Stack", self)
+        self._stack_cb.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        self._stack_cb.setStyleSheet(_overlay_checkbox_qss())
+        self._stack_cb.setToolTip(
+            f"Overlay waveforms across events (up to {self.MAX_STACK}). "
+            "Peaks and integral shading hidden in stack mode.")
+        self._stack_cb.toggled.connect(self._on_stack_toggled)
+        self._stack_cb.adjustSize()
+
+        self._stack_clear_btn = QPushButton("Clear", self)
+        self._stack_clear_btn.setFont(QFont("Monospace", 9, QFont.Weight.Bold))
+        self._stack_clear_btn.setStyleSheet(_overlay_button_qss())
+        self._stack_clear_btn.setToolTip("Drop all stacked waveforms")
+        self._stack_clear_btn.clicked.connect(self.clear_stack)
+        self._stack_clear_btn.setVisible(False)
+        self._stack_clear_btn.adjustSize()
+
+        self._stack_count_lbl = QLabel("", self)
+        self._stack_count_lbl.setFont(QFont("Monospace", 9))
+        self._stack_count_lbl.setStyleSheet(
+            f"color:{THEME.TEXT_DIM};background:transparent;")
+        self._stack_count_lbl.setVisible(False)
+        self._stack_count_lbl.adjustSize()
+
+    # ------------------------------------------------------------------
+    #  Public API
+    # ------------------------------------------------------------------
+
     def set_data(self, samples: np.ndarray, peaks: List[Peak],
                  ped_mean: float, ped_rms: float,
-                 title: str, clk_mhz: float = 250.0):
-        self._samples = np.asarray(samples, dtype=np.float32)
+                 title: str, clk_mhz: float = 250.0,
+                 stack_key: Optional[str] = None):
+        samples = np.asarray(samples, dtype=np.float32)
+        self._samples = samples
         self._peaks = peaks
         self._ped_mean = ped_mean
         self._ped_rms  = ped_rms
         self._title = title
         self._clk_mhz = clk_mhz
+
+        if self._stack_enabled:
+            key = stack_key if stack_key is not None else title
+            if key != self._stack_key:
+                self._stack_traces = []
+                self._stack_key = key
+            if samples.size >= 2:
+                self._stack_traces.append(samples.copy())
+                if len(self._stack_traces) > self.MAX_STACK:
+                    self._stack_traces = self._stack_traces[-self.MAX_STACK:]
+            self._update_stack_counter()
         self.update()
 
     def clear(self, title: str = ""):
@@ -834,11 +912,63 @@ class WaveformPlotWidget(QWidget):
         self._title = title
         self.update()
 
+    def clear_stack(self):
+        """Drop every accumulated trace but keep the current waveform."""
+        self._stack_traces = []
+        self._stack_key = ""
+        self._update_stack_counter()
+        self.update()
+
+    # ------------------------------------------------------------------
+    #  Internals
+    # ------------------------------------------------------------------
+
+    def _on_stack_toggled(self, on: bool):
+        self._stack_clear_btn.setVisible(on)
+        self._stack_count_lbl.setVisible(on)
+        if not on:
+            self._stack_traces = []
+            self._stack_key = ""
+        self._update_stack_counter()
+        self._layout_overlays()
+        self.update()
+
+    def _update_stack_counter(self):
+        self._stack_count_lbl.setText(
+            f"{len(self._stack_traces)}/{self.MAX_STACK}")
+        self._stack_count_lbl.adjustSize()
+        self._layout_overlays()
+
+    def _layout_overlays(self):
+        # top-right: [count]  [Clear]  [Stack]
+        margin = 6
+        x = self.width() - margin
+        y = 4
+        x -= self._stack_cb.width()
+        self._stack_cb.move(x, y)
+        if self._stack_clear_btn.isVisible():
+            x -= self._stack_clear_btn.width() + 4
+            self._stack_clear_btn.move(x, y)
+        if self._stack_count_lbl.isVisible():
+            x -= self._stack_count_lbl.width() + 6
+            self._stack_count_lbl.move(x, y + 2)
+
     def _plot_rect(self) -> QRectF:
         w, h = self.width(), self.height()
         return QRectF(self.PAD_L, self.PAD_T,
                       max(1.0, w - self.PAD_L - self.PAD_R),
                       max(1.0, h - self.PAD_T - self.PAD_B))
+
+    def resizeEvent(self, ev):
+        self._stack_cb.adjustSize()
+        self._stack_clear_btn.adjustSize()
+        self._stack_count_lbl.adjustSize()
+        self._layout_overlays()
+        super().resizeEvent(ev)
+
+    # ------------------------------------------------------------------
+    #  Painting
+    # ------------------------------------------------------------------
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -854,8 +984,17 @@ class WaveformPlotWidget(QWidget):
             f = QFont("Monospace", 10); f.setBold(True)
             p.setFont(f)
             p.setPen(QColor(THEME.TEXT))
-            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+            suffix = f" — Stacked ({len(self._stack_traces)})" if self._stack_enabled else ""
+            p.drawText(int(r.left()), int(r.top() - 6), self._title + suffix)
 
+        if self._stack_enabled:
+            self._paint_stacked(p, r)
+        else:
+            self._paint_single(p, r)
+
+    # --- single-event (default) view ---------------------------------
+
+    def _paint_single(self, p: QPainter, r: QRectF):
         n = self._samples.size
         if n < 2:
             p.setPen(QColor(THEME.TEXT_DIM))
@@ -871,43 +1010,143 @@ class WaveformPlotWidget(QWidget):
         pad_y = (ymax - ymin) * 0.05
         ymin -= pad_y; ymax += pad_y
 
-        def to_sx(i: int) -> float:
+        def to_sx(i: float) -> float:
             return r.left() + (i / (n - 1)) * r.width()
 
         def to_sy(v: float) -> float:
             return r.bottom() - (v - ymin) / (ymax - ymin) * r.height()
 
-        # pedestal line
-        if self._ped_mean != 0:
-            y_ped = to_sy(self._ped_mean)
+        # pedestal baseline
+        y_ped = to_sy(self._ped_mean) if self._ped_mean != 0 else None
+        if y_ped is not None:
             p.setPen(QPen(QColor(THEME.TEXT_DIM), 1, Qt.PenStyle.DashLine))
             p.drawLine(int(r.left()), int(y_ped), int(r.right()), int(y_ped))
+            # threshold line (same formula as waveform.js: pm + max(5*pr, 3))
+            thr_v = self._ped_mean + max(5.0 * self._ped_rms, 3.0)
+            y_thr = to_sy(thr_v)
+            p.setPen(QPen(QColor(THEME.TEXT_MUTED), 1, Qt.PenStyle.DotLine))
+            p.drawLine(int(r.left()), int(y_thr), int(r.right()), int(y_thr))
 
-        # peak integration window shading
-        if self._peaks:
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(88, 166, 255, 55))
-            for pk in self._peaks:
-                x0 = to_sx(pk.left)
-                x1 = to_sx(pk.right)
-                p.drawRect(QRectF(x0, r.top(), max(1.0, x1 - x0), r.height()))
+        # Fill the integral area (between pedestal and waveform) per peak,
+        # colour-coded from _PEAK_PALETTE. Mirrors resources/waveform.js.
+        if self._peaks and y_ped is not None:
+            for i, pk in enumerate(self._peaks):
+                base = QColor(self._PEAK_PALETTE[i % len(self._PEAK_PALETTE)])
+                fill = QColor(base); fill.setAlphaF(0.18)
+                poly = QPolygonF()
+                j = max(0, int(pk.left))
+                j_end = min(n - 1, int(pk.right))
+                for k in range(j, j_end + 1):
+                    poly.append(QPointF(to_sx(k),
+                                        to_sy(float(self._samples[k]))))
+                # close along the pedestal baseline
+                poly.append(QPointF(to_sx(j_end), y_ped))
+                poly.append(QPointF(to_sx(j), y_ped))
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fill)
+                p.drawPolygon(poly)
+                # outline the peak section with the solid palette colour
+                p.setPen(QPen(base, 2))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                for k in range(j, j_end):
+                    p.drawLine(QPointF(to_sx(k),
+                                       to_sy(float(self._samples[k]))),
+                               QPointF(to_sx(k + 1),
+                                       to_sy(float(self._samples[k + 1]))))
 
-        # waveform line
+        # waveform line (default accent, drawn under peak outlines)
         p.setPen(QPen(QColor(THEME.ACCENT), 1.4))
         for i in range(n - 1):
             p.drawLine(int(to_sx(i)),     int(to_sy(float(self._samples[i]))),
                        int(to_sx(i + 1)), int(to_sy(float(self._samples[i + 1]))))
 
-        # peak markers
+        # peak markers (diamonds, coloured per peak)
         if self._peaks:
-            p.setPen(QPen(QColor(THEME.DANGER), 1.2))
-            p.setBrush(QColor(THEME.DANGER))
-            for pk in self._peaks:
+            for i, pk in enumerate(self._peaks):
+                if pk.pos < 0 or pk.pos >= n:
+                    continue
+                col = QColor(self._PEAK_PALETTE[i % len(self._PEAK_PALETTE)])
+                p.setPen(QPen(col, 1.2))
+                p.setBrush(col)
                 cx = to_sx(pk.pos)
                 cy = to_sy(float(self._samples[pk.pos]))
-                p.drawEllipse(QRectF(cx - 3, cy - 3, 6, 6))
+                diamond = QPolygonF([
+                    QPointF(cx,     cy - 4),
+                    QPointF(cx + 4, cy),
+                    QPointF(cx,     cy + 4),
+                    QPointF(cx - 4, cy),
+                ])
+                p.drawPolygon(diamond)
 
-        # axes
+        self._paint_axes(p, r, ymin, ymax)
+
+        info = (f"ped={self._ped_mean:.1f}  rms={self._ped_rms:.2f}  "
+                f"peaks={len(self._peaks)}")
+        p.setPen(QColor(THEME.TEXT_DIM))
+        p.drawText(QRectF(r.left(), r.top() - 20,
+                          max(1.0, r.width() - 8), 14),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   info)
+
+    # --- stacked overlay view -----------------------------------------
+
+    def _paint_stacked(self, p: QPainter, r: QRectF):
+        traces = self._stack_traces
+        if not traces:
+            p.setPen(QColor(THEME.TEXT_DIM))
+            p.setFont(QFont("Monospace", 10))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter,
+                       "(stack is empty — step through events to accumulate)")
+            return
+
+        # Compute common y-range across all traces.
+        ymin = min(float(w.min()) for w in traces)
+        ymax = max(float(w.max()) for w in traces)
+        if ymax - ymin < 5.0:
+            ymax = ymin + 5.0
+        pad_y = (ymax - ymin) * 0.05
+        ymin -= pad_y; ymax += pad_y
+
+        # Width uses the max length so shorter traces still fit left-aligned.
+        n_max = max(w.size for w in traces)
+
+        def to_sx(i: float, n: int) -> float:
+            return r.left() + (i / max(1, n - 1)) * r.width()
+
+        def to_sy(v: float) -> float:
+            return r.bottom() - (v - ymin) / (ymax - ymin) * r.height()
+
+        # Dimmed stacked traces.
+        dim = QColor(THEME.ACCENT); dim.setAlphaF(0.18)
+        p.setPen(QPen(dim, 1))
+        for w in traces[:-1]:
+            n = w.size
+            for i in range(n - 1):
+                p.drawLine(int(to_sx(i, n)),     int(to_sy(float(w[i]))),
+                           int(to_sx(i + 1, n)), int(to_sy(float(w[i + 1]))))
+
+        # Latest trace drawn on top at full colour.
+        latest = traces[-1]
+        n = latest.size
+        p.setPen(QPen(QColor(THEME.ACCENT), 1.4))
+        for i in range(n - 1):
+            p.drawLine(int(to_sx(i, n)),     int(to_sy(float(latest[i]))),
+                       int(to_sx(i + 1, n)), int(to_sy(float(latest[i + 1]))))
+
+        self._paint_axes(p, r, ymin, ymax, n=n_max)
+
+        p.setPen(QColor(THEME.TEXT_DIM))
+        p.drawText(QRectF(r.left(), r.top() - 20,
+                          max(1.0, r.width() - 8), 14),
+                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                   f"stack={len(traces)}/{self.MAX_STACK}")
+
+    # --- shared axis/tick drawing -------------------------------------
+
+    def _paint_axes(self, p: QPainter, r: QRectF,
+                    ymin: float, ymax: float, n: Optional[int] = None):
+        if n is None:
+            n = self._samples.size
         p.setPen(QColor(THEME.TEXT_DIM))
         p.setFont(QFont("Monospace", 8))
         for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -917,7 +1156,7 @@ class WaveformPlotWidget(QWidget):
             p.drawText(int(r.left() - self.PAD_L + 2), int(y + 4), f"{val:.0f}")
         tick_every = max(1, n // 8)
         for i in range(0, n, tick_every):
-            x = to_sx(i)
+            x = r.left() + (i / max(1, n - 1)) * r.width()
             p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
             ns = i * 1e3 / self._clk_mhz
             p.drawText(int(x - 18), int(r.bottom() + 14), f"{ns:g}")
@@ -925,14 +1164,6 @@ class WaveformPlotWidget(QWidget):
         p.setFont(QFont("Monospace", 9))
         p.drawText(int(r.left() + r.width() / 2 - 10),
                    int(r.bottom() + 26), "ns")
-
-        info = (f"ped={self._ped_mean:.1f}  rms={self._ped_rms:.2f}  "
-                f"peaks={len(self._peaks)}")
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.drawText(QRectF(r.left(), r.top() - 20,
-                          max(1.0, r.width() - 8), 14),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                   info)
 
 
 # ===========================================================================
@@ -1099,20 +1330,64 @@ class WaveformViewerWindow(QMainWindow):
         self._file_lbl.setStyleSheet(themed("color:#8b949e;"))
         root.addWidget(self._file_lbl)
 
-        # module picker row
-        picker = QHBoxLayout()
-        lbl = QLabel("Module:")
-        lbl.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        lbl.setStyleSheet(themed("color:#c9d1d9;"))
-        picker.addWidget(lbl)
+        # -- top control bar: navigation on the left, module picker on the right --
+        top = QHBoxLayout()
+
+        self._prev_btn = self._small_btn("◀ Prev", self._on_prev)
+        self._next_btn = self._small_btn("Next ▶", self._on_next)
+        self._prev_btn.setEnabled(False)
+        self._next_btn.setEnabled(False)
+        top.addWidget(self._prev_btn)
+        top.addWidget(self._next_btn)
+
+        top.addSpacing(12)
+        top.addWidget(self._mk_label("Event:"))
+        self._event_spin = QSpinBox()
+        self._event_spin.setFont(QFont("Monospace", 10))
+        self._event_spin.setMinimum(0)
+        self._event_spin.setMaximum(0)
+        self._event_spin.setStyleSheet(themed(
+            "QSpinBox{background:#161b22;color:#c9d1d9;"
+            "border:1px solid #30363d;border-radius:6px;padding:2px 6px;}"))
+        self._event_spin.editingFinished.connect(self._on_spin_jump)
+        self._event_spin.setEnabled(False)
+        top.addWidget(self._event_spin)
+        self._total_lbl = QLabel(" / 0")
+        self._total_lbl.setFont(QFont("Monospace", 10))
+        self._total_lbl.setStyleSheet(themed("color:#8b949e;"))
+        top.addWidget(self._total_lbl)
+
+        top.addSpacing(18)
+        self._batch_btn = self._small_btn("Process next 10k",
+                                          self._on_batch_10k, primary=True)
+        self._batch_btn.setEnabled(False)
+        top.addWidget(self._batch_btn)
+        self._cancel_batch_btn = self._small_btn("Cancel",
+                                                 self._on_cancel_batch)
+        self._cancel_batch_btn.setVisible(False)
+        top.addWidget(self._cancel_batch_btn)
+
+        self._batch_status = QLabel("")
+        self._batch_status.setFont(QFont("Monospace", 10))
+        self._batch_status.setStyleSheet(themed("color:#8b949e;"))
+        top.addSpacing(8)
+        top.addWidget(self._batch_status)
+
+        top.addStretch(1)
+
+        # Right cluster: module dropdown + reset hist.
+        mod_lbl = QLabel("Module:")
+        mod_lbl.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+        mod_lbl.setStyleSheet(themed("color:#c9d1d9;"))
+        top.addWidget(mod_lbl)
         self._combo = QComboBox()
         self._combo.setEditable(True)
         self._combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._combo.setFont(QFont("Monospace", 11))
-        self._combo.setMinimumContentsLength(40)
+        self._combo.setMinimumContentsLength(32)
         self._combo.setStyleSheet(themed(
             "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
+            "border:1px solid #30363d;border-radius:6px;padding:2px 6px;}"
             "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
             "selection-background-color:#1f6feb;}"))
         comp = self._combo.completer()
@@ -1121,11 +1396,12 @@ class WaveformViewerWindow(QMainWindow):
             comp.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
             comp.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self._combo.currentIndexChanged.connect(self._on_combo_changed)
-        picker.addWidget(self._combo, stretch=1)
+        top.addWidget(self._combo)
         self._reset_btn = self._small_btn("Reset hist", self._reset_current_hists)
         self._reset_btn.setEnabled(False)
-        picker.addWidget(self._reset_btn)
-        root.addLayout(picker)
+        top.addWidget(self._reset_btn)
+
+        root.addLayout(top)
 
         self._info = QLabel("")
         self._info.setFont(QFont("Monospace", 10))
@@ -1172,49 +1448,6 @@ class WaveformViewerWindow(QMainWindow):
         split.setStretchFactor(1, 1)
         split.setSizes([750, 750])
         root.addWidget(split, stretch=1)
-
-        # navigation + batch controls
-        nav = QHBoxLayout()
-        self._prev_btn = self._small_btn("◀ Prev", self._on_prev)
-        self._next_btn = self._small_btn("Next ▶", self._on_next)
-        self._prev_btn.setEnabled(False)
-        self._next_btn.setEnabled(False)
-        nav.addWidget(self._prev_btn)
-        nav.addWidget(self._next_btn)
-
-        nav.addSpacing(12)
-        nav.addWidget(self._mk_label("Event:"))
-        self._event_spin = QSpinBox()
-        self._event_spin.setFont(QFont("Monospace", 10))
-        self._event_spin.setMinimum(0)
-        self._event_spin.setMaximum(0)
-        self._event_spin.setStyleSheet(themed(
-            "QSpinBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"))
-        self._event_spin.editingFinished.connect(self._on_spin_jump)
-        self._event_spin.setEnabled(False)
-        nav.addWidget(self._event_spin)
-        self._total_lbl = QLabel(" / 0")
-        self._total_lbl.setFont(QFont("Monospace", 10))
-        self._total_lbl.setStyleSheet(themed("color:#8b949e;"))
-        nav.addWidget(self._total_lbl)
-
-        nav.addSpacing(18)
-        self._batch_btn = self._small_btn("Process next 10k",
-                                          self._on_batch_10k, primary=True)
-        self._batch_btn.setEnabled(False)
-        nav.addWidget(self._batch_btn)
-        self._cancel_batch_btn = self._small_btn("Cancel",
-                                                 self._on_cancel_batch)
-        self._cancel_batch_btn.setVisible(False)
-        nav.addWidget(self._cancel_batch_btn)
-
-        nav.addStretch()
-        self._batch_status = QLabel("")
-        self._batch_status.setFont(QFont("Monospace", 10))
-        self._batch_status.setStyleSheet(themed("color:#8b949e;"))
-        nav.addWidget(self._batch_status)
-        root.addLayout(nav)
 
         self.setStatusBar(QStatusBar())
         self._clear_plots()
@@ -1617,7 +1850,8 @@ class WaveformViewerWindow(QMainWindow):
         self._wave.set_data(samples, peaks, ped_mean, ped_rms,
                             title=(f"{mod}   roc=0x{roc_tag:02X}  "
                                    f"slot={slot}  ch={ch}"),
-                            clk_mhz=self._wcfg.clk_mhz)
+                            clk_mhz=self._wcfg.clk_mhz,
+                            stack_key=f"{roc_tag:02X}_{slot}_{ch}")
 
     def _clear_hists(self):
         self._h_height.clear("Peak Height")

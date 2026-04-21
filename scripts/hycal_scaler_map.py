@@ -164,8 +164,11 @@ class ScalerMapWindow(QMainWindow):
         root.addLayout(top)
 
         # -- map --
+        # Only show modules that actually have scaler PVs; SCINT (V1–V4)
+        # has no scaler rate, so rendering them here would misleadingly
+        # grey them out. LMS is still filtered by include_lms=False.
         self._map = ScalerMapWidget()
-        self._map.set_modules(self._modules)
+        self._map.set_modules(self._scalable)
         self._map.moduleHovered.connect(self._on_hover)
         self._map.paletteClicked.connect(self._cycle_palette)
         root.addWidget(self._map, stretch=1)
