@@ -1114,13 +1114,23 @@ class WaveformPlotWidget(QWidget):
 
         self._paint_axes(p, r, ymin, ymax)
 
+        # ped/rms/peak-count readout — drawn inside the plot at top-right to
+        # stay clear of the Stack checkbox / Clear button in the widget's
+        # top-right margin.
         info = (f"ped={self._ped_mean:.1f}  rms={self._ped_rms:.2f}  "
                 f"peaks={len(self._peaks)}")
+        p.setFont(QFont("Monospace", 9))
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(info)
+        th = fm.height()
+        pad = 4
+        box = QRectF(r.right() - tw - 2 * pad - 2, r.top() + 4,
+                     tw + 2 * pad, th + 2)
+        bg = QColor(THEME.BG); bg.setAlphaF(0.70)
+        p.fillRect(box, bg)
         p.setPen(QColor(THEME.TEXT_DIM))
-        p.drawText(QRectF(r.left(), r.top() - 20,
-                          max(1.0, r.width() - 8), 14),
-                   Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                   info)
+        p.drawText(box,
+                   Qt.AlignmentFlag.AlignCenter, info)
 
     # --- stacked overlay view -----------------------------------------
 
@@ -1233,9 +1243,11 @@ class WaveformGeoView(HyCalMapWidget):
         return QColor(THEME.SELECT_BORDER)
 
     def __init__(self, parent=None):
+        # margin_bottom must exceed the base's colour-bar anchor (cb_y =
+        # h - 40) so the module rects clear the bar — leave ~16 px gap.
         super().__init__(parent, show_colorbar=True, include_lms=True,
-                         margin_top=4, margin_bottom=38,
-                         min_size=(220, 260), shrink=0.90)
+                         margin_top=4, margin_bottom=56,
+                         min_size=(220, 280), shrink=0.90)
         self._available: set = set()
         self._selected_name: Optional[str] = None
         self._label_names: set = set()          # filled in set_modules()
@@ -1387,7 +1399,9 @@ class WaveformViewerWindow(QMainWindow):
                                       {"min": 0, "max": 20000, "step": 100})
         self._p_cfg = hist_config.get("time_hist",
                                       {"min": 0, "max": 400,   "step": 4})
-        self._n_cfg = {"min": 0, "max": 10, "step": 1}
+        # Left edge at -0.5 so integer n_peaks values (0, 1, 2 …) sit on bin
+        # centres rather than at the left edge of each bar.
+        self._n_cfg = {"min": -0.5, "max": 10.5, "step": 1}
 
         thr_cfg = hist_config.get("thresholds", {})
         self._hist_threshold = float(thr_cfg.get("min_peak_height", 10.0))
@@ -1472,10 +1486,6 @@ class WaveformViewerWindow(QMainWindow):
                                           self._on_batch_10k, primary=True)
         self._batch_btn.setEnabled(False)
         top.addWidget(self._batch_btn)
-        self._cancel_batch_btn = self._small_btn("Cancel",
-                                                 self._on_cancel_batch)
-        self._cancel_batch_btn.setVisible(False)
-        top.addWidget(self._cancel_batch_btn)
 
         self._accum_all_cb = QCheckBox("Accumulate all modules")
         self._accum_all_cb.setChecked(True)
@@ -2089,7 +2099,25 @@ class WaveformViewerWindow(QMainWindow):
         thread = QThread(self)
         worker.moveToThread(thread)
 
+        # Modal progress dialog — blocks input to the main window until the
+        # batch finishes (or the user cancels), so they can't switch modules
+        # / reload / Prev / Next while hists are being filled underneath.
+        dlg = QProgressDialog(
+            f"Processing {count:,} events…", "Cancel", 0, count, self)
+        dlg.setWindowTitle("Accumulating")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(True)
+        dlg.setAutoReset(False)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+
         def _on_progress(done: int, target: int, peaks: int):
+            dlg.setValue(done)
+            dlg.setLabelText(
+                f"Processing {target:,} events\n"
+                f"done: {done:,} / {target:,}   peaks found: {peaks:,}")
             self._batch_status.setText(
                 f"batch: {done:,}/{target:,}  peaks={peaks:,}")
             # refresh hists + geo overall map incrementally
@@ -2114,8 +2142,8 @@ class WaveformViewerWindow(QMainWindow):
             self._batch_status.setText("batch failed")
 
         def _cleanup():
+            dlg.close()
             self._batch_btn.setEnabled(True)
-            self._cancel_batch_btn.setVisible(False)
             self._batch_worker = None
             self._batch_thread = None
 
@@ -2123,6 +2151,7 @@ class WaveformViewerWindow(QMainWindow):
         worker.progressed.connect(_on_progress)
         worker.finished.connect(_on_finished)
         worker.failed.connect(_on_failed)
+        dlg.canceled.connect(worker.request_cancel)
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -2132,14 +2161,8 @@ class WaveformViewerWindow(QMainWindow):
         self._batch_worker = worker
         self._batch_thread = thread
         self._batch_btn.setEnabled(False)
-        self._cancel_batch_btn.setVisible(True)
         self._batch_status.setText(f"batch: 0/{count:,}")
         thread.start()
-
-    def _on_cancel_batch(self):
-        if self._batch_worker is not None:
-            self._batch_worker.request_cancel()
-            self._batch_status.setText("batch: cancelling…")
 
     # -- JSON save --
 
