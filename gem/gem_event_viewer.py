@@ -711,23 +711,6 @@ class ApvPanel(QWidget):
                 prev_hi = QPointF(x, yhi)
                 prev_lo = QPointF(x, ylo)
 
-        # CM overlay: firmware's online_cm[6] — 6 short horizontal marks
-        # (one per time sample), each at the CM value for that sample.
-        # Drawn as pale grey so it doesn't fight the data traces.
-        if self._cm_trace is not None and self._cm_trace.size == n_ts:
-            cm_col = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))
-            cm_col.setAlpha(160)
-            pen = QPen(cm_col, 1.4)
-            p.setPen(pen)
-            seg_w = plot.width() / n_ts
-            for ts in range(n_ts):
-                if not self._sample_mask[ts]:
-                    continue
-                x0 = plot.left() + ts * seg_w
-                x1 = x0 + seg_w * 0.88
-                y  = to_y(float(self._cm_trace[ts]))
-                p.drawLine(QPointF(x0, y), QPointF(x1, y))
-
         # Colored time-sample traces — blue (t=0) → red (t=5).  Time
         # samples hidden by the sample-mask checkboxes are skipped.
         for ts in range(n_ts):
@@ -744,6 +727,23 @@ class ApvPanel(QWidget):
                 if prev is not None:
                     p.drawLine(prev, QPointF(x, y))
                 prev = QPointF(x, y)
+
+        # CM overlay — drawn AFTER data traces so it sits on top.  One
+        # bold dashed line per enabled time sample, colour-matched with
+        # the corresponding data trace so the user can pair firmware CM
+        # with the same-colour strip waveform.  Extends across the full
+        # plot width because CM is a single value for all 128 strips.
+        if self._cm_trace is not None and self._cm_trace.size == n_ts:
+            for ts in range(n_ts):
+                if not self._sample_mask[ts]:
+                    continue
+                frac = ts / max(n_ts - 1, 1)
+                col = QColor.fromHsvF(0.66 * (1.0 - frac), 0.6, 1.0)
+                pen = QPen(col, 1.4)
+                pen.setStyle(Qt.PenStyle.DashLine)
+                p.setPen(pen)
+                y = to_y(float(self._cm_trace[ts]))
+                p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
 
         # ZS survivor tick row (directly below the plot)
         if self._hits is not None and self._hits.any():
