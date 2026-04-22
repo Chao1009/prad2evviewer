@@ -57,18 +57,21 @@ except Exception as _exc:  # noqa: BLE001
 
 
 from PyQt6.QtCore import (  # noqa: E402
-    QObject, QRectF, Qt, QThread, QTimer, pyqtSignal,
+    QObject, QPointF, QRectF, Qt, QThread, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (  # noqa: E402
-    QAction, QColor, QImage, QKeySequence, QPainter,
+    QAction, QColor, QFont, QImage, QKeySequence,
+    QPainter, QPen,
 )
 from PyQt6.QtWidgets import (  # noqa: E402
     QApplication,
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -76,13 +79,17 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSlider,
     QSpinBox,
     QStatusBar,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
+
+import numpy as np  # noqa: E402
 
 # Sibling imports — this file lives in gem/ alongside the helpers.
 # gem_view imports gem_strip_map which requires prad2py.det, so wrap so
@@ -514,6 +521,307 @@ class GemEventCanvas(QWidget):
 
 
 # ---------------------------------------------------------------------------
+# Raw APV view
+# ---------------------------------------------------------------------------
+
+
+class ApvPanel(QWidget):
+    """Mini per-APV panel — 128 channels × 6 time samples drawn as 6 line
+    traces (blue → red by time sample), ZS-survivor channels marked at the
+    bottom, diagnostic badge in the title bar.  Data lives in a single
+    (128, 6) float32 numpy array — caller sets it via ``set_frame``."""
+
+    MIN_W = 180
+    MIN_H = 110
+    TITLE_H = 16
+    HIT_ROW_H = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMinimumSize(self.MIN_W, self.MIN_H)
+        self._title = ""
+        self._badge = ""                # e.g. "full-readout" warning
+        self._frame: Optional[np.ndarray] = None    # (128, 6) float or int16
+        self._hits:  Optional[np.ndarray] = None    # (128,) bool
+        self._y_auto = True
+        self._y_lo = 0.0
+        self._y_hi = 1.0
+
+    def set_frame(self, title: str, frame: np.ndarray,
+                  hits: Optional[np.ndarray] = None,
+                  badge: str = ""):
+        self._title = title
+        self._badge = badge
+        self._frame = frame
+        self._hits  = hits
+        if frame is None or frame.size == 0:
+            self._y_lo, self._y_hi = 0.0, 1.0
+        else:
+            lo = float(np.min(frame))
+            hi = float(np.max(frame))
+            if hi - lo < 8.0:
+                mid = 0.5 * (lo + hi)
+                lo, hi = mid - 4.0, mid + 4.0
+            pad = 0.08 * (hi - lo)
+            self._y_lo = lo - pad
+            self._y_hi = hi + pad
+        self.update()
+
+    def clear(self):
+        self._frame = None
+        self._hits  = None
+        self._title = ""
+        self._badge = ""
+        self.update()
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        try:
+            self._paint(p)
+        finally:
+            p.end()
+
+    def _paint(self, p: QPainter):
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        w, h = self.width(), self.height()
+
+        bg = QColor(getattr(THEME, "BG_SUBTLE", "#161b22"))
+        fg = QColor(getattr(THEME, "TEXT", "#c9d1d9"))
+        dim = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))
+        p.fillRect(0, 0, w, h, bg)
+
+        # Frame border, tinted red if badge is set
+        border = QColor(getattr(THEME, "BORDER", "#30363d"))
+        if self._badge:
+            border = QColor(getattr(THEME, "DANGER", "#ff6b6b"))
+        p.setPen(QPen(border, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(0, 0, w - 1, h - 1)
+
+        # Title
+        p.setPen(fg)
+        p.setFont(QFont("Monospace", 8, QFont.Weight.Bold))
+        title_rect = QRectF(4, 2, w - 8, self.TITLE_H - 2)
+        p.drawText(title_rect, Qt.AlignmentFlag.AlignLeft
+                   | Qt.AlignmentFlag.AlignVCenter, self._title)
+        if self._badge:
+            p.setPen(QColor(getattr(THEME, "DANGER", "#ff6b6b")))
+            p.drawText(title_rect, Qt.AlignmentFlag.AlignRight
+                       | Qt.AlignmentFlag.AlignVCenter, self._badge)
+
+        # Plot area
+        plot = QRectF(4, self.TITLE_H + 2,
+                      w - 8, h - self.TITLE_H - self.HIT_ROW_H - 4)
+        if self._frame is None or self._frame.size == 0:
+            p.setPen(dim)
+            p.setFont(QFont("Monospace", 8))
+            p.drawText(plot, Qt.AlignmentFlag.AlignCenter, "(no data)")
+            return
+
+        # Axes + zero line
+        p.setPen(QPen(dim, 0, Qt.PenStyle.DotLine))
+        if self._y_lo < 0 < self._y_hi:
+            zy = plot.bottom() - (0 - self._y_lo) / (self._y_hi - self._y_lo) * plot.height()
+            p.drawLine(QPointF(plot.left(), zy), QPointF(plot.right(), zy))
+
+        # 6 colored traces — blue (t=0) → red (t=5)
+        n_strips = self._frame.shape[0]
+        n_ts     = self._frame.shape[1]
+        span_y = max(self._y_hi - self._y_lo, 1e-6)
+        step_x = plot.width() / max(n_strips - 1, 1)
+
+        def to_y(v: float) -> float:
+            return plot.bottom() - (v - self._y_lo) / span_y * plot.height()
+
+        for ts in range(n_ts):
+            frac = ts / max(n_ts - 1, 1)
+            col = QColor.fromHsvF(0.66 * (1.0 - frac), 0.85, 0.95)
+            pen = QPen(col, 0.9)
+            p.setPen(pen)
+            prev = None
+            for ch in range(n_strips):
+                x = plot.left() + ch * step_x
+                y = to_y(float(self._frame[ch, ts]))
+                if prev is not None:
+                    p.drawLine(prev, QPointF(x, y))
+                prev = QPointF(x, y)
+
+        # ZS survivor tick row (directly below the plot)
+        if self._hits is not None and self._hits.any():
+            row_y = h - self.HIT_ROW_H - 2
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(getattr(THEME, "ACCENT", "#ffd166")))
+            for ch in range(n_strips):
+                if self._hits[ch]:
+                    x = plot.left() + ch * step_x
+                    p.drawRect(QRectF(x - 0.8, row_y, 1.6, self.HIT_ROW_H))
+
+
+class RawApvTab(QWidget):
+    """Sub-tabbed APV viewer — one tab per (crate, mpd), grid of ApvPanel
+    per tab.  Data cache is a dict ``{apv_idx: ApvFrame}`` filled once per
+    event; tab switches just repaint."""
+
+    COLS = 4
+    SIGNAL_Y_PAD = 4
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(4)
+
+        # -- toolbar ---------------------------------------------------
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+
+        bar.addWidget(QLabel("Show:"))
+        self.show_combo = QComboBox()
+        self.show_combo.addItems(["Processed", "Raw"])
+        self.show_combo.currentIndexChanged.connect(self._on_control_changed)
+        bar.addWidget(self.show_combo)
+
+        bar.addWidget(QLabel("Detector:"))
+        self.det_combo = QComboBox()
+        self.det_combo.addItem("All", -1)
+        self.det_combo.currentIndexChanged.connect(self._on_control_changed)
+        bar.addWidget(self.det_combo)
+
+        self.zs_only_cb = QCheckBox("ZS-hit only")
+        self.zs_only_cb.setChecked(False)
+        self.zs_only_cb.toggled.connect(self._on_control_changed)
+        bar.addWidget(self.zs_only_cb)
+
+        self._status = QLabel("")
+        self._status.setStyleSheet(f"color:{THEME.TEXT_DIM};")
+        bar.addWidget(self._status)
+
+        bar.addStretch(1)
+        lay.addLayout(bar)
+
+        # -- sub-tabs per (crate, mpd) ---------------------------------
+        self._tabs = QTabWidget()
+        lay.addWidget(self._tabs, stretch=1)
+
+        # Data cache populated per event
+        self._apv_meta: List[Dict] = []     # one dict per apv_index
+        self._processed: Dict[int, np.ndarray] = {}    # apv_idx → (128,6) float32
+        self._raw:       Dict[int, np.ndarray] = {}    # apv_idx → (128,6) int16
+        self._hits:      Dict[int, np.ndarray] = {}    # apv_idx → (128,) bool
+        # (crate, mpd) → list of apv_index in order
+        self._grouped: Dict[Tuple[int, int], List[int]] = {}
+        # (crate, mpd) → {apv_idx: ApvPanel}
+        self._panels: Dict[Tuple[int, int], Dict[int, ApvPanel]] = {}
+        self._dets_seen: set = set()
+
+    def reset_all(self):
+        self._apv_meta.clear()
+        self._processed.clear()
+        self._raw.clear()
+        self._hits.clear()
+        self._grouped.clear()
+        self._panels.clear()
+        self._dets_seen.clear()
+        self._tabs.clear()
+        self.det_combo.blockSignals(True)
+        while self.det_combo.count() > 1:
+            self.det_combo.removeItem(1)
+        self.det_combo.blockSignals(False)
+        self._status.setText("")
+
+    def set_apv_metadata(self, apv_meta: List[Dict]):
+        """Call once per run (after geometry load): fixes the (crate, mpd)
+        groupings and builds the sub-tab skeletons.  ``apv_meta`` is a list
+        of dicts with keys ``crate_id, mpd_id, adc_ch, det_id, plane_type,
+        det_pos, det_name``, one per GemSystem APV index."""
+        self.reset_all()
+        self._apv_meta = list(apv_meta)
+
+        # Group by (crate, mpd)
+        for idx, m in enumerate(self._apv_meta):
+            key = (int(m["crate_id"]), int(m["mpd_id"]))
+            self._grouped.setdefault(key, []).append(idx)
+            self._dets_seen.add(m["det_name"])
+
+        # Populate detector filter
+        self.det_combo.blockSignals(True)
+        for name in sorted(self._dets_seen):
+            self.det_combo.addItem(name, name)
+        self.det_combo.blockSignals(False)
+
+        # Build one sub-tab per (crate, mpd)
+        for key in sorted(self._grouped.keys()):
+            crate, mpd = key
+            page = QScrollArea()
+            page.setWidgetResizable(True)
+            content = QWidget()
+            grid = QGridLayout(content)
+            grid.setHorizontalSpacing(4)
+            grid.setVerticalSpacing(4)
+            panels: Dict[int, ApvPanel] = {}
+            for n, idx in enumerate(self._grouped[key]):
+                r, c = divmod(n, self.COLS)
+                panel = ApvPanel()
+                m = self._apv_meta[idx]
+                panel.setToolTip(
+                    f"crate {m['crate_id']} mpd {m['mpd_id']} adc {m['adc_ch']}  "
+                    f"{m['det_name']} {m['plane_type']} pos={m['det_pos']}")
+                grid.addWidget(panel, r, c)
+                panels[idx] = panel
+            grid.setRowStretch(grid.rowCount(), 1)
+            page.setWidget(content)
+            self._panels[key] = panels
+            self._tabs.addTab(page, f"crate {crate}  mpd {mpd}")
+
+    def set_event_data(self,
+                       processed: Dict[int, np.ndarray],
+                       raw:       Dict[int, np.ndarray],
+                       hits:      Dict[int, np.ndarray],
+                       full_readout_apvs: Optional[set] = None):
+        """Push per-event data; call after process_event() returns."""
+        self._processed = processed
+        self._raw       = raw
+        self._hits      = hits
+        self._full_readout = full_readout_apvs or set()
+        self._refresh_all_panels()
+
+    def _on_control_changed(self, *_):
+        self._refresh_all_panels()
+
+    def _refresh_all_panels(self):
+        show_raw   = self.show_combo.currentIndex() == 1
+        det_filter = self.det_combo.currentData()
+        zs_only    = self.zs_only_cb.isChecked()
+
+        shown = 0
+        total = 0
+        for key, panels in self._panels.items():
+            for idx, panel in panels.items():
+                m = self._apv_meta[idx]
+                total += 1
+                det_match = (det_filter == -1 or det_filter is None
+                             or m["det_name"] == det_filter)
+                has_zs = self._hits.get(idx)
+                has_any_zs = bool(has_zs is not None and has_zs.any())
+                if not det_match or (zs_only and not has_any_zs):
+                    panel.setVisible(False)
+                    continue
+                panel.setVisible(True)
+                shown += 1
+
+                frame = (self._raw.get(idx) if show_raw
+                         else self._processed.get(idx))
+                title = (f"c{m['crate_id']} m{m['mpd_id']} a{m['adc_ch']}  "
+                         f"{m['det_name']} {m['plane_type']} p{m['det_pos']}")
+                badge = ("full-readout" if idx in self._full_readout
+                         and not show_raw and not has_any_zs else "")
+                panel.set_frame(title, frame, has_zs, badge)
+
+        mode = "raw" if show_raw else "processed"
+        self._status.setText(f"{shown}/{total} APVs  [{mode}]")
+
+
+# ---------------------------------------------------------------------------
 # Advanced tuning dock
 # ---------------------------------------------------------------------------
 
@@ -797,8 +1105,14 @@ class GemEventViewer(QMainWindow):
         cbar.addAction(act_save)
         root.addWidget(cbar)
 
+        # Canvas + Raw APV tabs share the main area.  Event data flows
+        # into both after each process_event() call.
+        self.tabs = QTabWidget()
         self.canvas = GemEventCanvas()
-        root.addWidget(self.canvas, 1)
+        self.tabs.addTab(self.canvas, "Clustering")
+        self.raw_apv_tab = RawApvTab()
+        self.tabs.addTab(self.raw_apv_tab, "Raw APV")
+        root.addWidget(self.tabs, 1)
 
         # --- Status bar ---
         self.setStatusBar(QStatusBar(self))
@@ -962,6 +1276,28 @@ class GemEventViewer(QMainWindow):
         # next full-readout event can warn again if still missing peds.
         self._ped_warning_shown = bool(
             self._gem_ped_path and os.path.isfile(self._gem_ped_path))
+
+        # Feed the Raw APV tab its static per-APV metadata.  Detector
+        # names come from the detector config list; plane_type is "X"/"Y"
+        # straight out of the APV config.
+        try:
+            det_names = {d.id: d.name for d in self._gsys.get_detectors()}
+        except Exception:
+            det_names = {}
+        apv_meta = []
+        for i in range(self._gsys.get_n_apvs()):
+            cfg = self._gsys.get_apv_config(i)
+            apv_meta.append({
+                "crate_id":   int(cfg.crate_id),
+                "mpd_id":     int(cfg.mpd_id),
+                "adc_ch":     int(cfg.adc_ch),
+                "det_id":     int(cfg.det_id),
+                "plane_type": str(cfg.plane_type),
+                "det_pos":    int(cfg.det_pos),
+                "det_name":   det_names.get(int(cfg.det_id),
+                                            f"det{cfg.det_id}"),
+            })
+        self.raw_apv_tab.set_apv_metadata(apv_meta)
 
     # -----------------------------------------------------------------
     # File picker / pre-scan
@@ -1311,6 +1647,35 @@ class GemEventViewer(QMainWindow):
 
         self._re_reconstruct_current()
 
+    def _refill_raw_apv_cache(self):
+        """Pull per-APV processed + raw + hit-mask frames for the current
+        event and hand them to the Raw APV tab.  Runs after ProcessEvent so
+        ``get_apv_frame`` / ``get_apv_hit_mask`` are valid; raw data comes
+        straight from the cached SspEventData (what firmware shipped)."""
+        if self._gsys is None or self._last_ssp is None:
+            return
+        processed: Dict[int, np.ndarray] = {}
+        raw:       Dict[int, np.ndarray] = {}
+        hits:      Dict[int, np.ndarray] = {}
+        full_readout: set = set()
+        n = self._gsys.get_n_apvs()
+        for i in range(n):
+            try:
+                processed[i] = self._gsys.get_apv_frame(i)
+                hits[i]      = self._gsys.get_apv_hit_mask(i)
+            except Exception:
+                continue
+            cfg = self._gsys.get_apv_config(i)
+            apv_sd = self._last_ssp.find_apv(int(cfg.crate_id),
+                                              int(cfg.mpd_id),
+                                              int(cfg.adc_ch))
+            if apv_sd is not None and apv_sd.present:
+                # .strips is already bound as (128, 6) int16
+                raw[i] = np.asarray(apv_sd.strips)
+                if apv_sd.nstrips == 128:
+                    full_readout.add(i)
+        self.raw_apv_tab.set_event_data(processed, raw, hits, full_readout)
+
     def _re_reconstruct_current(self):
         if self._gsys is None or self._gcl is None:
             return
@@ -1345,6 +1710,9 @@ class GemEventViewer(QMainWindow):
                  f"bits 0x{evmeta.trigger_bits:X}")
         self.canvas.set_event(self._detectors, det_list, det_hits,
                               self._hole, title=title)
+
+        # Feed the Raw APV tab — bulk numpy bindings keep this cheap.
+        self._refill_raw_apv_cache()
 
         n_2d = sum(len(d.get("hits_2d", [])) for d in det_list)
         self._set_status(

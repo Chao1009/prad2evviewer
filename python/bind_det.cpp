@@ -343,6 +343,35 @@ static void bind_gem(py::module_ &m)
              py::arg("apv_index"), py::arg("ch"), py::arg("ts"),
              "Pedestal + common-mode-corrected ADC for (APV, channel, time "
              "sample); valid after process_event().")
+        .def("get_apv_frame",
+            [](const gem::GemSystem &self, int apv_idx) {
+                // Copy into a fresh (128, 6) float32 array in strip-major
+                // order.  Underlying storage is time-major (raw[ts*128+ch])
+                // — single-APV transposed copy is ~3 kB, negligible.
+                constexpr int NS = ssp::APV_STRIP_SIZE;
+                constexpr int NT = ssp::SSP_TIME_SAMPLES;
+                py::array_t<float> out({NS, NT});
+                auto buf = out.mutable_unchecked<2>();
+                for (int ch = 0; ch < NS; ++ch)
+                    for (int ts = 0; ts < NT; ++ts)
+                        buf(ch, ts) = self.GetProcessedAdc(apv_idx, ch, ts);
+                return out;
+            },
+            py::arg("apv_index"),
+            "(128, 6) float32 array of pedestal+CM-subtracted ADC values for "
+            "every strip of this APV.  Valid after process_event().")
+        .def("get_apv_hit_mask",
+            [](const gem::GemSystem &self, int apv_idx) {
+                constexpr int NS = ssp::APV_STRIP_SIZE;
+                py::array_t<bool> out(NS);
+                auto buf = out.mutable_unchecked<1>();
+                for (int ch = 0; ch < NS; ++ch)
+                    buf(ch) = self.IsChannelHit(apv_idx, ch);
+                return out;
+            },
+            py::arg("apv_index"),
+            "(128,) bool array: True where the channel survived ZS in the "
+            "last process_event().")
 
         // threshold knobs
         .def_property("common_mode_threshold",
