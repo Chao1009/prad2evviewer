@@ -535,7 +535,7 @@ class ApvPanel(QWidget):
     MIN_W = 180
     MIN_H = 110
     HINT_W = 260
-    HINT_H = 150
+    HINT_H = 200
     TITLE_H = 16
     HIT_ROW_H = 6
 
@@ -543,9 +543,12 @@ class ApvPanel(QWidget):
         super().__init__(parent)
         self.setMinimumSize(self.MIN_W, self.MIN_H)
         # Horizontal stretch to fill the grid cell (capped by RawApvTab
-        # to ≤ viewport/COLS); fixed height from sizeHint.
+        # to ≤ viewport/COLS); height is explicitly locked via
+        # setFixedHeight in _apply_panel_max_width so it stays constant
+        # across filter toggles regardless of what the layout thinks.
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(self.HINT_H)
         self._title = ""
         self._badge = ""                # e.g. "no hits" for full-readout APVs with no ZS survivors
         self._frame: Optional[np.ndarray] = None    # (128, 6) float or int16
