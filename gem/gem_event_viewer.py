@@ -649,6 +649,10 @@ class ApvPanel(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
 
+        # Canvas: slightly softer than THEME.BG so panels read as
+        # inset plot tiles rather than sitting flush with the window.
+        # Theme picks via BG_SUBTLE (dark/light-aware); fallback
+        # keeps the original #161b22 if the theme doesn't define it.
         bg = QColor(getattr(THEME, "BG_SUBTLE", "#161b22"))
         fg = QColor(getattr(THEME, "TEXT", "#c9d1d9"))
         dim = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))

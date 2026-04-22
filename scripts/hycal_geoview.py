@@ -94,6 +94,7 @@ class THEME:
 _THEMES: Dict[str, Dict[str, str]] = {
     "dark": {
         "BG":            "#000000",
+        "BG_SUBTLE":     "#161b22",     # inset plot/panel tile
         "CANVAS":        "#000000",
         "PANEL":         "#1d1d1f",
         "BUTTON":        "#1d1d1f",
@@ -120,6 +121,7 @@ _THEMES: Dict[str, Dict[str, str]] = {
         # Apple light: #ffffff / #f5f5f7 section alternation, #1d1d1f text,
         # #0066cc inline links, #0071e3 CTA blue.
         "BG":            "#ffffff",
+        "BG_SUBTLE":     "#f5f5f7",     # inset plot/panel tile
         "CANVAS":        "#f5f5f7",
         "PANEL":         "#ffffff",
         "BUTTON":        "#fafafc",
