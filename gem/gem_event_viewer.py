@@ -755,6 +755,25 @@ class ApvPanel(QWidget):
                     x = plot.left() + ch * step_x
                     p.drawRect(QRectF(x - 0.8, row_y, 1.6, self.HIT_ROW_H))
 
+        # Y-range readouts: two tiny labels tucked into the top-left and
+        # bottom-left of the plot area.  Useful both when Shared Y is on
+        # (see the common scale) and off (see each panel's auto scale).
+        p.setPen(dim)
+        p.setFont(QFont("Monospace", 7))
+        fm = p.fontMetrics()
+        hi_txt = self._fmt_compact(self._y_hi)
+        lo_txt = self._fmt_compact(self._y_lo)
+        tx = plot.left() + 2
+        p.drawText(QPointF(tx, plot.top() + fm.ascent() - 1), hi_txt)
+        p.drawText(QPointF(tx, plot.bottom() - 2), lo_txt)
+
+    @staticmethod
+    def _fmt_compact(v: float) -> str:
+        """Short Y-axis label: integer when |v| < 1000, else 1-decimal ke."""
+        if abs(v) < 1000:
+            return f"{v:.0f}"
+        return f"{v/1000:.1f}k"
+
 
 class RawApvTab(QWidget):
     """Sub-tabbed APV viewer — one tab per (crate, mpd), grid of ApvPanel
@@ -786,10 +805,11 @@ class RawApvTab(QWidget):
         self.zs_only_cb.toggled.connect(self._on_control_changed)
         bar.addWidget(self.zs_only_cb)
 
-        self.fixed_y_cb = QCheckBox("Fixed Y")
+        self.fixed_y_cb = QCheckBox("Shared Y")
+        self.fixed_y_cb.setChecked(True)
         self.fixed_y_cb.setToolTip(
             "Share one Y-axis range across every visible APV so traces "
-            "can be compared directly.")
+            "can be compared directly.  Uncheck for per-panel auto-scale.")
         self.fixed_y_cb.toggled.connect(self._on_control_changed)
         bar.addWidget(self.fixed_y_cb)
 
