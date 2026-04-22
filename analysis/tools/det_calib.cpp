@@ -15,7 +15,10 @@
 #include <TCanvas.h>
 #include <TF1.h>
 
+#include <nlohmann/json.hpp>
+
 #include <iostream>
+#include <fstream>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -83,23 +86,25 @@ float fitAndDraw(TH1F* hist, const std::string& out_path, const float survey_pos
 int main(int argc, char *argv[])
 {
     std::string output;
+    std::string calib_config;
     float Ebeam = 3500.f;
-    float hycal_z = 6222.5f; //mm, the default position of HyCal surface, TO DO: read from database
-    float hycal_x = 0.f; //mm, the default center x of HyCal, TO DO: read from database
-    float hycal_y = 0.f; //mm, the default center y of HyCal, TO DO: read from database
-    float gem_z[4] = {5423.71, 5384.00, 5823.71, 5784.00}; //mm, the default position of each GEM plane, TO DO: read from database
-    float gem_x[4] = {0., 0., 0., 0.}; //mm, the default center x of each GEM plane, TO DO: read from database
-    float gem_y[4] = {0., 0., 0., 0.}; //mm, the default center y of each GEM plane, TO DO: read from database
+    float hycal_z = 6222.5f;
+    float hycal_x = 0.f;
+    float hycal_y = 0.f;
+    float gem_z[4] = {5423.71, 5384.00, 5823.71, 5784.00};
+    float gem_x[4] = {0., 0., 0., 0.};
+    float gem_y[4] = {0., 0., 0., 0.};
 
     float shift_hx = 0.f, shift_hy = 0.f;
     float shift_gx[4] = {0.f, 0.f, 0.f, 0.f}, shift_gy[4] = {0.f, 0.f, 0.f, 0.f};
 
     int max_events = -1;
     int opt;
-    while ((opt = getopt(argc, argv, "o:n:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:n:c:")) != -1) {
         switch (opt) {
             case 'o': output = optarg; break;
             case 'n': max_events = std::atoi(optarg); break;
+            case 'c': calib_config = optarg; break;
         }
     }
     // collect input files (can be files, directories, or mixed)
@@ -110,7 +115,7 @@ int main(int argc, char *argv[])
     }
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
-        std::cerr << "Usage: det_calib <input_recon.root|dir> [more files...] [-o out.root] [-n max_events]\n";
+        std::cerr << "Usage: det_calib <input_recon.root|dir> [more files...] [-o out.root] [-n max_events] [-c det_calib_config.json]\n";
         return 1;
     }
     // extract run number from first input file name (e.g. prad_023626.00000_recon.root -> 23626)
@@ -131,6 +136,37 @@ int main(int argc, char *argv[])
         "PRAD2_DATABASE_DIR",
         {"../share/prad2evviewer/database"},
         DATABASE_DIR);
+
+    // --- load detector geometry config from JSON ---
+    if (calib_config.empty()) {
+        calib_config = dbDir + "/det_calib_config.json";
+    }
+    {
+        std::ifstream cfg_f(calib_config);
+        if (!cfg_f) {
+            std::cerr << "Warning: cannot open config file " << calib_config << ", using defaults.\n";
+        } else {
+            auto cfg = nlohmann::json::parse(cfg_f, nullptr, false, true);
+            if (!cfg.is_discarded()) {
+                if (cfg.contains("Ebeam"))           Ebeam   = cfg["Ebeam"].get<float>();
+                if (cfg.contains("hycal")) {
+                    auto &h = cfg["hycal"];
+                    if (h.contains("z")) hycal_z = h["z"].get<float>();
+                    if (h.contains("x")) hycal_x = h["x"].get<float>();
+                    if (h.contains("y")) hycal_y = h["y"].get<float>();
+                }
+                if (cfg.contains("gem")) {
+                    auto &g = cfg["gem"];
+                    if (g.contains("z")) for (int d = 0; d < 4; d++) gem_z[d] = g["z"][d].get<float>();
+                    if (g.contains("x")) for (int d = 0; d < 4; d++) gem_x[d] = g["x"][d].get<float>();
+                    if (g.contains("y")) for (int d = 0; d < 4; d++) gem_y[d] = g["y"][d].get<float>();
+                }
+                std::cerr << "Loaded detector config from: " << calib_config << "\n";
+            } else {
+                std::cerr << "Warning: failed to parse " << calib_config << ", using defaults.\n";
+            }
+        }
+    }
 
     // --- init detector system ---
     fdec::HyCalSystem hycal;
