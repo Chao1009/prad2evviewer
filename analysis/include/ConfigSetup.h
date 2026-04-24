@@ -29,12 +29,12 @@ namespace fs = std::filesystem;
 // Holds all run-specific detector geometry and beam parameters.
 // Using a struct allows multi-run processing without shared mutable state:
 //
-//   auto geo1 = LoadCalibConfig(path, run1);
-//   auto geo2 = LoadCalibConfig(path, run2);
+//   auto geo1 = LoadRunConfig(path, run1);
+//   auto geo2 = LoadRunConfig(path, run2);
 //   TransformDetData(hits1, geo1);
 //   TransformDetData(hits2, geo2);
 //
-struct CalibConfig {
+struct RunConfig {
     std::string energy_calib_file;
     float default_adc2mev  = 0.078f;
     float Ebeam      = 0.f;
@@ -53,36 +53,42 @@ struct CalibConfig {
     float gem_tilt_x[4] = {0.f, 0.f, 0.f, 0.f};
     float gem_tilt_y[4] = {0.f, 0.f, 0.f, 0.f};
     float gem_tilt_z[4] = {0.f, 180.f, 0.f, 180.f};
+    // time cuts
+    float hc_time_win_lo = 100.f;  // ns
+    float hc_time_win_hi = 200.f;  // ns
+    // cluster-track matching
+    float matching_radius     = 15.f;
+    bool  matching_use_square = true;
 };
 
 // Global geometry config for single-run tools.
-// Multi-run code should capture LoadCalibConfig()'s return value into a
-// local CalibConfig instead of relying on this global.
-inline CalibConfig gCalibConfig;
+// Multi-run code should capture LoadRunConfig()'s return value into a
+// local RunConfig instead of relying on this global.
+inline RunConfig gRunConfig;
 
-// Backward-compatible aliases pointing into gCalibConfig (zero overhead).
+// Backward-compatible aliases pointing into gRunConfig (zero overhead).
 // Existing code that reads/writes Ebeam_, hycal_x_, gem_z_[] etc. continues
 // to work without any modification.
-inline std::string  &energy_calib_file_ = gCalibConfig.energy_calib_file;
-inline float        &Ebeam_   = gCalibConfig.Ebeam;
-inline float        &hycal_z_ = gCalibConfig.hycal_z;
-inline float        &hycal_x_ = gCalibConfig.hycal_x;
-inline float        &hycal_y_ = gCalibConfig.hycal_y;
-inline float *const  gem_z_   = gCalibConfig.gem_z;
-inline float *const  gem_x_   = gCalibConfig.gem_x;
-inline float *const  gem_y_   = gCalibConfig.gem_y;
+inline std::string  &energy_calib_file_ = gRunConfig.energy_calib_file;
+inline float        &Ebeam_   = gRunConfig.Ebeam;
+inline float        &hycal_z_ = gRunConfig.hycal_z;
+inline float        &hycal_x_ = gRunConfig.hycal_x;
+inline float        &hycal_y_ = gRunConfig.hycal_y;
+inline float *const  gem_z_   = gRunConfig.gem_z;
+inline float *const  gem_x_   = gRunConfig.gem_x;
+inline float *const  gem_y_   = gRunConfig.gem_y;
 
 // --- config file loading ----------------------------------------------------
-// Returns a CalibConfig populated from the best-matching entry in the JSON file.
+// Returns a RunConfig populated from the best-matching entry in the JSON file.
 // Selects the entry whose run_number is the largest value <= run_num.
 // If run_num < 0 (unknown), uses the entry with the largest run_number.
 //
-// Single-run tools:  gCalibConfig = LoadCalibConfig(path, run);
-// Multi-run tools:   auto geo1 = LoadCalibConfig(path, run1);
-//                    auto geo2 = LoadCalibConfig(path, run2);
-inline CalibConfig LoadCalibConfig(const std::string &transform_config, int run_num)
+// Single-run tools:  gRunConfig = LoadRunConfig(path, run);
+// Multi-run tools:   auto geo1 = LoadRunConfig(path, run1);
+//                    auto geo2 = LoadRunConfig(path, run2);
+inline RunConfig LoadRunConfig(const std::string &transform_config, int run_num)
 {
-    CalibConfig result;   // start from defaults defined in CalibConfig
+    RunConfig result;   // start from defaults defined in RunConfig
 
     std::ifstream cfg_f(transform_config);
     if (!cfg_f) {
@@ -166,19 +172,32 @@ inline CalibConfig LoadCalibConfig(const std::string &transform_config, int run_
             }
         }
     }
+    if (c.contains("time_cuts")) {
+        const auto &tc = c["time_cuts"];
+        if (tc.contains("hc_time_window") && tc["hc_time_window"].is_array()
+                && tc["hc_time_window"].size() >= 2) {
+            result.hc_time_win_lo = tc["hc_time_window"][0].get<float>();
+            result.hc_time_win_hi = tc["hc_time_window"][1].get<float>();
+        }
+    }
+    if (c.contains("matching")) {
+        const auto &m = c["matching"];
+        if (m.contains("radius"))          result.matching_radius     = m["radius"].get<float>();
+        if (m.contains("use_square_cut"))  result.matching_use_square = m["use_square_cut"].get<bool>();
+    }
     std::cerr << "Loaded detector coordinates config (run_number=" << best_run
               << ") from: " << transform_config << "\n";
     return result;
 }
 
 // --- config file writing ----------------------------------------------------
-// Appends a new entry (run_number + CalibConfig) to the "configurations" array
+// Appends a new entry (run_number + RunConfig) to the "configurations" array
 // in the given JSON file. If the file does not exist, it is created from
 // scratch. If an entry with the same run_number already exists, it is
 // overwritten in-place. The updated JSON is written back atomically via a
 // temporary file to avoid corruption on failure.
 inline bool WriteTransformConfig(const std::string &transform_config, int run_num,
-                                 const CalibConfig &geo)
+                                 const RunConfig &geo)
 {
     // --- load existing file (or start empty) --------------------------------
     nlohmann::json cfg;
@@ -217,6 +236,9 @@ inline bool WriteTransformConfig(const std::string &transform_config, int run_nu
         g["tilting"]  = nlohmann::json::array({geo.gem_tilt_x[i], geo.gem_tilt_y[i], geo.gem_tilt_z[i]});
         entry["gem"].push_back(g);
     }
+    entry["time_cuts"]["hc_time_window"] = nlohmann::json::array({geo.hc_time_win_lo, geo.hc_time_win_hi});
+    entry["matching"]["radius"]          = geo.matching_radius;
+    entry["matching"]["use_square_cut"]  = geo.matching_use_square;
 
     // --- replace existing entry or append -----------------------------------
     auto &arr = cfg["configurations"];
@@ -262,12 +284,12 @@ inline bool WriteTransformConfig(const std::string &transform_config, int run_nu
 // Explicit-offset overloads (float beamX, float beamY, float ZfromTarget):
 //   Always available; callers supply the numbers directly.
 //
-// CalibConfig overloads (const CalibConfig &geo = gCalibConfig):
-//   Use the geometry loaded by LoadCalibConfig().
-//   Default argument = gCalibConfig, so existing single-arg calls like
+// RunConfig overloads (const RunConfig &geo = gRunConfig):
+//   Use the geometry loaded by LoadRunConfig().
+//   Default argument = gRunConfig, so existing single-arg calls like
 //     TransformDetData(hc_hits);
 //   still compile and use the global config unchanged.
-//   Multi-run code can pass an explicit CalibConfig:
+//   Multi-run code can pass an explicit RunConfig:
 //     TransformDetData(hc_hits, geo1);
 
 // -- single-hit primitives (used internally by the vector overloads) ---------
@@ -352,15 +374,15 @@ inline void RotateDetData(std::vector<GEMHit> &gem_hits,
     for (auto &h : gem_hits) RotateDetData(h, x_deg, y_deg, z_deg);
 }
 
-// -- CalibConfig overloads (use tilting angles stored in config) -------------
+// -- RunConfig overloads (use tilting angles stored in config) -------------
 inline void RotateDetData(std::vector<HCHit> &hc_hits,
-                          const CalibConfig &geo = gCalibConfig)
+                          const RunConfig &geo = gRunConfig)
 {
     RotateDetData(hc_hits, geo.hycal_tilt_x, geo.hycal_tilt_y, geo.hycal_tilt_z);
 }
 
 inline void RotateDetData(std::vector<GEMHit> &gem_hits,
-                          const CalibConfig &geo = gCalibConfig)
+                          const RunConfig &geo = gRunConfig)
 {
     for (auto &h : gem_hits) {
         int det_id = h.det_id;
@@ -378,7 +400,7 @@ inline void TransformDetData(std::vector<HCHit> &hc_hits, float beamX, float bea
     for (auto &h : hc_hits) TransformDetData(h, beamX, beamY, ZfromTarget);
 }
 
-inline void TransformDetData(std::vector<HCHit> &hc_hits, const CalibConfig &geo = gCalibConfig)
+inline void TransformDetData(std::vector<HCHit> &hc_hits, const RunConfig &geo = gRunConfig)
 {
     TransformDetData(hc_hits, geo.hycal_x, geo.hycal_y, geo.hycal_z);
 }
@@ -390,7 +412,7 @@ inline void TransformDetData(std::vector<GEMHit> &gem_hits, float beamX, float b
 }
 
 // Each GEM hit is transformed using its own detector id.
-inline void TransformDetData(std::vector<GEMHit> &gem_hits, const CalibConfig &geo = gCalibConfig)
+inline void TransformDetData(std::vector<GEMHit> &gem_hits, const RunConfig &geo = gRunConfig)
 {
     for (auto &h : gem_hits) {
         int det_id = h.det_id;

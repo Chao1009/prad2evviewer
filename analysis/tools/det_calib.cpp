@@ -127,7 +127,7 @@ int main(int argc, char *argv[])
     if (transform_config.empty()) {
         transform_config = dbDir + "/calibration/2p1_general.json";
     }
-    CalibConfig geo = LoadCalibConfig(transform_config, run_num);
+    RunConfig geo = LoadRunConfig(transform_config, run_num);
 
     // --- init detector system ---
     fdec::HyCalSystem hycal;

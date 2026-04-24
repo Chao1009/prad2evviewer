@@ -17,7 +17,14 @@
                 {"id": 1, "position": [252.8, 0.0, 5384.0],  "tilting": [0.0, 0.0, 180.0]},
                 {"id": 2, "position": [-252.8, 0.0, 5823.0], "tilting": [0.0, 0.0, 0.0]},
                 {"id": 3, "position": [252.8, 0.0, 5784.0],  "tilting": [0.0, 0.0, 180.0]}
-            ]
+            ],
+            "time_cuts": {
+                "hc_time_window": [100.0, 200.0]
+            },
+            "matching": {
+                "radius": 15.0,
+                "use_square_cut": true
+            }
         }
     ]
 }
