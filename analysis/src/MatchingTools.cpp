@@ -130,12 +130,6 @@ void MatchingTools::PostMatch(MatchHit &h) const
     std::sort(h.gem3_hits.begin(), h.gem3_hits.end(), by_dist);
     std::sort(h.gem4_hits.begin(), h.gem4_hits.end(), by_dist);
 
-    // set match flag for each plane that has candidates
-    if (!h.gem1_hits.empty()) fdec::set_bit(h.mflag, kGEM1Match);
-    if (!h.gem2_hits.empty()) fdec::set_bit(h.mflag, kGEM2Match);
-    if (!h.gem3_hits.empty()) fdec::set_bit(h.mflag, kGEM3Match);
-    if (!h.gem4_hits.empty()) fdec::set_bit(h.mflag, kGEM4Match);
-
     // pick the best match from upstream pair (GEM1/GEM2)
     float best_up = 1e9f;
     analysis::GEMHit best_gem_up{};
@@ -152,6 +146,10 @@ void MatchingTools::PostMatch(MatchHit &h) const
     check_up(h.gem2_hits);
     h.gem[0] = best_gem_up;
 
+    // set match flag for upstream pair
+    if(h.gem[0].det_id == 0) fdec::set_bit(h.mflag, kGEM1Match);
+    else if(h.gem[0].det_id == 1) fdec::set_bit(h.mflag, kGEM2Match);
+
     // pick the best match from downstream pair (GEM3/GEM4)
     float best_down = 1e9f;
     analysis::GEMHit best_gem_down{};
@@ -167,6 +165,10 @@ void MatchingTools::PostMatch(MatchHit &h) const
     check_down(h.gem3_hits);
     check_down(h.gem4_hits);
     h.gem[1] = best_gem_down;
+
+    // set match flag for downstream pair
+    if(h.gem[1].det_id == 2) fdec::set_bit(h.mflag, kGEM3Match);
+    else if(h.gem[1].det_id == 3) fdec::set_bit(h.mflag, kGEM4Match);
 }
 
 // ============================================================================
