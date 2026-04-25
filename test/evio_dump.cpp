@@ -1285,14 +1285,22 @@ int main(int argc, char *argv[])
     }
 
     int rc;
-    if      (mode == "tree")       rc = doTree(ch, num);
+    if      (mode.empty())         rc = doSummary(ch);
+    else if (mode == "tree")       rc = doTree(ch, num);
     else if (mode == "tags")       rc = doTags(ch);
     else if (mode == "epics")      rc = doEpics(ch, num);
     else if (mode == "triggers")   rc = doTriggers(ch, verbose);
     else if (mode == "trig-debug") rc = doTrigDebug(ch, verbose);
     else if (mode == "bank-debug") rc = doBankDebug(ch, verbose);
     else if (mode == "event")      rc = doEvent(ch, num);
-    else                           rc = doSummary(ch);
+    else if (mode == "summary")    rc = doSummary(ch);
+    else {
+        std::cerr << "Error: unknown mode '" << mode << "'.\n"
+                  << "Valid modes: summary, tree, tags, epics, event, "
+                     "triggers, trig-debug, bank-debug.\n";
+        ch.Close();
+        return 1;
+    }
 
     ch.Close();
     return rc;

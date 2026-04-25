@@ -379,7 +379,9 @@ const std::vector<GEMHit>& GemSystem::GetHits(int det) const
 //
 //   data.nstrips < APV_STRIP_SIZE → firmware zero-suppressed.  Only the
 //     surviving strips are in the bank; values are pedestal + CM subtracted
-//     by firmware.  Every present strip is a hit; skip offline processing.
+//     by firmware.  Re-apply pedestal.noise × zerosup_thres_ on the
+//     surviving strips so the viewer's threshold tracks the offline
+//     pedestals even if the firmware threshold drifts.
 //
 //   data.nstrips == APV_STRIP_SIZE → full readout.  Every channel is in the
 //     bank (calibration / debug mode, possibly with firmware emitting CM
@@ -403,16 +405,22 @@ void GemSystem::processApv(int apv_idx, const ssp::ApvData &data)
     auto &work = apv_work_[apv_idx];
 
     if (data.nstrips < APV_STRIP_SIZE) {
-        // Online-ZS path: every strip present in the bank is a surviving hit.
-        // Values are already pedestal + CM subtracted by firmware.
+        // Online-ZS path: firmware already pedestal + CM subtracted.  Apply
+        // a software N-sigma cut on the surviving strips so absent firmware
+        // pedestals can't leak sub-threshold strips into reconstruction.
         for (int ch = 0; ch < APV_STRIP_SIZE; ++ch) {
-            if (data.hasStrip(ch)) {
-                work.hit_pos[ch] = true;
-                for (int ts = 0; ts < SSP_TIME_SAMPLES; ++ts)
-                    work.raw[RAW_IDX(ch, ts)] = static_cast<float>(data.strips[ch][ts]);
-            } else {
+            if (!data.hasStrip(ch)) {
                 work.hit_pos[ch] = false;
+                continue;
             }
+            float avg = 0.f;
+            for (int ts = 0; ts < SSP_TIME_SAMPLES; ++ts) {
+                float v = static_cast<float>(data.strips[ch][ts]);
+                work.raw[RAW_IDX(ch, ts)] = v;
+                avg += v;
+            }
+            avg /= SSP_TIME_SAMPLES;
+            work.hit_pos[ch] = (avg > cfg.pedestal[ch].noise * zerosup_thres_);
         }
         collectHits(apv_idx);
         return;

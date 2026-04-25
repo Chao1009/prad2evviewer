@@ -7,9 +7,9 @@
 // the zero line, and a hit-row tick under the plot.
 //
 // Mirrors the simplified controls from gem_event_viewer.py's RawApvTab:
-// Process / Signal Only / Shared Y / per-sample (t0…t5) toggles.
-// Threshold curve, CM overlay, and clustering knobs are intentionally
-// left out — the monitor is for at-a-glance live inspection.
+// Process / Signal Only / Shared Y / Threshold / CM / per-sample (t0…t5).
+// Clustering knobs are intentionally left out — the monitor is for
+// at-a-glance live inspection.
 
 'use strict';
 
@@ -37,6 +37,18 @@ const GEM_APV_TS_COLORS = (() => {
     }
     return out;
 })();
+// CM overlay colours — same hue as the trace but desaturated so the
+// firmware CM line reads as related to the matching time sample without
+// fighting the data trace for visibility.
+const GEM_APV_CM_COLORS = (() => {
+    const out = [];
+    for (let t = 0; t < 6; t++) {
+        const frac = t / 5;
+        const h = 0.66 * (1 - frac);
+        out.push(hsv2rgb(h, 0.6, 1.0));
+    }
+    return out;
+})();
 function hsv2rgb(h, s, v) {
     const i = Math.floor(h * 6);
     const f = h * 6 - i;
@@ -61,6 +73,8 @@ let gemApvCurrentEvent = -1;
 let gemApvShowProcessed = true;
 let gemApvShowSignalOnly = false;
 let gemApvSharedY = true;
+let gemApvShowThreshold = false;
+let gemApvShowCm = false;
 let gemApvSampleMask = [true, true, true, true, true, true];
 // Per-detector visibility — index = det_id (0..3 cover all current PRad-II
 // GEMs).  Out-of-range det_ids fall back to "show" so unexpected
@@ -361,6 +375,29 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
         ctx.setLineDash([]);
     }
 
+    // Threshold band: ±noise[ch]·zs_sigma, dashed grey, drawn before the
+    // data traces so traces sit on top.  Only meaningful for processed
+    // view (raw view shows pre-pedestal-subtraction values).
+    const zsSigma = (gemApvData && gemApvData.zs_sigma) || 0;
+    if (gemApvShowThreshold && gemApvShowProcessed && apv.noise && zsSigma > 0) {
+        const nStrips = Math.min(128, apv.noise.length);
+        const stepX = plotW / Math.max(nStrips - 1, 1);
+        ctx.strokeStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.lineWidth = 0.8;
+        ctx.setLineDash([4, 3]);
+        for (const sign of [+1, -1]) {
+            ctx.beginPath();
+            for (let s = 0; s < nStrips; s++) {
+                const x = plotX + s * stepX;
+                const y = toY(sign * apv.noise[s] * zsSigma);
+                if (s === 0) ctx.moveTo(x, y);
+                else         ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
+    }
+
     // Time-sample traces.
     if (frame && frame.length > 0) {
         const nStrips = Math.min(128, frame.length);
@@ -378,6 +415,26 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
             }
             ctx.stroke();
         }
+    }
+
+    // CM overlay: one horizontal dashed line per enabled time sample,
+    // colour-matched (desaturated) with the trace so reader can pair
+    // firmware CM with the same-colour strip waveform.  Drawn AFTER the
+    // traces so it sits on top.  Skipped if the firmware didn't emit
+    // type-0xD debug-header words (apv.cm == null).
+    if (gemApvShowCm && Array.isArray(apv.cm)) {
+        ctx.lineWidth = 1.4;
+        ctx.setLineDash([5, 3]);
+        for (let t = 0; t < apv.cm.length && t < 6; t++) {
+            if (!gemApvSampleMask[t]) continue;
+            ctx.strokeStyle = GEM_APV_CM_COLORS[t];
+            ctx.beginPath();
+            const y = toY(apv.cm[t]);
+            ctx.moveTo(plotX, y);
+            ctx.lineTo(plotX + plotW, y);
+            ctx.stroke();
+        }
+        ctx.setLineDash([]);
     }
 
     // ZS hit tick row.
@@ -427,6 +484,10 @@ function setupGemApvControls() {
                     gemApvShowSignalOnly = el.checked; break;
                 case 'gem-apv-shared-y':
                     gemApvSharedY = el.checked; break;
+                case 'gem-apv-threshold':
+                    gemApvShowThreshold = el.checked; break;
+                case 'gem-apv-cm':
+                    gemApvShowCm = el.checked; break;
             }
             renderGemApvPanels();
         };
@@ -434,6 +495,8 @@ function setupGemApvControls() {
     cb('gem-apv-process',     gemApvShowProcessed);
     cb('gem-apv-signal-only', gemApvShowSignalOnly);
     cb('gem-apv-shared-y',    gemApvSharedY);
+    cb('gem-apv-threshold',   gemApvShowThreshold);
+    cb('gem-apv-cm',          gemApvShowCm);
     // Per-GEM filter (gem0…gem3) — hides whole sections, including the
     // separator above (which is a top border on the section itself).
     for (let d = 0; d < gemApvDetMask.length; d++) {

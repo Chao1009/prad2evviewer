@@ -657,6 +657,9 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
         result["apvs"]      = json::array();
         return result;
     }
+    // Global software N-sigma multiplier — frontend draws ±noise[ch]·zs_sigma
+    // bands as the threshold curve when the user toggles it on.
+    result["zs_sigma"] = gem_sys.GetZeroSupThreshold();
 
     // Detector summary — det_id → name + APV count, used by the frontend
     // to lay out one section per GEM with consistent ordering.
@@ -681,6 +684,8 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
     //   raw[128][6]        — int16 firmware samples (0 if APV not in event)
     //   processed[128][6]  — pedestal + CM corrected float (0 if not present)
     //   hits[128]          — ZS survivor bool, encoded as 0/1 ints to keep JSON compact
+    //   noise[128]         — per-channel pedestal RMS (for the threshold band)
+    //   cm[6] | null       — firmware online common mode per time sample
     //   no_hit_fr          — firmware full-readout (nstrips==128) but no survivors
     //   present            — APV showed up in this event's SSP data
     constexpr int N_STRIPS = 128;
@@ -697,6 +702,7 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
         json raw_arr = json::array();
         json proc_arr = json::array();
         json hit_arr = json::array();
+        json noise_arr = json::array();
         bool any_hit = false;
 
         for (int s = 0; s < N_STRIPS; ++s) {
@@ -717,6 +723,18 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
             bool hit = present && gem_sys.IsChannelHit(i, s);
             if (hit) any_hit = true;
             hit_arr.push_back(hit ? 1 : 0);
+            noise_arr.push_back(std::round(cfg.pedestal[s].noise * 10.f) / 10.f);
+        }
+
+        // Firmware online CM (6 samples) — only present when the MPD emitted
+        // type-0xD debug-header words; otherwise null so the frontend can
+        // skip the overlay rather than draw zeros.
+        json cm_val = nullptr;
+        if (present && raw->has_online_cm) {
+            json cm_arr = json::array();
+            for (int t = 0; t < N_TS; ++t)
+                cm_arr.push_back(static_cast<int>(raw->online_cm[t]));
+            cm_val = std::move(cm_arr);
         }
 
         std::string det_name;
@@ -743,6 +761,8 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
             {"raw",        std::move(raw_arr)},
             {"processed",  std::move(proc_arr)},
             {"hits",       std::move(hit_arr)},
+            {"noise",      std::move(noise_arr)},
+            {"cm",         std::move(cm_val)},
         });
     }
     result["apvs"] = apvs;
