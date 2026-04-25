@@ -828,11 +828,21 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
 // Per-trigger-bits counts are tracked per event type so EPICS / Sync / other
 // non-physics events (which have no 0xE10A TI bank and therefore default to
 // trigger_bits=0) don't get lumped in with real physics triggers.
+//
+// Rate estimates use the TI timestamp span across physics events (250 MHz /
+// 4 ns ticks) as the wall-clock denominator — the same span is applied to
+// non-physics rows since they share the run.
 static int doTriggers(EvChannel &ch, bool verbose)
 {
+    static constexpr double TI_TICK_SEC = 4e-9;
+
     int record = 0, decoded = 0;
     // key: (event_type, trigger_bits) → count
     std::map<std::pair<EventType, uint32_t>, int> trig_counts;
+
+    // Physics-event TI timestamps drive the run span; non-physics events have
+    // info.timestamp == 0 so they don't contribute.
+    uint64_t first_ts = 0, last_ts = 0;
 
     if (verbose) {
         std::cout << std::setw(10) << "evtype"
@@ -856,6 +866,11 @@ static int doTriggers(EvChannel &ch, bool verbose)
             decoded++;
             trig_counts[{et, info.trigger_bits}]++;
 
+            if (et == EventType::Physics && info.timestamp != 0) {
+                if (first_ts == 0) first_ts = info.timestamp;
+                last_ts = info.timestamp;
+            }
+
             if (verbose) {
                 const char *et_name =
                     et == EventType::Physics ? "Physics" :
@@ -874,11 +889,21 @@ static int doTriggers(EvChannel &ch, bool verbose)
         }
     }
 
-    std::cout << "=== Trigger Bits Summary (" << decoded << " events) ===\n";
+    double duration_sec = (last_ts > first_ts)
+        ? static_cast<double>(last_ts - first_ts) * TI_TICK_SEC
+        : 0.0;
+
+    std::cout << "=== Trigger Bits Summary (" << decoded << " events";
+    if (duration_sec > 0)
+        std::cout << ", span " << std::fixed << std::setprecision(3)
+                  << duration_sec << " s";
+    std::cout << ") ===\n";
+
     std::cout << "  " << std::setw(10) << std::left << "evtype"
               << std::setw(14) << "trigger_bits"
-              << std::setw(10) << "count" << std::right << "\n";
-    std::cout << "  " << std::string(34, '-') << "\n";
+              << std::setw(10) << "count"
+              << std::setw(14) << "rate(Hz)" << std::right << "\n";
+    std::cout << "  " << std::string(48, '-') << "\n";
     for (auto &[key, cnt] : trig_counts) {
         const char *et_name =
             key.first == EventType::Physics ? "Physics" :
@@ -888,11 +913,24 @@ static int doTriggers(EvChannel &ch, bool verbose)
         std::cout << "  " << std::setw(10) << std::left << et_name << std::right
                   << "  0x" << std::hex << std::setw(8) << std::setfill('0')
                   << key.second << std::dec << std::setfill(' ') << "  "
-                  << std::setw(10) << cnt << "\n";
+                  << std::setw(10) << cnt;
+        if (duration_sec > 0) {
+            char rbuf[32];
+            snprintf(rbuf, sizeof(rbuf), "%.3f", cnt / duration_sec);
+            std::cout << std::setw(14) << rbuf;
+        } else {
+            std::cout << std::setw(14) << "--";
+        }
+        std::cout << "\n";
     }
-    std::cout << "\nNote: non-physics rows (Epics/Sync/Unknown) have no 0xE10A TI\n"
-                 "bank, so their trigger_bits default to 0.  Inspect their bank\n"
-                 "structure with `-m tree -n <N>` or `-m epics`.\n";
+    std::cout << "\nNotes:\n"
+                 "  - Rates use the TI-timestamp span (250 MHz / 4 ns ticks)\n"
+                 "    of physics events as the wall-clock denominator; non-\n"
+                 "    physics rows share the same denominator.  '--' means no\n"
+                 "    decoded physics events with a valid timestamp were found.\n"
+                 "  - Non-physics rows (Epics/Sync/Unknown) have no 0xE10A TI\n"
+                 "    bank, so their trigger_bits default to 0.  Inspect their\n"
+                 "    bank structure with `-m tree -n <N>` or `-m epics`.\n";
 
     return 0;
 }
