@@ -29,8 +29,8 @@
 //
 // Pedestals, common-mode files, and HyCal calibration are auto-discovered
 // from database/config.json -> runinfo (matches the live monitor).  Pass
-// nullptr for any of the file args to use the discovered defaults; pass an
-// explicit path to override.
+// "" (empty string) for any of the file args to use the discovered
+// defaults; pass an explicit path to override.
 //
 // Tree (one entry per physics event):
 //   event_num, trigger_bits                         scalar
@@ -89,6 +89,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <TError.h>          // Printf() — line-flushed message output
 #include <TFile.h>
 #include <TTree.h>
 #include <TString.h>
@@ -102,6 +103,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -323,58 +325,151 @@ append_strips(EventVars &ev, int mi, int plane,
 } // anonymous namespace
 
 //=============================================================================
-// Entry point
+// Tiny probe — call this from the ROOT prompt right after `.L file.C+`.
+//   gem_clusters_to_root_probe(7)
+// If THIS prints `[probe] called with 7` and returns 14, the .so loads
+// cleanly and basic dispatch works.  If even this dies silently, the
+// problem is at .so load time (despite `.L` appearing to succeed); if
+// this works but the real function crashes, the issue is specific to
+// `gem_clusters_to_root`'s body or wrapper.
+//=============================================================================
+extern "C" int gem_clusters_to_root_probe(int x)
+{
+    std::fprintf(stderr, "[probe] called with %d\n", x);
+    std::fflush(stderr);
+    return x * 2;
+}
+
+//=============================================================================
+// Forward declaration of the full 11-arg version so the convenience
+// overloads below can delegate to it.
 //=============================================================================
 int gem_clusters_to_root(const char *evio_path,
-                         const char *out_path     = "match.root",
-                         const char *gem_ped_file = nullptr,    // null → runinfo
-                         const char *gem_cm_file  = nullptr,    // null → runinfo
-                         const char *hc_calib_file = nullptr,   // null → runinfo
-                         long        max_events   = 0,
-                         int         run_num      = -1,         // -1 → latest
-                         float       match_nsigma = 3.0f,
-                         const char *daq_config   = nullptr,
-                         const char *gem_map_file = nullptr,
-                         const char *hc_map_file  = nullptr)
+                         const char *out_path,
+                         const char *gem_ped_file,
+                         const char *gem_cm_file,
+                         const char *hc_calib_file,
+                         long        max_events,
+                         int         run_num,
+                         float       match_nsigma,
+                         const char *daq_config,
+                         const char *gem_map_file,
+                         const char *hc_map_file);
+
+// Convenience overloads — bottom-class to the full 11-arg version with
+// empty-string defaults (auto-discovery via runinfo).  Adding these
+// sidesteps a cling default-arg-marshalling bug that SEGVs at the call
+// site for 2..N arg invocations of the full signature.
+int gem_clusters_to_root(const char *evio_path, const char *out_path)
 {
+    return gem_clusters_to_root(evio_path, out_path,
+                                "", "", "", 0L, -1, 3.0f, "", "", "");
+}
+int gem_clusters_to_root(const char *evio_path, const char *out_path,
+                         long max_events)
+{
+    return gem_clusters_to_root(evio_path, out_path,
+                                "", "", "", max_events, -1, 3.0f, "", "", "");
+}
+int gem_clusters_to_root(const char *evio_path, const char *out_path,
+                         long max_events, int run_num)
+{
+    return gem_clusters_to_root(evio_path, out_path,
+                                "", "", "", max_events, run_num, 3.0f, "", "", "");
+}
+int gem_clusters_to_root(const char *evio_path, const char *out_path,
+                         long max_events, int run_num, float match_nsigma)
+{
+    return gem_clusters_to_root(evio_path, out_path,
+                                "", "", "", max_events, run_num, match_nsigma,
+                                "", "", "");
+}
+
+//=============================================================================
+// Entry point — full version
+//=============================================================================
+// NOTE on the function signature:
+//
+// The full version takes 11 explicit args (no defaults).  Cling has a
+// long-standing bug marshalling many mixed-type default arguments
+// (`const char*` interleaved with `long`, `int`, `float`) — a 2-arg call
+// like `gem_clusters_to_root(path, out)` would SEGV at the call site
+// before the function body even runs, because the default values get
+// synthesized with the wrong calling convention.
+//
+// To dodge that entirely we expose convenience overloads (2-arg, 3-arg,
+// 4-arg) that bottom-class to the full 11-arg version with empty-string
+// path defaults.  Empty strings are treated the same as nullptr by the
+// `blank` lambda inside the function.
+//
+// To override paths, use empty strings for the ones you want auto-
+// discovered from runinfo (e.g. ped="" cm="" calib="").
+int gem_clusters_to_root(const char *evio_path,
+                         const char *out_path,
+                         const char *gem_ped_file,
+                         const char *gem_cm_file,
+                         const char *hc_calib_file,
+                         long        max_events,
+                         int         run_num,
+                         float       match_nsigma,
+                         const char *daq_config,
+                         const char *gem_map_file,
+                         const char *hc_map_file)
+{
+    // Raw fprintf+fflush as the FIRST thing — if Printf were buggy from
+    // a dynamically loaded .so, this still shows.  If even THIS doesn't
+    // fire, the crash is at the call site itself (the function body is
+    // never executing) and we need a gdb backtrace.
+    std::fprintf(stderr,
+                 "[gem_clusters_to_root] ENTRY: evio=%s out=%s\n",
+                 evio_path ? evio_path : "(null)",
+                 out_path  ? out_path  : "(null)");
+    std::fflush(stderr);
+
+    // Treat null / empty interchangeably so callers who pass nullptr
+    // (e.g. through a wrapper) still get the auto-discovery path.
+    auto blank = [](const char *s) -> bool { return !s || !*s; };
+    Printf("[gem_clusters_to_root] entered: evio=%s out=%s",
+           evio_path ? evio_path : "(null)",
+           out_path  ? out_path  : "(null)");
+
     //---- DAQ config ---------------------------------------------------------
-    std::string daq_path = daq_config ? daq_config
-                                      : resolve_db_path("daq_config.json");
+    std::string daq_path = blank(daq_config)
+        ? resolve_db_path("daq_config.json") : std::string(daq_config);
     DaqConfig cfg;
     if (!load_daq_config(daq_path, cfg)) {
-        std::cerr << "ERROR: cannot load DAQ config " << daq_path << "\n";
+        Printf("[ERROR] cannot load DAQ config %s", daq_path.c_str());
         return 1;
     }
-    std::cout << "DAQ config : " << daq_path << "\n";
+    Printf("[setup] DAQ config : %s", daq_path.c_str());
 
     //---- runinfo (geometry + calibration paths) -----------------------------
     std::string ri_path = discover_runinfo_path();
     if (ri_path.empty()) {
-        std::cerr << "ERROR: no runinfo pointer in database/config.json — "
-                     "cannot resolve calibration / geometry.\n";
+        Printf("[ERROR] no runinfo pointer in database/config.json"
+               " — cannot resolve calibration / geometry.");
         return 1;
     }
     analysis::gRunConfig = prad2::LoadRunConfig(ri_path, run_num);
     auto &geo = analysis::gRunConfig;
-    std::cout << "RunInfo    : " << ri_path
-              << "  beam=" << geo.Ebeam
-              << "MeV  hycal_z=" << geo.hycal_z << "mm\n";
+    Printf("[setup] RunInfo    : %s  beam=%.0f MeV  hycal_z=%.1f mm",
+           ri_path.c_str(), geo.Ebeam, geo.hycal_z);
 
     //---- HyCal --------------------------------------------------------------
-    std::string hc_map = hc_map_file ? hc_map_file
-                                     : resolve_db_path("hycal_modules.json");
+    std::string hc_map = blank(hc_map_file)
+        ? resolve_db_path("hycal_modules.json") : std::string(hc_map_file);
     std::string daq_map = resolve_db_path("daq_map.json");
     fdec::HyCalSystem hycal;
     hycal.Init(hc_map, daq_map);
 
-    std::string hc_calib = hc_calib_file ? resolve_db_path(hc_calib_file)
-                                         : resolve_db_path(geo.energy_calib_file);
+    std::string hc_calib = blank(hc_calib_file)
+        ? resolve_db_path(geo.energy_calib_file)
+        : resolve_db_path(hc_calib_file);
     if (!hc_calib.empty()) {
         int n = hycal.LoadCalibration(hc_calib);
-        std::cout << "HC calib   : " << hc_calib
-                  << " (" << n << " modules)\n";
+        Printf("[setup] HC calib   : %s (%d modules)", hc_calib.c_str(), n);
     } else {
-        std::cerr << "WARN: no HyCal calibration file — energies will be wrong.\n";
+        Printf("[WARN] no HyCal calibration file — energies will be wrong.");
     }
 
     fdec::HyCalCluster hc_clusterer(hycal);
@@ -382,45 +477,48 @@ int gem_clusters_to_root(const char *evio_path,
     hc_clusterer.SetConfig(hc_cfg);
 
     //---- GEM ----------------------------------------------------------------
-    std::string gem_map = gem_map_file ? gem_map_file
-                                       : resolve_db_path("gem_map.json");
+    std::string gem_map = blank(gem_map_file)
+        ? resolve_db_path("gem_map.json") : std::string(gem_map_file);
     gem::GemSystem  gem_sys;
     gem::GemCluster gem_clusterer;
     gem_sys.Init(gem_map);
-    std::cout << "GEM map    : " << gem_map
-              << "  (" << gem_sys.GetNDetectors() << " detectors)\n";
+    Printf("[setup] GEM map    : %s  (%d detectors)",
+           gem_map.c_str(), gem_sys.GetNDetectors());
 
     auto remap     = build_gem_crate_remap(cfg);
     auto crate_map = build_full_crate_remap(cfg);
-    std::string ped_path = gem_ped_file ? resolve_db_path(gem_ped_file)
-                                        : resolve_db_path(geo.gem_pedestal_file);
-    std::string cm_path  = gem_cm_file  ? resolve_db_path(gem_cm_file)
-                                        : resolve_db_path(geo.gem_common_mode_file);
+    std::string ped_path = blank(gem_ped_file)
+        ? resolve_db_path(geo.gem_pedestal_file)
+        : resolve_db_path(gem_ped_file);
+    std::string cm_path = blank(gem_cm_file)
+        ? resolve_db_path(geo.gem_common_mode_file)
+        : resolve_db_path(gem_cm_file);
     if (!ped_path.empty()) {
         gem_sys.LoadPedestals(ped_path, remap);
-        std::cout << "GEM peds   : " << ped_path << "\n";
+        Printf("[setup] GEM peds   : %s", ped_path.c_str());
     } else {
-        std::cerr << "WARN: no GEM pedestal file — full-readout data reconstructs empty.\n";
+        Printf("[WARN] no GEM pedestal file — full-readout data reconstructs empty.");
     }
     if (!cm_path.empty()) {
         gem_sys.LoadCommonModeRange(cm_path, remap);
-        std::cout << "GEM CM     : " << cm_path << "\n";
+        Printf("[setup] GEM CM     : %s", cm_path.c_str());
     }
 
     //---- EVIO ---------------------------------------------------------------
     EvChannel ch;
     ch.SetConfig(cfg);
     if (ch.OpenAuto(evio_path) != status::success) {
-        std::cerr << "ERROR: cannot open " << evio_path << "\n";
+        Printf("[ERROR] cannot open EVIO %s", evio_path);
         return 1;
     }
-    std::cout << "EVIO       : " << evio_path << "\n";
-    std::cout << "Match cut  : " << match_nsigma << "·σ_total\n";
+    Printf("[setup] EVIO       : %s", evio_path);
+    Printf("[setup] Match cut  : %.2f · sigma_total", match_nsigma);
 
     //---- ROOT output --------------------------------------------------------
     TFile fout(out_path, "RECREATE");
     if (fout.IsZombie()) {
-        std::cerr << "ERROR: cannot create " << out_path << "\n"; return 1;
+        Printf("[ERROR] cannot create %s", out_path);
+        return 1;
     }
     TTree *tree = new TTree("match",
         "HyCal+GEM clusters with straight-line matches and constituent strip waveforms");
@@ -429,8 +527,16 @@ int gem_clusters_to_root(const char *evio_path,
 
     //---- event loop ---------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
-    fdec::EventData    fadc_evt;
-    ssp::SspEventData  ssp_evt;
+    // Heap-allocate the big POD-ish structs.  ssp::SspEventData and
+    // fdec::EventData both contain large fixed-size sample arrays
+    // (hundreds of KB to MB) and putting them on the stack overflows the
+    // guard page at function entry — the SEGV happens *before* the body
+    // even runs, so no Printf or fprintf at "line 1" can fire.  Same
+    // pattern as gem_dump.cpp and analysis/Replay.cpp.
+    auto fadc_evt_ptr = std::make_unique<fdec::EventData>();
+    auto ssp_evt_ptr  = std::make_unique<ssp::SspEventData>();
+    auto &fadc_evt    = *fadc_evt_ptr;
+    auto &ssp_evt     = *ssp_evt_ptr;
     fdec::WaveAnalyzer ana;
     fdec::WaveResult   wres;
 
@@ -644,8 +750,8 @@ int gem_clusters_to_root(const char *evio_path,
 
             if (max_events > 0 && n_phys >= max_events) goto done;
         }
-        if (n_phys % 5000 == 0 && n_phys > 0)
-            std::cerr << "  " << n_phys << " physics events...\r" << std::flush;
+        if (n_phys > 0 && n_phys % 5000 == 0)
+            Printf("[progress] %ld physics events", n_phys);
     }
 
 done:
@@ -656,14 +762,14 @@ done:
     tree->Write();
     fout.Close();
 
-    std::cout << "\n";
-    std::cout << "EVIO records          : " << n_read         << "\n";
-    std::cout << "physics events        : " << n_phys         << "\n";
-    std::cout << "tree entries written  : " << n_filled       << "\n";
-    std::cout << "total HyCal clusters  : " << total_clusters << "\n";
-    std::cout << "total matches         : " << total_matches  << "\n";
-    std::cout << "total strip rows      : " << total_strips   << "\n";
-    std::cout << "elapsed (s)           : " << secs           << "\n";
-    std::cout << "wrote                 : " << out_path       << "\n";
+    Printf("--- summary ---");
+    Printf("  EVIO records          : %ld", n_read);
+    Printf("  physics events        : %ld", n_phys);
+    Printf("  tree entries written  : %ld", n_filled);
+    Printf("  total HyCal clusters  : %ld", total_clusters);
+    Printf("  total matches         : %ld", total_matches);
+    Printf("  total strip rows      : %ld", total_strips);
+    Printf("  elapsed (s)           : %.2f", secs);
+    Printf("  wrote                 : %s", out_path);
     return 0;
 }

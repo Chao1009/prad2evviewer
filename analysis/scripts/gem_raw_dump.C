@@ -71,16 +71,36 @@ static void dump_bank(const EvChannel &ch, const EvNode &node,
 
 //-----------------------------------------------------------------------------
 // Entry point — runnable via `.x gem_raw_dump.C+(...)` after rootlogon.
+//
+// The full version takes 4 explicit args (no defaults).  Cling's
+// default-arg synthesis SEGVs when an interpreter call leaves trailing
+// `const char* = ...` defaults to be filled in alongside int/long
+// defaults, so we expose convenience overloads for the common arg
+// counts and let them delegate to the full version.
 //-----------------------------------------------------------------------------
 int gem_raw_dump(const char *evio_path,
-                 long        max_events    = 5,
-                 int         n_words_show  = 8,
-                 const char *daq_config    = nullptr)
+                 long        max_events,
+                 int         n_words_show,
+                 const char *daq_config);
+
+int gem_raw_dump(const char *evio_path)
+{ return gem_raw_dump(evio_path, 5L, 8, ""); }
+int gem_raw_dump(const char *evio_path, long max_events)
+{ return gem_raw_dump(evio_path, max_events, 8, ""); }
+int gem_raw_dump(const char *evio_path, long max_events, int n_words_show)
+{ return gem_raw_dump(evio_path, max_events, n_words_show, ""); }
+
+int gem_raw_dump(const char *evio_path,
+                 long        max_events,
+                 int         n_words_show,
+                 const char *daq_config)
 {
     //---- load DAQ config ----------------------------------------------------
     // PRAD2_DATABASE_DIR is set by rootlogon.C; honour an explicit override
     // if the caller wants to point at a different config (e.g. legacy run).
-    std::string cfg_path = daq_config ? daq_config : "";
+    // Default is an empty string rather than nullptr — cling SEGVs when
+    // marshalling mixed-type defaults if any of them is `nullptr`.
+    std::string cfg_path = (daq_config && *daq_config) ? daq_config : "";
     if (cfg_path.empty()) {
         const char *db = std::getenv("PRAD2_DATABASE_DIR");
         cfg_path = std::string(db ? db : "database") + "/daq_config.json";

@@ -149,10 +149,10 @@ Pedestals, common-mode files, and HyCal calibration are auto-discovered from `da
     "/data/stage6/prad_023867/prad_023867.evio.00000", \
     "match_023867.root")
 
-# tighter matching cut (2σ instead of 3σ default):
+# tighter matching cut (2σ instead of 3σ default) — 5-arg overload:
 .x ../analysis/scripts/gem_clusters_to_root.C+( \
     "/data/.../prad_023867.evio.00000", "out.root", \
-    nullptr, nullptr, nullptr, 0, /*run_num=*/-1, /*nsigma=*/2.0f)
+    0L, -1, 2.0f)
 
 # explicit overrides (paths relative to PRAD2_DATABASE_DIR or absolute):
 .x ../analysis/scripts/gem_clusters_to_root.C+( \
@@ -161,7 +161,14 @@ Pedestals, common-mode files, and HyCal calibration are auto-discovered from `da
     "calibration/calibration_factor_0.json")
 ```
 
-Full signature: `gem_clusters_to_root(evio_path, out_path, gem_ped_file=null, gem_cm_file=null, hc_calib_file=null, max_events=0, run_num=-1, match_nsigma=3.0, daq_config=null, gem_map_file=null, hc_map_file=null)`.
+Convenience overloads (sidestep a cling default-arg-marshalling SEGV):
+- `gem_clusters_to_root(evio, out)`
+- `gem_clusters_to_root(evio, out, max_events)`
+- `gem_clusters_to_root(evio, out, max_events, run_num)`
+- `gem_clusters_to_root(evio, out, max_events, run_num, match_nsigma)`
+
+Full 11-arg version (for explicit overrides — pass `""` to auto-discover any path):
+`gem_clusters_to_root(evio_path, out_path, gem_ped_file, gem_cm_file, hc_calib_file, max_events, run_num, match_nsigma, daq_config, gem_map_file, hc_map_file)`.
 
 ### tagger_hycal_correlation.C
 

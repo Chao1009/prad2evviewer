@@ -118,18 +118,33 @@ static std::vector<std::string> discoverFiles(const char *dir, int run)
 }
 
 // ── main ───────────────────────────────────────────────────────────────
+//
+// Full version takes 4 explicit args (no defaults).  A 2-arg overload
+// delegates with empty-string placeholders so cling's interpreter call
+// path doesn't have to synthesize `const char* = nullptr` defaults
+// (known SEGV trigger when mixed with other types — see the matching
+// note in gem_clusters_to_root.C).
 void lms_alpha_normalize(const char *data_dir, int run_number,
-                         const char *daq_cfg_path = nullptr,
-                         const char *daq_map_path = nullptr)
+                         const char *daq_cfg_path,
+                         const char *daq_map_path);
+
+void lms_alpha_normalize(const char *data_dir, int run_number)
+{
+    lms_alpha_normalize(data_dir, run_number, "", "");
+}
+
+void lms_alpha_normalize(const char *data_dir, int run_number,
+                         const char *daq_cfg_path,
+                         const char *daq_map_path)
 {
     // --- locate database directory ---
     TString dbDir = gSystem->Getenv("PRAD2_DATABASE_DIR");
     if (dbDir.IsNull()) dbDir = "database";
 
-    TString cfgFile = daq_cfg_path ? daq_cfg_path
-                                   : Form("%s/daq_config.json", dbDir.Data());
-    TString mapFile = daq_map_path ? daq_map_path
-                                   : Form("%s/daq_map.json", dbDir.Data());
+    TString cfgFile = (daq_cfg_path && *daq_cfg_path) ? TString(daq_cfg_path)
+                                                      : Form("%s/daq_config.json", dbDir.Data());
+    TString mapFile = (daq_map_path && *daq_map_path) ? TString(daq_map_path)
+                                                      : Form("%s/daq_map.json", dbDir.Data());
 
     printf("============================================\n");
     printf(" PRad LMS / Alpha Normalization\n");

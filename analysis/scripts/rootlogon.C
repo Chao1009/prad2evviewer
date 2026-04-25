@@ -296,6 +296,15 @@
 
     // -------------------------------------------------------------------------
     // Apply include paths (verbose).
+    //
+    // ACLiC compiles the .C with gcc *and* runs cling to generate a
+    // dictionary.  The two see different include lists:
+    //   gSystem->AddIncludePath()       → seen by gcc (ACLiC compile step)
+    //   gInterpreter->AddIncludePath()  → seen by cling (dictionary step)
+    // Without the second call, the dict step fails with
+    //   "fatal error: 'EvChannel.h' file not found"
+    // even though the actual gcc compile would succeed.  We add to both so
+    // every header reachable at gcc time is also reachable at dict time.
     // -------------------------------------------------------------------------
     Printf("[probe] include paths");
     auto addInc = [&](const char *tag, const TString &p) {
@@ -305,7 +314,10 @@
         }
         bool exists = !gSystem->AccessPathName(p);
         VLOG("  [%s] %-14s %s", exists ? "+" : "-", tag, p.Data());
-        if (exists) gSystem->AddIncludePath(Form("-I%s", p.Data()));
+        if (exists) {
+            gSystem->AddIncludePath(Form("-I%s", p.Data()));
+            gInterpreter->AddIncludePath(p.Data());
+        }
     };
     addInc("prad2dec",      incDec);
     addInc("prad2det",      incDet);

@@ -252,13 +252,29 @@ struct Row {
 // Entry point
 //=============================================================================
 
+// Full version takes 4 explicit args (no defaults).  Convenience overloads
+// delegate to it — sidesteps a cling default-arg-marshalling bug that
+// SEGVs at the call site for short-arg invocations of mixed-type defaults.
 int tagger_hycal_correlation(const char *evio_path,
-                             const char *out_path   = "tagger_wsum_corr.root",
-                             Long64_t    max_events = 0,
-                             const char *daq_config = nullptr)
+                             const char *out_path,
+                             Long64_t    max_events,
+                             const char *daq_config);
+
+int tagger_hycal_correlation(const char *evio_path)
+{ return tagger_hycal_correlation(evio_path, "tagger_wsum_corr.root", 0LL, ""); }
+int tagger_hycal_correlation(const char *evio_path, const char *out_path)
+{ return tagger_hycal_correlation(evio_path, out_path, 0LL, ""); }
+int tagger_hycal_correlation(const char *evio_path, const char *out_path,
+                             Long64_t max_events)
+{ return tagger_hycal_correlation(evio_path, out_path, max_events, ""); }
+
+int tagger_hycal_correlation(const char *evio_path,
+                             const char *out_path,
+                             Long64_t    max_events,
+                             const char *daq_config)
 {
     //---- load DAQ config ----------------------------------------------------
-    std::string cfg_path = daq_config ? daq_config : "";
+    std::string cfg_path = (daq_config && *daq_config) ? daq_config : "";
     if (cfg_path.empty()) {
         const char *db = std::getenv("PRAD2_DATABASE_DIR");
         cfg_path = std::string(db ? db : "database") + "/daq_config.json";
