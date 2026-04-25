@@ -494,10 +494,10 @@ if(!prad1){
     std::cerr << "GEM map  : " << gem_map_file
                 << " (" << gem_sys->GetNDetectors() << " detectors)\n";
 
-    if (!gem_ped_file.empty()) {
+    if (!gem_ped_file.empty()) 
         gem_sys->LoadPedestals(gem_ped_file);
-        std::cerr << "GEM peds : " << gem_ped_file << "\n";
-    }
+    else gem_sys->LoadPedestals(db_dir + "/" + gRunConfig.gem_pedestal_file);
+    std::cerr << "GEM peds : " << gem_ped_file << "\n";
 
     if (zerosup_override >= 0.f) {
         gem_sys->SetZeroSupThreshold(zerosup_override);
