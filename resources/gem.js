@@ -156,52 +156,82 @@ function plotGemOccupancy(data) {
 
     const detectors = data.detectors || [];
     const total = data.total || 0;
+    const scale = total > 0 ? 1.0 / total : 0;
 
-    GEM_OCC_IDS.forEach((divId, detId) => {
-        const det = detectors.find(d => d.id === detId);
-        if (!det) {
+    // Pre-compute per-detector z matrices and the global zmax so all four
+    // heatmaps share one colour axis.  Sharing the scale lets the eye
+    // compare absolute occupancy across GEMs, not just shape per GEM.
+    const dets = GEM_OCC_IDS.map((_, detId) => detectors.find(d => d.id === detId));
+    const grids = dets.map(det => {
+        if (!det) return null;
+        const nx = det.nx, ny = det.ny;
+        const z = [];
+        let local_max = 0;
+        for (let iy = 0; iy < ny; iy++) {
+            const row = [];
+            for (let ix = 0; ix < nx; ix++) {
+                const v = (det.bins[iy * nx + ix] || 0) * scale;
+                row.push(v);
+                if (v > local_max) local_max = v;
+            }
+            z.push(row);
+        }
+        return { det, z, local_max };
+    });
+    let zmax = 0;
+    for (const g of grids) if (g && g.local_max > zmax) zmax = g.local_max;
+    if (zmax <= 0) zmax = 1e-6;   // avoid Plotly auto-scaling to a flat plot
+
+    // Compact per-heatmap layout: thin colourbar only on the right column
+    // (cells 1 and 3), no axis titles, small title font.  Margins tightened
+    // so the 2x2 grid uses its real estate for the heatmaps, not whitespace.
+    const compactMargin  = { l: 28, r: 8,  t: 18, b: 20 };
+    const compactMarginR = { l: 28, r: 42, t: 18, b: 20 };  // reserve for colourbar
+
+    GEM_OCC_IDS.forEach((divId, idx) => {
+        const g = grids[idx];
+        const onRightCol = (idx % 2) === 1;   // 0,2 left | 1,3 right
+        const showBar = onRightCol;
+        const titleText = g && g.det
+            ? g.det.name + (total > 0 ? ` (${total})` : '')
+            : 'GEM' + idx;
+
+        const layout = Object.assign({}, PL_GEM_OCC(), {
+            title: { text: titleText, font: { size: 11, color: THEME.text } },
+            xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border, ticks: 'outside', ticklen: 3 },
+            yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border, ticks: 'outside', ticklen: 3 },
+            margin: showBar ? compactMarginR : compactMargin,
+        });
+
+        if (!g) {
             Plotly.react(divId,
                 [{ x: [], y: [], z: [[]], type: 'heatmap' }],
-                Object.assign({}, PL_GEM_OCC(), { title: { text: 'GEM' + detId, font: { size: 12, color: THEME.text } } }),
-                { responsive: true, displayModeBar: false });
+                layout, { responsive: true, displayModeBar: false });
             return;
         }
 
+        const det = g.det;
         const nx = det.nx, ny = det.ny;
-        const xSize = det.x_size, ySize = det.y_size;
-        const xStep = xSize / nx, yStep = ySize / ny;
-
-        // build z matrix as rate (count / total_events)
-        const z = [];
-        const scale = total > 0 ? 1.0 / total : 0;
-        for (let iy = 0; iy < ny; iy++) {
-            const row = [];
-            for (let ix = 0; ix < nx; ix++)
-                row.push((det.bins[iy * nx + ix] || 0) * scale);
-            z.push(row);
-        }
-
-        const x0 = -xSize / 2 + xStep / 2;
-        const y0 = -ySize / 2 + yStep / 2;
+        const xStep = det.x_size / nx, yStep = det.y_size / ny;
+        const x0 = -det.x_size / 2 + xStep / 2;
+        const y0 = -det.y_size / 2 + yStep / 2;
         const xArr = Array.from({length: nx}, (_, i) => x0 + i * xStep);
         const yArr = Array.from({length: ny}, (_, i) => y0 + i * yStep);
 
-        const traces = [{
-            x: xArr, y: yArr, z: z,
+        const trace = {
+            x: xArr, y: yArr, z: g.z,
             type: 'heatmap',
-            colorscale: 'Hot', reversescale: true,
-            hovertemplate: det.name + '<br>x=%{x:.0f} mm<br>y=%{y:.0f} mm<br>rate=%{z:.4f}<extra></extra>',
-            colorbar: { thickness: 10, tickfont: { size: 9 }, tickformat: '.3f' },
-        }];
+            colorscale: 'Hot',
+            zmin: 0, zmax: zmax,
+            zauto: false,
+            hovertemplate: det.name + '<br>x=%{x:.0f}<br>y=%{y:.0f}<br>rate=%{z:.4f}<extra></extra>',
+            showscale: showBar,
+        };
+        if (showBar) {
+            trace.colorbar = { thickness: 6, tickfont: { size: 8 }, tickformat: '.2f', len: 0.92 };
+        }
 
-        const layout = Object.assign({}, PL_GEM_OCC(), {
-            title: { text: det.name + (total > 0 ? ' (' + total + ' evts)' : ''),
-                     font: { size: 12, color: THEME.text } },
-            xaxis: { title: 'X (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border },
-            yaxis: { title: 'Y (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border },
-        });
-
-        Plotly.react(divId, traces, layout, { responsive: true, displayModeBar: false });
+        Plotly.react(divId, [trace], layout, { responsive: true, displayModeBar: false });
     });
 }
 
