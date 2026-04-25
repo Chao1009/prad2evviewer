@@ -149,6 +149,16 @@ function connectWebSocket() {
                     clearFrontend();
                     fetchConfigAndApply();
                 }
+            } else if (msg.type === 'gem_threshold_updated') {
+                // Another viewer (or this one) changed the GEM σ — keep
+                // every open tab's input in sync immediately so users
+                // see the same value across windows.  hits[] update
+                // arrives naturally with the next event.  Guarded so
+                // online.js loading before gem_apv.js can't TDZ-throw.
+                if (typeof syncGemApvZsSigmaInput === 'function')
+                    syncGemApvZsSigmaInput(msg.zs_sigma);
+                if (typeof gemApvCalib !== 'undefined' && gemApvCalib)
+                    gemApvCalib.zs_sigma = msg.zs_sigma;
             }
         } catch (e) {}
     };

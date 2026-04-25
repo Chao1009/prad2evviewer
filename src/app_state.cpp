@@ -657,9 +657,12 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
         result["apvs"]      = json::array();
         return result;
     }
-    // Global software N-sigma multiplier — frontend draws ±noise[ch]·zs_sigma
-    // bands as the threshold curve when the user toggles it on.
-    result["zs_sigma"] = gem_sys.GetZeroSupThreshold();
+    // Global software N-sigma multiplier and pedestal calibration revision.
+    // The frontend pairs this zs_sigma with the per-APV noise[] from
+    // /api/gem/calib to draw the threshold band; gem_calib_rev lets it
+    // detect when the cached calib payload is stale and needs re-fetching.
+    result["zs_sigma"]  = gem_sys.GetZeroSupThreshold();
+    result["calib_rev"] = gem_calib_rev.load();
 
     // Detector summary — det_id → name + APV count, used by the frontend
     // to lay out one section per GEM with consistent ordering.
@@ -683,11 +686,13 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
     // Per-APV dump.  Each APV carries:
     //   raw[128][6]        — int16 firmware samples (0 if APV not in event)
     //   processed[128][6]  — pedestal + CM corrected float (0 if not present)
-    //   hits[128]          — ZS survivor bool, encoded as 0/1 ints to keep JSON compact
-    //   noise[128]         — per-channel pedestal RMS (for the threshold band)
+    //   hits[128]          — software ZS survivor (post-cut), 0/1
+    //   fw_hits[128]       — firmware survivor (pre-software-cut), 0/1
     //   cm[6] | null       — firmware online common mode per time sample
     //   no_hit_fr          — firmware full-readout (nstrips==128) but no survivors
     //   present            — APV showed up in this event's SSP data
+    // Per-APV pedestal noise lives on /api/gem/calib (one-shot, cached
+    // by the frontend until calib_rev changes).
     constexpr int N_STRIPS = 128;
     constexpr int N_TS     = 6;
     json apvs = json::array();
@@ -702,7 +707,7 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
         json raw_arr = json::array();
         json proc_arr = json::array();
         json hit_arr = json::array();
-        json noise_arr = json::array();
+        json fw_hit_arr = json::array();
         bool any_hit = false;
 
         for (int s = 0; s < N_STRIPS; ++s) {
@@ -723,7 +728,7 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
             bool hit = present && gem_sys.IsChannelHit(i, s);
             if (hit) any_hit = true;
             hit_arr.push_back(hit ? 1 : 0);
-            noise_arr.push_back(std::round(cfg.pedestal[s].noise * 10.f) / 10.f);
+            fw_hit_arr.push_back(present && raw->hasStrip(s) ? 1 : 0);
         }
 
         // Firmware online CM (6 samples) — only present when the MPD emitted
@@ -761,12 +766,41 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) 
             {"raw",        std::move(raw_arr)},
             {"processed",  std::move(proc_arr)},
             {"hits",       std::move(hit_arr)},
-            {"noise",      std::move(noise_arr)},
+            {"fw_hits",    std::move(fw_hit_arr)},
             {"cm",         std::move(cm_val)},
         });
     }
     result["apvs"] = apvs;
     return result;
+}
+
+nlohmann::json AppState::apiGemCalib() const
+{
+    json result = json::object();
+    result["enabled"]   = gem_enabled;
+    result["rev"]       = gem_calib_rev.load();
+    result["zs_sigma"]  = gem_enabled ? gem_sys.GetZeroSupThreshold() : 0.f;
+    json apvs = json::array();
+    if (gem_enabled) {
+        constexpr int N_STRIPS = 128;
+        for (int i = 0; i < gem_sys.GetNApvs(); ++i) {
+            auto &cfg = gem_sys.GetApvConfig(i);
+            if (cfg.crate_id < 0 || cfg.mpd_id < 0 || cfg.adc_ch < 0)
+                continue;
+            json noise_arr = json::array();
+            for (int s = 0; s < N_STRIPS; ++s)
+                noise_arr.push_back(std::round(cfg.pedestal[s].noise * 10.f) / 10.f);
+            apvs.push_back({{"id", i}, {"noise", std::move(noise_arr)}});
+        }
+    }
+    result["apvs"] = std::move(apvs);
+    return result;
+}
+
+void AppState::setGemZsSigma(float v)
+{
+    if (v < 0.f) v = 0.f;
+    gem_sys.SetZeroSupThreshold(v);
 }
 
 //=============================================================================

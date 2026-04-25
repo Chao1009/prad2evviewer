@@ -468,7 +468,11 @@
             <label><input type="checkbox" id="gem-apv-process" checked> Process</label>
             <label><input type="checkbox" id="gem-apv-signal-only"> Signal Only</label>
             <label><input type="checkbox" id="gem-apv-shared-y" checked> Shared Y</label>
+            <label title="Show pre-software-cut firmware survivors as a dim row above the bright (post-cut) hit row."><input type="checkbox" id="gem-apv-fw-hits" checked> FW Hits</label>
             <label title="Draw the ±(ped.noise × ZS σ) cutoff curve as a dashed grey line."><input type="checkbox" id="gem-apv-threshold"> Threshold</label>
+            <label title="Software N-sigma cut applied on top of firmware ZS. Shared with all viewers — change here updates the live reconstruction.">σ
+                <input type="number" id="gem-apv-zs-sigma" min="0" max="20" step="0.1" style="width:50px;font-size:11px">
+            </label>
             <label title="Overlay firmware online common mode (per time sample) as bold dashed lines."><input type="checkbox" id="gem-apv-cm"> CM</label>
             <span style="margin-left:10px;color:var(--dim);font-size:11px">GEM:</span>
             <label><input type="checkbox" id="gem-apv-d0" checked> gem0</label>

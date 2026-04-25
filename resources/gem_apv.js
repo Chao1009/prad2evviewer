@@ -1,15 +1,23 @@
 // gem_apv.js — GEM APV waveform viewer tab
 //
-// Stacked per-GEM sections (one per detector, ordered by det_id),
-// each with a faint background tint and a thin separator above it.
-// Inside each section is a responsive grid of small canvas panels
-// — one per APV — drawing the 6 time-sample traces (blue → red),
-// the zero line, and a hit-row tick under the plot.
+// Stacked per-GEM sections (one per detector, ordered by det_id), each
+// with a faint background tint and a thin separator above it.  Inside
+// each section is a responsive grid of small canvas panels — one per
+// APV — drawing the 6 time-sample traces (blue → red), zero line,
+// optional ±N-sigma threshold band, optional firmware-CM overlay, and
+// two stacked tick rows: dim "fw_hits" (firmware survivors) above
+// bright "hits" (software-cut survivors).
+//
+// Per-APV pedestal noise comes from /api/gem/calib (one-shot, cached;
+// refetched only when the per-event calib_rev diverges from the cached
+// value).  The σ multiplier is editable from the toolbar — POST goes to
+// /api/gem/threshold and applies to the live reconstruction shared by
+// every consumer (other browsers, histograms, clustering downstream).
 //
 // Mirrors the simplified controls from gem_event_viewer.py's RawApvTab:
-// Process / Signal Only / Shared Y / Threshold / CM / per-sample (t0…t5).
-// Clustering knobs are intentionally left out — the monitor is for
-// at-a-glance live inspection.
+// Process / Signal Only / Shared Y / FW Hits / Threshold / σ / CM /
+// per-sample (t0…t5).  Clustering knobs are intentionally left out —
+// the monitor is for at-a-glance live inspection.
 
 'use strict';
 
@@ -68,12 +76,18 @@ function hsv2rgb(h, s, v) {
 }
 
 // Tab state.
-let gemApvData = null;          // last fetched {detectors:[], apvs:[]}
+let gemApvData = null;          // last fetched per-event payload
 let gemApvCurrentEvent = -1;
+// Cached calibration: { rev, zs_sigma, noise: Map<id, Float32Array(128)> }.
+// Populated lazily by ensureGemApvCalib(); refetched when a per-event
+// payload arrives with calib_rev != gemApvCalib.rev.
+let gemApvCalib = null;
+let gemApvCalibInflight = false;
 let gemApvShowProcessed = true;
 let gemApvShowSignalOnly = false;
 let gemApvSharedY = true;
 let gemApvShowThreshold = false;
+let gemApvShowFwHits = true;
 let gemApvShowCm = false;
 let gemApvSampleMask = [true, true, true, true, true, true];
 // Per-detector visibility — index = det_id (0..3 cover all current PRad-II
@@ -89,8 +103,11 @@ const gemApvCanvases = new Map(); // apv_id → canvas element
 
 // Panel size — driven by CSS minmax.  Canvas pixel size matches its
 // CSS box at render time so traces stay crisp on HiDPI screens.
-const GEM_APV_TITLE_H  = 16;
+const GEM_APV_TITLE_H   = 16;
 const GEM_APV_HIT_ROW_H = 6;
+// Two stacked hit rows (fw above, sw below) with a 1px gap.  Reserved
+// at all times so toggling FW Hits doesn't reflow the plot region.
+const GEM_APV_HIT_BLOCK_H = 2 * GEM_APV_HIT_ROW_H + 1;
 
 // =====================================================================
 // Fetch + section build
@@ -110,10 +127,63 @@ function fetchGemApvData(evnum) {
             }
             gemApvData = data;
             gemApvCurrentEvent = evnum;
+            // Reflect the encode-time σ in the toolbar input so all
+            // viewers stay in sync without firing a fresh POST.
+            syncGemApvZsSigmaInput(data.zs_sigma);
             buildGemApvSections();
-            renderGemApvPanels();
+            // Load (or refresh) calibration on rev mismatch — the
+            // threshold band needs noise, which lives on /api/gem/calib.
+            // Explicit type check so rev=0 isn't mis-read as "missing".
+            const haveRev = (gemApvCalib && typeof gemApvCalib.rev === 'number')
+                ? gemApvCalib.rev : null;
+            const dataRev = (typeof data.calib_rev === 'number')
+                ? data.calib_rev : null;
+            if (dataRev !== null && dataRev !== haveRev) {
+                ensureGemApvCalib(true /*force*/).then(renderGemApvPanels);
+            } else {
+                renderGemApvPanels();
+            }
         })
         .catch(err => gemApvSetStatus('Fetch error: ' + err));
+}
+
+// Fetch /api/gem/calib once and cache.  Pass force=true to bypass the
+// cache (e.g. on calib_rev mismatch).  Returns a Promise so callers can
+// chain a redraw.  Multiple concurrent calls dedupe on the inflight flag.
+function ensureGemApvCalib(force) {
+    if (!force && gemApvCalib) return Promise.resolve(gemApvCalib);
+    if (gemApvCalibInflight) return gemApvCalibInflight;
+    const p = fetch('/api/gem/calib')
+        .then(r => r.ok ? r.json() : Promise.reject('http ' + r.status))
+        .then(j => {
+            const noise = new Map();
+            for (const a of (j.apvs || [])) {
+                if (typeof a.id === 'number' && Array.isArray(a.noise))
+                    noise.set(a.id, Float32Array.from(a.noise));
+            }
+            gemApvCalib = { rev: j.rev || 0, zs_sigma: j.zs_sigma || 0, noise };
+            // First-time fetch happens before any event arrives — seed
+            // the toolbar input from the calib response.
+            syncGemApvZsSigmaInput(j.zs_sigma);
+            return gemApvCalib;
+        })
+        .catch(err => {
+            console.warn('gem calib fetch failed:', err);
+            return null;
+        })
+        .finally(() => { gemApvCalibInflight = false; });
+    gemApvCalibInflight = p;
+    return p;
+}
+
+// Update the toolbar σ input without re-firing onchange (which would
+// POST back to the server).  Skips if the user is currently editing.
+function syncGemApvZsSigmaInput(sigma) {
+    const el = document.getElementById('gem-apv-zs-sigma');
+    if (!el || sigma == null) return;
+    if (document.activeElement === el) return;   // don't clobber typing
+    const v = (+sigma).toFixed(1);
+    if (el.value !== v) el.value = v;
 }
 
 function gemApvSetStatus(text) {
@@ -221,11 +291,14 @@ function renderGemApvPanels() {
         if (firstVisibleSection) firstVisibleSection.classList.add('first-visible');
     }
 
-    // Compute global Y range across visible (non-filtered) APVs.
+    // Compute global Y range across visible (non-filtered) APVs.  Skip
+    // APVs that didn't show up in this event — their frame is all zeros
+    // and would otherwise pull the shared scale toward the origin.
     let yLo = Infinity, yHi = -Infinity;
     if (gemApvSharedY) {
         for (const apv of apvs) {
             if (!gemApvDetVisible(apv.det_id)) continue;
+            if (!apv.present) continue;
             if (gemApvShowSignalOnly && !apvHasSignal(apv)) continue;
             const f = apv[field];
             if (!f) continue;
@@ -284,7 +357,10 @@ function panelOf(apvId) {
     return c ? c.parentElement : null;
 }
 
-// Draw a single APV: title (top), 6 trace lines, zero line, hit-tick row.
+// Draw a single APV: title, zero line, optional threshold band, traces,
+// optional CM overlay, hit-tick rows, Y-range labels.  Non-present APVs
+// (firmware sent nothing this event) draw as an empty placeholder so a
+// missing chip is immediately spottable in the fixed grid.
 function drawApvCanvas(canvas, apv, field, sharedRange) {
     // Match the canvas pixel buffer to its CSS box for sharp lines.
     const dpr = window.devicePixelRatio || 1;
@@ -300,15 +376,25 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
 
     const W = cssW, H = cssH;
     // Canvas background: keep slightly darker than the section tint so
-    // the panel reads as a "tile" sitting on the tinted GEM row.
-    ctx.fillStyle = THEME && THEME.canvas ? THEME.canvas : '#11112a';
+    // the panel reads as a "tile" sitting on the tinted GEM row.  Non-
+    // present APVs use a desaturated tile so a missing chip stands out
+    // against the bright tiles around it.
+    const isMissing = !apv.present;
+    ctx.fillStyle = isMissing
+        ? (THEME && THEME.bgDim ? THEME.bgDim : '#0a0a14')
+        : (THEME && THEME.canvas ? THEME.canvas : '#11112a');
     ctx.fillRect(0, 0, W, H);
 
     // Border — red if firmware reported full readout but no ZS hits,
-    // accent if any ZS survivors, otherwise neutral.
+    // accent if any ZS survivors, dim/dashed if APV didn't show up this
+    // event, otherwise neutral.
     let borderCol = THEME && THEME.border ? THEME.border : '#333';
     let borderW = 1;
-    if (apv.no_hit_fr) {
+    let borderDash = null;
+    if (isMissing) {
+        borderCol = THEME && THEME.textDim ? THEME.textDim : '#666';
+        borderDash = [3, 3];
+    } else if (apv.no_hit_fr) {
         borderCol = THEME && THEME.danger ? THEME.danger : '#ff6b6b';
     } else if (apvHasSignal(apv) && !gemApvShowSignalOnly) {
         borderCol = THEME && THEME.accent ? THEME.accent : '#ffd166';
@@ -316,15 +402,28 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     }
     ctx.strokeStyle = borderCol;
     ctx.lineWidth = borderW;
+    if (borderDash) ctx.setLineDash(borderDash);
     ctx.strokeRect(0.5, 0.5, W - 1, H - 1);
+    if (borderDash) ctx.setLineDash([]);
 
-    // Title row.
+    // Title row.  Dim the title for missing APVs so the eye groups them
+    // with the dashed border / dim background.
     const titleH = GEM_APV_TITLE_H;
-    ctx.fillStyle = THEME && THEME.text ? THEME.text : '#e0e0e0';
+    ctx.fillStyle = isMissing
+        ? (THEME && THEME.textDim ? THEME.textDim : '#888')
+        : (THEME && THEME.text ? THEME.text : '#e0e0e0');
     ctx.font = 'bold 10px ui-monospace, monospace';
     ctx.textBaseline = 'middle';
     const title = `c${apv.crate} m${apv.mpd} a${apv.adc}  ${apv.plane} p${apv.det_pos}`;
     ctx.fillText(title, 4, titleH / 2);
+    if (isMissing) {
+        ctx.fillStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.textAlign = 'right';
+        ctx.fillText('no data', W - 4, titleH / 2);
+        ctx.textAlign = 'start';
+        ctx.textBaseline = 'alphabetic';
+        return;   // skip plot/hit-rows — there is nothing to draw
+    }
     if (apv.no_hit_fr) {
         ctx.fillStyle = THEME && THEME.danger ? THEME.danger : '#ff6b6b';
         ctx.textAlign = 'right';
@@ -332,10 +431,12 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
         ctx.textAlign = 'start';
     }
 
-    // Plot region.
+    // Plot region — reserve two stacked hit rows (fw + sw) at the bottom
+    // so toggling FW Hits doesn't reflow the trace area.
     const hitH = GEM_APV_HIT_ROW_H;
+    const hitBlockH = GEM_APV_HIT_BLOCK_H;
     const plotX = 4, plotY = titleH + 2;
-    const plotW = W - 8, plotH = H - titleH - hitH - 6;
+    const plotW = W - 8, plotH = H - titleH - hitBlockH - 6;
     if (plotW <= 0 || plotH <= 0) return;
 
     // Y range.
@@ -376,25 +477,30 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     }
 
     // Threshold band: ±noise[ch]·zs_sigma, dashed grey, drawn before the
-    // data traces so traces sit on top.  Only meaningful for processed
-    // view (raw view shows pre-pedestal-subtraction values).
+    // data traces so traces sit on top.  noise[] comes from the cached
+    // /api/gem/calib payload; zs_sigma is per-event so the band always
+    // tracks the σ used to encode this event's hits[].  Only meaningful
+    // for processed view (raw view shows pre-pedestal-subtraction).
     const zsSigma = (gemApvData && gemApvData.zs_sigma) || 0;
-    if (gemApvShowThreshold && gemApvShowProcessed && apv.noise && zsSigma > 0) {
-        const nStrips = Math.min(128, apv.noise.length);
+    const noise = (gemApvCalib && gemApvCalib.noise) ? gemApvCalib.noise.get(apv.id) : null;
+    if (gemApvShowThreshold && gemApvShowProcessed && noise && zsSigma > 0) {
+        const nStrips = Math.min(128, noise.length);
         const stepX = plotW / Math.max(nStrips - 1, 1);
         ctx.strokeStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
         ctx.lineWidth = 0.8;
         ctx.setLineDash([4, 3]);
-        for (const sign of [+1, -1]) {
+        const drawBand = (sign) => {
             ctx.beginPath();
             for (let s = 0; s < nStrips; s++) {
                 const x = plotX + s * stepX;
-                const y = toY(sign * apv.noise[s] * zsSigma);
+                const y = toY(sign * noise[s] * zsSigma);
                 if (s === 0) ctx.moveTo(x, y);
                 else         ctx.lineTo(x, y);
             }
             ctx.stroke();
-        }
+        };
+        drawBand(+1);
+        drawBand(-1);
         ctx.setLineDash([]);
     }
 
@@ -437,16 +543,35 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
         ctx.setLineDash([]);
     }
 
-    // ZS hit tick row.
-    if (apv.hits && apv.hits.length > 0) {
-        const nStrips = Math.min(128, apv.hits.length);
+    // Hit tick rows — bottom row = software-cut survivors (bright accent),
+    // top row = firmware survivors (dim, gated by FW Hits checkbox).
+    // Both rows reserved at all times so toggling FW Hits doesn't reflow.
+    const swRowY = H - hitH - 2;
+    const fwRowY = swRowY - hitH - 1;
+    const accent = (THEME && THEME.accent) ? THEME.accent : '#ffd166';
+    const stepXh = (apv.hits && apv.hits.length > 0)
+        ? plotW / Math.max(Math.min(128, apv.hits.length) - 1, 1)
+        : null;
+    if (gemApvShowFwHits && Array.isArray(apv.fw_hits) && apv.fw_hits.length > 0) {
+        const nStrips = Math.min(128, apv.fw_hits.length);
         const stepX = plotW / Math.max(nStrips - 1, 1);
-        const rowY = H - hitH - 2;
-        ctx.fillStyle = THEME && THEME.accent ? THEME.accent : '#ffd166';
+        ctx.globalAlpha = 0.45;
+        ctx.fillStyle = accent;
+        for (let s = 0; s < nStrips; s++) {
+            if (apv.fw_hits[s]) {
+                const x = plotX + s * stepX;
+                ctx.fillRect(x - 0.8, fwRowY, 1.6, hitH);
+            }
+        }
+        ctx.globalAlpha = 1.0;
+    }
+    if (stepXh !== null) {
+        const nStrips = Math.min(128, apv.hits.length);
+        ctx.fillStyle = accent;
         for (let s = 0; s < nStrips; s++) {
             if (apv.hits[s]) {
-                const x = plotX + s * stepX;
-                ctx.fillRect(x - 0.8, rowY, 1.6, hitH);
+                const x = plotX + s * stepXh;
+                ctx.fillRect(x - 0.8, swRowY, 1.6, hitH);
             }
         }
     }
@@ -479,13 +604,17 @@ function setupGemApvControls() {
         el.onchange = () => {
             switch (id) {
                 case 'gem-apv-process':
-                    gemApvShowProcessed = el.checked; break;
+                    gemApvShowProcessed = el.checked;
+                    syncGemApvControlEnables();
+                    break;
                 case 'gem-apv-signal-only':
                     gemApvShowSignalOnly = el.checked; break;
                 case 'gem-apv-shared-y':
                     gemApvSharedY = el.checked; break;
                 case 'gem-apv-threshold':
                     gemApvShowThreshold = el.checked; break;
+                case 'gem-apv-fw-hits':
+                    gemApvShowFwHits = el.checked; break;
                 case 'gem-apv-cm':
                     gemApvShowCm = el.checked; break;
             }
@@ -495,8 +624,31 @@ function setupGemApvControls() {
     cb('gem-apv-process',     gemApvShowProcessed);
     cb('gem-apv-signal-only', gemApvShowSignalOnly);
     cb('gem-apv-shared-y',    gemApvSharedY);
+    cb('gem-apv-fw-hits',     gemApvShowFwHits);
     cb('gem-apv-threshold',   gemApvShowThreshold);
     cb('gem-apv-cm',          gemApvShowCm);
+    syncGemApvControlEnables();
+
+    // σ input — POST on commit (change event fires on blur / Enter / arrows).
+    // The server applies to the live reconstruction; new events arriving
+    // through the WS will reflect the change in their per-event zs_sigma,
+    // which then rolls back into syncGemApvZsSigmaInput for everyone.
+    const zsEl = document.getElementById('gem-apv-zs-sigma');
+    if (zsEl) {
+        zsEl.onchange = () => {
+            const v = parseFloat(zsEl.value);
+            if (!isFinite(v) || v < 0) {
+                // Restore the last known good value rather than POST garbage.
+                if (gemApvCalib && gemApvCalib.zs_sigma != null)
+                    zsEl.value = (+gemApvCalib.zs_sigma).toFixed(1);
+                return;
+            }
+            postGemApvZsSigma(v);
+        };
+    }
+    // Pre-fetch calibration so the threshold band is ready by the time
+    // the first event renders (the band wouldn't draw without noise[]).
+    ensureGemApvCalib(false);
     // Per-GEM filter (gem0…gem3) — hides whole sections, including the
     // separator above (which is a top border on the section itself).
     for (let d = 0; d < gemApvDetMask.length; d++) {
@@ -517,6 +669,40 @@ function setupGemApvControls() {
             renderGemApvPanels();
         };
     }
+}
+
+// Threshold band assumes a pedestal-subtracted Y axis, so it only makes
+// sense in Process mode.  Reflect that in the UI by disabling the
+// Threshold checkbox when Process is off.
+function syncGemApvControlEnables() {
+    const el = document.getElementById('gem-apv-threshold');
+    if (el) el.disabled = !gemApvShowProcessed;
+}
+
+// POST a new σ to the server.  Cached calib is updated optimistically
+// so the next render uses the new value; a fresh fetch isn't needed
+// (noise[] hasn't changed).  Other viewers pick the change up through
+// the per-event zs_sigma echoed by the server in subsequent events.
+function postGemApvZsSigma(v) {
+    fetch('/api/gem/threshold', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ zs_sigma: v }),
+    })
+        .then(r => r.ok ? r.json() : Promise.reject('http ' + r.status))
+        .then(j => {
+            if (j.error) throw new Error(j.error);
+            if (gemApvCalib) gemApvCalib.zs_sigma = j.zs_sigma;
+            // Re-fetch the current event so the hits[] reflect the new σ.
+            // (The encoded ring entry for older events keeps the old σ.)
+            if (gemApvCurrentEvent > 0) fetchGemApvData(gemApvCurrentEvent);
+        })
+        .catch(err => {
+            console.warn('gem threshold POST failed:', err);
+            // Rollback the input to the server's last known good value.
+            if (gemApvCalib && gemApvCalib.zs_sigma != null)
+                syncGemApvZsSigmaInput(gemApvCalib.zs_sigma);
+        });
 }
 
 // Resize: just redraw — CSS auto-grid handles re-flow, canvas redraw

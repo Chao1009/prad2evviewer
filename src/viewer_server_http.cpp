@@ -418,6 +418,38 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         reply(computeClusters(evnum).dump()); return;
     }
 
+    // --- gem/calib (one-shot per-APV pedestal noise + global zs_sigma) ---
+    // The frontend caches this and refetches only when the calib_rev
+    // embedded in /api/gem/apv/<n> diverges from the cached value.
+    if (uri == "/api/gem/calib") {
+        reply(activeApp().apiGemCalib().dump());
+        return;
+    }
+
+    // --- gem/threshold (POST {zs_sigma:N} — applies to all consumers) ---
+    // Updates both file & online AppStates so the new threshold takes
+    // effect for the active mode immediately and for the other mode on
+    // the next event it processes.  Old ring entries keep their encoded
+    // hits[] (cosmetic lag of ~ring_size events); each new event reflects
+    // the new threshold via its zs_sigma field.  Broadcasts a WS notice
+    // so other open viewers can refresh their toolbar input.
+    if (uri == "/api/gem/threshold") {
+        std::string body = con->get_request_body();
+        auto j = json::parse(body, nullptr, false);
+        if (j.is_discarded() || !j.is_object() ||
+            !j.contains("zs_sigma") || !j["zs_sigma"].is_number()) {
+            reply("{\"error\":\"expected {\\\"zs_sigma\\\":N}\"}"); return;
+        }
+        float new_sigma = j["zs_sigma"].get<float>();
+        app_file_.setGemZsSigma(new_sigma);
+        app_online_.setGemZsSigma(new_sigma);
+        wsBroadcast(json({{"type", "gem_threshold_updated"},
+                          {"zs_sigma", new_sigma}}).dump());
+        reply(json({{"ok", true},
+                    {"zs_sigma", new_sigma}}).dump());
+        return;
+    }
+
     // --- gem/apv/<n> (per-event GEM APV waveforms, mode-dependent) ---
     // Online: served from a per-ring-entry pre-encoded string so older
     // events don't disturb the live gem_sys state.

@@ -255,6 +255,14 @@ struct AppState {
     fdec::EpicsStore epics;
     std::atomic<int> epics_events{0};
 
+    // ---- GEM calibration revision -------------------------------------------
+    // Bumped on any change to per-APV pedestal noise (e.g. LoadPedestals).
+    // The frontend caches /api/gem/calib (which carries this rev) and
+    // refetches when it sees a different value embedded in /api/gem/apv/<n>.
+    // Threshold (zs_sigma) changes do NOT bump this — the frontend reads
+    // zs_sigma per event so band tracks the encoded hits.
+    std::atomic<int> gem_calib_rev{0};
+
     // ---- Initialization (call once at startup) -----------------------------
 
     // Load all configs from db_dir. daq_config_file may be empty (uses daq_config.json from db_dir).
@@ -340,6 +348,17 @@ struct AppState {
     // samples come from ssp_evt; processed values + ZS hit mask come
     // from gem_sys's per-APV working buffer.
     nlohmann::json apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) const;
+
+    // One-shot calibration payload for the GEM APV tab: returns
+    //   {rev, zs_sigma, apvs:[{id, noise:[128]}, ...]}
+    // The frontend caches this and refetches only when the calib_rev
+    // embedded in /api/gem/apv/<n> diverges from the cached value.
+    nlohmann::json apiGemCalib() const;
+
+    // Update the software N-sigma cut on this AppState's gem_sys.  Does
+    // NOT bump gem_calib_rev — noise is unchanged, and frontend uses the
+    // per-event zs_sigma so band always tracks encoded hits.
+    void setGemZsSigma(float v);
 
     // ---- Filters ---------------------------------------------------------------
     std::string loadFilter(const nlohmann::json &j);
