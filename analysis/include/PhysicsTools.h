@@ -113,8 +113,6 @@ public:
     //   E:     measured energy in MeV
     static float EnergyLoss(float theta_deg, float E);
 
-    static float GetShowerDepth(int primex_id, const float &E);
-
     //calibration helpers
     TF1 nonLinearity_func_;
 

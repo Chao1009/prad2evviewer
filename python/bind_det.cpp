@@ -434,6 +434,15 @@ static void bind_gem(py::module_ &m)
 // -------------------------------------------------------------------------
 static void bind_hycal(py::module_ &m)
 {
+    // --- free helpers (module-level under prad2py.det) ----------------------
+    m.def("shower_depth", &fdec::shower_depth,
+          py::arg("center_id"), py::arg("energy_mev"),
+          "Maximum-shower-development depth (mm) for an EM shower of energy "
+          "`energy_mev` in the HyCal module with PrimEx id `center_id`.  "
+          "Discriminates W/G modules by the PWO_ID0 boundary.  Returns 0 for "
+          "energy ≤ 0.  Use to set the z coordinate of a HyCal cluster "
+          "centroid before lab-frame projection.");
+
     // --- enums --------------------------------------------------------------
 
     py::enum_<fdec::ModuleType>(m, "ModuleType")

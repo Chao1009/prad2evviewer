@@ -659,7 +659,7 @@ if(!prad1){
             for (int i = 0; i < ev->n_clusters; ++i) {
                 ev->cl_x[i]       = hits[i].x;
                 ev->cl_y[i]       = hits[i].y;
-                ev->cl_z[i]       = PhysicsTools::GetShowerDepth(hits[i].center_id, hits[i].energy);
+                ev->cl_z[i]       = fdec::shower_depth(hits[i].center_id, hits[i].energy);
                 ev->cl_energy[i]  = hits[i].energy;
                 ev->cl_nblocks[i] = hits[i].nblocks;
                 ev->cl_center[i]  = hits[i].center_id;

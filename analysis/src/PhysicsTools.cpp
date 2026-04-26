@@ -286,28 +286,6 @@ float PhysicsTools::EnergyLoss(float theta_deg, float E)
     return eloss;  // total energy loss in MeV
 }
 
-// get shower depth, unit is in MeV
-float PhysicsTools::GetShowerDepth(int primex_id, const float &E)
-{
-    if(E > 0.) {
-        // here all the values are hard coded, because these are all physical
-        // values corresponding to the material, so no need to change
-        // it returns the maximum shower depth that
-        // t = X0*(ln(E0/Ec) - Cf),
-        // where X0 is radiation length, Ec is critical energy, Cf = -0.5 for
-        // electron induced shower and 0.5 for photon
-        // units are in mm and MeV
-        if(primex_id >= fdec::PWO_ID0) //module_type PbWO4
-            return 8.6*(log(E/1.1) - 0.5);
-
-        // -101.2 is the surface difference between Lead Glass and Lead Tungstate modules
-        if(primex_id < fdec::PWO_ID0) //module_type PbGlass
-            return 26.7*(log(E/2.84) - 0.5);
-    }
-
-    return 0.;
-}
-
 std::array<float, 2> PhysicsTools::GetMollerCenter(MollerEvent &event1, MollerEvent &event2)
 {
     float x1[2], y1[2];

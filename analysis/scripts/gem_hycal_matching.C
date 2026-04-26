@@ -625,7 +625,7 @@ int gem_hycal_matching(const char *evio_path,
             for (const auto &h : hc_hits_raw) {
                 analysis::HCHit hh;
                 hh.x = h.x; hh.y = h.y;
-                hh.z = analysis::PhysicsTools::GetShowerDepth(h.center_id, h.energy);
+                hh.z = fdec::shower_depth(h.center_id, h.energy);
                 hh.energy    = h.energy;
                 hh.center_id = h.center_id;
                 hh.flag      = h.flag;

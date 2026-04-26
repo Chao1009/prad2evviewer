@@ -110,6 +110,8 @@ Smallest GEM example — opens an EVIO file, finds every GEM raw bank (tags from
 
 Full **HyCal + GEM** reconstruction pipeline with straight-line cluster matching → ROOT tree of matched HC↔GEM pairs and the constituent X/Y GEM strip waveforms.
 
+> **Python counterpart**: `analysis/pyscripts/gem_hycal_matching.py` — same pipeline via `prad2py`, no ROOT, flat TSV/CSV out, identical best-match rule. See [Python counterparts](#python-counterparts-pyscripts) below.
+
 **Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) are reconstructed and written. Everything else (LMS / Alpha / cosmic / etc.) is skipped — the summary reports raw physics count vs. kept count.
 
 **Multi-file** — chosen by the input path:
@@ -124,7 +126,8 @@ Per event (after the trigger cut):
 - HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters() / ReconstructHits()`
 - GEM: `GemSystem.ProcessEvent` (pedestal + CM + ZS) → `Reconstruct(GemCluster)` → 2D X×Y matched hits per detector
 - Lab-frame transform via `RotateDetData` / `TransformDetData` (uses `runinfo` geometry for HyCal + each GEM)
-- For each HyCal cluster, draw a line from `(0,0,0)` target through the lab-frame centroid (z = `hycal_z` + shower depth); intersect each GEM plane and accept GEM hits within `N · σ_total` of the projection
+- For each HyCal cluster, draw a line from `(0,0,0)` target through the lab-frame centroid (z = `hycal_z` + shower depth); intersect each GEM plane and find the closest GEM hit within `N · σ_total` of the projection
+- **Best-match rule** (HyCal cluster as baseline): per (HC cluster, GEM detector) pair, keep at most ONE row — the GEM hit with the smallest 2D residual that's still inside the window. A given GEM hit can win against multiple HC clusters (no GEM-side exclusivity). The Python counterpart uses the same rule.
 - For each match, look up the X & Y constituent `StripCluster` on the corresponding plane and copy every strip's full 6-sample waveform
 
 Matching geometry:
@@ -187,6 +190,8 @@ Full 11-arg version (for explicit overrides — pass `""` to auto-discover any p
 ### plot_hits_at_hycal.C
 
 Side-by-side 2D occupancy maps of **GEM hits projected to the HyCal surface** (left) and **HyCal cluster centroids on the HyCal surface** (right). Both plots share the same lab/target-centered, beam-aligned frame at z = `hycal_z`, so structure overlays directly between the two.
+
+> **Python counterpart**: `analysis/pyscripts/plot_hits_at_hycal.py` — same pipeline via `prad2py`, no ROOT. Dumps a flat per-hit TSV/CSV (one row per HyCal cluster + per GEM hit projected to HyCal); plot externally with pandas/matplotlib. See [Python counterparts](#python-counterparts-pyscripts) below.
 
 **Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) contribute to the histograms.
 
@@ -265,6 +270,60 @@ root -l rootlogon.C 'lms_alpha_normalize.C+("/path/to/data", 1234, "daq_config.j
 ```
 
 **Output:** `lms_alpha_run{N}.root` (per-module normalized LMS, reference time-series TGraphs) and a 6-panel summary PNG.
+
+## Python counterparts (`pyscripts/`)
+
+Two Python scripts mirror the ROOT analysis macros via the `prad2py` pybind11 module — same EVIO decode + HyCal/GEM reconstruction, but **no ROOT** and **flat TSV/CSV** output instead of ROOT trees / canvases. Run them anywhere `prad2py` is importable (`cmake -DBUILD_PYTHON=ON` and put the install dir on `PYTHONPATH`).
+
+Both scripts share the same per-event pipeline (`_common.py` factors out runinfo loading, lab-frame transforms, file discovery, the trigger gate `0x100`, and the multi-file glob/dir/single mode).
+
+### gem_hycal_matching.py
+
+Same pipeline as `gem_hycal_matching.C`, same best-match rule (closest GEM hit per HC cluster × GEM detector pair within `N · σ_total`). Output is one row per matched tuple:
+
+| Column | Notes |
+|--------|-------|
+| `event_num`, `trigger_bits` | event-level |
+| `hc_idx`, `hc_x/y/z`, `hc_energy`, `hc_center`, `hc_nblocks`, `hc_sigma` | HyCal cluster (lab frame, z includes shower depth) |
+| `det_id` (0..3) | which GEM won this row |
+| `gem_x/y/z`, `gem_x_charge`, `gem_y_charge`, `gem_x_size`, `gem_y_size` | best-matched GEM hit |
+| `proj_x`, `proj_y`, `residual`, `sigma_total` | matching geometry |
+
+```bash
+# full run, glob discovers every split:
+python analysis/pyscripts/gem_hycal_matching.py \
+    /data/stage6/prad_023867/prad_023867.evio.* match_023867.tsv
+
+# CSV, tighter cut, capped:
+python analysis/pyscripts/gem_hycal_matching.py input.evio.* out.csv \
+    --csv --match-nsigma 2.0 --max-events 50000
+```
+
+### plot_hits_at_hycal.py
+
+Same pipeline as `plot_hits_at_hycal.C`. Dumps **all** hits (not just matched) — one row per HyCal cluster centroid and per GEM hit projected to z = `hycal_z`. Plot externally with pandas/matplotlib.
+
+| Column | Notes |
+|--------|-------|
+| `event_num`, `trigger_bits` | event-level |
+| `kind` | `"hycal"` or `"gem"` |
+| `det_id` | 0..3 for GEM, -1 for HyCal |
+| `x`, `y`, `z` | lab/target-centered mm at z = `hycal_z` |
+| `energy` | MeV (HyCal); empty for GEM |
+
+```bash
+python analysis/pyscripts/plot_hits_at_hycal.py \
+    /data/stage6/prad_023867/prad_023867.evio.* hits_023867.tsv
+
+# minimal matplotlib:
+import pandas as pd, matplotlib.pyplot as plt
+df = pd.read_csv("hits_023867.tsv", sep="\t")
+for kind, sub in df.groupby("kind"):
+    plt.hist2d(sub.x, sub.y, bins=260, range=[[-650, 650], [-650, 650]])
+    plt.title(kind); plt.show()
+```
+
+Each script accepts the same path / overrides as its C++ counterpart (`--max-events`, `--run-num`, `--gem-ped-file`, etc.). Run with `--help` for the full list.
 
 ## Adding a Tool
 

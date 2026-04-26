@@ -71,6 +71,19 @@ struct ClusterHit {
     uint32_t flag;      // cluster flags
 };
 
+// Shower-max depth into the calorimeter face for an EM shower of energy `E`
+// (MeV) in the module with PrimEx id `center_id`.  Discriminates W/G by the
+// PWO_ID0 boundary.  Returns 0 for E ≤ 0.  Units: mm.
+//
+//   t = X0 · (ln(E/Ec) − Cf)
+//   Cf  = 0.5  for photon-induced showers
+//   PWO4:    X0 = 8.6 mm, Ec = 1.1  MeV
+//   PbGlass: X0 = 26.7 mm, Ec = 2.84 MeV
+//
+// (Same formula as the legacy analysis::PhysicsTools::GetShowerDepth, moved
+// here so prad2det owns it and the python binding can expose it.)
+float shower_depth(int center_id, float energy_mev);
+
 // --- cluster profile (energy sharing lookup) --------------------------------
 // Abstract interface — users can plug in their own profile data.
 // Default implementation uses a simple analytical approximation.

@@ -18,6 +18,23 @@ static constexpr int ISLAND_GROUP_RESERVE = 50;
 static constexpr int POS_RECON_HITS       = 15;
 
 //=============================================================================
+// shower_depth (free function — declared in HyCalCluster.h)
+//
+// Maximum-shower-development depth into the calorimeter face for an EM
+// shower of energy E, t = X0 · (ln(E/Ec) − Cf), with Cf = 0.5 for photons.
+// Constants verbatim from the legacy analysis::PhysicsTools::GetShowerDepth
+// (PRadAnalyzer lineage) and not expected to change — they're physical
+// properties of the W and G modules.
+//=============================================================================
+float shower_depth(int center_id, float energy_mev)
+{
+    if (energy_mev <= 0.f) return 0.f;
+    if (center_id >= PWO_ID0)            // PbWO4 (W-modules)
+        return 8.6f  * (std::log(energy_mev / 1.1f)  - 0.5f);
+    return            26.7f * (std::log(energy_mev / 2.84f) - 0.5f);  // PbGlass
+}
+
+//=============================================================================
 // Construction / setup
 //=============================================================================
 
