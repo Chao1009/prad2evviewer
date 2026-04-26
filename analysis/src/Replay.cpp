@@ -595,6 +595,7 @@ if(!prad1){
                                     ev->veto_npeaks[veto_nch] = wres.npeaks;
                                     for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                         ev->veto_peak_integral[veto_nch][p] = wres.peaks[p].integral;
+                                        ev->veto_peak_time[veto_nch][p] = wres.peaks[p].time;
                                     }
                                     veto_nch++;
                                 }
@@ -606,6 +607,7 @@ if(!prad1){
                                     ev->lms_npeaks[lms_nch] = wres.npeaks;
                                     for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                         ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
+                                        ev->lms_peak_time[lms_nch][p] = wres.peaks[p].time;
                                     }
                                     lms_nch++;
                                 }
