@@ -62,16 +62,9 @@ static void SetReadBranches(TTree *tree, EventVars &ev)
 {
     tree->SetBranchAddress("event_num",         &ev.event_num);
     tree->SetBranchAddress("trigger_bits",      &ev.trigger_bits);
-    tree->SetBranchAddress("timestamp",         &ev.timestamp);
     tree->SetBranchAddress("hycal.nch",         &ev.nch);
     tree->SetBranchAddress("hycal.module_id",   ev.module_id);
-    tree->SetBranchAddress("hycal.nsamples",    ev.nsamples);
-    tree->SetBranchAddress("hycal.samples",     ev.samples);
-    tree->SetBranchAddress("hycal.ped_mean",    ev.ped_mean);
-    tree->SetBranchAddress("hycal.ped_rms",     ev.ped_rms);
-    tree->SetBranchAddress("hycal.integral",    ev.integral);
     tree->SetBranchAddress("hycal.npeaks",      &ev.npeaks);
-    tree->SetBranchAddress("hycal.peak_height", ev.peak_height);
     tree->SetBranchAddress("hycal.peak_time",   ev.peak_time);
     tree->SetBranchAddress("hycal.peak_integral", ev.peak_integral);
 }
