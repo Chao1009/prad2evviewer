@@ -79,7 +79,7 @@ MODULES_JSON = next((p for p in _DB_CANDIDATES if p.is_file()), None)
 class ModuleMetrics:
     """Per-module computed metrics for one (run, iteration) pair."""
     __slots__ = ("name", "stats", "peak", "sigma", "chi2",
-                 "factor", "base_energy")
+                 "factor", "base_energy", "old_factor")
 
     def __init__(self, name: str):
         self.name        = name
@@ -87,8 +87,9 @@ class ModuleMetrics:
         self.peak        = 0.0    # measured peak (MeV)
         self.sigma       = 0.0    # Gaussian sigma (MeV)
         self.chi2        = 0.0    # chi2/ndf of Gaussian fit
-        self.factor      = 1.0    # calibration factor from JSON
+        self.factor      = 1.0    # calibration factor from JSON (after this iteration)
         self.base_energy = 0.0    # expected peak from JSON (MeV)
+        self.old_factor  = 0.0    # factor before this iteration (from .dat oldFactor column)
 
 
 class IterData:
@@ -98,6 +99,7 @@ class IterData:
         self.root_path:      Optional[Path]           = None
         self.factors:        Dict[str, dict]          = {}   # raw JSON entries
         self.expected_peaks: Dict[str, float]         = {}   # from .dat ExpectedPeak
+        self.old_factors:    Dict[str, float]         = {}   # from .dat oldFactor
         self._global_hists:  dict = {}   # preloaded by worker: ratio_all etc.
 
     @property
@@ -152,6 +154,7 @@ def scan_calib_dir(base: Path) -> Dict[str, Dict[int, IterData]]:
             df = run_dir / f"fitting_parameters_iter{it}.dat"
             if df.is_file():
                 data.expected_peaks = _parse_dat_expected_peaks(df)
+                data.old_factors    = _parse_dat_old_factors(df)
             iters[it] = data
         if iters:
             result[run_dir.name] = iters
@@ -169,6 +172,24 @@ def _parse_dat_expected_peaks(dat_path: Path) -> Dict[str, float]:
                 continue
             try:
                 result[tokens[0]] = float(tokens[1])
+            except ValueError:
+                pass
+    except Exception:
+        pass
+    return result
+
+
+def _parse_dat_old_factors(dat_path: Path) -> Dict[str, float]:
+    """Parse fitting_parameters_iter{N}.dat and return {module: oldFactor} (column 3)."""
+    result: Dict[str, float] = {}
+    try:
+        for line in dat_path.read_text().splitlines():
+            tokens = line.split()
+            # columns: Module ExpectedPeak MeasuredPeak oldFactor Ratio Sigma Chi2/ndf
+            if len(tokens) < 4 or tokens[0] == "Module":
+                continue
+            try:
+                result[tokens[0]] = float(tokens[3])
             except ValueError:
                 pass
     except Exception:
@@ -249,6 +270,11 @@ def compute_metrics(data: IterData) -> None:
             mm.base_energy = data.expected_peaks[name]
         else:
             mm.base_energy = float(entry.get("base_energy") or 0.0)
+        # oldFactor from .dat (the factor before this iteration)
+        if name in data.old_factors:
+            mm.old_factor = data.old_factors[name]
+        else:
+            mm.old_factor = 0.0  # not available (e.g. no .dat file)
 
     # --- compute delta_E = (peak - base_energy) / base_energy ---
     # handled on-demand in _refresh_map()
@@ -651,10 +677,13 @@ class ModuleDetailPanel(QWidget):
         sig0 = math.sqrt(max(var, bw ** 2 / 12.0))
 
         old_peak   = self._mm.peak   if (self._mm and self._mm.peak > 0.0) else 0.0
-        old_factor = self._mm.factor if self._mm else 1.0
-        ref_peak   = old_peak if old_peak > 0.0 else (
-            self._mm.base_energy if (self._mm and self._mm.base_energy > 0.0) else 0.0)
-        new_factor = old_factor * mu0 / ref_peak if ref_peak > 0.0 else 0.0
+        # Use oldFactor from .dat (factor before this iteration);
+        # fall back to current JSON factor if .dat was not available.
+        old_factor = (self._mm.old_factor if (self._mm and self._mm.old_factor > 0.0)
+                      else (self._mm.factor if self._mm else 1.0))
+        base_energy = self._mm.base_energy if (self._mm and self._mm.base_energy > 0.0) else 0.0
+        # Formula: new_factor = old_factor * expected_peak / refit_peak
+        new_factor = old_factor * base_energy / mu0 if (mu0 > 0.0 and base_energy > 0.0) else 0.0
 
         self._refit_peak       = mu0
         self._refit_sigma      = sig0
@@ -672,7 +701,7 @@ class ModuleDetailPanel(QWidget):
             f"σ = {sig0:.2f} MeV     χ²/ndf = 1.000  (fixed){range_note}"
         )
         if new_factor > 0.0:
-            msg += f"\nNew factor: {new_factor:.5f}   (was {old_factor:.5f})"
+            msg += f"\nNew factor: {new_factor:.5f}   (oldFactor={old_factor:.5f},  expected={base_energy:.1f} MeV)"
         self._refit_status.setText(msg)
         self._apply_btn.setEnabled(new_factor > 0.0)
         self._redraw_refit_overlay(name, counts, edges, mu0, sig0)
@@ -734,12 +763,14 @@ class ModuleDetailPanel(QWidget):
             self._refit_sigma = float(abs(sig_f))
             self._refit_chi2  = chi2_ndf
 
-            old_peak   = self._mm.peak   if (self._mm and self._mm.peak > 0.0) else 0.0
-            old_factor = self._mm.factor if self._mm else 1.0
-            ref_peak   = old_peak if old_peak > 0.0 else (
-                self._mm.base_energy if (self._mm and self._mm.base_energy > 0.0) else 0.0)
+            # Use oldFactor from .dat (factor before this iteration);
+            # fall back to current JSON factor if .dat was not available.
+            old_factor  = (self._mm.old_factor if (self._mm and self._mm.old_factor > 0.0)
+                           else (self._mm.factor if self._mm else 1.0))
+            base_energy = self._mm.base_energy if (self._mm and self._mm.base_energy > 0.0) else 0.0
+            # Formula: new_factor = old_factor * expected_peak / refit_peak
             self._refit_new_factor = (
-                old_factor * mu_f / ref_peak if ref_peak > 0.0 else 0.0
+                old_factor * base_energy / mu_f if (mu_f > 0.0 and base_energy > 0.0) else 0.0
             )
 
             msg = (
@@ -749,7 +780,7 @@ class ModuleDetailPanel(QWidget):
             if self._refit_new_factor > 0.0:
                 msg += (
                     f"\nNew factor: {self._refit_new_factor:.5f}"
-                    f"   (was {old_factor:.5f})"
+                    f"   (oldFactor={old_factor:.5f},  expected={base_energy:.1f} MeV)"
                 )
             self._refit_status.setText(msg)
             self._apply_btn.setEnabled(self._refit_new_factor > 0.0)
