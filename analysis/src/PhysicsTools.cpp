@@ -200,7 +200,7 @@ std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
     // find peak bin, fit Gaussian around it
     double peak0 = h->GetBinCenter(h->GetMaximumBin());
     double rms0  = h->GetRMS();
-    double lo = peak0 - 2.0 * rms0, hi = peak0 + 2.0 * rms0;
+    double lo = peak0 - 1.3 * rms0, hi = peak0 + 1.3 * rms0;
 
     TF1 gaus("gfit", "gaus", lo, hi);
     gaus.SetParameters(h->GetMaximum(), peak0, rms0);

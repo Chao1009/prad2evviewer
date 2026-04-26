@@ -23,6 +23,7 @@ import json
 import math
 import re
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -97,7 +98,6 @@ class IterData:
         self.root_path:      Optional[Path]           = None
         self.factors:        Dict[str, dict]          = {}   # raw JSON entries
         self.expected_peaks: Dict[str, float]         = {}   # from .dat ExpectedPeak
-        self._hist_cache:    Dict[str, Tuple[np.ndarray, np.ndarray]] = {}
         self._global_hists:  dict = {}   # preloaded by worker: ratio_all etc.
 
     @property
@@ -235,7 +235,6 @@ def compute_metrics(data: IterData) -> None:
                 # hname like "h_W1" -> module name "W1"
                 mod_name = hname[len("h_"):]
                 counts, edges = f[raw_key].to_numpy()
-                data._hist_cache[mod_name] = (counts, edges)
                 mm = data.metrics.setdefault(mod_name, ModuleMetrics(mod_name))
                 mm.stats = float(counts.sum())
                 mm.peak, mm.sigma, mm.chi2 = _fit_histogram(counts, edges)
@@ -329,6 +328,7 @@ class ModuleDetailPanel(QWidget):
         self._mm:              Optional[ModuleMetrics] = None
         self._iter_data:       Optional[IterData]      = None
         self._cur_module_name: str   = ""
+        self._hist_cache: "OrderedDict[str, Tuple[np.ndarray, np.ndarray]]" = OrderedDict()
         self._refit_peak:      float = 0.0
         self._refit_sigma:     float = 0.0
         self._refit_chi2:      float = 0.0
@@ -494,11 +494,14 @@ class ModuleDetailPanel(QWidget):
                                 "Energy (MeV)", "Counts")
         self._canvas.redraw()
 
+    _HIST_CACHE_MAX = 30
+
     def _read_module_hist(self, name: str
                           ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        # Fast path: return in-memory cache populated during compute_metrics
-        if self._iter_data is not None and name in self._iter_data._hist_cache:
-            return self._iter_data._hist_cache[name]
+        # Fast path: bounded LRU cache (cleared when iteration changes)
+        if name in self._hist_cache:
+            self._hist_cache.move_to_end(name)
+            return self._hist_cache[name]
         if not HAS_UPROOT or self._root_path is None:
             return None
         key = f"module_energy/h_{name}"
@@ -508,8 +511,9 @@ class ModuleDetailPanel(QWidget):
                 if key not in avail:
                     return None
                 result = f[key].to_numpy()
-                if self._iter_data is not None:
-                    self._iter_data._hist_cache[name] = result
+                self._hist_cache[name] = result
+                if len(self._hist_cache) > self._HIST_CACHE_MAX:
+                    self._hist_cache.popitem(last=False)
                 return result
         except Exception:
             return None
@@ -519,6 +523,7 @@ class ModuleDetailPanel(QWidget):
     def set_iter_data(self, data: Optional["IterData"]) -> None:
         """Store reference to current IterData (needed for JSON write-back)."""
         self._iter_data = data
+        self._hist_cache.clear()
 
     def _do_use_mean(self) -> None:
         """Use histogram weighted mean as peak value; chi2/ndf is fixed at 1.0."""
@@ -1048,6 +1053,7 @@ class EpCalibViewerWindow(QMainWindow):
         self._cur_data:  Optional[IterData] = None
         self._map_mode = CalibMapWidget.MODE_DELTA_E
         self._worker:    Optional[_MetricsWorker] = None
+        self._abandoned_workers: List[_MetricsWorker] = []
 
         self._build_ui()
         self.setWindowTitle("epCalib Viewer")
@@ -1288,10 +1294,17 @@ class EpCalibViewerWindow(QMainWindow):
             self._stats.set_root_path(data.root_path)
             self._refresh_map()
             return
-        # stop any previous worker still running
+        # Disconnect previous worker (if still running) without blocking the UI.
+        # Keep a reference in _abandoned_workers so the QThread object stays alive
+        # until it finishes naturally.
         if self._worker is not None and self._worker.isRunning():
-            self._worker.quit()
-            self._worker.wait()
+            try:
+                self._worker.finished.disconnect(self._on_metrics_ready)
+            except TypeError:
+                pass
+            self._abandoned_workers.append(self._worker)
+        # Prune any already-finished abandoned workers
+        self._abandoned_workers = [w for w in self._abandoned_workers if w.isRunning()]
         self.statusBar().showMessage(
             f"Loading run {run} iter {it} …")
         self._worker = _MetricsWorker(data, self)
