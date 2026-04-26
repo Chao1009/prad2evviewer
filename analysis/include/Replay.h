@@ -10,6 +10,7 @@
 #include "EventData.h"
 #include "WaveAnalyzer.h"
 #include "DaqConfig.h"
+#include "ConfigSetup.h"
 #include "load_daq_config.h"
 
 #include <TFile.h>
@@ -43,7 +44,7 @@ public:
     bool Process(const std::string &input_evio, const std::string &output_root,
                  int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "");
 
-    bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root,
+    bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                             const std::string &daq_config_file = "",
                             const std::string &gem_ped_file = "", float zerosup_override = 0.f,
                             bool prad1 = false);

@@ -15,6 +15,7 @@
 //=============================================================================
 
 #include "Replay.h"
+#include "ConfigSetup.h"
 #include "InstallPaths.h"
 
 #include <iostream>
@@ -35,6 +36,8 @@
 #ifndef DATABASE_DIR
 #define DATABASE_DIR "."
 #endif
+
+using namespace analysis;
 
 static std::vector<std::string> getFilesInDir(const std::string &dir_path)
 {
@@ -120,6 +123,10 @@ int main(int argc, char *argv[])
     std::cout << "Processing " << num_files << " files with "
               << num_threads << " threads\n";
 
+    std::string run_str = get_run_str(evio_files[0]);
+    int run_num = get_run_int(evio_files[0]);
+    gRunConfig = LoadRunConfig(db_dir + "/runinfo/2p1_general.json", run_num);
+
     // shared work queue: atomic index into file list
     std::atomic<int> next_file{0};
     std::mutex io_mtx;
@@ -137,7 +144,7 @@ int main(int argc, char *argv[])
             if (idx >= num_files) break;
 
             std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.ProcessWithRecon(evio_files[idx], out, daq_config,
+            bool ok = replay.ProcessWithRecon(evio_files[idx], out, gRunConfig, daq_config,
                                               gem_ped_file, zerosup_override, prad1);
 
             std::lock_guard<std::mutex> lk(io_mtx);

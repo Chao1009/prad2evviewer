@@ -423,7 +423,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     return true;
 }
 
-bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &output_root,
+bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
                                 const float zerosup_override, bool prad1)
 {
@@ -467,10 +467,6 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     hycal.Init(db_dir + "/hycal_modules.json", daq_map_file);
     
     if(prad1 == true) evc::load_pedestals(db_dir + "/prad1/adc1881m_pedestals.json", daq_cfg_);
-    
-    std::string run_str = get_run_str(input_evio);
-    int run_num = get_run_int(input_evio);
-    gRunConfig = LoadRunConfig(db_dir + "/runinfo/2p1_general.json", run_num);
 
     std::string calib_file = db_dir + "/" + gRunConfig.energy_calib_file;
     int nmatched = hycal.LoadCalibration(calib_file);
