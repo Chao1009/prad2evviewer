@@ -95,7 +95,7 @@ static std::vector<std::string> collectRootFiles(const std::string &path);
 int main(int argc, char *argv[])
 {
     std::string output;
-    float Ebeam = 1100.f;
+    float Ebeam = 2108.f;
     int run_id = 12345;
 
     // --- geometry constants (can be made configurable) ---
@@ -203,7 +203,7 @@ int main(int argc, char *argv[])
 
             float Epair = ev.cl_energy[0] + ev.cl_energy[1];
             float sigma = Ebeam * 0.025f / std::sqrt(Ebeam / 1000.f);
-            if (std::abs(Epair - Ebeam) < 3. * sigma) {
+            if (std::abs(Epair - Ebeam) < 4. * sigma) {
                 MollerEvent mp(
                     {ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], ev.cl_energy[0]},
                     {ev.cl_x[1], ev.cl_y[1], ev.cl_z[1], ev.cl_energy[1]});
