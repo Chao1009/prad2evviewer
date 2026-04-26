@@ -30,10 +30,10 @@ from PyQt6.QtWidgets import (
     QWidget, QPushButton, QSizePolicy, QToolTip,
     QLineEdit, QLabel, QHBoxLayout, QVBoxLayout, QApplication,
 )
-from PyQt6.QtCore import Qt, QRectF, QPointF, QSize, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QRectF, QPointF, QSize, QTimer, QObject, QEvent, pyqtSignal
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPalette,
-    QDoubleValidator,
+    QPainter, QColor, QPen, QBrush, QFont, QFontMetricsF, QLinearGradient,
+    QPalette, QDoubleValidator,
 )
 
 
@@ -406,6 +406,7 @@ class HyCalMapWidget(QWidget):
     moduleHovered = pyqtSignal(str)
     moduleClicked = pyqtSignal(str)   # "" means deselect
     paletteClicked = pyqtSignal()
+    rangeEdited   = pyqtSignal(float, float)   # user-edited via inline editor
 
     _CLICK_THRESHOLD = 4
 
@@ -446,6 +447,7 @@ class HyCalMapWidget(QWidget):
                  include_lms: bool = False,
                  show_colorbar: bool = True,
                  enable_zoom_pan: bool = False,
+                 enable_inline_range_edit: bool = True,
                  min_size: Tuple[int, int] = (400, 400)):
         super().__init__(parent)
         self._shrink = shrink
@@ -455,6 +457,7 @@ class HyCalMapWidget(QWidget):
         self._include_lms = include_lms
         self._show_colorbar = show_colorbar
         self._enable_zoom_pan = enable_zoom_pan
+        self._enable_inline_range_edit = enable_inline_range_edit
 
         self.setMouseTracking(True)
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
@@ -473,6 +476,18 @@ class HyCalMapWidget(QWidget):
         self._geo_bounds: Tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0)
         self._cb_rect: Optional[QRectF] = None
         self._layout_dirty = True
+
+        # Inline range editor (set up lazily on first colorbar paint).
+        # ``_cb_min_hit`` / ``_cb_max_hit`` are screen-space rects covering the
+        # vmin / vmax label + pencil glyph; ``_inline_editor`` is a child
+        # QLineEdit shown over whichever was clicked.
+        self._cb_min_hit: Optional[QRectF] = None
+        self._cb_max_hit: Optional[QRectF] = None
+        self._inline_editor: Optional[QLineEdit] = None
+        self._inline_which: Optional[str] = None
+        self._inline_cancelled = False
+        self._inline_min_editable = True
+        self._inline_max_editable = True
 
         # zoom / pan state (only used when enable_zoom_pan is True)
         self._zoom = 1.0
@@ -755,12 +770,46 @@ class HyCalMapWidget(QWidget):
 
         p.setPen(self.CB_TEXT)
         p.setFont(QFont("Consolas", 9))
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, 120, 14),
-                   Qt.AlignmentFlag.AlignLeft, self._fmt_value(self._vmin))
-        p.drawText(QRectF(cb_x + cb_w - 120, cb_y + cb_h + 2, 120, 14),
-                   Qt.AlignmentFlag.AlignRight, self._fmt_value(self._vmax))
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, cb_w, 14),
+        label_y = cb_y + cb_h + 2
+        label_h = 14
+        min_str = self._fmt_value(self._vmin)
+        max_str = self._fmt_value(self._vmax)
+        p.drawText(QRectF(cb_x, label_y, 120, label_h),
+                   Qt.AlignmentFlag.AlignLeft, min_str)
+        p.drawText(QRectF(cb_x + cb_w - 120, label_y, 120, label_h),
+                   Qt.AlignmentFlag.AlignRight, max_str)
+        p.drawText(QRectF(cb_x, label_y, cb_w, label_h),
                    Qt.AlignmentFlag.AlignCenter, self._colorbar_center_text())
+
+        if self._enable_inline_range_edit:
+            # Faint pencil glyph next to each editable label hints
+            # "click to edit".  Hit rects cover both the value text and
+            # the pencil so the user can click anywhere on either.
+            fm = QFontMetricsF(p.font())
+            pencil = "✎"   # LOWER RIGHT PENCIL
+            pencil_w = fm.horizontalAdvance(pencil) + 4
+            min_w = fm.horizontalAdvance(min_str) + 4
+            max_w = fm.horizontalAdvance(max_str) + 4
+            p.setPen(QColor(THEME.TEXT_DIM))
+            if self._inline_min_editable:
+                self._cb_min_hit = QRectF(
+                    cb_x - 2, label_y - 1, min_w + pencil_w + 4, label_h + 2)
+                p.drawText(QRectF(cb_x + min_w, label_y, pencil_w, label_h),
+                           Qt.AlignmentFlag.AlignLeft, pencil)
+            else:
+                self._cb_min_hit = None
+            if self._inline_max_editable:
+                self._cb_max_hit = QRectF(
+                    cb_x + cb_w - max_w - pencil_w - 2, label_y - 1,
+                    max_w + pencil_w + 4, label_h + 2)
+                p.drawText(QRectF(cb_x + cb_w - max_w - pencil_w, label_y,
+                                  pencil_w, label_h),
+                           Qt.AlignmentFlag.AlignLeft, pencil)
+            else:
+                self._cb_max_hit = None
+        else:
+            self._cb_min_hit = None
+            self._cb_max_hit = None
 
     # ------------------------------------------------------------------
     #  Mouse / hit-test
@@ -799,12 +848,34 @@ class HyCalMapWidget(QWidget):
         self._dragging = False
 
     def _handle_click(self, pos):
-        """Default: colour-bar hit → paletteClicked, else → moduleClicked."""
+        """Default: vmin/vmax label hit → inline edit; colour-bar body →
+        paletteClicked; else → moduleClicked."""
+        if self._check_inline_range_edit_click(pos):
+            return
         if self._cb_rect and self._cb_rect.contains(pos):
             self.paletteClicked.emit()
             return
         name = self._hit(pos)
         self.moduleClicked.emit(name or "")
+
+    def _check_inline_range_edit_click(self, pos) -> bool:
+        """Hit-test ``pos`` against the colorbar vmin/vmax labels and open
+        the inline editor if it lands on one.  Returns True if handled.
+
+        Subclasses that override ``mousePressEvent`` (e.g. paint editors
+        that intercept clicks on press rather than release) should call
+        this at the top of their override to keep the inline-edit feature
+        working — otherwise their override swallows clicks on the labels.
+        """
+        if not self._enable_inline_range_edit:
+            return False
+        if self._cb_min_hit is not None and self._cb_min_hit.contains(pos):
+            self._show_inline_editor("min", self._cb_min_hit)
+            return True
+        if self._cb_max_hit is not None and self._cb_max_hit.contains(pos):
+            self._show_inline_editor("max", self._cb_max_hit)
+            return True
+        return False
 
     def mouseMoveEvent(self, e):
         # zoom/pan drag
@@ -826,7 +897,11 @@ class HyCalMapWidget(QWidget):
 
         # hover
         pos = e.position()
-        if self._cb_rect and self._cb_rect.contains(pos):
+        if self._enable_inline_range_edit and (
+                (self._cb_min_hit is not None and self._cb_min_hit.contains(pos))
+                or (self._cb_max_hit is not None and self._cb_max_hit.contains(pos))):
+            self.setCursor(Qt.CursorShape.IBeamCursor)
+        elif self._cb_rect and self._cb_rect.contains(pos):
             self.setCursor(Qt.CursorShape.PointingHandCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -856,6 +931,86 @@ class HyCalMapWidget(QWidget):
         self._zoom = new_zoom
         self._layout_dirty = True
         self.update()
+
+    # ------------------------------------------------------------------
+    #  Inline range edit (colorbar vmin / vmax labels)
+    # ------------------------------------------------------------------
+
+    def set_inline_edit_targets(self, min_editable: bool = True,
+                                max_editable: bool = True):
+        """Lock vmin and/or vmax against inline editing.
+
+        When a side is locked, its pencil glyph is hidden and clicks on
+        the label fall through to the colour-bar (palette cycle) handler.
+        Used by ``ColorRangeController`` when ``min_fixed`` is set so the
+        user can't bypass the lock by clicking the label.
+        """
+        self._inline_min_editable = bool(min_editable)
+        self._inline_max_editable = bool(max_editable)
+        self.update()
+
+    def _show_inline_editor(self, which: str, rect: QRectF):
+        """Open a child QLineEdit over the clicked vmin/vmax label."""
+        if self._inline_editor is None:
+            self._inline_editor = QLineEdit(self)
+            self._inline_editor.setValidator(
+                QDoubleValidator(-1e12, 1e12, 6, self._inline_editor))
+            self._inline_editor.setStyleSheet(themed(
+                f"QLineEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
+                f"border:1px solid {THEME.ACCENT_STRONG};border-radius:3px;"
+                f"padding:1px 4px;font:9pt Consolas;}}"))
+            self._inline_editor.installEventFilter(self)
+            self._inline_editor.editingFinished.connect(self._commit_inline_edit)
+        self._inline_which = which
+        self._inline_cancelled = False
+        cur = self._vmin if which == "min" else self._vmax
+        self._inline_editor.setText(self._fmt_value(cur))
+        ed_w = max(80, int(rect.width()))
+        ed_h = max(20, int(rect.height()) + 4)
+        if which == "max":
+            ed_x = int(rect.right()) - ed_w
+        else:
+            ed_x = int(rect.left())
+        ed_y = int(rect.top()) - 2
+        self._inline_editor.setGeometry(ed_x, ed_y, ed_w, ed_h)
+        self._inline_editor.show()
+        self._inline_editor.raise_()
+        self._inline_editor.selectAll()
+        self._inline_editor.setFocus()
+
+    def _commit_inline_edit(self):
+        # editingFinished fires on Enter and on focus-loss.  Esc handler
+        # sets _inline_cancelled and hides the editor; bail in that case.
+        if self._inline_editor is None or self._inline_which is None:
+            return
+        if self._inline_cancelled:
+            self._inline_which = None
+            return
+        try:
+            new_val = float(self._inline_editor.text())
+        except ValueError:
+            self._inline_editor.hide()
+            self._inline_which = None
+            return
+        if self._inline_which == "min":
+            new_min, new_max = new_val, self._vmax
+        else:
+            new_min, new_max = self._vmin, new_val
+        if (math.isfinite(new_min) and math.isfinite(new_max)
+                and new_max > new_min):
+            self.set_range(new_min, new_max)
+            self.rangeEdited.emit(new_min, new_max)
+        self._inline_editor.hide()
+        self._inline_which = None
+
+    def eventFilter(self, obj, event):
+        if obj is self._inline_editor and event.type() == QEvent.Type.KeyPress:
+            if event.key() == Qt.Key.Key_Escape:
+                self._inline_cancelled = True
+                self._inline_editor.hide()
+                self._inline_which = None
+                return True
+        return super().eventFilter(obj, event)
 
     def sizeHint(self):
         return QSize(680, 680)
@@ -942,40 +1097,46 @@ class _AutoButton(QPushButton):
             self._click_count = 0
 
 
-class ColorRangeControl(QWidget):
-    """Reusable colormap-range control for HyCalMapWidget callers.
+class ColorRangeController(QObject):
+    """Headless controller for a HyCalMapWidget colormap range.
+
+    Holds auto-fit / pin / log / min-fixed behaviour and exposes signals
+    and methods so scripts can wire whatever GUI they want — a single
+    "Auto" toolbar button, a menu action, the inline edits on the
+    colorbar, or no GUI at all.
 
     Parameters
     ----------
     target
-        ``HyCalMapWidget``                  — push edits straight into the widget.
-        ``MapViewState``                    — push edits into a per-tab profile.
-        ``(MapViewState, HyCalMapWidget)``  — drive both (per-tab profile that
-                                              also reflects on the live widget).
+        ``HyCalMapWidget``                  — push range/log into the widget.
+        ``MapViewState``                    — push into a per-tab profile.
+        ``(MapViewState, HyCalMapWidget)``  — drive both.
     auto_fit
-        Strategy used by the Auto button.  Preset name (``"minmax"``,
-        ``"minmax_nonzero"``, ``"percentile"``) or a callable
-        ``f(values) -> (vmin, vmax)``.
+        ``"minmax"`` / ``"minmax_nonzero"`` / ``"percentile"`` or a
+        callable ``f(values) -> (vmin, vmax)``.
     auto_fit_percentile
-        ``(lo, hi)`` percentiles for the ``"percentile"`` preset.
-        Default ``(2.0, 98.0)``.
-    include_log
-        Add a Log toggle next to the Auto button.  Emits ``logToggled``
-        and (if a target widget is bound) calls ``set_log_scale`` on it.
-    orientation
-        ``"horizontal"`` (default) or ``"vertical"`` (use for narrow side
-        panels — stacks min/max on separate lines).
-    start_pinned
-        Start in persistent auto-fit mode.  Equivalent to the user
-        double-clicking the Auto button after construction; useful for
-        live monitors where the range should track incoming data until
-        the user opts out.
+        ``(lo, hi)`` for the ``"percentile"`` preset.  Default ``(2, 98)``.
+    min_fixed
+        Lock the lower bound at this value (auto-fit and ``set_range``
+        clamp vmin).  ``None`` (default) means both bounds are free.
 
     Signals
     -------
-    rangeChanged(vmin, vmax)  — emitted on any range change (auto-fit or edit).
-    autoPinned(on)            — emitted when persistent auto mode flips.
-    logToggled(on)            — emitted when the Log toggle flips.
+    rangeChanged(vmin, vmax) — any range change (auto-fit, set_range, or
+                               relayed widget inline edit).
+    autoPinned(on)           — persistent auto mode flipped.
+    logToggled(on)           — log/linear flipped.
+
+    Public API
+    ----------
+    notify_values_changed(values)  — call when the data dict changes
+                                     (re-fits if pinned).
+    auto_fit(values=None)          — one-shot programmatic fit.
+    set_range(vmin, vmax)          — push a range; turns off pin.
+    set_pinned(on) / toggle_pinned() / is_pinned()
+    set_log(on)
+    set_state(view)                — rebind to a different MapViewState.
+    Properties: vmin, vmax, pinned, min_fixed, values.
     """
 
     rangeChanged = pyqtSignal(float, float)
@@ -983,7 +1144,6 @@ class ColorRangeControl(QWidget):
     logToggled   = pyqtSignal(bool)
 
     _AUTO_FIT_PRESETS = ("minmax", "minmax_nonzero", "percentile")
-
     AutoFit = Union[str, Callable[[Dict[str, float]], Tuple[float, float]]]
 
     def __init__(self,
@@ -991,10 +1151,8 @@ class ColorRangeControl(QWidget):
                  *,
                  auto_fit: AutoFit = "minmax",
                  auto_fit_percentile: Tuple[float, float] = (2.0, 98.0),
-                 include_log: bool = False,
-                 orientation: str = "horizontal",
-                 start_pinned: bool = False,
-                 parent: Optional[QWidget] = None):
+                 min_fixed: Optional[float] = None,
+                 parent: Optional[QObject] = None):
         super().__init__(parent)
 
         self._map: Optional[HyCalMapWidget] = None
@@ -1009,7 +1167,7 @@ class ColorRangeControl(QWidget):
             self._state, self._map = target
         else:
             raise TypeError(
-                "ColorRangeControl target must be HyCalMapWidget, "
+                "ColorRangeController target must be HyCalMapWidget, "
                 "MapViewState, or (MapViewState, HyCalMapWidget)")
 
         if not (callable(auto_fit) or auto_fit in self._AUTO_FIT_PRESETS):
@@ -1018,110 +1176,28 @@ class ColorRangeControl(QWidget):
                 f"got {auto_fit!r}")
         self._auto_fit = auto_fit
         self._auto_pct = auto_fit_percentile
+        self._min_fixed: Optional[float] = (
+            float(min_fixed) if min_fixed is not None else None)
 
         self._pinned = False
         self._values: Dict[str, float] = {}
 
-        self._build_ui(orientation, include_log)
-        self._refresh_from_target()
-        if start_pinned:
-            self._set_pinned(True)
+        # Relay widget inline edits — they always override pin (manual edit).
+        if self._map is not None:
+            self._map.rangeEdited.connect(self._on_widget_range_edited)
 
-    # ---- UI construction --------------------------------------------------
+        # Honour min_fixed up front so any pre-existing target range obeys it.
+        if self._min_fixed is not None:
+            _, vmax = self._read_target_range()
+            if vmax <= self._min_fixed:
+                vmax = self._min_fixed + 1.0
+            self._push_range(self._min_fixed, vmax)
+            # Lock the widget's inline-edit min so it can't be overridden.
+            if self._map is not None:
+                self._map.set_inline_edit_targets(
+                    min_editable=False, max_editable=True)
 
-    def _build_ui(self, orientation: str, include_log: bool):
-        edit_css = themed(
-            f"QLineEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
-            f"border:1px solid {THEME.BORDER};border-radius:4px;"
-            f"padding:2px 6px;}}")
-        self._min_edit = QLineEdit()
-        self._min_edit.setMaximumWidth(90)
-        self._min_edit.setValidator(
-            QDoubleValidator(-1e12, 1e12, 6, self._min_edit))
-        self._min_edit.editingFinished.connect(self._on_edit)
-        self._min_edit.setStyleSheet(edit_css)
-
-        self._max_edit = QLineEdit()
-        self._max_edit.setMaximumWidth(90)
-        self._max_edit.setValidator(
-            QDoubleValidator(-1e12, 1e12, 6, self._max_edit))
-        self._max_edit.editingFinished.connect(self._on_edit)
-        self._max_edit.setStyleSheet(edit_css)
-
-        self._auto_btn = _AutoButton("Auto", self)
-        self._auto_btn.setToolTip(
-            "Click: auto-fit once   ·   Double-click: keep auto-fitting")
-        self._auto_btn.oneshotRequested.connect(self._on_auto_oneshot)
-        self._auto_btn.pinToggleRequested.connect(self._on_auto_double)
-        self._update_auto_btn_style()
-
-        self._log_btn: Optional[QPushButton] = None
-        if include_log:
-            self._log_btn = QPushButton("Log")
-            self._log_btn.setCheckable(True)
-            self._log_btn.toggled.connect(self._on_log_toggled)
-            self._update_log_btn_style()
-
-        self.setStyleSheet(themed(
-            f"QLabel{{color:{THEME.TEXT};background:transparent;}}"))
-
-        if orientation == "vertical":
-            outer = QVBoxLayout(self)
-            outer.setContentsMargins(0, 0, 0, 0)
-            outer.setSpacing(4)
-            r1 = QHBoxLayout(); r1.setSpacing(4)
-            r1.addWidget(QLabel("min:")); r1.addWidget(self._min_edit); r1.addStretch()
-            r2 = QHBoxLayout(); r2.setSpacing(4)
-            r2.addWidget(QLabel("max:")); r2.addWidget(self._max_edit); r2.addStretch()
-            r3 = QHBoxLayout(); r3.setSpacing(6)
-            r3.addWidget(self._auto_btn)
-            if self._log_btn is not None:
-                r3.addWidget(self._log_btn)
-            r3.addStretch()
-            outer.addLayout(r1); outer.addLayout(r2); outer.addLayout(r3)
-        else:
-            row = QHBoxLayout(self)
-            row.setContentsMargins(0, 0, 0, 0)
-            row.setSpacing(6)
-            row.addWidget(QLabel("Range:"))
-            row.addWidget(self._min_edit)
-            row.addWidget(QLabel("–"))
-            row.addWidget(self._max_edit)
-            row.addWidget(self._auto_btn)
-            if self._log_btn is not None:
-                row.addWidget(self._log_btn)
-            row.addStretch()
-
-    def _update_auto_btn_style(self):
-        if self._pinned:
-            self._auto_btn.setStyleSheet(themed(
-                f"QPushButton{{background:{THEME.ACCENT_STRONG};"
-                f"color:{THEME.TEXT};border:1px solid {THEME.ACCENT_STRONG};"
-                f"padding:5px 14px;font:10pt;border-radius:6px;}}"))
-        else:
-            self._auto_btn.setStyleSheet(themed(
-                f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT};"
-                f"border:1px solid {THEME.BORDER};padding:5px 14px;"
-                f"font:10pt;border-radius:6px;}}"
-                f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};}}"))
-
-    def _update_log_btn_style(self):
-        if self._log_btn is None:
-            return
-        if self._log_btn.isChecked():
-            self._log_btn.setStyleSheet(themed(
-                f"QPushButton{{background:{THEME.ACCENT};color:{THEME.TEXT};"
-                f"border:1px solid {THEME.ACCENT};padding:5px 14px;"
-                f"font:10pt;border-radius:6px;}}"))
-        else:
-            self._log_btn.setStyleSheet(themed(
-                f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT_DIM};"
-                f"border:1px solid {THEME.BORDER};padding:5px 14px;"
-                f"font:10pt;border-radius:6px;}}"
-                f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};"
-                f"color:{THEME.TEXT};}}"))
-
-    # ---- target/state plumbing -------------------------------------------
+    # ---- target plumbing -------------------------------------------------
 
     def _read_target_range(self) -> Tuple[float, float]:
         if self._state is not None:
@@ -1131,125 +1207,106 @@ class ColorRangeControl(QWidget):
         return 0.0, 1.0
 
     def _push_range(self, vmin: float, vmax: float):
+        if self._min_fixed is not None:
+            vmin = self._min_fixed
         if self._state is not None:
             self._state.vmin = vmin
             self._state.vmax = vmax
         if self._map is not None:
             self._map.set_range(vmin, vmax)
 
-    def _set_edits(self, vmin: float, vmax: float):
-        self._min_edit.blockSignals(True)
-        self._max_edit.blockSignals(True)
-        self._min_edit.setText(f"{vmin:.6g}")
-        self._max_edit.setText(f"{vmax:.6g}")
-        self._min_edit.blockSignals(False)
-        self._max_edit.blockSignals(False)
-
-    def _refresh_from_target(self):
-        vmin, vmax = self._read_target_range()
-        self._set_edits(vmin, vmax)
-        if self._log_btn is not None and self._state is not None:
-            self._log_btn.blockSignals(True)
-            self._log_btn.setChecked(self._state.log_scale)
-            self._log_btn.blockSignals(False)
-            self._update_log_btn_style()
-
     # ---- public API ------------------------------------------------------
 
     def notify_values_changed(self, values: Dict[str, float]):
-        """Host calls this when the data being shown changes.  When
-        persistent auto mode is on, re-fits and pushes the new range."""
+        """Call when the data dict changes; re-fits if pinned."""
         self._values = values or {}
         if self._pinned:
             self._do_auto_fit_and_apply()
 
-    def set_state(self, view: MapViewState):
-        """Rebind to a different MapViewState (per-tab profile switch).
-
-        Refreshes the edits and Log toggle from the new state.  Does
-        *not* push to the bound widget — the host typically calls
-        ``widget.apply_view(view)`` separately.
-        """
-        self._state = view
-        self._refresh_from_target()
-
-    def set_range(self, vmin: float, vmax: float):
-        """Programmatic range update.  Doesn't change pin state."""
-        if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
-            return
-        self._push_range(vmin, vmax)
-        self._set_edits(vmin, vmax)
-        self.rangeChanged.emit(vmin, vmax)
-
     def auto_fit(self, values: Optional[Dict[str, float]] = None):
-        """Programmatically run the configured auto-fit strategy and apply.
-
-        ``values`` overrides the cached value dict; useful when the host
-        wants to fit to a freshly-computed dict without first calling
-        ``notify_values_changed``.  Pin state is unchanged.
-        """
+        """One-shot fit.  Pin state unchanged.  ``values`` overrides cache."""
         if values is not None:
             self._values = values
         self._do_auto_fit_and_apply()
 
-    def is_pinned(self) -> bool:
-        return self._pinned
-
-    # ---- handlers --------------------------------------------------------
-
-    def _on_edit(self):
-        try:
-            vmin = float(self._min_edit.text())
-            vmax = float(self._max_edit.text())
-        except ValueError:
-            return
-        if vmax <= vmin:
+    def set_range(self, vmin: float, vmax: float):
+        """Push a range; clamps vmin if min_fixed is set; turns off pin."""
+        if self._min_fixed is not None:
+            vmin = self._min_fixed
+        if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
             return
         if self._pinned:
-            # Manual edit overrides persistent mode.
             self._set_pinned(False)
         self._push_range(vmin, vmax)
         self.rangeChanged.emit(vmin, vmax)
 
-    def _on_auto_oneshot(self):
-        if self._pinned:
-            # Already auto-fitting; single-click means "stop pinning".
-            self._set_pinned(False)
-            return
-        self._do_auto_fit_and_apply()
+    def set_pinned(self, on: bool):
+        self._set_pinned(bool(on))
 
-    def _on_auto_double(self):
-        if self._pinned:
-            # Self-cancelling gesture: double-click while pinned exits.
-            self._set_pinned(False)
-            return
-        self._do_auto_fit_and_apply()
-        self._set_pinned(True)
+    def toggle_pinned(self):
+        self._set_pinned(not self._pinned)
 
-    def _set_pinned(self, on: bool):
-        if self._pinned == on:
-            return
-        self._pinned = on
-        self._update_auto_btn_style()
-        self.autoPinned.emit(on)
+    def is_pinned(self) -> bool:
+        return self._pinned
 
-    def _on_log_toggled(self, on: bool):
-        self._update_log_btn_style()
+    def set_log(self, on: bool):
+        on = bool(on)
         if self._state is not None:
             self._state.log_scale = on
         if self._map is not None:
             self._map.set_log_scale(on)
         self.logToggled.emit(on)
 
-    # ---- auto-fit --------------------------------------------------------
+    def set_state(self, view: MapViewState):
+        """Rebind to a different MapViewState (per-tab profile switch)."""
+        self._state = view
+        self.rangeChanged.emit(*self._read_target_range())
+
+    @property
+    def pinned(self) -> bool:
+        return self._pinned
+
+    @property
+    def min_fixed(self) -> Optional[float]:
+        return self._min_fixed
+
+    @property
+    def vmin(self) -> float:
+        return self._read_target_range()[0]
+
+    @property
+    def vmax(self) -> float:
+        return self._read_target_range()[1]
+
+    @property
+    def values(self) -> Dict[str, float]:
+        return self._values
+
+    # ---- internal --------------------------------------------------------
+
+    def _on_widget_range_edited(self, vmin: float, vmax: float):
+        """Inline edit on the widget's colorbar — always exits pin."""
+        if self._pinned:
+            self._set_pinned(False)
+        if self._state is not None:
+            self._state.vmin = vmin
+            self._state.vmax = vmax
+        self.rangeChanged.emit(vmin, vmax)
+
+    def _set_pinned(self, on: bool):
+        if self._pinned == on:
+            return
+        self._pinned = on
+        self.autoPinned.emit(on)
 
     def _do_auto_fit_and_apply(self):
         vmin, vmax = self._compute_auto_fit()
+        if self._min_fixed is not None:
+            vmin = self._min_fixed
         if not (math.isfinite(vmin) and math.isfinite(vmax)) or vmax <= vmin:
             pad = max(abs(vmin) * 0.05, 1e-6)
             vmax = vmin + pad
         self._push_range(vmin, vmax)
-        self._set_edits(vmin, vmax)
         self.rangeChanged.emit(vmin, vmax)
 
     def _compute_auto_fit(self) -> Tuple[float, float]:
@@ -1286,3 +1343,250 @@ class ColorRangeControl(QWidget):
             return (float(np.percentile(arr, lo)),
                     float(np.percentile(arr, hi)))
         return self._read_target_range()
+
+
+class ColorRangeControl(QWidget):
+    """Default min/max + Auto button + Log toggle widget.
+
+    Thin shim over :class:`ColorRangeController` that provides the
+    classic two-edit row UI.  Construct it for the simple case; for
+    custom UIs (single button, inline-only, …) build a
+    ``ColorRangeController`` directly and wire your own widgets.
+
+    See :class:`ColorRangeController` for the auto-fit / pin /
+    min_fixed / target-binding semantics; this widget passes those
+    parameters straight through.
+
+    Extra parameters
+    ----------------
+    include_log    — add an inline Log toggle button.
+    orientation    — ``"horizontal"`` or ``"vertical"``.
+    start_pinned   — start in persistent auto-fit mode.
+
+    The underlying controller is exposed as ``self.controller`` for
+    advanced wiring.
+    """
+
+    rangeChanged = pyqtSignal(float, float)
+    autoPinned   = pyqtSignal(bool)
+    logToggled   = pyqtSignal(bool)
+
+    AutoFit = ColorRangeController.AutoFit
+
+    def __init__(self,
+                 target,
+                 *,
+                 auto_fit: AutoFit = "minmax",
+                 auto_fit_percentile: Tuple[float, float] = (2.0, 98.0),
+                 include_log: bool = False,
+                 orientation: str = "horizontal",
+                 start_pinned: bool = False,
+                 min_fixed: Optional[float] = None,
+                 parent: Optional[QWidget] = None):
+        super().__init__(parent)
+        self._ctrl = ColorRangeController(
+            target,
+            auto_fit=auto_fit,
+            auto_fit_percentile=auto_fit_percentile,
+            min_fixed=min_fixed,
+            parent=self,
+        )
+        self._build_ui(orientation, include_log)
+        # Re-emit + sync on controller events.
+        self._ctrl.rangeChanged.connect(self._on_ctrl_range_changed)
+        self._ctrl.autoPinned.connect(self._on_ctrl_pin_changed)
+        self._ctrl.logToggled.connect(self._on_ctrl_log_changed)
+        # Initial sync.
+        self._set_edits(self._ctrl.vmin, self._ctrl.vmax)
+        if start_pinned:
+            self._ctrl.set_pinned(True)
+
+    # ---- accessors -------------------------------------------------------
+
+    @property
+    def controller(self) -> ColorRangeController:
+        return self._ctrl
+
+    # Pass-through public API for back-compat with the old widget.
+    def notify_values_changed(self, values: Dict[str, float]):
+        self._ctrl.notify_values_changed(values)
+
+    def auto_fit(self, values: Optional[Dict[str, float]] = None):
+        self._ctrl.auto_fit(values)
+
+    def set_range(self, vmin: float, vmax: float):
+        self._ctrl.set_range(vmin, vmax)
+
+    def set_state(self, view: MapViewState):
+        self._ctrl.set_state(view)
+        # Pull updated state into the widgets.
+        self._set_edits(self._ctrl.vmin, self._ctrl.vmax)
+        if self._log_btn is not None:
+            self._log_btn.blockSignals(True)
+            self._log_btn.setChecked(view.log_scale)
+            self._log_btn.blockSignals(False)
+            self._update_log_btn_style()
+
+    def is_pinned(self) -> bool:
+        return self._ctrl.is_pinned()
+
+    # ---- UI construction --------------------------------------------------
+
+    def _build_ui(self, orientation: str, include_log: bool):
+        edit_css = themed(
+            f"QLineEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"border:1px solid {THEME.BORDER};border-radius:4px;"
+            f"padding:2px 6px;}}")
+        self._min_edit = QLineEdit()
+        self._min_edit.setMaximumWidth(90)
+        self._min_edit.setValidator(
+            QDoubleValidator(-1e12, 1e12, 6, self._min_edit))
+        self._min_edit.editingFinished.connect(self._on_edit)
+        self._min_edit.setStyleSheet(edit_css)
+
+        self._max_edit = QLineEdit()
+        self._max_edit.setMaximumWidth(90)
+        self._max_edit.setValidator(
+            QDoubleValidator(-1e12, 1e12, 6, self._max_edit))
+        self._max_edit.editingFinished.connect(self._on_edit)
+        self._max_edit.setStyleSheet(edit_css)
+
+        self._auto_btn = _AutoButton("Auto", self)
+        self._auto_btn.setToolTip(
+            "Click: auto-fit once   ·   Double-click: keep auto-fitting")
+        self._auto_btn.oneshotRequested.connect(self._on_auto_oneshot)
+        self._auto_btn.pinToggleRequested.connect(self._on_auto_double)
+        self._update_auto_btn_style()
+
+        self._log_btn: Optional[QPushButton] = None
+        if include_log:
+            self._log_btn = QPushButton("Log")
+            self._log_btn.setCheckable(True)
+            self._log_btn.toggled.connect(self._on_log_clicked)
+            self._update_log_btn_style()
+
+        self.setStyleSheet(themed(
+            f"QLabel{{color:{THEME.TEXT};background:transparent;}}"))
+
+        single_value = self._ctrl.min_fixed is not None
+        if orientation == "vertical":
+            outer = QVBoxLayout(self)
+            outer.setContentsMargins(0, 0, 0, 0)
+            outer.setSpacing(4)
+            if not single_value:
+                r1 = QHBoxLayout(); r1.setSpacing(4)
+                r1.addWidget(QLabel("min:"))
+                r1.addWidget(self._min_edit); r1.addStretch()
+                outer.addLayout(r1)
+            r2 = QHBoxLayout(); r2.setSpacing(4)
+            r2.addWidget(QLabel("max:"))
+            r2.addWidget(self._max_edit); r2.addStretch()
+            r3 = QHBoxLayout(); r3.setSpacing(6)
+            r3.addWidget(self._auto_btn)
+            if self._log_btn is not None:
+                r3.addWidget(self._log_btn)
+            r3.addStretch()
+            outer.addLayout(r2); outer.addLayout(r3)
+        else:
+            row = QHBoxLayout(self)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(6)
+            if single_value:
+                row.addWidget(QLabel("Max:"))
+                row.addWidget(self._max_edit)
+            else:
+                row.addWidget(QLabel("Range:"))
+                row.addWidget(self._min_edit)
+                row.addWidget(QLabel("–"))
+                row.addWidget(self._max_edit)
+            row.addWidget(self._auto_btn)
+            if self._log_btn is not None:
+                row.addWidget(self._log_btn)
+            row.addStretch()
+
+    def _update_auto_btn_style(self):
+        if self._ctrl.is_pinned():
+            self._auto_btn.setStyleSheet(themed(
+                f"QPushButton{{background:{THEME.ACCENT_STRONG};"
+                f"color:{THEME.TEXT};border:1px solid {THEME.ACCENT_STRONG};"
+                f"padding:5px 14px;font:10pt;border-radius:6px;}}"))
+        else:
+            self._auto_btn.setStyleSheet(themed(
+                f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT};"
+                f"border:1px solid {THEME.BORDER};padding:5px 14px;"
+                f"font:10pt;border-radius:6px;}}"
+                f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};}}"))
+
+    def _update_log_btn_style(self):
+        if self._log_btn is None:
+            return
+        if self._log_btn.isChecked():
+            self._log_btn.setStyleSheet(themed(
+                f"QPushButton{{background:{THEME.ACCENT};color:{THEME.TEXT};"
+                f"border:1px solid {THEME.ACCENT};padding:5px 14px;"
+                f"font:10pt;border-radius:6px;}}"))
+        else:
+            self._log_btn.setStyleSheet(themed(
+                f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT_DIM};"
+                f"border:1px solid {THEME.BORDER};padding:5px 14px;"
+                f"font:10pt;border-radius:6px;}}"
+                f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};"
+                f"color:{THEME.TEXT};}}"))
+
+    def _set_edits(self, vmin: float, vmax: float):
+        self._min_edit.blockSignals(True)
+        self._max_edit.blockSignals(True)
+        self._min_edit.setText(f"{vmin:.6g}")
+        self._max_edit.setText(f"{vmax:.6g}")
+        self._min_edit.blockSignals(False)
+        self._max_edit.blockSignals(False)
+
+    # ---- handlers --------------------------------------------------------
+
+    def _on_edit(self):
+        try:
+            if self._ctrl.min_fixed is not None:
+                vmin = self._ctrl.min_fixed
+            else:
+                vmin = float(self._min_edit.text())
+            vmax = float(self._max_edit.text())
+        except ValueError:
+            return
+        if vmax <= vmin:
+            return
+        self._ctrl.set_range(vmin, vmax)
+
+    def _on_auto_oneshot(self):
+        if self._ctrl.is_pinned():
+            self._ctrl.set_pinned(False)
+        else:
+            self._ctrl.auto_fit()
+
+    def _on_auto_double(self):
+        if self._ctrl.is_pinned():
+            self._ctrl.set_pinned(False)
+        else:
+            self._ctrl.auto_fit()
+            self._ctrl.set_pinned(True)
+
+    def _on_log_clicked(self, on: bool):
+        self._update_log_btn_style()
+        self._ctrl.set_log(on)
+
+    # ---- controller relays -----------------------------------------------
+
+    def _on_ctrl_range_changed(self, vmin: float, vmax: float):
+        self._set_edits(vmin, vmax)
+        self.rangeChanged.emit(vmin, vmax)
+
+    def _on_ctrl_pin_changed(self, on: bool):
+        self._update_auto_btn_style()
+        self.autoPinned.emit(on)
+
+    def _on_ctrl_log_changed(self, on: bool):
+        if self._log_btn is not None and self._log_btn.isChecked() != on:
+            self._log_btn.blockSignals(True)
+            self._log_btn.setChecked(on)
+            self._log_btn.blockSignals(False)
+            self._update_log_btn_style()
+        self.logToggled.emit(on)

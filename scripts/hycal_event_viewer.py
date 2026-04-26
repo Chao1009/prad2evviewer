@@ -50,7 +50,8 @@ from PyQt6.QtGui import (
 
 from hycal_geoview import (
     load_modules as load_geo_modules,
-    HyCalMapWidget, cmap_qcolor, apply_theme_palette, set_theme,
+    HyCalMapWidget, ColorRangeController, cmap_qcolor,
+    apply_theme_palette, set_theme,
     available_themes, THEME, themed,
 )
 
@@ -1112,6 +1113,12 @@ class WaveformGeoView(HyCalMapWidget):
         self._mode = self.MODE_CURRENT
         self._current_vals: Dict[str, float] = {}
         self._overall_vals: Dict[str, float] = {}
+        # Headless range controller: handles auto-fit logic and locks vmin
+        # at 0 (occupancy and per-event integrals both start at zero).
+        # Inline-clicking the max value on the colorbar lets the user
+        # override the range without any extra UI.
+        self._range_ctrl = ColorRangeController(
+            self, auto_fit="minmax", min_fixed=0.0, parent=self)
 
         # Top-left mode toggle.  Default label matches MODE_CURRENT.
         self._mode_btn = QPushButton("Current", self)
@@ -1165,7 +1172,8 @@ class WaveformGeoView(HyCalMapWidget):
             self.set_range(0.0, 1.0)          # occupancy fraction
         else:
             self.set_values(self._current_vals)
-            self.auto_range()                  # max-integral per-event rescales
+            # Re-fit per event; user can override via inline colorbar edit.
+            self._range_ctrl.auto_fit(self._current_vals)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

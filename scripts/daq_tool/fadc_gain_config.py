@@ -503,6 +503,10 @@ class _HyCalGainMap(_HyCalMapBase):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
+        # Defer to the base inline-range edit feature first — this would
+        # otherwise be swallowed by our paint-mode dispatch below.
+        if self._check_inline_range_edit_click(pos):
+            return
         # Click on the colour bar cycles palettes (base widget feature)
         if self._cb_rect and self._cb_rect.contains(pos):
             self.cycle_palette()
