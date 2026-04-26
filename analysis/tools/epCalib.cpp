@@ -398,6 +398,7 @@ int main(int argc, char *argv[])
     dat_out << std::setw(8)  << "Module"
             << std::setw(16) << "ExpectedPeak"
             << std::setw(16) << "MeasuredPeak"
+            << std::setw(16) << "oldFactor"
             << std::setw(16) << "Ratio"
             << std::setw(16) << "Sigma"
             << std::setw(16) << "Chi2/ndf" << "\n";
@@ -424,10 +425,13 @@ int main(int argc, char *argv[])
                                     / hycal_z) * 180.f / 3.14159265f;
         float expected_peak = physics.ExpectedEnergy(theta_deg, Ebeam, "ep");
         float ratio         = expected_peak / peak;
+        if(ratio < 0.5) ratio = 0.5; 
+        if(ratio > 2.0) ratio = 2.0;
         ratio_module_all->Fill(ratio);
 
         double current_factor = hycal.GetCalibConstant(mod_id);
-        hycal.SetCalibConstant(mod_id, current_factor * ratio);
+        double new_factor = current_factor * ratio;
+        hycal.SetCalibConstant(mod_id, new_factor);
         hycal.SetCalibBaseEnergy(mod_id, expected_peak);
 
         module_ratio->Fill(hycal.module(m).x, hycal.module(m).y,
@@ -440,6 +444,7 @@ int main(int argc, char *argv[])
         dat_out << std::setw(8)  << name
                 << std::setw(16) << expected_peak
                 << std::setw(16) << peak
+                << std::setw(16) << current_factor
                 << std::setw(16) << ratio
                 << std::setw(16) << sigma
                 << std::setw(16) << chi2 << "\n";
