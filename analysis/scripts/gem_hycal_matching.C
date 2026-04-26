@@ -32,6 +32,17 @@
 // (LMS / Alpha / cosmic / etc.) is skipped.  The summary lines report
 // raw physics count vs. kept count.
 //
+// Multi-file mode is selected by the input path:
+//   * `/data/.../prad_023881.evio.*`  → glob: enumerate every sibling
+//     `prad_023881.evio.<digits>`, process them in suffix order, and
+//     warn (to stderr) about any gap in the suffix sequence (including
+//     missing from .00000).
+//   * `/data/prad_023881/`            → directory: same enumeration,
+//     run number sniffed from the directory name.
+//   * `/data/.../prad_023881.evio.00000` → single specific split file.
+// Use the glob form for a full-run replay; use the explicit suffix when
+// you want to debug or re-process a single segment.
+//
 // Pedestals, common-mode files, and HyCal calibration are auto-discovered
 // from database/config.json -> runinfo (matches the live monitor).  Pass
 // "" (empty string) for any of the file args to use the discovered
@@ -71,9 +82,16 @@
 // -----
 //   cd build
 //   root -l ../analysis/scripts/rootlogon.C
+//
+//   # full run (glob — warns about any missing split):
+//   .x ../analysis/scripts/gem_hycal_matching.C+( \
+//       "/data/stage6/prad_023867/prad_023867.evio.*", \
+//       "match_023867.root")
+//
+//   # single split (debugging):
 //   .x ../analysis/scripts/gem_hycal_matching.C+( \
 //       "/data/stage6/prad_023867/prad_023867.evio.00000", \
-//       "match_023867.root")
+//       "match_023867_seg0.root")
 //============================================================================
 
 #include "EvChannel.h"
@@ -474,14 +492,16 @@ int gem_hycal_matching(const char *evio_path,
         Printf("[setup] GEM CM     : %s", cm_path.c_str());
     }
 
-    //---- EVIO ---------------------------------------------------------------
+    //---- EVIO discovery -----------------------------------------------------
+    // Auto-discover all split files for this run sitting alongside the
+    // user-supplied path (`prad_NNNNNN.evio.NNNNN`).  Falls back to the
+    // single file if no run number can be parsed.
     EvChannel ch;
     ch.SetConfig(cfg);
-    if (ch.OpenAuto(evio_path) != status::success) {
-        Printf("[ERROR] cannot open EVIO %s", evio_path);
-        return 1;
-    }
-    Printf("[setup] EVIO       : %s", evio_path);
+    auto evio_files = discover_split_files(evio_path ? evio_path : "");
+    Printf("[setup] EVIO       : %zu split file(s) for input %s",
+           evio_files.size(), evio_path ? evio_path : "(null)");
+    for (const auto &f : evio_files) Printf("           %s", f.c_str());
     Printf("[setup] Match cut  : %.2f · sigma_total", match_nsigma);
 
     //---- ROOT output --------------------------------------------------------
@@ -511,14 +531,24 @@ int gem_hycal_matching(const char *evio_path,
     fdec::WaveResult   wres;
 
     long n_read = 0, n_phys = 0, n_kept = 0, n_filled = 0;
+    long n_files_open = 0;
     long total_clusters = 0, total_matches = 0, total_strips = 0;
     long total_gem_2d   = 0;
     long gem_2d_per_det[4] = {0, 0, 0, 0};
 
-    while (ch.Read() == status::success) {
-        ++n_read;
-        if (!ch.Scan()) continue;
-        if (ch.GetEventType() != EventType::Physics) continue;
+    for (const auto &fpath : evio_files) {
+        if (ch.OpenAuto(fpath) != status::success) {
+            Printf("[WARN] skip (cannot open): %s", fpath.c_str());
+            continue;
+        }
+        ++n_files_open;
+        Printf("[file %ld/%zu] %s",
+               n_files_open, evio_files.size(), fpath.c_str());
+
+        while (ch.Read() == status::success) {
+            ++n_read;
+            if (!ch.Scan()) continue;
+            if (ch.GetEventType() != EventType::Physics) continue;
 
         for (int i = 0; i < ch.GetNEvents(); ++i) {
             ssp_evt.clear();
@@ -736,6 +766,8 @@ int gem_hycal_matching(const char *evio_path,
         }
         if (n_phys > 0 && n_phys % 5000 == 0)
             Printf("[progress] %ld physics events", n_phys);
+        }
+        ch.Close();
     }
 
 done:
@@ -747,6 +779,7 @@ done:
     fout.Close();
 
     Printf("--- summary ---");
+    Printf("  EVIO files opened     : %ld / %zu", n_files_open, evio_files.size());
     Printf("  EVIO records          : %ld", n_read);
     Printf("  physics events        : %ld", n_phys);
     Printf("  passed trig cut 0x100 : %ld", n_kept);

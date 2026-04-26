@@ -112,6 +112,13 @@ Full **HyCal + GEM** reconstruction pipeline with straight-line cluster matching
 
 **Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) are reconstructed and written. Everything else (LMS / Alpha / cosmic / etc.) is skipped — the summary reports raw physics count vs. kept count.
 
+**Multi-file** — chosen by the input path:
+- `prad_023881.evio.*` → **glob mode**: enumerate every sibling `prad_023881.evio.<digits>` in the enclosing directory, process them all into one output tree (suffix-sorted). Warns to stderr about any gap in the suffix sequence — including a missing `.00000` start.
+- A directory (e.g. `/data/prad_023881/`) → same enumeration, run number sniffed from the directory name.
+- `prad_023881.evio.00000` → **single-file mode**: just that one split.
+
+The summary reports `EVIO files opened : M / N`.
+
 Per event (after the trigger cut):
 - `EvChannel.DecodeEvent` → FADC + SSP buffers
 - HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters() / ReconstructHits()`
@@ -146,19 +153,24 @@ Tree layout (`match`, one entry per physics event):
 Pedestals, common-mode files, and HyCal calibration are auto-discovered from `database/config.json` → `runinfo` (the same path `app_state_init.cpp` uses on the live monitor), so the analysis tree's reconstruction matches what the monitor sees. Pass an explicit path to override.
 
 ```bash
-# simplest — everything auto-discovered:
+# full-run replay — glob discovers every split, warns on gaps:
+.x ../analysis/scripts/gem_hycal_matching.C+( \
+    "/data/stage6/prad_023867/prad_023867.evio.*", \
+    "match_023867.root")
+
+# debug a single split file:
 .x ../analysis/scripts/gem_hycal_matching.C+( \
     "/data/stage6/prad_023867/prad_023867.evio.00000", \
-    "match_023867.root")
+    "match_023867_seg0.root")
 
 # tighter matching cut (2σ instead of 3σ default) — 5-arg overload:
 .x ../analysis/scripts/gem_hycal_matching.C+( \
-    "/data/.../prad_023867.evio.00000", "out.root", \
+    "/data/.../prad_023867.evio.*", "out.root", \
     0L, -1, 2.0f)
 
 # explicit overrides (paths relative to PRAD2_DATABASE_DIR or absolute):
 .x ../analysis/scripts/gem_hycal_matching.C+( \
-    "/data/.../prad_023867.evio.00000", "out.root", \
+    "/data/.../prad_023867.evio.*", "out.root", \
     "gem_peds/peds_23867.txt", "gem_peds/cm_23867.txt", \
     "calibration/calibration_factor_0.json")
 ```
@@ -178,6 +190,11 @@ Side-by-side 2D occupancy maps of **GEM hits projected to the HyCal surface** (l
 
 **Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) contribute to the histograms.
 
+**Multi-file** — chosen by the input path:
+- `prad_023881.evio.*` → glob: enumerate all `prad_023881.evio.<digits>` siblings, fold into the same two histograms; gap warnings to stderr.
+- A directory → same, run number sniffed from the directory name.
+- `prad_023881.evio.00000` → single specific split.
+
 Per event (after the trigger cut):
 - HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters / ReconstructHits`. HC hits are built with `z = 0` (no shower-depth applied) so the lab transform places them at exactly z = `hycal_z`.
 - GEM: `GemSystem.ProcessEvent` → `Reconstruct(GemCluster)` → per-detector hit list.
@@ -188,14 +205,19 @@ Per event (after the trigger cut):
 Outputs the canvas in whatever format the extension implies (`.pdf`, `.png`, `.svg`, …) and a sibling `.root` file with both `TH2F`s and the canvas saved for re-plotting.
 
 ```bash
-# simplest — everything auto-discovered, all events:
+# full-run scan — glob discovers every split, warns on gaps:
 .x ../analysis/scripts/plot_hits_at_hycal.C+( \
-    "/data/stage6/prad_023867/prad_023867.evio.00000", \
+    "/data/stage6/prad_023867/prad_023867.evio.*", \
     "hits_at_hycal.pdf")
 
-# subset of events:
+# single split file (debugging):
 .x ../analysis/scripts/plot_hits_at_hycal.C+( \
-    "/data/.../prad_023867.evio.00000", "hits.png", 50000L)
+    "/data/stage6/prad_023867/prad_023867.evio.00000", \
+    "hits_at_hycal_seg0.pdf")
+
+# subset of events across the full run:
+.x ../analysis/scripts/plot_hits_at_hycal.C+( \
+    "/data/.../prad_023867.evio.*", "hits.png", 50000L)
 ```
 
 Convenience overloads:

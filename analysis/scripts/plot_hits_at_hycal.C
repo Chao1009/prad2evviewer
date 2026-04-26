@@ -22,6 +22,15 @@
 // physics trigger) contribute.  Everything else (LMS / Alpha / cosmic /
 // etc.) is skipped.
 //
+// Multi-file mode is selected by the input path:
+//   * `/data/.../prad_023881.evio.*`  → glob: enumerate every sibling
+//     `prad_023881.evio.<digits>`, fold them all into the same two
+//     histograms, and warn (to stderr) about any gap in the suffix
+//     sequence (including missing from .00000).
+//   * `/data/prad_023881/`            → directory: same enumeration,
+//     run number sniffed from the directory name.
+//   * `/data/.../prad_023881.evio.00000` → single specific split file.
+//
 // Heap-allocate the big POD-ish decoder structs (fdec::EventData,
 // ssp::SspEventData) — see the project's `feedback_heap_allocate_decoder
 // _structs` memory: stack-allocating them SEGVs at function prologue.
@@ -30,9 +39,16 @@
 // -----
 //   cd build
 //   root -l ../analysis/scripts/rootlogon.C
+//
+//   # full run (glob — warns about any missing split):
+//   .x ../analysis/scripts/plot_hits_at_hycal.C+( \
+//       "/data/stage6/prad_023867/prad_023867.evio.*", \
+//       "hits_at_hycal.pdf")
+//
+//   # single split (debugging):
 //   .x ../analysis/scripts/plot_hits_at_hycal.C+( \
 //       "/data/stage6/prad_023867/prad_023867.evio.00000", \
-//       "hits_at_hycal.pdf")
+//       "hits_at_hycal_seg0.pdf")
 //
 //   args (full): evio_path, out_path, max_events, run_num,
 //                gem_ped_file, gem_cm_file, hc_calib_file,
@@ -215,14 +231,16 @@ int plot_hits_at_hycal(const char *evio_path,
         Printf("[setup] GEM CM     : %s", cm_path.c_str());
     }
 
-    //---- EVIO ---------------------------------------------------------------
+    //---- EVIO discovery -----------------------------------------------------
+    // Auto-discover all split files for this run sitting alongside the
+    // user-supplied path (`prad_NNNNNN.evio.NNNNN`).  Falls back to the
+    // single file if no run number can be parsed.
     EvChannel ch;
     ch.SetConfig(cfg);
-    if (ch.OpenAuto(evio_path) != status::success) {
-        Printf("[ERROR] cannot open EVIO %s", evio_path);
-        return 1;
-    }
-    Printf("[setup] EVIO       : %s", evio_path);
+    auto evio_files = discover_split_files(evio_path ? evio_path : "");
+    Printf("[setup] EVIO       : %zu split file(s) for input %s",
+           evio_files.size(), evio_path ? evio_path : "(null)");
+    for (const auto &f : evio_files) Printf("           %s", f.c_str());
 
     //---- histograms ---------------------------------------------------------
     // Lab frame (target-centered, beam-aligned) at z = hycal_z.
@@ -253,12 +271,22 @@ int plot_hits_at_hycal(const char *evio_path,
     fdec::WaveResult   wres;
 
     long n_read = 0, n_phys = 0, n_kept = 0;
+    long n_files_open = 0;
     long n_hc_clusters = 0, n_gem_hits = 0;
 
-    while (ch.Read() == status::success) {
-        ++n_read;
-        if (!ch.Scan()) continue;
-        if (ch.GetEventType() != EventType::Physics) continue;
+    for (const auto &fpath : evio_files) {
+        if (ch.OpenAuto(fpath) != status::success) {
+            Printf("[WARN] skip (cannot open): %s", fpath.c_str());
+            continue;
+        }
+        ++n_files_open;
+        Printf("[file %ld/%zu] %s",
+               n_files_open, evio_files.size(), fpath.c_str());
+
+        while (ch.Read() == status::success) {
+            ++n_read;
+            if (!ch.Scan()) continue;
+            if (ch.GetEventType() != EventType::Physics) continue;
 
         for (int i = 0; i < ch.GetNEvents(); ++i) {
             ssp_evt.clear();
@@ -361,6 +389,8 @@ int plot_hits_at_hycal(const char *evio_path,
         }
         if (n_phys > 0 && n_phys % 5000 == 0)
             Printf("[progress] %ld physics events", n_phys);
+        }
+        ch.Close();
     }
 
 done:
@@ -399,6 +429,7 @@ done:
     }
 
     Printf("--- summary ---");
+    Printf("  EVIO files opened     : %ld / %zu", n_files_open, evio_files.size());
     Printf("  EVIO records          : %ld", n_read);
     Printf("  physics events        : %ld", n_phys);
     Printf("  passed trig cut 0x100 : %ld", n_kept);

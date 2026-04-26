@@ -19,11 +19,17 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <regex>
 #include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
 // Resolve a possibly-relative database path to an absolute one using
 // PRAD2_DATABASE_DIR.  Empty / already-absolute paths pass through.
@@ -83,6 +89,109 @@ inline std::map<int, int> build_gem_crate_remap(const evc::DaqConfig &cfg)
     for (const auto &re : cfg.roc_tags)
         if (re.type == "gem") remap[(int)re.tag] = re.crate;
     return remap;
+}
+
+// Resolve an EVIO input path to the list of files to process.
+//
+// Modes (chosen by the input path):
+//   * Glob mode — path contains `*` (e.g. `.../prad_023881.evio.*`):
+//       enumerate every sibling `prad_<run>.evio.<digits>` in the
+//       enclosing directory, sort by suffix, and warn (to stderr) about
+//       any gaps in the suffix sequence — including suffixes < the
+//       lowest one found, since splits are expected to start at .00000.
+//   * Directory mode — path is a directory:
+//       same enumeration as glob mode, sniffing the run number from the
+//       directory's name.
+//   * Single-file mode — anything else:
+//       return just `{ any_path }` unchanged.  Use this to process one
+//       specific split (e.g. for debugging a single segment).
+//
+// File pattern: `prad_<run>.evio.<digits>`.  The run number in the name
+// can be unpadded (`prad_1234.evio.0`) or zero-padded to any width
+// (`prad_023881.evio.00000`); both forms are accepted on either side.
+inline std::vector<std::string>
+discover_split_files(const std::string &any_path)
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path p(any_path);
+
+    const bool wants_glob = (any_path.find('*') != std::string::npos);
+    const bool is_dir     = fs::is_directory(p, ec);
+
+    // Single-file mode: pass through unchanged.
+    if (!wants_glob && !is_dir) return { any_path };
+
+    // Discovery mode: figure out the search dir + run number.
+    fs::path dir;
+    int run = -1;
+    if (is_dir) {
+        dir = p;
+        run = extract_run_number_from_path(p.filename().string());
+    } else {
+        // Glob: strip the glob suffix, work in the parent directory.
+        dir = p.parent_path();
+        if (dir.empty()) dir = ".";
+        run = extract_run_number_from_path(p.filename().string());
+        if (run < 0)
+            run = extract_run_number_from_path(dir.filename().string());
+    }
+    if (run < 0 || !fs::is_directory(dir, ec)) {
+        std::fprintf(stderr,
+            "[WARN] discover_split_files: cannot resolve run/dir from '%s' — "
+            "passing through as a single file.\n", any_path.c_str());
+        return { any_path };
+    }
+
+    std::regex pat("^prad_0*" + std::to_string(run) + R"(\.evio\.(\d+)$)",
+                   std::regex_constants::icase);
+
+    // Collect (suffix_int, full_path) so we can sort numerically and detect
+    // gaps in one pass.
+    std::vector<std::pair<int, std::string>> matched;
+    for (const auto &entry : fs::directory_iterator(dir, ec)) {
+        std::string name = entry.path().filename().string();
+        std::smatch m;
+        if (std::regex_match(name, m, pat)) {
+            try {
+                matched.emplace_back(std::stoi(m[1].str()),
+                                     entry.path().string());
+            } catch (...) {}
+        }
+    }
+    std::sort(matched.begin(), matched.end());
+
+    // Gap warning: expected sequence is .00000, .00001, ..., contiguous.
+    // Report missing suffixes from 0 to the highest found (so the user
+    // notices both internal gaps AND a missing-from-the-start situation).
+    if (!matched.empty()) {
+        int last = matched.back().first;
+        std::vector<int> missing;
+        size_t k = 0;
+        for (int i = 0; i <= last; ++i) {
+            if (k < matched.size() && matched[k].first == i) { ++k; continue; }
+            missing.push_back(i);
+        }
+        if (!missing.empty()) {
+            std::fprintf(stderr,
+                "[WARN] split-file gaps in run %d (found %zu file(s), "
+                "max suffix .%05d): missing",
+                run, matched.size(), last);
+            for (int i : missing) std::fprintf(stderr, " .%05d", i);
+            std::fprintf(stderr, "\n");
+        }
+    }
+
+    std::vector<std::string> out;
+    out.reserve(matched.size());
+    for (auto &pr : matched) out.push_back(std::move(pr.second));
+    if (out.empty()) {
+        std::fprintf(stderr,
+            "[WARN] discover_split_files: no files matched 'prad_%d.evio.*' "
+            "in %s\n", run, dir.string().c_str());
+        return { any_path };
+    }
+    return out;
 }
 
 // Strip the extension off a path so "out.pdf" becomes "out".  Used by
