@@ -409,6 +409,31 @@ class ModuleDetailPanel(QWidget):
 
         lay.addWidget(rf_box)
 
+        # ── Set Factor directly ─────────────────────────────────────────
+        sf_box = QGroupBox("Set Factor Directly")
+        sf_lay = QHBoxLayout(sf_box)
+        sf_lay.setContentsMargins(6, 12, 6, 4)
+        sf_lay.setSpacing(6)
+        sf_lay.addWidget(QLabel("Preset:"))
+        for preset in (0.122, 0.15):
+            btn = QPushButton(f"{preset}")
+            btn.setFixedWidth(60)
+            btn.setToolTip(f"Set factor to {preset} and save JSON")
+            btn.clicked.connect(lambda _, v=preset: self._do_set_factor(v))
+            sf_lay.addWidget(btn)
+        sf_lay.addSpacing(16)
+        sf_lay.addWidget(QLabel("Custom:"))
+        self._sf_custom = QLineEdit()
+        self._sf_custom.setFixedWidth(80)
+        self._sf_custom.setPlaceholderText("factor")
+        sf_lay.addWidget(self._sf_custom)
+        self._sf_apply_btn = QPushButton("Set && Save")
+        self._sf_apply_btn.setToolTip("Apply the custom factor value and save JSON")
+        self._sf_apply_btn.clicked.connect(self._do_set_factor_custom)
+        sf_lay.addWidget(self._sf_apply_btn)
+        sf_lay.addStretch()
+        lay.addWidget(sf_box)
+
     def set_root_path(self, path: Optional[Path]):
         self._root_path = path
 
@@ -524,6 +549,61 @@ class ModuleDetailPanel(QWidget):
         """Store reference to current IterData (needed for JSON write-back)."""
         self._iter_data = data
         self._hist_cache.clear()
+
+    def _do_set_factor(self, value: float) -> None:
+        """Directly set factor to *value* and write to JSON."""
+        name = self._cur_module_name
+        if not name or self._iter_data is None:
+            self._refit_status.setText("No module selected")
+            return
+        mm = self._iter_data.metrics.get(name)
+        if mm is None:
+            self._refit_status.setText(f"Module {name!r} not in metrics")
+            return
+
+        old_factor = mm.factor
+        mm.factor  = value
+
+        entry = self._iter_data.factors.get(name)
+        if entry is not None:
+            entry["factor"] = value
+
+        jpath = self._iter_data.json_path
+        if jpath is not None:
+            try:
+                entries = list(self._iter_data.factors.values())
+                with open(jpath, "w") as fj:
+                    json.dump(entries, fj, indent=2)
+                note = f"  →  saved {jpath.name}"
+            except Exception as exc:
+                self._refit_status.setText(f"Save failed: {exc}")
+                return
+        else:
+            note = "  (JSON path not found — not saved)"
+
+        self._mm = mm
+        self._info_lbl.setText(
+            f"Factor: {mm.factor:.5f}  (was {old_factor:.5f})   "
+            f"Base energy: {mm.base_energy:.1f} MeV\n"
+            f"Events: {mm.stats:.0f}   "
+            f"Peak: {mm.peak:.1f} MeV   σ: {mm.sigma:.1f} MeV   "
+            f"χ²/ndf: {mm.chi2:.3f}"
+        )
+        self._refit_status.setText(f"Factor set to {value:.5f}  (was {old_factor:.5f}){note}")
+        self.refitApplied.emit(name)
+
+    def _do_set_factor_custom(self) -> None:
+        """Read the custom factor QLineEdit and call _do_set_factor."""
+        txt = self._sf_custom.text().strip()
+        try:
+            value = float(txt)
+        except ValueError:
+            self._refit_status.setText("Invalid factor value — enter a number")
+            return
+        if value <= 0:
+            self._refit_status.setText("Factor must be positive")
+            return
+        self._do_set_factor(value)
 
     def _do_use_mean(self) -> None:
         """Use histogram weighted mean as peak value; chi2/ndf is fixed at 1.0."""
