@@ -203,6 +203,8 @@ void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev)
     tree->Branch("gem_y_peak",   ev.gem_y_peak,    "gem_y_peak[n_gem_hits]/F");
     tree->Branch("gem_x_size",   ev.gem_x_size,    "gem_x_size[n_gem_hits]/b");
     tree->Branch("gem_y_size",   ev.gem_y_size,    "gem_y_size[n_gem_hits]/b");
+    tree->Branch("gem_x_mTbin",  ev.gem_x_mTbin,    "gem_x_mTbin[n_gem_hits]/b");
+    tree->Branch("gem_y_mTbin",  ev.gem_y_mTbin,    "gem_y_mTbin[n_gem_hits]/b");
     //veto information
     tree->Branch("veto_nch",       &ev.veto_nch,       "veto_nch/I");
     tree->Branch("veto_id",        ev.veto_id,        "veto_id[veto_nch]/b");
@@ -697,6 +699,8 @@ if(!prad1){
                 ev->gem_y_peak[i] = h.y_peak;
                 ev->gem_x_size[i] = h.x_size;
                 ev->gem_y_size[i] = h.y_size;
+                ev->gem_x_mTbin[i] = h.x_max_timebin;
+                ev->gem_y_mTbin[i] = h.y_max_timebin;
                 //transform the GEM hit positions to the lab coordinate
                 GEMHit local_hit = {h.x, h.y, 0.f, static_cast<uint8_t>(h.det_id)};
                 RotateDetData(local_hit, gRunConfig);
