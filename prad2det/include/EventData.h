@@ -142,6 +142,8 @@ struct ReconEventData {
     float   gem_y_peak[kMaxGemHits]   = {};
     uint8_t gem_x_size[kMaxGemHits]   = {};
     uint8_t gem_y_size[kMaxGemHits]   = {};
+    uint8_t gem_x_mTbin[kMaxGemHits]   = {};
+    uint8_t gem_y_mTbin[kMaxGemHits]   = {};
 
     //veto information
     int      veto_nch = 0;
