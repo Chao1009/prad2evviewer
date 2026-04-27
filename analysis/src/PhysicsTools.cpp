@@ -5,6 +5,7 @@
 #include "PhysicsTools.h"
 #include "InstallPaths.h"
 #include <TF1.h>
+#include <TSpectrum.h>
 #include <TMath.h>
 #include <cmath>
 #include <cstdlib>
@@ -94,6 +95,24 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
 }
 
 PhysicsTools::~PhysicsTools() = default;
+
+// Crystal Ball: p[0]=amp, p[1]=mean, p[2]=sigma, p[3]=alpha, p[4]=n
+static double crystalBallFunc(double *x, double *p)
+{
+    double amp   = p[0];
+    double mu    = p[1];
+    double sigma = p[2];
+    double alpha = p[3];
+    double n     = p[4];
+    double t = (x[0] - mu) / sigma;
+    if (t > -std::abs(alpha)) {
+        return amp * std::exp(-0.5 * t * t);
+    } else {
+        double a = std::pow(n / std::abs(alpha), n) * std::exp(-0.5 * alpha * alpha);
+        double b = n / std::abs(alpha) - std::abs(alpha);
+        return amp * a * std::pow(b - t, -n);
+    }
+}
 
 void PhysicsTools::FillModuleEnergy(int module_id, float energy)
 {   
@@ -197,19 +216,39 @@ std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
     TH1F *h = module_hists_[module_index].get();
     if (!h || h->GetEntries() < 1) return {0.f, 0.f, 100.f};
 
-    // find peak bin, fit Gaussian around it
-    double peak0 = h->GetBinCenter(h->GetMaximumBin());
-    double rms0  = 40.;
-    double lo = peak0 - 2. * rms0, hi = peak0 + 2. * rms0;
+    // --- peak search via TSpectrum ---
+    TSpectrum spec(10);
+    // sigma=2 bins, threshold=5% of maximum; suppress background and drawing
+    int nfound = spec.Search(h, 2, "nobackground nodraw", 0.05);
 
-    TF1 gaus("gfit", "gaus", lo, hi);
-    gaus.SetParameters(h->GetMaximum(), peak0, rms0);
-    h->Fit(&gaus, "RQ");
+    double peak0;
+    if (nfound > 0) {
+        // pick the rightmost (highest-energy) peak
+        const double *xpeaks = spec.GetPositionX();
+        peak0 = xpeaks[0];
+        for (int i = 1; i < nfound; ++i)
+            if (xpeaks[i] > peak0) peak0 = xpeaks[i];
+    } else {
+        // fallback: maximum bin
+        peak0 = h->GetBinCenter(h->GetMaximumBin());
+    }
 
-    float mean  = gaus.GetParameter(1);
-    //if( mean < 0 ) mean = 0.f;
-    float sigma = gaus.GetParameter(2);
-    float chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.f;
+    // --- Gaussian fit around the selected peak ---
+    double rms0 = 40.;
+    double lo = peak0 - 3. * rms0, hi = peak0 + 2. * rms0;
+
+    // Crystal Ball: Gaussian core + power-law low-energy tail
+    // p[0]=amplitude, p[1]=mean, p[2]=sigma, p[3]=alpha, p[4]=n
+    TF1 cb("cb_fit", crystalBallFunc, lo, hi, 5);
+    cb.SetParameters(h->GetBinContent(h->FindBin(peak0)), peak0, rms0, 1.5, 3.0);
+    cb.SetParLimits(2, 1.,  200.);   // sigma > 0
+    cb.SetParLimits(3, 0.1,   5.);   // alpha > 0
+    cb.SetParLimits(4, 1.1,  20.);   // n > 1
+    h->Fit(&cb, "RQL");
+
+    float mean  = cb.GetParameter(1);
+    float sigma = std::abs(cb.GetParameter(2));
+    float chi2  = (cb.GetNDF() > 0) ? cb.GetChisquare() / cb.GetNDF() : 0.f;
     return {mean, sigma, chi2};
 }
 
