@@ -551,7 +551,7 @@ class ModuleDetailPanel(QWidget):
         sf_lay.addWidget(self._sf_apply_btn)
         sf_lay.addSpacing(16)
         self._restore_btn = QPushButton("↩ Restore Old Factor")
-        self._restore_btn.setToolTip("Write old_factor (from .dat) back to JSON and clear the mark")
+        self._restore_btn.setToolTip("Write old_factor (from .dat) back to JSON and keep the mark")
         self._restore_btn.clicked.connect(self._do_restore_old_factor)
         sf_lay.addWidget(self._restore_btn)
         self._clear_mark_btn = QPushButton("✕ Clear Mark")
@@ -767,7 +767,7 @@ class ModuleDetailPanel(QWidget):
         else:
             note = "  (JSON path not found — not saved)"
 
-        self._iter_data.modified_modules.discard(name)
+        self._iter_data.modified_modules.add(name)
         self._mm = mm
         self._info_lbl.setText(
             f"Factor: {mm.factor:.5f}  (restored from {old_cur:.5f})   "
