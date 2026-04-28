@@ -139,7 +139,8 @@ int main(int argc, char *argv[])
                 static constexpr uint32_t TBIT_lms = (1u << 24);
                 static constexpr uint32_t TBIT_alpha = (1u << 25);
                 if ( !(trigger_bits & TBIT_lms) && !(trigger_bits & TBIT_alpha) ) continue;
-
+                if(trigger_bits & TBIT_lms) std::cout << "Event " << total << ": LMS trigger\n";
+                if(trigger_bits & TBIT_alpha) std::cout << "Event " << total << ": Alpha trigger\n";
                 // decode HyCal FADC250 data
                 int nch = 0;
                 for (int r = 0; r < event->nrocs; ++r) {
@@ -172,6 +173,7 @@ int main(int argc, char *argv[])
                                     float peak_height = wres.peaks[idx].height;
                                     float peak_integral = wres.peaks[idx].integral;
                                     if(trigger_bits & TBIT_lms) {
+                                        std::cout << "Event " << total << ": LMS" << lms_id << " peak height = " << peak_height << ", integral = " << peak_integral << "\n";
                                         physics.Fill_lmsCH_lmsHeight(lms_id, peak_height);
                                         physics.Fill_lmsCH_lmsIntegral(lms_id, peak_integral);
                                     }
@@ -230,7 +232,7 @@ done:
 
     int n_lms = 0;
     for (int i = 0; i < 4; ++i) {
-        TH1F *h_lms = physics.Get_lmsCH_lmsHeightHist(i);
+        TH1F *h_lms = physics.Get_lmsCH_lmsIntegralHist(i);
         if (h_lms == nullptr || h_lms->GetEntries() < 10) continue;
         {
             double peak0 = h_lms->GetBinCenter(h_lms->GetMaximumBin());
@@ -244,7 +246,7 @@ done:
             lms_chi2[i]  = (f_gaus.GetNDF() > 0) ? f_gaus.GetChisquare() / f_gaus.GetNDF() : 0;
         }
 
-        TH1F *h_alpha = physics.Get_lmsCH_alphaHeightHist(i);
+        TH1F *h_alpha = physics.Get_lmsCH_alphaIntegralHist(i);
         if (h_alpha == nullptr || h_alpha->GetEntries() < 10) continue;
         {
             double peak0 = h_alpha->GetBinCenter(h_alpha->GetMaximumBin());
@@ -278,7 +280,7 @@ done:
         if (!hycal.module(i).is_hycal()) continue;
         if (hycal.module(i).name[0] != 'W') continue;
 
-        TH1F *h_lms = physics.Get_modCH_lmsHeightHist(hycal.module(i).id);
+        TH1F *h_lms = physics.Get_modCH_lmsIntegralHist(hycal.module(i).id);
         if (h_lms == nullptr) continue;
 
         {
@@ -322,7 +324,7 @@ done:
     outfile->mkdir("modules");
     outfile->cd("modules");
     for (int i = 0; i < hycal.module_count(); ++i) {
-        if (physics.Get_modCH_lmsHeightHist(hycal.module(i).id)) physics.Get_modCH_lmsHeightHist(hycal.module(i).id)->Write();
+        if (physics.Get_modCH_lmsIntegralHist(hycal.module(i).id)) physics.Get_modCH_lmsIntegralHist(hycal.module(i).id)->Write();
     }
     outfile->Close();
 }

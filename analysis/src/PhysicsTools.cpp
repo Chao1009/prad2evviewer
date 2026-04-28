@@ -66,11 +66,11 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         h_lmsCH_lmsHeight_[ch] = std::make_unique<TH1F>(
             Form("h_lmsCH%d_lmsHeight", ch), Form("LMS%d Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
         h_lmsCH_lmsIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 40000);
+            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 20000);
         h_lmsCH_alphaHeight_[ch] = std::make_unique<TH1F>(
             Form("h_lmsCH%d_alphaHeight", ch), Form("LMS%d Alpha Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
         h_lmsCH_alphaIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 400000);
+            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 20000);
     }
     module_gains_.resize(nmod);
     for (int i = 0; i < nmod; ++i)
@@ -85,7 +85,7 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         h_modCH_lmsHeight_[i] = std::make_unique<TH1F>(name_height.c_str(), title_height.c_str(), 1000, 0, 4000);
         std::string name_integral = "h_mod" + mod.name + "_lmsIntegral";
         std::string title_integral = mod.name + " LMS Peak Integral;Integral (ADC*ns);Counts";
-        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 1000, 0, 40000);
+        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 1000, 0, 20000);
     }
 
     nonLinearity_func_ = TF1("nonLinearity_func_",
@@ -405,7 +405,7 @@ static std::array<double, 3> fitGaus(TH1F *h)
     return {gaus.GetParameter(1), std::abs(gaus.GetParameter(2)), chi2};
 }
 
-void PhysicsTools::ComputeModuleGains()
+void PhysicsTools::ComputeModuleGains(const std::string &refer_gain_file)
 {
     // --- fit LMS and alpha reference channels (index 1..3) ---
     double lms_ref[4]   = {}, alpha_ref[4] = {};

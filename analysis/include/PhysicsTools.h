@@ -112,7 +112,7 @@ public:
     };
     // Fit LMS/alpha reference channels and all W-modules;
     // updates module_gains_ in-place and resets the source histograms.
-    void ComputeModuleGains();
+    void ComputeModuleGains(const std::string &refer_gain_file);
 
     // Result array indexed by module index (size = module_count).
     std::vector<GainResult> module_gains_;

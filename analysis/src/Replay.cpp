@@ -305,12 +305,6 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             bool is_lms = (ev->trigger_bits & TBIT_lms) != 0;
             bool is_alpha = (ev->trigger_bits & TBIT_alpha) != 0;
 
-            if(is_lms) lms_count++;
-            if(lms_count > 1000) {
-                physics.ComputeModuleGains();
-                lms_count = 0;
-            }
-
             // decode HyCal FADC250 data
             int nch = 0;
             int veto_nch = 0;
@@ -361,22 +355,12 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                                 ev->lms_ped_rms[lms_nch]  = wres.ped.rms;
                                 ev->lms_integral[lms_nch] = computeIntegral(cd, wres.ped.mean);
                                 if (write_peaks) {
-                                    int best = -1; float best_h = -1.f;
                                     ev->lms_npeaks[lms_nch] = wres.npeaks;
                                     for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                         ev->lms_peak_height[lms_nch][p]   = wres.peaks[p].height;
                                         ev->lms_peak_time[lms_nch][p]     = wres.peaks[p].time;
                                         ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
-                                        if(wres.peaks[p].time > gRunConfig.hc_time_win_lo &&
-                                           wres.peaks[p].time < gRunConfig.hc_time_win_hi
-                                            && wres.peaks[p].height > best_h) {
-                                            best_h = wres.peaks[p].height; best = p;
-                                        }
                                     }
-                                    if (best < 0) continue;
-                                    //for gain factor
-                                    if(is_lms)   {physics.Fill_lmsCH_lmsIntegral(ev->lms_id[lms_nch], wres.peaks[best].integral);}
-                                    if(is_alpha) {physics.Fill_lmsCH_alphaIntegral(ev->lms_id[lms_nch], wres.peaks[best].integral);}
                                 }
                                 lms_nch++;
                             }
@@ -395,23 +379,14 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                         ev->ped_mean[nch] = wres.ped.mean;
                         ev->ped_rms[nch]  = wres.ped.rms;
                         ev->integral[nch] = computeIntegral(cd, wres.ped.mean);
-                        ev->gain_factor[nch] = physics.GetModuleGainFactor(mod_id);
 
                         if (write_peaks) {
                             ev->npeaks[nch] = wres.npeaks;
-                            int best = -1; float best_h = -1.f;
                             for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                 ev->peak_height[nch][p]   = wres.peaks[p].height;
                                 ev->peak_time[nch][p]     = wres.peaks[p].time;
                                 ev->peak_integral[nch][p] = wres.peaks[p].integral;
-                                if(wres.peaks[p].time > gRunConfig.hc_time_win_lo &&
-                                   wres.peaks[p].time < gRunConfig.hc_time_win_hi
-                                    && wres.peaks[p].height > best_h) {
-                                    best_h = wres.peaks[p].height; best = p;
-                                }
                             }
-                            //for gain factor
-                            if(is_lms)   {physics.Fill_modCH_lmsIntegral(mod_id, wres.peaks[best].integral);}
                         }
                         nch++;
                     }
