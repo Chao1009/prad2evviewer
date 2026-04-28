@@ -67,6 +67,7 @@ static void SetReadBranches(TTree *tree, EventVars &ev)
     tree->SetBranchAddress("hycal.npeaks",      &ev.npeaks);
     tree->SetBranchAddress("hycal.peak_time",   ev.peak_time);
     tree->SetBranchAddress("hycal.peak_integral", ev.peak_integral);
+    tree->SetBranchAddress("hycal.gain_factor", ev.gain_factor);
 }
 
 // ── Per-thread accumulated results ──────────────────────────────────────────
@@ -280,7 +281,7 @@ int main(int argc, char *argv[])
                 const auto *mod = res->hycal.module_by_id(ev.module_id[j]);
                 if (!mod || !mod->is_hycal()) continue;
                 if (ev.npeaks[j] <= 0) continue;
-                float adc    = ev.peak_integral[j][0];
+                float adc    = ev.peak_integral[j][0]*ev.gain_factor[j]; // gain correction for HyCal modules
                 float energy = (mod->cal_factor > 0)
                     ? static_cast<float>(mod->energize(adc))
                     : adc * 0.1f;
