@@ -39,7 +39,7 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         nmod, 0, nmod, 2000, 0, 4000);
     h2_energy_theta_ = std::make_unique<TH2F>(
         "h2_energy_theta", "Energy vs Theta;Theta (deg);Energy (MeV)",
-        80, 0, 8, 2000, 0, 4000);
+        160, 0, 8, 4000, 0, 4000);
     h2_Nevents_moduleMap_ = std::make_unique<TH2F>(
         "h2_Nevents_moduleMap", "Number of Events per Module;Column;Row",
         34, 0.5, 34.5, 34, -34.5, -0.5);

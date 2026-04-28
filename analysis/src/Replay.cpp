@@ -611,6 +611,7 @@ if(!prad1){
             // decode FADC250 and reconstruct HyCal data
             int veto_nch = 0;
             int lms_nch = 0;
+            int nch = 0;
             for (int r = 0; r < event->nrocs; ++r) {
                 auto &roc = event->rocs[r];
                 if (!roc.present) continue;
@@ -687,11 +688,13 @@ if(!prad1){
                         float energy = static_cast<float>(mod->energize(adc));
                         clusterer.AddHit(mod->index, energy);
                         ev->total_energy += energy;
+                        nch++;
                     }
                 }
             }
             ev->veto_nch = veto_nch;
             ev->lms_nch = lms_nch;
+            if(nch > 500) continue; // too many hits, likely noise, skip the event
 
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;

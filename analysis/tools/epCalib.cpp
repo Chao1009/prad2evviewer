@@ -70,6 +70,7 @@ static void SetReadBranches(TTree *tree, EventVars &ev)
     tree->SetBranchAddress("hycal.peak_time",   ev.peak_time);
     tree->SetBranchAddress("hycal.peak_integral", ev.peak_integral);
     tree->SetBranchAddress("hycal.gain_factor", ev.gain_factor);
+    tree->SetBranchAddress("hycal.peak_height", ev.peak_height);
 }
 
 // ── Per-thread accumulated results ──────────────────────────────────────────
@@ -298,19 +299,34 @@ int main(int argc, char *argv[])
                     if (!(ev.trigger_bits & TBIT_sum)) continue;
                     if (  ev.trigger_bits & TBIT_lms ) continue;
 
+                    if (ev.nch > 500) continue;
+
                     clusterer.Clear();
                     for (int j = 0; j < ev.nch; ++j) {
                         const auto *mod = res->hycal.module_by_id(ev.module_id[j]);
                         if (!mod || !mod->is_hycal()) continue;
                         if (ev.npeaks[j] <= 0) continue;
-                        float adc    = ev.peak_integral[j][0];
+
+                        int bestIdx = -1;
+                        float bestHeight = -1.f;
+                        for(int p = 0; p < ev.npeaks[j]; ++p){
+                            if(ev.peak_time[j][p] > gRunConfig.hc_time_win_lo &&
+                                ev.peak_time[j][p] < gRunConfig.hc_time_win_hi) {
+                                if(ev.peak_height[j][p] > bestHeight) {
+                                    bestHeight = ev.peak_height[j][p];
+                                    bestIdx = p;
+                                }
+                            }
+                        }
+                        if (bestIdx < 0) continue;
+                        float adc    = ev.peak_integral[j][bestIdx];
                         int mod_id = ev.module_id[j];
                         // gain correction for HyCal modules
                         if(mod_id>1000) adc *= gain_correction.w[mod_id-1000].avg;
                         else adc *= gain_correction.g[mod_id].avg;
                         float energy = (mod->cal_factor > 0)
                             ? static_cast<float>(mod->energize(adc))
-                            : adc * 0.1f;
+                            : adc * 0.f;
                         clusterer.AddHit(mod->index, energy);
                     }
 
