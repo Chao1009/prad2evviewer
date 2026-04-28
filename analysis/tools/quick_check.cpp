@@ -21,6 +21,7 @@
 #include <TTree.h>
 #include <TH1F.h>
 #include <TH2F.h>
+#include <TLatex.h>
 #include <TString.h>
 #include <TSystem.h>
 #include <TChain.h>
@@ -41,6 +42,9 @@
 
 using namespace analysis;
 namespace fs = std::filesystem;
+
+// Forward declaration
+float fitAndDraw(TH1F* hist, const std::string& out_path, float fit_range);
 
 // Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
@@ -225,6 +229,10 @@ int main(int argc, char *argv[])
         }
     }
 
+    float hycal_vertex_z = fitAndDraw(physics.GetMollerZHist(), "Poscalib_result/hycal_vertex_z", 100.);
+    float hycal_center_x = fitAndDraw(physics.GetMollerXHist(), "Poscalib_result/hycal_center_x", 2.);
+    float hycal_center_y = fitAndDraw(physics.GetMollerYHist(), "Poscalib_result/hycal_center_y", 2.);
+
     // --- write output ---
     outfile.cd();
     hit_pos->Write();
@@ -286,4 +294,20 @@ static std::vector<std::string> collectRootFiles(const std::string &path)
         files.push_back(path);
     }
     return files;
+}
+
+float fitAndDraw(TH1F* hist, const std::string& out_path, const float fit_range){
+    TCanvas *c = new TCanvas("", "", 800, 600);
+    float mean = hist->GetBinCenter(hist->GetMaximumBin());
+    hist->Fit("gaus", "rq", "", mean-fit_range, mean+fit_range);
+    hist->Draw();
+    TLatex *latex = new TLatex();
+    latex->SetNDC();
+    latex->SetTextSize(0.04);
+    latex->DrawLatex(0.15, 0.85, Form("%.2f mm +- %.2f mm", hist->GetFunction("gaus")->GetParameter(1), hist->GetFunction("gaus")->GetParError(1)));
+    fs::create_directories(fs::path(out_path).parent_path());
+    c->SaveAs((out_path + ".png").c_str());
+    delete c;
+
+    return hist->GetFunction("gaus")->GetParameter(1);
 }
