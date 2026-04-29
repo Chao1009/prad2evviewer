@@ -72,6 +72,38 @@ inline std::string discover_runinfo_path()
     return resolve_db_path(j["runinfo"].get<std::string>());
 }
 
+// Load the "matching" section from database/reconstruction_config.json.
+// Out-params are written only when the corresponding JSON key is present
+// and well-formed; otherwise they're left untouched (so the caller can
+// pre-seed them with sensible defaults).  Returns true if the config file
+// could be opened — even if the matching section was absent — so the caller
+// can warn separately on missing files vs missing sections.
+//
+//   hycal_pos_res = [A, B, C]   coefficients for HyCalSystem::PositionResolution
+//   gem_pos_res   = [σ0, σ1, …]  per-detector sigma in mm
+inline bool load_matching_config(float &A, float &B, float &C,
+                                 std::vector<float> &gem_pos_res)
+{
+    const char *db = std::getenv("PRAD2_DATABASE_DIR");
+    std::string db_dir = db ? db : "database";
+    std::ifstream f(db_dir + "/reconstruction_config.json");
+    if (!f) return false;
+    auto j = nlohmann::json::parse(f, nullptr, false, true);
+    if (j.is_discarded() || !j.contains("matching")) return true;
+    const auto &m = j["matching"];
+    if (m.contains("hycal_pos_res") && m["hycal_pos_res"].is_array()
+            && m["hycal_pos_res"].size() >= 3) {
+        A = m["hycal_pos_res"][0].get<float>();
+        B = m["hycal_pos_res"][1].get<float>();
+        C = m["hycal_pos_res"][2].get<float>();
+    }
+    if (m.contains("gem_pos_res") && m["gem_pos_res"].is_array()) {
+        gem_pos_res.clear();
+        for (const auto &v : m["gem_pos_res"]) gem_pos_res.push_back(v.get<float>());
+    }
+    return true;
+}
+
 // EVIO bank-tag → logical-crate index (every ROC type).  Mirrors the
 // roc_to_crate map in src/app_state_init.cpp / analysis/src/Replay.cpp.
 inline std::map<int, int> build_full_crate_remap(const evc::DaqConfig &cfg)

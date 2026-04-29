@@ -246,6 +246,31 @@ public:
         }
     }
 
+    // --- position resolution at HyCal face ----------------------------------
+    // sigma(E) = sqrt( (A / sqrt(E_GeV))^2 + (B / E_GeV)^2 + C^2 )   [mm]
+    //   A — stochastic term [mm·sqrt(GeV)]
+    //   B — noise term       [mm·GeV]
+    //   C — constant term    [mm]
+    // Defaults are zero except C=5 mm so that an uninitialized HyCalSystem
+    // returns a sensible (conservative) value.  Loaded from
+    // reconstruction_config.json:matching:hycal_pos_res = [A, B, C].
+    void  SetPositionResolutionParams(float A, float B, float C)
+    {
+        pos_res_A_ = A;
+        pos_res_B_ = B;
+        pos_res_C_ = C;
+    }
+    float GetPositionResolutionA() const { return pos_res_A_; }
+    float GetPositionResolutionB() const { return pos_res_B_; }
+    float GetPositionResolutionC() const { return pos_res_C_; }
+    float PositionResolution(float energy_mev) const
+    {
+        const float E_GeV = (energy_mev > 0.f) ? energy_mev / 1000.f : 1e-6f;
+        const float a = pos_res_A_ / std::sqrt(E_GeV);
+        const float b = pos_res_B_ / E_GeV;
+        return std::sqrt(a * a + b * b + pos_res_C_ * pos_res_C_);
+    }
+
     // --- static helpers -----------------------------------------------------
     static int          name_to_id(const std::string &name);
     int                 id_to_index(int id) const;
@@ -265,6 +290,11 @@ private:
 
     int                  n_modules_ = 0;
     std::vector<Module>  modules_;
+
+    // position resolution coefficients (see PositionResolution above)
+    float                pos_res_A_ = 0.f;   // mm·sqrt(GeV)
+    float                pos_res_B_ = 0.f;   // mm·GeV
+    float                pos_res_C_ = 5.f;   // mm
 
     // lookup maps
     std::unordered_map<std::string, int> name_map_;     // name → index

@@ -199,21 +199,29 @@ struct AppState {
     float hxy_x_min=-600.f, hxy_x_max=600.f, hxy_x_step=5.f;  // mm
     float hxy_y_min=-600.f, hxy_y_max=600.f, hxy_y_step=5.f;  // mm
 
-    // GEM↔HyCal matching: per-detector residuals filled when ep candidate fires
+    // GEM↔HyCal matching: per-detector residuals filled when ep candidate fires.
+    // The cut is parametric: cut = match_nsigma * sqrt(sigma_HC² + sigma_GEM²),
+    // where sigma_HC = hycal.PositionResolution(E) and sigma_GEM = gem_pos_res[d]
+    // (both projected to the residual plane).  See reconstruction_config.json:matching.
     bool  gem_match_require_ep = true;    // gate on hxy_* selection (clean track)
-    float gem_match_window_mm  = 10.f;    // only fill if sqrt(dx²+dy²) < this (mm)
+    float gem_match_nsigma     = 3.f;     // residual cut in σ_total
     float gem_resid_min = -50.f, gem_resid_max = 50.f, gem_resid_step = 0.5f;  // mm
+
+    // Per-detector GEM position resolution (mm), parsed from
+    // reconstruction_config.json:matching:gem_pos_res.  HyCal's energy-
+    // dependent resolution lives on HyCalSystem (PositionResolution(E)).
+    std::vector<float> gem_pos_res;
 
     // GEM tracking-efficiency monitor (HyCal-anchored straight-line fits).
     //
     // A "good track" is one where the fit through HyCal + ≥3 GEM hits (each
-    // within match_window_mm of the seed line) passes the χ² gate.  Each
+    // within match_nsigma · σ_total of the seed line) passes the χ² gate.  Each
     // good track increments the shared denominator gem_eff_den.  Per-detector
     // numerator gem_eff_num[R] increments for every detector R whose hit is
     // included in that fit (i.e. R was matched within the window).  See
     // runGemEfficiency().
     float gem_eff_min_cluster_energy = 100.f;
-    float gem_eff_match_window_mm    = 10.f;
+    float gem_eff_match_nsigma       = 3.f;
     float gem_eff_max_chi2           = 10.f;
     int   gem_eff_max_hits_per_det   = 50;
     int   gem_eff_min_denom          = 20;
@@ -438,7 +446,7 @@ struct AppState {
     // Updates gem_eff_num/den, residual histograms, and gem_eff_snapshot.
     using LabHit = std::array<float, 3>;
     void runGemEfficiency(int event_id,
-                          float hcx, float hcy, float hcz,
+                          float hcx, float hcy, float hcz, float hc_energy,
                           const std::vector<std::vector<LabHit>> &hits_by_det);
     void clearGemEfficiency();   // counters + snapshot (data_mtx already held)
     void initGemEfficiency();    // size num/den/residuals (called from init())

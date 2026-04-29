@@ -19,10 +19,14 @@
 // each GEM plane.  A GEM 2D hit is a match if the 2D residual at the GEM
 // plane is within N·σ_total, where
 //
-//   σ_hc_face = 2.6 / sqrt(E / 1 GeV)      [mm at HyCal face]
-//   σ_hc@gem  = σ_hc_face · (z_gem / z_hc) [scaled by line geometry]
-//   σ_gem     = 0.1 mm
+//   σ_hc_face = HyCalSystem::PositionResolution(E)   [mm at HyCal face]
+//             = sqrt((A/sqrt(E_GeV))^2 + (B/E_GeV)^2 + C^2)
+//   σ_hc@gem  = σ_hc_face · (z_gem / z_hc)           [scaled by line geometry]
+//   σ_gem     = gem_pos_res[det_id]                  [mm, per-detector]
 //   σ_total   = sqrt(σ_hc@gem² + σ_gem²)
+//
+// (A, B, C) and gem_pos_res are read from
+// reconstruction_config.json:matching via load_matching_config().
 //
 // Defaults: N = 3 (3-sigma).  The actual residual is stored in the tree so
 // downstream cuts can be tightened or loosened without re-running.
@@ -472,6 +476,24 @@ int gem_hycal_matching(const char *evio_path,
     fdec::ClusterConfig hc_cfg;
     hc_clusterer.SetConfig(hc_cfg);
 
+    //---- matching config (HyCal sigma(E) + per-detector GEM sigma) ---------
+    // Defaults match the historical formula (face sigma = 2.6/sqrt(E/GeV))
+    // and 0.1 mm GEM resolution; reconstruction_config.json:matching can
+    // override either independently.
+    float pr_A = 2.6f, pr_B = 0.f, pr_C = 0.f;
+    std::vector<float> gem_pos_res = {0.1f, 0.1f, 0.1f, 0.1f};
+    load_matching_config(pr_A, pr_B, pr_C, gem_pos_res);
+    hycal.SetPositionResolutionParams(pr_A, pr_B, pr_C);
+    Printf("[setup] HC sigma(E)= sqrt((%.3f/sqrt(E_GeV))^2+(%.3f/E_GeV)^2+%.3f^2) mm",
+           pr_A, pr_B, pr_C);
+    {
+        TString g = "[";
+        for (size_t i = 0; i < gem_pos_res.size(); ++i)
+            g += TString::Format("%s%.3f", i ? "," : "", gem_pos_res[i]);
+        g += "]";
+        Printf("[setup] GEM sigma  : %s mm", g.Data());
+    }
+
     //---- GEM ----------------------------------------------------------------
     std::string gem_map = blank(gem_map_file)
         ? resolve_db_path("gem_daq_map.json") : std::string(gem_map_file);
@@ -667,9 +689,8 @@ int gem_hycal_matching(const char *evio_path,
                 ev.hc_center.push_back(h.center_id);
                 ev.hc_nblocks.push_back(hc_hits_raw[k].nblocks);
                 ev.hc_flag.push_back(h.flag);
-                // σ_HC at the HyCal face (mm); E in MeV → /1000 → GeV
-                float E_GeV = std::max(h.energy, 1.f) / 1000.f;
-                ev.hc_sigma.push_back(2.6f / std::sqrt(E_GeV));
+                // σ_HC at the HyCal face (mm) — see HyCalSystem::PositionResolution
+                ev.hc_sigma.push_back(hycal.PositionResolution(h.energy));
             }
 
             // ---------- best-match per HC cluster × GEM detector ------------
@@ -695,8 +716,10 @@ int gem_hycal_matching(const char *evio_path,
                     const float proj_x = h.x * scale;
                     const float proj_y = h.y * scale;
                     const float sig_hc_at_gem = sigma_face * scale;
+                    const float sig_gem = (d < (int)gem_pos_res.size())
+                                            ? gem_pos_res[d] : 0.1f;
                     const float sig_total = std::sqrt(
-                        sig_hc_at_gem * sig_hc_at_gem + 0.1f * 0.1f);
+                        sig_hc_at_gem * sig_hc_at_gem + sig_gem * sig_gem);
                     const float cut = match_nsigma * sig_total;
 
                     // Find the closest GEM hit on detector d — must be

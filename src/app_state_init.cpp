@@ -389,7 +389,7 @@ void AppState::init(const std::string &db_dir,
         if (gemcfg.contains("hycal_match")) {
             auto &gm = gemcfg["hycal_match"];
             if (gm.contains("require_ep_candidate")) gem_match_require_ep = gm["require_ep_candidate"];
-            if (gm.contains("window_mm"))            gem_match_window_mm  = gm["window_mm"];
+            if (gm.contains("match_nsigma"))         gem_match_nsigma     = gm["match_nsigma"];
             if (gm.contains("residual_hist")) {
                 auto &rh = gm["residual_hist"];
                 if (rh.contains("min"))  gem_resid_min  = rh["min"];
@@ -400,16 +400,16 @@ void AppState::init(const std::string &db_dir,
         if (gemcfg.contains("efficiency")) {
             auto &ge = gemcfg["efficiency"];
             if (ge.contains("min_cluster_energy"))    gem_eff_min_cluster_energy = ge["min_cluster_energy"];
-            if (ge.contains("match_window_mm"))       gem_eff_match_window_mm    = ge["match_window_mm"];
+            if (ge.contains("match_nsigma"))          gem_eff_match_nsigma       = ge["match_nsigma"];
             if (ge.contains("max_chi2_per_dof"))      gem_eff_max_chi2           = ge["max_chi2_per_dof"];
             if (ge.contains("max_hits_per_detector")) gem_eff_max_hits_per_det   = ge["max_hits_per_detector"];
             if (ge.contains("min_denom_for_eff"))     gem_eff_min_denom          = ge["min_denom_for_eff"];
             if (ge.contains("healthy"))               gem_eff_healthy            = ge["healthy"];
             if (ge.contains("warning"))               gem_eff_warning            = ge["warning"];
         }
-        std::cerr << "GEM cfg   : match window=" << gem_match_window_mm
-                  << "mm  efficiency: window=" << gem_eff_match_window_mm
-                  << "mm chi2/dof<=" << gem_eff_max_chi2 << "\n";
+        std::cerr << "GEM cfg   : match=" << gem_match_nsigma << "σ"
+                  << "  efficiency=" << gem_eff_match_nsigma << "σ"
+                  << "  chi2/dof<=" << gem_eff_max_chi2 << "\n";
     }
 
     std::cerr << "Monitor   : " << (monitor_path.empty() ? "(none)" : monitor_path) << "\n";
@@ -557,6 +557,31 @@ void AppState::init(const std::string &db_dir,
         gem_sys.SetReconConfigs(std::move(per));
         std::cerr << "GEM reco  : " << gem_sys.GetNDetectors()
                   << " per-detector ClusterConfig(s) installed\n";
+    }
+
+    // HyCal-GEM matching: position-resolution inputs.  hycal_pos_res = [A,B,C]
+    // feeds HyCalSystem::PositionResolution(E); gem_pos_res is a per-detector
+    // sigma (mm) consumed by analysis tools that build the matching window.
+    if (rcfg.contains("matching")) {
+        auto &m = rcfg["matching"];
+        if (m.contains("hycal_pos_res") && m["hycal_pos_res"].is_array()
+                && m["hycal_pos_res"].size() >= 3) {
+            float A = m["hycal_pos_res"][0].get<float>();
+            float B = m["hycal_pos_res"][1].get<float>();
+            float C = m["hycal_pos_res"][2].get<float>();
+            hycal.SetPositionResolutionParams(A, B, C);
+        }
+        if (m.contains("gem_pos_res") && m["gem_pos_res"].is_array()) {
+            gem_pos_res.clear();
+            for (auto &v : m["gem_pos_res"]) gem_pos_res.push_back(v.get<float>());
+        }
+        std::cerr << "Matching  : HyCal sigma(E)=sqrt((" << hycal.GetPositionResolutionA()
+                  << "/sqrt(E_GeV))^2+(" << hycal.GetPositionResolutionB()
+                  << "/E_GeV)^2+" << hycal.GetPositionResolutionC() << "^2) mm"
+                  << "  GEM sigma=[";
+        for (size_t i = 0; i < gem_pos_res.size(); ++i)
+            std::cerr << (i ? "," : "") << gem_pos_res[i];
+        std::cerr << "] mm\n";
     }
 
     std::cerr << "Reco      : " << (recon_path.empty() ? "(none)" : recon_path)

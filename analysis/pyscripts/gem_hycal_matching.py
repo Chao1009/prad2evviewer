@@ -21,11 +21,13 @@ same trigger filter (trigger_bits == 0x100), same multi-file discovery
 
 Matching geometry (lab frame, target at origin, beam along +z):
 
-    σ_hc_face = 2.6 / sqrt(E / 1 GeV)        [mm at HyCal face]
+    σ_hc_face = sqrt((A/sqrt(E_GeV))^2 + (B/E_GeV)^2 + C^2)  [mm at HyCal face]
     σ_hc@gem  = σ_hc_face · (z_gem / z_hc)
-    σ_gem     = 0.1 mm
+    σ_gem     = gem_pos_res[det_id] mm                       (per detector)
     σ_total   = sqrt(σ_hc@gem² + σ_gem²)
     cut       = nsigma · σ_total
+
+    (A, B, C) and gem_pos_res come from reconstruction_config.json:matching.
 
 Output columns (one row per matched pair):
 
@@ -97,6 +99,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"[setup] Match cut  : {args.match_nsigma:.2f} · sigma_total",
           flush=True)
+
+    (pr_A, pr_B, pr_C), gem_pos_res = C.load_matching_config()
+    print(f"[setup] HC sigma(E)= sqrt(({pr_A:.3f}/sqrt(E_GeV))^2"
+          f"+({pr_B:.3f}/E_GeV)^2+{pr_C:.3f}^2) mm", flush=True)
+    print(f"[setup] GEM sigma  : {gem_pos_res} mm", flush=True)
 
     cols = [
         "event_num", "trigger_bits",
@@ -211,9 +218,8 @@ def main(argv: list[str] | None = None) -> int:
                     for k, (hx, hy, hz, he, hc_center, hc_nblocks) in enumerate(hc_lab):
                         if hz <= 0.0:
                             continue
-                        # σ_HC at HyCal face — energy in MeV → /1000 → GeV
-                        E_GeV  = max(he, 1.0) / 1000.0
-                        sig_face = 2.6 / math.sqrt(E_GeV)
+                        # σ_HC at HyCal face — see _common.hycal_pos_resolution
+                        sig_face = C.hycal_pos_resolution(pr_A, pr_B, pr_C, he)
 
                         for d in range(n_dets):
                             gl = gem_lab[d]
@@ -226,8 +232,10 @@ def main(argv: list[str] | None = None) -> int:
                             proj_x        = hx * scale
                             proj_y        = hy * scale
                             sig_hc_at_gem = sig_face * scale
+                            sig_gem       = (gem_pos_res[d] if d < len(gem_pos_res)
+                                             else 0.1)
                             sig_total     = math.sqrt(
-                                sig_hc_at_gem * sig_hc_at_gem + 0.01)
+                                sig_hc_at_gem * sig_hc_at_gem + sig_gem * sig_gem)
                             cut           = args.match_nsigma * sig_total
 
                             best_gi = -1

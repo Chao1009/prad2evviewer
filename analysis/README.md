@@ -130,15 +130,16 @@ Per event (after the trigger cut):
 - **Best-match rule** (HyCal cluster as baseline): per (HC cluster, GEM detector) pair, keep at most ONE row — the GEM hit with the smallest 2D residual that's still inside the window. A given GEM hit can win against multiple HC clusters (no GEM-side exclusivity). The Python counterpart uses the same rule.
 - For each match, look up the X & Y constituent `StripCluster` on the corresponding plane and copy every strip's full 6-sample waveform
 
-Matching geometry:
+Matching geometry (driven by `reconstruction_config.json:matching`):
 ```
-σ_hc(face) = 2.6 / sqrt(E / 1 GeV)     [mm at HyCal face]
+σ_hc(face) = sqrt((A/sqrt(E_GeV))² + (B/E_GeV)² + C²)   [mm at HyCal face]
+             A,B,C = matching.hycal_pos_res
 σ_hc@gem   = σ_hc(face) · (z_gem / z_hc)
-σ_gem      = 0.1 mm
+σ_gem      = matching.gem_pos_res[det_id]               [mm, per detector]
 σ_total    = sqrt(σ_hc@gem² + σ_gem²)
-match if  |residual| < N · σ_total     [N defaults to 3, configurable]
+match if  |residual| < N · σ_total                      [N defaults to 3, configurable]
 ```
-The actual residual + `σ_total` are stored per match so downstream cuts can be tuned without re-running.
+The actual residual + `σ_total` are stored per match so downstream cuts can be tuned without re-running. The C++ formula lives on `HyCalSystem::PositionResolution(E)` (set via `SetPositionResolutionParams(A, B, C)`); the loader helper is `script_helpers.h::load_matching_config(...)`. Python counterpart: `_common.load_matching_config()` + `_common.hycal_pos_resolution(...)`.
 
 Tree layout (`match`, one entry per physics event):
 

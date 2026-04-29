@@ -125,7 +125,7 @@ json AppState::apiGemResiduals() const
     return {{"enabled", gem_enabled},
             {"detectors", dets},
             {"events", gem_match_events},
-            {"cuts", {{"window_mm", gem_match_window_mm},
+            {"cuts", {{"match_nsigma", gem_match_nsigma},
                       {"require_ep_candidate", gem_match_require_ep}}}};
 }
 
@@ -171,7 +171,7 @@ json AppState::apiGemEfficiency() const
         {"hycal_z",   hycal_transform.z},
         {"config", {
             {"min_cluster_energy",    gem_eff_min_cluster_energy},
-            {"match_window_mm",       gem_eff_match_window_mm},
+            {"match_nsigma",          gem_eff_match_nsigma},
             {"max_chi2_per_dof",      gem_eff_max_chi2},
             {"max_hits_per_detector", gem_eff_max_hits_per_det},
             {"min_denom_for_eff",     gem_eff_min_denom},
@@ -586,20 +586,26 @@ void AppState::fillConfigJson(json &cfg) const
     cfg["gem"] = apiGemConfig();
     cfg["gem"]["hycal_match"] = {
         {"require_ep_candidate", gem_match_require_ep},
-        {"window_mm", gem_match_window_mm},
+        {"match_nsigma",         gem_match_nsigma},
         {"residual_hist", {
             {"min", gem_resid_min}, {"max", gem_resid_max}, {"step", gem_resid_step},
         }},
     };
     cfg["gem"]["efficiency"] = {
         {"min_cluster_energy",    gem_eff_min_cluster_energy},
-        {"match_window_mm",       gem_eff_match_window_mm},
+        {"match_nsigma",          gem_eff_match_nsigma},
         {"max_chi2_per_dof",      gem_eff_max_chi2},
         {"max_hits_per_detector", gem_eff_max_hits_per_det},
         {"min_denom_for_eff",     gem_eff_min_denom},
         {"healthy",               gem_eff_healthy},
         {"warning",               gem_eff_warning},
     };
+    cfg["gem"]["pos_res"] = gem_pos_res;
+    cfg["gem"]["hycal_pos_res"] = json::array({
+        hycal.GetPositionResolutionA(),
+        hycal.GetPositionResolutionB(),
+        hycal.GetPositionResolutionC()
+    });
 }
 
 AppState::ApiResult AppState::handleReadApi(const std::string &uri) const

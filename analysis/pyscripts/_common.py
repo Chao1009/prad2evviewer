@@ -86,6 +86,40 @@ def discover_runinfo_path() -> Optional[str]:
     return resolve_db_path(ri)
 
 
+def load_matching_config() -> tuple[tuple[float, float, float], list[float]]:
+    """Read the 'matching' section from
+    database/reconstruction_config.json and return ((A, B, C), gem_pos_res).
+    Missing keys / file fall back to (2.6, 0, 0) and [0.1]*4 — the legacy
+    inline values, so existing analysis behavior is preserved."""
+    A, B, C = 2.6, 0.0, 0.0
+    gem = [0.1, 0.1, 0.1, 0.1]
+    db = os.environ.get("PRAD2_DATABASE_DIR", "database")
+    try:
+        with open(Path(db) / "reconstruction_config.json", "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return (A, B, C), gem
+    m = j.get("matching")
+    if not isinstance(m, dict):
+        return (A, B, C), gem
+    h = m.get("hycal_pos_res")
+    if isinstance(h, list) and len(h) >= 3:
+        A, B, C = float(h[0]), float(h[1]), float(h[2])
+    g = m.get("gem_pos_res")
+    if isinstance(g, list) and g:
+        gem = [float(v) for v in g]
+    return (A, B, C), gem
+
+
+def hycal_pos_resolution(A: float, B: float, C: float, energy_mev: float) -> float:
+    """sigma(E) at the HyCal face (mm), mirroring HyCalSystem::PositionResolution."""
+    import math
+    E_GeV = energy_mev / 1000.0 if energy_mev > 0 else 1e-6
+    a = A / math.sqrt(E_GeV)
+    b = B / E_GeV
+    return math.sqrt(a * a + b * b + C * C)
+
+
 def discover_split_files(any_path: str) -> list[str]:
     """Three modes by input shape (mirrors discover_split_files in
     script_helpers.h):

@@ -15,5 +15,11 @@
         "split_iter":         6,
         "least_split":        0.01,
         "log_weight_thres":   3.6
+    },
+
+    "matching": {
+        "// PRad has no GEMs — gem_pos_res is unused but kept for schema parity.": "",
+        "hycal_pos_res": [0.0, 0.0, 5.0],
+        "gem_pos_res":   []
     }
 }

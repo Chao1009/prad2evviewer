@@ -543,20 +543,31 @@ void AppState::processEvent(fdec::EventData &event,
             }
             // GEM↔HyCal matching residuals.  Reference is the FIRST cluster's
             // HyCal-local xy — for ep candidates that's the only cluster, for
-            // multi-cluster events it's the leading reconstructed hit.
+            // multi-cluster events it's the leading reconstructed hit.  The
+            // residual lives at the HyCal plane, so σ_GEM is projected through
+            // the target onto that plane: σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)².
             if (gem_enabled && (ep_cand || !gem_match_require_ep) && !reco_hits.empty()) {
                 const float ref_x = reco_hits[0].x, ref_y = reco_hits[0].y;
+                const float sigma_hc = hycal.PositionResolution(reco_hits[0].energy);
+                const float z_hc = cinfo[0].lz;
                 const int n_dets = std::min<int>(gem_sys.GetNDetectors(),
                                                  (int)gem_dx_hist.size());
                 for (int d = 0; d < n_dets; ++d) {
                     auto &xform = gem_transforms[d];
+                    const float z_gem  = (xform.z != 0.f) ? xform.z : 1.f;
+                    const float s_gem  = (d < (int)gem_pos_res.size())
+                                            ? gem_pos_res[d] : 0.1f;
+                    const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
+                    const float s_total = std::sqrt(sigma_hc*sigma_hc
+                                                  + s_gem_at_hc*s_gem_at_hc);
+                    const float cut = gem_match_nsigma * s_total;
                     for (auto &h : gem_sys.GetHits(d)) {
                         float lx, ly, lz;
                         xform.toLab(h.x, h.y, lx, ly, lz);
                         float px, py;
                         projectToHyCalLocal(lx, ly, lz, px, py);
                         float dxr = px - ref_x, dyr = py - ref_y;
-                        if (std::sqrt(dxr*dxr + dyr*dyr) < gem_match_window_mm) {
+                        if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
                             gem_dx_hist[d].fill(dxr, gem_resid_min, gem_resid_step);
                             gem_dy_hist[d].fill(dyr, gem_resid_min, gem_resid_step);
                             gem_match_hits[d]++;
@@ -584,6 +595,7 @@ void AppState::processEvent(fdec::EventData &event,
                     if (reco_hits[i].energy < gem_eff_min_cluster_energy) continue;
                     runGemEfficiency((int)event.info.event_number,
                                      cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
+                                     reco_hits[i].energy,
                                      hits_by_det);
                 }
             }
@@ -674,8 +686,12 @@ void AppState::processReconEvent(const ReconEventData &recon)
         }
         // GEM↔HyCal matching residuals (ROOT recon path uses recon.gem_hits,
         // which carry detector-local x,y just like the live gem_sys hits).
+        // Same parametric cut as the live path:
+        //   σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)²,  cut = nsigma · σ_total.
         if (gem_enabled && (ep_cand || !gem_match_require_ep) && !recon.clusters.empty()) {
             const float ref_x = recon.clusters[0].x, ref_y = recon.clusters[0].y;
+            const float sigma_hc = hycal.PositionResolution(recon.clusters[0].energy);
+            const float z_hc = cinfo[0].lz;
             const int n_dets = (int)gem_dx_hist.size();
             for (auto &gh : recon.gem_hits) {
                 if (gh.det_id < 0 || gh.det_id >= n_dets) continue;
@@ -686,7 +702,14 @@ void AppState::processReconEvent(const ReconEventData &recon)
                 float px, py;
                 projectToHyCalLocal(lx, ly, lz, px, py);
                 float dxr = px - ref_x, dyr = py - ref_y;
-                if (std::sqrt(dxr*dxr + dyr*dyr) < gem_match_window_mm) {
+                const float z_gem = (xform.z != 0.f) ? xform.z : 1.f;
+                const float s_gem = (gh.det_id < (int)gem_pos_res.size())
+                                        ? gem_pos_res[gh.det_id] : 0.1f;
+                const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
+                const float s_total = std::sqrt(sigma_hc*sigma_hc
+                                              + s_gem_at_hc*s_gem_at_hc);
+                const float cut = gem_match_nsigma * s_total;
+                if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
                     gem_dx_hist[gh.det_id].fill(dxr, gem_resid_min, gem_resid_step);
                     gem_dy_hist[gh.det_id].fill(dyr, gem_resid_min, gem_resid_step);
                     gem_match_hits[gh.det_id]++;
@@ -710,6 +733,7 @@ void AppState::processReconEvent(const ReconEventData &recon)
                 if (recon.clusters[i].energy < gem_eff_min_cluster_energy) continue;
                 runGemEfficiency(recon.event_num,
                                  cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
+                                 recon.clusters[i].energy,
                                  hits_by_det);
             }
         }
@@ -1069,7 +1093,7 @@ void AppState::clearGemEfficiency()
 }
 
 void AppState::runGemEfficiency(int event_id,
-                                float hcx, float hcy, float hcz,
+                                float hcx, float hcy, float hcz, float hc_energy,
                                 const std::vector<std::vector<LabHit>> &hits_by_det)
 {
     if (!gem_enabled) return;
@@ -1078,12 +1102,18 @@ void AppState::runGemEfficiency(int event_id,
     n_dets = std::min(n_dets, GEM_EFF_MAX_DETS);
     if (n_dets < 3) return;
 
-    // Detector-resolution weights: HyCal cluster ≈ 5 mm σ, GEM strip ≈ 0.1 mm σ.
-    constexpr float w_h = 1.f / (5.f * 5.f);
-    constexpr float w_g = 1.f / (0.1f * 0.1f);
+    // Detector resolutions (mm) — σ_HC(E) at HyCal face, σ_GEM[d] at GEM plane.
+    // The fit is in lab frame so weights are 1/σ² in mm⁻².  findClosest below
+    // gates each detector at match_nsigma · σ_total at the GEM plane:
+    //   σ_HC@gem = σ_HC · |z_gem / z_hc|,  σ_total = sqrt(σ_HC@gem² + σ_GEM²).
+    const float sigma_hc = hycal.PositionResolution(hc_energy);
+    const float w_h      = 1.f / (sigma_hc * sigma_hc);
+    auto sigmaGem = [&](int d) -> float {
+        return (d >= 0 && d < (int)gem_pos_res.size()) ? gem_pos_res[d] : 0.1f;
+    };
 
-    // Find closest GEM-d hit (in detector-local coords) within match_window_mm
-    // of a predicted local point.  Returns -1 if none in window.
+    // Find closest GEM-d hit (in detector-local coords) within
+    // match_nsigma · σ_total of a predicted local point.  -1 if none in window.
     auto findClosest = [&](int d, float pred_lx, float pred_ly,
                            int &out_idx,
                            float &out_lab_x, float &out_lab_y, float &out_lab_z) {
@@ -1093,7 +1123,14 @@ void AppState::runGemEfficiency(int event_id,
         int max_n = std::min((int)hits.size(), gem_eff_max_hits_per_det);
         if (max_n == 0) return;
         const auto &xform = gem_transforms[d];
-        float best_d2 = gem_eff_match_window_mm * gem_eff_match_window_mm;
+        const float z_gem        = (xform.z != 0.f) ? xform.z : 1.f;
+        const float z_hc_safe    = (hcz != 0.f) ? hcz : 1.f;
+        const float s_hc_at_gem  = sigma_hc * std::abs(z_gem / z_hc_safe);
+        const float s_gem        = sigmaGem(d);
+        const float s_total      = std::sqrt(s_hc_at_gem*s_hc_at_gem
+                                            + s_gem*s_gem);
+        const float cut          = gem_eff_match_nsigma * s_total;
+        float best_d2 = cut * cut;
         for (int i = 0; i < max_n; ++i) {
             const auto &h = hits[i];
             float lx, ly, lz;
@@ -1171,7 +1208,8 @@ void AppState::runGemEfficiency(int event_id,
         for (int d = 0; d < n_dets; ++d) {
             if (!matched[d]) continue;
             zarr[N] = cand_lz[d]; xarr[N] = cand_lx[d]; yarr[N] = cand_ly[d];
-            warr[N] = w_g; ++N;
+            const float s = sigmaGem(d);
+            warr[N] = 1.f / (s * s); ++N;
         }
 
         Line3D fit;

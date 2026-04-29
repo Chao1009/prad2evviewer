@@ -598,6 +598,17 @@ static void bind_hycal(py::module_ &m)
         .def("print_calib_constants", &fdec::HyCalSystem::PrintCalibConstants,
              py::arg("output_file"))
 
+        .def("set_position_resolution_params",
+             &fdec::HyCalSystem::SetPositionResolutionParams,
+             py::arg("A"), py::arg("B"), py::arg("C"),
+             "Set the [A, B, C] coefficients of the HyCal-face position "
+             "resolution formula. See PositionResolution(E).")
+        .def("position_resolution",
+             &fdec::HyCalSystem::PositionResolution,
+             py::arg("energy_mev"),
+             "sigma(E) at HyCal face (mm): "
+             "sqrt((A/sqrt(E_GeV))^2 + (B/E_GeV)^2 + C^2).")
+
         .def("sector_info",
             &fdec::HyCalSystem::sector_info, py::arg("sector"),
             py::return_value_policy::reference_internal)
