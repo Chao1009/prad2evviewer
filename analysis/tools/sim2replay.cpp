@@ -191,7 +191,7 @@ int main (int argc, char *argv[])
     // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_modules.json",
-               dbDir + "/daq_map.json");
+               dbDir + "/hycal_daq_map.json");
     PhysicsTools physics(hycal);
     MatchingTools matching;
 

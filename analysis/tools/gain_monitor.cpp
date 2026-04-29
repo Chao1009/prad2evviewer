@@ -105,7 +105,7 @@ int main(int argc, char *argv[])
         DATABASE_DIR).c_str();
 
     TString cfgFile = Form("%s/daq_config.json", dbDir.Data());
-    TString mapFile = Form("%s/daq_map.json", dbDir.Data());
+    TString mapFile = Form("%s/hycal_daq_map.json", dbDir.Data());
 
     printf("============================================\n");
     printf(" PRad LMS / Alpha Normalization\n");
@@ -310,7 +310,7 @@ int main(int argc, char *argv[])
     return 0;
 }
 
-// Load database/daq_map.json — maps every (crate,slot,channel) to a name.
+// Load database/hycal_daq_map.json — maps every (crate,slot,channel) to a name.
 // W* / G* names are HyCal modules; LMS1/2/3 are reference channels.
 static void loadDaqMap(const char *path)
 {

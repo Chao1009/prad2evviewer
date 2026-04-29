@@ -71,10 +71,10 @@ def resolve_db_path(p: str) -> str:
 
 
 def discover_runinfo_path() -> Optional[str]:
-    """Read database/config.json (under PRAD2_DATABASE_DIR or ./database) and
-    return the resolved runinfo path; None if missing/malformed."""
+    """Read database/reconstruction_config.json (under PRAD2_DATABASE_DIR or
+    ./database) and return the resolved runinfo path; None if missing/malformed."""
     db = os.environ.get("PRAD2_DATABASE_DIR", "database")
-    cfg_path = Path(db) / "config.json"
+    cfg_path = Path(db) / "reconstruction_config.json"
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             j = json.load(f)
@@ -341,7 +341,7 @@ def setup_pipeline(*,
     # ---- runinfo ---------------------------------------------------------
     ri_path = discover_runinfo_path()
     if not ri_path:
-        raise SystemExit("[ERROR] no runinfo pointer in database/config.json"
+        raise SystemExit("[ERROR] no runinfo pointer in database/reconstruction_config.json"
                          " — cannot resolve calibration / geometry.")
     eff_run = run_num
     if eff_run <= 0:
@@ -357,7 +357,7 @@ def setup_pipeline(*,
 
     # ---- HyCal -----------------------------------------------------------
     hc_map = hc_map_file or resolve_db_path("hycal_modules.json")
-    daq_map = resolve_db_path("daq_map.json")
+    daq_map = resolve_db_path("hycal_daq_map.json")
     p.hycal = det.HyCalSystem()
     p.hycal.init(hc_map, daq_map)
 
@@ -374,7 +374,7 @@ def setup_pipeline(*,
     p.wave_ana = dec.WaveAnalyzer(dec.WaveConfig())
 
     # ---- GEM -------------------------------------------------------------
-    gem_map = gem_map_file or resolve_db_path("gem_map.json")
+    gem_map = gem_map_file or resolve_db_path("gem_daq_map.json")
     p.gem_sys = det.GemSystem()
     p.gem_sys.init(gem_map)
     _print(f"[setup] GEM map    : {gem_map}  "
@@ -483,7 +483,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--daq-config",    default="",
                     help='DAQ config (default "" = installed default).')
     ap.add_argument("--gem-map-file",  default="",
-                    help='GEM map (default "" = database/gem_map.json).')
+                    help='GEM map (default "" = database/gem_daq_map.json).')
     ap.add_argument("--hc-map-file",   default="",
                     help='HyCal modules map (default "" = database/hycal_modules.json).')
     ap.add_argument("--csv", action="store_true",

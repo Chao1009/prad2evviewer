@@ -48,7 +48,7 @@ from hycal_geoview import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_modules.json"
-DAQ_MAP_JSON = DB_DIR / "daq_map.json"
+DAQ_MAP_JSON = DB_DIR / "hycal_daq_map.json"
 
 NUM_CRATES = 7
 CRATE_NAMES = [f"adchycal{i}" for i in range(1, NUM_CRATES + 1)]

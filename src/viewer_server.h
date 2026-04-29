@@ -75,8 +75,9 @@ public:
         std::string database_dir;
         std::string resource_dir;
         std::string data_dir;           // file browsing root (empty = disabled)
-        std::string daq_config_file;    // empty = auto-find in database_dir
-        std::string config_file;        // empty = auto-find in database_dir
+        std::string daq_config_file;          // empty = auto-find in database_dir
+        std::string monitor_config_file;      // empty = auto-find (monitor_config.json)
+        std::string reconstruction_config_file; // empty = auto-find (reconstruction_config.json)
         std::string initial_file;       // .evio file to open on startup
         int    port         = 5051;
         bool   hist_enabled = false;

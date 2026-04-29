@@ -21,18 +21,28 @@ static void setTransform(DetectorTransform &t,
 
 //=============================================================================
 // Initialization
+//
+// Three top-level configs are involved:
+//   daq_config.json            DAQ + raw decoding (event tags, bank tags,
+//                              ROC layout, sync format, file pointers).
+//                              Loaded once via evc::load_daq_config(); the
+//                              file pointers (modules_file, hycal_daq_map_file,
+//                              gem_daq_map_file, pedestal_file) tell us where
+//                              the channel maps + pedestal JSON live.
+//   monitor_config.json        GUI + online server (waveform/hycal_hist
+//                              binning, lms_monitor, livetime, epics, physics
+//                              display cuts, gem diagnostics, elog, etc.).
+//   reconstruction_config.json runinfo pointer + cluster/hit reco knobs
+//                              (hycal clustering, gem per-detector
+//                              ClusterConfig with default + per-id overrides).
 //=============================================================================
 
 void AppState::init(const std::string &db_dir,
                     const std::string &daq_config_file,
-                    const std::string &config_file)
+                    const std::string &monitor_config_file,
+                    const std::string &recon_config_file)
 {
-    // resolve main config file: -c override > config.json > reconstruction.json
-    std::string main_config = config_file;
-    if (main_config.empty()) main_config = findFile("config.json", db_dir);
-    if (main_config.empty()) main_config = findFile("reconstruction.json", db_dir);
-
-    // --- DAQ config + pedestals (required) ---
+    // --- DAQ config (required, single source of truth for file pointers) ---
     std::string daq_cfg_path = daq_config_file;
     if (daq_cfg_path.empty())
         daq_cfg_path = findFile("daq_config.json", db_dir);
@@ -45,24 +55,54 @@ void AppState::init(const std::string &db_dir,
     }
     std::cerr << "DAQ config: " << daq_cfg_path
               << " (adc_format=" << daq_cfg.adc_format << ")\n";
+
+    // optional ADC1881M pedestals (PRad legacy)
+    if (!daq_cfg.pedestal_file.empty()) {
+        std::string ped_file = findFile(daq_cfg.pedestal_file, db_dir);
+        if (!ped_file.empty() && evc::load_pedestals(ped_file, daq_cfg))
+            std::cerr << "Pedestals : " << ped_file
+                      << " (" << daq_cfg.pedestals.size() << " channels)\n";
+    }
+
+    // --- resolve monitor + reconstruction config paths ---------------------
+    std::string monitor_path = monitor_config_file;
+    if (monitor_path.empty())
+        monitor_path = findFile("monitor_config.json", db_dir);
+
+    std::string recon_path = recon_config_file;
+    if (recon_path.empty())
+        recon_path = findFile("reconstruction_config.json", db_dir);
+
+    // --- trigger definitions (needed for trigger filter parsing) -----------
     {
-        std::ifstream dcf(daq_cfg_path);
-        if (dcf.is_open()) {
-            auto dcj = json::parse(dcf, nullptr, false, true);
-            if (dcj.contains("pedestal_file")) {
-                std::string ped_file = findFile(dcj["pedestal_file"].get<std::string>(), db_dir);
-                if (evc::load_pedestals(ped_file, daq_cfg))
-                    std::cerr << "Pedestals : " << ped_file
-                              << " (" << daq_cfg.pedestals.size() << " channels)\n";
+        std::string tbpath = findFile("trigger_bits.json", db_dir);
+        std::string tbs = readFile(tbpath);
+        if (!tbs.empty()) {
+            auto tb = json::parse(tbs, nullptr, false);
+            if (tb.is_array()) {
+                trigger_bits_def = tb;
+            } else if (tb.is_object()) {
+                if (tb.contains("trigger_bits"))
+                    trigger_bits_def = tb["trigger_bits"];
+                if (tb.contains("trigger_type"))
+                    trigger_type_def = tb["trigger_type"];
             }
         }
     }
 
+    // --- load monitor config -----------------------------------------------
+    json mcfg = json::object();
+    if (!monitor_path.empty()) {
+        std::string s = readFile(monitor_path);
+        if (!s.empty()) {
+            auto j = json::parse(s, nullptr, false);
+            if (!j.is_discarded()) mcfg = std::move(j);
+        }
+    }
 
-    // --- Waveform / histogram config ---
-    // Try "waveform" section from config.json (loaded later in reco_file),
-    // then fall back to separate hist_config.json, then -H override.
-    auto loadWaveformConfig = [&](const json &w) {
+    // waveform binning + trigger filter (monitor side)
+    if (mcfg.contains("waveform")) {
+        auto &w = mcfg["waveform"];
         waveform_trigger.parse(w, trigger_bits_def);
         if (w.contains("time_cut")) {
             auto &tc = w["time_cut"];
@@ -92,64 +132,9 @@ void AppState::init(const std::string &db_dir,
             if (t.contains("min_peak_height"))          hist_cfg.threshold      = t["min_peak_height"];
             if (t.contains("min_secondary_peak_ratio")) hist_cfg.min_peak_ratio = t["min_secondary_peak_ratio"];
         }
-    };
-
-    // legacy: load from separate hist_config.json or -H override
-    auto loadLegacyHistConfig = [&](const json &hcfg) {
-        if (hcfg.contains("hist")) {
-            auto &h = hcfg["hist"];
-            if (h.contains("time_min"))  hist_cfg.time_min  = h["time_min"];
-            if (h.contains("time_max"))  hist_cfg.time_max  = h["time_max"];
-            if (h.contains("bin_min"))   hist_cfg.bin_min   = h["bin_min"];
-            if (h.contains("bin_max"))   hist_cfg.bin_max   = h["bin_max"];
-            if (h.contains("bin_step"))  hist_cfg.bin_step  = h["bin_step"];
-            if (h.contains("threshold")) hist_cfg.threshold = h["threshold"];
-            if (h.contains("pos_min"))   hist_cfg.pos_min   = h["pos_min"];
-            if (h.contains("pos_max"))   hist_cfg.pos_max   = h["pos_max"];
-            if (h.contains("pos_step"))  hist_cfg.pos_step  = h["pos_step"];
-            if (h.contains("height_min"))  hist_cfg.height_min  = h["height_min"];
-            if (h.contains("height_max"))  hist_cfg.height_max  = h["height_max"];
-            if (h.contains("height_step")) hist_cfg.height_step = h["height_step"];
-            if (h.contains("min_peak_ratio")) hist_cfg.min_peak_ratio = h["min_peak_ratio"];
-        }
-    };
-
-    // load trigger definitions first — needed for name resolution in trigger filters
-    {
-        std::string tbpath = findFile("trigger_bits.json", db_dir);
-        std::string tbs = readFile(tbpath);
-        if (!tbs.empty()) {
-            auto tb = json::parse(tbs, nullptr, false);
-            if (tb.is_array()) {
-                trigger_bits_def = tb;
-            } else if (tb.is_object()) {
-                if (tb.contains("trigger_bits"))
-                    trigger_bits_def = tb["trigger_bits"];
-                if (tb.contains("trigger_type"))
-                    trigger_type_def = tb["trigger_type"];
-            }
-        }
     }
-
-    // load waveform config from main config, or legacy hist_config.json
-    bool waveform_loaded = false;
-    if (!main_config.empty()) {
-        std::string s = readFile(main_config);
-        if (!s.empty()) {
-            auto j = json::parse(s, nullptr, false);
-            if (j.contains("waveform")) { loadWaveformConfig(j["waveform"]); waveform_loaded = true; }
-            // legacy "hist" section
-            else if (j.contains("hist")) { loadLegacyHistConfig(j); waveform_loaded = true; }
-            if (j.contains("ref_lines") && j["ref_lines"].is_object())
-                ref_lines = j["ref_lines"];
-        }
-    }
-    if (!waveform_loaded) {
-        std::string hcfg_path = findFile("hist_config.json", db_dir);
-        std::string hcfg_str = readFile(hcfg_path);
-        if (!hcfg_str.empty())
-            loadLegacyHistConfig(json::parse(hcfg_str, nullptr, false));
-    }
+    if (mcfg.contains("ref_lines") && mcfg["ref_lines"].is_object())
+        ref_lines = mcfg["ref_lines"];
 
     hist_nbins = std::max(1, (int)std::ceil(
         (hist_cfg.bin_max - hist_cfg.bin_min) / hist_cfg.bin_step));
@@ -161,74 +146,49 @@ void AppState::init(const std::string &db_dir,
               << "] threshold=" << hist_cfg.threshold
               << " " << waveform_trigger << "\n";
 
-    // --- HyCal system ---
-    std::string modules_filename = "hycal_modules.json";
-    std::string daq_filename     = "daq_map.json";
+    // --- HyCal system ------------------------------------------------------
     {
-        std::ifstream dcf2(daq_cfg_path);
-        if (dcf2.is_open()) {
-            auto dcj2 = json::parse(dcf2, nullptr, false, true);
-            if (dcj2.contains("modules_file")) modules_filename = dcj2["modules_file"].get<std::string>();
-            if (dcj2.contains("daq_map_file")) daq_filename = dcj2["daq_map_file"].get<std::string>();
+        const std::string mods = daq_cfg.modules_file.empty()
+            ? std::string("hycal_modules.json") : daq_cfg.modules_file;
+        const std::string daqm = daq_cfg.hycal_daq_map_file.empty()
+            ? std::string("hycal_daq_map.json") : daq_cfg.hycal_daq_map_file;
+        std::string mod_file = findFile(mods, db_dir);
+        std::string daq_file = findFile(daqm, db_dir);
+        if (!mod_file.empty() && !daq_file.empty()) {
+            if (hycal.Init(mod_file, daq_file))
+                std::cerr << "HyCal     : " << hycal.module_count() << " modules\n";
+            else
+                std::cerr << "Warning: HyCal system initialization failed\n";
         }
     }
-    std::string mod_file = findFile(modules_filename, db_dir);
-    std::string daq_file = findFile(daq_filename, db_dir);
 
-    if (!mod_file.empty() && !daq_file.empty()) {
-        if (hycal.Init(mod_file, daq_file))
-            std::cerr << "HyCal     : " << hycal.module_count() << " modules\n";
-        else
-            std::cerr << "Warning: HyCal system initialization failed\n";
-    }
-
-    // --- GEM system (optional) ---
-    {
-        std::string gem_map_filename = "gem_map.json";
-        std::ifstream dcf_gem(daq_cfg_path);
-        if (dcf_gem.is_open()) {
-            auto dcj_gem = json::parse(dcf_gem, nullptr, false, true);
-            if (dcj_gem.contains("gem_map_file"))
-                gem_map_filename = dcj_gem["gem_map_file"].get<std::string>();
-        }
-        std::string gem_map_file = findFile(gem_map_filename, db_dir);
+    // --- GEM system (optional) --------------------------------------------
+    if (!daq_cfg.gem_daq_map_file.empty()) {
+        std::string gem_map_file = findFile(daq_cfg.gem_daq_map_file, db_dir);
         if (!gem_map_file.empty()) {
             gem_sys.Init(gem_map_file);
             gem_enabled = (gem_sys.GetNDetectors() > 0);
             if (gem_enabled) {
                 std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
-                // init per-detector data (identity transform by default, pre-prepared)
                 int ndet = gem_sys.GetNDetectors();
                 gem_transforms.resize(ndet);
                 for (auto &t : gem_transforms) t.prepare();
                 gem_occupancy.resize(ndet);
                 for (auto &h : gem_occupancy) h.init(GEM_OCC_NX, GEM_OCC_NY);
-                // Pedestals + common-mode ranges are loaded later from the
-                // runinfo block (per-run calibration data).
+                // Pedestals + common-mode ranges are loaded from runinfo
+                // (per-run calibration) below.
             }
         }
     }
 
-    // --- crate_roc map ---
+    // --- crate_roc map (directly from daq_cfg.roc_tags) -------------------
     crate_roc_json = json::object();
-    {
-        std::ifstream dcf3(daq_cfg_path);
-        if (dcf3.is_open()) {
-            auto dcj3 = json::parse(dcf3, nullptr, false, true);
-            if (dcj3.contains("roc_tags")) {
-                for (auto &entry : dcj3["roc_tags"]) {
-                    if (entry.contains("crate") && entry.contains("tag")) {
-                        // only use data ROCs (type "roc") for crate→tag mapping;
-                        // ti_slaves share crate numbers but have different tags
-                        std::string rtype = entry.value("type", "");
-                        if (!rtype.empty() && rtype != "roc" && rtype != "gem") continue;
-                        int crate = entry["crate"].get<int>();
-                        uint32_t tag = evc::parse_hex(entry["tag"]);
-                        crate_roc_json[std::to_string(crate)] = tag;
-                    }
-                }
-            }
-        }
+    for (const auto &re : daq_cfg.roc_tags) {
+        // only data ROCs (type "roc"/"gem"); ti_slaves share crate numbers
+        // but have different tags and must not overwrite the data ROC entry.
+        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
+        if (re.crate < 0) continue;
+        crate_roc_json[std::to_string(re.crate)] = re.tag;
     }
     if (crate_roc_json.empty())
         crate_roc_json = {{"0",0x80},{"1",0x82},{"2",0x84},{"3",0x86},{"4",0x88},{"5",0x8a},{"6",0x8c}};
@@ -237,335 +197,372 @@ void AppState::init(const std::string &db_dir,
     for (auto &[k, v] : crate_roc_json.items())
         roc_to_crate[v.get<int>()] = std::stoi(k);
 
-    // --- Reconstruction config (from same main config file) ---
-    std::string reco_str = readFile(main_config);
-    if (!reco_str.empty()) {
-        auto rcfg = json::parse(reco_str, nullptr, false);
-
-        if (rcfg.contains("online")) {
-            auto &on = rcfg["online"];
-            if (on.contains("refresh_ms")) {
-                auto &r = on["refresh_ms"];
-                if (r.contains("event"))     refresh_event_ms = r["event"];
-                if (r.contains("ring"))      refresh_ring_ms  = r["ring"];
-                if (r.contains("histogram")) refresh_hist_ms  = r["histogram"];
-                if (r.contains("lms"))       refresh_lms_ms   = r["lms"];
-            }
+    // --- monitor config: remaining sections -------------------------------
+    if (mcfg.contains("online")) {
+        auto &on = mcfg["online"];
+        if (on.contains("refresh_ms")) {
+            auto &r = on["refresh_ms"];
+            if (r.contains("event"))     refresh_event_ms = r["event"];
+            if (r.contains("ring"))      refresh_ring_ms  = r["ring"];
+            if (r.contains("histogram")) refresh_hist_ms  = r["histogram"];
+            if (r.contains("lms"))       refresh_lms_ms   = r["lms"];
         }
-
-        if (rcfg.contains("clustering")) {
-            auto &cc = rcfg["clustering"];
-            auto loadCfg = [](const json &j, fdec::ClusterConfig &cfg) {
-                if (j.contains("min_module_energy"))  cfg.min_module_energy  = j["min_module_energy"];
-                if (j.contains("min_center_energy"))  cfg.min_center_energy  = j["min_center_energy"];
-                if (j.contains("min_cluster_energy")) cfg.min_cluster_energy = j["min_cluster_energy"];
-                if (j.contains("min_cluster_size"))   cfg.min_cluster_size   = j["min_cluster_size"];
-                if (j.contains("corner_conn"))        cfg.corner_conn        = j["corner_conn"];
-                if (j.contains("split_iter"))         cfg.split_iter         = j["split_iter"];
-                if (j.contains("least_split"))        cfg.least_split        = j["least_split"];
-                if (j.contains("log_weight_thres"))   cfg.log_weight_thres   = j["log_weight_thres"];
-            };
-            loadCfg(cc, cluster_cfg);
-            cluster_trigger.parse(cc, trigger_bits_def);
-            if (cc.contains("energy_hist")) {
-                auto &eh = cc["energy_hist"];
-                if (eh.contains("min"))  cl_hist_min  = eh["min"];
-                if (eh.contains("max"))  cl_hist_max  = eh["max"];
-                if (eh.contains("step")) cl_hist_step = eh["step"];
-            }
-            if (cc.contains("nclusters_hist")) {
-                auto &nh = cc["nclusters_hist"];
-                if (nh.contains("min"))  nclusters_hist_min  = nh["min"];
-                if (nh.contains("max"))  nclusters_hist_max  = nh["max"];
-                if (nh.contains("step")) nclusters_hist_step = nh["step"];
-            }
-            if (cc.contains("nblocks_hist")) {
-                auto &bh = cc["nblocks_hist"];
-                if (bh.contains("min"))  nblocks_hist_min  = bh["min"];
-                if (bh.contains("max"))  nblocks_hist_max  = bh["max"];
-                if (bh.contains("step")) nblocks_hist_step = bh["step"];
-            }
-            std::cerr << "Clustering: min_mod=" << cluster_cfg.min_module_energy
-                      << " min_center=" << cluster_cfg.min_center_energy
-                      << " min_cluster=" << cluster_cfg.min_cluster_energy
-                      << " " << cluster_trigger
-                      << " hist=[" << cl_hist_min << "," << cl_hist_max
-                      << "]/" << cl_hist_step << "\n";
-        }
-
-        if (rcfg.contains("lms_monitor")) {
-            auto &lm = rcfg["lms_monitor"];
-            lms_trigger.parse(lm, trigger_bits_def);
-            if (lm.contains("warn_threshold")) lms_warn_thresh     = lm["warn_threshold"];
-            if (lm.contains("warn_min_mean"))  lms_warn_min_mean  = lm["warn_min_mean"];
-            if (lm.contains("max_history"))    lms_max_history    = lm["max_history"];
-            if (lm.contains("reference_channels")) {
-                for (auto &name : lm["reference_channels"]) {
-                    std::string n = name.get<std::string>();
-                    const auto *mod = hycal.module_by_name(n);
-                    lms_ref_channels.push_back({n, mod ? mod->index : -1});
-                }
-            }
-            // Alpha-source trigger lives under lms_monitor.alpha because
-            // Alpha events are always fed to the same LMS ref channels.
-            if (lm.contains("alpha"))
-                alpha_trigger.parse(lm["alpha"], trigger_bits_def);
-            std::cerr << "LMS       : " << lms_trigger
-                      << " warn=" << lms_warn_thresh
-                      << " refs=" << lms_ref_channels.size()
-                      << " alpha=" << alpha_trigger << "\n";
-        }
-
-        if (rcfg.contains("livetime")) {
-            auto &lt = rcfg["livetime"];
-            if (lt.contains("command"))  livetime_cmd      = lt["command"].get<std::string>();
-            if (lt.contains("poll_sec")) livetime_poll_sec = std::max(1, (int)lt["poll_sec"]);
-            if (lt.contains("healthy"))  livetime_healthy  = lt["healthy"];
-            if (lt.contains("warning"))  livetime_warning  = lt["warning"];
-            // DSC2-scaler config (bank/slot/source/channel) lives in
-            // daq_config.json under `dsc_scaler` — see DaqConfig::DscScaler.
-            const auto &ds = daq_cfg.dsc_scaler;
-            using DSrc = evc::DaqConfig::DscScaler::Source;
-            const char *src_name = (ds.source == DSrc::Ref) ? "ref"
-                                 : (ds.source == DSrc::Trg) ? "trg" : "tdc";
-            std::cerr << "Livetime  : "
-                      << (livetime_cmd.empty() ? "disabled"
-                                               : ("'" + livetime_cmd + "' every "
-                                                  + std::to_string(livetime_poll_sec) + "s"))
-                      << " healthy>=" << livetime_healthy
-                      << " warn>=" << livetime_warning;
-            if (ds.enabled()) {
-                std::cerr << " | DSC2 bank=0x" << std::hex << ds.bank_tag << std::dec
-                          << " slot=" << ds.slot << " src=" << src_name;
-                if (ds.source != DSrc::Ref)
-                    std::cerr << " ch=" << ds.channel;
-            } else {
-                std::cerr << " | DSC2 disabled";
-            }
-            std::cerr << "\n";
-        }
-
-        if (rcfg.contains("color_ranges")) {
-            for (auto &[key, val] : rcfg["color_ranges"].items()) {
-                if (val.is_array() && val.size() == 2)
-                    color_range_defaults[key] = {val[0].get<float>(), val[1].get<float>()};
-            }
-            std::cerr << "Color ranges: " << color_range_defaults.size() << " entries\n";
-        }
-
-        if (rcfg.contains("runinfo") && rcfg["runinfo"].is_string()) {
-            // Run number isn't known at init time (no event yet) — pick the
-            // entry with the largest run_number ("latest"). The shared loader
-            // logs which entry it selected.
-            std::string ri_file = findFile(rcfg["runinfo"].get<std::string>(), db_dir);
-            if (ri_file.empty()) {
-                std::cerr << "Warning: runinfo file '"
-                          << rcfg["runinfo"].get<std::string>()
-                          << "' not found in " << db_dir << "\n";
-            } else {
-                prad2::RunConfig rc = prad2::LoadRunConfig(ri_file, /*run_num=*/-1);
-
-                // Single-source beam energy: runinfo is the fallback. EPICS
-                // (MBSY2C_energy) overrides at runtime in processEpics().
-                beam_energy_runinfo = rc.Ebeam;
-                beam_energy.store(rc.Ebeam);
-                target_x = rc.target_x;
-                target_y = rc.target_y;
-                target_z = rc.target_z;
-                adc_to_mev = rc.default_adc2mev;
-                setTransform(hycal_transform,
-                             rc.hycal_x, rc.hycal_y, rc.hycal_z,
-                             rc.hycal_tilt_x, rc.hycal_tilt_y, rc.hycal_tilt_z);
-
-                if (!rc.energy_calib_file.empty()) {
-                    std::string calib_file = findFile(rc.energy_calib_file, db_dir);
-                    if (calib_file.empty()) {
-                        std::cerr << "Warning: calibration file '"
-                                  << rc.energy_calib_file
-                                  << "' not found in " << db_dir << "\n";
-                    } else {
-                        int nmatched = hycal.LoadCalibration(calib_file);
-                        if (nmatched >= 0)
-                            std::cerr << "Calibration: " << calib_file
-                                      << " (" << nmatched << " modules)\n";
-                    }
-                }
-                std::cerr << "RunInfo   : beam=" << beam_energy.load()
-                          << "MeV default_adc2mev=" << adc_to_mev
-                          << " target=(" << target_x << "," << target_y << "," << target_z
-                          << ") HyCal=(" << hycal_transform.x << ","
-                          << hycal_transform.y << "," << hycal_transform.z << ")\n";
-
-                if (gem_enabled) {
-                    int n = std::min<int>(4, (int)gem_transforms.size());
-                    for (int id = 0; id < n; ++id) {
-                        setTransform(gem_transforms[id],
-                                     rc.gem_x[id], rc.gem_y[id], rc.gem_z[id],
-                                     rc.gem_tilt_x[id], rc.gem_tilt_y[id], rc.gem_tilt_z[id]);
-                    }
-                    std::cerr << "GEM geom  : " << gem_transforms.size()
-                              << " detectors configured\n";
-
-                    // Build hardware-crate -> logical-crate remap from
-                    // daq_config.roc_tags so the upstream pedestal/CM files
-                    // (which key by EVIO bank tag = decimal hardware ID,
-                    // e.g. 146/147) match our gem_map.json (logical 1/2).
-                    std::map<int, int> gem_crate_remap;
-                    for (const auto &re : daq_cfg.roc_tags) {
-                        if (re.type == "gem")
-                            gem_crate_remap[(int)re.tag] = re.crate;
-                    }
-
-                    if (!rc.gem_pedestal_file.empty()) {
-                        std::string ped = findFile(rc.gem_pedestal_file, db_dir);
-                        if (ped.empty())
-                            std::cerr << "Warning: gem pedestal file '"
-                                      << rc.gem_pedestal_file
-                                      << "' not found in " << db_dir << "\n";
-                        else
-                            gem_sys.LoadPedestals(ped, gem_crate_remap);
-                    }
-                    if (!rc.gem_common_mode_file.empty()) {
-                        std::string cm = findFile(rc.gem_common_mode_file, db_dir);
-                        if (cm.empty())
-                            std::cerr << "Warning: gem common-mode file '"
-                                      << rc.gem_common_mode_file
-                                      << "' not found in " << db_dir << "\n";
-                        else
-                            gem_sys.LoadCommonModeRange(cm, gem_crate_remap);
-                    }
-                }
-            }
-        } else if (rcfg.contains("runinfo")) {
-            std::cerr << "Warning: 'runinfo' must be a path string to a "
-                         "configurations-format JSON file\n";
-        }
-        if (rcfg.contains("elog")) {
-            auto &el = rcfg["elog"];
-            if (el.contains("url"))      elog_url      = el["url"];
-            if (el.contains("logbook"))  elog_logbook   = el["logbook"];
-            if (el.contains("author"))   elog_author    = el["author"];
-            if (el.contains("tags"))
-                for (auto &t : el["tags"]) elog_tags.push_back(t);
-            if (el.contains("cert")) elog_cert = el["cert"];
-            if (el.contains("key"))  elog_key  = el["key"];
-            std::cerr << "Elog      : " << elog_url
-                      << " logbook=" << elog_logbook
-                      << (elog_cert.empty() ? "" : " cert=" + elog_cert)
-                      << "\n";
-        }
-
-        if (rcfg.contains("physics")) {
-            auto &ph = rcfg["physics"];
-            physics_trigger.parse(ph, trigger_bits_def);
-            if (ph.contains("beam_energy")) {
-                auto &be = ph["beam_energy"];
-                if (be.contains("epics_channel")) beam_energy_epics_channel = be["epics_channel"];
-                if (be.contains("min_valid"))     beam_energy_min_valid     = be["min_valid"];
-            }
-            if (ph.contains("energy_angle_hist")) {
-                auto &ea = ph["energy_angle_hist"];
-                if (ea.contains("angle_min"))   ea_angle_min   = ea["angle_min"];
-                if (ea.contains("angle_max"))   ea_angle_max   = ea["angle_max"];
-                if (ea.contains("angle_step"))  ea_angle_step  = ea["angle_step"];
-                if (ea.contains("energy_min"))  ea_energy_min  = ea["energy_min"];
-                if (ea.contains("energy_max"))  ea_energy_max  = ea["energy_max"];
-                if (ea.contains("energy_step")) ea_energy_step = ea["energy_step"];
-            }
-            if (ph.contains("moller")) {
-                auto &ml = ph["moller"];
-                if (ml.contains("energy_tolerance")) moller_energy_tol = ml["energy_tolerance"];
-                if (ml.contains("angle_min"))        moller_angle_min  = ml["angle_min"];
-                if (ml.contains("angle_max"))        moller_angle_max  = ml["angle_max"];
-                if (ml.contains("xy_hist")) {
-                    auto &xy = ml["xy_hist"];
-                    if (xy.contains("x_min"))  moller_xy_x_min  = xy["x_min"];
-                    if (xy.contains("x_max"))  moller_xy_x_max  = xy["x_max"];
-                    if (xy.contains("x_step")) moller_xy_x_step = xy["x_step"];
-                    if (xy.contains("y_min"))  moller_xy_y_min  = xy["y_min"];
-                    if (xy.contains("y_max"))  moller_xy_y_max  = xy["y_max"];
-                    if (xy.contains("y_step")) moller_xy_y_step = xy["y_step"];
-                }
-            }
-            if (ph.contains("hycal_cluster_hit")) {
-                auto &hc = ph["hycal_cluster_hit"];
-                if (hc.contains("n_clusters"))      hxy_n_clusters      = hc["n_clusters"];
-                if (hc.contains("energy_frac_min")) hxy_energy_frac_min = hc["energy_frac_min"];
-                if (hc.contains("nblocks_min"))     hxy_nblocks_min     = hc["nblocks_min"];
-                if (hc.contains("nblocks_max"))     hxy_nblocks_max     = hc["nblocks_max"];
-                if (hc.contains("xy_hist")) {
-                    auto &xy = hc["xy_hist"];
-                    if (xy.contains("x_min"))  hxy_x_min  = xy["x_min"];
-                    if (xy.contains("x_max"))  hxy_x_max  = xy["x_max"];
-                    if (xy.contains("x_step")) hxy_x_step = xy["x_step"];
-                    if (xy.contains("y_min"))  hxy_y_min  = xy["y_min"];
-                    if (xy.contains("y_max"))  hxy_y_max  = xy["y_max"];
-                    if (xy.contains("y_step")) hxy_y_step = xy["y_step"];
-                }
-            }
-            std::cerr << "Physics   : " << physics_trigger
-                      << " Moller: tol=" << moller_energy_tol
-                      << " angle=[" << moller_angle_min << "," << moller_angle_max << "]"
-                      << " HyCalXY: Ncl=" << hxy_n_clusters
-                      << " E>=" << hxy_energy_frac_min << "*Eb"
-                      << " blocks=[" << hxy_nblocks_min << "," << hxy_nblocks_max << "]"
-                      << " beam_src='" << beam_energy_epics_channel << "'\n";
-        }
-
-        if (rcfg.contains("epics")) {
-            auto &ep = rcfg["epics"];
-            if (ep.contains("max_history"))     epics_max_history  = ep["max_history"];
-            if (ep.contains("warn_threshold"))  epics_warn_thresh  = ep["warn_threshold"];
-            if (ep.contains("alert_threshold")) epics_alert_thresh = ep["alert_threshold"];
-            if (ep.contains("min_avg_points"))  epics_min_avg_pts  = ep["min_avg_points"];
-            if (ep.contains("mean_window"))     epics_mean_window  = ep["mean_window"];
-            if (ep.contains("slots")) {
-                for (auto &slot : ep["slots"]) {
-                    std::vector<std::string> names;
-                    for (auto &ch : slot) names.push_back(ch);
-                    epics_default_slots.push_back(std::move(names));
-                }
-            }
-            std::cerr << "EPICS     : max_history=" << epics_max_history
-                      << " slots=" << epics_default_slots.size() << "\n";
-        }
-
-        // Top-level "gem" block — diagnostics for the GEM tab (HyCal-anchored
-        // matching residuals + tracking-efficiency monitor).  Pulled out of
-        // "physics" so the GEM tab owns its own configuration.
-        if (rcfg.contains("gem")) {
-            auto &gemcfg = rcfg["gem"];
-            if (gemcfg.contains("hycal_match")) {
-                auto &gm = gemcfg["hycal_match"];
-                if (gm.contains("require_ep_candidate")) gem_match_require_ep = gm["require_ep_candidate"];
-                if (gm.contains("window_mm"))            gem_match_window_mm  = gm["window_mm"];
-                if (gm.contains("residual_hist")) {
-                    auto &rh = gm["residual_hist"];
-                    if (rh.contains("min"))  gem_resid_min  = rh["min"];
-                    if (rh.contains("max"))  gem_resid_max  = rh["max"];
-                    if (rh.contains("step")) gem_resid_step = rh["step"];
-                }
-            }
-            if (gemcfg.contains("efficiency")) {
-                auto &ge = gemcfg["efficiency"];
-                if (ge.contains("min_cluster_energy"))    gem_eff_min_cluster_energy = ge["min_cluster_energy"];
-                if (ge.contains("match_window_mm"))       gem_eff_match_window_mm    = ge["match_window_mm"];
-                if (ge.contains("max_chi2_per_dof"))      gem_eff_max_chi2           = ge["max_chi2_per_dof"];
-                if (ge.contains("max_hits_per_detector")) gem_eff_max_hits_per_det   = ge["max_hits_per_detector"];
-                if (ge.contains("min_denom_for_eff"))     gem_eff_min_denom          = ge["min_denom_for_eff"];
-                if (ge.contains("healthy"))               gem_eff_healthy            = ge["healthy"];
-                if (ge.contains("warning"))               gem_eff_warning            = ge["warning"];
-            }
-            std::cerr << "GEM cfg   : match window=" << gem_match_window_mm
-                      << "mm  efficiency: window=" << gem_eff_match_window_mm
-                      << "mm chi2/dof<=" << gem_eff_max_chi2 << "\n";
-        }
-
-        std::cerr << "Reco      : " << main_config
-                  << " (adc_to_mev=" << adc_to_mev << ")\n";
     }
 
-    // init cluster histograms
+    // hycal_hist: trigger filter + display-histogram binning for the cluster
+    // monitor.  Cluster-reco knobs (min_*_energy, split_iter, ...) come from
+    // reconstruction_config.json:hycal further below.
+    if (mcfg.contains("hycal_hist")) {
+        auto &hh = mcfg["hycal_hist"];
+        cluster_trigger.parse(hh, trigger_bits_def);
+        if (hh.contains("energy_hist")) {
+            auto &eh = hh["energy_hist"];
+            if (eh.contains("min"))  cl_hist_min  = eh["min"];
+            if (eh.contains("max"))  cl_hist_max  = eh["max"];
+            if (eh.contains("step")) cl_hist_step = eh["step"];
+        }
+        if (hh.contains("nclusters_hist")) {
+            auto &nh = hh["nclusters_hist"];
+            if (nh.contains("min"))  nclusters_hist_min  = nh["min"];
+            if (nh.contains("max"))  nclusters_hist_max  = nh["max"];
+            if (nh.contains("step")) nclusters_hist_step = nh["step"];
+        }
+        if (hh.contains("nblocks_hist")) {
+            auto &bh = hh["nblocks_hist"];
+            if (bh.contains("min"))  nblocks_hist_min  = bh["min"];
+            if (bh.contains("max"))  nblocks_hist_max  = bh["max"];
+            if (bh.contains("step")) nblocks_hist_step = bh["step"];
+        }
+    }
+
+    if (mcfg.contains("lms_monitor")) {
+        auto &lm = mcfg["lms_monitor"];
+        lms_trigger.parse(lm, trigger_bits_def);
+        if (lm.contains("warn_threshold")) lms_warn_thresh    = lm["warn_threshold"];
+        if (lm.contains("warn_min_mean"))  lms_warn_min_mean  = lm["warn_min_mean"];
+        if (lm.contains("max_history"))    lms_max_history    = lm["max_history"];
+        if (lm.contains("reference_channels")) {
+            for (auto &name : lm["reference_channels"]) {
+                std::string n = name.get<std::string>();
+                const auto *mod = hycal.module_by_name(n);
+                lms_ref_channels.push_back({n, mod ? mod->index : -1});
+            }
+        }
+        if (lm.contains("alpha"))
+            alpha_trigger.parse(lm["alpha"], trigger_bits_def);
+        std::cerr << "LMS       : " << lms_trigger
+                  << " warn=" << lms_warn_thresh
+                  << " refs=" << lms_ref_channels.size()
+                  << " alpha=" << alpha_trigger << "\n";
+    }
+
+    if (mcfg.contains("livetime")) {
+        auto &lt = mcfg["livetime"];
+        if (lt.contains("command"))  livetime_cmd      = lt["command"].get<std::string>();
+        if (lt.contains("poll_sec")) livetime_poll_sec = std::max(1, (int)lt["poll_sec"]);
+        if (lt.contains("healthy"))  livetime_healthy  = lt["healthy"];
+        if (lt.contains("warning"))  livetime_warning  = lt["warning"];
+        const auto &ds = daq_cfg.dsc_scaler;
+        using DSrc = evc::DaqConfig::DscScaler::Source;
+        const char *src_name = (ds.source == DSrc::Ref) ? "ref"
+                             : (ds.source == DSrc::Trg) ? "trg" : "tdc";
+        std::cerr << "Livetime  : "
+                  << (livetime_cmd.empty() ? "disabled"
+                                           : ("'" + livetime_cmd + "' every "
+                                              + std::to_string(livetime_poll_sec) + "s"))
+                  << " healthy>=" << livetime_healthy
+                  << " warn>=" << livetime_warning;
+        if (ds.enabled()) {
+            std::cerr << " | DSC2 bank=0x" << std::hex << ds.bank_tag << std::dec
+                      << " slot=" << ds.slot << " src=" << src_name;
+            if (ds.source != DSrc::Ref)
+                std::cerr << " ch=" << ds.channel;
+        } else {
+            std::cerr << " | DSC2 disabled";
+        }
+        std::cerr << "\n";
+    }
+
+    if (mcfg.contains("color_ranges")) {
+        for (auto &[key, val] : mcfg["color_ranges"].items()) {
+            if (val.is_array() && val.size() == 2)
+                color_range_defaults[key] = {val[0].get<float>(), val[1].get<float>()};
+        }
+        std::cerr << "Color ranges: " << color_range_defaults.size() << " entries\n";
+    }
+
+    if (mcfg.contains("elog")) {
+        auto &el = mcfg["elog"];
+        if (el.contains("url"))     elog_url     = el["url"];
+        if (el.contains("logbook")) elog_logbook = el["logbook"];
+        if (el.contains("author"))  elog_author  = el["author"];
+        if (el.contains("tags"))
+            for (auto &t : el["tags"]) elog_tags.push_back(t);
+        if (el.contains("cert")) elog_cert = el["cert"];
+        if (el.contains("key"))  elog_key  = el["key"];
+        std::cerr << "Elog      : " << elog_url
+                  << " logbook=" << elog_logbook
+                  << (elog_cert.empty() ? "" : " cert=" + elog_cert)
+                  << "\n";
+    }
+
+    if (mcfg.contains("physics")) {
+        auto &ph = mcfg["physics"];
+        physics_trigger.parse(ph, trigger_bits_def);
+        if (ph.contains("beam_energy")) {
+            auto &be = ph["beam_energy"];
+            if (be.contains("epics_channel")) beam_energy_epics_channel = be["epics_channel"];
+            if (be.contains("min_valid"))     beam_energy_min_valid     = be["min_valid"];
+        }
+        if (ph.contains("energy_angle_hist")) {
+            auto &ea = ph["energy_angle_hist"];
+            if (ea.contains("angle_min"))   ea_angle_min   = ea["angle_min"];
+            if (ea.contains("angle_max"))   ea_angle_max   = ea["angle_max"];
+            if (ea.contains("angle_step"))  ea_angle_step  = ea["angle_step"];
+            if (ea.contains("energy_min"))  ea_energy_min  = ea["energy_min"];
+            if (ea.contains("energy_max"))  ea_energy_max  = ea["energy_max"];
+            if (ea.contains("energy_step")) ea_energy_step = ea["energy_step"];
+        }
+        if (ph.contains("moller")) {
+            auto &ml = ph["moller"];
+            if (ml.contains("energy_tolerance")) moller_energy_tol = ml["energy_tolerance"];
+            if (ml.contains("angle_min"))        moller_angle_min  = ml["angle_min"];
+            if (ml.contains("angle_max"))        moller_angle_max  = ml["angle_max"];
+            if (ml.contains("xy_hist")) {
+                auto &xy = ml["xy_hist"];
+                if (xy.contains("x_min"))  moller_xy_x_min  = xy["x_min"];
+                if (xy.contains("x_max"))  moller_xy_x_max  = xy["x_max"];
+                if (xy.contains("x_step")) moller_xy_x_step = xy["x_step"];
+                if (xy.contains("y_min"))  moller_xy_y_min  = xy["y_min"];
+                if (xy.contains("y_max"))  moller_xy_y_max  = xy["y_max"];
+                if (xy.contains("y_step")) moller_xy_y_step = xy["y_step"];
+            }
+        }
+        if (ph.contains("hycal_cluster_hit")) {
+            auto &hc = ph["hycal_cluster_hit"];
+            if (hc.contains("n_clusters"))      hxy_n_clusters      = hc["n_clusters"];
+            if (hc.contains("energy_frac_min")) hxy_energy_frac_min = hc["energy_frac_min"];
+            if (hc.contains("nblocks_min"))     hxy_nblocks_min     = hc["nblocks_min"];
+            if (hc.contains("nblocks_max"))     hxy_nblocks_max     = hc["nblocks_max"];
+            if (hc.contains("xy_hist")) {
+                auto &xy = hc["xy_hist"];
+                if (xy.contains("x_min"))  hxy_x_min  = xy["x_min"];
+                if (xy.contains("x_max"))  hxy_x_max  = xy["x_max"];
+                if (xy.contains("x_step")) hxy_x_step = xy["x_step"];
+                if (xy.contains("y_min"))  hxy_y_min  = xy["y_min"];
+                if (xy.contains("y_max"))  hxy_y_max  = xy["y_max"];
+                if (xy.contains("y_step")) hxy_y_step = xy["y_step"];
+            }
+        }
+        std::cerr << "Physics   : " << physics_trigger
+                  << " Moller: tol=" << moller_energy_tol
+                  << " angle=[" << moller_angle_min << "," << moller_angle_max << "]"
+                  << " HyCalXY: Ncl=" << hxy_n_clusters
+                  << " E>=" << hxy_energy_frac_min << "*Eb"
+                  << " blocks=[" << hxy_nblocks_min << "," << hxy_nblocks_max << "]"
+                  << " beam_src='" << beam_energy_epics_channel << "'\n";
+    }
+
+    if (mcfg.contains("epics")) {
+        auto &ep = mcfg["epics"];
+        if (ep.contains("max_history"))     epics_max_history  = ep["max_history"];
+        if (ep.contains("warn_threshold"))  epics_warn_thresh  = ep["warn_threshold"];
+        if (ep.contains("alert_threshold")) epics_alert_thresh = ep["alert_threshold"];
+        if (ep.contains("min_avg_points"))  epics_min_avg_pts  = ep["min_avg_points"];
+        if (ep.contains("mean_window"))     epics_mean_window  = ep["mean_window"];
+        if (ep.contains("slots")) {
+            for (auto &slot : ep["slots"]) {
+                std::vector<std::string> names;
+                for (auto &ch : slot) names.push_back(ch);
+                epics_default_slots.push_back(std::move(names));
+            }
+        }
+        std::cerr << "EPICS     : max_history=" << epics_max_history
+                  << " slots=" << epics_default_slots.size() << "\n";
+    }
+
+    // GEM diagnostics (HyCal-anchored matching residuals + tracking efficiency).
+    // Not to be confused with reconstruction_config.json:gem (per-detector
+    // ClusterConfig); this section is monitor-side only.
+    if (mcfg.contains("gem")) {
+        auto &gemcfg = mcfg["gem"];
+        if (gemcfg.contains("hycal_match")) {
+            auto &gm = gemcfg["hycal_match"];
+            if (gm.contains("require_ep_candidate")) gem_match_require_ep = gm["require_ep_candidate"];
+            if (gm.contains("window_mm"))            gem_match_window_mm  = gm["window_mm"];
+            if (gm.contains("residual_hist")) {
+                auto &rh = gm["residual_hist"];
+                if (rh.contains("min"))  gem_resid_min  = rh["min"];
+                if (rh.contains("max"))  gem_resid_max  = rh["max"];
+                if (rh.contains("step")) gem_resid_step = rh["step"];
+            }
+        }
+        if (gemcfg.contains("efficiency")) {
+            auto &ge = gemcfg["efficiency"];
+            if (ge.contains("min_cluster_energy"))    gem_eff_min_cluster_energy = ge["min_cluster_energy"];
+            if (ge.contains("match_window_mm"))       gem_eff_match_window_mm    = ge["match_window_mm"];
+            if (ge.contains("max_chi2_per_dof"))      gem_eff_max_chi2           = ge["max_chi2_per_dof"];
+            if (ge.contains("max_hits_per_detector")) gem_eff_max_hits_per_det   = ge["max_hits_per_detector"];
+            if (ge.contains("min_denom_for_eff"))     gem_eff_min_denom          = ge["min_denom_for_eff"];
+            if (ge.contains("healthy"))               gem_eff_healthy            = ge["healthy"];
+            if (ge.contains("warning"))               gem_eff_warning            = ge["warning"];
+        }
+        std::cerr << "GEM cfg   : match window=" << gem_match_window_mm
+                  << "mm  efficiency: window=" << gem_eff_match_window_mm
+                  << "mm chi2/dof<=" << gem_eff_max_chi2 << "\n";
+    }
+
+    std::cerr << "Monitor   : " << (monitor_path.empty() ? "(none)" : monitor_path) << "\n";
+
+    // --- reconstruction config: runinfo + hycal reco knobs + gem per-det --
+    json rcfg = json::object();
+    if (!recon_path.empty()) {
+        std::string s = readFile(recon_path);
+        if (!s.empty()) {
+            auto j = json::parse(s, nullptr, false);
+            if (!j.is_discarded()) rcfg = std::move(j);
+        }
+    }
+
+    // HyCal cluster-reco knobs
+    if (rcfg.contains("hycal")) {
+        auto &hc = rcfg["hycal"];
+        if (hc.contains("min_module_energy"))  cluster_cfg.min_module_energy  = hc["min_module_energy"];
+        if (hc.contains("min_center_energy"))  cluster_cfg.min_center_energy  = hc["min_center_energy"];
+        if (hc.contains("min_cluster_energy")) cluster_cfg.min_cluster_energy = hc["min_cluster_energy"];
+        if (hc.contains("min_cluster_size"))   cluster_cfg.min_cluster_size   = hc["min_cluster_size"];
+        if (hc.contains("corner_conn"))        cluster_cfg.corner_conn        = hc["corner_conn"];
+        if (hc.contains("split_iter"))         cluster_cfg.split_iter         = hc["split_iter"];
+        if (hc.contains("least_split"))        cluster_cfg.least_split        = hc["least_split"];
+        if (hc.contains("log_weight_thres"))   cluster_cfg.log_weight_thres   = hc["log_weight_thres"];
+    }
+    std::cerr << "Clustering: min_mod=" << cluster_cfg.min_module_energy
+              << " min_center=" << cluster_cfg.min_center_energy
+              << " min_cluster=" << cluster_cfg.min_cluster_energy
+              << " " << cluster_trigger
+              << " hist=[" << cl_hist_min << "," << cl_hist_max
+              << "]/" << cl_hist_step << "\n";
+
+    // runinfo: a path string to a runinfo file with a "configurations" array.
+    if (rcfg.contains("runinfo") && rcfg["runinfo"].is_string()) {
+        std::string ri_file = findFile(rcfg["runinfo"].get<std::string>(), db_dir);
+        if (ri_file.empty()) {
+            std::cerr << "Warning: runinfo file '"
+                      << rcfg["runinfo"].get<std::string>()
+                      << "' not found in " << db_dir << "\n";
+        } else {
+            // Run number isn't known at init time (no event yet) — pick the
+            // entry with the largest run_number ("latest").
+            prad2::RunConfig rc = prad2::LoadRunConfig(ri_file, /*run_num=*/-1);
+
+            beam_energy_runinfo = rc.Ebeam;
+            beam_energy.store(rc.Ebeam);
+            target_x = rc.target_x;
+            target_y = rc.target_y;
+            target_z = rc.target_z;
+            adc_to_mev = rc.default_adc2mev;
+            setTransform(hycal_transform,
+                         rc.hycal_x, rc.hycal_y, rc.hycal_z,
+                         rc.hycal_tilt_x, rc.hycal_tilt_y, rc.hycal_tilt_z);
+
+            if (!rc.energy_calib_file.empty()) {
+                std::string calib_file = findFile(rc.energy_calib_file, db_dir);
+                if (calib_file.empty()) {
+                    std::cerr << "Warning: calibration file '"
+                              << rc.energy_calib_file
+                              << "' not found in " << db_dir << "\n";
+                } else {
+                    int nmatched = hycal.LoadCalibration(calib_file);
+                    if (nmatched >= 0)
+                        std::cerr << "Calibration: " << calib_file
+                                  << " (" << nmatched << " modules)\n";
+                }
+            }
+            std::cerr << "RunInfo   : beam=" << beam_energy.load()
+                      << "MeV default_adc2mev=" << adc_to_mev
+                      << " target=(" << target_x << "," << target_y << "," << target_z
+                      << ") HyCal=(" << hycal_transform.x << ","
+                      << hycal_transform.y << "," << hycal_transform.z << ")\n";
+
+            if (gem_enabled) {
+                int n = std::min<int>(4, (int)gem_transforms.size());
+                for (int id = 0; id < n; ++id) {
+                    setTransform(gem_transforms[id],
+                                 rc.gem_x[id], rc.gem_y[id], rc.gem_z[id],
+                                 rc.gem_tilt_x[id], rc.gem_tilt_y[id], rc.gem_tilt_z[id]);
+                }
+                std::cerr << "GEM geom  : " << gem_transforms.size()
+                          << " detectors configured\n";
+
+                // hardware-crate -> logical-crate remap from daq_cfg.roc_tags
+                // so upstream pedestal/CM files (keyed by EVIO bank tag, e.g.
+                // 146/147) line up with gem_daq_map.json (logical 1/2).
+                std::map<int, int> gem_crate_remap;
+                for (const auto &re : daq_cfg.roc_tags) {
+                    if (re.type == "gem")
+                        gem_crate_remap[(int)re.tag] = re.crate;
+                }
+
+                if (!rc.gem_pedestal_file.empty()) {
+                    std::string ped = findFile(rc.gem_pedestal_file, db_dir);
+                    if (ped.empty())
+                        std::cerr << "Warning: gem pedestal file '"
+                                  << rc.gem_pedestal_file
+                                  << "' not found in " << db_dir << "\n";
+                    else
+                        gem_sys.LoadPedestals(ped, gem_crate_remap);
+                }
+                if (!rc.gem_common_mode_file.empty()) {
+                    std::string cm = findFile(rc.gem_common_mode_file, db_dir);
+                    if (cm.empty())
+                        std::cerr << "Warning: gem common-mode file '"
+                                  << rc.gem_common_mode_file
+                                  << "' not found in " << db_dir << "\n";
+                    else
+                        gem_sys.LoadCommonModeRange(cm, gem_crate_remap);
+                }
+            }
+        }
+    } else if (rcfg.contains("runinfo")) {
+        std::cerr << "Warning: 'runinfo' must be a path string to a "
+                     "configurations-format JSON file\n";
+    }
+
+    // GEM per-detector ClusterConfig (default + per-id overrides).  Empty
+    // section / missing detector key falls through to library defaults.
+    if (gem_enabled && rcfg.contains("gem")) {
+        auto &gemr = rcfg["gem"];
+        auto applyOne = [](const json &j, gem::ClusterConfig &cfg) {
+            if (j.contains("min_cluster_hits"))    cfg.min_cluster_hits    = j["min_cluster_hits"];
+            if (j.contains("max_cluster_hits"))    cfg.max_cluster_hits    = j["max_cluster_hits"];
+            if (j.contains("consecutive_thres"))   cfg.consecutive_thres   = j["consecutive_thres"];
+            if (j.contains("split_thres"))         cfg.split_thres         = j["split_thres"];
+            if (j.contains("cross_talk_width"))    cfg.cross_talk_width    = j["cross_talk_width"];
+            if (j.contains("charac_dists") && j["charac_dists"].is_array()) {
+                cfg.charac_dists.clear();
+                for (auto &v : j["charac_dists"]) cfg.charac_dists.push_back(v.get<float>());
+            }
+            if (j.contains("match_mode"))          cfg.match_mode          = j["match_mode"];
+            if (j.contains("match_adc_asymmetry")) cfg.match_adc_asymmetry = j["match_adc_asymmetry"];
+            if (j.contains("match_time_diff"))     cfg.match_time_diff     = j["match_time_diff"];
+            if (j.contains("match_ts_period"))     cfg.ts_period           = j["match_ts_period"];
+        };
+        gem::ClusterConfig def;  // library defaults
+        if (gemr.contains("default")) applyOne(gemr["default"], def);
+        std::vector<gem::ClusterConfig> per(gem_sys.GetNDetectors(), def);
+        for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+            std::string key = std::to_string(d);
+            if (gemr.contains(key)) applyOne(gemr[key], per[d]);
+        }
+        gem_sys.SetReconConfigs(std::move(per));
+        std::cerr << "GEM reco  : " << gem_sys.GetNDetectors()
+                  << " per-detector ClusterConfig(s) installed\n";
+    }
+
+    std::cerr << "Reco      : " << (recon_path.empty() ? "(none)" : recon_path)
+              << " (adc_to_mev=" << adc_to_mev << ")\n";
+
+    // --- init derived histograms ------------------------------------------
     int cl_nbins = std::max(1, (int)std::ceil((cl_hist_max - cl_hist_min) / cl_hist_step));
     cluster_energy_hist.init(cl_nbins);
     int nb_nclusters = std::max(1, (int)std::ceil(
@@ -573,8 +570,6 @@ void AppState::init(const std::string &db_dir,
     nclusters_hist.init(nb_nclusters);
     int nb_blocks = std::max(1, (nblocks_hist_max - nblocks_hist_min) / nblocks_hist_step);
     nblocks_hist.init(nb_blocks);
-    // One dependent histogram per Ncl bucket — sized to match the
-    // unfiltered ones so the frontend can swap them in 1:1.
     cluster_energy_hist_by_ncl.assign(nb_nclusters, Histogram{});
     nblocks_hist_by_ncl.assign(nb_nclusters, Histogram{});
     for (auto &h : cluster_energy_hist_by_ncl) h.init(cl_nbins);
@@ -588,7 +583,6 @@ void AppState::init(const std::string &db_dir,
     int hxy_nx = std::max(1, (int)std::ceil((hxy_x_max - hxy_x_min) / hxy_x_step));
     int hxy_ny = std::max(1, (int)std::ceil((hxy_y_max - hxy_y_min) / hxy_y_step));
     hycal_xy_hist.init(hxy_nx, hxy_ny);
-    // GEM↔HyCal residual histograms — one per GEM detector for each axis.
     {
         int n_gem = gem_enabled ? (int)gem_transforms.size() : 0;
         int resid_nbins = std::max(1, (int)std::ceil((gem_resid_max - gem_resid_min) / gem_resid_step));
@@ -599,6 +593,5 @@ void AppState::init(const std::string &db_dir,
         for (auto &h : gem_dy_hist) h.init(resid_nbins);
     }
     initGemEfficiency();
-    // ensure all transforms are pre-prepared before multithreaded use
     hycal_transform.prepare();
 }

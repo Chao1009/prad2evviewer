@@ -1,16 +1,7 @@
 {
-    "runinfo": {
-        "beam_energy": 1100.0,
-        "calibration": {
-            "file": "prad1/prad_calibration.json",
-            "default_adc2mev": 0.078
-        },
-        "target": [0.0, 0.0, 0.0],
-        "hycal": {
-            "position": [0.0, 0.0, 5800.0],
-            "tilting": [0.0, 0.0, 0.0]
-        }
-    },
+    "// Monitor / GUI config for legacy PRad — paired with prad_daq_config.json": "",
+    "// (DAQ + raw decoding) and prad_reconstruction_config.json (runinfo + HyCal reco).": "",
+
     "online": {
         "et_host": "localhost",
         "et_port": 11111,
@@ -34,19 +25,11 @@
             "min_secondary_peak_ratio": 0.3
         }
     },
-    "clustering": {
+    "hycal_hist": {
         "accept_trigger_bits": [0, 1],
-        "min_module_energy": 1.0,
-        "min_center_energy": 10.0,
-        "min_cluster_energy": 50.0,
-        "min_cluster_size": 1,
-        "corner_conn": false,
-        "split_iter": 6,
-        "least_split": 0.01,
-        "log_weight_thres": 3.6,
-        "energy_hist": {"min": 0, "max": 3000, "step": 10},
+        "energy_hist":    {"min": 0, "max": 3000, "step": 10},
         "nclusters_hist": {"min": 0, "max": 20, "step": 1},
-        "nblocks_hist": {"min": 0, "max": 40, "step": 1}
+        "nblocks_hist":   {"min": 0, "max": 40, "step": 1}
     },
     "lms_monitor": {
         "accept_trigger_bits": [2],

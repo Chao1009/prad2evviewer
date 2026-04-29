@@ -17,7 +17,7 @@
 //     ch  = dec.EvChannel(); ch.set_config(cfg); ch.open(path)
 //
 //     gsys = det.GemSystem()
-//     gsys.init("database/gem_map.json")
+//     gsys.init("database/gem_daq_map.json")
 //     gsys.load_pedestals("database/gem_ped.json")    # optional
 //     gcl = det.GemCluster()
 //
@@ -112,7 +112,7 @@ static void bind_gem(py::module_ &m)
 
     py::class_<gem::ApvConfig>(m, "ApvConfig",
         "Per-APV configuration: DAQ address + detector mapping + strip-mapping "
-        "params + per-strip pedestals.  One entry per APV in the gem_map.json.")
+        "params + per-strip pedestals.  One entry per APV in the gem_daq_map.json.")
         .def_readwrite("crate_id",     &gem::ApvConfig::crate_id)
         .def_readwrite("mpd_id",       &gem::ApvConfig::mpd_id)
         .def_readwrite("adc_ch",       &gem::ApvConfig::adc_ch)
@@ -246,7 +246,7 @@ static void bind_gem(py::module_ &m)
     // --- GemSystem (the main entry point) -----------------------------------
 
     py::class_<gem::GemSystem>(m, "GemSystem",
-        "PRad-II GEM detector system: loads the gem_map.json / gem_ped.json, "
+        "PRad-II GEM detector system: loads the gem_daq_map.json / gem_ped.json, "
         "processes SspEventData (pedestal subtraction, common-mode correction, "
         "zero suppression, strip mapping), and hands off to GemCluster for "
         "2-D reconstruction.")
@@ -260,7 +260,7 @@ static void bind_gem(py::module_ &m)
             },
             py::arg("map_file"),
             "Load the detector hierarchy and APV mapping from a JSON file "
-            "(typically database/gem_map.json).")
+            "(typically database/gem_daq_map.json).")
         .def("load_pedestals",
             [](gem::GemSystem &self, const std::string &path) {
                 py::gil_scoped_release rel;
@@ -297,6 +297,14 @@ static void bind_gem(py::module_ &m)
             py::arg("clusterer"),
             "Cluster the per-plane strip hits and match X/Y clusters into "
             "2-D GEMHits via the supplied GemCluster instance.")
+        .def("set_recon_configs", &gem::GemSystem::SetReconConfigs,
+             py::arg("cfgs"),
+             "Install per-detector ClusterConfig (clustering + XY matching). "
+             "Vector size is clamped/padded to GetNDetectors() — entry [d] "
+             "is applied before clustering detector d in reconstruct().")
+        .def("get_recon_configs", &gem::GemSystem::GetReconConfigs,
+             py::return_value_policy::reference_internal,
+             "Per-detector ClusterConfig list installed via set_recon_configs.")
 
         // accessors
         .def("get_n_detectors", &gem::GemSystem::GetNDetectors)
@@ -542,7 +550,7 @@ static void bind_hycal(py::module_ &m)
             },
             py::arg("modules_path"), py::arg("daq_path"),
             "Load module geometry (hycal_modules.json) and DAQ map "
-            "(daq_map.json).  Returns True on success.")
+            "(hycal_daq_map.json).  Returns True on success.")
         .def("load_calibration",
             [](fdec::HyCalSystem &self, const std::string &path) {
                 py::gil_scoped_release rel;

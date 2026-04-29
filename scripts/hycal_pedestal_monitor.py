@@ -47,7 +47,7 @@ from hycal_geoview import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_modules.json"
-DAQ_MAP_JSON = DB_DIR / "daq_map.json"
+DAQ_MAP_JSON = DB_DIR / "hycal_daq_map.json"
 PEDESTALS_DIR = SCRIPT_DIR / ".." / "pedestals"
 ORIGINAL_PED_DIR = Path("/usr/clas12/release/2.0.0/parms/fadc250/peds")
 

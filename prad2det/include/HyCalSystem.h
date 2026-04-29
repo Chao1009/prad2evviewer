@@ -178,7 +178,7 @@ public:
 
     // Initialize from JSON config files.
     // modules_path: hycal_modules.json (geometry)
-    // daq_path:     daq_map.json (crate/slot/channel mapping)
+    // daq_path:     hycal_daq_map.json (crate/slot/channel mapping)
     // Returns false on error.
     bool Init(const std::string &modules_path, const std::string &daq_path);
 

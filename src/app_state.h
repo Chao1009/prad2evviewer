@@ -112,7 +112,7 @@ struct AppState {
     // GEM system
     gem::GemSystem gem_sys;
     gem::GemCluster gem_clusterer;
-    bool gem_enabled = false;       // true if gem_map.json loaded successfully
+    bool gem_enabled = false;       // true if gem_daq_map.json loaded successfully
 
     // GEM per-detector lab-frame transform (same type as HyCal)
     std::vector<DetectorTransform> gem_transforms;  // indexed by detector id
@@ -368,11 +368,14 @@ struct AppState {
 
     // ---- Initialization (call once at startup) -----------------------------
 
-    // Load all configs from db_dir. daq_config_file may be empty (uses daq_config.json from db_dir).
-    // config_file: main config (config.json or -c override). Empty = auto-find.
+    // Load all configs from db_dir.  Empty filename ⇒ auto-find in db_dir:
+    //   daq_config_file   → daq_config.json   (DAQ + raw decoding)
+    //   monitor_config_file → monitor_config.json (GUI / online server)
+    //   recon_config_file → reconstruction_config.json (runinfo + clustering)
     void init(const std::string &db_dir,
               const std::string &daq_config_file,
-              const std::string &config_file = "");
+              const std::string &monitor_config_file = "",
+              const std::string &recon_config_file = "");
 
     // ---- Per-event processing ----------------------------------------------
 

@@ -1,5 +1,8 @@
 {
-    "runinfo": "runinfo/2p1_general.json",
+    "// Monitor / GUI config — online server, display histograms, diagnostics.": "",
+    "// Sister files: daq_config.json (DAQ + raw decoding), reconstruction_config.json": "",
+    "// (cluster/hit reconstruction + runinfo).  Loaded by prad2_server -c.": "",
+
     "online": {
         "et_host": "clondaq2",
         "et_port": 11111,
@@ -25,17 +28,12 @@
             "min_secondary_peak_ratio": 0.3
         }
     },
-    "clustering": {
+    "hycal_hist": {
+        "// Trigger filter + histogram binning for the HyCal cluster monitor.": "",
+        "// Reconstruction knobs (min_*_energy, split_iter, ...) live in": "",
+        "// reconstruction_config.json under 'hycal'.": "",
         "accept_trigger_bits": ["SSP0", "SSP1", "SSP2", "SSP3"],
         "reject_trigger_bits": [],
-        "min_module_energy": 1.0,
-        "min_center_energy": 10.0,
-        "min_cluster_energy": 50.0,
-        "min_cluster_size": 1,
-        "corner_conn": false,
-        "split_iter": 6,
-        "least_split": 0.01,
-        "log_weight_thres": 3.6,
         "energy_hist": {
             "min": 0,
             "max": 3000,

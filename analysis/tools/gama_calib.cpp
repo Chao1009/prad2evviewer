@@ -113,7 +113,7 @@ int main(int argc, char *argv[])
     evc::DaqConfig daq_cfg;
     std::string daq_config_file = db_dir + "/daq_config.json"; // default DAQ config for PRad2
     evc::load_daq_config(daq_config_file, daq_cfg);
-    hycal.Init(db_dir + "/hycal_modules.json", db_dir + "/daq_map.json");
+    hycal.Init(db_dir + "/hycal_modules.json", db_dir + "/hycal_daq_map.json");
 
     int nmatched = hycal.LoadCalibration(in_calib_file);
     if (nmatched >= 0)
@@ -133,7 +133,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < N_events; i++) {
         tree->GetEntry(i);
 
-        // TODO: use config-driven trigger filter (config.json "physics" section
+        // TODO: use config-driven trigger filter (monitor_config.json "physics" section
         // accept_trigger_bits/reject_trigger_bits) instead of hardcoded bit check.
         // Currently drops all non-SSP_RawSum events, including LMS.
         static constexpr uint32_t TBIT_sum = (1u << 8);

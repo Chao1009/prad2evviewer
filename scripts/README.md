@@ -292,13 +292,13 @@ ch  = dec.EvChannel(); ch.set_config(cfg); ch.open("run.evio.00000")
 
 # --- GEM reconstruction -----------------------------------------------
 gsys = det.GemSystem()
-gsys.init("database/gem_map.json")
+gsys.init("database/gem_daq_map.json")
 gsys.load_pedestals("database/gem_ped.json")    # optional
 gcl  = det.GemCluster()
 
 # --- HyCal reconstruction ---------------------------------------------
 hsys = det.HyCalSystem()
-hsys.init("database/hycal_modules.json", "database/daq_map.json")
+hsys.init("database/hycal_modules.json", "database/hycal_daq_map.json")
 hsys.load_calibration("database/hycal_calib.json")
 hcl  = det.HyCalCluster(hsys)
 

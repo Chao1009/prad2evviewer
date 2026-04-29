@@ -2,8 +2,9 @@
 // prad2_server — CLI entry point for PRad-II event viewer/monitor server
 //
 // Usage:
-//   prad2_server [evio_file] [-p port] [-H] [-c config.json]
-//                [-d data_dir] [-D daq_config.json] [--et]
+//   prad2_server [evio_file] [-p port] [-H]
+//                [-c monitor_config.json] [-r reconstruction_config.json]
+//                [-D daq_config.json] [-d data_dir] [--et]
 //
 // Examples:
 //   prad2_server data.evio -H              # view file with histograms
@@ -46,11 +47,12 @@ int main(int argc, char *argv[])
         RESOURCE_DIR);
 
     static struct option long_opts[] = {
-        {"port",       required_argument, nullptr, 'p'},
-        {"hist",       no_argument,       nullptr, 'H'},
-        {"config",     required_argument, nullptr, 'c'},
-        {"data-dir",   required_argument, nullptr, 'd'},
-        {"daq-config", required_argument, nullptr, 'D'},
+        {"port",        required_argument, nullptr, 'p'},
+        {"hist",        no_argument,       nullptr, 'H'},
+        {"config",      required_argument, nullptr, 'c'},   // monitor_config.json
+        {"reco-config", required_argument, nullptr, 'r'},   // reconstruction_config.json
+        {"data-dir",    required_argument, nullptr, 'd'},
+        {"daq-config",  required_argument, nullptr, 'D'},
         {"et",          no_argument,       nullptr, 'E'},
         {"interactive", no_argument,       nullptr, 'i'},
         {"filter",      required_argument, nullptr, 'f'},
@@ -59,11 +61,12 @@ int main(int argc, char *argv[])
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:Hc:d:D:if:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:Hc:r:d:D:if:", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'p': cfg.port = std::atoi(optarg); break;
         case 'H': cfg.hist_enabled = true; break;
-        case 'c': cfg.config_file = optarg; break;
+        case 'c': cfg.monitor_config_file = optarg; break;
+        case 'r': cfg.reconstruction_config_file = optarg; break;
         case 'd': cfg.data_dir = optarg; break;
         case 'D': cfg.daq_config_file = optarg; break;
         case 'E': cfg.start_online = true; break;
@@ -72,7 +75,8 @@ int main(int argc, char *argv[])
         default:
             std::cerr << "Usage: " << argv[0]
                       << " [evio_file] [-p port] [-H] [-i] [-f filter.json]"
-                      << " [-c config.json] [-d data_dir] [-D daq_config.json] [--et]\n";
+                      << " [-c monitor_config.json] [-r reconstruction_config.json]"
+                      << " [-D daq_config.json] [-d data_dir] [--et]\n";
             return 1;
         }
     }

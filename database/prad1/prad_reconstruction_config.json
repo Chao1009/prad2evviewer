@@ -1,0 +1,19 @@
+{
+    "// Reconstruction config for legacy PRad (Fastbus ADC1881M) — runinfo + HyCal clustering.": "",
+    "// PRad has no GEMs, so no 'gem' section.  Sister files:": "",
+    "//   prad_monitor_config.json   — GUI config for the prad2_server monitor.": "",
+    "//   prad_daq_config.json       — DAQ + raw decoding (ADC1881M, CODA2 tags).": "",
+
+    "runinfo": "prad1/runinfo/prad_general.json",
+
+    "hycal": {
+        "min_module_energy":  1.0,
+        "min_center_energy":  10.0,
+        "min_cluster_energy": 50.0,
+        "min_cluster_size":   1,
+        "corner_conn":        false,
+        "split_iter":         6,
+        "least_split":        0.01,
+        "log_weight_thres":   3.6
+    }
+}

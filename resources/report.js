@@ -756,6 +756,6 @@ function initReport(data){
     } else {
         const eb=document.getElementById('btn-report-elog');
         eb.disabled=true;
-        eb.title='Configure "elog" section in config.json to enable';
+        eb.title='Configure "elog" section in monitor_config.json to enable';
     }
 }

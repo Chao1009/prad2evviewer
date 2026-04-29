@@ -1966,7 +1966,7 @@ class HyCalEventViewer(QMainWindow):
 
         rlay.addStretch(1)
 
-        # Snapshot initial widget values (from config.json + WaveConfig
+        # Snapshot initial widget values (from monitor_config.json + WaveConfig
         # defaults + HyCalClusterConfig defaults) so "Reset to defaults"
         # can restore them after arbitrary tuning.
         self._adv_defaults: Dict[str, object] = {}
@@ -2130,7 +2130,7 @@ class HyCalEventViewer(QMainWindow):
         if self._hcsys is None:
             QMessageBox.warning(self, "HyCal system not ready",
                 "Cannot load calibration — HyCalSystem.init() did not "
-                "complete.  Check that hycal_modules.json and daq_map.json "
+                "complete.  Check that hycal_modules.json and hycal_daq_map.json "
                 "are present.")
             return
         path_str, _ = QFileDialog.getOpenFileName(
@@ -2859,14 +2859,14 @@ def main():
     ap.add_argument("path", nargs="?", type=Path,
                     help="evio file to open (otherwise use File → Open…).")
     ap.add_argument("--config", type=Path,
-                    default=_REPO_DIR / "database" / "config.json",
-                    help="Main config.json (for waveform binning).")
+                    default=_REPO_DIR / "database" / "monitor_config.json",
+                    help="monitor_config.json (waveform binning).")
     ap.add_argument("--daq-config", type=Path,
                     default=_REPO_DIR / "database" / "daq_config.json",
                     help="daq_config.json (ROC-tag → crate mapping).")
     ap.add_argument("--daq-map", type=Path,
-                    default=_REPO_DIR / "database" / "daq_map.json",
-                    help="daq_map.json (module-name lookup).")
+                    default=_REPO_DIR / "database" / "hycal_daq_map.json",
+                    help="hycal_daq_map.json (module-name lookup).")
     ap.add_argument("--hycal-modules", type=Path,
                     default=_REPO_DIR / "database" / "hycal_modules.json",
                     help="hycal_modules.json (module geometry for the geo selector).")
@@ -2879,7 +2879,7 @@ def main():
     ap.add_argument("--reject-trigger", action="append", default=None,
                     metavar="NAME",
                     help="Drop events with any of these trigger bits (repeatable). "
-                         "Default: uses config.json setting.")
+                         "Default: uses monitor_config.json setting.")
     ap.add_argument("--theme", choices=available_themes(), default="dark",
                     help="Colour theme (default: dark)")
     args = ap.parse_args()

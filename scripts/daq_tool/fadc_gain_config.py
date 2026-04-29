@@ -63,10 +63,10 @@ def find_database_dir(explicit: Optional[str] = None) -> Path:
         Path.cwd(),
     ]
     for c in candidates:
-        if (c / "daq_map.json").is_file() and (c / "hycal_modules.json").is_file():
+        if (c / "hycal_daq_map.json").is_file() and (c / "hycal_modules.json").is_file():
             return c.resolve()
     sys.exit("error: could not locate database directory "
-             "(looked for daq_map.json + hycal_modules.json)")
+             "(looked for hycal_daq_map.json + hycal_modules.json)")
 
 
 def load_modules(db_dir: Path) -> Dict[str, str]:
@@ -78,7 +78,7 @@ def load_modules(db_dir: Path) -> Dict[str, str]:
 
 def load_daq_map(db_dir: Path) -> List[Tuple[str, int, int, int]]:
     """Return list of (name, crate, slot, channel)."""
-    with open(db_dir / "daq_map.json") as f:
+    with open(db_dir / "hycal_daq_map.json") as f:
         entries = json.load(f)
     return [(e["name"], e["crate"], e["slot"], e["channel"]) for e in entries]
 
@@ -254,7 +254,7 @@ def _load_module_info(db_dir: Path) -> List[_ModuleInfo]:
     """Load HyCal modules joined with the DAQ map for the GUI."""
     with open(db_dir / "hycal_modules.json") as f:
         mods_json = json.load(f)
-    with open(db_dir / "daq_map.json") as f:
+    with open(db_dir / "hycal_daq_map.json") as f:
         daq_json = json.load(f)
 
     daq_by_name: Dict[str, Tuple[int, int, int]] = {

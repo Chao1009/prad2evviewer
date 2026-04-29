@@ -81,7 +81,7 @@ except ImportError:
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON  = DB_DIR / "hycal_modules.json"
-DAQ_MAP_JSON  = DB_DIR / "daq_map.json"
+DAQ_MAP_JSON  = DB_DIR / "hycal_daq_map.json"
 DAQ_CFG_JSON  = DB_DIR / "daq_config.json"
 
 DEFAULT_URL = "http://localhost:5051"
@@ -220,7 +220,7 @@ def _load_crate_to_roc(path: Path) -> Dict[int, int]:
 
 def _load_daq_map(path: Path,
                   crate_to_roc: Optional[Dict[int, int]] = None) -> Dict[str, str]:
-    """Return {module_name: "roc_tag_slot_channel"} from daq_map.json.
+    """Return {module_name: "roc_tag_slot_channel"} from hycal_daq_map.json.
 
     The event JSON produced by the C++ server uses the actual ROC tag (not the
     sequential crate index) as the first component of the channel key.  Pass

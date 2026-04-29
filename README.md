@@ -43,7 +43,9 @@ Or build natively in WSL2.
 `prad2_server` is a unified HTTP server that supports both file-based viewing and online ET monitoring. It replaces the former `prad2_viewer` and `prad2_monitor` executables.
 
 ```bash
-prad2_server [evio_file] [-p port] [-H] [-i] [-f filter.json] [-c config.json] [-d data_dir] [-D daq_config.json] [--et]
+prad2_server [evio_file] [-p port] [-H] [-i] [-f filter.json] \
+             [-c monitor_config.json] [-r reconstruction_config.json] \
+             [-D daq_config.json] [-d data_dir] [--et]
 ```
 
 Opens a web GUI at `http://localhost:5051` with tabs: Waveform Data, Clustering, Gain Monitoring (LMS), EPICS, Physics, GEM. See [docs/API.md](docs/API.md) for the full HTTP/WebSocket API reference and interactive CLI commands (`-i`).
@@ -59,11 +61,11 @@ prad2_server -d /data/stage6 -H                                    # file browse
 ### Online mode
 
 ```bash
-prad2_server --et                       # connect to ET system (config from database/config.json)
+prad2_server --et                       # connect to ET system (config from database/monitor_config.json)
 prad2_server data.evio --et -H          # start with file, "Go Online" button available in UI
 ```
 
-ET connection settings are read from the `"online"` section of `config.json`.
+ET connection settings are read from the `"online"` section of `monitor_config.json`.
 
 ### Mode switching
 
@@ -76,7 +78,9 @@ The server maintains separate data accumulators for file and online modes -- swi
 Test with `et_feeder`:
 ```bash
 et_start -f /tmp/test_et -s 100000 -n 500
-./bin/prad2_server --et -D ../database/prad1/prad_daq_config.json -c ../database/prad1/prad_config.json
+./bin/prad2_server --et -D ../database/prad1/prad_daq_config.json \
+                   -c ../database/prad1/prad_monitor_config.json \
+                   -r ../database/prad1/prad_reconstruction_config.json
 ./bin/et_feeder prad.evio -f /tmp/test_et -i 50 -n 5000
 ```
 
@@ -169,9 +173,13 @@ Then source the venv's `activate` *before* sourcing `prad2_setup.csh` in your pe
 
 ## Configuration
 
-`database/config.json` -- main config for the server (waveform, clustering, LMS, EPICS, elog, online/ET, color ranges).
+The server reads three top-level configs from `database/`:
 
-PRad support: use `-D database/prad1/prad_daq_config.json` with the server.
+- `monitor_config.json` (`-c`) — GUI / online server: waveform, hycal_hist, LMS, EPICS, livetime, physics display cuts, gem diagnostics, elog, color ranges, online/ET.
+- `reconstruction_config.json` (`-r`) — runinfo pointer + cluster/hit reconstruction knobs (HyCal clustering, per-detector GEM ClusterConfig with `default` + per-id overrides).
+- `daq_config.json` (`-D`) — DAQ + raw decoding: event tags, bank tags, ROC layout, sync format, and file pointers (`modules_file`, `hycal_daq_map_file`, `gem_daq_map_file`, `pedestal_file`).
+
+PRad support: use the `database/prad1/` mirrored set (`prad_daq_config.json`, `prad_monitor_config.json`, `prad_reconstruction_config.json`).
 
 ## Project Structure
 

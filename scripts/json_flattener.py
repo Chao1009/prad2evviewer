@@ -97,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            "  json_flattener.py database/config.json\n"
+            "  json_flattener.py database/monitor_config.json\n"
             "  json_flattener.py runinfo.json --max-depth 2 --csv > runs.csv\n"
             "  curl -s http://host/state.json | json_flattener.py -\n"
         ),

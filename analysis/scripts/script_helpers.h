@@ -57,14 +57,14 @@ inline int extract_run_number_from_path(const std::string &path)
     return -1;
 }
 
-// Read database/config.json (under PRAD2_DATABASE_DIR or ./database) and
-// return the resolved runinfo path, or "" if the pointer is missing /
-// malformed.
+// Read database/reconstruction_config.json (under PRAD2_DATABASE_DIR or
+// ./database) and return the resolved runinfo path, or "" if the pointer
+// is missing / malformed.
 inline std::string discover_runinfo_path()
 {
     const char *db = std::getenv("PRAD2_DATABASE_DIR");
     std::string db_dir = db ? db : "database";
-    std::ifstream f(db_dir + "/config.json");
+    std::ifstream f(db_dir + "/reconstruction_config.json");
     if (!f) return {};
     auto j = nlohmann::json::parse(f, nullptr, false, true);
     if (j.is_discarded() || !j.contains("runinfo") || !j["runinfo"].is_string())

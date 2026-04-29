@@ -18,7 +18,7 @@
 //         W_sum_height     sum of peak heights over all W modules
 //         W_sum_integral   sum of peak integrals over all W modules
 //     The "W" subset is the PbWO4 crystal modules; the DAQ map at
-//     ``database/daq_map.json`` identifies them by name (entries starting
+//     ``database/hycal_daq_map.json`` identifies them by name (entries starting
 //     with 'W').  PbGlass ("G"), LMS references, veto, etc. are excluded.
 //
 //   The summary canvas shows all 10 ΔT spectra with their fitted μ/±Nσ
@@ -172,7 +172,7 @@ static bool hycal_peak(const fdec::ChannelData &c,
 }
 
 // W-channel lookup table indexed by [crate_idx][slot][channel].  Populated
-// from database/daq_map.json at startup: every entry whose "name" starts
+// from database/hycal_daq_map.json at startup: every entry whose "name" starts
 // with 'W' (PbWO4 modules) sets a flag here.  Non-W channels (PbGlass "G",
 // LMS references, veto, etc.) are left false.
 struct WMap {
@@ -285,7 +285,7 @@ int tagger_hycal_correlation(const char *evio_path,
         return 1;
     }
 
-    //---- load the W-channel lookup from daq_map.json ------------------------
+    //---- load the W-channel lookup from hycal_daq_map.json ------------------------
     std::string daq_map_path;
     {
         const char *db = std::getenv("PRAD2_DATABASE_DIR");
@@ -298,7 +298,7 @@ int tagger_hycal_correlation(const char *evio_path,
                 daq_map_path = dir + "/"
                                + dcj["daq_map_file"].get<std::string>();
         }
-        if (daq_map_path.empty()) daq_map_path = dir + "/daq_map.json";
+        if (daq_map_path.empty()) daq_map_path = dir + "/hycal_daq_map.json";
     }
     WMap wmap;
     if (!wmap.load(daq_map_path)) {

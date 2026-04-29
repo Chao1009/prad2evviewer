@@ -1,0 +1,17 @@
+{
+    "configurations": [
+        {
+            "run_number": 0,
+            "beam_energy": 1100.0,
+            "calibration": {
+                "file": "prad1/prad_calibration.json",
+                "default_adc2mev": 0.078
+            },
+            "target": [0.0, 0.0, 0.0],
+            "hycal": {
+                "position": [0.0, 0.0, 5800.0],
+                "tilting": [0.0, 0.0, 0.0]
+            }
+        }
+    ]
+}

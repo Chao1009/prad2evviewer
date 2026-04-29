@@ -76,11 +76,11 @@ int main(int argc, char *argv[])
 
     analysis::Replay replay;
     if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-    replay.LoadDaqMap(db_dir + "/daq_map.json");
-    std::cerr << "Using DAQ map: " << db_dir + "/daq_map.json" << "\n";
+    replay.LoadDaqMap(db_dir + "/hycal_daq_map.json");
+    std::cerr << "Using DAQ map: " << db_dir + "/hycal_daq_map.json" << "\n";
     
     fdec::HyCalSystem hycal;
-    hycal.Init(db_dir + "/hycal_modules.json", db_dir + "/daq_map.json");
+    hycal.Init(db_dir + "/hycal_modules.json", db_dir + "/hycal_daq_map.json");
     analysis::PhysicsTools physics(hycal);
 
     // build ROC tag → crate index mapping from DAQ config JSON

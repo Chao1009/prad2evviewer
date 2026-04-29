@@ -39,6 +39,15 @@ function clearFrontend(){
 
     // GEM, EPICS, Physics tabs
     gemEffData=null;
+    // Cluster-tab GEM overlay cache — nullify so the next event refetches
+    // and redrawGeo() (below) draws the cluster geo without stale dots.
+    gemHits=null; gemHitsEvent=-1;
+    // GEM APV waveform tab — drop cached payload, clear the canvas registry,
+    // and empty the body so previously rendered traces aren't left visible.
+    gemApvData=null;
+    gemApvCanvases.clear();
+    const apvBody=document.getElementById('gem-apv-body');
+    if(apvBody) apvBody.innerHTML='';
     clearEpicsFrontend();
     clearPhysicsFrontend();
 

@@ -8,7 +8,7 @@
 //
 // Usage:
 //   gem::GemSystem sys;
-//   sys.Init("gem_map.json");
+//   sys.Init("gem_daq_map.json");
 //   sys.LoadPedestals("gem_ped.dat");
 //
 //   // per-event:
@@ -146,6 +146,27 @@ std::vector<int> MapApvStrips(int plane_index, int orient,
                               int  apv_channels  = 128,
                               int  readout_center = 32);
 
+// --- reconstruction config (per-detector knobs for GemCluster) --------------
+//
+// Lives here (rather than in GemCluster.h) so GemSystem can store one entry
+// per detector by value.  Defaults reproduce the historical mpd_gem_view_ssp
+// reconstruction chain.
+struct ClusterConfig {
+    int   min_cluster_hits  = 1;
+    int   max_cluster_hits  = 20;
+    int   consecutive_thres = 1;    // max gap between consecutive strips
+    float split_thres       = 14.f; // charge valley depth for splitting
+    float cross_talk_width  = 2.f;  // mm
+    std::vector<float> charac_dists;// cross-talk characteristic distances
+
+    // XY matching mode: 0 = ADC-sorted 1:1, 1 = full Cartesian with cuts
+    int   match_mode          = 1;
+    // XY matching cuts (mode 1 only)
+    float match_adc_asymmetry = 0.8f;  // max |Qx-Qy|/(Qx+Qy), <0 to disable
+    float match_time_diff     = 50.f;  // max |mean_t_x - mean_t_y| in ns, <0 to disable
+    float ts_period           = 25.f;  // ns per time sample
+};
+
 // --- GemSystem class --------------------------------------------------------
 
 class GemCluster;   // forward declaration
@@ -165,7 +186,7 @@ public:
     // and is ignored for matching — APVs are keyed by (crate, fiber, adc).
     //
     // crate_remap maps file-side hardware crate IDs to the logical crate
-    // IDs used by gem_map.json (e.g. 146 -> 1, 147 -> 2).  Empty map = no
+    // IDs used by gem_daq_map.json (e.g. 146 -> 1, 147 -> 2).  Empty map = no
     // remap (file IDs are used directly).
     void LoadPedestals(const std::string &ped_file,
                        const std::map<int, int> &crate_remap = {});
@@ -175,6 +196,16 @@ public:
     // slot is ignored).  See LoadPedestals for crate_remap semantics.
     void LoadCommonModeRange(const std::string &cm_file,
                              const std::map<int, int> &crate_remap = {});
+
+    // --- reconstruction config ---------------------------------------------
+    // Set per-detector clustering / XY-matching parameters.  Application
+    // layer (app_state_init.cpp / Replay) supplies one ClusterConfig per
+    // detector after parsing reconstruction_config.json.  cfgs.size() must
+    // equal GetNDetectors(); shorter/longer vectors are clamped + padded
+    // with library defaults.  Reconstruct() applies entry [d] before
+    // clustering each detector.
+    void SetReconConfigs(std::vector<ClusterConfig> cfgs);
+    const std::vector<ClusterConfig>& GetReconConfigs() const { return per_det_cfgs_; }
 
     // --- per-event processing -----------------------------------------------
     void Clear();
@@ -282,11 +313,11 @@ private:
     float min_peak_adc_         = 0.f;    // min peak ADC per strip (0=disabled)
     float min_sum_adc_          = 0.f;    // min sum ADC per strip (0=disabled)
 
-    // --- XY matching (passed to GemCluster at Reconstruct time) -----------
-    int   match_mode_           = 1;     // 0=sorted, 1=Cartesian+cuts
-    float match_adc_asymmetry_  = 0.8f;
-    float match_time_diff_      = 50.f;
-    float match_ts_period_      = 25.f;
+    // --- per-detector reconstruction config (clustering + XY matching) ----
+    // Sized to detectors_.size() during Init().  Library-default ClusterConfig
+    // until SetReconConfigs() supplies parsed values.  Reconstruct() applies
+    // entry [d] to the supplied GemCluster before clustering each detector.
+    std::vector<ClusterConfig> per_det_cfgs_;
 };
 
 } // namespace gem

@@ -19,7 +19,7 @@ let clHistMin=0, clHistMax=3000, clHistStep=10;
 let currentClHist=null;  // {x:[], y:[]} for copy button
 let currentNclustHist=null, currentNblocksHist=null;
 
-// cluster count histograms (configurable via config.json clustering section)
+// cluster count histograms (configurable via monitor_config.json hycal_hist section)
 let nclustBins=null, nblocksBins=null;
 let nclustMin=0.5, nclustMax=10.5, nclustStep=1;
 let nblocksMin=0, nblocksMax=40, nblocksStep=1;

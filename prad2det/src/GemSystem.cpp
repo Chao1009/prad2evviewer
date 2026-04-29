@@ -74,11 +74,10 @@ void GemSystem::Init(const std::string &map_file)
     min_peak_adc_         = j.value("min_peak_adc", 0.f);
     min_sum_adc_          = j.value("min_sum_adc", 0.f);
 
-    // XY matching (stored here, applied via GemCluster)
-    match_mode_           = j.value("match_mode", 1);
-    match_adc_asymmetry_  = j.value("match_adc_asymmetry", 0.8f);
-    match_time_diff_      = j.value("match_time_diff", 50.f);
-    match_ts_period_      = j.value("match_ts_period", 25.f);
+    // Reconstruction config (clustering + XY matching) is supplied by the
+    // application layer via SetReconConfigs() — one ClusterConfig per
+    // detector parsed from reconstruction_config.json.  Until then each
+    // detector starts with library defaults.
 
     // --- parse APV entries ---
     apvs_.clear();
@@ -117,6 +116,7 @@ void GemSystem::Init(const std::string &map_file)
     // --- allocate per-plane and per-detector storage ---
     plane_data_.resize(detectors_.size());
     det_hits_.resize(detectors_.size());
+    per_det_cfgs_.assign(detectors_.size(), ClusterConfig{});
 }
 
 //=============================================================================
@@ -140,7 +140,7 @@ static inline int remapCrate(int crate, const std::map<int, int> &m)
 // is ignored for matching — APVs are looked up by (crate, fiber, adc).
 //
 // crate_remap: hardware crate ID -> logical crate ID expected by
-// gem_map.json (e.g. 146 -> 1, 147 -> 2). Empty = identity.
+// gem_daq_map.json (e.g. 146 -> 1, 147 -> 2). Empty = identity.
 //=============================================================================
 
 void GemSystem::LoadPedestals(const std::string &ped_file,
@@ -312,20 +312,27 @@ void GemSystem::ProcessEvent(const ssp::SspEventData &evt)
 }
 
 //=============================================================================
+// SetReconConfigs — install per-detector clustering / XY-matching params.
+// Clamps to detectors_.size(); pads short input with library defaults so
+// callers can supply any number of entries (typical: one per detector).
+//=============================================================================
+
+void GemSystem::SetReconConfigs(std::vector<ClusterConfig> cfgs)
+{
+    cfgs.resize(detectors_.size(), ClusterConfig{});
+    per_det_cfgs_ = std::move(cfgs);
+}
+
+//=============================================================================
 // Reconstruct — run clustering on all planes, then 2D matching
 //=============================================================================
 
 void GemSystem::Reconstruct(GemCluster &clusterer)
 {
-    // apply XY matching config from gem_map
-    auto cfg = clusterer.GetConfig();
-    cfg.match_mode          = match_mode_;
-    cfg.match_adc_asymmetry = match_adc_asymmetry_;
-    cfg.match_time_diff     = match_time_diff_;
-    cfg.ts_period           = match_ts_period_;
-    clusterer.SetConfig(cfg);
-
     for (int d = 0; d < static_cast<int>(detectors_.size()); ++d) {
+        // apply this detector's clustering / matching config
+        clusterer.SetConfig(per_det_cfgs_[d]);
+
         // cluster X and Y planes
         for (int p = 0; p < 2; ++p) {
             auto &pd = plane_data_[d][p];

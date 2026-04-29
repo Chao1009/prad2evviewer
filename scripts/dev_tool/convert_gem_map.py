@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
 convert_gem_map.py — Convert the upstream APV mapping text format
-(docs/gem/gem_map_prad2*.txt) into the gem_map.json structure we
-consume in database/gem_map.json.
+(docs/gem/gem_map_prad2*.txt) into the gem_daq_map.json structure we
+consume in database/gem_daq_map.json.
 
 Usage
 -----
     python scripts/dev_tool/convert_gem_map.py INPUT.txt OUTPUT.json \
         [--crate-map OLD=NEW,OLD=NEW,...] \
-        [--template database/gem_map.json]
+        [--template database/gem_daq_map.json]
 
 Example (HallB layout — keep upstream CrateIDs 146/147 as-is, which is
 the current convention in daq_config.json)
     python scripts/dev_tool/convert_gem_map.py \
         docs/gem/gem_map_prad2_hallB.txt \
-        database/gem_map.json \
-        --template database/gem_map.json
+        database/gem_daq_map.json \
+        --template database/gem_daq_map.json
 
 Pass --crate-map only when you need to remap (e.g. legacy maps that
 used different IDs).  Without it the upstream CrateID is preserved.
@@ -72,10 +72,6 @@ DEFAULT_HEADER: "OrderedDict[str, Any]" = OrderedDict([
     ("reject_last_timebin", True),
     ("min_peak_adc", 30.0),
     ("min_sum_adc", 60.0),
-    ("match_mode", 1),
-    ("match_adc_asymmetry", 0.8),
-    ("match_time_diff", 50.0),
-    ("match_ts_period", 25.0),
     ("hole", OrderedDict([("width", 52.0), ("height", 52.0)])),
 ])
 
@@ -403,11 +399,11 @@ def parse_crate_map(spec: str) -> dict[int, int]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(
-        description="Convert gem_map_prad2*.txt -> gem_map.json")
+        description="Convert gem_map_prad2*.txt -> gem_daq_map.json")
     ap.add_argument("input_txt", type=Path,
                     help="Input text file (e.g. docs/gem/gem_map_prad2_hallB.txt)")
     ap.add_argument("output_json", type=Path,
-                    help="Output JSON file (e.g. database/gem_map.json)")
+                    help="Output JSON file (e.g. database/gem_daq_map.json)")
     ap.add_argument("--crate-map", default="",
                     help="Optional: comma-separated OLD=NEW pairs to remap "
                          "upstream CrateID values (e.g. 146=21,147=22). "

@@ -485,9 +485,9 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 
     // Setup HyCal system and clusterer
     fdec::HyCalSystem hycal;
-     std::string daq_map_file = db_dir + "/daq_map.json";
+     std::string daq_map_file = db_dir + "/hycal_daq_map.json";
     if(prad1 == true)
-        daq_map_file = db_dir + "/prad1/prad_daq_map.json";
+        daq_map_file = db_dir + "/prad1/prad_hycal_daq_map.json";
     hycal.Init(db_dir + "/hycal_modules.json", daq_map_file);
     
     if(prad1 == true) evc::load_pedestals(db_dir + "/prad1/adc1881m_pedestals.json", daq_cfg_);
@@ -508,7 +508,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     std::unique_ptr<gem::GemCluster> gem_clusterer;
 if(!prad1){
     gem_sys = std::make_unique<gem::GemSystem>();
-    std::string gem_map_file = db_dir + "/gem_map.json";
+    std::string gem_map_file = db_dir + "/gem_daq_map.json";
     gem_sys->Init(gem_map_file);
     std::cerr << "GEM map  : " << gem_map_file
                 << " (" << gem_sys->GetNDetectors() << " detectors)\n";
@@ -585,7 +585,7 @@ if(!prad1){
             ev->timestamp    = event->info.timestamp;
             ev->ssp_raw      = ssp_raw_snapshot;
 
-            // TODO: use config-driven trigger filter (config.json "physics" section
+            // TODO: use config-driven trigger filter (monitor_config.json "physics" section
             // accept_trigger_bits/reject_trigger_bits) instead of hardcoded bit check.
             // Currently drops all non-SSP_RawSum events, including LMS.
             static constexpr uint32_t TBIT_sum = (1u << 8);

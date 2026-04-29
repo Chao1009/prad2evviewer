@@ -82,12 +82,11 @@ void ViewerServer::init(const Config &cfg)
     if (daq_cfg_file.empty())
         daq_cfg_file = findFile("daq_config.json", db_dir);
 
-    // --- load ET config from config.json "online" section ---
+    // --- load ET config from monitor_config.json "online" section ---
 #ifdef WITH_ET
     {
-        std::string cf = cfg.config_file;
-        if (cf.empty()) cf = findFile("config.json", db_dir);
-        if (cf.empty()) cf = findFile("online_config.json", db_dir);
+        std::string cf = cfg.monitor_config_file;
+        if (cf.empty()) cf = findFile("monitor_config.json", db_dir);
         std::string s = readFile(cf);
         if (!s.empty()) {
             auto j = json::parse(s, nullptr, false);
@@ -98,21 +97,16 @@ void ViewerServer::init(const Config &cfg)
                 if (e.contains("et_file"))    et_cfg_.et_file = e["et_file"];
                 if (e.contains("et_station")) et_cfg_.station = e["et_station"];
                 if (e.contains("ring_buffer_size")) ring_size_ = e["ring_buffer_size"];
-            } else if (j.contains("et")) {
-                auto &e = j["et"];
-                if (e.contains("host"))    et_cfg_.host    = e["host"];
-                if (e.contains("port"))    et_cfg_.port    = e["port"];
-                if (e.contains("et_file")) et_cfg_.et_file = e["et_file"];
-                if (e.contains("station")) et_cfg_.station = e["station"];
-                if (j.contains("ring_buffer_size")) ring_size_ = j["ring_buffer_size"];
             }
         }
     }
 #endif
 
     // --- initialize both AppState instances (same config, separate accumulators) ---
-    app_file_.init(db_dir, daq_cfg_file, cfg.config_file);
-    app_online_.init(db_dir, daq_cfg_file, cfg.config_file);
+    app_file_.init(db_dir, daq_cfg_file,
+                   cfg.monitor_config_file, cfg.reconstruction_config_file);
+    app_online_.init(db_dir, daq_cfg_file,
+                     cfg.monitor_config_file, cfg.reconstruction_config_file);
 
     // --- load external filter file if specified ---
     if (!cfg.filter_file.empty()) {
@@ -131,19 +125,17 @@ void ViewerServer::init(const Config &cfg)
     }
 
     // --- build base_config JSON for /api/config ---
+    // File pointers come from the parsed daq_cfg (already loaded by AppState::init).
     json modules_j = json::array(), daq_j = json::array();
-    { std::string s = readFile(findFile("hycal_modules.json", db_dir));
-      if (!s.empty()) modules_j = json::parse(s, nullptr, false); }
     {
-        std::string daq_fn = "daq_map.json";
-        if (!daq_cfg_file.empty()) {
-            std::ifstream dcf(daq_cfg_file);
-            if (dcf.is_open()) {
-                auto dcj = json::parse(dcf, nullptr, false, true);
-                if (dcj.contains("daq_map_file"))
-                    daq_fn = dcj["daq_map_file"].get<std::string>();
-            }
-        }
+        const std::string mods = app_file_.daq_cfg.modules_file.empty()
+            ? std::string("hycal_modules.json") : app_file_.daq_cfg.modules_file;
+        std::string s = readFile(findFile(mods, db_dir));
+        if (!s.empty()) modules_j = json::parse(s, nullptr, false);
+    }
+    {
+        const std::string daq_fn = app_file_.daq_cfg.hycal_daq_map_file.empty()
+            ? std::string("hycal_daq_map.json") : app_file_.daq_cfg.hycal_daq_map_file;
         std::string s = readFile(findFile(daq_fn, db_dir));
         if (!s.empty()) daq_j = json::parse(s, nullptr, false);
     }

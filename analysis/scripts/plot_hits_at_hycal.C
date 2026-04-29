@@ -163,7 +163,7 @@ int plot_hits_at_hycal(const char *evio_path,
     //---- runinfo (geometry + calibration paths) -----------------------------
     std::string ri_path = discover_runinfo_path();
     if (ri_path.empty()) {
-        Printf("[ERROR] no runinfo pointer in database/config.json");
+        Printf("[ERROR] no runinfo pointer in database/reconstruction_config.json");
         return 1;
     }
     int eff_run = run_num;
@@ -184,7 +184,7 @@ int plot_hits_at_hycal(const char *evio_path,
     //---- HyCal --------------------------------------------------------------
     std::string hc_map = blank(hc_map_file)
         ? resolve_db_path("hycal_modules.json") : std::string(hc_map_file);
-    std::string daq_map = resolve_db_path("daq_map.json");
+    std::string daq_map = resolve_db_path("hycal_daq_map.json");
     fdec::HyCalSystem hycal;
     hycal.Init(hc_map, daq_map);
 
@@ -205,7 +205,7 @@ int plot_hits_at_hycal(const char *evio_path,
 
     //---- GEM ----------------------------------------------------------------
     std::string gem_map = blank(gem_map_file)
-        ? resolve_db_path("gem_map.json") : std::string(gem_map_file);
+        ? resolve_db_path("gem_daq_map.json") : std::string(gem_map_file);
     gem::GemSystem  gem_sys;
     gem::GemCluster gem_clusterer;
     gem_sys.Init(gem_map);

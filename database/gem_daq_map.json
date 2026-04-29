@@ -13,10 +13,6 @@
     "reject_last_timebin": false,
     "min_peak_adc": 30.0,
     "min_sum_adc": 60.0,
-    "match_mode": 1,
-    "match_adc_asymmetry": 0.8,
-    "match_time_diff": 50.0,
-    "match_ts_period": 25.0,
     "hole": {
         "width": 52.0,
         "height": 52.0
