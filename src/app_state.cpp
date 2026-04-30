@@ -124,6 +124,50 @@ static json encodePeaks(const fdec::WaveResult &wres)
     return parr;
 }
 
+// Run the firmware-faithful FADC250 emulator on one channel and serialize the
+// result.  Used by both the on-demand /api/waveform path (file mode) and the
+// ring-buffer encoder (online mode) so the DAQ overlay works in both modes.
+static json encodeChannelDaq(const fdec::ChannelData &cd, float ped_mean,
+                             const evc::DaqConfig::Fadc250FwConfig &fw_cfg)
+{
+    fdec::Fadc250FwAnalyzer fw_ana(fw_cfg);
+    fdec::DaqWaveResult daq_res;
+    fw_ana.Analyze(cd.samples, cd.nsamples, ped_mean, daq_res);
+
+    json daq_pulses = json::array();
+    for (int p = 0; p < daq_res.npeaks; ++p) {
+        const auto &pk = daq_res.peaks[p];
+        daq_pulses.push_back({
+            {"n",       pk.pulse_id},
+            {"vmin",    std::round(pk.vmin  * 10) / 10},
+            {"vp",      std::round(pk.vpeak * 10) / 10},
+            {"va",      std::round(pk.va    * 10) / 10},
+            {"coarse",  pk.coarse},
+            {"fine",    pk.fine},
+            {"t",       std::round(pk.time_ns * 100) / 100},
+            {"cross",   pk.cross_sample},
+            {"vp_pos",  pk.peak_sample},
+            {"i",       std::round(pk.integral * 10) / 10},
+            {"wlo",     pk.window_lo},
+            {"whi",     pk.window_hi},
+            {"q",       pk.quality},
+        });
+    }
+    return {
+        {"vnoise",     std::round(daq_res.vnoise * 10) / 10},
+        {"ped_used",   std::round(ped_mean       * 10) / 10},
+        {"tet",        fw_cfg.TET},
+        {"nsb",        fw_cfg.NSB},
+        {"nsa",        fw_cfg.NSA},
+        {"max_pulses", fw_cfg.MAX_PULSES},
+        {"nsat",       fw_cfg.NSAT},
+        {"nped",       fw_cfg.NPED},
+        {"maxped",     fw_cfg.MAXPED},
+        {"clk_ns",     fw_cfg.CLK_NS},
+        {"pk",         daq_pulses},
+    };
+}
+
 json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
                                fdec::WaveAnalyzer &ana, fdec::WaveResult &wres,
                                bool include_samples)
@@ -153,6 +197,11 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
                     json sarr = json::array();
                     for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
                     ch_j["s"] = std::move(sarr);
+                    // Embed firmware-emulator output alongside the samples so
+                    // the waveform tab's DAQ overlay works for ring-buffer
+                    // events (online mode) — /api/waveform is file-mode only.
+                    ch_j["daq"] = encodeChannelDaq(cd, wres.ped.mean,
+                                                   daq_cfg.fadc250_fw);
                 }
                 channels[key] = std::move(ch_j);
             }
@@ -186,51 +235,12 @@ json AppState::encodeWaveformJson(fdec::EventData &event, const std::string &cha
         json sarr = json::array();
         for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
 
-        // Firmware-faithful Mode 1/2/3 emulation alongside the soft analyzer.
-        // PED: at PRad-II's data path the recorded waveforms have already
-        // passed firmware TET, so the soft analyzer's pedestal mean is a
-        // sufficient proxy for the per-channel firmware register.
-        fdec::Fadc250FwAnalyzer fw_ana(daq_cfg.fadc250_fw);
-        fdec::DaqWaveResult daq_res;
-        fw_ana.Analyze(cd.samples, cd.nsamples, wres.ped.mean, daq_res);
-
-        json daq_pulses = json::array();
-        for (int p = 0; p < daq_res.npeaks; ++p) {
-            const auto &pk = daq_res.peaks[p];
-            daq_pulses.push_back({
-                {"n",       pk.pulse_id},
-                {"vmin",    std::round(pk.vmin  * 10) / 10},
-                {"vp",      std::round(pk.vpeak * 10) / 10},
-                {"va",      std::round(pk.va    * 10) / 10},
-                {"coarse",  pk.coarse},
-                {"fine",    pk.fine},
-                {"t",       std::round(pk.time_ns * 100) / 100},
-                {"cross",   pk.cross_sample},
-                {"vp_pos",  pk.peak_sample},
-                {"i",       std::round(pk.integral * 10) / 10},
-                {"wlo",     pk.window_lo},
-                {"whi",     pk.window_hi},
-                {"q",       pk.quality},
-            });
-        }
-
         return {{"key", chan_key}, {"s", sarr},
                 {"pm", std::round(wres.ped.mean * 10) / 10},
                 {"pr", std::round(wres.ped.rms * 10) / 10},
                 {"pk", encodePeaks(wres)},
-                {"daq", {
-                    {"vnoise",   std::round(daq_res.vnoise * 10) / 10},
-                    {"ped_used", std::round(wres.ped.mean  * 10) / 10},
-                    {"tet",      daq_cfg.fadc250_fw.TET},
-                    {"nsb",      daq_cfg.fadc250_fw.NSB},
-                    {"nsa",      daq_cfg.fadc250_fw.NSA},
-                    {"max_pulses", daq_cfg.fadc250_fw.MAX_PULSES},
-                    {"nsat",     daq_cfg.fadc250_fw.NSAT},
-                    {"nped",     daq_cfg.fadc250_fw.NPED},
-                    {"maxped",   daq_cfg.fadc250_fw.MAXPED},
-                    {"clk_ns",   daq_cfg.fadc250_fw.CLK_NS},
-                    {"pk",       daq_pulses}
-                }}};
+                {"daq", encodeChannelDaq(cd, wres.ped.mean,
+                                         daq_cfg.fadc250_fw)}};
     }
     return {{"error", "channel not found"}};
 }
