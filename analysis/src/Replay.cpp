@@ -139,6 +139,18 @@ void Replay::clearEvent(EventVars &ev)
     ev.nch = 0;
     ev.gem_nch = 0;
     ev.ssp_raw.clear();
+    std::fill(std::begin(ev.npeaks), std::end(ev.npeaks), 0);
+    std::fill(&ev.peak_height[0][0],   &ev.peak_height[0][0]   + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.peak_time[0][0],     &ev.peak_time[0][0]     + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.peak_integral[0][0], &ev.peak_integral[0][0] + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
+    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
+    std::fill(&ev.veto_peak_height[0][0],   &ev.veto_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.veto_peak_time[0][0],     &ev.veto_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.veto_peak_integral[0][0], &ev.veto_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
+    std::fill(&ev.lms_peak_height[0][0],   &ev.lms_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.lms_peak_time[0][0],     &ev.lms_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.lms_peak_integral[0][0], &ev.lms_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
 }
 
 void Replay::clearReconEvent(EventVars_Recon &ev)
@@ -155,6 +167,12 @@ void Replay::clearReconEvent(EventVars_Recon &ev)
     ev.veto_nch = 0;
     ev.lms_nch = 0;
     ev.ssp_raw.clear();
+    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
+    std::fill(&ev.veto_peak_time[0][0],     &ev.veto_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.veto_peak_integral[0][0], &ev.veto_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
+    std::fill(&ev.lms_peak_time[0][0],     &ev.lms_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.lms_peak_integral[0][0], &ev.lms_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
 }
 
 void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
@@ -301,7 +319,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                             ev->ped_quality[nch] = wres.ped.quality;
                             ev->ped_slope[nch]   = wres.ped.slope;
                             ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
-                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
                                 ev->peak_height[nch][p]   = wres.peaks[p].height;
                                 ev->peak_time[nch][p]     = wres.peaks[p].time;
                                 ev->peak_integral[nch][p] = wres.peaks[p].integral;
