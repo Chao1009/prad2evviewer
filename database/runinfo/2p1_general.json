@@ -1,7 +1,7 @@
 {
     "configurations": [
         {
-            "run_number": 0,
+            "run_number": 24150,
             "beam_energy": 2108.8,
             "calibration": {
                 "file": "calibration/calibration_factor_1.json",
@@ -9,17 +9,17 @@
             },
             "target": [0.0, 0.0, 0.0],
             "hycal": {
-                "position": [-0.48, 1.03, 6267.5],
+                "position": [-0.48, 0.63, 6269.81],
                 "tilting": [0.0, 0.0, 0.0]
             },
             "gem": {
-                "pedestal_file":    "gem_peds/peds_23867.txt",
-                "common_mode_file": "gem_peds/cm_23867.txt",
+                "pedestal_file":    "gem_peds/peds_24111.txt",
+                "common_mode_file": "gem_peds/cm_24111.txt",
                 "detectors": [
-                    {"id": 0, "position": [-230.0, 0.0, 5784.0], "tilting": [180.0, 0.0, 0.0]},
-                    {"id": 1, "position": [228.0,  0.0, 5823.0], "tilting": [180.0, 0.0, 180.0]},
-                    {"id": 2, "position": [-232.0, 0.0, 5384.0], "tilting": [180.0, 0.0, 0.0]},
-                    {"id": 3, "position": [224.0,  0.0, 5423.0], "tilting": [180.0, 0.0, 180.0]}
+                    {"id": 0, "position": [-230.0, 0.0, 5812.0], "tilting": [180.0, 0.0, 0.0]},
+                    {"id": 1, "position": [229.13, -1.5, 5852.0], "tilting": [180.0, 0.0, 180.0]},
+                    {"id": 2, "position": [-235.2, -1.7, 5412.4], "tilting": [180.0, 0.0, 0.0]},
+                    {"id": 3, "position": [221.63, -1.66, 5458.9], "tilting": [180.0, 0.0, 180.0]}
                 ]
             },
             "time_cuts": {
