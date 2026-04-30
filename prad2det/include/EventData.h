@@ -186,6 +186,7 @@ struct ReconEventData {
     uint8_t veto_id[4]   = {}; // 0,1,2,3 for veto1-4
     int veto_npeaks[4] = {};
     float veto_peak_time[4][fdec::MAX_PEAKS]     = {};
+    float veto_peak_height[4][fdec::MAX_PEAKS]   = {};
     float veto_peak_integral[4][fdec::MAX_PEAKS] = {};
 
     //LMS reference PMT information
@@ -193,6 +194,7 @@ struct ReconEventData {
     uint8_t lms_id[4]   = {}; // 0,1,2,3 for lms1-4
     int lms_npeaks[4] = {};
     float lms_peak_time[4][fdec::MAX_PEAKS]     = {};
+    float lms_peak_height[4][fdec::MAX_PEAKS]   = {};
     float lms_peak_integral[4][fdec::MAX_PEAKS] = {};
 
     // Raw 0xE10C SSP trigger bank words (one variable-length entry per event)
