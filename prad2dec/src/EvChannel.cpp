@@ -9,9 +9,18 @@
 #include <cstring>
 #include <iostream>
 #include <iomanip>
+#include <mutex>
 #include <set>
 
 using namespace evc;
+
+// The EVIO C library maintains a global handle table (handleList[]) that is
+// NOT thread-safe.  evOpen and evClose both write to this table, so concurrent
+// calls from multiple threads corrupt it, causing crashes in evReadRandom,
+// SspDecoder, and GemSystem on all threads.  Serialize all evOpen/evClose
+// calls with a process-wide mutex.  evRead/evReadRandom on distinct handles
+// are safe to call concurrently once the handles are established.
+static std::mutex g_evio_open_mutex;
 
 // --- evio C library status --------------------------------------------------
 static inline status evio_status(int code)
@@ -32,13 +41,15 @@ status EvChannel::OpenSequential(const std::string &path)
 {
     if (fHandle > 0) Close();
     char *cp = strdup(path.c_str()), *cm = strdup("r");
-    int st = evOpen(cp, cm, &fHandle);
+    int st;
+    { std::lock_guard<std::mutex> lk(g_evio_open_mutex); st = evOpen(cp, cm, &fHandle); }
     free(cp); free(cm);
     return evio_status(st);
 }
 
 void EvChannel::Close()
 {
+    std::lock_guard<std::mutex> lk(g_evio_open_mutex);
     evClose(fHandle);
     fHandle = -1;
     ra_count = 0;
@@ -66,7 +77,8 @@ status EvChannel::OpenRandomAccess(const std::string &path)
     ra_count = 0;
     ra_pos   = 0;
     char *cp = strdup(path.c_str()), *cm = strdup("ra");
-    int st = evOpen(cp, cm, &fHandle);
+    int st;
+    { std::lock_guard<std::mutex> lk(g_evio_open_mutex); st = evOpen(cp, cm, &fHandle); }
     free(cp); free(cm);
     if (st != S_SUCCESS) return evio_status(st);
 
