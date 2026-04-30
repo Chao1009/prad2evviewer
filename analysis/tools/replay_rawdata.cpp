@@ -3,13 +3,14 @@
 //
 // Usage: replay_rawdata <evio_file_or_dir> [more files/dirs...]
 //                       -o output_dir [-f max_files] [-n max_events] [-p] [-j num_threads]
-//                       [-D daq_config.json]
+//                       [-c daq_config.json] [-d daq_map.json]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
 //   -p  include peak analysis branches
 //   -j  number of threads (default: 4)
-//   -D  DAQ configuration file
+//   -c  DAQ configuration file
+//   -d  DAQ map file (default: <db>/hycal_daq_map.json)
 //=============================================================================
 
 #include "Replay.h"
@@ -74,7 +75,7 @@ int main(int argc, char *argv[])
     TClass::GetClass("TFile");
     TClass::GetClass("TBranch");
 
-    std::string daq_config, output_dir;
+    std::string daq_config, daq_map, output_dir;
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
@@ -87,12 +88,13 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:f:n:D:j:p")) != -1) {
+    while ((opt = getopt(argc, argv, "o:f:n:c:d:j:p")) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f': max_files = std::atoi(optarg); break;
             case 'n': max_events = std::atoi(optarg); break;
-            case 'D': daq_config = optarg; break;
+            case 'c': daq_config = optarg; break;
+            case 'd': daq_map = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
             case 'p': peaks = true; break;
         }
@@ -111,7 +113,8 @@ int main(int argc, char *argv[])
         std::cerr << "  -o  output directory (REQUIRED)\n";
         std::cerr << "  -f  max files to process (default: all)\n";
         std::cerr << "  -j  number of threads (default: 4)\n";
-        std::cerr << "  -D  DAQ config JSON (default: <db>/daq_config.json)\n";
+        std::cerr << "  -c  DAQ config JSON (default: <db>/daq_config.json)\n";
+        std::cerr << "  -d  DAQ map JSON (default: <db>/hycal_daq_map.json)\n";
         std::cerr << "  -n  max events per file (default: all)\n";
         std::cerr << "  -p  include peak analysis branches\n";
         return 1;
@@ -122,6 +125,8 @@ int main(int argc, char *argv[])
 
     std::cout << "Processing " << num_files << " files with "
               << num_threads << " threads\n";
+
+    if(daq_map.empty()) daq_map = db_dir + "/hycal_daq_map.json";
     
     std::string run_str = get_run_str(evio_files[0]);
     int run_num = get_run_int(evio_files[0]);
@@ -136,8 +141,8 @@ int main(int argc, char *argv[])
         // each thread gets its own Replay instance (own EvChannel, own buffers)
         analysis::Replay replay;
         if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadDaqMap(db_dir + "/hycal_daq_map.json");
-        std::cerr << "Using DAQ map: " << db_dir + "/hycal_daq_map.json" << "\n";
+        replay.LoadDaqMap(daq_map);
+        std::cerr << "Using DAQ map: " << daq_map << "\n";
         // Module-type dispatch comes from hycal_modules.json's "t" field —
         // single source of truth for whether a channel is PbGlass / PbWO4 /
         // SCINT / LMS.  Without this load, every channel falls back to

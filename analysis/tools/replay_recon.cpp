@@ -3,14 +3,15 @@
 //
 // Usage: replay_recon <evio_file_or_dir> [more files/dirs...]
 //                     -o output_dir [-f max_files] [-n max_events] [-p] [-j num_threads]
-//                     [-D daq_config.json]
+//                     [-c daq_config.json] [-d daq_map.json]
 //                     [-g gem_pedestal.json] [-z zerosup_threshold]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
 //   -p  read prad1 data and do not include GEM
 //   -j  number of threads (default: 4)
-//   -D  DAQ configuration file
+//   -c  DAQ configuration file
+//   -d  DAQ map file (default: <db>/hycal_daq_map.json)
 //   -g  GEM pedestal file
 //   -z  zero-suppression threshold override
 //=============================================================================
@@ -76,7 +77,7 @@ int main(int argc, char *argv[])
     TClass::GetClass("TFile");
     TClass::GetClass("TBranch");
 
-    std::string daq_config, gem_ped_file, output_dir;
+    std::string daq_config, daq_map, gem_ped_file, output_dir;
     float zerosup_override = 0.f;
     int max_files = -1;
     int num_threads = 4;
@@ -89,11 +90,12 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:f:D:j:g:z:p")) != -1) {
+    while ((opt = getopt(argc, argv, "o:f:c:d:j:g:z:p")) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f': max_files = std::atoi(optarg); break;
-            case 'D': daq_config = optarg; break;
+            case 'c': daq_config = optarg; break;
+            case 'd': daq_map = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
             case 'g': gem_ped_file = optarg; break;
             case 'z': zerosup_override = std::atof(optarg); break;
@@ -127,6 +129,8 @@ int main(int argc, char *argv[])
 
     std::cout << "Processing " << num_files << " files with "
               << num_threads << " threads\n";
+    
+    if(daq_map.empty()) daq_map = db_dir + "/hycal_daq_map.json";
 
     std::string run_str = get_run_str(evio_files[0]);
     int run_num = get_run_int(evio_files[0]);
@@ -141,8 +145,8 @@ int main(int argc, char *argv[])
         // each thread gets its own Replay instance (own EvChannel, own buffers)
         analysis::Replay replay;
         if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadDaqMap(db_dir + "/hycal_daq_map.json");
-        std::cerr << "Using DAQ map: " << db_dir + "/hycal_daq_map.json" << "\n";
+        replay.LoadDaqMap(daq_map);
+        std::cerr << "Using DAQ map: " << daq_map << "\n";
 
         while (true) {
             int idx = next_file.fetch_add(1);
