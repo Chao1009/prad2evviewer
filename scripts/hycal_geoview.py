@@ -408,7 +408,8 @@ class HyCalMapWidget(QWidget):
                                         Default paints the hover highlight.
     * ``_paint_after_colorbar(p, w, h)`` — drawn last (legends etc.).
     * ``_colorbar_center_text()``    — palette name line; default shows palette
-                                        name and "[log]" flag.
+                                        name and "[log]" flag.  Hidden unless
+                                        ``show_palette_name=True`` is passed.
     * ``_fmt_value(v)``              — vmin/vmax label format.
     * ``_tooltip_text(name)``        — tooltip when hovering a module.
     """
@@ -456,6 +457,7 @@ class HyCalMapWidget(QWidget):
                  margin_bottom: int = 50,
                  include_lms: bool = False,
                  show_colorbar: bool = True,
+                 show_palette_name: bool = False,
                  enable_zoom_pan: bool = False,
                  enable_inline_range_edit: bool = True,
                  min_size: Tuple[int, int] = (400, 400)):
@@ -466,6 +468,7 @@ class HyCalMapWidget(QWidget):
         self._margin_bottom = margin_bottom
         self._include_lms = include_lms
         self._show_colorbar = show_colorbar
+        self._show_palette_name = show_palette_name
         self._enable_zoom_pan = enable_zoom_pan
         self._enable_inline_range_edit = enable_inline_range_edit
 
@@ -827,6 +830,17 @@ class HyCalMapWidget(QWidget):
             return cb_x + t * cb_w
 
         label_min_gap = 8   # minimum pixel gap between label edges
+        # When the palette name is shown on the min/max row, reserve its
+        # central span so intermediate ticks don't collide with it.
+        if self._show_palette_name:
+            pal_text = self._colorbar_center_text()
+            pal_w = fm.horizontalAdvance(pal_text) + 8
+            cb_center = cb_x + cb_w / 2
+            pal_left = cb_center - pal_w / 2
+            pal_right = cb_center + pal_w / 2
+        else:
+            pal_text = ""
+            pal_left = pal_right = None
         accepted = []   # list of (iv, tx, lbl_w)
         for iv in int_vals:
             lbl  = str(iv)
@@ -839,6 +853,10 @@ class HyCalMapWidget(QWidget):
             if tx - lw / 2 < cb_x + end_w + label_min_gap:
                 ok = False
             elif tx + lw / 2 > cb_x + cb_w - end_w - label_min_gap:
+                ok = False
+            elif (pal_left is not None
+                  and tx + lw / 2 + label_min_gap > pal_left
+                  and tx - lw / 2 - label_min_gap < pal_right):
                 ok = False
             else:
                 for _, ptx, plw in accepted:
@@ -862,12 +880,12 @@ class HyCalMapWidget(QWidget):
                    Qt.AlignmentFlag.AlignLeft, min_str)
         p.drawText(QRectF(cb_x + cb_w - 130, label_y, 130, label_h),
                    Qt.AlignmentFlag.AlignRight, max_str)
-        # center text (palette name) sits above the bar
-        center_font = QFont("Consolas", 10)
-        p.setFont(center_font)
-        p.drawText(QRectF(cb_x, cb_y - fm.height() - 2, cb_w, fm.height() + 2),
-                   Qt.AlignmentFlag.AlignCenter, self._colorbar_center_text())
-        p.setFont(font)  # restore
+        # Palette name (optional) sits centered on the min/max row, under
+        # the bar.  Hidden by default; subclasses opt in via the
+        # ``show_palette_name=True`` constructor flag.
+        if self._show_palette_name:
+            p.drawText(QRectF(cb_x, label_y, cb_w, label_h),
+                       Qt.AlignmentFlag.AlignCenter, pal_text)
 
         if self._enable_inline_range_edit:
             # Faint pencil glyph next to each editable label hints

@@ -394,7 +394,7 @@ class TriggerMaskEditor(QMainWindow):
                  output_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("HyCal Trigger Mask Editor")
-        self.resize(1000, 780)
+        self.resize(1600, 900)
         self._modules = modules
         self._output_path = output_path
         self._mod_map: Dict[str, ModuleInfo] = {m.name: m for m in modules}
@@ -431,7 +431,7 @@ class TriggerMaskEditor(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._map)
         splitter.addWidget(self._right)
-        splitter.setSizes([700, 320])
+        splitter.setSizes([900, 700])
 
         central = QWidget()
         layout = QVBoxLayout(central)

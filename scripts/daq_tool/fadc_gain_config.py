@@ -4,21 +4,18 @@ FADC Gain Config Editor (PyQt6)
 ================================
 Interactive HyCal geo-view editor for the FADC250 gain config
 (``adchycal_gain.cnf``).  Always opens a GUI: load a calibration JSON,
-edit per-channel gains by clicking or dragging on the HyCal map, switch
-to *Closing* mode to null gains (effectively masking channels off), and
+edit per-channel gains by clicking or dragging on the HyCal map, and
 save the resulting trigger config.
 
 Workflow inside the GUI
 -----------------------
 * **Load Calibration…** – read a JSON list of ``{name, factor, ...}``
   entries; gains for matched modules become the displayed colormap.
-* **Paint mode**:
-    * *Set gain* – left-click / drag paints the spinbox value.
-    * *Closing (null = 0)* – left-click / drag zeroes channels (mask off).
-  Drag the mouse with the left button held to bulk-paint a region.
+* **Set / Set All** – left-click / drag paints the value in the line
+  edit (or click *Set All* to bulk-apply).  Use ``0`` to mask channels.
 * **Safe Cap** – clamp every channel's gain to a configurable
   ``[Min, Max]`` (defaults ``[0.0, 0.15]``); gains stay non-negative.
-* **Reset** – revert all manual edits to the loaded base.
+* **Undo / Reset** – revert the last action / discard all manual edits.
 * **Load .cnf… / Save .cnf…** – open / save an ``adchycal_gain.cnf`` file.
 
 Optional CLI shortcuts (still always open the GUI):
@@ -338,17 +335,16 @@ def _btn_style(checked_color: Optional[str] = None) -> str:
 # ---------------------------------------------------------------------------
 #  HyCal geo-view widget
 # ---------------------------------------------------------------------------
-# Three interaction modes (selected via the editor's right-panel buttons):
+# Two interaction modes (selected via the editor's right-panel buttons):
 #   * Edit (default): click on a module emits ``moduleEditRequested`` with
 #     the current gain.  The editor opens a popup dialog to set a new value.
-#   * Mask: drag-paint zeros (channel closed).
-#   * Set:  drag-paint the value carried by ``_paint_value``.
+#   * Set:  drag-paint the value carried by ``_paint_value``.  Use a
+#     value of 0 to mask channels off.
 # At drag end ``paintCommitted`` fires with the batch of
 # ``(name, prior_override_or_None)`` tuples so the editor can record the
 # action on its undo stack.
 
 PAINT_MODE_EDIT = "edit"
-PAINT_MODE_MASK = "mask"
 PAINT_MODE_SET = "set"
 
 
@@ -378,7 +374,7 @@ class _HyCalGainMap(_HyCalMapBase):
     # ---- public API ----
 
     def set_paint_mode(self, mode: str) -> None:
-        if mode not in (PAINT_MODE_EDIT, PAINT_MODE_MASK, PAINT_MODE_SET):
+        if mode not in (PAINT_MODE_EDIT, PAINT_MODE_SET):
             return
         self._paint_mode = mode
         self._paint_dragging = False
@@ -460,9 +456,7 @@ class _HyCalGainMap(_HyCalMapBase):
         p.setFont(QFont("Monospace", 9))
         n_masked = sum(1 for v in self._gains.values() if v == 0.0)
         info = f"Edits: {len(self._overrides)}    Masked: {n_masked}"
-        if self._paint_mode == PAINT_MODE_MASK:
-            info += "    [MASK]"
-        elif self._paint_mode == PAINT_MODE_SET:
+        if self._paint_mode == PAINT_MODE_SET:
             info += f"    [SET={self._paint_value:.6g}]"
         p.drawText(QRectF(8, h - 18, w - 16, 16),
                    Qt.AlignmentFlag.AlignLeft, info)
@@ -478,18 +472,15 @@ class _HyCalGainMap(_HyCalMapBase):
         return None
 
     def _apply_paint(self, name: str) -> None:
-        """Apply the current paint mode's value to ``name``.  Records the
-        prior override (or ``None``) onto the active drag batch so the
-        editor can undo the action."""
+        """Apply the current paint value to ``name``.  Records the prior
+        override (or ``None``) onto the active drag batch so the editor
+        can undo the action."""
         m = self._mod_map.get(name)
         if not m or m.crate < 0:
             return
-        if self._paint_mode == PAINT_MODE_MASK:
-            v = 0.0
-        elif self._paint_mode == PAINT_MODE_SET:
-            v = self._paint_value
-        else:
+        if self._paint_mode != PAINT_MODE_SET:
             return
+        v = self._paint_value
         # No-op if the cell already holds this exact override.
         if (name in self._overrides
                 and self._overrides[name] == v
@@ -510,12 +501,10 @@ class _HyCalGainMap(_HyCalMapBase):
             tip += "  (edit)"
         if m and m.crate >= 0:
             tip += f"\ncrate={m.crate} slot={m.slot} ch={m.channel}"
-        if self._paint_mode == PAINT_MODE_EDIT:
-            tip += "\n(click to edit gain)"
-        elif self._paint_mode == PAINT_MODE_SET:
+        if self._paint_mode == PAINT_MODE_SET:
             tip += f"\n(click/drag to set {self._paint_value:.6g})"
         else:
-            tip += "\n(click/drag to mask)"
+            tip += "\n(click to edit gain)"
         return tip
 
     def mousePressEvent(self, event):
@@ -588,7 +577,7 @@ class _GainEditor(QMainWindow):
                  output_path: Optional[str] = None):
         super().__init__()
         self.setWindowTitle("FADC Gain Editor")
-        self.resize(1100, 800)
+        self.resize(1600, 900)
 
         self._modules = modules
         self._daq = daq
@@ -634,8 +623,8 @@ class _GainEditor(QMainWindow):
         merged = dict(self._base_gains)
         merged.update(overrides)
         self._map.set_gains(merged, overrides)
-        # Pre-fit so the colorbar isn't 0..1 at first paint.
-        self._fit_initial_range()
+        # Color range defaults to [0, 1] (set in _HyCalGainMap.__init__);
+        # user can click Auto in the Color Range control to fit to data.
 
         self._build_right_panel()
 
@@ -650,7 +639,7 @@ class _GainEditor(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._map)
         splitter.addWidget(self._right)
-        splitter.setSizes([700, 400])
+        splitter.setSizes([900, 700])
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -682,18 +671,6 @@ class _GainEditor(QMainWindow):
             if base is None or abs(base - val) > 1e-12:
                 out[name] = val
         return out
-
-    def _fit_initial_range(self) -> None:
-        """One-time min/max-of-nonzero fit before the range control exists."""
-        vals = [v for v in self._map.gains.values() if v > 0]
-        if vals:
-            vmin = min(vals)
-            vmax = max(vals)
-            if vmin == vmax:
-                vmax = vmin + max(abs(vmin) * 0.1, 1e-3)
-            self._map.set_range(vmin, vmax)
-        else:
-            self._map.set_range(0.0, 1.0)
 
     def _notify_range_values(self) -> None:
         """Tell the range control the gain dict changed.  Re-fits if the
@@ -767,17 +744,17 @@ class _GainEditor(QMainWindow):
         rlayout.addWidget(self._range_ctrl)
         v.addWidget(range_grp)
 
-        # ---- Mask group ----
-        # Default interaction is "edit": clicking a module opens a popup
-        # dialog to set its gain.  Toggling "Mask" or "Set" switches to a
-        # drag-paint mode — Mask zeroes channels, Set assigns the value
-        # in the line edit.  Reset clears all GUI edits; Undo reverts the
-        # most recent action.
-        mask_grp = QGroupBox("Mask")
-        mlayout = QVBoxLayout(mask_grp)
-        mlayout.setSpacing(6)
+        # ---- Edit group ----
+        # Default click-on-module opens a popup to set its gain.  Toggling
+        # Set switches to drag-paint mode — clicks/drags apply the value
+        # in the line edit (use 0 to mask channels off).  Set All applies
+        # the value to every DAQ-mapped channel.  Undo reverts the last
+        # action; Reset discards all GUI edits.
+        edit_grp = QGroupBox("Edit")
+        elayout = QHBoxLayout(edit_grp)
+        elayout.setContentsMargins(8, 4, 8, 4)
+        elayout.setSpacing(6)
 
-        # Build buttons + value edit; layout is split into two rows below.
         self._set_value_edit = QLineEdit("0.150000")
         self._set_value_edit.setMaximumWidth(110)
         self._set_value_edit.setValidator(
@@ -789,27 +766,15 @@ class _GainEditor(QMainWindow):
             _btn_style(checked_color=THEME.ACCENT_STRONG))
         self._btn_set.setCheckable(True)
         self._btn_set.setToolTip(
-            "Toggle set mode — click or drag modules to apply the value")
+            "Toggle set mode — click or drag modules to apply the value "
+            "(use 0 to mask)")
         self._btn_set.toggled.connect(self._on_set_toggled)
 
         self._btn_set_all = QPushButton("Set All")
         self._btn_set_all.setStyleSheet(_btn_style())
         self._btn_set_all.setToolTip(
-            "Apply the Set value to every DAQ-mapped channel")
+            "Apply the value to every DAQ-mapped channel (use 0 to mask all)")
         self._btn_set_all.clicked.connect(self._on_set_all)
-
-        self._btn_mask = QPushButton("Mask")
-        self._btn_mask.setStyleSheet(_btn_style(checked_color=THEME.DANGER))
-        self._btn_mask.setCheckable(True)
-        self._btn_mask.setToolTip(
-            "Toggle mask mode — click or drag modules to close (gain = 0)")
-        self._btn_mask.toggled.connect(self._on_mask_toggled)
-
-        self._btn_mask_all = QPushButton("Mask All")
-        self._btn_mask_all.setStyleSheet(_btn_style())
-        self._btn_mask_all.setToolTip(
-            "Set every DAQ-mapped channel's gain to 0")
-        self._btn_mask_all.clicked.connect(self._on_mask_all)
 
         self._btn_undo = QPushButton("Undo")
         self._btn_undo.setStyleSheet(_btn_style())
@@ -822,25 +787,15 @@ class _GainEditor(QMainWindow):
             "Discard all manual edits, revert to loaded base")
         self._btn_reset.clicked.connect(self._reset_overrides)
 
-        # Row 1: gain value edit + Set paint mode + Set All bulk apply.
-        set_row = QHBoxLayout()
-        set_row.addWidget(self._set_value_edit)
-        set_row.addSpacing(6)
-        set_row.addWidget(self._btn_set)
-        set_row.addWidget(self._btn_set_all)
-        set_row.addStretch()
-        mlayout.addLayout(set_row)
+        elayout.addWidget(self._set_value_edit)
+        elayout.addSpacing(6)
+        elayout.addWidget(self._btn_set)
+        elayout.addWidget(self._btn_set_all)
+        elayout.addStretch()
+        elayout.addWidget(self._btn_undo)
+        elayout.addWidget(self._btn_reset)
 
-        # Row 2: Mask paint + Mask All + Undo + Reset.
-        mask_row = QHBoxLayout()
-        mask_row.addWidget(self._btn_mask)
-        mask_row.addWidget(self._btn_mask_all)
-        mask_row.addStretch()
-        mask_row.addWidget(self._btn_undo)
-        mask_row.addWidget(self._btn_reset)
-        mlayout.addLayout(mask_row)
-
-        v.addWidget(mask_grp)
+        v.addWidget(edit_grp)
 
         # ---- Safe Cap group ----
         # One-shot clamp of every DAQ-mapped channel to [min, max].  Min is
@@ -913,21 +868,6 @@ class _GainEditor(QMainWindow):
         else:
             self._cal_label.setText("(no calibration loaded)")
 
-    def _on_mask_toggled(self, on: bool) -> None:
-        if on and self._btn_set.isChecked():
-            # Mask and Set are mutually exclusive — silently un-check Set.
-            self._btn_set.blockSignals(True)
-            self._btn_set.setChecked(False)
-            self._btn_set.blockSignals(False)
-        if on:
-            self._map.set_paint_mode(PAINT_MODE_MASK)
-            self._status.setText(
-                "Mask mode — click or drag modules to close (gain = 0)")
-        elif not self._btn_set.isChecked():
-            self._map.set_paint_mode(PAINT_MODE_EDIT)
-            self._status.setText(
-                "Edit mode — click a module to set its gain")
-
     def _on_set_toggled(self, on: bool) -> None:
         if on:
             v = self._read_set_value()
@@ -938,15 +878,11 @@ class _GainEditor(QMainWindow):
                 self._btn_set.setChecked(False)
                 self._btn_set.blockSignals(False)
                 return
-            if self._btn_mask.isChecked():
-                self._btn_mask.blockSignals(True)
-                self._btn_mask.setChecked(False)
-                self._btn_mask.blockSignals(False)
             self._map.set_paint_value(v)
             self._map.set_paint_mode(PAINT_MODE_SET)
             self._status.setText(
                 f"Set mode — click or drag modules to apply gain = {v:.6g}")
-        elif not self._btn_mask.isChecked():
+        else:
             self._map.set_paint_mode(PAINT_MODE_EDIT)
             self._status.setText(
                 "Edit mode — click a module to set its gain")
@@ -964,17 +900,6 @@ class _GainEditor(QMainWindow):
             return float(self._set_value_edit.text())
         except ValueError:
             return None
-
-    def _on_mask_all(self) -> None:
-        if QMessageBox.question(
-                self, "Mask all channels?",
-                "Set every DAQ-mapped channel's gain to 0?\n"
-                "Use Undo to revert.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
-        ) != QMessageBox.StandardButton.Yes:
-            return
-        self._bulk_apply(0.0, "Masked all")
 
     def _on_set_all(self) -> None:
         v = self._read_set_value()
