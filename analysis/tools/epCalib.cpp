@@ -9,7 +9,7 @@
 // Usage: epCalib <input_raw.root|dir> [more files/dirs...]
 //                  [-i iteration] [-o output_root_file]
 //                  [-E Ebeam] [-D daq_config.json] [-n max_events]
-//                  [-j num_threads]
+//                  [-j num_threads] [-f (use firmware peaks)]
 //   - input_raw.root|dir: input ROOT file(s) or directory with *_raw.root files
 //   - iteration: calibration iteration (default: 1)
 //   - output_root_file: output ROOT file (default: auto from db_dir)
@@ -17,6 +17,7 @@
 //   - daq_config.json: DAQ config file (default: db_dir/daq_config.json)
 //   - max_events: max total events to process (default: all)
 //   - num_threads: number of parallel threads (default: 4)
+//   - -f: use firmware peak analysis instead of DAQ-mode peaks (default: false)
 //=============================================================================
 
 #include "Replay.h"
@@ -106,6 +107,7 @@ int main(int argc, char *argv[])
     int  num_threads = 4;
     float Ebeam      = 2100.f;
     float hycal_z    = 6225.f;
+    bool firmware_peaks = false;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -114,12 +116,13 @@ int main(int argc, char *argv[])
     if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:E:D:n:j:")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:E:D:n:j:f")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_root_file = optarg; break;
             case 'E': Ebeam            = std::atof(optarg); break;
             case 'D': daq_config_file  = optarg; break;
+            case 'f': firmware_peaks   = true; break;
             case 'n': max_events       = std::atoi(optarg); break;
             case 'j': num_threads      = std::atoi(optarg); break;
         }
@@ -135,7 +138,7 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: epCalib <input_raw.root|dir> [more...] "
                      "[-i iter] [-o out.root] [-E Ebeam] [-D daq.json] "
-                     "[-n max_events] [-j threads]\n";
+                     "[-n max_events] [-j threads] [-f (use firmware peaks)]\n";
         return 1;
     }
 
@@ -294,25 +297,33 @@ int main(int argc, char *argv[])
                     for (int j = 0; j < ev.nch; ++j) {
                         const auto *mod = res->hycal.module_by_id(ev.module_id[j]);
                         if (!mod || !mod->is_hycal()) continue;
-                        if (ev.npeaks[j] <= 0) continue;
 
-                        int bestIdx = -1;
-                        float bestHeight = -1.f;
-                        for(int p = 0; p < ev.npeaks[j]; ++p){
-                            if(ev.peak_time[j][p] > gRunConfig.hc_time_win_lo &&
-                                ev.peak_time[j][p] < gRunConfig.hc_time_win_hi) {
-                                if(ev.peak_integral[j][p] > bestHeight) {
-                                    bestHeight = ev.peak_integral[j][p];
-                                    bestIdx = p;
+                        float adc = 0.f;
+
+                        if(!firmware_peaks){
+                            int bestIdx = -1;
+                            float bestHeight = -1.f;
+                            for(int p = 0; p < ev.npeaks[j]; ++p){
+                                if(ev.peak_time[j][p] > gRunConfig.hc_time_win_lo &&
+                                    ev.peak_time[j][p] < gRunConfig.hc_time_win_hi) {
+                                    if(ev.peak_integral[j][p] > bestHeight) {
+                                        bestHeight = ev.peak_integral[j][p];
+                                        bestIdx = p;
+                                    }
                                 }
                             }
+                            if (bestIdx < 0) continue;
+                            adc    = ev.peak_integral[j][bestIdx];
+                            int mod_id = ev.module_id[j];
+                            // gain correction for HyCal modules
+                            if(mod_id>1000) adc *= gain_correction.w[mod_id-1000].avg;
+                            else adc *= gain_correction.g[mod_id].avg;
                         }
-                        if (bestIdx < 0) continue;
-                        float adc    = ev.peak_integral[j][bestIdx];
-                        int mod_id = ev.module_id[j];
-                        // gain correction for HyCal modules
-                        if(mod_id>1000) adc *= gain_correction.w[mod_id-1000].avg;
-                        else adc *= gain_correction.g[mod_id].avg;
+                        else{
+                            if(ev.daq_npeaks[j] <= 0) continue;
+                            adc = ev.daq_peak_integral[j][0]; // take the first DAQ peak (should be only one)
+                        }
+
                         float energy = (mod->cal_factor > 0)
                             ? static_cast<float>(mod->energize(adc))
                             : adc * 0.f;
