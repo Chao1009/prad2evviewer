@@ -70,6 +70,11 @@ from _common import dec  # prad2py.dec re-export
 # 20 × 50 samples × 8 bytes × ~2000 channels ≈ 16 MB — negligible.
 PULSE_CACHE = 20
 
+# Stable colour assignments for the per-type summary panels.  Types that
+# don't appear in this map fall through to matplotlib's default cycle.
+TYPE_COLORS = {"PbGlass": "C0", "PbWO4": "C1",
+               "LMS":     "C2", "SCINT": "C3", "Unknown": "0.5"}
+
 
 # ---------------------------------------------------------------------------
 # Pulse model
@@ -127,6 +132,8 @@ def two_tau_p_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float,
 class ChannelStats:
     name: str
     channel_id: str            # roc_<tag>_<slot>_<channel>
+    module_type: str = "Unknown"   # mod.type.name from HyCalSystem; "Unknown"
+                                   # for non-HyCal channels (tagger TDC, etc).
     n_attempted: int = 0
     n_used: int = 0
     tau_r:    List[float] = field(default_factory=list)
@@ -154,6 +161,45 @@ def _median_mad(values: List[float]) -> Tuple[float, float]:
     return med, mad
 
 
+def aggregate_by_type(summaries: List[Dict], min_pulses: int) -> Dict[str, Dict]:
+    """For each module type present in `summaries`, take the channels with
+    enough pulses and compute median ± MAD across their per-channel
+    medians for every fit parameter.  Used downstream as per-type initial
+    guesses / priors when a per-channel template is missing or
+    low-statistics.  Type strings come from HyCalSystem.Module.type
+    (sourced from hycal_modules.json), so SCINT/LMS/PbWO4/PbGlass are
+    whatever the JSON spelled them."""
+    by_type: Dict[str, Dict] = {}
+    types_present = sorted({s["module_type"] for s in summaries})
+    for t in types_present:
+        chans = [s for s in summaries
+                 if s["module_type"] == t
+                 and s["n_pulses_used"] >= min_pulses]
+        if not chans:
+            continue
+        rec: Dict = {
+            "n_channels":        len(chans),
+            "n_channels_good":   int(sum(s["good_fit"] for s in chans)),
+            "n_pulses_total":    int(sum(s["n_pulses_used"] for s in chans)),
+        }
+        # Aggregate every numeric "{median, mad}" parameter that is present
+        # on at least one channel.  Channel medians become the per-type
+        # population — we report median+MAD over them.
+        for key in ("t0_ns", "tau_r_ns", "tau_f_ns", "p", "peak_amp_adc"):
+            vals = [s[key]["median"] for s in chans if key in s]
+            if not vals:
+                continue
+            med, mad = _median_mad(vals)
+            rec[key] = {"median": med, "mad": mad}
+        chi2_vals = [s["chi2_per_dof"]["median"] for s in chans]
+        rec["chi2_per_dof"] = {
+            "median": float(np.median(chi2_vals)),
+            "mean":   float(np.mean(chi2_vals)),
+        }
+        by_type[t] = rec
+    return by_type
+
+
 def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float
                      ) -> Dict:
     tr_med, tr_mad = _median_mad(s.tau_r)
@@ -167,6 +213,7 @@ def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float
     ped_rms  = s.ped_rms_sum  / s.ped_n if s.ped_n else float("nan")
     rec = {
         "channel_id": s.channel_id,
+        "module_type": s.module_type,
         "n_pulses_attempted": s.n_attempted,
         "n_pulses_used":      s.n_used,
         "tau_r_ns": {"median": tr_med, "mad": tr_mad},
@@ -274,54 +321,90 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
 
 def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
                  out_png: Path) -> None:
-    """Global τ_r / τ_f / χ² histograms across all fitted channels."""
+    """Global histograms of every fit parameter, split by module type
+    (PbGlass / PbWO4 / LMS / SCINT — whatever HyCalSystem reported per
+    channel).  Bottom row: τ_r vs τ_f scatter coloured by χ²/dof."""
     have = [s for s in summaries if s["n_pulses_used"] >= min_pulses]
     if not have:
         print("[plot] no channels with enough pulses for summary", flush=True)
         return
-    tau_r = np.array([s["tau_r_ns"]["median"] for s in have])
-    tau_f = np.array([s["tau_f_ns"]["median"] for s in have])
-    chi2  = np.array([s["chi2_per_dof"]["median"] for s in have])
-    good  = np.array([s["good_fit"] for s in have])
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    types_arr = np.array([s["module_type"] for s in have])
+    # Order types by population (largest first) for legend stability.
+    types_present = sorted(set(types_arr.tolist()),
+                           key=lambda t: -int((types_arr == t).sum()))
+    type_masks = {t: (types_arr == t) for t in types_present}
 
-    ax = axes[0, 0]
-    ax.hist(tau_r, bins=60, color="C0", alpha=0.85)
-    ax.set_xlabel("τ_r (ns) — channel median")
-    ax.set_ylabel("channels")
-    ax.set_title(f"rise time   (N={len(have)})")
-    ax.grid(True, alpha=0.3)
+    t0       = np.array([s["t0_ns"]["median"]        for s in have])
+    tau_r    = np.array([s["tau_r_ns"]["median"]     for s in have])
+    tau_f    = np.array([s["tau_f_ns"]["median"]     for s in have])
+    peak_amp = np.array([s["peak_amp_adc"]["median"] for s in have])
+    chi2     = np.array([s["chi2_per_dof"]["median"] for s in have])
+    good     = np.array([s["good_fit"]               for s in have])
+    has_p    = all("p" in s for s in have)
+    p_arr    = (np.array([s["p"]["median"] for s in have])
+                if has_p else None)
 
-    ax = axes[0, 1]
-    ax.hist(tau_f, bins=60, color="C2", alpha=0.85)
-    ax.set_xlabel("τ_f (ns) — channel median")
-    ax.set_ylabel("channels")
-    ax.set_title("fall time")
-    ax.grid(True, alpha=0.3)
+    def _split_hist(ax, x, bins, xlabel, title, log=False):
+        """One histogram per type, overlaid; legend shows per-type counts."""
+        if log:
+            ax.set_xscale("log")
+        for t in types_present:
+            mask = type_masks[t]
+            n = int(mask.sum())
+            if n == 0:
+                continue
+            ax.hist(x[mask], bins=bins,
+                    color=TYPE_COLORS.get(t),
+                    alpha=0.65, label=f"{t} (N={n})")
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel("channels")
+        ax.set_title(title)
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc="best", fontsize=8)
 
-    ax = axes[1, 0]
-    bins = np.logspace(np.log10(max(chi2.min(), 1e-2)),
-                       np.log10(max(chi2.max(), 10.0)), 60)
-    ax.hist(chi2[good],  bins=bins, color="C2", alpha=0.7, label="good_fit")
-    ax.hist(chi2[~good], bins=bins, color="C3", alpha=0.7, label="bad")
-    ax.axvline(chi2_max, color="k", ls="--", lw=1, label=f"χ²_max={chi2_max}")
+    fig, axes = plt.subplots(3, 3, figsize=(15, 12))
+
+    _split_hist(axes[0, 0], t0,    60, "t0 (ns) — channel median",      "pulse onset t0")
+    _split_hist(axes[0, 1], tau_r, 60, "τ_r (ns) — channel median",     "rise time τ_r")
+    _split_hist(axes[0, 2], tau_f, 60, "τ_f (ns) — channel median",     "fall time τ_f")
+
+    if has_p:
+        _split_hist(axes[1, 0], p_arr, 60, "p — channel median",        "rise-edge exponent p")
+    else:
+        axes[1, 0].set_visible(False)
+
+    pk_bins = np.logspace(np.log10(max(peak_amp.min(), 1.0)),
+                          np.log10(max(peak_amp.max(), 10.0)), 60)
+    _split_hist(axes[1, 1], peak_amp, pk_bins, "peak amplitude (ADC) — channel median",
+                "peak amplitude", log=True)
+
+    chi2_bins = np.logspace(np.log10(max(chi2.min(), 1e-2)),
+                            np.log10(max(chi2.max(), 10.0)), 60)
+    ax = axes[1, 2]
     ax.set_xscale("log")
+    ax.hist(chi2[good],  bins=chi2_bins, color="C2", alpha=0.7, label="good_fit")
+    ax.hist(chi2[~good], bins=chi2_bins, color="C3", alpha=0.7, label="bad")
+    ax.axvline(chi2_max, color="k", ls="--", lw=1, label=f"χ²_max={chi2_max}")
     ax.set_xlabel("χ²/dof — channel median")
     ax.set_ylabel("channels")
     ax.set_title(f"fit quality   (good={int(good.sum())}, "
                  f"bad={int((~good).sum())})")
-    ax.legend(loc="best")
+    ax.legend(loc="best", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    ax = axes[1, 1]
-    sc = ax.scatter(tau_r, tau_f, c=np.log10(np.clip(chi2, 1e-2, None)),
-                    s=8, cmap="viridis")
-    fig.colorbar(sc, ax=ax, label="log₁₀(χ²/dof)")
-    ax.set_xlabel("τ_r (ns)")
-    ax.set_ylabel("τ_f (ns)")
-    ax.set_title("τ_r vs τ_f, coloured by χ²/dof")
-    ax.grid(True, alpha=0.3)
+    # Bottom row: τ_r vs τ_f scatter, full width.
+    gs = axes[2, 0].get_gridspec()
+    for a in axes[2, :]:
+        a.remove()
+    ax_sc = fig.add_subplot(gs[2, :])
+    sc = ax_sc.scatter(tau_r, tau_f, c=np.log10(np.clip(chi2, 1e-2, None)),
+                       s=10, cmap="viridis")
+    fig.colorbar(sc, ax=ax_sc, label="log₁₀(χ²/dof)")
+    ax_sc.set_xlabel("τ_r (ns)")
+    ax_sc.set_ylabel("τ_f (ns)")
+    ax_sc.set_title("τ_r vs τ_f, coloured by χ²/dof")
+    ax_sc.grid(True, alpha=0.3)
 
     fig.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -457,20 +540,26 @@ def main() -> None:
     pre, post = args.pre_samples, args.post_samples
 
     stats: Dict[str, ChannelStats] = {}
-    name_cache: Dict[Tuple[int, int, int], Tuple[str, str]] = {}
+    # cache: (roc_tag, slot, ch) -> (name, chan_id, module_type)
+    name_cache: Dict[Tuple[int, int, int], Tuple[str, str, str]] = {}
 
-    def _key_for(roc_tag: int, crate: Optional[int], s: int, c: int) -> Tuple[str, str]:
+    def _key_for(roc_tag: int, crate: Optional[int], s: int, c: int
+                 ) -> Tuple[str, str, str]:
         cached = name_cache.get((roc_tag, s, c))
         if cached is not None:
             return cached
         chan_id = f"{roc_tag}_{s}_{c}"
         name = chan_id
+        mtype = "Unknown"
         if crate is not None:
             mod = p.hycal.module_by_daq(crate, s, c)
             if mod is not None:
-                name = mod.name
-        name_cache[(roc_tag, s, c)] = (name, chan_id)
-        return name, chan_id
+                name  = mod.name
+                # mod.type is the C++ HyCalSystem ModuleType enum, populated
+                # from hycal_modules.json's "t" field — single source of truth.
+                mtype = mod.type.name
+        name_cache[(roc_tag, s, c)] = (name, chan_id, mtype)
+        return name, chan_id, mtype
 
     ch = dec.EvChannel()
     ch.set_config(p.cfg)
@@ -525,7 +614,7 @@ def main() -> None:
                                 cd = slot.channel(c)
                                 if cd.nsamples <= 0:
                                     continue
-                                name, chan_id = _key_for(roc.tag, crate, s, c)
+                                name, chan_id, mtype = _key_for(roc.tag, crate, s, c)
                                 if chan_filter and name not in chan_filter:
                                     continue
 
@@ -556,7 +645,8 @@ def main() -> None:
 
                                 st = stats.get(name)
                                 if st is None:
-                                    st = ChannelStats(name=name, channel_id=chan_id)
+                                    st = ChannelStats(name=name, channel_id=chan_id,
+                                                      module_type=mtype)
                                     stats[name] = st
                                 if st.n_used >= args.max_pulses_per_channel:
                                     continue
@@ -663,6 +753,11 @@ def main() -> None:
         rec = finalize_channel(stats[name], args.min_pulses, args.chi2_max)
         out[name] = rec
         summaries.append({"name": name, **rec})
+
+    # Per-type aggregate (median ± MAD across channel medians) for each
+    # fit parameter — feeds per-type initial guesses in the deconv when a
+    # per-channel template is missing or low-statistics.
+    out["_by_type"] = aggregate_by_type(summaries, args.min_pulses)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
