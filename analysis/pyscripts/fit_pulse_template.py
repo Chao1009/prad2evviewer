@@ -369,6 +369,9 @@ def main() -> None:
                          "of fit quality (e.g. W001,W002).")
     ap.add_argument("--no-summary-plot", action="store_true",
                     help="Skip the global τ_r/τ_f/χ² summary PNG.")
+    ap.add_argument("--progress-every", type=int, default=2000,
+                    help="Print a progress line every N physics sub-events "
+                         "(file index, events, fits, rate, elapsed).")
     ap.add_argument("--daq-config", default="",
                     help="DAQ config (default: installed default).")
     ap.add_argument("--hc-map-file", default="",
@@ -431,6 +434,17 @@ def main() -> None:
     n_phys = n_pulses_attempted = n_pulses_used = 0
     n_files_open = 0
     t0_wall = time.monotonic()
+    progress_every = max(1, int(args.progress_every))
+    next_progress = progress_every
+
+    def _emit_progress(file_idx: int, file_total: int, fname: str) -> None:
+        elapsed = time.monotonic() - t0_wall
+        rate = n_phys / elapsed if elapsed > 0 else 0.0
+        print(f"  [progress] file {file_idx}/{file_total} {Path(fname).name}  "
+              f"phys={n_phys}  fit_attempted={n_pulses_attempted}  "
+              f"fit_used={n_pulses_used}  "
+              f"rate={rate:.0f} ev/s  elapsed={elapsed:.1f}s",
+              flush=True)
 
     try:
         for fpath in p.evio_files:
@@ -524,11 +538,16 @@ def main() -> None:
                                 if plotting and len(st.sample_pulses) < PULSE_CACHE:
                                     st.sample_pulses.append(slc_pedsub.copy())
 
+                if n_phys >= next_progress:
+                    _emit_progress(n_files_open, len(p.evio_files), fpath)
+                    # Bump past every threshold this CODA read crossed, so
+                    # we always have a fresh next-target rather than firing
+                    # repeatedly on the same plateau.
+                    while next_progress <= n_phys:
+                        next_progress += progress_every
+
                 if done:
                     break
-                if n_phys and n_phys % 5000 == 0:
-                    print(f"  phys={n_phys}  fit_attempted={n_pulses_attempted}"
-                          f"  fit_used={n_pulses_used}", flush=True)
 
             ch.close()
             if done:
