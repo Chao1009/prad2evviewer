@@ -233,9 +233,11 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("tau_r_max_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_r_max_ns)
         .def_readwrite("tau_f_min_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_f_min_ns)
         .def_readwrite("tau_f_max_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_f_max_ns)
-        .def_readwrite("cond_number_max", &fdec::WaveConfig::NnlsDeconvConfig::cond_number_max)
-        .def_readwrite("pre_samples",     &fdec::WaveConfig::NnlsDeconvConfig::pre_samples)
-        .def_readwrite("post_samples",    &fdec::WaveConfig::NnlsDeconvConfig::post_samples);
+        .def_readwrite("shape_window_factor", &fdec::WaveConfig::NnlsDeconvConfig::shape_window_factor)
+        .def_readwrite("t0_window_ns",        &fdec::WaveConfig::NnlsDeconvConfig::t0_window_ns)
+        .def_readwrite("amp_max_factor",      &fdec::WaveConfig::NnlsDeconvConfig::amp_max_factor)
+        .def_readwrite("pre_samples",         &fdec::WaveConfig::NnlsDeconvConfig::pre_samples)
+        .def_readwrite("post_samples",        &fdec::WaveConfig::NnlsDeconvConfig::post_samples);
 
     py::class_<fdec::PulseTemplateStore>(m, "PulseTemplateStore",
         "Per-channel pulse-template store loaded from the JSON written by "
@@ -327,19 +329,6 @@ void bind_fadc(py::module_ &m)
         .def_readonly("chi2_per_dof",  &fdec::WaveAnalyzer::PulseFitResult::chi2_per_dof)
         .def_readonly("n_iter",        &fdec::WaveAnalyzer::PulseFitResult::n_iter);
 
-    py::class_<fdec::WaveAnalyzer::PulseFitGammaResult>(m, "PulseFitGammaResult",
-        "Output of WaveAnalyzer.fit_pulse_shape_gamma() — Gamma model "
-        "v(t) = (t-t0)^b · exp(-c·(t-t0)) (Li et al. 2024, "
-        "10.1371/journal.pone.0313999).  c_inv_ns = 1/c so it's "
-        "directly comparable to two-tau τ_f / τ_r.")
-        .def_readonly("ok",            &fdec::WaveAnalyzer::PulseFitGammaResult::ok)
-        .def_readonly("t0_ns",         &fdec::WaveAnalyzer::PulseFitGammaResult::t0_ns)
-        .def_readonly("b",             &fdec::WaveAnalyzer::PulseFitGammaResult::b)
-        .def_readonly("c_inv_ns",      &fdec::WaveAnalyzer::PulseFitGammaResult::c_inv_ns)
-        .def_readonly("peak_amp",      &fdec::WaveAnalyzer::PulseFitGammaResult::peak_amp)
-        .def_readonly("chi2_per_dof",  &fdec::WaveAnalyzer::PulseFitGammaResult::chi2_per_dof)
-        .def_readonly("n_iter",        &fdec::WaveAnalyzer::PulseFitGammaResult::n_iter);
-
     py::class_<fdec::WaveResult>(m, "WaveResult",
         "Output of WaveAnalyzer.analyze_result(): {ped, npeaks, peaks}. "
         "Use this as the second argument to WaveAnalyzer.deconvolve() to "
@@ -362,7 +351,6 @@ void bind_fadc(py::module_ &m)
         .def_readonly("state",        &fdec::DeconvOutput::state)
         .def_readonly("n",            &fdec::DeconvOutput::n)
         .def_readonly("chi2_per_dof", &fdec::DeconvOutput::chi2_per_dof)
-        .def_readonly("cond_number",  &fdec::DeconvOutput::cond_number)
         .def_property_readonly("amplitude", [](const fdec::DeconvOutput &self) {
             return std::vector<float>(self.amplitude, self.amplitude + self.n);
         })
@@ -371,6 +359,15 @@ void bind_fadc(py::module_ &m)
         })
         .def_property_readonly("integral", [](const fdec::DeconvOutput &self) {
             return std::vector<float>(self.integral, self.integral + self.n);
+        })
+        .def_property_readonly("t0_ns", [](const fdec::DeconvOutput &self) {
+            return std::vector<float>(self.t0_ns, self.t0_ns + self.n);
+        })
+        .def_property_readonly("tau_r_ns", [](const fdec::DeconvOutput &self) {
+            return std::vector<float>(self.tau_r_ns, self.tau_r_ns + self.n);
+        })
+        .def_property_readonly("tau_f_ns", [](const fdec::DeconvOutput &self) {
+            return std::vector<float>(self.tau_f_ns, self.tau_f_ns + self.n);
         });
 
     py::class_<fdec::WaveAnalyzer>(m, "WaveAnalyzer",
@@ -471,31 +468,6 @@ void bind_fadc(py::module_ &m)
             "within the slice; `ped` / `ped_rms` come from the same "
             "WaveAnalyzer pass that produced the peak.  Returns a "
             "PulseFitResult; check `.ok` before reading the params.")
-        .def_static("fit_pulse_shape_gamma",
-            [](py::array_t<uint16_t> slice, int peak_idx,
-               float ped, float ped_rms, float clk_ns,
-               float model_err_floor) {
-                py::buffer_info buf = slice.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("slice must be a 1-D uint16 array");
-                fdec::WaveAnalyzer::PulseFitGammaResult res;
-                {
-                    py::gil_scoped_release rel;
-                    res = fdec::WaveAnalyzer::FitPulseShapeGamma(
-                        static_cast<const uint16_t*>(buf.ptr),
-                        static_cast<int>(buf.shape[0]),
-                        peak_idx, ped, ped_rms, clk_ns,
-                        model_err_floor);
-                }
-                return res;
-            },
-            py::arg("slice"), py::arg("peak_idx"),
-            py::arg("ped"), py::arg("ped_rms"), py::arg("clk_ns"),
-            py::arg("model_err_floor") = 0.01f,
-            "Same machinery as fit_pulse_shape() but with the Gamma "
-            "model from Li et al. 2024 (PLOS ONE 10.1371/journal.pone."
-            "0313999): v(t) = (t-t0)^b · exp(-c·(t-t0)) for t > t0.  "
-            "Three params (t0, b, c).  Returns PulseFitGammaResult.")
         .def("set_template_store",
             [](fdec::WaveAnalyzer &self,
                const fdec::PulseTemplateStore *store) {
@@ -584,7 +556,7 @@ void bind_fadc(py::module_ &m)
     m.attr("Q_DECONV_NOT_RUN")          = py::int_(fdec::Q_DECONV_NOT_RUN);
     m.attr("Q_DECONV_NO_TEMPLATE")      = py::int_(fdec::Q_DECONV_NO_TEMPLATE);
     m.attr("Q_DECONV_BAD_TEMPLATE")     = py::int_(fdec::Q_DECONV_BAD_TEMPLATE);
-    m.attr("Q_DECONV_SINGULAR")         = py::int_(fdec::Q_DECONV_SINGULAR);
+    m.attr("Q_DECONV_LM_NOT_CONVERGED") = py::int_(fdec::Q_DECONV_LM_NOT_CONVERGED);
     m.attr("Q_DECONV_APPLIED")          = py::int_(fdec::Q_DECONV_APPLIED);
     m.attr("Q_DECONV_FALLBACK_GLOBAL")  = py::int_(fdec::Q_DECONV_FALLBACK_GLOBAL);
 

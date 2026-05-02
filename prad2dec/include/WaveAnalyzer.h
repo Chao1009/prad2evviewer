@@ -45,12 +45,14 @@ struct WaveConfig {
     uint16_t overflow      = 4095;    // overflow ADC value (12-bit)
     float    clk_mhz       = 250.0f;  // clock frequency for time conversion
 
-    // ---- NNLS pile-up deconvolution ------------------------------------
+    // ---- Per-pulse-fit pile-up deconvolution ----------------------------
     //
-    // Deconvolve() solves a non-negative linear-least-squares problem
-    // against per-channel pulse templates to recover individual peak
-    // amplitudes when pulses overlap.  Knobs match the JSON layout in
-    // database/daq_config.json under fadc250_waveform.analyzer.nnls_deconv.
+    // Deconvolve() runs a non-linear Levenberg-Marquardt fit per event,
+    // freeing (a_k, t0_k, τ_r_k, τ_f_k) for each peak with the channel
+    // template providing the initial guess (and tight bounds around it).
+    // This handles per-pulse shape variation that a fixed-template NNLS
+    // can't capture.  Config name is historical — kept as `nnls_deconv`
+    // for daq_config.json compatibility.
     //
     // - enabled                     Master switch for the auto-deconv path
     //                                inside Analyze().  Has no effect on
@@ -62,25 +64,36 @@ struct WaveConfig {
     //                                deconv silently stays off.
     // - fallback_to_global_template Use the synthesised global-median
     //                                template for channels whose own fit
-    //                                failed gates.  Auto-deconv path passes
-    //                                this to PulseTemplateStore::Lookup;
-    //                                outcome is recorded as
+    //                                failed gates.  Outcome surfaced as
     //                                Q_DECONV_FALLBACK_GLOBAL on success.
     // - apply_to_all_peaks          When false, auto-deconv only fires on
     //                                events with at least one Q_PEAK_PILED
-    //                                peak.  Setting true runs NNLS on
+    //                                peak.  Setting true runs the LM on
     //                                EVERY channel-event with peaks, even
     //                                isolated ones — order-of-magnitude
-    //                                slowdown of the replay/viewer.  Use
-    //                                only for debugging or when you
-    //                                explicitly need a deconvolved height
-    //                                on every peak.
-    // - tau_*_min_ns / tau_*_max_ns Hard validation bounds; templates with
-    //                                τ outside this range yield
-    //                                Q_DECONV_BAD_TEMPLATE.
-    // - cond_number_max             Conditioning ceiling on M^T M; above
-    //                                this we abort with Q_DECONV_SINGULAR
-    //                                rather than amplify noise.
+    //                                slowdown.  Debug knob only.
+    // - tau_*_min_ns / tau_*_max_ns Hard validation bounds on the
+    //                                template itself; templates with τ
+    //                                outside this range yield
+    //                                Q_DECONV_BAD_TEMPLATE.  Per-peak
+    //                                fitted τ values can drift away from
+    //                                the template by up to
+    //                                shape_window_factor× regardless.
+    // - shape_window_factor         Per-peak τ_r / τ_f stay inside
+    //                                [tmpl/factor, tmpl·factor] during LM.
+    //                                1.5 covers 3-5σ of the typical
+    //                                within-channel pulse-to-pulse spread
+    //                                seen in PRad-II PbWO₄ data.
+    // - t0_window_ns                Per-peak t0 stays inside
+    //                                [peak.time ± t0_window_ns].  ±8 ns
+    //                                = ±2 samples is generous for the
+    //                                quadratic-interp peak time error.
+    // - amp_max_factor              Per-peak amplitude bound
+    //                                a_k ∈ [0, amp_max_factor·peak.height].
+    //                                2.0 covers noise-driven height
+    //                                estimation error without letting the
+    //                                LM explode amplitudes into
+    //                                compensation modes.
     // - pre_samples / post_samples  Per-peak window for integral_dec.
     struct NnlsDeconvConfig {
         bool        enabled                     = false;
@@ -95,7 +108,9 @@ struct WaveConfig {
         float       tau_r_max_ns = 10.0f;
         float       tau_f_min_ns =  2.0f;
         float       tau_f_max_ns = 100.0f;
-        float       cond_number_max = 1.0e6f;
+        float       shape_window_factor = 1.5f;
+        float       t0_window_ns        = 8.0f;
+        float       amp_max_factor      = 2.0f;
         int         pre_samples  =  8;
         int         post_samples = 40;
     };
@@ -170,27 +185,6 @@ public:
         int    n_iter;
     };
 
-    // Output of FitPulseShapeGamma() — same conventions, but the shape is
-    // the 3-parameter Gamma model from Li et al. 2024 (PLOS ONE
-    // 10.1371/journal.pone.0313999):
-    //
-    //     v(t) = (t-t0)^b · exp(-c·(t-t0))   for t > t0
-    //
-    // physically motivated as the impulse response of a multi-stage
-    // CR-RC shaping network (which is what the FADC250 anti-alias
-    // front end actually is).  The peak is at t = t0 + b/c.  `b` is a
-    // shape exponent allowed to be a real number (not just integer
-    // filter order); `c_inv_ns` = 1/c stored as ns instead of 1/ns so
-    // it's directly comparable to the two-tau τ_f / τ_r values.
-    struct PulseFitGammaResult {
-        bool   ok;
-        float  t0_ns;
-        float  b;              // shape exponent (≈ filter order)
-        float  c_inv_ns;       // 1/c, ns — asymptotic decay timescale
-        float  peak_amp;
-        float  chi2_per_dof;
-        int    n_iter;
-    };
 
     // Three-parameter Levenberg-Marquardt fit of the unit-amplitude
     // two-tau model T(t; t0, τ_r, τ_f) / T_max(τ_r, τ_f) to a waveform
@@ -214,16 +208,6 @@ public:
                                         float clk_ns,
                                         float model_err_floor = 0.01f);
 
-    // Same fit machinery as FitPulseShape but with the Gamma model (see
-    // PulseFitGammaResult for the formula).  Three shape params (t0, b,
-    // c); the per-pulse peak-height normalisation is identical.  Caller
-    // and downstream Python script use --model {two_tau,gamma} to switch.
-    static PulseFitGammaResult FitPulseShapeGamma(const uint16_t *slice,
-                                                  int nslice,
-                                                  int peak_idx_in_slice,
-                                                  float ped, float ped_rms,
-                                                  float clk_ns,
-                                                  float model_err_floor = 0.01f);
 
     // Power-user / diagnostic API: explicit NNLS deconvolution against a
     // caller-supplied template.  Used by the Python `apply_pulse_template`

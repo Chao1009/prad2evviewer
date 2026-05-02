@@ -86,7 +86,8 @@ PULSE_CACHE = 20
 # fitting hot path no longer touches it.
 
 def two_tau_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float) -> np.ndarray:
-    """Two-tau pulse normalized to unit peak height — for plot overlays."""
+    """Two-tau pulse normalized to unit peak height — for plot overlays.
+    The C++ fitter has its own copy."""
     out = np.zeros_like(t, dtype=np.float64)
     mask = t > t0
     if not mask.any():
@@ -99,38 +100,18 @@ def two_tau_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float) -> np.nda
     return out
 
 
-def gamma_unit(t: np.ndarray, t0: float, b: float, c_inv_ns: float) -> np.ndarray:
-    """Gamma pulse v(t) = (t-t0)^b · exp(-c·(t-t0)) normalised to unit
-    peak — for plot overlays.  c_inv_ns = 1/c (input in ns)."""
-    out = np.zeros_like(t, dtype=np.float64)
-    mask = t > t0
-    if not mask.any():
-        return out
-    if c_inv_ns <= 0 or b <= 0:
-        return out
-    c = 1.0 / c_inv_ns
-    dt = t[mask] - t0
-    t_peak = b / c
-    t_max  = (t_peak ** b) * np.exp(-b)
-    out[mask] = (np.power(dt, b) * np.exp(-c * dt)) / t_max
-    return out
-
-
 # ---------------------------------------------------------------------------
 # Per-channel accumulator
 # ---------------------------------------------------------------------------
 
 @dataclass
 class ChannelStats:
-    """Per-channel accumulator.  shape_a / shape_b are the two model-shape
-    parameters: (τ_r, τ_f) for two_tau, (b, 1/c [ns]) for gamma — same
-    JSON layout for both, the model name is recorded in `_meta`."""
     name: str
     channel_id: str            # roc_<tag>_<slot>_<channel>
     n_attempted: int = 0
     n_used: int = 0
-    shape_a:  List[float] = field(default_factory=list)
-    shape_b:  List[float] = field(default_factory=list)
+    tau_r:    List[float] = field(default_factory=list)
+    tau_f:    List[float] = field(default_factory=list)
     t0:       List[float] = field(default_factory=list)
     chi2:     List[float] = field(default_factory=list)
     peak_amp: List[float] = field(default_factory=list)   # original ADC peak height per pulse
@@ -144,13 +125,6 @@ class ChannelStats:
     sample_peak_amps: List[float]   = field(default_factory=list)
 
 
-# Per-model labels: (a-name, b-name, plot-display-a, plot-display-b)
-_MODEL_LABELS = {
-    "two_tau": ("tau_r_ns", "tau_f_ns", "τ_r (ns)",   "τ_f (ns)"),
-    "gamma":   ("b",        "c_inv_ns", "b",          "1/c (ns)"),
-}
-
-
 def _median_mad(values: List[float]) -> Tuple[float, float]:
     if not values:
         return (float("nan"), float("nan"))
@@ -160,10 +134,10 @@ def _median_mad(values: List[float]) -> Tuple[float, float]:
     return med, mad
 
 
-def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float,
-                     model: str) -> Dict:
-    a_med, a_mad = _median_mad(s.shape_a)
-    b_med, b_mad = _median_mad(s.shape_b)
+def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float
+                     ) -> Dict:
+    tr_med, tr_mad = _median_mad(s.tau_r)
+    tf_med, tf_mad = _median_mad(s.tau_f)
     t0_med, t0_mad = _median_mad(s.t0)
     pk_med, pk_mad = _median_mad(s.peak_amp)
     chi2_med = float(np.median(s.chi2)) if s.chi2 else float("nan")
@@ -171,14 +145,13 @@ def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float,
     good = bool(s.n_used >= min_pulses and chi2_med < chi2_max)
     ped_mean = s.ped_mean_sum / s.ped_n if s.ped_n else float("nan")
     ped_rms  = s.ped_rms_sum  / s.ped_n if s.ped_n else float("nan")
-    a_name, b_name, _, _ = _MODEL_LABELS[model]
     return {
         "channel_id": s.channel_id,
         "n_pulses_attempted": s.n_attempted,
         "n_pulses_used":      s.n_used,
-        a_name:    {"median": a_med, "mad": a_mad},
-        b_name:    {"median": b_med, "mad": b_mad},
-        "t0_ns":   {"median": t0_med, "mad": t0_mad},
+        "tau_r_ns": {"median": tr_med, "mad": tr_mad},
+        "tau_f_ns": {"median": tf_med, "mad": tf_mad},
+        "t0_ns":    {"median": t0_med, "mad": t0_mad},
         "peak_amp_adc": {"median": pk_med, "mad": pk_mad},
         "chi2_per_dof": {"median": chi2_med, "mean": chi2_mean},
         "ped": {"mean": float(ped_mean), "rms": float(ped_rms)},
@@ -202,7 +175,7 @@ def _import_pyplot():
 
 
 def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
-                 model: str, out_png: Path, label: str = "") -> None:
+                 out_png: Path, label: str = "") -> None:
     """Two-panel diagnostic — top: raw pulses + raw-scale median fit;
     bottom: normalised stack + unit-amplitude median-shape fit (the view
     the LM actually sees)."""
@@ -212,19 +185,15 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
         sharex=True,
         gridspec_kw=dict(height_ratios=[1, 1], hspace=0.08))
 
-    a_name, b_name, a_disp, b_disp = _MODEL_LABELS[model]
-    has_fit = bool(st.shape_a)
+    has_fit = bool(st.tau_r)
 
     if has_fit:
-        med_t0 = float(np.median(st.t0))
-        med_a  = float(np.median(st.shape_a))
-        med_b  = float(np.median(st.shape_b))
-        med_pk = float(np.median(st.peak_amp))
-        t_dense = np.linspace(0, (pre + post) * clk_ns, 400)
-        if model == "gamma":
-            unit_curve = gamma_unit(t_dense, med_t0, med_a, med_b)
-        else:
-            unit_curve = two_tau_unit(t_dense, med_t0, med_a, med_b)
+        med_t0    = float(np.median(st.t0))
+        med_tau_r = float(np.median(st.tau_r))
+        med_tau_f = float(np.median(st.tau_f))
+        med_pk    = float(np.median(st.peak_amp))
+        t_dense   = np.linspace(0, (pre + post) * clk_ns, 400)
+        unit_curve = two_tau_unit(t_dense, med_t0, med_tau_r, med_tau_f)
 
         # Top — raw scale.
         for s in st.sample_pulses:
@@ -245,9 +214,9 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
 
         chi2_med = float(np.median(st.chi2)) if st.chi2 else float("nan")
         title = (f"{label + ' ' if label else ''}{st.name}  "
-                 f"({st.channel_id})  [{model}]\n"
+                 f"({st.channel_id})\n"
                  f"n_used={st.n_used}  "
-                 f"{a_disp}={med_a:.2f}  {b_disp}={med_b:.2f}  "
+                 f"τ_r={med_tau_r:.2f} ns  τ_f={med_tau_f:.2f} ns  "
                  f"peak={med_pk:.0f} ADC  χ²/dof med={chi2_med:.2f}")
     else:
         for s in st.sample_pulses:
@@ -273,32 +242,31 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
 
 
 def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
-                 model: str, out_png: Path) -> None:
-    """Global shape-param / χ² histograms across all fitted channels."""
+                 out_png: Path) -> None:
+    """Global τ_r / τ_f / χ² histograms across all fitted channels."""
     have = [s for s in summaries if s["n_pulses_used"] >= min_pulses]
     if not have:
         print("[plot] no channels with enough pulses for summary", flush=True)
         return
-    a_name, b_name, a_disp, b_disp = _MODEL_LABELS[model]
-    a_arr = np.array([s[a_name]["median"] for s in have])
-    b_arr = np.array([s[b_name]["median"] for s in have])
+    tau_r = np.array([s["tau_r_ns"]["median"] for s in have])
+    tau_f = np.array([s["tau_f_ns"]["median"] for s in have])
     chi2  = np.array([s["chi2_per_dof"]["median"] for s in have])
     good  = np.array([s["good_fit"] for s in have])
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
 
     ax = axes[0, 0]
-    ax.hist(a_arr, bins=60, color="C0", alpha=0.85)
-    ax.set_xlabel(f"{a_disp} — channel median")
+    ax.hist(tau_r, bins=60, color="C0", alpha=0.85)
+    ax.set_xlabel("τ_r (ns) — channel median")
     ax.set_ylabel("channels")
-    ax.set_title(f"{a_disp}   ({model}, N={len(have)})")
+    ax.set_title(f"rise time   (N={len(have)})")
     ax.grid(True, alpha=0.3)
 
     ax = axes[0, 1]
-    ax.hist(b_arr, bins=60, color="C2", alpha=0.85)
-    ax.set_xlabel(f"{b_disp} — channel median")
+    ax.hist(tau_f, bins=60, color="C2", alpha=0.85)
+    ax.set_xlabel("τ_f (ns) — channel median")
     ax.set_ylabel("channels")
-    ax.set_title(f"{b_disp}   ({model})")
+    ax.set_title("fall time")
     ax.grid(True, alpha=0.3)
 
     ax = axes[1, 0]
@@ -316,12 +284,12 @@ def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
     ax.grid(True, alpha=0.3)
 
     ax = axes[1, 1]
-    sc = ax.scatter(a_arr, b_arr, c=np.log10(np.clip(chi2, 1e-2, None)),
+    sc = ax.scatter(tau_r, tau_f, c=np.log10(np.clip(chi2, 1e-2, None)),
                     s=8, cmap="viridis")
     fig.colorbar(sc, ax=ax, label="log₁₀(χ²/dof)")
-    ax.set_xlabel(a_disp)
-    ax.set_ylabel(b_disp)
-    ax.set_title(f"{a_disp} vs {b_disp}, coloured by χ²/dof")
+    ax.set_xlabel("τ_r (ns)")
+    ax.set_ylabel("τ_f (ns)")
+    ax.set_title("τ_r vs τ_f, coloured by χ²/dof")
     ax.grid(True, alpha=0.3)
 
     fig.tight_layout()
@@ -378,13 +346,6 @@ def main() -> None:
                     help="Minimum peak height (ADC, pedsub) for fitting.")
     ap.add_argument("--height-rms-mult", type=float, default=10.0,
                     help="Also require peak height >= this × ped.rms.")
-    ap.add_argument("--model", choices=["two_tau", "gamma"], default="two_tau",
-                    help="Pulse-shape model.  'two_tau': "
-                         "(1 - exp(-(t-t0)/τ_r)) * exp(-(t-t0)/τ_f).  "
-                         "'gamma': (t-t0)^b * exp(-c·(t-t0))  "
-                         "(Li et al. 2024, PLOS ONE 0313999) — physically "
-                         "motivated as the impulse response of a CR-RC "
-                         "shaping network.")
     ap.add_argument("--model-err-floor", type=float, default=0.01,
                     help="Floor on per-sample sigma in the normalised fit, as "
                          "a fraction of unit peak.  Caps how much a small "
@@ -565,24 +526,14 @@ def main() -> None:
                                 st.ped_rms_sum  += float(rms)
                                 st.ped_n        += 1
 
-                                if args.model == "gamma":
-                                    fit = dec.WaveAnalyzer.fit_pulse_shape_gamma(
-                                        slice_u16, rel_peak,
-                                        float(ped), float(rms), clk_ns,
-                                        args.model_err_floor)
-                                    if not fit.ok:
-                                        continue
-                                    st.shape_a.append(fit.b)
-                                    st.shape_b.append(fit.c_inv_ns)
-                                else:  # two_tau
-                                    fit = dec.WaveAnalyzer.fit_pulse_shape(
-                                        slice_u16, rel_peak,
-                                        float(ped), float(rms), clk_ns,
-                                        args.model_err_floor)
-                                    if not fit.ok:
-                                        continue
-                                    st.shape_a.append(fit.tau_r_ns)
-                                    st.shape_b.append(fit.tau_f_ns)
+                                fit = dec.WaveAnalyzer.fit_pulse_shape(
+                                    slice_u16, rel_peak,
+                                    float(ped), float(rms), clk_ns,
+                                    args.model_err_floor)
+                                if not fit.ok:
+                                    continue
+                                st.tau_r.append(fit.tau_r_ns)
+                                st.tau_f.append(fit.tau_f_ns)
                                 st.t0.append(fit.t0_ns)
                                 st.peak_amp.append(fit.peak_amp)
                                 st.chi2.append(fit.chi2_per_dof)
@@ -630,16 +581,9 @@ def main() -> None:
             "n_pulses_attempted": n_pulses_attempted,
             "n_pulses_used": n_pulses_used,
             "n_channels": len(stats),
-            "model": args.model,
-            "model_formula": (
-                "((1 - exp(-(t-t0)/tau_r)) * exp(-(t-t0)/tau_f)) / T_max(tau_r, tau_f),  t > t0"
-                if args.model == "two_tau" else
-                "((t-t0)^b * exp(-c*(t-t0))) / T_max(b, c),  t > t0   "
-                "[Li et al. 2024, PLOS ONE 0313999]"
-            ),
-            "fit_params": (["t0_ns", "tau_r_ns", "tau_f_ns"]
-                           if args.model == "two_tau"
-                           else ["t0_ns", "b", "c_inv_ns"]),
+            "model": "two_tau",
+            "model_formula": "((1 - exp(-(t-t0)/tau_r)) * exp(-(t-t0)/tau_f)) / T_max(tau_r, tau_f),  t > t0",
+            "fit_params": ["t0_ns", "tau_r_ns", "tau_f_ns"],
             "amplitude_handling": "each pulse divided by its own pedsub peak height before the fit; peak_amp_adc records the un-normalised peak amplitude per channel for downstream diagnostics",
             "sigma_per_sample": "ped.rms / pulse_peak_amp (i.e. relative noise on the normalised pulse) — keeps chi2/dof comparable across channels with very different signal amplitudes",
             "clk_ns": clk_ns,
@@ -654,8 +598,7 @@ def main() -> None:
     }
     summaries: List[Dict] = []
     for name in sorted(stats):
-        rec = finalize_channel(stats[name], args.min_pulses, args.chi2_max,
-                               args.model)
+        rec = finalize_channel(stats[name], args.min_pulses, args.chi2_max)
         out[name] = rec
         summaries.append({"name": name, **rec})
 
@@ -686,25 +629,25 @@ def main() -> None:
         st = stats.get(name)
         if st is None or not st.sample_pulses:
             continue
-        plot_channel(plt, st, clk_ns, pre, post, args.model,
+        plot_channel(plt, st, clk_ns, pre, post,
                      plot_dir / "good" / f"{name}.png", label="[good]")
     for name in bad_names:
         st = stats.get(name)
         if st is None or not st.sample_pulses:
             continue
-        plot_channel(plt, st, clk_ns, pre, post, args.model,
+        plot_channel(plt, st, clk_ns, pre, post,
                      plot_dir / "bad" / f"{name}.png", label="[bad]")
     for name in sorted(extra_plot):
         st = stats.get(name)
         if st is None or not st.sample_pulses:
             print(f"[plot] no pulses for explicit channel {name}", flush=True)
             continue
-        plot_channel(plt, st, clk_ns, pre, post, args.model,
+        plot_channel(plt, st, clk_ns, pre, post,
                      plot_dir / "explicit" / f"{name}.png")
 
     if not args.no_summary_plot:
         plot_summary(plt, summaries, args.min_pulses, args.chi2_max,
-                     args.model, plot_dir / "summary.png")
+                     plot_dir / "summary.png")
         print(f"[plot] wrote {plot_dir / 'summary.png'}", flush=True)
 
 

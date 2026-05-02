@@ -57,7 +57,7 @@ class ChanSummary:
     n_with_peaks:             int = 0
     n_with_piled:             int = 0
     n_deconv_applied:         int = 0
-    n_deconv_singular:        int = 0
+    n_deconv_lm_failed:       int = 0
     n_deconv_no_template:     int = 0
     n_deconv_bad_template:    int = 0
     n_deconv_fallback_global: int = 0
@@ -80,7 +80,7 @@ class ChanSummary:
             "n_with_piled":   self.n_with_piled,
             "deconv": {
                 "applied":              self.n_deconv_applied,
-                "singular":             self.n_deconv_singular,
+                "lm_not_converged":     self.n_deconv_lm_failed,
                 "skipped_no_template":  self.n_deconv_no_template,
                 "skipped_bad_template": self.n_deconv_bad_template,
                 "fallback_global":      self.n_deconv_fallback_global,
@@ -126,7 +126,7 @@ def plot_pileup_event(plt, samples_pedsub: np.ndarray,
                       tmpl: Template, clk_ns: float,
                       title: str, out_png: Path) -> None:
     """Two-panel diagnostic: top = waveform + deconv overlay, bottom =
-    residual.  `deconv` may be None (e.g. singular case) — then we draw
+    residual.  `deconv` may be None (e.g. LM failure) — then we draw
     just the WaveAnalyzer view."""
     n = samples_pedsub.shape[0]
     t = np.arange(n) * clk_ns
@@ -215,7 +215,7 @@ def plot_pileup_event(plt, samples_pedsub: np.ndarray,
 def _stat_field_for(state_byte: int) -> str:
     if state_byte == dec.Q_DECONV_APPLIED:         return "n_deconv_applied"
     if state_byte == dec.Q_DECONV_FALLBACK_GLOBAL: return "n_deconv_fallback_global"
-    if state_byte == dec.Q_DECONV_SINGULAR:        return "n_deconv_singular"
+    if state_byte == dec.Q_DECONV_LM_NOT_CONVERGED: return "n_deconv_lm_failed"
     if state_byte == dec.Q_DECONV_BAD_TEMPLATE:    return "n_deconv_bad_template"
     if state_byte == dec.Q_DECONV_NO_TEMPLATE:     return "n_deconv_no_template"
     return "n_deconv_no_template"  # Q_DECONV_NOT_RUN — group with no_template
@@ -495,7 +495,7 @@ def main() -> None:
         "n_phys_events": n_phys,
         "n_evio_splits": len(p.evio_files),
         "n_channels":    len(chans),
-        "deconv": {"applied": 0, "singular": 0,
+        "deconv": {"applied": 0, "lm_not_converged": 0,
                    "skipped_no_template": 0, "skipped_bad_template": 0,
                    "fallback_global": 0},
         "n_with_piled": 0,
@@ -505,7 +505,7 @@ def main() -> None:
     for su in chans.values():
         totals["n_with_piled"] += su.n_with_piled
         totals["deconv"]["applied"]              += su.n_deconv_applied
-        totals["deconv"]["singular"]             += su.n_deconv_singular
+        totals["deconv"]["lm_not_converged"]     += su.n_deconv_lm_failed
         totals["deconv"]["skipped_no_template"]  += su.n_deconv_no_template
         totals["deconv"]["skipped_bad_template"] += su.n_deconv_bad_template
         totals["deconv"]["fallback_global"]      += su.n_deconv_fallback_global
@@ -533,7 +533,7 @@ def main() -> None:
     print(f"  channel template state: " +
           "  ".join(f"{k}={v}" for k, v in state_counts.items()))
     print(f"  events with piled peaks: {totals['n_with_piled']}")
-    print(f"  deconv applied={d['applied']}  singular={d['singular']}  "
+    print(f"  deconv applied={d['applied']}  lm_not_converged={d['lm_not_converged']}  "
           f"fallback_global={d['fallback_global']}  "
           f"skipped(no_template)={d['skipped_no_template']}  "
           f"skipped(bad_template)={d['skipped_bad_template']}", flush=True)

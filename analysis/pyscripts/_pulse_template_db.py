@@ -53,7 +53,9 @@ class DeconvConfig:
     apply_to_all_peaks:          bool  = False
     tau_r_range_ns:  Tuple[float, float] = (0.5, 10.0)
     tau_f_range_ns:  Tuple[float, float] = (2.0, 100.0)
-    cond_number_max: float = 1.0e6
+    shape_window_factor: float = 1.5
+    t0_window_ns:        float = 8.0
+    amp_max_factor:      float = 2.0
     pre_samples:     int = 8
     post_samples:    int = 40
     min_pulses_override: Optional[int]   = None
@@ -79,7 +81,8 @@ def load_nnls_deconv_config(daq_config_path: Optional[str]) -> DeconvConfig:
 
     known = {"enabled", "template_file",
              "fallback_to_global_template", "apply_to_all_peaks",
-             "tau_r_range_ns", "tau_f_range_ns", "cond_number_max",
+             "tau_r_range_ns", "tau_f_range_ns",
+             "shape_window_factor", "t0_window_ns", "amp_max_factor",
              "pre_samples", "post_samples",
              "min_pulses_override", "chi2_max_override"}
     payload = {k: v for k, v in sec.items() if not k.startswith("_")}
@@ -94,7 +97,9 @@ def load_nnls_deconv_config(daq_config_path: Optional[str]) -> DeconvConfig:
         apply_to_all_peaks          = bool(payload.get("apply_to_all_peaks", False)),
         tau_r_range_ns  = tuple(payload.get("tau_r_range_ns",  (0.5, 10.0))),
         tau_f_range_ns  = tuple(payload.get("tau_f_range_ns",  (2.0, 100.0))),
-        cond_number_max = float(payload.get("cond_number_max", 1.0e6)),
+        shape_window_factor = float(payload.get("shape_window_factor", 1.5)),
+        t0_window_ns        = float(payload.get("t0_window_ns",        8.0)),
+        amp_max_factor      = float(payload.get("amp_max_factor",      2.0)),
         pre_samples     = int(payload.get("pre_samples",  8)),
         post_samples    = int(payload.get("post_samples", 40)),
         min_pulses_override = payload.get("min_pulses_override"),

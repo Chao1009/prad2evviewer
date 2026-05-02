@@ -187,9 +187,11 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
                     dc.tau_f_min_ns = nd["tau_f_range_ns"][0].get<float>();
                     dc.tau_f_max_ns = nd["tau_f_range_ns"][1].get<float>();
                 }
-                if (nd.contains("cond_number_max")) dc.cond_number_max = nd["cond_number_max"].get<float>();
-                if (nd.contains("pre_samples"))     dc.pre_samples     = nd["pre_samples"].get<int>();
-                if (nd.contains("post_samples"))    dc.post_samples    = nd["post_samples"].get<int>();
+                if (nd.contains("shape_window_factor")) dc.shape_window_factor = nd["shape_window_factor"].get<float>();
+                if (nd.contains("t0_window_ns"))        dc.t0_window_ns        = nd["t0_window_ns"].get<float>();
+                if (nd.contains("amp_max_factor"))      dc.amp_max_factor      = nd["amp_max_factor"].get<float>();
+                if (nd.contains("pre_samples"))         dc.pre_samples         = nd["pre_samples"].get<int>();
+                if (nd.contains("post_samples"))        dc.post_samples        = nd["post_samples"].get<int>();
             }
         }
     }

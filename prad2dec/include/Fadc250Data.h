@@ -293,42 +293,53 @@ struct PulseTemplate {
 // FALLBACK_GLOBAL from everything else, but the diagnostic Python
 // script reports the full breakdown:
 //
-//   Q_DECONV_NOT_RUN          Deconvolve() never invoked, or pre-flight
-//                              check failed (no samples / npeaks==0 /
-//                              nsamples > MAX_SAMPLES)
-//   Q_DECONV_NO_TEMPLATE      reserved for callers that want to surface
-//                              "no template available for this channel"
-//                              (the C++ Deconvolve method itself never
-//                              sets this — it requires a template to be
-//                              passed in; applyAutoDeconv skips the call
-//                              entirely when the store returns nullptr)
-//   Q_DECONV_BAD_TEMPLATE     τ_r / τ_f outside cfg.nnls_deconv ranges
-//   Q_DECONV_SINGULAR         design matrix ill-conditioned (cond proxy
-//                              exceeds cfg.cond_number_max, or the
-//                              active-set Cholesky went indefinite);
-//                              deconv aborted, peaks left unchanged
-//   Q_DECONV_APPLIED          per-channel template, NNLS converged
-//   Q_DECONV_FALLBACK_GLOBAL  global-median fallback template,
-//                              NNLS converged
+//   Q_DECONV_NOT_RUN           Deconvolve() never invoked, or pre-flight
+//                               check failed (no samples / npeaks==0 /
+//                               nsamples > MAX_SAMPLES)
+//   Q_DECONV_NO_TEMPLATE       reserved for callers that want to surface
+//                               "no template available for this channel"
+//                               (the C++ Deconvolve method itself never
+//                               sets this — it requires a template to be
+//                               passed in; applyAutoDeconv skips the call
+//                               entirely when the store returns nullptr)
+//   Q_DECONV_BAD_TEMPLATE      τ_r / τ_f outside cfg.nnls_deconv ranges
+//   Q_DECONV_LM_NOT_CONVERGED  the per-pulse LM exhausted MAX_ITER without
+//                               ever finding a step that improved on the
+//                               initial guess, OR every Cholesky in the
+//                               active set went indefinite; caller should
+//                               treat this as a deconv failure and fall
+//                               back to WaveAnalyzer's local-maxima values
+//   Q_DECONV_APPLIED           per-channel template, LM converged
+//   Q_DECONV_FALLBACK_GLOBAL   global-median fallback template,
+//                               LM converged
 //
 // On any non-converged outcome the amplitude/height/integral arrays are
 // zeroed so callers can safely fall back to WaveResult.peaks values
-// without checking state per element.
+// without checking state per element.  The per-peak (t0, τ_r, τ_f)
+// arrays carry the per-pulse fit values when state ∈ {APPLIED,
+// FALLBACK_GLOBAL} — the diagnostic Python script reads them to plot
+// the actual fitted templates per peak; production consumers (replay
+// tree, viewer) ignore them.
 struct DeconvOutput {
     uint8_t state;
     int     n;                      // # peaks deconvolved (= WaveResult.npeaks at call time)
-    float   amplitude[MAX_PEAKS];   // a_k from NNLS (template-shape units)
-    float   height  [MAX_PEAKS];    // a_k · T_max(τ_r, τ_f)
+    float   amplitude[MAX_PEAKS];   // a_k from LM (peak height of unit template at this peak)
+    float   height  [MAX_PEAKS];    // = a_k · T_max(τ_r_k, τ_f_k)
     float   integral[MAX_PEAKS];    // a_k · Σ template over per-peak window
-    float   chi2_per_dof;           // residual chi² normalized by sigma=ped.rms
-    float   cond_number;            // proxy condition number of M^T M
+    float   t0_ns   [MAX_PEAKS];    // per-peak fitted onset time (ns from sample 0)
+    float   tau_r_ns[MAX_PEAKS];    // per-peak fitted rise constant
+    float   tau_f_ns[MAX_PEAKS];    // per-peak fitted fall constant
+    float   chi2_per_dof;           // residual χ²/dof of the multi-peak fit
     void clear()
     {
-        state = 0; n = 0; chi2_per_dof = 0; cond_number = 0;
+        state = 0; n = 0; chi2_per_dof = 0;
         for (int i = 0; i < MAX_PEAKS; ++i) {
             amplitude[i] = 0;
             height[i]    = 0;
             integral[i]  = 0;
+            t0_ns[i]     = 0;
+            tau_r_ns[i]  = 0;
+            tau_f_ns[i]  = 0;
         }
     }
 };
@@ -336,7 +347,7 @@ struct DeconvOutput {
 constexpr uint8_t Q_DECONV_NOT_RUN          = 0;
 constexpr uint8_t Q_DECONV_NO_TEMPLATE      = 1;
 constexpr uint8_t Q_DECONV_BAD_TEMPLATE     = 2;
-constexpr uint8_t Q_DECONV_SINGULAR         = 3;
+constexpr uint8_t Q_DECONV_LM_NOT_CONVERGED = 3;
 constexpr uint8_t Q_DECONV_APPLIED          = 4;
 constexpr uint8_t Q_DECONV_FALLBACK_GLOBAL  = 5;
 

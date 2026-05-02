@@ -110,14 +110,16 @@
             "clk_mhz":         250.0,
 
             "nnls_deconv": {
-                "_comment": "NNLS pile-up deconvolution. When enabled, the analyzer follows the local-maxima peak finder with a per-channel two-tau template fit that solves for non-negative per-peak amplitudes, overwriting peak.height/integral on piled events and marking the touched peaks with Q_PEAK_DECONVOLVED. Channels without a usable template fall back to the WaveAnalyzer values unless fallback_to_global_template is true. WARNING: apply_to_all_peaks=true runs NNLS on every channel-event (~10x slowdown) — leave false unless debugging. See docs/technical_notes/waveform_analysis/wave_analysis.md.",
+                "_comment": "Per-pulse-fit pile-up deconvolution. When enabled, the analyzer runs a per-event Levenberg-Marquardt fit that frees (a_k, t0_k, tau_r_k, tau_f_k) for each peak with the channel template providing initial guess + tight bounds. Overwrites peak.height/integral on piled events and marks the touched peaks with Q_PEAK_DECONVOLVED. Channels without a usable template fall back to the WaveAnalyzer values unless fallback_to_global_template is true. WARNING: apply_to_all_peaks=true runs the LM on every channel-event (~10x slowdown) — leave false unless debugging. See docs/technical_notes/waveform_analysis/wave_analysis.md. Config block name 'nnls_deconv' is historical; the underlying solver is no longer NNLS.",
                 "enabled":                     false,
                 "template_file":               "pulse_templates.json",
                 "fallback_to_global_template": false,
                 "apply_to_all_peaks":          false,
                 "tau_r_range_ns":              [0.5, 10.0],
                 "tau_f_range_ns":              [2.0, 100.0],
-                "cond_number_max":             1.0e6,
+                "shape_window_factor":         1.5,
+                "t0_window_ns":                8.0,
+                "amp_max_factor":              2.0,
                 "pre_samples":                 8,
                 "post_samples":                40,
                 "min_pulses_override":         null,
