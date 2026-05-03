@@ -121,7 +121,7 @@ struct AppState {
     // GEM system
     gem::GemSystem gem_sys;
     gem::GemCluster gem_clusterer;
-    bool gem_enabled = false;       // true if gem_daq_map.json loaded successfully
+    bool gem_enabled = false;       // true if gem_map.json loaded successfully
 
     // GEM per-detector lab-frame transform (same type as HyCal)
     std::vector<DetectorTransform> gem_transforms;  // indexed by detector id

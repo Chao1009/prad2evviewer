@@ -16,10 +16,10 @@ FADC250 channels (HyCal + Veto + LMS) — distinguish via `hycal.module_type`:
 | Value | Type | Source |
 |---|---|---|
 | 0 | Unknown | — |
-| 1 | PbGlass | `hycal_modules.json` `t="PbGlass"` |
-| 2 | PbWO4   | `hycal_modules.json` `t="PbWO4"`   |
-| 3 | SCINT   | `hycal_modules.json` `t="SCINT"` (Veto V1..V4) |
-| 4 | LMS     | `hycal_modules.json` `t="LMS"` (LMSPin, LMS1..3) |
+| 1 | PbGlass | `hycal_map.json` `t="PbGlass"` |
+| 2 | PbWO4   | `hycal_map.json` `t="PbWO4"`   |
+| 3 | SCINT   | `hycal_map.json` `t="SCINT"` (Veto V1..V4) |
+| 4 | LMS     | `hycal_map.json` `t="LMS"` (LMSPin, LMS1..3) |
 
 `hycal.module_id` encoding (globally unique):
 PbGlass = 1..1156, PbWO4 = 1001..2152, SCINT = 3001..3004,

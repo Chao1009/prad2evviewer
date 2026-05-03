@@ -126,21 +126,15 @@ void ViewerServer::init(const Config &cfg)
 
     // --- build base_config JSON for /api/config ---
     // File pointers come from the parsed daq_cfg (already loaded by AppState::init).
-    json modules_j = json::array(), daq_j = json::array();
+    json hycal_map_j = json::array();
     {
-        const std::string mods = app_file_.daq_cfg.modules_file.empty()
-            ? std::string("hycal_modules.json") : app_file_.daq_cfg.modules_file;
-        std::string s = readFile(findFile(mods, db_dir));
-        if (!s.empty()) modules_j = json::parse(s, nullptr, false);
-    }
-    {
-        const std::string daq_fn = app_file_.daq_cfg.hycal_daq_map_file.empty()
-            ? std::string("hycal_daq_map.json") : app_file_.daq_cfg.hycal_daq_map_file;
-        std::string s = readFile(findFile(daq_fn, db_dir));
-        if (!s.empty()) daq_j = json::parse(s, nullptr, false);
+        const std::string map_name = app_file_.daq_cfg.hycal_map_file.empty()
+            ? std::string("hycal_map.json") : app_file_.daq_cfg.hycal_map_file;
+        std::string s = readFile(findFile(map_name, db_dir));
+        if (!s.empty()) hycal_map_j = json::parse(s, nullptr, false);
     }
     json base_cfg = {
-        {"modules", modules_j}, {"daq", daq_j}, {"crate_roc", app_file_.crate_roc_json},
+        {"hycal_map", hycal_map_j}, {"crate_roc", app_file_.crate_roc_json},
     };
     app_file_.base_config = std::move(base_cfg);
     app_online_.base_config = app_file_.base_config;

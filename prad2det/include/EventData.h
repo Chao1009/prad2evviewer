@@ -33,7 +33,7 @@ static constexpr int kMaxGemHits   = 400;
 // ── Module type categorisation ────────────────────────────────────────────
 //
 // Single source of truth at the data-tree level.  Values come from the "t"
-// field of hycal_modules.json (PbGlass / PbWO4 / SCINT / LMS), parsed at
+// field of hycal_map.json (PbGlass / PbWO4 / SCINT / LMS), parsed at
 // load time and stored per-channel in RawEventData::module_type.  Numeric
 // values are arbitrary but stable — kept as a uint8_t so the TTree branch
 // stays compact (1 byte per channel).

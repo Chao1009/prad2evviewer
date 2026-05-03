@@ -1,9 +1,8 @@
 {
     "_comment": "DAQ configuration for prad2decoder — JLab single-event mode (tag 0xB1)",
 
-    "modules_file":       "hycal_modules.json",
-    "hycal_daq_map_file": "hycal_daq_map.json",
-    "gem_daq_map_file":   "gem_daq_map.json",
+    "hycal_map_file": "hycal_map.json",
+    "gem_map_file":   "gem_map.json",
     "adc_format": "fadc250",
     "ti_master_tag": "0x27",
     "sparsify_sigma": 0,

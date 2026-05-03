@@ -176,11 +176,13 @@ class HyCalSystem
 public:
     HyCalSystem() = default;
 
-    // Initialize from JSON config files.
-    // modules_path: hycal_modules.json (geometry)
-    // daq_path:     hycal_daq_map.json (crate/slot/channel mapping)
+    // Initialize from the merged HyCal map JSON.
+    // map_path: hycal_map.json — array of per-module records of the form
+    //   {"n": ..., "t": ..., "geo": {sx,sy,x,y,sec,row,col},
+    //                          "daq": {crate,slot,channel}}.
+    // The "daq" block is optional (e.g. PRad-1 has no daq for V1-V4).
     // Returns false on error.
-    bool Init(const std::string &modules_path, const std::string &daq_path);
+    bool Init(const std::string &map_path);
 
     // Load per-module calibration from JSON file.
     // Format: [{"name":"W735","factor":0.37,"base_energy":2138.67,"non_linear":0.006}, ...]

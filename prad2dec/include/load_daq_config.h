@@ -288,10 +288,9 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     // companion-file pointers — application layer resolves them against the
     // database directory and decides which to actually load.  pedestal_file
     // is consumed by load_pedestals().
-    if (j.contains("modules_file"))       cfg.modules_file       = j["modules_file"].get<std::string>();
-    if (j.contains("hycal_daq_map_file")) cfg.hycal_daq_map_file = j["hycal_daq_map_file"].get<std::string>();
-    if (j.contains("gem_daq_map_file"))   cfg.gem_daq_map_file   = j["gem_daq_map_file"].get<std::string>();
-    if (j.contains("pedestal_file"))      cfg.pedestal_file      = j["pedestal_file"].get<std::string>();
+    if (j.contains("hycal_map_file")) cfg.hycal_map_file = j["hycal_map_file"].get<std::string>();
+    if (j.contains("gem_map_file"))   cfg.gem_map_file   = j["gem_map_file"].get<std::string>();
+    if (j.contains("pedestal_file"))  cfg.pedestal_file  = j["pedestal_file"].get<std::string>();
 
     return true;
 }

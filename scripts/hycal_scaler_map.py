@@ -42,7 +42,7 @@ from hycal_geoview import (
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
-MODULES_JSON = DB_DIR / "hycal_modules.json"
+MODULES_JSON = DB_DIR / "hycal_map.json"
 
 SCALER_PV = "B_DET_HYCAL_FADC_{label}:c"
 POLL_INTERVAL_MS = 2_500   # 1 seconds
@@ -346,7 +346,7 @@ def main():
     ap.add_argument("--sim", action="store_true",
                     help="Simulation mode (random values, no EPICS)")
     ap.add_argument("--database", type=Path, default=MODULES_JSON,
-                    help="Path to hycal_modules.json")
+                    help="Path to hycal_map.json")
     ap.add_argument("--theme", choices=available_themes(), default="dark",
                     help="Colour theme (default: dark)")
     args = ap.parse_args()

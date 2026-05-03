@@ -66,14 +66,14 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def _find_modules_json() -> Path:
     candidates = [
-        SCRIPT_DIR / ".." / "database" / "hycal_modules.json",
-        Path.cwd() / "database" / "hycal_modules.json",
-        Path.cwd() / "hycal_modules.json",
+        SCRIPT_DIR / ".." / "database" / "hycal_map.json",
+        Path.cwd() / "database" / "hycal_map.json",
+        Path.cwd() / "hycal_map.json",
     ]
     for c in candidates:
         if c.is_file():
             return c.resolve()
-    return (SCRIPT_DIR / ".." / "database" / "hycal_modules.json").resolve()
+    return (SCRIPT_DIR / ".." / "database" / "hycal_map.json").resolve()
 
 MODULES_JSON = _find_modules_json()
 
@@ -617,7 +617,7 @@ def main():
     ap.add_argument("--field", type=str, default=None,
                     help="Initial field to display (default: first field)")
     ap.add_argument("--modules", type=Path, default=MODULES_JSON,
-                    help=f"Path to hycal_modules.json (default: {MODULES_JSON})")
+                    help=f"Path to hycal_map.json (default: {MODULES_JSON})")
     ap.add_argument("--theme", choices=available_themes(), default="dark",
                     help="Colour theme (default: dark)")
     args = ap.parse_args()

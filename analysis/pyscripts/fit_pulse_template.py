@@ -167,7 +167,7 @@ def aggregate_by_type(summaries: List[Dict], min_pulses: int) -> Dict[str, Dict]
     medians for every fit parameter.  Used downstream as per-type initial
     guesses / priors when a per-channel template is missing or
     low-statistics.  Type strings come from HyCalSystem.Module.type
-    (sourced from hycal_modules.json), so SCINT/LMS/PbWO4/PbGlass are
+    (sourced from hycal_map.json), so SCINT/LMS/PbWO4/PbGlass are
     whatever the JSON spelled them."""
     by_type: Dict[str, Dict] = {}
     types_present = sorted({s["module_type"] for s in summaries})
@@ -556,7 +556,7 @@ def main() -> None:
             if mod is not None:
                 name  = mod.name
                 # mod.type is the C++ HyCalSystem ModuleType enum, populated
-                # from hycal_modules.json's "t" field — single source of truth.
+                # from hycal_map.json's "t" field — single source of truth.
                 mtype = mod.type.name
         name_cache[(roc_tag, s, c)] = (name, chan_id, mtype)
         return name, chan_id, mtype

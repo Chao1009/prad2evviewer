@@ -27,37 +27,18 @@ using json = nlohmann::json;
 
 namespace analysis {
 
-void Replay::LoadDaqMap(const std::string &json_path)
+void Replay::LoadHyCalMap(const std::string &json_path)
 {
     std::ifstream f(json_path);
     if (!f.is_open()) {
-        std::cerr << "Replay: cannot open DAQ map: " << json_path << "\n";
+        std::cerr << "Replay: cannot open HyCal map: " << json_path << "\n";
         return;
     }
     auto j = json::parse(f, nullptr, false, true);
-    if (j.is_array()) {
-        for (auto &entry : j) {
-            std::string name = entry.value("name", "");
-            int crate   = entry.value("crate", -1);
-            int slot    = entry.value("slot", -1);
-            int channel = entry.value("channel", -1);
-            if (!name.empty() && crate >= 0)
-                daq_map_[std::to_string(crate) + "_" + std::to_string(slot) +
-                         "_" + std::to_string(channel)] = name;
-        }
-    }
-    std::cerr << "Replay: loaded " << daq_map_.size() << " DAQ map entries\n";
-}
-
-void Replay::LoadModulesInfo(const std::string &json_path)
-{
-    std::ifstream f(json_path);
-    if (!f.is_open()) {
-        std::cerr << "Replay: cannot open modules info: " << json_path << "\n";
+    if (!j.is_array()) {
+        std::cerr << "Replay: " << json_path << " is not a JSON array\n";
         return;
     }
-    auto j = json::parse(f, nullptr, false, true);
-    if (!j.is_array()) return;
 
     auto parse_t = [](const std::string &t) {
         if (t == "PbGlass") return prad2::MOD_PbGlass;
@@ -67,14 +48,26 @@ void Replay::LoadModulesInfo(const std::string &json_path)
         return prad2::MOD_UNKNOWN;
     };
 
+    daq_map_.clear();
+    module_types_.clear();
     for (auto &entry : j) {
         std::string name = entry.value("n", "");
-        std::string t    = entry.value("t", "");
         if (name.empty()) continue;
-        module_types_[name] = parse_t(t);
+        module_types_[name] = parse_t(entry.value("t", ""));
+
+        if (entry.contains("daq")) {
+            const auto &d = entry["daq"];
+            int crate   = d.value("crate", -1);
+            int slot    = d.value("slot", -1);
+            int channel = d.value("channel", -1);
+            if (crate >= 0)
+                daq_map_[std::to_string(crate) + "_" + std::to_string(slot) +
+                         "_" + std::to_string(channel)] = name;
+        }
     }
     std::cerr << "Replay: loaded " << module_types_.size()
-              << " module-type entries from " << json_path << "\n";
+              << " modules (" << daq_map_.size() << " with daq) from "
+              << json_path << "\n";
 }
 
 std::string Replay::moduleName(int roc, int slot, int ch) const
@@ -275,8 +268,9 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             ev->ssp_raw      = ssp_raw_snapshot;
 
             // Decode FADC250 data — single pass over all channels (HyCal +
-            // Veto + LMS).  Type dispatch comes from hycal_modules.json,
-            // not module-name prefix; module_type[nch] records the category.
+            // Veto + LMS).  Type dispatch comes from hycal_map.json's "t"
+            // field, not module-name prefix; module_type[nch] records the
+            // category.
             int nch = 0;
             for (int r = 0; r < event->nrocs; ++r) {
                 auto &roc = event->rocs[r];
@@ -426,11 +420,10 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 
     // Setup HyCal system and clusterer
     fdec::HyCalSystem hycal;
-     std::string daq_map_file = db_dir + "/hycal_daq_map.json";
-    if(prad1 == true)
-        daq_map_file = db_dir + "/prad1/prad_hycal_daq_map.json";
-    hycal.Init(db_dir + "/hycal_modules.json", daq_map_file);
-    
+    std::string hycal_map_file = db_dir + (prad1 ? "/prad1/prad_hycal_map.json"
+                                                  : "/hycal_map.json");
+    hycal.Init(hycal_map_file);
+
     if(prad1 == true) evc::load_pedestals(db_dir + "/prad1/adc1881m_pedestals.json", daq_cfg_);
 
     std::string calib_file = db_dir + "/" + gRunConfig.energy_calib_file;
@@ -449,7 +442,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     std::unique_ptr<gem::GemCluster> gem_clusterer;
 if(!prad1){
     gem_sys = std::make_unique<gem::GemSystem>();
-    std::string gem_map_file = db_dir + "/gem_daq_map.json";
+    std::string gem_map_file = db_dir + "/gem_map.json";
     gem_sys->Init(gem_map_file);
     std::cerr << "GEM map  : " << gem_map_file
                 << " (" << gem_sys->GetNDetectors() << " detectors)\n";
