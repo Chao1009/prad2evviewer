@@ -25,7 +25,28 @@ struct DetectorTransform {
         float tx=0, ty=0, tz=0;
     };
 
-    // Force matrix precomputation (idempotent).
+    // Mark the cached rotation matrix as stale so the next prepare() /
+    // toLab() / rotate() / matrix() call rebuilds it.  Use this after
+    // any direct mutation of x/y/z/rx/ry/rz — those raw field writes
+    // don't know about the cache.  set() and the Python property setters
+    // call this for you.
+    void invalidate() { prepared_ = false; }
+
+    // Set pose (translation in mm + tilts in degrees) and rebuild the
+    // cached rotation matrix in one shot.  Equivalent to writing the six
+    // fields plus invalidate() + prepare(); preferred over field-at-a-
+    // time mutation because it can't leave the cache half-built.
+    void set(float x_, float y_, float z_,
+             float rx_, float ry_, float rz_) {
+        x = x_; y = y_; z = z_;
+        rx = rx_; ry = ry_; rz = rz_;
+        invalidate();
+        prepare();
+    }
+
+    // Force matrix precomputation (idempotent — first call only).  Call
+    // invalidate() first if you mutated any field after the previous
+    // prepare(), or just use set() to do both at once.
     void prepare() const {
         if (prepared_) return;
         const float DEG = 3.14159265f / 180.f;

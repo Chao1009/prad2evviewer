@@ -782,19 +782,41 @@ static void bind_transform(py::module_ &m)
         .def_readonly("ty",  &DetectorTransform::Matrix::ty)
         .def_readonly("tz",  &DetectorTransform::Matrix::tz);
 
+    // Property setter that invalidates the cached rotation matrix on
+    // every write, so `t.x = 5` does the obvious thing — the next to_lab
+    // call rebuilds with the new field.  Macro keeps the six bindings
+    // identical without the boilerplate.
+#define PRAD2_BIND_TRANSFORM_AXIS(NAME, MEMBER)                            \
+    .def_property(NAME,                                                    \
+        [](const DetectorTransform &t) { return t.MEMBER; },               \
+        [](DetectorTransform &t, float v) {                                \
+            t.MEMBER = v; t.invalidate();                                  \
+        })
+
     py::class_<DetectorTransform>(m, "DetectorTransform",
         "Planar detector pose (origin + tilts in degrees).  to_lab(x, y) "
-        "returns a lab-frame 3-vector; rotate(x, y) skips the translation.")
+        "returns a lab-frame 3-vector; rotate(x, y) skips the translation. "
+        "Field setters auto-invalidate the cached rotation matrix; prefer "
+        "set(x, y, z, rx, ry, rz) when writing all six at once.")
         .def(py::init<>())
-        .def_readwrite("x",  &DetectorTransform::x)
-        .def_readwrite("y",  &DetectorTransform::y)
-        .def_readwrite("z",  &DetectorTransform::z)
-        .def_readwrite("rx", &DetectorTransform::rx)
-        .def_readwrite("ry", &DetectorTransform::ry)
-        .def_readwrite("rz", &DetectorTransform::rz)
+        PRAD2_BIND_TRANSFORM_AXIS("x",  x)
+        PRAD2_BIND_TRANSFORM_AXIS("y",  y)
+        PRAD2_BIND_TRANSFORM_AXIS("z",  z)
+        PRAD2_BIND_TRANSFORM_AXIS("rx", rx)
+        PRAD2_BIND_TRANSFORM_AXIS("ry", ry)
+        PRAD2_BIND_TRANSFORM_AXIS("rz", rz)
+        .def("set", &DetectorTransform::set,
+             py::arg("x"), py::arg("y"), py::arg("z"),
+             py::arg("rx"), py::arg("ry"), py::arg("rz"),
+             "Set translation (mm) and tilts (degrees), then rebuild the "
+             "cached rotation matrix.  Preferred over per-field writes.")
+        .def("invalidate", &DetectorTransform::invalidate,
+             "Mark the cached rotation matrix stale; the next to_lab / "
+             "rotate / matrix call will rebuild it.")
         .def("prepare", &DetectorTransform::prepare,
-             "Force matrix precomputation (idempotent).  Called implicitly "
-             "by to_lab / rotate / matrix().")
+             "Force matrix precomputation (idempotent — first call after "
+             "construction or invalidate()).  Called implicitly by "
+             "to_lab / rotate / matrix().")
         .def("to_lab",
             [](const DetectorTransform &self, float dx, float dy) {
                 float lx, ly, lz;
@@ -815,6 +837,8 @@ static void bind_transform(py::module_ &m)
             "translation.  Handy for drawing in detector-local coords.")
         .def("matrix", &DetectorTransform::matrix,
              py::return_value_policy::reference_internal);
+
+#undef PRAD2_BIND_TRANSFORM_AXIS
 }
 
 static void bind_epics(py::module_ &m)

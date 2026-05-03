@@ -14,9 +14,7 @@ static void setTransform(DetectorTransform &t,
                          float x, float y, float z,
                          float rx, float ry, float rz)
 {
-    t.x = x; t.y = y; t.z = z;
-    t.rx = rx; t.ry = ry; t.rz = rz;
-    t.prepare();
+    t.set(x, y, z, rx, ry, rz);
 }
 
 //=============================================================================
@@ -183,7 +181,12 @@ void AppState::init(const std::string &db_dir,
                 std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
                 int ndet = gem_sys.GetNDetectors();
                 gem_transforms.resize(ndet);
-                for (auto &t : gem_transforms) t.prepare();
+                // No eager prepare() here — fields are still defaults; the
+                // runinfo block below calls set(...) to write the real pose
+                // and rebuild the cache.  Pre-preparing with default zeros
+                // would lock in an identity matrix that set() couldn't undo
+                // before the API was hardened (was a real bug — see
+                // DetectorTransform.h::set).
                 gem_occupancy.resize(ndet);
                 for (auto &h : gem_occupancy) h.init(GEM_OCC_NX, GEM_OCC_NY);
                 // Pedestals + common-mode ranges are loaded from runinfo
