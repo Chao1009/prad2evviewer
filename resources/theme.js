@@ -51,6 +51,7 @@ const _FALLBACK = {
     '--theme-overlay':       'rgba(0,0,0,0.7)',
     '--theme-overlay-light': 'rgba(0,0,0,0.35)',
     '--theme-shadow':        'rgba(0,0,0,0.5)',
+    '--theme-cut-shade':     'rgba(0,0,0,0.18)',
 };
 
 function _readCssVar(name){
@@ -87,6 +88,7 @@ function refreshTheme(){
         ['overlay',      '--theme-overlay'],
         ['overlayLight', '--theme-overlay-light'],
         ['shadow',       '--theme-shadow'],
+        ['cutShade',     '--theme-cut-shade'],
     ];
     for(const [k, css] of keys) THEME[k] = _readCssVar(css);
 }

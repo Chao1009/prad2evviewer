@@ -34,10 +34,38 @@ function initCutDialog(){
             cb.type = 'checkbox';
             cb.dataset.bit = d.name;
             cb.checked = !!(set && set.has(d.name));
+            cb.onchange = syncBitMutualExclusion;
             lbl.appendChild(cb);
             lbl.appendChild(document.createTextNode(d.label || d.name));
             c.appendChild(lbl);
         });
+    }
+
+    // A bit can be in Accept OR Reject but not both — disable the twin
+    // checkbox when its sibling is checked, so the user can't accidentally
+    // submit a contradictory filter.  Called on every checkbox change AND
+    // after the lists are built (to seed the disabled state from saved
+    // filter values).
+    function syncBitMutualExclusion(){
+        const accept = $('cut-accept-list');
+        const reject = $('cut-reject-list');
+        if (!accept || !reject) return;
+        const accBits = new Set(
+            Array.from(accept.querySelectorAll('input[type="checkbox"]'))
+                .filter(cb => cb.checked).map(cb => cb.dataset.bit));
+        const rejBits = new Set(
+            Array.from(reject.querySelectorAll('input[type="checkbox"]'))
+                .filter(cb => cb.checked).map(cb => cb.dataset.bit));
+        const setDisabled = (cb, otherSet) => {
+            const taken = otherSet.has(cb.dataset.bit);
+            cb.disabled = taken;
+            const lbl = cb.parentElement;
+            if (lbl) lbl.classList.toggle('disabled', taken);
+        };
+        accept.querySelectorAll('input[type="checkbox"]')
+            .forEach(cb => setDisabled(cb, rejBits));
+        reject.querySelectorAll('input[type="checkbox"]')
+            .forEach(cb => setDisabled(cb, accBits));
     }
 
     function openCutDialog(){
@@ -58,6 +86,7 @@ function initCutDialog(){
         const qb     = f.quality_bits || {};
         buildBitList('cut-accept-list', new Set(qb.accept || []));
         buildBitList('cut-reject-list', new Set(qb.reject || []));
+        syncBitMutualExclusion();
     }
 
     function closeCutDialog(){
@@ -121,6 +150,7 @@ function initCutDialog(){
         ['cut-accept-list','cut-reject-list'].forEach(cid => {
             $(cid).querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
         });
+        syncBitMutualExclusion();
     };
 
     $('cut-apply-btn').onclick = () => {

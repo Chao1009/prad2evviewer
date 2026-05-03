@@ -59,7 +59,7 @@ function xRangeShapes(xMin, xMax, range){
     if (!range) return [];
     const out = [];
     const dim = {type:'rect', yref:'paper', y0:0, y1:1,
-        fillcolor:THEME.overlayLight, line:{width:0}, layer:'below'};
+        fillcolor:THEME.cutShade, line:{width:0}, layer:'below'};
     const edge = {type:'line', yref:'paper', y0:0, y1:1,
         line:{color:THEME.highlight, width:1, dash:'dash'}};
     if (range.min != null) {
@@ -82,7 +82,7 @@ function yRangeShapes(range, yOffset){
     yOffset = yOffset || 0;
     const out = [];
     const dim = {type:'rect', xref:'paper', x0:0, x1:1,
-        fillcolor:THEME.overlayLight, line:{width:0}, layer:'below'};
+        fillcolor:THEME.cutShade, line:{width:0}, layer:'below'};
     const edge = {type:'line', xref:'paper', x0:0, x1:1,
         line:{color:THEME.highlight, width:1, dash:'dash'}};
     if (range.min != null) {
