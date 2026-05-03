@@ -114,15 +114,12 @@ void AppState::init(const std::string &db_dir,
 
     // Per-peak quality bit palette (mirrors Q_PEAK_* in Fadc250Data.h).
     // Exposed via /api/config so the GUI populates the Cut-Settings dialog
-    // dropdowns from a single source of truth.  Built via push_back to
-    // sidestep nlohmann::json's brace-initializer ambiguity (a list of
-    // pair-shaped braces would otherwise be parsed as one object instead of
-    // an array of objects).
+    // dropdowns from a single source of truth.  Each push_back arg is a
+    // 3-pair brace-init: nlohmann's auto-detector sees 3 string-keyed pairs
+    // and builds an object, then push_back appends it to the array.
     peak_quality_bits_def = json::array();
-    peak_quality_bits_def.push_back(json::object({
-        {"bit", 0}, {"name", "PILED"}, {"label", "Pile-up"}}));
-    peak_quality_bits_def.push_back(json::object({
-        {"bit", 1}, {"name", "DECONVOLVED"}, {"label", "Deconvolved"}}));
+    peak_quality_bits_def.push_back({{"bit", 0}, {"name", "PILED"},       {"label", "Pile-up"}});
+    peak_quality_bits_def.push_back({{"bit", 1}, {"name", "DECONVOLVED"}, {"label", "Deconvolved"}});
 
     // waveform binning + trigger filter (monitor side)
     if (mcfg.contains("waveform")) {
