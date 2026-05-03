@@ -153,8 +153,27 @@ void AppState::init(const std::string &db_dir,
         // min_peak_ratio) live in daq_config.json `fadc250_waveform.analyzer`
         // and are loaded into wave_cfg by the prad2dec config loader.
     }
+    // ref_lines: assemble the flat key→[lines] map the frontend expects
+    // (`refShapes(key)` consumes it).  Two sources, in order:
+    //   1. Nested form — any object like `<section>.<subkey>.ref_lines` is
+    //      stored under `<subkey>`.  This lets each `*_hist` block keep its
+    //      reference lines next to its own min/max/step.
+    //   2. Top-level `ref_lines` — for plots that don't have a natural
+    //      sub-block (raw waveform, lms, physics scatter plots).  Top-level
+    //      entries override nested ones if both are defined.
+    ref_lines = json::object();
+    for (auto it = mcfg.begin(); it != mcfg.end(); ++it) {
+        if (it.key() == "ref_lines" || !it.value().is_object()) continue;
+        for (auto sit = it.value().begin(); sit != it.value().end(); ++sit) {
+            if (!sit.value().is_object()) continue;
+            if (sit.value().contains("ref_lines")
+                && sit.value()["ref_lines"].is_array())
+                ref_lines[sit.key()] = sit.value()["ref_lines"];
+        }
+    }
     if (mcfg.contains("ref_lines") && mcfg["ref_lines"].is_object())
-        ref_lines = mcfg["ref_lines"];
+        for (auto it = mcfg["ref_lines"].begin(); it != mcfg["ref_lines"].end(); ++it)
+            ref_lines[it.key()] = it.value();
 
     hist_nbins = std::max(1, (int)std::ceil(
         (hist_cfg.bin_max - hist_cfg.bin_min) / hist_cfg.bin_step));

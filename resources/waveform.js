@@ -438,18 +438,6 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
     });
 }
 
-// Compose a short "[min-max ns]" suffix for hist titles when the time filter
-// has values; empty string otherwise.
-function timeRangeLabel(){
-    const f = (typeof histConfig !== 'undefined')
-        && histConfig.waveform_filter && histConfig.waveform_filter.time;
-    if (!f) return '';
-    const lo = f.min != null ? f.min : '';
-    const hi = f.max != null ? f.max : '';
-    if (lo === '' && hi === '') return '';
-    return ` [${lo}-${hi} ns]`;
-}
-
 function showHistograms(mod){
     const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
     // in online mode, throttle auto-refreshes of the same module to ~1 Hz
@@ -460,13 +448,14 @@ function showHistograms(mod){
     }
     lastHistFetch = Date.now();
     lastHistModule = key;
+    // Cut ranges are visualised by the dashed-line + dim-region overlays
+    // when "show" is on, so the titles stay clean (no stale [min-max] suffix).
     const h=histConfig;
-    const tlabel = timeRangeLabel();
     fetchAndPlotHist('heighthist-div',`/api/heighthist/${key}`,
-        `${mod.n} Peak Height${tlabel}`,
+        `${mod.n} Peak Height`,
         'Peak Height', h.height_min||0, h.height_step||10, '#e599f7', 'heighthist-logy', 'height_hist', 'height');
     fetchAndPlotHist('inthist-div',`/api/hist/${key}`,
-        `${mod.n} Integral${tlabel}`,
+        `${mod.n} Integral`,
         'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8', 'inthist-logy', 'integral_hist', 'integral');
     fetchAndPlotHist('poshist-div',`/api/poshist/${key}`,
         `${mod.n} Peak Position`,
