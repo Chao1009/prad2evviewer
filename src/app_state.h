@@ -232,7 +232,7 @@ struct AppState {
     // denominator gem_eff_den; per-detector numerator gem_eff_num[R]
     // increments for every detector R that contributed a matched hit.
     // See runGemEfficiency().
-    float gem_eff_min_cluster_energy = 100.f;
+    float gem_eff_min_cluster_energy = 500.f;  // MeV — HyCal cluster gate for the seed
     float gem_eff_match_nsigma       = 3.f;
     float gem_eff_max_chi2           = 10.f;
     int   gem_eff_max_hits_per_det   = 50;

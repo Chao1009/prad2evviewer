@@ -125,7 +125,8 @@
             "residual_hist": {"min": -50.0, "max": 50.0, "step": 0.5}
         },
         "efficiency": {
-            "min_cluster_energy":     100.0,
+            "// min_cluster_energy: MeV — HyCal cluster gate for target-seed line": "",
+            "min_cluster_energy":     500.0,
             "match_nsigma":           3.0,
             "max_chi2_per_dof":       10.0,
             "max_hits_per_detector":  50,
