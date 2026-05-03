@@ -15,7 +15,7 @@ from `prad2dec` and produces physics-level outputs (clusters, 2-D hits).
   with cuts or ADC-sorted)
   (see [`docs/technical_notes/gem_clustering/gem_clustering.md`](../docs/technical_notes/gem_clustering/gem_clustering.md)
   for a worked example with plots)
-- **DetectorTransform** — 2×3 rotation + translation matrix for detector → lab-frame geometry
+- **DetectorTransform** — 3×3 rotation + translation matrix for detector → lab-frame geometry; mutate via `set(...)` (or per-field setters in Python) so the cached matrix invalidates
 - **EpicsStore** — EPICS slow-control snapshot accumulator with look-up by event number
 - **EventData** — Shared HyCal module-hit / cluster-hit data structures
 

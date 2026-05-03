@@ -632,5 +632,7 @@ void AppState::init(const std::string &db_dir,
         for (auto &h : gem_dy_hist) h.init(resid_nbins);
     }
     initGemEfficiency();
-    hycal_transform.prepare();
+    // hycal_transform is already prepared by setTransform() above (or, if
+    // runinfo wasn't loaded, will lazy-prepare on first toLab/rotate/matrix
+    // call) — no eager prepare needed here.
 }

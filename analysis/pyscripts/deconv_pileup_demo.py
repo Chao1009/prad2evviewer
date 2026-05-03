@@ -91,7 +91,7 @@ def plot_one(samples: np.ndarray,
 
     # Deconvolution result: per-peak amplitude + integral, plus the model
     # reconstruction (Σ a_k T(t - τ_k)).
-    npk = dec_out.npeaks
+    npk = dec_out.n
     amps = np.array(dec_out.amplitude[:npk], dtype=np.float64)
     heights = np.array(dec_out.height[:npk],  dtype=np.float64)
     times = [wa_peaks[k].time for k in range(npk)]
@@ -250,7 +250,7 @@ def main() -> int:
                         # Plot.
                         title = (f"crate{crate} slot{s} ch{c}  "
                                  f"event #{n_events}  "
-                                 f"({len(peaks)} peaks, deconv n={dec_out.npeaks})")
+                                 f"({len(peaks)} peaks, deconv n={dec_out.n})")
                         out_path = (args.out_dir
                                     / f"deconv_c{crate}_s{s:02d}_ch{c:02d}"
                                       f"_ev{n_events:06d}.png")

@@ -770,14 +770,17 @@ static void bind_hycal(py::module_ &m)
 static void bind_transform(py::module_ &m)
 {
     py::class_<DetectorTransform::Matrix>(m, "TransformMatrix",
-        "Pre-computed 2×3 rotation + translation matrix cached inside a "
-        "DetectorTransform.")
+        "Pre-computed 3×3 rotation + translation matrix cached inside a "
+        "DetectorTransform.  Row-major: rIJ.")
         .def_readonly("r00", &DetectorTransform::Matrix::r00)
         .def_readonly("r01", &DetectorTransform::Matrix::r01)
+        .def_readonly("r02", &DetectorTransform::Matrix::r02)
         .def_readonly("r10", &DetectorTransform::Matrix::r10)
         .def_readonly("r11", &DetectorTransform::Matrix::r11)
+        .def_readonly("r12", &DetectorTransform::Matrix::r12)
         .def_readonly("r20", &DetectorTransform::Matrix::r20)
         .def_readonly("r21", &DetectorTransform::Matrix::r21)
+        .def_readonly("r22", &DetectorTransform::Matrix::r22)
         .def_readonly("tx",  &DetectorTransform::Matrix::tx)
         .def_readonly("ty",  &DetectorTransform::Matrix::ty)
         .def_readonly("tz",  &DetectorTransform::Matrix::tz);
