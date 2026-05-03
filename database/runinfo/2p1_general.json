@@ -65,7 +65,7 @@
             },
             "gain_factor": {
                 "data_dir": "gain_factor",
-                "ref_run": 23960
+                "ref_run": 24200
             }
         }
     ]
