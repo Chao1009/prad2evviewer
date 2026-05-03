@@ -29,6 +29,7 @@ ModuleType HyCalSystem::parse_type(const std::string &t)
     if (t == "PbGlass") return ModuleType::PbGlass;
     if (t == "PbWO4")   return ModuleType::PbWO4;
     if (t == "LMS")     return ModuleType::LMS;
+    if (t == "Veto")    return ModuleType::Veto;
     return ModuleType::Unknown;
 }
 

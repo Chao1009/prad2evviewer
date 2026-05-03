@@ -142,7 +142,7 @@ int main(int argc, char *argv[])
         analysis::Replay replay;
         if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
         // Module-type dispatch comes from hycal_map.json's "t" field — single
-        // source of truth for whether a channel is PbGlass / PbWO4 / SCINT /
+        // source of truth for whether a channel is PbGlass / PbWO4 / Veto /
         // LMS.  LoadHyCalMap also fills the (crate,slot,ch)→name lookup; both
         // were two separate calls before the schema merge.
         replay.LoadHyCalMap(daq_map);

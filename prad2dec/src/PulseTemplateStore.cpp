@@ -3,9 +3,7 @@
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
-#include <algorithm>
 #include <cmath>
-#include <vector>
 #include <cstdio>
 #include <cstdlib>
 
@@ -15,9 +13,7 @@ using nlohmann::json;
 namespace {
 
 // Pull "<roc>_<slot>_<channel>" out of the entry's `channel_id` string.
-// Returns true on success, false if the format doesn't match.  We tolerate
-// unmapped channels (where the channel_id is itself the key, e.g. for
-// LMS lines that the daq_map doesn't resolve) — same parser handles both.
+// Returns true on success, false if the format doesn't match.
 bool parse_channel_id(const std::string &s, int &roc, int &slot, int &ch)
 {
     int a = 0, b = 0, c = 0;
@@ -26,8 +22,8 @@ bool parse_channel_id(const std::string &s, int &roc, int &slot, int &ch)
     return true;
 }
 
-// Read a {"median": <num>, "mad": <num>} sub-object's median field.  The
-// fitter writes NaN when no pulses contributed; we propagate NaN.
+// Read a {"median": <num>, "mad": <num>} sub-object's median field.
+// The fitter writes NaN when no pulses contributed; we propagate NaN.
 double read_median(const json &j, const char *key)
 {
     if (!j.contains(key)) return std::nan("");
@@ -38,25 +34,8 @@ double read_median(const json &j, const char *key)
     return std::nan("");
 }
 
-} // anon
-
-void PulseTemplateStore::Clear()
-{
-    by_csc_.clear();
-    global_      = {};
-    valid_       = false;
-    has_global_  = false;
-    n_channels_loaded_ = 0;
-    n_good_      = 0;
-}
-
-namespace {
-
 // Fill `tmpl.grid` with the unit-amplitude two-tau template on the
 // hardwired 8× oversampled time axis t_i = i · (clk_ns / GRID_OVERSAMPLE).
-// Sets tmpl.grid_clk_ns so consumers can detect "grid filled" via
-// grid_clk_ns > 0.  See PulseTemplate doc for why the oversample factor
-// isn't a runtime knob.
 void fill_grid(PulseTemplate &tmpl, float clk_ns)
 {
     const float dt = clk_ns / static_cast<float>(PulseTemplate::GRID_OVERSAMPLE);
@@ -71,6 +50,13 @@ void fill_grid(PulseTemplate &tmpl, float clk_ns)
 }
 
 } // anon
+
+void PulseTemplateStore::Clear()
+{
+    channel_type_.clear();
+    by_type_.clear();
+    valid_ = false;
+}
 
 bool PulseTemplateStore::LoadFromFile(const std::string &path,
                                       const WaveConfig &cfg)
@@ -94,42 +80,18 @@ bool PulseTemplateStore::LoadFromFile(const std::string &path,
 
     const auto &dcfg = cfg.nnls_deconv;
     const float clk_ns = (cfg.clk_mhz > 0.0f) ? (1000.0f / cfg.clk_mhz) : 4.0f;
-
-    // Effective gates.  min_pulses / chi2_max come from the fitter's
-    // _meta block (those are properties of the fit, not the analyzer);
-    // the τ ranges come from the analyzer config.
-    int   min_pulses = 50;
-    float chi2_max   = 3.0f;
-    if (j.contains("_meta")) {
-        const auto &meta = j["_meta"];
-        if (meta.contains("min_pulses") && meta["min_pulses"].is_number())
-            min_pulses = meta["min_pulses"].get<int>();
-        if (meta.contains("chi2_max") && meta["chi2_max"].is_number())
-            chi2_max = meta["chi2_max"].get<float>();
-    }
     const float tr_lo = dcfg.tau_r_min_ns, tr_hi = dcfg.tau_r_max_ns;
     const float tf_lo = dcfg.tau_f_min_ns, tf_hi = dcfg.tau_f_max_ns;
 
-    std::vector<float> good_taur, good_tauf;
-
+    // ---- channel_id → module_type lookup --------------------------------
+    // We only need each channel's category; per-channel τ values are
+    // intentionally ignored (the deconvolver uses the per-type aggregate).
     for (auto it = j.begin(); it != j.end(); ++it) {
         const std::string &name = it.key();
         if (!name.empty() && name[0] == '_') continue;     // skip _meta etc.
         const auto &rec = it.value();
         if (!rec.is_object())                  continue;
 
-        const double tr   = read_median(rec, "tau_r_ns");
-        const double tf   = read_median(rec, "tau_f_ns");
-        const double chi2 = read_median(rec, "chi2_per_dof");
-        int n_used = 0;
-        if (rec.contains("n_pulses_used") && rec["n_pulses_used"].is_number())
-            n_used = rec["n_pulses_used"].get<int>();
-
-        if (!std::isfinite(tr) || !std::isfinite(tf)) continue;
-
-        // Resolve (roc, slot, channel) from channel_id field; if absent
-        // OR malformed (e.g. unmapped channel keyed only by name), skip
-        // this entry — the analyzer can't look it up by name anyway.
         if (!rec.contains("channel_id") || !rec["channel_id"].is_string())
             continue;
         int roc = -1, slot = -1, ch = -1;
@@ -137,80 +99,67 @@ bool PulseTemplateStore::LoadFromFile(const std::string &path,
                               roc, slot, ch))
             continue;
 
-        Entry e{};
-        e.tmpl.tau_r_ns    = static_cast<float>(tr);
-        e.tmpl.tau_f_ns    = static_cast<float>(tf);
-        e.tmpl.is_global   = false;
-        e.tmpl.grid_clk_ns = 0.0f;          // filled below if gates pass
+        if (!rec.contains("module_type") || !rec["module_type"].is_string())
+            continue;
+        std::string type_name = rec["module_type"].get<std::string>();
+        if (type_name.empty() || type_name == "Unknown")    continue;
 
-        const bool gates_ok =
-            (n_used >= min_pulses) &&
-            std::isfinite(chi2) && (chi2 < chi2_max) &&
-            (tr >= tr_lo && tr <= tr_hi) &&
-            (tf >= tf_lo && tf <= tf_hi);
-        e.is_good = gates_ok;
-        if (gates_ok) {
-            fill_grid(e.tmpl, clk_ns);              // precompute to skip exp() in hot loop
-            ++n_good_;
-            good_taur.push_back(e.tmpl.tau_r_ns);
-            good_tauf.push_back(e.tmpl.tau_f_ns);
-        }
-
-        by_csc_.emplace(pack_key(roc, slot, ch), e);
-        ++n_channels_loaded_;
+        channel_type_.emplace(pack_key(roc, slot, ch), std::move(type_name));
     }
 
-    if (n_channels_loaded_ == 0) {
+    // ---- per-type templates from `_by_type` block ----------------------
+    if (j.contains("_by_type") && j["_by_type"].is_object()) {
+        for (auto bt = j["_by_type"].begin(); bt != j["_by_type"].end(); ++bt) {
+            const std::string &type_name = bt.key();
+            const auto &rec = bt.value();
+            if (!rec.is_object()) continue;
+            const double tr = read_median(rec, "tau_r_ns");
+            const double tf = read_median(rec, "tau_f_ns");
+            if (!std::isfinite(tr) || !std::isfinite(tf)) continue;
+            if (tr < tr_lo || tr > tr_hi || tf < tf_lo || tf > tf_hi) continue;
+            PulseTemplate t{};
+            t.tau_r_ns    = static_cast<float>(tr);
+            t.tau_f_ns    = static_cast<float>(tf);
+            t.is_global   = true;     // a category aggregate, not a per-channel fit
+            fill_grid(t, clk_ns);
+            by_type_.emplace(type_name, t);
+        }
+    }
+
+    if (by_type_.empty()) {
         std::cerr << "[PulseTemplateStore] WARN: " << path
-                  << " contained no usable channel templates"
+                  << " yielded no per-type templates"
                   << " — deconv will fall back to non-deconv mode.\n";
         return false;
     }
 
-    // Synthesise the global-median template if at least a handful of
-    // channels survived gates — bar set low so a partial run is still
-    // useful as a fallback.
-    if (good_taur.size() >= 5) {
-        std::sort(good_taur.begin(), good_taur.end());
-        std::sort(good_tauf.begin(), good_tauf.end());
-        const auto med = [](const std::vector<float> &v) {
-            const size_t n = v.size();
-            return (n % 2 == 1) ? v[n/2]
-                                : 0.5f * (v[n/2 - 1] + v[n/2]);
-        };
-        global_.tau_r_ns  = med(good_taur);
-        global_.tau_f_ns  = med(good_tauf);
-        global_.is_global = true;
-        fill_grid(global_, clk_ns);
-        has_global_       = true;
-    }
-
     valid_ = true;
     std::cerr << "[PulseTemplateStore] loaded " << path
-              << ": " << n_channels_loaded_ << " channels, "
-              << n_good_ << " pass gates";
-    if (has_global_) {
-        std::cerr << "; global τ_r=" << global_.tau_r_ns
-                  << "ns τ_f=" << global_.tau_f_ns << "ns";
-    } else {
-        std::cerr << "; no global template (need ≥5 good channels)";
-    }
+              << ": " << channel_type_.size() << " channels typed,"
+              << " per-type:";
+    for (const auto &kv : by_type_)
+        std::cerr << " " << kv.first
+                  << "(τ_r=" << kv.second.tau_r_ns
+                  << ",τ_f=" << kv.second.tau_f_ns << ")";
     std::cerr << "\n";
     return true;
 }
 
 const PulseTemplate *
-PulseTemplateStore::Lookup(int roc_tag, int slot, int channel,
-                           bool fallback_to_global) const
+PulseTemplateStore::type_template(const std::string &type_name) const
+{
+    auto it = by_type_.find(type_name);
+    return (it != by_type_.end()) ? &it->second : nullptr;
+}
+
+const PulseTemplate *
+PulseTemplateStore::Lookup(int roc_tag, int slot, int channel) const
 {
     if (!valid_) return nullptr;
 
-    auto it = by_csc_.find(pack_key(roc_tag, slot, channel));
-    if (it != by_csc_.end() && it->second.is_good)
-        return &it->second.tmpl;
+    auto it = channel_type_.find(pack_key(roc_tag, slot, channel));
+    if (it == channel_type_.end()) return nullptr;
 
-    if (fallback_to_global && has_global_)
-        return &global_;
-
-    return nullptr;
+    auto bt = by_type_.find(it->second);
+    return (bt != by_type_.end()) ? &bt->second : nullptr;
 }

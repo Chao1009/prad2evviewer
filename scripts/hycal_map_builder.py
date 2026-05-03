@@ -218,7 +218,7 @@ def _fmt(v) -> str:
 class MapBuilderWidget(HyCalMapWidget):
     """HyCal map with adjustable PbGlass transparency and field-name colourbar.
 
-    LMS and SCINT modules are partitioned from the loaded module list and can
+    LMS and Veto modules are partitioned from the loaded module list and can
     be toggled independently via :meth:`set_lms_visible` /
     :meth:`set_scint_visible`. The canvas is always centred on geometric
     origin ``(0, 0)``, so toggling those modules does not shift the view.
@@ -241,7 +241,7 @@ class MapBuilderWidget(HyCalMapWidget):
     def set_modules(self, modules: List[Module]):
         self._hycal = [m for m in modules if m.mod_type in self._BOUNDS_TYPES]
         self._lms   = [m for m in modules if m.mod_type == "LMS"]
-        self._scint = [m for m in modules if m.mod_type == "SCINT"]
+        self._scint = [m for m in modules if m.mod_type == "Veto"]
         self._pbglass_names = {m.name for m in self._hycal
                                if m.mod_type == "PbGlass"}
         self._rebuild_layout()
@@ -266,7 +266,7 @@ class MapBuilderWidget(HyCalMapWidget):
             display.extend(self._scint)
         self._modules = display
         # Symmetric bounds around origin so the canvas stays centred on
-        # (0, 0) even when LMS/SCINT sit off to the side.
+        # (0, 0) even when LMS/Veto sit off to the side.
         if display:
             rx = max(max(abs(m.x - m.sx / 2), abs(m.x + m.sx / 2))
                      for m in display)
@@ -457,7 +457,7 @@ class MapBuilderWindow(QMainWindow):
 
         ctrl.addSpacing(12)
         self._lms_chk = self._styled_checkbox("LMS", self._on_lms_toggled)
-        self._scint_chk = self._styled_checkbox("SCINT", self._on_scint_toggled)
+        self._scint_chk = self._styled_checkbox("Veto", self._on_scint_toggled)
         ctrl.addWidget(self._lms_chk)
         ctrl.addWidget(self._scint_chk)
 

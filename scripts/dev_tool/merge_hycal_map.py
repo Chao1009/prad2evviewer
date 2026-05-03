@@ -3,7 +3,7 @@
 merge_hycal_map.py — Join the legacy hycal_modules.json + hycal_daq_map.json
 into the unified hycal_map.json schema.
 
-Output schema (one entry per HyCal/LMS/SCINT/booster element):
+Output schema (one entry per HyCal/LMS/Veto/booster element):
 
     [
       {"n": "G1",

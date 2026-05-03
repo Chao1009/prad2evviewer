@@ -95,7 +95,7 @@ def prepare_modules(modules: List[Module]) -> List[Module]:
         else:
             result.append(m)
     for name in ("V1", "V2", "V3", "V4"):
-        result.append(Module(name, "Scintillator",
+        result.append(Module(name, "Veto",
                              _LMS_V_XPOS[name], _BOTTOM_Y,
                              _BOTTOM_SZ, _BOTTOM_SZ))
     return result

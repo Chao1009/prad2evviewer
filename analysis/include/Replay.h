@@ -37,7 +37,7 @@ public:
     // Load the merged HyCal map.  Populates both the (crate,slot,ch)→name
     // DAQ lookup used by moduleName() and the name→ModuleType lookup used
     // by moduleType().  The "t" field in each record ("PbGlass" / "PbWO4" /
-    // "SCINT" / "LMS") is the single source of truth for category dispatch;
+    // "Veto" / "LMS") is the single source of truth for category dispatch;
     // entries without a "daq" block contribute to module_types_ but not
     // daq_map_.  Calling this is strongly recommended — without it every
     // channel returns MOD_UNKNOWN and module_id encoding falls back to
@@ -52,7 +52,7 @@ public:
     // Returns the globally-unique module_id (see RawEventData docs):
     //   PbGlass : 1..1156      (G-module ID)
     //   PbWO4   : 1001..2152   (W-module ID + 1000)
-    //   SCINT   : 3001..3004   (V1..V4)
+    //   VETO    : 3001..3004   (V1..V4)
     //   LMS     : 3100..3103   (LMSPin=3100, LMS1..3=3101..3103)
     // Returns -1 if the module name is unknown.
     int moduleID(int roc, int slot, int ch) const;

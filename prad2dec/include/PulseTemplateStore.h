@@ -1,13 +1,16 @@
 #pragma once
 //=============================================================================
-// PulseTemplateStore.h — per-channel pulse-template lookup for the NNLS
-// pile-up deconvolver.
+// PulseTemplateStore.h — per-type pulse-template lookup for the pile-up
+// deconvolver.
 //
-// Loads the JSON written by `analysis/pyscripts/fit_pulse_template.py`,
-// validates each per-channel entry against the same gates the analyzer
-// would apply (min_pulses / chi2_max / τ_r / τ_f range), synthesises a
-// global-median fallback template, and answers (roc_tag, slot, channel)
-// → const PulseTemplate* queries.
+// Loads the JSON written by `analysis/pyscripts/fit_pulse_template.py`
+// and exposes the per-type aggregates (PbGlass / PbWO4 / LMS / Veto)
+// from its `_by_type` block.  Per-channel τ_r / τ_f entries in the JSON
+// are read only to learn each channel's module type — the per-channel
+// shapes themselves are no longer used.  The deconvolver gets one
+// shape per category, which keeps the inputs well-conditioned (a
+// well-fit median across many channels) and avoids amplifying noise
+// from low-statistics single-channel fits.
 //
 // The store is owned by the application layer (Replay, viewer servers,
 // gain tools) and bound to a WaveAnalyzer via
@@ -19,10 +22,9 @@
 //
 //   * file missing / parse error → warning to stderr, store stays
 //     invalid()  ⇒ Lookup() returns nullptr always
-//   * channel absent from JSON   → Lookup() returns nullptr
-//   * per-channel gates failed   → Lookup() returns either the global
-//     template (if `fallback_to_global_template` AND a global template
-//     exists) or nullptr
+//   * channel's type is unknown  → Lookup() returns nullptr
+//   * per-type entry rejected at load time (τ outside config range) →
+//     Lookup() returns nullptr for that type's channels
 //=============================================================================
 
 #include "Fadc250Data.h"
@@ -45,62 +47,52 @@ class PulseTemplateStore
 public:
     PulseTemplateStore() = default;
 
-    // Load the per-channel JSON (output of fit_pulse_template.py).
-    // Validates each channel against `cfg.nnls_deconv` τ-range gates
-    // (and the JSON _meta block's min_pulses / chi2_max, no overrides
-    // at this layer); precomputes a unit-amplitude template grid for
-    // each good channel at sample period 1000/cfg.clk_mhz so the
+    // Load the per-type templates from the JSON written by
+    // `fit_pulse_template.py`.  `cfg.nnls_deconv` provides the τ-range
+    // gates each per-type entry must satisfy to be accepted, and
+    // `cfg.clk_mhz` sets the precomputed grid sample period so the
     // deconv hot loop can skip per-sample exp().  Returns true on
-    // success — `valid()` will then be true and at least one good
-    // per-channel template is present.  False on file-not-found,
-    // parse error, or empty contents; logs a one-line warning to
-    // stderr in any failure path.
+    // success — `valid()` will then be true and at least one per-type
+    // template is present.  False on file-not-found, parse error, or
+    // empty contents; logs a one-line warning to stderr in any failure
+    // path.
     //
     // Re-loading is allowed; the existing contents are dropped first.
     bool LoadFromFile(const std::string &path, const WaveConfig &cfg);
 
-    // Look up the template for a channel identified by its (roc_tag,
-    // slot, channel) triple — the same triple the fitter records as
-    // `channel_id` "<roc_tag>_<slot>_<channel>".
-    //
-    // Returns:
-    //   * the per-channel template if present AND it passed gates
-    //   * the global-median fallback if the per-channel template is
-    //     missing / failed gates AND `fallback_to_global` is true AND
-    //     a global template exists
-    //   * nullptr otherwise (caller should skip deconv)
+    // Look up the deconv template for a channel identified by its
+    // (roc_tag, slot, channel) triple — the same triple the fitter
+    // records as `channel_id` "<roc_tag>_<slot>_<channel>".  The store
+    // resolves the channel's module type from its loaded per-channel
+    // metadata and returns the matching per-type template, or nullptr
+    // if the channel is unknown / its type lacks a usable per-type
+    // entry.
     //
     // The returned pointer is owned by the store and remains valid
     // until the next LoadFromFile() / store destruction.
-    const PulseTemplate *Lookup(int roc_tag, int slot, int channel,
-                                bool fallback_to_global) const;
+    const PulseTemplate *Lookup(int roc_tag, int slot, int channel) const;
 
-    // True iff LoadFromFile() succeeded and at least one good per-channel
-    // template is loaded.  Caller can use this to short-circuit deconv
-    // when the store is empty.
-    bool valid()      const { return valid_; }
-    bool has_global() const { return has_global_; }
+    // Pointer to the per-type template (e.g. type_name = "PbGlass" /
+    // "PbWO4" / "LMS" / "Veto"), or nullptr if the file's `_by_type`
+    // block did not include this type / it failed gates.  Exposed for
+    // diagnostics and Python scripts that want the per-type template
+    // directly without going through (roc, slot, channel).
+    const PulseTemplate *type_template(const std::string &type_name) const;
 
-    // Diagnostics — counts after LoadFromFile.
-    int n_channels_loaded() const { return n_channels_loaded_; }
-    int n_good()            const { return n_good_; }
+    // True iff LoadFromFile() succeeded and at least one per-type
+    // template is loaded.  Callers can short-circuit deconv when this
+    // returns false.
+    bool valid() const { return valid_; }
 
-    // Pointer to the synthesised global template, or nullptr if none.
-    const PulseTemplate *global_template() const
-    {
-        return has_global_ ? &global_ : nullptr;
-    }
+    // Diagnostics.
+    int  n_channels_known() const { return static_cast<int>(channel_type_.size()); }
+    int  n_types_loaded()   const { return static_cast<int>(by_type_.size()); }
 
     // Reset to empty state (no templates, invalid).  Useful in tests
     // and for "disable deconv at runtime" code paths.
     void Clear();
 
 private:
-    struct Entry {
-        PulseTemplate tmpl;
-        bool          is_good;
-    };
-
     static uint64_t pack_key(int roc_tag, int slot, int channel)
     {
         return (static_cast<uint64_t>(roc_tag) << 40) |
@@ -108,12 +100,19 @@ private:
                static_cast<uint64_t>(channel);
     }
 
-    std::unordered_map<uint64_t, Entry> by_csc_;
-    PulseTemplate global_{};
-    bool          valid_      = false;
-    bool          has_global_ = false;
-    int           n_channels_loaded_ = 0;
-    int           n_good_     = 0;
+    // (roc_tag, slot, channel) → "PbGlass" / "PbWO4" / "LMS" / "Veto".
+    // Built from each per-channel entry's `module_type` field at load
+    // time; per-channel τ values are intentionally not stored.
+    std::unordered_map<uint64_t, std::string>      channel_type_;
+
+    // Per-type templates from the file's `_by_type` block — keyed by
+    // the type name string the fitter wrote ("PbGlass", "PbWO4",
+    // "LMS", "Veto").  Each entry only present when the JSON carried
+    // both τ_r and τ_f for that type AND they passed the analyzer's
+    // tau-range gates.
+    std::unordered_map<std::string, PulseTemplate> by_type_;
+
+    bool valid_ = false;
 };
 
 } // namespace fdec

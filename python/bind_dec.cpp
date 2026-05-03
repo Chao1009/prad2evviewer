@@ -225,10 +225,9 @@ void bind_fadc(py::module_ &m)
         "NNLS pile-up deconvolution.  Mirrors the JSON layout in "
         "database/daq_config.json under fadc250_waveform.analyzer.nnls_deconv.")
         .def(py::init<>())
-        .def_readwrite("enabled",                     &fdec::WaveConfig::NnlsDeconvConfig::enabled)
-        .def_readwrite("template_file",               &fdec::WaveConfig::NnlsDeconvConfig::template_file)
-        .def_readwrite("fallback_to_global_template", &fdec::WaveConfig::NnlsDeconvConfig::fallback_to_global_template)
-        .def_readwrite("apply_to_all_peaks",          &fdec::WaveConfig::NnlsDeconvConfig::apply_to_all_peaks)
+        .def_readwrite("enabled",            &fdec::WaveConfig::NnlsDeconvConfig::enabled)
+        .def_readwrite("template_file",      &fdec::WaveConfig::NnlsDeconvConfig::template_file)
+        .def_readwrite("apply_to_all_peaks", &fdec::WaveConfig::NnlsDeconvConfig::apply_to_all_peaks)
         .def_readwrite("tau_r_min_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_r_min_ns)
         .def_readwrite("tau_r_max_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_r_max_ns)
         .def_readwrite("tau_f_min_ns",    &fdec::WaveConfig::NnlsDeconvConfig::tau_f_min_ns)
@@ -240,44 +239,50 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("post_samples",        &fdec::WaveConfig::NnlsDeconvConfig::post_samples);
 
     py::class_<fdec::PulseTemplateStore>(m, "PulseTemplateStore",
-        "Per-channel pulse-template store loaded from the JSON written by "
+        "Per-type pulse-template store loaded from the JSON written by "
         "fit_pulse_template.py.  Bind via WaveAnalyzer.set_template_store() "
         "and the analyzer's Analyze() method will auto-deconvolve piled "
-        "events once a per-channel template is found.")
+        "events using the per-type template (PbGlass / PbWO4 / LMS / Veto) "
+        "for each channel's category.")
         .def(py::init<>())
         .def("load_from_file", &fdec::PulseTemplateStore::LoadFromFile,
              py::arg("path"), py::arg("wave_cfg"),
-             "Load templates from JSON.  wave_cfg is a WaveConfig used to "
-             "validate per-channel τ-range gates (via wave_cfg.nnls_deconv) "
-             "and to set the precomputed grid sample period (via "
-             "wave_cfg.clk_mhz).  Returns False on file-not-found / parse "
-             "error / empty contents (caller falls back to non-deconv mode).")
+             "Load per-type templates from the JSON's `_by_type` block "
+             "and the (roc_tag, slot, channel) → module_type lookup from "
+             "the per-channel records.  wave_cfg's `nnls_deconv` τ-range "
+             "gates are applied to each per-type entry; `clk_mhz` sets "
+             "the precomputed grid period.  Returns False on file-not-"
+             "found / parse error / empty contents (caller falls back to "
+             "non-deconv mode).")
         .def("lookup",
              [](const fdec::PulseTemplateStore &self,
-                int roc_tag, int slot, int channel,
-                bool fallback_to_global) -> py::object {
+                int roc_tag, int slot, int channel) -> py::object {
                  const fdec::PulseTemplate *t = self.Lookup(
-                     roc_tag, slot, channel, fallback_to_global);
+                     roc_tag, slot, channel);
                  if (!t) return py::none();
                  return py::cast(*t);
              },
              py::arg("roc_tag"), py::arg("slot"), py::arg("channel"),
-             py::arg("fallback_to_global") = false,
-             "Look up template by (roc_tag, slot, channel). Returns "
-             "None if no template is available (and fallback isn't "
-             "requested or unavailable).")
+             "Resolve the channel's module type and return the matching "
+             "per-type template. Returns None when the channel is not in "
+             "the loaded JSON or its type lacks a usable per-type entry.")
         .def("clear", &fdec::PulseTemplateStore::Clear)
-        .def_property_readonly("valid",      &fdec::PulseTemplateStore::valid)
-        .def_property_readonly("has_global", &fdec::PulseTemplateStore::has_global)
-        .def_property_readonly("n_channels_loaded",
-            &fdec::PulseTemplateStore::n_channels_loaded)
-        .def_property_readonly("n_good", &fdec::PulseTemplateStore::n_good)
-        .def_property_readonly("global_template",
-            [](const fdec::PulseTemplateStore &self) -> py::object {
-                const fdec::PulseTemplate *t = self.global_template();
+        .def_property_readonly("valid", &fdec::PulseTemplateStore::valid)
+        .def_property_readonly("n_channels_known",
+            &fdec::PulseTemplateStore::n_channels_known)
+        .def_property_readonly("n_types_loaded",
+            &fdec::PulseTemplateStore::n_types_loaded)
+        .def("type_template",
+            [](const fdec::PulseTemplateStore &self,
+               const std::string &type_name) -> py::object {
+                const fdec::PulseTemplate *t = self.type_template(type_name);
                 if (!t) return py::none();
                 return py::cast(*t);
-            });
+            },
+            py::arg("type_name"),
+            "Per-type template (`type_name` ∈ "
+            "{'PbGlass', 'PbWO4', 'LMS', 'Veto'}) parsed from the JSON's "
+            "`_by_type` block.  Returns None if the type isn't present.");
 
     py::class_<fdec::WaveConfig>(m, "WaveConfig",
         "Knobs for WaveAnalyzer (smoothing, thresholds, pedestal window, ...).")
@@ -303,8 +308,8 @@ void bind_fadc(py::module_ &m)
     py::class_<fdec::PulseTemplate>(m, "PulseTemplate",
         "Per-channel two-tau pulse template used by WaveAnalyzer.deconvolve(). "
         "tau_r_ns / tau_f_ns are the median values from "
-        "fit_pulse_template.py.  is_global=True marks the synthesized "
-        "fallback template (median across all 'good' channels).")
+        "fit_pulse_template.py.  is_global=True marks a per-type aggregate "
+        "(the only kind currently produced by PulseTemplateStore).")
         .def(py::init<>())
         .def(py::init([](float tr, float tf, bool is_global) {
                 fdec::PulseTemplate t{tr, tf, is_global};
@@ -559,11 +564,12 @@ void bind_fadc(py::module_ &m)
                 return out;
             },
             py::arg("samples"), py::arg("wres"), py::arg("template_"),
-            "Run NNLS pile-up deconvolution against per-channel template "
-            "`template_`.  Caller must have already obtained `wres` from "
-            "analyze_result() with the same samples.  Returns a "
-            "DeconvOutput; check `.state` (Q_DECONV_*) before reading the "
-            "height/integral arrays.");
+            "Run pile-up deconvolution against the supplied template "
+            "`template_` (typically a per-type entry from "
+            "PulseTemplateStore.lookup() / type_template()).  Caller must "
+            "have already obtained `wres` from analyze_result() with the "
+            "same samples.  Returns a DeconvOutput; check `.state` "
+            "(Q_DECONV_*) before reading the height/integral arrays.");
 
     // ----- Firmware-faithful (Mode 1/2/3) analyzer -----------------------
     // Quality bitmask constants — exposed at module scope so callers can

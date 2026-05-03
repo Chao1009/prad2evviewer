@@ -48,24 +48,21 @@ struct WaveConfig {
     // ---- Per-pulse-fit pile-up deconvolution ----------------------------
     //
     // Deconvolve() runs a non-linear Levenberg-Marquardt fit per event,
-    // freeing (a_k, t0_k, τ_r_k, τ_f_k) for each peak with the channel
-    // template providing the initial guess (and tight bounds around it).
-    // This handles per-pulse shape variation that a fixed-template NNLS
-    // can't capture.  Config name is historical — kept as `nnls_deconv`
-    // for daq_config.json compatibility.
+    // freeing (a_k, t0_k, τ_r_k, τ_f_k) for each peak with the per-type
+    // template (PbGlass / PbWO4 / LMS / Veto) providing the initial
+    // guess and tight bounds around it.  This handles per-pulse shape
+    // variation that a fixed-template NNLS can't capture.  Config name
+    // is historical — kept as `nnls_deconv` for daq_config.json
+    // compatibility.
     //
     // - enabled                     Master switch for the auto-deconv path
     //                                inside Analyze().  Has no effect on
     //                                the explicit Deconvolve() API used by
     //                                the Python diagnostic script.
-    // - template_file               Path to the per-channel template JSON
+    // - template_file               Path to the per-type template JSON
     //                                (see PulseTemplateStore).  Empty ⇒
     //                                application skips the store load and
     //                                deconv silently stays off.
-    // - fallback_to_global_template Use the synthesised global-median
-    //                                template for channels whose own fit
-    //                                failed gates.  Outcome surfaced as
-    //                                Q_DECONV_FALLBACK_GLOBAL on success.
     // - apply_to_all_peaks          When false, auto-deconv only fires on
     //                                events with at least one Q_PEAK_PILED
     //                                peak.  Setting true runs the LM on
@@ -97,12 +94,11 @@ struct WaveConfig {
     // - pre_samples / post_samples  Per-peak window for integral_dec.
     struct NnlsDeconvConfig {
         bool        enabled                     = false;
-        // Path to the per-channel template JSON (output of
+        // Path to the per-type template JSON (output of
         // fit_pulse_template.py).  Caller resolves relative paths against
         // the database directory before handing to PulseTemplateStore.
         // Empty ⇒ no template file configured ⇒ deconv silently disabled.
         std::string template_file;
-        bool        fallback_to_global_template = false;
         bool        apply_to_all_peaks          = false;
         float       tau_r_min_ns =  0.5f;
         float       tau_r_max_ns = 10.0f;

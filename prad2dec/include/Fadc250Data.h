@@ -151,9 +151,11 @@ struct Peak {
 //                                adjacent peak's window — both peaks in
 //                                the pair get the bit set
 // Q_PEAK_DECONVOLVED  = 1 << 1  height/integral were replaced in place
-//                                by NNLS pile-up deconvolution against
-//                                the per-channel template (instead of
-//                                the local-maxima + tail-cutoff values).
+//                                by per-pulse-fit pile-up deconvolution
+//                                against the per-type template
+//                                (PbGlass / PbWO4 / LMS / Veto) for
+//                                this channel's category, instead of
+//                                the local-maxima + tail-cutoff values.
 //                                Set by WaveAnalyzer::Analyze when a
 //                                PulseTemplateStore + channel key are
 //                                bound and the deconv converged.
@@ -252,13 +254,16 @@ struct DaqWaveResult {
 // docs/technical_notes/waveform_analysis/wave_analysis.md and
 // fdec::WaveConfig::NnlsDeconvConfig in WaveAnalyzer.h.
 
-// Per-channel pulse template (medians from fit_pulse_template.py).  τ_r and
-// τ_f are time constants in ns of the two-tau scintillator+PMT model
+// Per-type pulse template (medians from fit_pulse_template.py's `_by_type`
+// block, one per module category).  τ_r and τ_f are time constants in ns of
+// the two-tau scintillator+PMT model
 //
 //   T(t; τ_r, τ_f) = (1 − exp(−t/τ_r)) · exp(−t/τ_f)   for t ≥ 0
 //
-// is_global: true if this is the synthesized fallback (median across all
-// "good" channels) rather than a per-channel fit.
+// is_global: kept for backwards compatibility.  Set to true on every
+// PulseTemplateStore-loaded template since the templates are category
+// aggregates rather than per-channel fits.  Templates constructed
+// directly in Python (via dec.PulseTemplate(tr, tf)) default to false.
 //
 // Precomputed grid: when filled by PulseTemplateStore::LoadFromFile() the
 // `grid[]` array holds T evaluated at i · grid_clk_ns (i = 0..GRID_N-1).
@@ -309,9 +314,10 @@ struct PulseTemplate {
 //                               active set went indefinite; caller should
 //                               treat this as a deconv failure and fall
 //                               back to WaveAnalyzer's local-maxima values
-//   Q_DECONV_APPLIED           per-channel template, LM converged
-//   Q_DECONV_FALLBACK_GLOBAL   global-median fallback template,
-//                               LM converged
+//   Q_DECONV_APPLIED           non-aggregate template, LM converged
+//                               (currently unused — every store-loaded
+//                                template is a per-type aggregate)
+//   Q_DECONV_FALLBACK_GLOBAL   per-type aggregate template, LM converged
 //
 // On any non-converged outcome the amplitude/height/integral arrays are
 // zeroed so callers can safely fall back to WaveResult.peaks values

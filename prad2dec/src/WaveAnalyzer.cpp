@@ -424,8 +424,7 @@ void WaveAnalyzer::applyAutoDeconv(const uint16_t *samples, int nsamples,
     }
 
     const PulseTemplate *tmpl = template_store_->Lookup(
-        ck_roc_, ck_slot_, ck_chan_,
-        cfg.nnls_deconv.fallback_to_global_template);
+        ck_roc_, ck_slot_, ck_chan_);
     if (tmpl == nullptr) return;
 
     DeconvOutput out;

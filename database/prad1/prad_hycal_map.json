@@ -1730,8 +1730,8 @@
   {"n":"LMS1", "t":"LMS", "geo":{"sx":50, "sy":50, "x":-730, "y":160, "sec":"LMS", "row":0, "col":0}, "daq":{"crate":6, "slot":4, "channel":1}},
   {"n":"LMS2", "t":"LMS", "geo":{"sx":50, "sy":50, "x":-680, "y":160, "sec":"LMS", "row":0, "col":0}, "daq":{"crate":6, "slot":4, "channel":2}},
   {"n":"LMS3", "t":"LMS", "geo":{"sx":50, "sy":50, "x":-630, "y":160, "sec":"LMS", "row":0, "col":0}, "daq":{"crate":6, "slot":4, "channel":3}},
-  {"n":"V1", "t":"SCINT", "geo":{"sx":50, "sy":50, "x":-630, "y":0, "sec":"SCINT", "row":0, "col":0}},
-  {"n":"V2", "t":"SCINT", "geo":{"sx":50, "sy":50, "x":-680, "y":50, "sec":"SCINT", "row":0, "col":0}},
-  {"n":"V3", "t":"SCINT", "geo":{"sx":50, "sy":50, "x":-730, "y":0, "sec":"SCINT", "row":0, "col":0}},
-  {"n":"V4", "t":"SCINT", "geo":{"sx":50, "sy":50, "x":-680, "y":-50, "sec":"SCINT", "row":0, "col":0}}
+  {"n":"V1", "t":"Veto", "geo":{"sx":50, "sy":50, "x":-630, "y":0, "sec":"Veto", "row":0, "col":0}},
+  {"n":"V2", "t":"Veto", "geo":{"sx":50, "sy":50, "x":-680, "y":50, "sec":"Veto", "row":0, "col":0}},
+  {"n":"V3", "t":"Veto", "geo":{"sx":50, "sy":50, "x":-730, "y":0, "sec":"Veto", "row":0, "col":0}},
+  {"n":"V4", "t":"Veto", "geo":{"sx":50, "sy":50, "x":-680, "y":-50, "sec":"Veto", "row":0, "col":0}}
 ]

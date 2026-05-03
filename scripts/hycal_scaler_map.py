@@ -194,7 +194,7 @@ class ScalerMapWindow(QMainWindow):
         root.addLayout(top)
 
         # -- map --
-        # Only show modules that actually have scaler PVs; SCINT (V1–V4)
+        # Only show modules that actually have scaler PVs; Veto (V1–V4)
         # has no scaler rate, so rendering them here would misleadingly
         # grey them out. LMS is still filtered by include_lms=False.
         self._map = ScalerMapWidget()

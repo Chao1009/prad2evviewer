@@ -24,7 +24,7 @@ static constexpr int HYCAL_MAX_MODULES  = 1800;  // 1728 real + margin
 static constexpr int MAX_NEIGHBORS      = 12;    // max neighbors per module
 
 // --- module types -----------------------------------------------------------
-enum class ModuleType : int8_t { PbGlass = 0, PbWO4 = 1, LMS = 2, Unknown = -1 };
+enum class ModuleType : int8_t { PbGlass = 0, PbWO4 = 1, LMS = 2, Veto = 3, Unknown = -1 };
 
 // crystal module IDs start from 1000 (PrimEx convention)
 static constexpr int PWO_ID0 = 1000;

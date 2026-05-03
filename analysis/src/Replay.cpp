@@ -43,7 +43,7 @@ void Replay::LoadHyCalMap(const std::string &json_path)
     auto parse_t = [](const std::string &t) {
         if (t == "PbGlass") return prad2::MOD_PbGlass;
         if (t == "PbWO4")   return prad2::MOD_PbWO4;
-        if (t == "SCINT")   return prad2::MOD_SCINT;
+        if (t == "Veto")    return prad2::MOD_VETO;
         if (t == "LMS")     return prad2::MOD_LMS;
         return prad2::MOD_UNKNOWN;
     };
@@ -92,7 +92,7 @@ int Replay::moduleID(int roc, int slot, int ch) const
     auto t = moduleType(roc, slot, ch);
     // Globally-unique ID encoding — see RawEventData docs.  The numeric
     // ranges are deliberately disjoint so HyCalSystem::module_by_id(...)
-    // returns nullptr for SCINT/LMS, letting existing HyCal consumers
+    // returns nullptr for Veto/LMS, letting existing HyCal consumers
     // skip them via their existing nullptr / is_hycal() checks.
     switch (t) {
         case prad2::MOD_PbGlass:
@@ -103,7 +103,7 @@ int Replay::moduleID(int roc, int slot, int ch) const
         case prad2::MOD_PbWO4:
             try { return std::stoi(name.substr(1)) + 1000; } catch (...) { return -1; }
 
-        case prad2::MOD_SCINT:
+        case prad2::MOD_VETO:
             // "V1".."V4" → 3001..3004
             if (name.size() >= 2 && name[0] == 'V')
                 try { return 3000 + std::stoi(name.substr(1)); } catch (...) {}
@@ -297,7 +297,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                             ev->samples[nch][i] = cd.samples[i];
 
                         // Gain correction is HyCal-only (PbGlass / PbWO4) —
-                        // SCINT / LMS get unity factor.  Comes from a lookup
+                        // Veto / LMS get unity factor.  Comes from a lookup
                         // table, no analyzer needed.
                         if (mod_type == prad2::MOD_PbWO4) {
                             ev->gain_factor[nch] = gain_correction.w[mod_id - 1000].avg;

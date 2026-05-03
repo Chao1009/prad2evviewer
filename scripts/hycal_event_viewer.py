@@ -1083,7 +1083,7 @@ class WaveformPlotWidget(QWidget):
 
 # Module types that should get a small name label painted on top of the cell
 # (so the tiny LMS / V blocks off to the left of HyCal are identifiable).
-_LABEL_TYPES = {"LMS", "SCINT"}
+_LABEL_TYPES = {"LMS", "Veto"}
 
 class WaveformGeoView(HyCalMapWidget):
     """Compact HyCal geo view with two colour-coding modes.
@@ -2559,7 +2559,7 @@ class HyCalEventViewer(QMainWindow):
                               cache_key: Tuple[int, int, int]):
         """Look up a HyCal Module by DAQ address, caching on the ROC-tag key.
         Returns the Module or None if this channel isn't a HyCal module
-        (LMS / SCINT / scaler channels return None and are silently ignored)."""
+        (LMS / Veto / scaler channels return None and are silently ignored)."""
         if self._hcsys is None:
             return None
         if cache_key in self._hc_cache:

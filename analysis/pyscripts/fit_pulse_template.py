@@ -73,7 +73,7 @@ PULSE_CACHE = 20
 # Stable colour assignments for the per-type summary panels.  Types that
 # don't appear in this map fall through to matplotlib's default cycle.
 TYPE_COLORS = {"PbGlass": "C0", "PbWO4": "C1",
-               "LMS":     "C2", "SCINT": "C3", "Unknown": "0.5"}
+               "LMS":     "C2", "Veto":  "C3", "Unknown": "0.5"}
 
 
 # ---------------------------------------------------------------------------
@@ -164,11 +164,12 @@ def _median_mad(values: List[float]) -> Tuple[float, float]:
 def aggregate_by_type(summaries: List[Dict], min_pulses: int) -> Dict[str, Dict]:
     """For each module type present in `summaries`, take the channels with
     enough pulses and compute median ± MAD across their per-channel
-    medians for every fit parameter.  Used downstream as per-type initial
-    guesses / priors when a per-channel template is missing or
-    low-statistics.  Type strings come from HyCalSystem.Module.type
-    (sourced from hycal_map.json), so SCINT/LMS/PbWO4/PbGlass are
-    whatever the JSON spelled them."""
+    medians for every fit parameter.  These per-type aggregates are the
+    templates the C++ PulseTemplateStore actually feeds to the deconv —
+    one shape per category (PbGlass / PbWO4 / LMS / Veto), shared by
+    every channel of that type.  Type strings come from
+    HyCalSystem.Module.type (sourced from hycal_map.json), so
+    Veto/LMS/PbWO4/PbGlass are whatever the JSON spelled them."""
     by_type: Dict[str, Dict] = {}
     types_present = sorted({s["module_type"] for s in summaries})
     for t in types_present:
@@ -322,7 +323,7 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
 def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
                  out_png: Path) -> None:
     """Global histograms of every fit parameter, split by module type
-    (PbGlass / PbWO4 / LMS / SCINT — whatever HyCalSystem reported per
+    (PbGlass / PbWO4 / LMS / Veto — whatever HyCalSystem reported per
     channel).  Bottom row: τ_r vs τ_f scatter coloured by χ²/dof."""
     have = [s for s in summaries if s["n_pulses_used"] >= min_pulses]
     if not have:
@@ -859,8 +860,11 @@ def main() -> None:
         summaries.append({"name": name, **rec})
 
     # Per-type aggregate (median ± MAD across channel medians) for each
-    # fit parameter — feeds per-type initial guesses in the deconv when a
-    # per-channel template is missing or low-statistics.
+    # fit parameter.  This is what the C++ PulseTemplateStore actually
+    # uses for deconvolution — one shape per category (PbGlass / PbWO4 /
+    # LMS / Veto) for every channel of that type.  The per-channel
+    # entries above are kept for diagnostics + so the store can build
+    # its (roc, slot, channel) → module_type lookup at load time.
     out["_by_type"] = aggregate_by_type(summaries, args.min_pulses)
 
     out_path = Path(args.out)

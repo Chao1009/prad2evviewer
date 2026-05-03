@@ -41,8 +41,8 @@ CRATE_NAMES = [f"adchycal{i}" for i in range(1, NUM_CRATES + 1)]
 CHANNELS_PER_SLOT = 16
 
 DEFAULT_UNMAPPED_GAIN = 0.0    # nonexistent channel — disable
-DEFAULT_LMS_GAIN = 1.0
-DEFAULT_SCINT_GAIN = 1.0
+DEFAULT_LMS_GAIN  = 1.0
+DEFAULT_VETO_GAIN = 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +122,8 @@ def resolve_gain(name: str,
         return pbglass_gain
     if mod_type == "LMS":
         return DEFAULT_LMS_GAIN
-    # V1-V4 scintillators and anything else
-    return DEFAULT_SCINT_GAIN
+    # V1-V4 vetos and anything else
+    return DEFAULT_VETO_GAIN
 
 
 def safe_cap_gains(gains: Dict[str, float],
@@ -307,7 +307,7 @@ def _load_module_info(db_dir: Path) -> List[_ModuleInfo]:
             continue
         crate, slot, ch = daq_by_name.get(name, (-1, -1, -1))
         if crate >= 0:
-            t = "Scintillator" if name.startswith("V") else "LMS"
+            t = "Veto" if name.startswith("V") else "LMS"
             modules.append(_ModuleInfo(name, t, _LMS_V_XPOS[name],
                                        _BOTTOM_Y, _BOTTOM_SZ, _BOTTOM_SZ,
                                        crate, slot, ch))
