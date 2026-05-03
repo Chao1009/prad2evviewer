@@ -551,6 +551,41 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .report-menu button:disabled { color:var(--dim); cursor:default; }
 .report-menu button:disabled:hover { background:none; }
 
+/* --- cut-settings dialog --- */
+.cut-fieldset {
+    border:1px solid var(--border); border-radius:4px;
+    padding:8px 10px; margin:0;
+}
+.cut-fieldset legend {
+    font-size:11px; padding:0 6px; color:var(--dim);
+    text-transform:uppercase; letter-spacing:0.5px;
+}
+.cut-row { display:flex; gap:8px; }
+.cut-row label {
+    flex:1; display:flex; flex-direction:column; gap:2px;
+    font-size:11px; color:var(--dim); margin:0;
+}
+.cut-row label input {
+    background:var(--bg); border:1px solid var(--border); color:var(--text);
+    padding:4px 6px; border-radius:3px; font-family:inherit; font-size:12px;
+    box-sizing:border-box;
+}
+.cut-row label input:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+.cut-quality { display:flex; gap:8px; }
+.cut-quality-col { flex:1; display:flex; flex-direction:column; gap:4px; }
+.cut-quality-title { font-size:11px; color:var(--dim); }
+.cut-bit-list {
+    display:flex; flex-direction:column; gap:4px;
+    background:var(--bg); border:1px solid var(--border); border-radius:3px;
+    padding:6px; min-height:48px; font-size:12px;
+}
+.cut-bit-list label {
+    display:flex; align-items:center; gap:6px;
+    color:var(--text); margin:0; cursor:pointer;
+}
+.cut-bit-list input[type="checkbox"] { accent-color:var(--accent); margin:0; }
+.cut-hint { font-size:10px; color:var(--dim); margin-top:6px; line-height:1.4; }
+
 /* --- elog dialog --- */
 .elog-form { padding:14px; }
 .elog-form label { display:block; font-size:12px; color:var(--dim); margin-bottom:8px; }

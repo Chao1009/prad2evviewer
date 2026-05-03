@@ -98,16 +98,13 @@ function applyConfig(data){
     filteredCount=data.filtered_count||totalEvents;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
-    // peak filter (Waveform Tab) — runtime-mutable; the GUI dialog edits this
+    // peak filter (Waveform Tab) — runtime-mutable; the Cut-Settings dialog edits this
     histConfig.filter        = data.filter        || {};
     histConfig.filter_enable = !!data.filter_enable;
     histConfig.quality_bits  = data.quality_bits  || [];
-    // sync "apply" checkbox to server's enable state
+    // sync "apply" toggle to server's enable state
     const cutApplyCb = document.getElementById('cut-apply');
     if (cutApplyCb) cutApplyCb.checked = histConfig.filter_enable;
-    if(document.getElementById('thr-show'))
-        document.getElementById('thr-show').textContent=
-            histConfig.threshold!==undefined ? histConfig.threshold : '?';
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
     triggerTypeDef=data.trigger_type||[];

@@ -743,30 +743,8 @@ function init(){
         v=>{const r=getGeoRange('cluster','energy');setGeoRange('cluster','energy',r[0],v);},
         clRangeApply);
 
-    // Threshold edit — pushes to backend; filter ranges live in the
-    // Cut-Settings dialog (cut_dialog.js).
-    function thrApply(){
-        if (histConfig.threshold === undefined || histConfig.threshold === null) return;
-        fetch('/api/hist_config',{method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({threshold: histConfig.threshold})})
-            .then(r=>r.json()).then(()=>{
-                if(typeof clusterEvent!=='undefined') clusterEvent=-1;
-                if(currentEvent>0) loadEvent(currentEvent);
-                else { geoDq(); }
-            }).catch(()=>{ geoDq(); });
-        if(selectedModule){
-            lastHistModule=''; // force histogram refresh
-            showWaveform(selectedModule);
-        }
-    }
-    function updateThrDisplay(){
-        const thrShow=document.getElementById('thr-show');
-        if(thrShow) thrShow.textContent=
-            histConfig.threshold!==undefined ? histConfig.threshold : '?';
-    }
-    setupRangeEdit('thr-btn','thr-edit','thr-show',
-        ()=>histConfig.threshold, v=>{histConfig.threshold=v; updateThrDisplay();}, thrApply);
+    // Threshold edit lives in the Cut-Settings dialog (cut_dialog.js); no
+    // toolbar control here.
 
     // --- online mode nav ---
     document.getElementById('ring-select').onchange=e=>{

@@ -169,49 +169,48 @@
         <span>Cut Settings</span>
         <button id="cut-dialog-close">&times;</button>
     </div>
-    <div class="elog-form" style="gap:6px">
-        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
-            <legend style="font-size:12px;padding:0 4px">Time (ns)</legend>
-            <div class="flt-fields">
-                <div style="display:flex;gap:6px">
-                    <label style="flex:1">min<input type="number" id="cut-time-min" step="any" placeholder=""></label>
-                    <label style="flex:1">max<input type="number" id="cut-time-max" step="any" placeholder=""></label>
-                </div>
+    <div class="elog-form" style="gap:8px;display:flex;flex-direction:column">
+        <fieldset class="cut-fieldset">
+            <legend>Time (ns)</legend>
+            <div class="cut-row">
+                <label>min<input type="number" id="cut-time-min" step="any"></label>
+                <label>max<input type="number" id="cut-time-max" step="any"></label>
             </div>
         </fieldset>
-        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
-            <legend style="font-size:12px;padding:0 4px">Integral</legend>
-            <div class="flt-fields">
-                <div style="display:flex;gap:6px">
-                    <label style="flex:1">min<input type="number" id="cut-integral-min" step="any" placeholder=""></label>
-                    <label style="flex:1">max<input type="number" id="cut-integral-max" step="any" placeholder=""></label>
-                </div>
+        <fieldset class="cut-fieldset">
+            <legend>Integral</legend>
+            <div class="cut-row">
+                <label>min<input type="number" id="cut-integral-min" step="any"></label>
+                <label>max<input type="number" id="cut-integral-max" step="any"></label>
             </div>
         </fieldset>
-        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
-            <legend style="font-size:12px;padding:0 4px">Height</legend>
-            <div class="flt-fields">
-                <div style="display:flex;gap:6px">
-                    <label style="flex:1">min<input type="number" id="cut-height-min" step="any" placeholder=""></label>
-                    <label style="flex:1">max<input type="number" id="cut-height-max" step="any" placeholder=""></label>
-                </div>
+        <fieldset class="cut-fieldset">
+            <legend>Height</legend>
+            <div class="cut-row">
+                <label>min<input type="number" id="cut-height-min" step="any"></label>
+                <label>max<input type="number" id="cut-height-max" step="any"></label>
             </div>
         </fieldset>
-        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
-            <legend style="font-size:12px;padding:0 4px">Quality bits</legend>
-            <div class="flt-fields">
-                <details>
-                    <summary style="cursor:pointer;font-size:12px">Accept (allowed flags)</summary>
-                    <div id="cut-accept-list" style="padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px"></div>
-                </details>
-                <details>
-                    <summary style="cursor:pointer;font-size:12px">Reject (forbidden flags)</summary>
-                    <div id="cut-reject-list" style="padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px"></div>
-                </details>
-                <div style="font-size:11px;color:var(--dim);margin-top:4px">
-                    Empty = no constraint. Accept: peak's set bits must be a subset of accepted flags. Reject: peak fails if any rejected flag is set.
+        <fieldset class="cut-fieldset">
+            <legend>Quality bits</legend>
+            <div class="cut-quality">
+                <div class="cut-quality-col">
+                    <div class="cut-quality-title">Accept</div>
+                    <div id="cut-accept-list" class="cut-bit-list"></div>
+                </div>
+                <div class="cut-quality-col">
+                    <div class="cut-quality-title">Reject</div>
+                    <div id="cut-reject-list" class="cut-bit-list"></div>
                 </div>
             </div>
+            <div class="cut-hint">Empty = no constraint. Accept: peak's set bits must be a subset of accepted flags. Reject: peak fails if any rejected flag is set.</div>
+        </fieldset>
+        <fieldset class="cut-fieldset">
+            <legend>Threshold</legend>
+            <div class="cut-row">
+                <label>min peak height<input type="number" id="cut-threshold" step="any"></label>
+            </div>
+            <div class="cut-hint">Hard pre-filter applied before the cuts above. Also affects clustering input.</div>
         </fieldset>
         <div class="elog-form-actions">
             <button id="cut-cancel">Cancel</button>
@@ -286,13 +285,9 @@
                 <span class="range-btn" id="range-max-btn" title="Edit max">✎</span>
             </div>
             <div class="tcut-bar">
-                <button id="cut-settings-btn" title="Edit peak filter ranges">Cut Settings…</button>
-                <label title="Apply the filter on the server (affects all clients)"><input type="checkbox" id="cut-apply"> apply</label>
-                <label title="Show cut-range overlays on histograms and the waveform plot"><input type="checkbox" id="cut-show" checked> show</label>
-                <label style="margin-left:8px" title="Peak height threshold for clustering / integral view">Thr</label>
-                <span class="range-val" id="thr-show">0</span>
-                <input class="range-edit" id="thr-edit" type="number" step="any">
-                <span class="range-btn" id="thr-btn" title="Edit threshold">✎</span>
+                <button id="cut-settings-btn" class="copy-btn" title="Edit peak filter ranges">Cut Settings…</button>
+                <label class="toggle-btn" title="Apply the filter on the server (affects all clients)"><input type="checkbox" id="cut-apply"> apply</label>
+                <label class="toggle-btn" title="Show cut-range overlays on histograms and the waveform plot"><input type="checkbox" id="cut-show" checked> show</label>
             </div>
         </div>
         <div class="geo-toolbar" id="geo-toolbar-cl" style="display:none">
