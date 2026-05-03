@@ -485,7 +485,9 @@ def reconstruct_hycal(p: Pipeline, fadc_evt) -> list:
                         best_h = pk.height
                 if best is None:
                     continue
-                p.hc_clusterer.add_hit(mod.index, mod.energize(best.integral))
+                p.hc_clusterer.add_hit(mod.index,
+                                        mod.energize(best.integral),
+                                        float(best.time))
     p.hc_clusterer.form_clusters()
     return p.hc_clusterer.reconstruct_hits()
 
