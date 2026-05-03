@@ -40,7 +40,7 @@ NUM_CRATES = 7
 CRATE_NAMES = [f"adchycal{i}" for i in range(1, NUM_CRATES + 1)]
 CHANNELS_PER_SLOT = 16
 
-DEFAULT_UNMAPPED_GAIN = 1.0
+DEFAULT_UNMAPPED_GAIN = 0.0    # nonexistent channel — disable
 DEFAULT_LMS_GAIN = 1.0
 DEFAULT_SCINT_GAIN = 1.0
 
