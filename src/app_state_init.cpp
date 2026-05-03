@@ -127,6 +127,10 @@ void AppState::init(const std::string &db_dir,
         waveform_trigger.parse(w, trigger_bits_def);
         if (w.contains("filter") && w["filter"].is_object())
             peak_filter.parse(w["filter"], peak_quality_bits_def);
+        // Snapshot for the Cut-Settings "Reset" button.  `enable` defaults
+        // to true so Reset both restores the JSON ranges and re-arms the
+        // apply toggle (matches startup state).
+        peak_filter_default = peak_filter;
         if (w.contains("integral_hist")) {
             auto &ih = w["integral_hist"];
             if (ih.contains("min"))  hist_cfg.bin_min  = ih["min"];

@@ -138,11 +138,23 @@
 body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:var(--text); overflow:hidden; }
 
 .header {
+    position:relative;
     display:flex; align-items:center; gap:16px;
     padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border);
 }
 .header h1 { font-size:15px; font-weight:600; color:var(--accent); white-space:nowrap; }
 .header .nav { display:flex; align-items:center; gap:6px; }
+/* Live status (livetime, beam energy/current) centered in the header
+   regardless of nav width.  pointer-events:none so the wrapper doesn't
+   block clicks on whatever sits beneath it; child spans flip it back on
+   for hover/title behaviour. */
+.header-center {
+    position:absolute; left:50%; top:50%;
+    transform:translate(-50%, -50%);
+    display:flex; align-items:center; gap:16px;
+    pointer-events:none; white-space:nowrap;
+}
+.header-center > * { pointer-events:auto; }
 .header button {
     background:var(--border); border:none; color:var(--text); padding:4px 12px;
     border-radius:3px; cursor:pointer; font-family:inherit; font-size:13px;

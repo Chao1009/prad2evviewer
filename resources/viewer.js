@@ -772,6 +772,16 @@ function init(){
         // Canvas widgets read THEME at draw time, so force a full repaint.
         drawColorBar();
         redrawGeo();
+        // Plotly *shapes* (cut-range overlays, ref lines) embed THEME
+        // colors at draw time — relayout above only patches axis chrome,
+        // so the shapes still carry the previous theme's colors.  Re-run
+        // showWaveform to regenerate the layout (which calls wfLayout +
+        // showHistograms internally with fresh THEME.cutShade).
+        if (typeof selectedModule !== 'undefined' && selectedModule
+            && typeof showWaveform === 'function') {
+            if (typeof lastHistModule !== 'undefined') lastHistModule = '';
+            showWaveform(selectedModule);
+        }
     });
 
     // Clear All — resets all tabs' data for new run

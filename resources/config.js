@@ -63,9 +63,12 @@ function clearFrontend(){
     document.getElementById('status-bar').textContent='All data cleared';
 }
 
-// fetch /api/config and reconfigure the UI
+// fetch /api/config and reconfigure the UI.  Returns the underlying
+// promise so callers (e.g. the Cut-Settings Save handler) can await
+// applyConfig() before triggering plot redraws that depend on the
+// freshly-updated histConfig fields.
 function fetchConfigAndApply(){
-    fetch('/api/config').then(r=>r.json()).then(applyConfig);
+    return fetch('/api/config').then(r=>r.json()).then(applyConfig);
 }
 
 // ET connection dialog
@@ -103,9 +106,10 @@ function applyConfig(data){
     // toggle); `waveform_filter` is the {time, integral, height, quality_bits}
     // payload.  Distinct from `filter_active` (event-level filter loaded via
     // /api/filter/load).
-    histConfig.waveform_filter        = data.waveform_filter        || {};
-    histConfig.waveform_filter_active = !!data.waveform_filter_active;
-    histConfig.quality_bits           = data.quality_bits           || [];
+    histConfig.waveform_filter         = data.waveform_filter         || {};
+    histConfig.waveform_filter_active  = !!data.waveform_filter_active;
+    histConfig.waveform_filter_default = data.waveform_filter_default || {};
+    histConfig.quality_bits            = data.quality_bits            || [];
     // sync "apply" toggle to server's enable state
     const cutApplyCb = document.getElementById('cut-apply');
     if (cutApplyCb) cutApplyCb.checked = histConfig.waveform_filter_active;

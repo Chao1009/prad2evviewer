@@ -169,9 +169,13 @@ function connectWebSocket() {
                 initClHist(); plotClHist(); plotClStatHists();
                 gemResidData=null; plotGemResiduals();
                 lastHistModule = '';   // bypass refresh throttle
-                if (selectedModule) showHistograms(selectedModule);
+                // Use showWaveform (not showHistograms) so the waveform
+                // plot's cut-range shapes also refresh when the peak
+                // filter changes.  showWaveform calls showHistograms +
+                // redrawGeo internally; cached samples avoid a re-fetch.
+                if (selectedModule) showWaveform(selectedModule);
+                else                redrawGeo();
                 clearPhysicsFrontend();
-                redrawGeo();
                 if(activeTab==='gem') fetchGemAccum();
             } else if (msg.type === 'hist_config_updated') {
                 // Server's peak_filter changed (any client could have edited).

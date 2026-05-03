@@ -512,9 +512,10 @@ void AppState::fillConfigJson(json &cfg) const
         {"height_min", hist_cfg.height_min}, {"height_max", hist_cfg.height_max},
         {"height_step", hist_cfg.height_step},
     };
-    cfg["waveform_filter"]        = peak_filter.toJson(peak_quality_bits_def);
-    cfg["waveform_filter_active"] = peak_filter.enable;
-    cfg["quality_bits"]           = peak_quality_bits_def;
+    cfg["waveform_filter"]         = peak_filter.toJson(peak_quality_bits_def);
+    cfg["waveform_filter_active"]  = peak_filter.enable;
+    cfg["waveform_filter_default"] = peak_filter_default.toJson(peak_quality_bits_def);
+    cfg["quality_bits"]            = peak_quality_bits_def;
     cfg["ref_lines"] = ref_lines;
     cfg["trigger_bits"] = trigger_bits_def;
     cfg["trigger_type"] = trigger_type_def;

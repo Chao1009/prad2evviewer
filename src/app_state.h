@@ -166,8 +166,12 @@ struct AppState {
 
     // Waveform-Tab peak filter (height/integral/time hist + show overlays).
     // `enable` is the GUI "apply" checkbox; runtime-only, not in monitor_config.json.
+    // `peak_filter_default` snapshots the JSON-configured filter at startup
+    // so the Cut-Settings "Reset" button can restore the file values without
+    // a server round-trip.
     // peak_quality_bits_def is the [{bit,name,label},…] palette exposed via /api/config.
     PeakFilter      peak_filter;
+    PeakFilter      peak_filter_default;
     nlohmann::json  peak_quality_bits_def = nlohmann::json::array();
 
     // Gain-monitoring (LMS/Alpha) time window — distinct from peak_filter so
