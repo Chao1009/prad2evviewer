@@ -225,9 +225,14 @@ function renderGemEffSnapshot() {
             ? snap.chi2_per_dof.toFixed(2) : '—';
         // Per-detector ✓/✗ flag — ✓ = detector contributed to the fit (its hit
         // is within match_window of the seed line), ✗ = no in-window hit.
+        // Missing detectors are dimmed so the present ones read at a glance.
         const flags = (snap.dets || []).map((d, i) => {
             const c = GEM_COLORS[i] || THEME.text;
-            return `<span style="color:${c}">GEM${i}${d && d.used_in_fit ? '✓' : '✗'}</span>`;
+            const ok = d && d.used_in_fit;
+            const style = ok
+                ? `color:${c}`
+                : `color:${c};opacity:0.35`;
+            return `<span style="${style}">GEM${i}${ok ? '✓' : '✗'}</span>`;
         }).join(' ');
         info.innerHTML = `Event #${snap.event_id} &nbsp; χ²/dof=${chi2} &nbsp; ${flags}`;
     }

@@ -39,7 +39,7 @@
         "// Reconstruction knobs (min_*_energy, split_iter, ...) live in": "",
         "// reconstruction_config.json under 'hycal'.": "",
         "accept_trigger_bits": ["SSP0", "SSP1", "SSP2", "SSP3"],
-        "reject_trigger_bits": [],
+        "reject_trigger_bits": ["LMS", "Alpha", "Pulser"],
         "energy_hist": {
             "min": 0,
             "max": 4000,
