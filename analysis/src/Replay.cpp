@@ -728,7 +728,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             }
             ev->veto_nch = veto_nch;
             ev->lms_nch = lms_nch;
-            if(nch > 500) continue; // too many hits, likely noise, skip the event
+            if(nch > 1000) continue; // too many hits, likely noise, skip the event
 
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;
