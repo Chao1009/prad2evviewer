@@ -50,10 +50,10 @@
                 "pedestal_file":    "gem_peds/peds_24177.txt",
                 "common_mode_file": "gem_peds/cm_24177.txt",
                 "detectors": [
-                    {"id": 0, "position": [-229.16, -1.5, 5805.0], "tilting": [180.0, 0.0, 0.0]},
-                    {"id": 1, "position": [226.35, -1.4, 5850.0], "tilting": [180.0, 0.0, 180.0]},
-                    {"id": 2, "position": [-229.1, -1.0, 5420.0], "tilting": [180.0, 0.0, 0.0]},
-                    {"id": 3, "position": [226.53, -1.2, 5458.9], "tilting": [180.0, 0.0, 180.0]}
+                    {"id": 0, "position": [-229.16, -2.2, 5817.0], "tilting": [180.0, 0.0, 0.0]},
+                    {"id": 1, "position": [226.35, -1.4, 5853.8], "tilting": [180.0, 0.0, 180.0]},
+                    {"id": 2, "position": [-229.1, -1.0, 5414.0], "tilting": [180.0, 0.0, 0.0]},
+                    {"id": 3, "position": [226.53, -1.2, 5458.0], "tilting": [180.0, 0.0, 180.0]}
                 ]
             },
             "time_cuts": {
