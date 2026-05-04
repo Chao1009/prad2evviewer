@@ -13,6 +13,7 @@
 #include "MatchingTools.h"
 #include "ConfigSetup.h"
 #include "InstallPaths.h"
+#include "PipelineBuilder.h"
 #include "gain_factor.h"
 
 #include <nlohmann/json.hpp>
@@ -437,72 +438,89 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     // - We also run the GemSystem reconstruction to get GEM hits.
     // - We fill a different TTree with reconstructed quantities instead of raw data.
 
-    // build ROC tag → crate index mapping from DAQ config JSON
-    std::unordered_map<int, int> roc_to_crate;
-    if (!daq_config_file.empty()) {
-        std::cout << "Loading DAQ config from " << daq_config_file << "\n";
-        std::ifstream dcf(daq_config_file);
-        if (dcf.is_open()) {
-            auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
-            if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
-                for (auto &entry : dcj["roc_tags"]) {
-                    int tag   = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
-                    int crate = entry.at("crate").get<int>();
-                    roc_to_crate[tag] = crate;
+    // Detectors: PRad-II flows through PipelineBuilder so the wiring stays in
+    // one place (see prad2det/include/PipelineBuilder.h).  PRad-1 keeps its
+    // hand-wired path because the builder is PRad-II-shaped (no GEM, different
+    // hycal map, ADC1881M pedestals).
+    fdec::HyCalSystem                 hycal;
+    gem::GemSystem                    gem_sys;
+    fdec::ClusterConfig               cluster_cfg;
+    DetectorTransform                 hycal_transform;
+    std::array<DetectorTransform, 4>  gem_transforms;
+    std::unordered_map<int, int>      roc_to_crate;
+
+    if (prad1) {
+        // Legacy PRad-1 setup — no GEM, ADC1881M pedestals.
+        std::string hycal_map_file = db_dir + "/prad1/prad_hycal_map.json";
+        hycal.Init(hycal_map_file);
+        evc::load_pedestals(db_dir + "/prad1/adc1881m_pedestals.json", daq_cfg_);
+
+        std::string calib_file = db_dir + "/" + gRunConfig.energy_calib_file;
+        int nmatched = hycal.LoadCalibration(calib_file);
+        if (nmatched >= 0)
+            std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
+
+        // ROC→crate map from JSON (PRad-1 doesn't go through PipelineBuilder).
+        if (!daq_config_file.empty()) {
+            std::ifstream dcf(daq_config_file);
+            if (dcf.is_open()) {
+                auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
+                if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
+                    for (auto &entry : dcj["roc_tags"]) {
+                        int tag = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
+                        roc_to_crate[tag] = entry.at("crate").get<int>();
+                    }
                 }
             }
         }
+
+        // PRad-1 transforms come from the externally-loaded gRunConfig (the
+        // builder owns this for PRad-II).
+        auto t = analysis::BuildLabTransforms(gRunConfig);
+        hycal_transform = t.hycal;
+        gem_transforms  = t.gem;
+    } else {
+        // PRad-II: hand off to the canonical PipelineBuilder.  daq_cfg_ moves
+        // through the builder (which then attaches map paths) and comes back
+        // populated with everything the per-event loop needs.
+        std::string hycal_map_override = daq_cfg_.hycal_map_file;
+        std::string gem_map_override   = daq_cfg_.gem_map_file;
+
+        prad2::Pipeline pipeline = prad2::PipelineBuilder()
+            .set_database_dir(db_dir)
+            .set_loaded_daq_config(std::move(daq_cfg_))
+            .set_daq_config(daq_config_file)        // logging only
+            .set_hycal_map(std::move(hycal_map_override))
+            .set_gem_map(std::move(gem_map_override))
+            .set_gem_pedestal(gem_ped_file)         // empty falls back to RunConfig default
+            .set_run_number_from_evio(input_evio)
+            .set_log_stream(&std::cerr)
+            .build();
+
+        daq_cfg_         = std::move(pipeline.daq_cfg);
+        hycal            = std::move(pipeline.hycal);
+        gem_sys          = std::move(pipeline.gem);
+        cluster_cfg      = pipeline.hycal_cluster_cfg;
+        hycal_transform  = pipeline.hycal_transform;
+        gem_transforms   = pipeline.gem_transforms;
+
+        // ROC→crate map from the same daq_cfg the builder consumed.
+        for (const auto &re : daq_cfg_.roc_tags) {
+            if (re.crate < 0) continue;
+            if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
+            roc_to_crate[re.tag] = re.crate;
+        }
+
+        if (zerosup_override >= 0.f) {
+            gem_sys.SetZeroSupThreshold(zerosup_override);
+            std::cerr << "Zero-sup : " << zerosup_override << " sigma (override)\n";
+        }
     }
-    else {
-        std::cerr << "No DAQ config file provided, ROC tag to crate mapping will be unavailable.\n";
-    }
 
-    // Setup HyCal system and clusterer
-    fdec::HyCalSystem hycal;
-    std::string hycal_map_file = db_dir + (prad1 ? "/prad1/prad_hycal_map.json"
-                                                  : "/hycal_map.json");
-    hycal.Init(hycal_map_file);
-
-    if(prad1 == true) evc::load_pedestals(db_dir + "/prad1/adc1881m_pedestals.json", daq_cfg_);
-
-    std::string calib_file = db_dir + "/" + gRunConfig.energy_calib_file;
-    int nmatched = hycal.LoadCalibration(calib_file);
-    if (nmatched >= 0)
-        std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
-
-    fdec::HyCalCluster clusterer(hycal);
-    fdec::ClusterConfig cl_cfg;
-    clusterer.SetConfig(cl_cfg);
-
-    MatchingTools matching;
-
-    // Initialize GEM system and clusterer
-    std::unique_ptr<gem::GemSystem> gem_sys;
-    std::unique_ptr<gem::GemCluster> gem_clusterer;
-if(!prad1){
-    gem_sys = std::make_unique<gem::GemSystem>();
-    std::string gem_map_file = db_dir + "/gem_map.json";
-    gem_sys->Init(gem_map_file);
-    std::cerr << "GEM map  : " << gem_map_file
-                << " (" << gem_sys->GetNDetectors() << " detectors)\n";
-
-    if (!gem_ped_file.empty()) {
-        gem_sys->LoadPedestals(gem_ped_file);
-        std::cerr << "GEM peds : " << gem_ped_file << "\n";
-    }
-    else {
-        gem_sys->LoadPedestals(db_dir + "/" + gRunConfig.gem_pedestal_file);
-            std::cerr << "GEM peds : " << db_dir + "/" + gRunConfig.gem_pedestal_file << "\n";
-
-    }
-
-    if (zerosup_override >= 0.f) {
-        gem_sys->SetZeroSupThreshold(zerosup_override);
-        std::cerr << "Zero-sup : " << zerosup_override << " sigma (override)\n";
-    }
-    
-    gem_clusterer = std::make_unique<gem::GemCluster>();
-}
+    fdec::HyCalCluster   clusterer(hycal);
+    clusterer.SetConfig(cluster_cfg);
+    gem::GemCluster      gem_clusterer;
+    MatchingTools        matching;
     //open EVIO file and output ROOT file
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
@@ -552,8 +570,10 @@ if(!prad1){
     int run_num = get_run_int(input_evio);
     auto gain_correction = prad2::ComputeGainCorrection(db_dir + "/" + gRunConfig.gain_data_dir, run_num, gRunConfig.gain_ref_run);
 
-    // Per-detector lab transforms (rotation matrices precomputed once).
-    auto xforms = analysis::BuildLabTransforms(gRunConfig);
+    // Per-detector lab transforms — set up by either branch of the detector
+    // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).
+    const auto &hc_xform = hycal_transform;
+    const auto &g_xform  = gem_transforms;
 
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
@@ -719,7 +739,7 @@ if(!prad1){
                 //transform the cluster positions to the lab coordinate
                 HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
                     hits[i].energy, static_cast<uint16_t>(hits[i].center_id), hits[i].flag};
-                analysis::ApplyToLab(xforms.hycal, local_hit);
+                analysis::ApplyToLab(hc_xform, local_hit);
                 GetProjection(local_hit, gRunConfig.hycal_z);
                 ev->cl_x[i] = local_hit.x;
                 ev->cl_y[i] = local_hit.y;
@@ -730,18 +750,11 @@ if(!prad1){
             }
 
             //decode GEM data and reconstruct GEM hits
-        if(!prad1){
-            if (gem_sys) {
-                gem_sys->Clear();
-                gem_sys->ProcessEvent(*ssp_evt);
-                if (gem_clusterer)
-                    gem_sys->Reconstruct(*gem_clusterer);
-            }
-            else {
-                ev->n_gem_hits = 0;
-                std::cerr << "Warning: GEM system not initialized, skipping GEM reconstruction\n";
-            }
-            auto &all_hits = gem_sys->GetAllHits();
+        if(!prad1 && gem_sys.GetNDetectors() > 0){
+            gem_sys.Clear();
+            gem_sys.ProcessEvent(*ssp_evt);
+            gem_sys.Reconstruct(gem_clusterer);
+            auto &all_hits = gem_sys.GetAllHits();
             ev->n_gem_hits = std::min((int)all_hits.size(), prad2::kMaxGemHits);
             for (int i = 0; i < ev->n_gem_hits; i++) {
                 auto &h = all_hits[i];
@@ -758,7 +771,7 @@ if(!prad1){
                 GEMHit local_hit = {h.x, h.y, 0.f, static_cast<uint8_t>(h.det_id)};
                 int d = local_hit.det_id;
                 if (d >= 0 && d < 4) {
-                    analysis::ApplyToLab(xforms.gem[d], local_hit);
+                    analysis::ApplyToLab(g_xform[d], local_hit);
                 }
                 ev->gem_x[i] = local_hit.x;
                 ev->gem_y[i] = local_hit.y;
