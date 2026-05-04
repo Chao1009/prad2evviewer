@@ -52,6 +52,34 @@ def _font(size: float, bold: bool = False) -> QFont:
 
 
 # =============================================================================
+# PRad-II GEM mechanical layout (transcribed from
+# mpd_gem_view_ssp/gui/experiment_setup/PRadSetup.cpp).
+#
+# Each PRad GEM chamber has six horizontal G10 spacers and two vertical
+# spacers; positions are given for det_pos == 0 (left chamber).  The right
+# chamber is the same physical part rotated 180°, so we mirror around the
+# chamber centre.
+# =============================================================================
+
+_SPACER_VERT_X_LEFT = (183.8, 366.2)                                    # mm
+_SPACER_HORIZ_Y_LEFT = (171.0, 347.0, 523.0, 729.8, 920.8, 1096.8)      # mm
+
+# APV box geometry, all in chamber-mm.  ``MARGIN`` is what we reserve in the
+# panel transform to keep boxes inside the panel bounds.
+_APV_THICKNESS_MM = 40.0
+_APV_GAP_MM = 4.0
+_APV_MARGIN_MM = 50.0
+_SPLIT_BOX_RATIO = 0.5      # split (half-active) APVs draw at this fraction of thickness
+
+# Per-chamber accent colors — mirror PRadSetup's red (left) / dark-green
+# (right) convention.  Saturated so they read on dark and light backgrounds.
+_DET_POS_FILL = {
+    0: (217,  83,  79),  # left chamber red
+    1: ( 61, 139,  61),  # right chamber green
+}
+
+
+# =============================================================================
 # Colour LUTs
 # =============================================================================
 
@@ -119,6 +147,11 @@ def build_strip_layout(layers, apvs, hole, raw):
             "y_strips": [],
             "x_apv_edges": set(),
             "y_apv_edges": set(),
+            "x_apv_boxes": [],     # APV chips on the chamber's top/bottom edges
+            "y_apv_boxes": [],     # APV chips on the chamber's left/right edges
+            "det_pos": 0,          # 0 = left chamber, 1 = right chamber (mirrored)
+            "spacer_x": [],        # x positions of vertical spacer dashed lines
+            "spacer_y": [],        # y positions of horizontal spacer dashed lines
         }
 
     apv_ch = raw.get("apv_channels", 128)
@@ -167,6 +200,11 @@ def build_strip_layout(layers, apvs, hole, raw):
     for apv, det_id, plane, plane_strips in apv_data:
         det = detectors[det_id]
         match = apv.get("match", "")
+        is_split = bool(match)
+        pos = apv.get("pos", 0)
+        orient = apv.get("orient", 0)
+        det_pos = apv.get("det_pos", 0)
+        det["det_pos"] = det_pos  # consistent across APVs of the same chamber
         if plane == "X":
             pitch = det["x_pitch"]
             strip_positions = sorted(set(plane_strips))
@@ -182,6 +220,17 @@ def build_strip_layout(layers, apvs, hole, raw):
             det["x_apv_edges"].add((x_max, y0_edge, y1_edge))
             for s in plane_strips:
                 det["x_strips"].append((s * pitch, y0_edge, y1_edge))
+            # APV chip box outside the chamber frame.  Convention: orient
+            # 0 = readout cables on top of chamber, orient 1 = bottom.
+            det["x_apv_boxes"].append({
+                "pos": pos,
+                "side": "top" if orient == 0 else "bottom",
+                "x_min": x_min,
+                "x_max": x_max,
+                "label": str(pos),
+                "split": is_split,
+                "match": match,
+            })
         elif plane == "Y":
             pitch = det["y_pitch"]
             strip_positions = sorted(set(plane_strips))
@@ -196,6 +245,29 @@ def build_strip_layout(layers, apvs, hole, raw):
                     det["y_strips"].append((strip_y, hole_x1, det["x_size"]))
                 else:
                     det["y_strips"].append((strip_y, 0, det["x_size"]))
+            # Y APVs all sit on the chamber's outer side: left edge for the
+            # left chamber, right edge for the right chamber.
+            det["y_apv_boxes"].append({
+                "pos": pos,
+                "side": "left" if det_pos == 0 else "right",
+                "y_min": y_min,
+                "y_max": y_max,
+                "label": str(pos),
+                "split": is_split,
+                "match": match,
+            })
+
+    # Spacer positions — mirrored for the right chamber (det_pos == 1) since
+    # the same physical chamber is rotated 180° when installed on that side.
+    for det in detectors.values():
+        x_size = det["x_size"] if det["x_size"] > 0 else 1.0
+        y_size = det["y_size"] if det["y_size"] > 0 else 1.0
+        if det.get("det_pos", 0) == 1:
+            det["spacer_x"] = [x_size - x for x in _SPACER_VERT_X_LEFT]
+            det["spacer_y"] = [y_size - y for y in _SPACER_HORIZ_Y_LEFT]
+        else:
+            det["spacer_x"] = list(_SPACER_VERT_X_LEFT)
+            det["spacer_y"] = list(_SPACER_HORIZ_Y_LEFT)
 
     return detectors
 
@@ -381,17 +453,123 @@ def build_det_list_from_gemsys(gsys) -> List[dict]:
 
 
 def _panel_transform(world_w: float, world_h: float,
-                     panel: QRectF) -> Tuple[float, float, float]:
-    """Uniform fit of a world-space box into the panel rect (aspect preserved).
-    Returns (scale, origin_x, origin_y) where world (0, 0) lives at
-    (ox, oy + world_h * scale) in panel coords (Y flipped so up = +y)."""
-    if world_w <= 0 or world_h <= 0:
+                     panel: QRectF,
+                     *, margin_x: float = 0.0, margin_y: float = 0.0,
+                     fit_factor: float = 0.92) -> Tuple[float, float, float]:
+    """Uniform fit of a (margin-padded) world box into the panel rect.
+
+    With ``margin_x = margin_y = 0`` (default), behaves as before: world
+    (0, 0) sits at ``(ox, oy + world_h * scale)`` in panel coords (Y
+    flipped so up = +y).
+
+    Non-zero margins reserve that many world-units on every side of the
+    chamber, which is where APV boxes / external markers go.  ``ox/oy``
+    still point at the chamber's top-left in panel coords."""
+    ext_w = world_w + 2 * margin_x
+    ext_h = world_h + 2 * margin_y
+    if ext_w <= 0 or ext_h <= 0:
         return 1.0, panel.x(), panel.y()
-    scale = min(panel.width() / world_w, panel.height() / world_h) * 0.92
-    dw, dh = world_w * scale, world_h * scale
-    ox = panel.x() + (panel.width() - dw) / 2
-    oy = panel.y() + (panel.height() - dh) / 2
+    scale = min(panel.width() / ext_w, panel.height() / ext_h) * fit_factor
+    dw, dh = ext_w * scale, ext_h * scale
+    ox_box = panel.x() + (panel.width() - dw) / 2
+    oy_box = panel.y() + (panel.height() - dh) / 2
+    ox = ox_box + margin_x * scale
+    oy = oy_box + margin_y * scale
     return scale, ox, oy
+
+
+# =============================================================================
+# QPainter drawing — APV boxes & mechanical spacers
+# =============================================================================
+
+
+def _draw_spacers(p: QPainter, det: dict,
+                  scale: float, ox: float, oy: float,
+                  x_size: float, y_size: float,
+                  *, alpha: int = 80, width: float = 1.0):
+    """Mechanical G10 spacer dashed lines (6 horizontal + 2 vertical per chamber)."""
+    pen = QPen(QColor(150, 150, 150, alpha), width)
+    pen.setStyle(Qt.PenStyle.DashLine)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    for x in det.get("spacer_x", []):
+        if 0.0 < x < x_size:
+            xa = ox + x * scale
+            p.drawLine(QPointF(xa, oy), QPointF(xa, oy + y_size * scale))
+    for y in det.get("spacer_y", []):
+        if 0.0 < y < y_size:
+            ya = oy + (y_size - y) * scale
+            p.drawLine(QPointF(ox, ya), QPointF(ox + x_size * scale, ya))
+
+
+def _draw_apv_boxes(p: QPainter, det: dict,
+                    scale: float, ox: float, oy: float,
+                    x_size: float, y_size: float,
+                    *,
+                    show_labels: bool = True,
+                    thickness_mm: float = _APV_THICKNESS_MM,
+                    gap_mm: float = _APV_GAP_MM,
+                    split_ratio: float = _SPLIT_BOX_RATIO,
+                    fill_alpha: int = 200,
+                    border_color: Optional[QColor] = None,
+                    border_width: float = 0.6,
+                    label_color: Optional[QColor] = None,
+                    font_size: float = 7.5):
+    """Draw APV chip boxes around the chamber frame with index labels.
+
+    X APVs use ``orient`` (0 → top, 1 → bottom); Y APVs use ``det_pos``
+    (0 → left, 1 → right).  Split APVs (those with a ``match`` field)
+    are drawn at half thickness as visual stubs."""
+    if border_color is None:
+        border_color = QColor("#222")
+    if label_color is None:
+        label_color = QColor("white")
+
+    rgb = _DET_POS_FILL.get(det.get("det_pos", 0), _DET_POS_FILL[0])
+    fill = QColor(*rgb); fill.setAlpha(fill_alpha)
+
+    border_pen = QPen(border_color, border_width)
+
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    def _draw_box(rect: QRectF, label: str):
+        p.setPen(border_pen)
+        p.setBrush(fill)
+        p.drawRect(rect)
+        if show_labels and rect.width() > 6 and rect.height() > 6:
+            p.setPen(label_color)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setFont(_font(font_size, bold=True))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
+
+    # X APVs — boxes above (top) or below (bottom) the chamber.
+    for box in det.get("x_apv_boxes", []):
+        thick = thickness_mm * (split_ratio if box["split"] else 1.0)
+        if box["side"] == "top":
+            y_lo, y_hi = y_size + gap_mm, y_size + gap_mm + thick
+        else:
+            y_lo, y_hi = -gap_mm - thick, -gap_mm
+        rx = ox + box["x_min"] * scale
+        ry = oy + (y_size - y_hi) * scale
+        rw = (box["x_max"] - box["x_min"]) * scale
+        rh = (y_hi - y_lo) * scale
+        _draw_box(QRectF(rx, ry, rw, rh), box["label"])
+
+    # Y APVs — boxes to the left or right of the chamber.
+    for box in det.get("y_apv_boxes", []):
+        thick = thickness_mm * (split_ratio if box["split"] else 1.0)
+        if box["side"] == "left":
+            x_lo, x_hi = -gap_mm - thick, -gap_mm
+        else:
+            x_lo, x_hi = x_size + gap_mm, x_size + gap_mm + thick
+        rx = ox + x_lo * scale
+        ry = oy + (y_size - box["y_max"]) * scale
+        rw = (x_hi - x_lo) * scale
+        rh = (box["y_max"] - box["y_min"]) * scale
+        _draw_box(QRectF(rx, ry, rw, rh), box["label"])
+
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
 
 def _w2p(scale: float, ox: float, oy: float, world_h: float,
@@ -524,23 +702,36 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     inner = QRectF(panel.x() + 6, panel.y() + TITLE_H,
                    panel.width() - 12,
                    panel.height() - TITLE_H - BOTTOM_PAD)
-    scale, ox, oy = _panel_transform(x_size, y_size, inner)
+    scale, ox, oy = _panel_transform(x_size, y_size, inner,
+                                     margin_x=_APV_MARGIN_MM,
+                                     margin_y=_APV_MARGIN_MM)
 
     # Detector outline
     p.setPen(QPen(QColor("#888"), 0))  # cosmetic
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
-    # Beam hole (yellow translucent)
+    # Mechanical spacers — light dashed lines, drawn before strips so any
+    # strip hits render on top.
+    _draw_spacers(p, geom, scale, ox, oy, x_size, y_size,
+                  alpha=70, width=0.8)
+
+    # APV chip boxes around the chamber (drawn before strips so cluster
+    # markers and 2D-hit pluses can land on top without occlusion).
+    _draw_apv_boxes(p, geom, scale, ox, oy, x_size, y_size,
+                    show_labels=True, fill_alpha=180,
+                    border_width=0.5, font_size=6.5)
+
+    # Beam hole — round in the actual detector; draw as ellipse.
     if hole and "x_center" in hole:
         hx, hy = hole["x_center"], hole["y_center"]
         hw, hh = hole["width"], hole["height"]
         rx = ox + (hx - hw / 2) * scale
         ry = oy + (y_size - (hy + hh / 2)) * scale
         rw, rh = hw * scale, hh * scale
-        p.setPen(QPen(QColor("#ffcc00"), 1.2))
+        p.setPen(QPen(QColor("#cc3333"), 1.2))
         p.setBrush(QColor(255, 204, 0, 24))
-        p.drawRect(QRectF(rx, ry, rw, rh))
+        p.drawEllipse(QRectF(rx, ry, rw, rh))
 
     # Strip segments (solid first, then cross-talk dashed).  Both planes
     # use the active colormap — orientation alone identifies X vs Y.
@@ -767,7 +958,9 @@ def draw_layout(painter: QPainter, canvas: QRectF,
 
     x_size = det["x_size"]
     y_size = det["y_size"]
-    scale, ox, oy = _panel_transform(x_size, y_size, panel)
+    scale, ox, oy = _panel_transform(x_size, y_size, panel,
+                                     margin_x=_APV_MARGIN_MM,
+                                     margin_y=_APV_MARGIN_MM)
 
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
@@ -776,16 +969,21 @@ def draw_layout(painter: QPainter, canvas: QRectF,
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
-    # Beam hole
+    # Mechanical spacers (dashed light gray, drawn before strips so the
+    # strip lines render on top and remain readable).
+    _draw_spacers(painter, det, scale, ox, oy, x_size, y_size,
+                  alpha=110, width=1.0)
+
+    # Beam hole — round in the actual detector; draw as ellipse.
     if hole and "x_center" in hole:
         hx, hy = hole["x_center"], hole["y_center"]
         hw, hh = hole["width"], hole["height"]
         rx = ox + (hx - hw / 2) * scale
         ry = oy + (y_size - (hy + hh / 2)) * scale
         rw, rh = hw * scale, hh * scale
-        painter.setPen(QPen(QColor("#ffcc00"), 2.0))
+        painter.setPen(QPen(QColor("#cc3333"), 2.0))
         painter.setBrush(QColor(255, 204, 0, 36))
-        painter.drawRect(QRectF(rx, ry, rw, rh))
+        painter.drawEllipse(QRectF(rx, ry, rw, rh))
 
     # X strips (vertical blue lines, decimated by show_every within each extent group)
     x_by_extent: Dict[Tuple[float, float], list] = {}
@@ -839,19 +1037,29 @@ def draw_layout(painter: QPainter, canvas: QRectF,
 
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
+    # APV chip boxes around the chamber perimeter (drawn last so they sit
+    # on top of strip lines that would otherwise show through the gap).
+    _draw_apv_boxes(painter, det, scale, ox, oy, x_size, y_size,
+                    show_labels=True, font_size=8.0)
+
     # Legend
+    n_x_apvs = len(det.get("x_apv_boxes", []))
+    n_y_apvs = len(det.get("y_apv_boxes", []))
     legend_entries = [
         ("patch-steelblue", f"X strips ({len(det['x_strips'])})"),
         ("patch-indianred", f"Y strip segments ({len(det['y_strips'])})"),
+        ("patch-apv",       f"APVs (X:{n_x_apvs}/Y:{n_y_apvs}, split = stub)"),
+        ("dash-spacer",     "Spacers"),
     ]
     if hole:
         legend_entries.append(("patch-yellow", "Beam hole"))
     legend = QRectF(canvas.x(), canvas.bottom() - legend_h,
                     canvas.width(), legend_h)
-    _paint_layout_legend(painter, legend, legend_entries, fg)
+    _paint_layout_legend(painter, legend, legend_entries, fg, det)
 
 
-def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor):
+def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor,
+                         det: Optional[dict] = None):
     p.setPen(fg)
     p.setFont(_font(9))
     fm = QFontMetrics(p.font())
@@ -859,6 +1067,7 @@ def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor):
     if n == 0:
         return
     cell_w = area.width() / n
+    apv_rgb = _DET_POS_FILL.get((det or {}).get("det_pos", 0), _DET_POS_FILL[0])
     for i, (kind, label) in enumerate(entries):
         cx = area.x() + i * cell_w + 16
         cy = area.center().y()
@@ -871,8 +1080,19 @@ def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor):
             p.setPen(QPen(c, 0)); p.setBrush(c)
             p.drawRect(QRectF(cx, cy - 5, 14, 10))
         elif kind == "patch-yellow":
-            p.setPen(QPen(QColor("#ffcc00"), 1.2))
+            p.setPen(QPen(QColor("#cc3333"), 1.2))
             p.setBrush(QColor(255, 204, 0, 48))
-            p.drawRect(QRectF(cx, cy - 5, 14, 10))
+            p.drawEllipse(QRectF(cx, cy - 5, 14, 10))
+        elif kind == "patch-apv":
+            c = QColor(*apv_rgb, 220)
+            p.setPen(QPen(QColor("#222"), 0.8)); p.setBrush(c)
+            # full-thickness sample + half-thickness stub side-by-side.
+            p.drawRect(QRectF(cx, cy - 5, 9, 10))
+            p.drawRect(QRectF(cx + 11, cy - 2, 4, 4))
+        elif kind == "dash-spacer":
+            pen = QPen(QColor(150, 150, 150, 160), 1.0)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            p.drawLine(QPointF(cx, cy), QPointF(cx + 14, cy))
         p.setPen(fg)
         p.drawText(QPointF(cx + 20, cy + fm.ascent() / 2 - 2), label)
