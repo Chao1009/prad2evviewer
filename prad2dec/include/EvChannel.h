@@ -30,6 +30,8 @@
 #include "VtpData.h"
 #include "TdcData.h"
 #include "SyncData.h"
+#include "DscData.h"
+#include "EpicsData.h"
 #include "DaqConfig.h"
 #include <string>
 #include <vector>
@@ -154,6 +156,27 @@ public:
     // (distinguish those via `event_tag`).
     const psync::SyncInfo &Sync() const;
 
+    // DSC2 scaler readout (0xE115 inside the TI master crate).  Populated
+    // on physics events that carry the SYNC flag — at most once per scan.
+    // Returns a record with `present == false` when no DSC2 bank is in this
+    // event (or the configured slot/source doesn't match); see DscData.h.
+    const dsc::DscEventData &Dsc() const;
+
+    // EPICS slow-control record.  Populated on EPICS events (top-level
+    // tag 0x001F) and stamped with absolute unix_time + sync_counter from
+    // the 0xE112 HEAD bank plus the most-recent physics event_number seen
+    // before this EPICS event.  Returns a record with `present == false`
+    // on any other event type.
+    const epics::EpicsRecord &Epics() const;
+
+    // Most-recent physics event_number observed since this channel was
+    // opened.  Refreshed automatically when a Physics event is scanned and
+    // its TI/trigger-bank info has been decoded (Info() / DecodeEvent()).
+    // Used to stamp slow events (EPICS, DSC2 SYNCs) so analysis can join
+    // them to the physics tree by integer key.  Returns -1 before any
+    // physics event has been seen.
+    int32_t GetLastPhysicsEventNumber() const { return last_physics_event_number_; }
+
     // --- legacy API (compat, writes directly to caller-owned structs) -------
     //
     // Preserves the original semantics: populate the caller's structs without
@@ -201,15 +224,24 @@ protected:
     // callers declare `EvChannel ch;` as a local.  Marked mutable so the
     // accessors stay const-callable — the cache is an implementation detail.
     mutable int  cached_event_idx = -1;
-    mutable bool info_ready = false;
-    mutable bool fadc_ready = false;
-    mutable bool gem_ready  = false;
-    mutable bool tdc_ready  = false;
-    mutable bool vtp_ready  = false;
+    mutable bool info_ready  = false;
+    mutable bool fadc_ready  = false;
+    mutable bool gem_ready   = false;
+    mutable bool tdc_ready   = false;
+    mutable bool vtp_ready   = false;
+    mutable bool dsc_ready   = false;
+    mutable bool epics_ready = false;
     mutable std::unique_ptr<fdec::EventData>   cache_fadc;   // .info also serves Info()
     mutable std::unique_ptr<ssp::SspEventData> cache_gem;
     mutable std::unique_ptr<tdc::TdcEventData> cache_tdc;
     mutable std::unique_ptr<vtp::VtpEventData> cache_vtp;
+    mutable std::unique_ptr<dsc::DscEventData> cache_dsc;
+    mutable std::unique_ptr<epics::EpicsRecord> cache_epics;
+
+    // Latest physics event_number observed via Info()/DecodeEvent().  Used by
+    // slow-event consumers to stamp non-physics records with the most recent
+    // physics event so analysis can join trees by integer key.
+    mutable int32_t last_physics_event_number_ = -1;
 
     // Persistent across Scan() — refreshed only when a SYNC/EPICS or control
     // event is scanned, otherwise carries the most recent snapshot.  The
@@ -237,6 +269,14 @@ protected:
     // fields untouched when the current event contributes nothing.  Returns
     // true if `out` was updated.
     bool decodeSyncInto(psync::SyncInfo &out) const;
+    // DSC2 0xE115 scaler bank, configured slot/source/channel from
+    // config.dsc_scaler.  Leaves `out.present` false when there is no DSC2
+    // bank or the slot doesn't match the configured one.
+    void decodeDscInto(dsc::DscEventData &out) const;
+    // EPICS slow-control bank.  Stamps with the latest Sync() unix_time /
+    // sync_counter / run_number plus last_physics_event_number_.  Leaves
+    // `out.present` false on non-EPICS events.
+    void decodeEpicsInto(epics::EpicsRecord &out) const;
 
     // Invalidate all product cache flags.
     void clearCache() const;

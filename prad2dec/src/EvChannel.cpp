@@ -5,6 +5,7 @@
 #include "SspDecoder.h"
 #include "VtpDecoder.h"
 #include "TdcDecoder.h"
+#include "Dsc2Decoder.h"
 #include "evio.h"
 #include <cstring>
 #include <iostream>
@@ -216,6 +217,7 @@ bool EvChannel::Scan()
 void EvChannel::clearCache() const
 {
     info_ready = fadc_ready = gem_ready = tdc_ready = vtp_ready = false;
+    dsc_ready = epics_ready = false;
 }
 
 void EvChannel::SelectEvent(int i) const
@@ -403,6 +405,26 @@ const psync::SyncInfo &EvChannel::Sync() const
     return last_sync_info_;
 }
 
+const dsc::DscEventData &EvChannel::Dsc() const
+{
+    if (!cache_dsc) cache_dsc = std::make_unique<dsc::DscEventData>();
+    if (!dsc_ready) {
+        decodeDscInto(*cache_dsc);
+        dsc_ready = true;
+    }
+    return *cache_dsc;
+}
+
+const epics::EpicsRecord &EvChannel::Epics() const
+{
+    if (!cache_epics) cache_epics = std::make_unique<epics::EpicsRecord>();
+    if (!epics_ready) {
+        decodeEpicsInto(*cache_epics);
+        epics_ready = true;
+    }
+    return *cache_epics;
+}
+
 const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) const
 {
     nbytes = 0;
@@ -579,6 +601,11 @@ void EvChannel::decodeInfoInto(fdec::EventInfo &info) const
             }
         }
     }
+
+    // Track the latest physics event_number so slow events (DSC2 SYNCs,
+    // EPICS) can stamp themselves with it for offline join-by-key.
+    if (evtype == EventType::Physics && info.event_number != 0)
+        last_physics_event_number_ = info.event_number;
 }
 
 void EvChannel::decodeFadcInto(fdec::EventData &evt) const
@@ -785,6 +812,49 @@ bool EvChannel::decodeSyncInto(psync::SyncInfo &out) const
     }
 
     return false;
+}
+
+// === DSC2 livetime / EPICS slow-control =====================================
+
+void EvChannel::decodeDscInto(dsc::DscEventData &out) const
+{
+    out.clear();
+    const auto &cfg = config.dsc_scaler;
+    if (!cfg.enabled() || cfg.bank_tag < 0) return;
+
+    auto it = tag_index.find(static_cast<uint32_t>(cfg.bank_tag));
+    if (it == tag_index.end()) return;
+    for (int ni : it->second) {
+        const auto &n = nodes[ni];
+        if (n.data_words == 0) continue;
+        // First bank that matches the configured slot wins.  DecodeBank
+        // leaves out.present false on mismatch, so we keep probing.
+        if (dsc::Dsc2Decoder::DecodeBank(GetData(n), n.data_words, cfg, out))
+            return;
+    }
+}
+
+void EvChannel::decodeEpicsInto(epics::EpicsRecord &out) const
+{
+    out.clear();
+    if (evtype != EventType::Epics) return;
+
+    const std::string text = ExtractEpicsText();
+    if (text.empty()) return;
+    epics::ParseEpicsText(text, out);
+
+    // Stamp absolute time / run from the 0xE112 HEAD bank that this EPICS
+    // event also carries (Sync() pulls it out and caches it).
+    const auto &si = Sync();
+    out.unix_time    = si.unix_time;
+    out.sync_counter = si.sync_counter;
+    out.run_number   = si.run_number;
+
+    // last_physics_event_number_ is updated by decodeInfoInto() whenever a
+    // physics event is decoded.  Stamping it here lets analysis join the
+    // EPICS row to the physics tree by integer key.
+    out.event_number_at_arrival = last_physics_event_number_;
+    out.present = true;
 }
 
 // =============================================================================

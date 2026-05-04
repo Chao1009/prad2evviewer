@@ -19,9 +19,17 @@
 #include "SspData.h"       // MAX_MPDS, MAX_APVS_PER_MPD, APV_STRIP_SIZE, SSP_TIME_SAMPLES
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace prad2 {
+
+// ── Slow-control / scaler tree capacity constants ───────────────────────
+//
+// DSC2 has 16 TRG + 16 TDC channels per slot; we mirror that fixed layout
+// in the side tree so analysis can index by channel directly without
+// de-serializing a vector.
+static constexpr int kDscChannels = 16;
 
 // ── Capacity constants ───────────────────────────────────────────────────
 
@@ -200,6 +208,57 @@ struct ReconEventData {
 
     // Raw 0xE10C SSP trigger bank words (one variable-length entry per event)
     std::vector<uint32_t> ssp_raw;
+};
+
+// ── Scaler ("scalers" tree) ──────────────────────────────────────────────
+//
+// One row per DSC2 readout, written when a physics event carrying a SYNC
+// flag arrives.  Counts ACCUMULATE from the GO transition; offline code
+// gets a windowed live time by diffing two consecutive rows.
+//
+// Join key for the events tree: `event_number` is the physics event_number
+// of the wrapping physics event — analysis can look up scaler rows for any
+// physics event N by finding the row with `event_number ≤ N`.
+struct RawScalerData {
+    int       event_number = 0;       // physics event_number this DSC2 lives inside
+    long long ti_ticks     = 0;       // 48-bit TI timestamp of the carrying physics event
+    uint32_t  unix_time    = 0;       // most recent SYNC/EPICS unix_time (Sync().unix_time)
+    uint32_t  sync_counter = 0;       // most recent SYNC counter
+    uint32_t  run_number   = 0;
+    uint8_t   trigger_type = 0;       // trigger_type of the carrying physics event
+
+    int       slot         = -1;      // DSC2 physical slot
+    uint32_t  gated        = 0;       // selected source: gated   (live)
+    uint32_t  ungated      = 0;       // selected source: ungated (total)
+    float     live_ratio   = -1.f;    // cached gated/ungated; -1 if ungated == 0
+    uint8_t   source       = 0;       // 0=ref, 1=trg, 2=tdc — matches DscScaler::Source
+    uint8_t   channel      = 0;       // 0..15 (ignored for ref)
+
+    // Full counter set, kept for diagnostics and so analysis can compute
+    // per-channel live time without rerunning the decoder.
+    uint32_t ref_gated     = 0;
+    uint32_t ref_ungated   = 0;
+    uint32_t trg_gated[kDscChannels]   = {};
+    uint32_t trg_ungated[kDscChannels] = {};
+    uint32_t tdc_gated[kDscChannels]   = {};
+    uint32_t tdc_ungated[kDscChannels] = {};
+};
+
+// ── EPICS ("epics" tree) ─────────────────────────────────────────────────
+//
+// One row per EPICS event (top-level tag 0x001F).  Channel readings are
+// parallel name/value vectors so analysis can iterate without per-row
+// std::pair overhead.  `event_number_at_arrival` is the most-recent
+// physics event_number the channel had seen before this EPICS event —
+// used as the join key to the events tree.
+struct RawEpicsData {
+    int      event_number_at_arrival = -1;
+    uint32_t unix_time               = 0;
+    uint32_t sync_counter            = 0;
+    uint32_t run_number              = 0;
+
+    std::vector<std::string> channel;
+    std::vector<double>      value;
 };
 
 } // namespace prad2

@@ -216,6 +216,17 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     auto ev = std::make_unique<EventVars>();
     setupBranches(tree, *ev, write_peaks);
 
+    // Side trees — one DSC2 row per SYNC physics event, one EPICS row per
+    // 0x001F event.  Both are populated from prad2dec accessors; this loop
+    // just copies the resulting POD into a TTree-friendly struct.  See
+    // EventData_io.h for the format and the join-by-event_number scheme.
+    TTree *scalers_tree = new TTree("scalers", "PRad2 DSC2 scaler readouts");
+    TTree *epics_tree   = new TTree("epics",   "PRad2 EPICS slow control");
+    auto sc_row = std::make_unique<prad2::RawScalerData>();
+    auto ep_row = std::make_unique<prad2::RawEpicsData>();
+    prad2::SetScalerWriteBranches(scalers_tree, *sc_row);
+    prad2::SetEpicsWriteBranches  (epics_tree,  *ep_row);
+
     auto event = std::make_unique<fdec::EventData>();
     auto ssp_evt = std::make_unique<ssp::SspEventData>();
     fdec::WaveAnalyzer ana(daq_cfg_.wave_cfg);
@@ -244,6 +255,20 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
+
+        // Slow-control side trees — non-physics events fill them, then the
+        // loop continues without touching the events tree.  Heavy lifting
+        // (parsing, anchoring with last_physics_event_number, applying the
+        // DSC2 source/channel selection) lives in prad2dec; this is just a
+        // copy step.
+        if (ch.GetEventType() == evc::EventType::Epics) {
+            const auto &rec = ch.Epics();
+            if (rec.present) {
+                prad2::FillEpicsRow(rec, *ep_row);
+                epics_tree->Fill();
+            }
+            continue;
+        }
         if (ch.GetEventType() != evc::EventType::Physics) continue;
 
         // Snapshot raw 0xE10C SSP trigger bank for this read group (one bank
@@ -259,6 +284,20 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             ssp_evt->clear();
             if (!ch.DecodeEvent(ie, *event, ssp_evt.get())) continue;
             if (max_events > 0 && total >= max_events) break;
+
+            // DSC2 lives at the CODA-event level (one bank per Read()
+            // covering all sub-events from that block), but the carrying
+            // sub-event has a unique event_number — write the scaler row
+            // before any per-sub-event filtering so the row count tracks
+            // SYNC arrivals 1:1 regardless of downstream cuts.
+            if (ie == 0) {
+                const auto &dsc = ch.Dsc();
+                if (dsc.present) {
+                    prad2::FillScalerRow(dsc, ch.Sync(), event->info,
+                                         daq_cfg_.dsc_scaler, *sc_row);
+                    scalers_tree->Fill();
+                }
+            }
 
             clearEvent(*ev);
             ev->event_num    = event->info.event_number;
@@ -484,6 +523,16 @@ if(!prad1){
     auto ev = std::make_unique<EventVars_Recon>();
     setupReconBranches(tree, *ev);
 
+    // Side trees — see Process() above for the design.  The recon path
+    // writes the same scalers / epics records so analysis joining keeps
+    // working regardless of which replay output the user opens.
+    TTree *scalers_tree = new TTree("scalers", "PRad2 DSC2 scaler readouts");
+    TTree *epics_tree   = new TTree("epics",   "PRad2 EPICS slow control");
+    auto sc_row = std::make_unique<prad2::RawScalerData>();
+    auto ep_row = std::make_unique<prad2::RawEpicsData>();
+    prad2::SetScalerWriteBranches(scalers_tree, *sc_row);
+    prad2::SetEpicsWriteBranches  (epics_tree,  *ep_row);
+
     //initialize tools for event decoder and cluster reconstruction
     auto event = std::make_unique<fdec::EventData>();
     auto ssp_evt = std::make_unique<ssp::SspEventData>();
@@ -508,6 +557,16 @@ if(!prad1){
 
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
+
+        // Slow-control side trees (see Process() for the rationale).
+        if (ch.GetEventType() == evc::EventType::Epics) {
+            const auto &rec = ch.Epics();
+            if (rec.present) {
+                prad2::FillEpicsRow(rec, *ep_row);
+                epics_tree->Fill();
+            }
+            continue;
+        }
         if (ch.GetEventType() != evc::EventType::Physics) continue;
 
         // Snapshot raw 0xE10C SSP trigger bank for this read group.
@@ -522,6 +581,16 @@ if(!prad1){
             ssp_evt->clear();
             clusterer.Clear();
             if (!ch.DecodeEvent(ie, *event, ssp_evt.get())) continue;
+
+            // DSC2 row: same logic as the raw-replay path.  See Process().
+            if (ie == 0) {
+                const auto &dsc = ch.Dsc();
+                if (dsc.present) {
+                    prad2::FillScalerRow(dsc, ch.Sync(), event->info,
+                                         daq_cfg_.dsc_scaler, *sc_row);
+                    scalers_tree->Fill();
+                }
+            }
 
             clearReconEvent(*ev);
             ev->event_num    = event->info.event_number;

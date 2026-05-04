@@ -25,8 +25,16 @@
 
 #include "EventData.h"
 
+#include "DscData.h"
+#include "EpicsData.h"
+#include "SyncData.h"
+#include "Fadc250Data.h"
+#include "DaqConfig.h"
+
 #include <TTree.h>
 #include <TString.h>   // for Form()
+
+#include <cstring>
 
 namespace prad2 {
 
@@ -363,6 +371,165 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_ssp_raw = (tree->GetBranch("ssp_raw") != nullptr);
 
     return s;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Scaler tree ("scalers") — write / read
+//
+// Branch names mirror the field names so analysis can reference them
+// directly.  Per-channel TRG/TDC arrays use a fixed [kDscChannels] length —
+// the underlying DSC2 always emits 16 channels regardless of how many are
+// hooked up — so no count branch is needed.
+// ─────────────────────────────────────────────────────────────────────────
+inline void SetScalerWriteBranches(TTree *tree, RawScalerData &sc)
+{
+    tree->Branch("event_number", &sc.event_number, "event_number/I");
+    tree->Branch("ti_ticks",     &sc.ti_ticks,     "ti_ticks/L");
+    tree->Branch("unix_time",    &sc.unix_time,    "unix_time/i");
+    tree->Branch("sync_counter", &sc.sync_counter, "sync_counter/i");
+    tree->Branch("run_number",   &sc.run_number,   "run_number/i");
+    tree->Branch("trigger_type", &sc.trigger_type, "trigger_type/b");
+
+    tree->Branch("slot",         &sc.slot,         "slot/I");
+    tree->Branch("gated",        &sc.gated,        "gated/i");
+    tree->Branch("ungated",      &sc.ungated,      "ungated/i");
+    tree->Branch("live_ratio",   &sc.live_ratio,   "live_ratio/F");
+    tree->Branch("source",       &sc.source,       "source/b");   // 0=ref 1=trg 2=tdc
+    tree->Branch("channel",      &sc.channel,      "channel/b");
+
+    tree->Branch("ref_gated",    &sc.ref_gated,    "ref_gated/i");
+    tree->Branch("ref_ungated",  &sc.ref_ungated,  "ref_ungated/i");
+    tree->Branch("trg_gated",    sc.trg_gated,
+                 Form("trg_gated[%d]/i",   kDscChannels));
+    tree->Branch("trg_ungated",  sc.trg_ungated,
+                 Form("trg_ungated[%d]/i", kDscChannels));
+    tree->Branch("tdc_gated",    sc.tdc_gated,
+                 Form("tdc_gated[%d]/i",   kDscChannels));
+    tree->Branch("tdc_ungated",  sc.tdc_ungated,
+                 Form("tdc_ungated[%d]/i", kDscChannels));
+}
+
+inline void SetScalerReadBranches(TTree *tree, RawScalerData &sc)
+{
+    auto bind = [&](const char *name, void *addr) {
+        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
+    };
+    bind("event_number", &sc.event_number);
+    bind("ti_ticks",     &sc.ti_ticks);
+    bind("unix_time",    &sc.unix_time);
+    bind("sync_counter", &sc.sync_counter);
+    bind("run_number",   &sc.run_number);
+    bind("trigger_type", &sc.trigger_type);
+    bind("slot",         &sc.slot);
+    bind("gated",        &sc.gated);
+    bind("ungated",      &sc.ungated);
+    bind("live_ratio",   &sc.live_ratio);
+    bind("source",       &sc.source);
+    bind("channel",      &sc.channel);
+    bind("ref_gated",    &sc.ref_gated);
+    bind("ref_ungated",  &sc.ref_ungated);
+    bind("trg_gated",    sc.trg_gated);
+    bind("trg_ungated",  sc.trg_ungated);
+    bind("tdc_gated",    sc.tdc_gated);
+    bind("tdc_ungated",  sc.tdc_ungated);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// EPICS tree ("epics") — write / read
+//
+// `channel` and `value` are std::vector branches: ROOT's I/O writes them
+// fine but the reader needs a stable pointer-to-pointer address.  Callers
+// that bind for reading should use the vector members of the struct
+// directly — see the note inline in SetEpicsReadBranches.
+// ─────────────────────────────────────────────────────────────────────────
+inline void SetEpicsWriteBranches(TTree *tree, RawEpicsData &ep)
+{
+    tree->Branch("event_number_at_arrival", &ep.event_number_at_arrival,
+                 "event_number_at_arrival/I");
+    tree->Branch("unix_time",    &ep.unix_time,    "unix_time/i");
+    tree->Branch("sync_counter", &ep.sync_counter, "sync_counter/i");
+    tree->Branch("run_number",   &ep.run_number,   "run_number/i");
+    tree->Branch("channel",      &ep.channel);
+    tree->Branch("value",        &ep.value);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fillers — copy decoded prad2dec records into the side-tree POD structs.
+//
+// These keep the Replay loops minimal: the per-event call chain becomes
+//   ch.Scan();
+//   if (Sync event)  { FillEpicsRow(ch.Epics(), ep_row);     epics->Fill(); }
+//   if (Physics)     {
+//       ch.DecodeEvent(...);                  // fills info, fadc, ssp, ...
+//       const auto &dsc = ch.Dsc();
+//       if (dsc.present) {
+//           FillScalerRow(dsc, ch.Sync(), info, daq_cfg.dsc_scaler, sc_row);
+//           scalers->Fill();
+//       }
+//       events->Fill();
+//   }
+// All conversion / convention details (gated→live etc.) stay in prad2dec.
+// ─────────────────────────────────────────────────────────────────────────
+inline void FillScalerRow(const dsc::DscEventData &dsc,
+                          const psync::SyncInfo &sync,
+                          const fdec::EventInfo &info,
+                          const evc::DaqConfig::DscScaler &cfg,
+                          RawScalerData &out)
+{
+    using DSrc = evc::DaqConfig::DscScaler::Source;
+    out = RawScalerData{};
+    out.event_number = info.event_number;
+    out.ti_ticks     = static_cast<long long>(info.timestamp);
+    out.unix_time    = sync.unix_time;
+    out.sync_counter = sync.sync_counter;
+    out.run_number   = sync.run_number;
+    out.trigger_type = info.trigger_type;
+
+    out.slot       = dsc.slot;
+    out.gated      = dsc.gated;
+    out.ungated    = dsc.ungated;
+    out.live_ratio = (dsc.ungated > 0)
+        ? static_cast<float>((double)dsc.gated / (double)dsc.ungated) : -1.f;
+    out.source     = (cfg.source == DSrc::Ref) ? 0
+                   : (cfg.source == DSrc::Trg) ? 1 : 2;
+    out.channel    = static_cast<uint8_t>(cfg.channel);
+
+    out.ref_gated   = dsc.ref_gated;
+    out.ref_ungated = dsc.ref_ungated;
+    static_assert(kDscChannels == dsc::DSC2_NCH,
+                  "RawScalerData/DscEventData channel count mismatch");
+    std::memcpy(out.trg_gated,   dsc.trg_gated,   kDscChannels * sizeof(uint32_t));
+    std::memcpy(out.trg_ungated, dsc.trg_ungated, kDscChannels * sizeof(uint32_t));
+    std::memcpy(out.tdc_gated,   dsc.tdc_gated,   kDscChannels * sizeof(uint32_t));
+    std::memcpy(out.tdc_ungated, dsc.tdc_ungated, kDscChannels * sizeof(uint32_t));
+}
+
+inline void FillEpicsRow(const epics::EpicsRecord &rec, RawEpicsData &out)
+{
+    out = RawEpicsData{};
+    out.event_number_at_arrival = rec.event_number_at_arrival;
+    out.unix_time               = rec.unix_time;
+    out.sync_counter            = rec.sync_counter;
+    out.run_number              = rec.run_number;
+    out.channel                 = rec.channel;
+    out.value                   = rec.value;
+}
+
+inline void SetEpicsReadBranches(TTree *tree, RawEpicsData &ep)
+{
+    auto bind = [&](const char *name, void *addr) {
+        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
+    };
+    bind("event_number_at_arrival", &ep.event_number_at_arrival);
+    bind("unix_time",    &ep.unix_time);
+    bind("sync_counter", &ep.sync_counter);
+    bind("run_number",   &ep.run_number);
+    // Vector branches: ROOT requires `vector<T>**`.  Callers that need to
+    // read these must bind their own held pointer:
+    //   auto *cp = &ep.channel; auto *vp = &ep.value;
+    //   tree->SetBranchAddress("channel", &cp);
+    //   tree->SetBranchAddress("value",   &vp);
+    // (Pointers must outlive each GetEntry call.)
 }
 
 } // namespace prad2
