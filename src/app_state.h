@@ -490,11 +490,12 @@ struct AppState {
     };
     GemEffSnapshot gem_eff_snapshot;
     // Inferred vertex-z spread (DOCA to z-axis − target_z), one entry per
-    // matched event.  100 bins × 1 mm = ±50 mm = ±5 cm.
+    // matched event.  Range/step are configurable via
+    // monitor_config.json: gem.efficiency.z_target_hist.{min,max,step}.
     Histogram gem_eff_z_target_hist;
-    static constexpr float gem_eff_z_target_min  = -50.f;
-    static constexpr float gem_eff_z_target_max  =  50.f;
-    static constexpr float gem_eff_z_target_step =   1.f;
+    float gem_eff_z_target_min  = -50.f;   // mm
+    float gem_eff_z_target_max  =  50.f;   // mm
+    float gem_eff_z_target_step =   1.f;   // mm
     int         moller_events = 0;
     int       cluster_events_processed = 0;
 

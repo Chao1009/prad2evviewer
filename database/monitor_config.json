@@ -168,7 +168,11 @@
             "max_hits_per_detector":  50,
             "min_denom_for_eff":      20,
             "healthy":                90,
-            "warning":                70
+            "warning":                70,
+            "// z_target_hist: distribution of inferred vertex z (DOCA of the": "",
+            "// fit line to the lab z-axis, minus target_z) accumulated over": "",
+            "// matched events.  Range/step in mm.": "",
+            "z_target_hist":          {"min": -50.0, "max": 50.0, "step": 1.0}
         }
     },
     "elog": {

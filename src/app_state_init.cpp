@@ -513,6 +513,12 @@ void AppState::init(const std::string &db_dir,
                 else std::cerr << "[WARN] gem.efficiency.loo_mode='" << m
                                << "' unknown; falling back to loo-target-seed\n";
             }
+            if (ge.contains("z_target_hist")) {
+                auto &zh = ge["z_target_hist"];
+                if (zh.contains("min"))  gem_eff_z_target_min  = zh["min"];
+                if (zh.contains("max"))  gem_eff_z_target_max  = zh["max"];
+                if (zh.contains("step")) gem_eff_z_target_step = zh["step"];
+            }
         }
         std::cerr << "GEM cfg   : match=" << gem_match_nsigma << "σ"
                   << "  efficiency=" << gem_eff_match_nsigma << "σ"

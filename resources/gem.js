@@ -461,8 +461,10 @@ function plotGemZTargetHist(hist) {
         margin: { l: 42, r: 8, t: 22, b: 32 },
         xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
                  ticks: 'outside', ticklen: 3 },
+        // Counts are non-negative — anchor the y-axis at 0 so the empty
+        // histogram still shows a [0, …] range instead of dipping below.
         yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                 ticks: 'outside', ticklen: 3 },
+                 ticks: 'outside', ticklen: 3, rangemode: 'nonnegative' },
         bargap: 0.05,
     });
     if (!hist || !hist.bins || !hist.bins.length) {
