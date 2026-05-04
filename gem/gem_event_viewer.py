@@ -7,10 +7,10 @@ process via ``prad2py``.
 Features:
   * Pre-scans the file on open to build an event index (progress dialog).
   * Prev / Next / Goto event# + slider for navigation.
-  * Primary threshold sliders (ZS, CM, min-cluster-hits) above the canvas.
-  * Collapsible "Advanced tuning" dock for every other knob on
-    GemSystem / GemCluster — values are live; each change re-runs
-    reconstruction on cached SSP data (no EVIO I/O).
+  * Collapsible "Advanced tuning" dock with every GemSystem / GemCluster
+    knob (ZS σ, CM threshold, min-cluster-hits, clustering, XY matching) —
+    values are live; each change re-runs reconstruction on cached SSP
+    data (no EVIO I/O).
 
 Usage:
     python gem/gem_event_viewer.py [file.evio.00000]
@@ -86,7 +86,6 @@ from PyQt6.QtWidgets import (  # noqa: E402
     QSpinBox,
     QStatusBar,
     QTabWidget,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -1277,6 +1276,17 @@ class AdvancedDock(QDockWidget):
         layout = QVBoxLayout(root)
         layout.setContentsMargins(6, 6, 6, 6)
 
+        # --- Thresholds (live during reconstruction) ----------------
+        tg = QGroupBox("Thresholds")
+        tf = QFormLayout(tg)
+        self.zs_slider, self.zs_spin = self._mkfloat_slider(2.0, 15.0, 5.0, 0.1)
+        tf.addRow("ZS σ", self._slider_row(self.zs_slider, self.zs_spin))
+        self.cm_slider, self.cm_spin = self._mkfloat_slider(5.0, 50.0, 20.0, 0.5)
+        tf.addRow("CM thr", self._slider_row(self.cm_slider, self.cm_spin))
+        self.mch_spin = self._mkspin(1, 10, 1)
+        tf.addRow("min cluster hits", self.mch_spin)
+        layout.addWidget(tg)
+
         # --- Clustering ----------------------------------------------
         cg = QGroupBox("Clustering")
         cf = QFormLayout(cg)
@@ -1315,7 +1325,8 @@ class AdvancedDock(QDockWidget):
         layout.addWidget(self._reset_btn)
 
         # Wire every editor → changed
-        for w in (self.max_cluster_hits, self.consecutive_thres,
+        for w in (self.zs_spin, self.cm_spin, self.mch_spin,
+                  self.max_cluster_hits, self.consecutive_thres,
                   self.cross_talk_width):
             w.valueChanged.connect(lambda *_: self.changed.emit())
         for w in (self.split_thres, self.match_adc_asym,
@@ -1333,9 +1344,53 @@ class AdvancedDock(QDockWidget):
         sb.setSingleStep(step); sb.setDecimals(3); sb.setValue(val)
         return sb
 
+    @staticmethod
+    def _mkfloat_slider(lo: float, hi: float, val: float, step: float
+                        ) -> Tuple[QSlider, QDoubleSpinBox]:
+        """Build a (slider, spinbox) pair for a float parameter — slider
+        holds integer ticks of ``step`` resolution, spinbox shows the
+        float value, edits on either widget reach both."""
+        n_ticks = int(round((hi - lo) / step))
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, n_ticks)
+        slider.setValue(int(round((val - lo) / step)))
+        spin = QDoubleSpinBox()
+        spin.setRange(lo, hi); spin.setSingleStep(step); spin.setDecimals(2)
+        spin.setValue(val)
+        spin.setMaximumWidth(90)
+
+        def s2b(tick: int):
+            spin.blockSignals(True)
+            spin.setValue(lo + tick * step)
+            spin.blockSignals(False)
+
+        def b2s(v: float):
+            slider.blockSignals(True)
+            slider.setValue(int(round((v - lo) / step)))
+            slider.blockSignals(False)
+
+        slider.valueChanged.connect(s2b)
+        spin.valueChanged.connect(b2s)
+        return slider, spin
+
+    @staticmethod
+    def _slider_row(slider: QSlider, spin: QDoubleSpinBox) -> QWidget:
+        w = QWidget()
+        h = QHBoxLayout(w)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.addWidget(slider, 1)
+        h.addWidget(spin)
+        return w
+
+    def apply_to_system(self, gsys: "det.GemSystem"):
+        """Push live threshold values into a GemSystem."""
+        gsys.zero_sup_threshold = float(self.zs_spin.value())
+        gsys.common_mode_threshold = float(self.cm_spin.value())
+
     def apply_to(self, cluster: "det.GemCluster"):
         """Write current dock values into a GemCluster's ClusterConfig."""
         cfg = cluster.get_config()
+        cfg.min_cluster_hits = int(self.mch_spin.value())
         cfg.max_cluster_hits = int(self.max_cluster_hits.value())
         cfg.consecutive_thres = int(self.consecutive_thres.value())
         cfg.split_thres = float(self.split_thres.value())
@@ -1499,45 +1554,22 @@ class GemEventViewer(QMainWindow):
         self.slider.valueChanged.connect(self._on_slider)
         top.addWidget(self.slider, 2)
 
+        # Save as PNG — also bound as a window-level Ctrl+S shortcut via
+        # the QAction below so the keybinding works regardless of focus.
+        self.act_save_png = QAction("Save as PNG…", self)
+        self.act_save_png.setShortcut(QKeySequence("Ctrl+S"))
+        self.act_save_png.triggered.connect(self._save_canvas_png)
+        self.addAction(self.act_save_png)
+        self.btn_save_png = QPushButton("Save as PNG…")
+        self.btn_save_png.clicked.connect(self.act_save_png.trigger)
+        top.addWidget(self.btn_save_png)
+
         self.btn_advanced = QPushButton("Advanced…")
         self.btn_advanced.setCheckable(True)
         self.btn_advanced.toggled.connect(self._toggle_advanced)
         top.addWidget(self.btn_advanced)
 
         root.addLayout(top)
-
-        # --- Second row: primary threshold sliders ---
-        thr = QHBoxLayout()
-        thr.addWidget(QLabel("ZS σ:"))
-        self.zs_slider, self.zs_spin = self._mkfloat_slider(2.0, 15.0, 5.0, 0.1)
-        thr.addWidget(self.zs_slider); thr.addWidget(self.zs_spin)
-
-        thr.addSpacing(16)
-        thr.addWidget(QLabel("CM thr:"))
-        self.cm_slider, self.cm_spin = self._mkfloat_slider(5.0, 50.0, 20.0, 0.5)
-        thr.addWidget(self.cm_slider); thr.addWidget(self.cm_spin)
-
-        thr.addSpacing(16)
-        thr.addWidget(QLabel("min cluster hits:"))
-        self.mch_spin = QSpinBox(); self.mch_spin.setRange(1, 10); self.mch_spin.setValue(1)
-        thr.addWidget(self.mch_spin)
-
-        thr.addSpacing(16)
-        self.btn_reset = QPushButton("Reset defaults")
-        self.btn_reset.clicked.connect(self._reset_defaults)
-        thr.addWidget(self.btn_reset)
-
-        thr.addStretch(1)
-        root.addLayout(thr)
-
-        # --- Canvas + minimal toolbar (save PNG) ---
-        cbar = QToolBar(self)
-        cbar.setMovable(False)
-        act_save = QAction("Save as PNG…", self)
-        act_save.setShortcut(QKeySequence("Ctrl+S"))
-        act_save.triggered.connect(self._save_canvas_png)
-        cbar.addAction(act_save)
-        root.addWidget(cbar)
 
         # Canvas + Raw APV tabs share the main area.  Event data flows
         # into both after each process_event() call.
@@ -1574,11 +1606,6 @@ class GemEventViewer(QMainWindow):
         self.adv_dock.changed.connect(self._on_threshold_change)
         self.adv_dock.resetRequested.connect(self._reset_defaults)
 
-        # --- Wire primary threshold widgets ---
-        self.zs_spin.valueChanged.connect(lambda *_: self._on_threshold_change())
-        self.cm_spin.valueChanged.connect(lambda *_: self._on_threshold_change())
-        self.mch_spin.valueChanged.connect(lambda *_: self._on_threshold_change())
-
         # --- Menu bar ---
         self._build_menu()
 
@@ -1609,39 +1636,6 @@ class GemEventViewer(QMainWindow):
         self.act_adv = QAction("Show &Advanced tuning", self, checkable=True)
         self.act_adv.triggered.connect(self._toggle_advanced)
         m_view.addAction(self.act_adv)
-
-    @staticmethod
-    def _mkfloat_slider(lo: float, hi: float, val: float, step: float
-                        ) -> Tuple[QSlider, QDoubleSpinBox]:
-        """Build a (slider, spinbox) pair for a float parameter.
-
-        The slider holds integer ticks of ``step`` resolution; the spinbox
-        shows the float value.  They stay synchronized — edits on either
-        widget reach both.  Return (slider, spinbox) so the caller can add
-        them to a layout in whatever order it likes.
-        """
-        n_ticks = int(round((hi - lo) / step))
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, n_ticks)
-        slider.setValue(int(round((val - lo) / step)))
-        spin = QDoubleSpinBox()
-        spin.setRange(lo, hi); spin.setSingleStep(step); spin.setDecimals(2)
-        spin.setValue(val)
-        spin.setMaximumWidth(90)
-
-        def s2b(tick: int):
-            spin.blockSignals(True)
-            spin.setValue(lo + tick * step)
-            spin.blockSignals(False)
-
-        def b2s(v: float):
-            slider.blockSignals(True)
-            slider.setValue(int(round((v - lo) / step)))
-            slider.blockSignals(False)
-
-        slider.valueChanged.connect(s2b)
-        spin.valueChanged.connect(b2s)
-        return slider, spin
 
     # -----------------------------------------------------------------
     # Geometry + GemSystem init
@@ -1685,13 +1679,13 @@ class GemEventViewer(QMainWindow):
         self._default_cm = float(self._gsys.common_mode_threshold)
         self._default_cluster_cfg = det.GemCluster().get_config()
 
-        # Pull current system defaults into the widgets.
-        self.zs_spin.blockSignals(True)
-        self.cm_spin.blockSignals(True)
-        self.zs_spin.setValue(self._default_zs)
-        self.cm_spin.setValue(self._default_cm)
-        self.zs_spin.blockSignals(False)
-        self.cm_spin.blockSignals(False)
+        # Pull current system defaults into the dock widgets.
+        self.adv_dock.zs_spin.blockSignals(True)
+        self.adv_dock.cm_spin.blockSignals(True)
+        self.adv_dock.zs_spin.setValue(self._default_zs)
+        self.adv_dock.cm_spin.setValue(self._default_cm)
+        self.adv_dock.zs_spin.blockSignals(False)
+        self.adv_dock.cm_spin.blockSignals(False)
 
         cfg = self._gcl.get_config()
         self.adv_dock.max_cluster_hits.setValue(int(cfg.max_cluster_hits))
@@ -1702,7 +1696,7 @@ class GemEventViewer(QMainWindow):
         self.adv_dock.match_adc_asym.setValue(float(cfg.match_adc_asymmetry))
         self.adv_dock.match_time_diff.setValue(float(cfg.match_time_diff))
         self.adv_dock.ts_period.setValue(float(cfg.ts_period))
-        self.mch_spin.setValue(int(cfg.min_cluster_hits))
+        self.adv_dock.mch_spin.setValue(int(cfg.min_cluster_hits))
 
         ped_status = ("ped: " + os.path.basename(self._gem_ped_path)
                       if self._gem_ped_path and os.path.isfile(self._gem_ped_path)
@@ -2074,18 +2068,19 @@ class GemEventViewer(QMainWindow):
             cfg = det.GemCluster().get_config()
         self._gcl.set_config(cfg)
 
-        self.zs_spin.blockSignals(True); self.zs_spin.setValue(self._default_zs); self.zs_spin.blockSignals(False)
-        self.cm_spin.blockSignals(True); self.cm_spin.setValue(self._default_cm); self.cm_spin.blockSignals(False)
-        self.mch_spin.blockSignals(True); self.mch_spin.setValue(int(cfg.min_cluster_hits)); self.mch_spin.blockSignals(False)
+        d = self.adv_dock
+        d.zs_spin.blockSignals(True); d.zs_spin.setValue(self._default_zs); d.zs_spin.blockSignals(False)
+        d.cm_spin.blockSignals(True); d.cm_spin.setValue(self._default_cm); d.cm_spin.blockSignals(False)
+        d.mch_spin.blockSignals(True); d.mch_spin.setValue(int(cfg.min_cluster_hits)); d.mch_spin.blockSignals(False)
 
-        self.adv_dock.max_cluster_hits.blockSignals(True); self.adv_dock.max_cluster_hits.setValue(int(cfg.max_cluster_hits)); self.adv_dock.max_cluster_hits.blockSignals(False)
-        self.adv_dock.consecutive_thres.blockSignals(True); self.adv_dock.consecutive_thres.setValue(int(cfg.consecutive_thres)); self.adv_dock.consecutive_thres.blockSignals(False)
-        self.adv_dock.split_thres.blockSignals(True); self.adv_dock.split_thres.setValue(float(cfg.split_thres)); self.adv_dock.split_thres.blockSignals(False)
-        self.adv_dock.cross_talk_width.blockSignals(True); self.adv_dock.cross_talk_width.setValue(int(cfg.cross_talk_width)); self.adv_dock.cross_talk_width.blockSignals(False)
-        self.adv_dock.match_mode.blockSignals(True); self.adv_dock.match_mode.setCurrentIndex(int(cfg.match_mode)); self.adv_dock.match_mode.blockSignals(False)
-        self.adv_dock.match_adc_asym.blockSignals(True); self.adv_dock.match_adc_asym.setValue(float(cfg.match_adc_asymmetry)); self.adv_dock.match_adc_asym.blockSignals(False)
-        self.adv_dock.match_time_diff.blockSignals(True); self.adv_dock.match_time_diff.setValue(float(cfg.match_time_diff)); self.adv_dock.match_time_diff.blockSignals(False)
-        self.adv_dock.ts_period.blockSignals(True); self.adv_dock.ts_period.setValue(float(cfg.ts_period)); self.adv_dock.ts_period.blockSignals(False)
+        d.max_cluster_hits.blockSignals(True); d.max_cluster_hits.setValue(int(cfg.max_cluster_hits)); d.max_cluster_hits.blockSignals(False)
+        d.consecutive_thres.blockSignals(True); d.consecutive_thres.setValue(int(cfg.consecutive_thres)); d.consecutive_thres.blockSignals(False)
+        d.split_thres.blockSignals(True); d.split_thres.setValue(float(cfg.split_thres)); d.split_thres.blockSignals(False)
+        d.cross_talk_width.blockSignals(True); d.cross_talk_width.setValue(int(cfg.cross_talk_width)); d.cross_talk_width.blockSignals(False)
+        d.match_mode.blockSignals(True); d.match_mode.setCurrentIndex(int(cfg.match_mode)); d.match_mode.blockSignals(False)
+        d.match_adc_asym.blockSignals(True); d.match_adc_asym.setValue(float(cfg.match_adc_asymmetry)); d.match_adc_asym.blockSignals(False)
+        d.match_time_diff.blockSignals(True); d.match_time_diff.setValue(float(cfg.match_time_diff)); d.match_time_diff.blockSignals(False)
+        d.ts_period.blockSignals(True); d.ts_period.setValue(float(cfg.ts_period)); d.ts_period.blockSignals(False)
 
         self._re_reconstruct_current()
 
@@ -2168,12 +2163,8 @@ class GemEventViewer(QMainWindow):
         if self._last_ssp is None:
             return
 
-        # Push widget values into the GemSystem / GemCluster.
-        self._gsys.zero_sup_threshold = float(self.zs_spin.value())
-        self._gsys.common_mode_threshold = float(self.cm_spin.value())
-        cfg = self._gcl.get_config()
-        cfg.min_cluster_hits = int(self.mch_spin.value())
-        self._gcl.set_config(cfg)
+        # Push dock values into the GemSystem / GemCluster.
+        self.adv_dock.apply_to_system(self._gsys)
         self.adv_dock.apply_to(self._gcl)
 
         # Run reconstruction on cached SSP.
