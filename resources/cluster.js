@@ -455,19 +455,19 @@ function plotGemResiduals(){
         const sx=_residStats(det.dx_hist), sy=_residStats(det.dy_hist);
         const meanN=events>0 ? (det.matched_hits||0)/events : 0;
         const fmt=v=>(v>=0?' ':'')+v.toFixed(2);
-        const titleText=
-            `<span style="color:${gemColor}">${det.name||'GEM'+d}</span>  `
-            +`⟨N⟩=${meanN.toFixed(2)}`;
+        const titleText=`<span style="color:${gemColor}">${det.name||'GEM'+d}</span>`;
         // Mean/σ panel anchored to the top-right of the plot area.  Larger
         // font than the title so the numbers are legible at a glance; one
         // colored line per axis (X = blue, Y = red — matches the trace).
+        // Third row is ⟨N⟩ (avg matched hits per event for this detector).
         const statsAnnotation={
             xref:'paper',yref:'paper',
             x:0.98,y:0.97,xanchor:'right',yanchor:'top',
             align:'right',showarrow:false,
             text:
                 `<span style="color:#4dabf7">μₓ=${fmt(sx.mean)} σₓ=${sx.sigma.toFixed(2)}</span><br>`
-               +`<span style="color:#ff6b6b">μᵧ=${fmt(sy.mean)} σᵧ=${sy.sigma.toFixed(2)}</span>`,
+               +`<span style="color:#ff6b6b">μᵧ=${fmt(sy.mean)} σᵧ=${sy.sigma.toFixed(2)}</span><br>`
+               +`⟨N⟩=${meanN.toFixed(2)}`,
             font:{size:12,color:THEME.text},
             bgcolor:'rgba(0,0,0,0)',
         };
