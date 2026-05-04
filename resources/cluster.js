@@ -440,10 +440,14 @@ function _residTrace(h, color, name){
 function plotGemResiduals(){
     for(let d=0;d<4;d++){
         const div='gem-resid-'+d;
+        // GEM_COLORS is defined in gem.js (loaded before cluster.js); use it
+        // here so each title's detector tag matches the GEM tab's color code.
+        const gemColor=(typeof GEM_COLORS!=='undefined' && GEM_COLORS[d]) || THEME.text;
         const det=gemResidData && gemResidData.detectors && gemResidData.detectors[d];
         if(!det || !det.dx_hist || !det.dx_hist.bins || !det.dx_hist.bins.length){
             Plotly.react(div,[],{...PL,
-                title:{text:`GEM ${d+1} — No data`,font:{size:10,color:THEME.textDim}},
+                title:{text:`<span style="color:${gemColor}">GEM${d}</span> — No data`,
+                       font:{size:10,color:THEME.textDim}},
                 margin:{l:35,r:8,t:24,b:24}},PC2);
             continue;
         }
@@ -452,7 +456,7 @@ function plotGemResiduals(){
         const meanN=events>0 ? (det.matched_hits||0)/events : 0;
         const fmt=v=>(v>=0?' ':'')+v.toFixed(2);
         const titleText=
-            `${det.name||'GEM '+(d+1)} `
+            `<span style="color:${gemColor}">${det.name||'GEM'+d}</span> `
             +`<span style="color:#4dabf7">μₓ${fmt(sx.mean)} σₓ${sx.sigma.toFixed(2)}</span>  `
             +`<span style="color:#ff6b6b">μᵧ${fmt(sy.mean)} σᵧ${sy.sigma.toFixed(2)}</span>  `
             +`⟨N⟩=${meanN.toFixed(2)}`;

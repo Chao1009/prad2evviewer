@@ -319,7 +319,7 @@ struct AppState {
     // (both projected to the residual plane).  See reconstruction_config.json:matching.
     bool  gem_match_require_ep = true;    // gate on hxy_* selection (clean track)
     float gem_match_nsigma     = 3.f;     // residual cut in σ_total
-    float gem_resid_min = -50.f, gem_resid_max = 50.f, gem_resid_step = 0.5f;  // mm
+    float gem_resid_min = -25.f, gem_resid_max = 25.f, gem_resid_step = 0.5f;  // mm
 
     // Per-detector GEM position resolution (mm), parsed from
     // reconstruction_config.json:matching:gem_pos_res.  HyCal's energy-
