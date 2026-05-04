@@ -35,6 +35,29 @@ function wfWindowNs(){
     return ptw * NS_PER_SAMPLE;
 }
 
+// FADC250 hardware bounds — 12-bit ADC, never goes below 0 or above 4095.
+const ADC_MIN = 0;
+const ADC_MAX = 4095;
+
+// Compute a Plotly-style auto y-range from a sample vector: [min−pad, max+pad]
+// with a 5 % padding floor of 5 ADC, then clamped to the FADC250 hardware
+// bounds.  Returns null on empty / non-finite input so callers can fall back
+// to Plotly autorange.  Used both to pin yaxis.range explicitly (so Plotly
+// doesn't try to fit huge cut-overlay rectangles) and to size those overlay
+// rectangles to the visible plot area.
+function adcYRange(values){
+    if (!values || !values.length) return null;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of values) {
+        if (!Number.isFinite(v)) continue;
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+    }
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+    const pad = Math.max(5, (hi - lo) * 0.05);
+    return [Math.max(ADC_MIN, lo - pad), Math.min(ADC_MAX, hi + pad)];
+}
+
 // "show" toggle for overlay rendering — purely client-side.
 function cutShow(){
     const cb = document.getElementById('cut-show');
@@ -73,46 +96,59 @@ function xRangeShapes(xMin, xMax, range){
     return out;
 }
 
-// Build dim+edge shapes for a y-axis cut. yOffset (defaults to 0) shifts the
-// range — used by the waveform plot, which displays raw ADC samples while
-// the filter's `height` is in (sample − pedestal) units, so we pass
-// yOffset = pedestal_mean.
-function yRangeShapes(range, yOffset){
-    if (!range) return [];
+// Build dim+edge shapes for a y-axis cut.  `yOffset` shifts the range —
+// the waveform plot displays raw ADC samples while the filter's `height`
+// is in (sample − pedestal) units, so callers pass yOffset = pedestal_mean.
+// `axisRange` is the [yMin, yMax] of the plot's y-axis; the shaded
+// rectangles are clamped to it so they never extend past the visible plot
+// area (otherwise Plotly autorange would fit them and squish the data).
+function yRangeShapes(range, yOffset, axisRange){
+    if (!range || !axisRange) return [];
     yOffset = yOffset || 0;
+    const [aMin, aMax] = axisRange;
+    if (!Number.isFinite(aMin) || !Number.isFinite(aMax) || aMax <= aMin) return [];
+    const clamp = v => Math.max(aMin, Math.min(aMax, v));
     const out = [];
     const dim = {type:'rect', xref:'paper', x0:0, x1:1,
         fillcolor:THEME.cutShade, line:{width:0}, layer:'below'};
     const edge = {type:'line', xref:'paper', x0:0, x1:1,
         line:{color:THEME.highlight, width:1, dash:'dash'}};
     if (range.min != null) {
-        // shade from -∞ to (offset + min) — anchor low side via yref:'paper' y0:0
-        // is not quite right; safer: rely on Plotly clamping when shape extends
-        // beyond the view.  Use a generous lower bound.
-        out.push({...dim, y0:-1e9, y1:yOffset + range.min});
-        const y = yOffset + range.min;
-        out.push({...edge, y0:y, y1:y});
+        const yCut = yOffset + range.min;
+        // Dim region [aMin, min(yCut, aMax)] — degenerate (yCut ≤ aMin)
+        // means cut sits at or below the visible range, no shading needed.
+        if (yCut > aMin) out.push({...dim, y0:aMin, y1:clamp(yCut)});
+        if (yCut >= aMin && yCut <= aMax) out.push({...edge, y0:yCut, y1:yCut});
     }
     if (range.max != null) {
-        out.push({...dim, y0:yOffset + range.max, y1:1e9});
-        const y = yOffset + range.max;
-        out.push({...edge, y0:y, y1:y});
+        const yCut = yOffset + range.max;
+        if (yCut < aMax) out.push({...dim, y0:clamp(yCut), y1:aMax});
+        if (yCut >= aMin && yCut <= aMax) out.push({...edge, y0:yCut, y1:yCut});
     }
     return out;
 }
 
-// Waveform plot layout with x-axis time-cut overlay and (optional) y-axis
-// height-cut overlay anchored to the pedestal mean.  Pass pm=null/undefined
-// to skip the height overlay (no-data / stack-mode contexts).
-function wfLayout(title, xMax, pm){
+// Waveform plot layout.  Optional args:
+//   `pm`      — pedestal mean (anchor for height-cut overlays).  Omit to
+//               skip the y-axis cut overlay (no-data contexts).
+//   `yRange`  — [yMin, yMax] from adcYRange(samples); when present the
+//               y-axis is pinned to this range (autorange off) so the
+//               cut-overlay rectangles can be clamped to it.  When absent,
+//               y-axis falls back to Plotly autorange.
+function wfLayout(title, xMax, pm, yRange){
     const shapes = refShapes('waveform') || [];
     shapes.push(...xRangeShapes(0, xMax, filterRange('time')));
-    if (pm != null && Number.isFinite(pm))
-        shapes.push(...yRangeShapes(filterRange('height'), pm));
+    if (pm != null && Number.isFinite(pm) && yRange)
+        shapes.push(...yRangeShapes(filterRange('height'), pm, yRange));
+    const yaxis = (yRange
+                   && Number.isFinite(yRange[0])
+                   && Number.isFinite(yRange[1]))
+        ? {...PL.yaxis, title:'ADC', range: yRange.slice(), autorange: false}
+        : {...PL.yaxis, title:'ADC'};
     return {...PL,
         title:{text:title, font:{size:11,color:THEME.textDim}},
         xaxis:{...PL.xaxis, title:'Time (ns)', range:[0, xMax], autorange:false},
-        yaxis:{...PL.yaxis, title:'ADC'},
+        yaxis,
         shapes,
     };
 }
@@ -215,13 +251,20 @@ function renderWaveform(mod, key, d, samples){
                 name:'Latest', line:{color:THEME.accent, width:1.5}, showlegend:false});
         }
 
-        let ylo=Infinity, yhi=-Infinity;
-        for(const w of wfStackTraces) for(const v of w.y){ if(v<ylo) ylo=v; if(v>yhi) yhi=v; }
-        const pad=(yhi-ylo)*0.05||5;
+        // Pool every sample across the stack so the y-range covers the
+        // full envelope; adcYRange handles the padding + ADC clamp and
+        // wfLayout pins the axis so cut overlays stay inside the plot.
+        const stackY = [];
+        for (const w of wfStackTraces) for (const v of w.y) stackY.push(v);
+        const stackYRange = adcYRange(stackY);
 
         document.getElementById('wf-stack-count').textContent=`${wfStackTraces.length}/${maxStack}`;
-        const stackLayout = wfLayout(`${mod.n} — Stacked (${wfStackTraces.length})`, tMax);
-        stackLayout.yaxis = {...stackLayout.yaxis, range:[ylo-pad,yhi+pad], autorange:false};
+        // pm is null in stack mode — the per-event pedestal isn't a
+        // useful anchor when overlaying many events, so the height-cut
+        // overlay is intentionally skipped here.
+        const stackLayout = wfLayout(
+            `${mod.n} — Stacked (${wfStackTraces.length})`,
+            tMax, null, stackYRange);
         Plotly.react('waveform-div', traces, stackLayout, PC2);
 
         document.getElementById('peaks-tbody').innerHTML=
@@ -249,7 +292,12 @@ function renderWaveform(mod, key, d, samples){
             marker:{color:col,size:7,symbol:'diamond'},showlegend:false});
     });
 
-    const layout = wfLayout(`${mod.n} — Event ${currentEvent}`, tMax, d.pm);
+    // Pin y-range to the actual sample range (with padding, ADC-clamped)
+    // so cut-overlay rectangles can be sized to the visible plot area
+    // without disturbing autorange.  Includes d.pm so the pedestal line
+    // stays in view even on quiet channels with all-baseline samples.
+    const yRange = adcYRange(samples.concat([d.pm]));
+    const layout = wfLayout(`${mod.n} — Event ${currentEvent}`, tMax, d.pm, yRange);
     layout.legend = {x:1,y:1,xanchor:'right',bgcolor:THEME.overlay,font:{size:9}};
     Plotly.react('waveform-div', traces, layout, PC2);
 
@@ -297,7 +345,12 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
          line:{color:'#ff6b6b', width:1.4, dash:'dash'}},
     ];
 
-    const shapes = timeCutShapes(tMax);
+    // Same shape stack the soft-mode plot uses: ref lines for the waveform
+    // plot + the time-axis cut overlay (when "show" is on).  The legacy
+    // helper `timeCutShapes(tMax)` was removed during the cut-overlay
+    // refactor; this is the equivalent expansion.
+    const shapes = refShapes('waveform') || [];
+    shapes.push(...xRangeShapes(0, tMax, filterRange('time')));
     const annotations = [];
 
     pulses.forEach((p, idx) => {
