@@ -5,30 +5,28 @@
 let physicsData=null, mollerData=null, hycalXyData=null;
 
 function fetchEnergyAngle(){
-    fetch('/api/physics/energy_angle').then(r=>r.json()).then(data=>{
+    return fetch('/api/physics/energy_angle').then(r=>r.json()).then(data=>{
         physicsData=data;
         plotEnergyAngle();
     }).catch(()=>{});
 }
 
 function fetchMoller(){
-    fetch('/api/physics/moller').then(r=>r.json()).then(data=>{
+    return fetch('/api/physics/moller').then(r=>r.json()).then(data=>{
         mollerData=data;
         plotMollerXY();
     }).catch(()=>{});
 }
 
 function fetchHycalXY(){
-    fetch('/api/physics/hycal_xy').then(r=>r.json()).then(data=>{
+    return fetch('/api/physics/hycal_xy').then(r=>r.json()).then(data=>{
         hycalXyData=data;
         plotHycalXY();
     }).catch(()=>{});
 }
 
 function fetchPhysics(){
-    fetchEnergyAngle();
-    fetchMoller();
-    fetchHycalXY();
+    return Promise.all([fetchEnergyAngle(), fetchMoller(), fetchHycalXY()]);
 }
 
 // ep elastic scattering: E' = E / (1 + (E/Mp)*(1 - cos(theta)))

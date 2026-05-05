@@ -165,7 +165,11 @@ function _resolveByPath(root, path){
 async function captureTabScreenshot(tab){
     const prevTab = activeTab;
     if(tab !== activeTab){
-        switchTab(tab);
+        // skipFetch: refreshDataForReport already loaded every tab's data and
+        // ran the corresponding plot* call. Letting switchTab re-fire its
+        // action.fetch races the screenshot — the second response can land
+        // mid-render, leaving the captured PNG with empty plots.
+        switchTab(tab, {skipFetch:true});
         await _wait(TAB_SETTLE_MS);
     }
 
@@ -264,7 +268,7 @@ async function captureTabScreenshot(tab){
     }finally{
         if(svgUrl) URL.revokeObjectURL(svgUrl);
         if(restore) restore();
-        if(prevTab !== activeTab) switchTab(prevTab);
+        if(prevTab !== activeTab) switchTab(prevTab, {skipFetch:true});
     }
     return dataUrl;
 }
@@ -417,12 +421,14 @@ REPORT_TABS.forEach((t, i)=>{
 });
 
 // =========================================================================
-// Pre-fetch live data the summaries depend on (occupancy / cluster hists)
+// Pre-fetch live data for every tab so captureTabScreenshot doesn't have
+// to wait for in-flight async fetches inside switchTab. Each fetch* call
+// returns a promise that resolves after its plot* call has run, so by the
+// time Promise.all finishes the page state matches what each tab would
+// show if the user navigated to it.
 // =========================================================================
 async function refreshDataForReport(){
     const fetches=[];
-    if(typeof fetchGemResiduals==='function') fetchGemResiduals();
-    if(typeof fetchGemAccum==='function')     fetchGemAccum();
     fetches.push(fetch('/api/occupancy').then(r=>r.json()).then(d=>{
         occData=d.occ||{}; occTcutData=d.occ_tcut||{}; occTotal=d.total||0;
     }).catch(()=>{}));
@@ -446,7 +452,17 @@ async function refreshDataForReport(){
             rawEnergyStep=d.raw_energy.step||20; rawEnergyBins=d.raw_energy.bins;
         }
     }).catch(()=>{}));
+    if(typeof fetchGemResiduals==='function') fetches.push(fetchGemResiduals());
+    if(typeof fetchGemAccum==='function')     fetches.push(fetchGemAccum());
+    if(typeof fetchLmsSummary==='function')   fetches.push(fetchLmsSummary());
+    if(typeof fetchEpicsChannels==='function')fetches.push(fetchEpicsChannels());
+    if(typeof fetchEpicsLatest==='function')  fetches.push(fetchEpicsLatest());
+    if(typeof fetchAllEpicsSlots==='function')fetches.push(fetchAllEpicsSlots());
+    if(typeof fetchPhysics==='function')      fetches.push(fetchPhysics());
     await Promise.all(fetches);
+    // Plotly.react schedules an async DOM update; give the browser a frame
+    // to commit the latest plots before we start switching tabs.
+    await _wait(THEME_SETTLE_MS);
 }
 
 // =========================================================================

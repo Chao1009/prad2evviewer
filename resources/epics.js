@@ -17,7 +17,7 @@ let lastEpicsFetch=0, refreshEpicsMs=2000;
 // =========================================================================
 
 function fetchEpicsChannels(){
-    fetch('/api/epics/channels').then(r=>r.json()).then(data=>{
+    return fetch('/api/epics/channels').then(r=>r.json()).then(data=>{
         epicsChannels=data.channels||[];
     }).catch(()=>{});
 }
@@ -61,25 +61,27 @@ function fetchAndPlotEpicsSlot(slot){
     if(!names.length){
         epicsSlotData[slot]=null;
         plotEpicsSlot(slot);
-        return;
+        return Promise.resolve();
     }
     // batch fetch: single request for all channels in this slot
     const query=names.map(n=>'ch='+encodeURIComponent(n)).join('&');
-    fetch(`/api/epics/batch?${query}`).then(r=>r.json()).then(batch=>{
+    return fetch(`/api/epics/batch?${query}`).then(r=>r.json()).then(batch=>{
         // reshape batch response to match the per-channel format
         epicsSlotData[slot]=(batch.channels||[]).map(ch=>({
             name:ch.name, time:batch.time||[], value:ch.value||[], count:ch.count||0
         }));
         plotEpicsSlot(slot);
-    });
+    }).catch(()=>{});
 }
 
 function fetchAllEpicsSlots(){
-    for(let i=0;i<EPICS_NUM_SLOTS;i++) fetchAndPlotEpicsSlot(i);
+    const ps=[];
+    for(let i=0;i<EPICS_NUM_SLOTS;i++) ps.push(fetchAndPlotEpicsSlot(i));
+    return Promise.all(ps);
 }
 
 function fetchEpicsLatest(){
-    fetch('/api/epics/latest').then(r=>r.json()).then(data=>{
+    return fetch('/api/epics/latest').then(r=>r.json()).then(data=>{
         epicsLatestData=data;
         updateEpicsTable();
         if(activeTab!=='epics') updateEpicsDot();

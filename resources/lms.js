@@ -55,7 +55,7 @@ function geoLms(){
 
 function fetchLmsSummary(){
     const refQ=g_lmsRefIndex>=0?`?ref=${g_lmsRefIndex}`:'';
-    fetch(`/api/lms/summary${refQ}`).then(r=>r.json()).then(data=>{
+    return fetch(`/api/lms/summary${refQ}`).then(r=>r.json()).then(data=>{
         lmsSummaryData=data;
         geoLms();
         updateLmsTable();

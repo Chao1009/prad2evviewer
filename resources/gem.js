@@ -42,11 +42,13 @@ function PL_GEM_EFF() {
 // --- fetch + render ---------------------------------------------------------
 
 function fetchGemAccum() {
-    fetch('/api/gem/occupancy').then(r => r.json()).then(d => {
-        gemOccupancyData = d;
-        plotGemOccupancy(d);
-    }).catch(() => {});
-    fetch('/api/gem/efficiency').then(r => r.json()).then(updateGemEfficiency).catch(() => {});
+    return Promise.all([
+        fetch('/api/gem/occupancy').then(r => r.json()).then(d => {
+            gemOccupancyData = d;
+            plotGemOccupancy(d);
+        }).catch(() => {}),
+        fetch('/api/gem/efficiency').then(r => r.json()).then(updateGemEfficiency).catch(() => {}),
+    ]);
 }
 
 // --- occupancy heatmap (left, 2x2 per-detector) ----------------------------

@@ -489,7 +489,7 @@ function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, min
 // =========================================================================
 // Tab switching
 // =========================================================================
-function switchTab(tab){
+function switchTab(tab, opts){
     if(tab===activeTab) return;
     activeTab=tab;
     selectedModule=null;
@@ -531,7 +531,7 @@ function switchTab(tab){
     };
     const action = tabActions[tab] || tabActions.dq;
 
-    if (action.fetch) action.fetch();
+    if (action.fetch && !(opts && opts.skipFetch)) action.fetch();
 
     // after layout settles: resize geo (for geo tabs) + registered Plotly plots + custom after()
     setTimeout(()=>{

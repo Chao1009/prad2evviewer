@@ -445,7 +445,7 @@ function plotClStatHists(){
 // =========================================================================
 
 function fetchGemResiduals(){
-    fetch('/api/gem/residuals').then(r=>r.json()).then(data=>{
+    return fetch('/api/gem/residuals').then(r=>r.json()).then(data=>{
         if(!data.enabled) return;
         gemResidData=data;
         plotGemResiduals();
