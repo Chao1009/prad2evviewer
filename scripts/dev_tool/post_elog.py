@@ -41,6 +41,16 @@ DEFAULT_BOOK        = "PRADLOG"
 TITLE_BASE          = "PRad2 Event Monitor Auto Report"
 TIMEOUT_S           = 30
 
+# Tag substitutions applied to every upload so old saved XMLs (whose
+# <Tags> block still references tags from before the elog enum was
+# tightened) post cleanly.  No-op on new XMLs that already use the
+# correct tags. Override / extend with --rewrite-tag OLD=NEW; disable
+# entirely with --no-rewrite-tags.
+DEFAULT_TAG_REWRITES = {
+    "AutoReport": "Autolog",
+    "PRad2":      "DAQ",
+}
+
 
 def auto_title(run: int) -> str:
     return f"Run #{run}: {TITLE_BASE}"
@@ -205,8 +215,10 @@ def main(argv=None):
         help="print dedup result and exit; do not post")
     ap.add_argument("--rewrite-tag", action="append", default=[],
         metavar="OLD=NEW",
-        help="rewrite a <tag> on the fly before upload (repeatable). "
-             "e.g. --rewrite-tag AutoReport=Autolog --rewrite-tag PRad2=DAQ")
+        help="extra tag rewrite to apply before upload (repeatable). "
+             f"defaults already cover {DEFAULT_TAG_REWRITES}")
+    ap.add_argument("--no-rewrite-tags", action="store_true",
+        help="disable the default tag rewrites (post the XML verbatim)")
     args = ap.parse_args(argv)
 
     # Resolve XML path + run number
@@ -245,12 +257,14 @@ def main(argv=None):
             return
 
     print("posting...")
-    rewrite_map = {}
+    rewrite_map = {} if args.no_rewrite_tags else dict(DEFAULT_TAG_REWRITES)
     for spec in args.rewrite_tag:
         if "=" not in spec:
             sys.exit(f"--rewrite-tag expects OLD=NEW, got '{spec}'")
         old, new = spec.split("=", 1)
         rewrite_map[old.strip()] = new.strip()
+    if rewrite_map:
+        print(f"tag rewrites: {rewrite_map}")
     code, body = post_elog(args.url, args.cert, args.key, xml_path, run,
                            rewrite_map=rewrite_map or None)
     print(f"HTTP {code}")
