@@ -152,10 +152,10 @@
     },
 
     "dsc_scaler": {
-        "_comment": "DSC2 scaler bank — emitted by trig0.c on SYNC events (~every 1-2 s) inside the TI master crate (parent ROC tag 0x0027). Counts accumulate from the GO transition and are not reset by reads, so realtime livetime should be computed as a delta between consecutive SYNCs. Bank layout in run 024246: 72 words = 3-word JLab BLKHDR/EVTHDR/TRGTIME prefix, 67-word DSC2 payload, 2-word FILLER+BLKTLR trailer; slot is read from BLKHDR bits 26:22 (= 18 in this run, confirmed by tools/dsc_scan). Convention: gated/ungated ratio is ~0.99 — gated counts LIVE time, so live_time = gated/ungated (NOT 1 - gated/ungated). source ∈ 'ref' (DSC2 ref counter pair, channel ignored), 'trg' (TRG input), 'tdc' (TDC input).",
+        "_comment": "DSC2 scaler bank — emitted by trig0.c on SYNC events (~every 1-2 s) inside the TI master crate (parent ROC tag 0x0027). Counts accumulate from the GO transition and are not reset by reads, so realtime livetime should be computed as a delta between consecutive SYNCs. Bank layout in run 024246: 72 words = 3-word JLab BLKHDR/EVTHDR/TRGTIME prefix, then 4 groups of 16 input-connector counters (groups 1+2 gated and identical, groups 3+4 ungated and identical), 2-word bank-level reference pair (gated, ungated), 3-word block trailer; slot is read from BLKHDR bits 26:22 (= 18 in this run). Convention: gated counters are enabled while NOT busy → live_time = gated/ungated. source ∈ 'trg' (group 1 / group 3, per-channel — recommended primary), 'tdc' (group 2 / group 4, duplicate of trg), 'ref' (bank-level reference pair, useful cross-check). Channel selects the input connector (faraday is typically channel 0 but cabling varies by run — verify against the data).",
         "bank_tag": "0xE115",
         "slot":     18,
-        "source":   "ref",
+        "source":   "trg",
         "channel":  0
     },
 

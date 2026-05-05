@@ -11,20 +11,36 @@
 //
 //   Legacy 67-word: payload at offset 0, slot in 0xDCA0... magic header word.
 //   PRad-II rflag=1 (run 024246): 72 words = 3-word JLab BLKHDR/EVTHDR/TRGTIME
-//     prefix, 67-word payload at offset 2, 2-word FILLER/BLKTLR trailer; slot
-//     lives in BLKHDR bits 26:22.
+//     prefix, 64-word counter array + 5-word trailer at offset 2; slot lives
+//     in BLKHDR bits 26:22.
 //
-// 67-word payload, per slot:
-//   [0]      header (placeholder in the rflag=1 form)
-//   [1..16]  TRG Grp1 (gated)   — 16 channels
-//   [17..32] TDC Grp1 (gated)   — 16 channels
-//   [33..48] TRG Grp2 (ungated) — 16 channels
-//   [49..64] TDC Grp2 (ungated) — 16 channels
-//   [65]     Ref Grp1 (gated)
-//   [66]     Ref Grp2 (ungated)
+// 64 per-channel counters + a reference pair, organised as 4 groups of
+// 16 input connectors followed by 2 reference words — group 1 + group 2
+// are gated, group 3 + group 4 are ungated, and groups 1/2 (resp. 3/4)
+// report nearly identical counts (the firmware writes each pair from
+// the same hardware counter).  Indices below use the bank-relative
+// numbering after the 3-word header skip:
 //
-// Convention in this DAQ: Group A (gated) is enabled while NOT busy, so it
-// counts LIVE time and live_fraction = gated/ungated.
+//   [3..18]  group 1 (gated)   — 16 channels — `trg_gated[]`
+//   [19..34] group 2 (gated)   — 16 channels — `tdc_gated[]`   (≈ group 1)
+//   [35..50] group 3 (ungated) — 16 channels — `trg_ungated[]`
+//   [51..66] group 4 (ungated) — 16 channels — `tdc_ungated[]` (≈ group 3)
+//   [67]     reference (gated)                — `ref_gated`
+//   [68]     reference (ungated)              — `ref_ungated`
+//   [69..71] block trailer (FILLER + BLKTLR + tail) — not decoded
+//
+// Convention: gated counters are enabled while NOT busy, so they count
+// LIVE time and live_fraction = gated/ungated.  Faraday cup readout is
+// typically on channel 0, channel 1 carries an auxiliary signal, and
+// the remaining 14 connectors are usually unused (cabling varies by
+// run — verify with a few non-zero channels in the live data).
+//
+// Recommended primary source for livetime is `trg` (group 1 + group 3,
+// per-channel).  The `ref` pair tracks the same livetime via the bank-
+// level reference inputs and gives a similar fraction; it is a useful
+// cross-check but not the canonical pick.  The `tdc_*` field names
+// predate the spec where group 2/4 are duplicates of group 1/3 (not a
+// separate TDC source) — kept for back-compat.
 //=============================================================================
 
 #include <cstdint>
