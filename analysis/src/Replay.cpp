@@ -340,9 +340,9 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                         // Veto / LMS get unity factor.  Comes from a lookup
                         // table, no analyzer needed.
                         if (mod_type == prad2::MOD_PbWO4) {
-                            ev->gain_factor[nch] = gain_correction.w[mod_id - 1000].avg;
+                            ev->gain_factor[nch] = gain_correction.w[mod_id - 1000].corr[1]; // Use g2-based correction for PbWO4 (matches LMS2)
                         } else if (mod_type == prad2::MOD_PbGlass) {
-                            ev->gain_factor[nch] = gain_correction.g[mod_id].avg;
+                            ev->gain_factor[nch] = gain_correction.g[mod_id].corr[1]; // Use g2-based correction for PbGlass (matches LMS2)
                         } else {
                             ev->gain_factor[nch] = 1.0f;
                         }
@@ -714,8 +714,8 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                                     time = wres.peaks[bestIdx].time;
                                 }
                                 //gain correction for HyCal modules
-                                if(mod->id > 1000) adc *= gain_correction.w[mod->id-1000].avg;
-                                else adc *= gain_correction.g[mod->id].avg;
+                                if(mod->id > 1000) adc *= gain_correction.w[mod->id-1000].corr[1]; // Use g2-based correction for PbWO4 (matches LMS2)
+                                else adc *= gain_correction.g[mod->id].corr[1]; // Use g2-based correction for PbGlass (matches LMS2)
 
                                 float energy = static_cast<float>(mod->energize(adc));
                                 clusterer.AddHit(mod->index, energy, time);
@@ -728,7 +728,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             }
             ev->veto_nch = veto_nch;
             ev->lms_nch = lms_nch;
-            if(nch > 500) continue; // too many hits, likely noise, skip the event
+            if(nch > 1000) continue; // too many hits, likely noise, skip the event
 
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;
