@@ -1362,6 +1362,42 @@ class _MetricsWorker(QThread):
 
 
 # =============================================================================
+#  W-module layer helper
+# =============================================================================
+
+def _build_w_layer_map(modules_json_path: Optional[Path]) -> Dict[str, int]:
+    """Return {module_name: layer_number} for all PbWO4 (W) modules.
+
+    Layer 1 = outermost ring (adjacent to the PbGlass border), increasing
+    inward.  Computed as min(row-1, max_row-row, col-1, max_col-col) + 1
+    using the 1-based row/col grid indices stored in hycal_map.json.
+    """
+    if modules_json_path is None or not modules_json_path.is_file():
+        return {}
+    try:
+        with open(modules_json_path) as f:
+            data = json.load(f)
+    except Exception:
+        return {}
+    entries = [
+        (e["n"], e["geo"]["row"], e["geo"]["col"])
+        for e in data
+        if e.get("t") == "PbWO4"
+        and "geo" in e
+        and "row" in e["geo"]
+        and "col" in e["geo"]
+    ]
+    if not entries:
+        return {}
+    max_row = max(r for _, r, _ in entries)
+    max_col = max(c for _, _, c in entries)
+    return {
+        name: min(row - 1, max_row - row, col - 1, max_col - col) + 1
+        for name, row, col in entries
+    }
+
+
+# =============================================================================
 #  Main window
 # =============================================================================
 
@@ -1384,6 +1420,7 @@ class EpCalibViewerWindow(QMainWindow):
         self._map_mode = CalibMapWidget.MODE_DELTA_E
         self._worker:    Optional[_MetricsWorker] = None
         self._abandoned_workers: List[_MetricsWorker] = []
+        self._w_layer_map: Dict[str, int] = _build_w_layer_map(MODULES_JSON)
 
         self._build_ui()
         self.setWindowTitle("epCalib Viewer")
@@ -1563,6 +1600,26 @@ class EpCalibViewerWindow(QMainWindow):
         self._batch_clear_btn.setEnabled(False)
         self._batch_clear_btn.clicked.connect(self._do_batch_clear_selection)
         batch_bar.addWidget(self._batch_clear_btn)
+        # ── outer W-layer restore ────────────────────────────────────────
+        from PyQt6.QtWidgets import QSpinBox
+        sep = QLabel("|")  # visual separator
+        sep.setStyleSheet(f"color: {THEME.BORDER}; margin: 0 4px;")
+        batch_bar.addWidget(sep)
+        batch_bar.addWidget(QLabel("Outer W layers:"))
+        self._outer_layer_spin = QSpinBox()
+        self._outer_layer_spin.setRange(1, 3)
+        self._outer_layer_spin.setValue(1)
+        self._outer_layer_spin.setFixedWidth(44)
+        self._outer_layer_spin.setToolTip(
+            "Number of outermost PbWO4 rings to include\n"
+            "(1 = single border ring, 2 = two outer rings, 3 = three)")
+        batch_bar.addWidget(self._outer_layer_spin)
+        self._outer_restore_btn = QPushButton("\u21a9 Restore Outer W Old Factor")
+        self._outer_restore_btn.setToolTip(
+            "Restore old_factor (from .dat) for the outermost N rings of W (PbWO4) modules\n"
+            "and save JSON.  Affected modules are marked with a red cross.")
+        self._outer_restore_btn.clicked.connect(self._do_restore_outer_w_layers)
+        batch_bar.addWidget(self._outer_restore_btn)
         batch_bar.addStretch()
         ml.addLayout(batch_bar)
 
@@ -1914,6 +1971,66 @@ class EpCalibViewerWindow(QMainWindow):
         # turn off multi-select mode, clear selection, refresh display
         self._multiselect_btn.setChecked(False)
         self._map.clear_selection()
+        self._refresh_map()
+        self._map.set_marked_modules(data.modified_modules)
+
+    def _do_restore_outer_w_layers(self) -> None:
+        """Restore old_factor for the outermost N rings of PbWO4 (W) modules."""
+        data = self._cur_data
+        if data is None:
+            self.statusBar().showMessage("No calibration data loaded", 4000)
+            return
+        if not self._w_layer_map:
+            self.statusBar().showMessage(
+                "W layer map not available — check hycal_map.json path", 4000)
+            return
+
+        n_layers = self._outer_layer_spin.value()
+        target_names = {
+            name for name, layer in self._w_layer_map.items() if layer <= n_layers
+        }
+
+        updated: List[str] = []
+        skipped: List[str] = []
+        for name in target_names:
+            mm = data.metrics.get(name)
+            if mm is None or mm.old_factor <= 0.0:
+                skipped.append(name)
+                continue
+            mm.factor = mm.old_factor
+            entry = data.factors.get(name)
+            if entry is not None:
+                entry["factor"] = mm.old_factor
+            data.modified_modules.add(name)
+            updated.append(name)
+
+        if not updated:
+            self.statusBar().showMessage(
+                f"Outer W restore: no modules had old_factor available "
+                f"(.dat not loaded?), checked {len(target_names)} modules", 6000)
+            return
+
+        jpath = data.json_path
+        if jpath is not None:
+            try:
+                entries = list(data.factors.values())
+                with open(jpath, "w") as fj:
+                    json.dump(entries, fj, indent=2)
+                note = f"saved {jpath.name}"
+            except Exception as exc:
+                self.statusBar().showMessage(
+                    f"Outer W restore: save failed: {exc}", 6000)
+                return
+        else:
+            note = "JSON path not found — not saved"
+
+        msg = (
+            f"Restored old_factor for {len(updated)} outer W module(s) "
+            f"(≤{n_layers} layer(s)).  {note}"
+        )
+        if skipped:
+            msg += f"  ({len(skipped)} skipped — no old_factor)"
+        self.statusBar().showMessage(msg, 8000)
         self._refresh_map()
         self._map.set_marked_modules(data.modified_modules)
 
