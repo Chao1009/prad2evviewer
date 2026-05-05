@@ -6,6 +6,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <cmath>
+#include <sys/stat.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -164,27 +165,242 @@ json ViewerServer::buildConfig()
 // Elog post
 // =========================================================================
 
+namespace {
+// Minimal base64 decoder (RFC4648). Skips whitespace and '='.
+std::string _b64Decode(const std::string &s)
+{
+    static int8_t TBL[256];
+    static bool init = false;
+    if (!init) {
+        for (int i = 0; i < 256; ++i) TBL[i] = -1;
+        const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; ++i) TBL[(unsigned char)a[i]] = static_cast<int8_t>(i);
+        init = true;
+    }
+    std::string out;
+    out.reserve(s.size() * 3 / 4);
+    int val = 0, valb = -8;
+    for (unsigned char c : s) {
+        if (TBL[c] < 0) continue;
+        val = (val << 6) | TBL[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(static_cast<char>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
+// Pull <Attachment> blocks out of the elog XML body, base64-decode each,
+// and write the bytes to <dir>/<filename>. The XML is the canonical
+// payload — there is no separate JSON attachment field anymore.
+void _extractXmlAttachments(const std::string &xml, const fs::path &dir)
+{
+    static const std::string A_OPEN  = "<Attachment>";
+    static const std::string A_CLOSE = "</Attachment>";
+    static const std::string F_OPEN  = "<filename>";
+    static const std::string F_CLOSE = "</filename>";
+    static const std::string D_OPEN  = "<data encoding=\"base64\">";
+    static const std::string D_CLOSE = "</data>";
+    size_t pos = 0;
+    while (true) {
+        auto a_beg = xml.find(A_OPEN, pos);
+        if (a_beg == std::string::npos) break;
+        auto a_end = xml.find(A_CLOSE, a_beg);
+        if (a_end == std::string::npos) break;
+        const std::string block = xml.substr(a_beg, a_end - a_beg);
+        pos = a_end + A_CLOSE.size();
+
+        auto fb = block.find(F_OPEN);
+        auto fe = block.find(F_CLOSE);
+        auto db = block.find(D_OPEN);
+        auto de = block.find(D_CLOSE);
+        if (fb == std::string::npos || fe == std::string::npos ||
+            db == std::string::npos || de == std::string::npos) continue;
+        std::string filename = block.substr(fb + F_OPEN.size(),
+                                            fe - fb - F_OPEN.size());
+        std::string b64      = block.substr(db + D_OPEN.size(),
+                                            de - db - D_OPEN.size());
+        // strip any path component (don't trust the client filename)
+        auto slash = filename.find_last_of("/\\");
+        if (slash != std::string::npos) filename = filename.substr(slash + 1);
+        if (filename.empty()) continue;
+
+        std::ofstream f(dir / filename, std::ios::binary);
+        if (!f) {
+            std::cerr << "Elog local-save: open "
+                      << (dir / filename) << " failed\n";
+            continue;
+        }
+        std::string raw = _b64Decode(b64);
+        f.write(raw.data(), static_cast<std::streamsize>(raw.size()));
+    }
+}
+
+// Result of the local archive write — both the directory and the XML
+// path so the post step can read back from the same file.
+struct LocalSaveResult {
+    fs::path    dir;
+    fs::path    xml;
+    bool        ok = false;
+    std::string error;
+};
+
+LocalSaveResult _saveReportLocally(const std::string &local_save_dir,
+                                   uint32_t run, const std::string &xml_body)
+{
+    LocalSaveResult r;
+    if (local_save_dir.empty()) {
+        r.error = "local_save_dir not configured";
+        return r;
+    }
+    char run_name[32];
+    std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
+    r.dir = fs::path(local_save_dir) / run_name;
+    std::error_code ec;
+    fs::create_directories(r.dir, ec);
+    if (ec) {
+        r.error = "mkdir " + r.dir.string() + ": " + ec.message();
+        return r;
+    }
+    std::time_t t = std::time(nullptr);
+    char ts[32];
+    std::strftime(ts, sizeof(ts), "%Y%m%dT%H%M%SZ", std::gmtime(&t));
+    r.xml = r.dir / (std::string("report_") + ts + ".xml");
+    {
+        std::ofstream f(r.xml);
+        if (!f) { r.error = "open " + r.xml.string() + " failed"; return r; }
+        f << xml_body;
+        if (!f.good()) {
+            r.error = "write " + r.xml.string() + " failed";
+            return r;
+        }
+    }
+    _extractXmlAttachments(xml_body, r.dir);
+    r.ok = true;
+    return r;
+}
+}  // namespace
+
 json ViewerServer::handleElogPost(const std::string &body)
 {
     if (body.empty())
         return {{"ok", false}, {"error", "Empty body"}};
-    if (activeApp().elog_url.empty())
+    auto &app = activeApp();
+    if (app.elog_url.empty())
         return {{"ok", false}, {"error", "No elog URL configured"}};
 
     auto req = json::parse(body, nullptr, false);
     if (req.is_discarded() || !req.contains("xml"))
         return {{"ok", false}, {"error", "Invalid request"}};
 
-    std::string xml_body = req["xml"].get<std::string>();
-    std::string tmp = "/tmp/prad2_elog_" + std::to_string(std::time(nullptr)) + ".xml";
-    { std::ofstream f(tmp); f << xml_body; }
+    std::string xml_body  = req["xml"].get<std::string>();
+    bool        is_auto   = req.value("auto", false);
+    uint32_t    run       = req.value("run_number", 0u);
+    std::string request_id = req.value("request_id", std::string());
 
+    // On-demand auto-post validation: when auto:true, request_id MUST
+    // be present and match the in-flight pending capture.  Empty or
+    // stale ids are rejected so a buggy / malicious client can't
+    // bypass the dispatch handshake.
+    if (is_auto) {
+        std::lock_guard<std::mutex> lk(pending_capture_mtx_);
+        if (request_id.empty()) {
+            return {{"ok", false}, {"error", "auto post requires request_id"}};
+        }
+        if (!pending_capture_ ||
+            pending_capture_->request_id != request_id) {
+            return {{"ok", false}, {"error", "stale request_id"}};
+        }
+    }
+
+    // Hard precondition: local archive must be configured.  Every elog
+    // post is mirrored on disk first; the actual upload reads back from
+    // that file so the local copy is the canonical artifact.
+    if (app.auto_report_local_save_dir.empty()) {
+        return {{"ok", false},
+                {"error", "auto_report.local_save_dir is required"}};
+    }
+    if (!save_dir_writable_) {
+        return {{"ok", false},
+                {"error", "local_save_dir not writable"}};
+    }
+
+    // Hold elog_post_mtx_ for the entire dedup-check + save sequence so
+    // two concurrent POSTs (multi-browser race) can't both pass the
+    // on-disk check before either has written. Releases as soon as the
+    // file is on disk; the curl upload is allowed to run unlocked.
+    std::unique_lock<std::mutex> post_lock(elog_post_mtx_);
+
+    // Server-side dedup: if run_NNNNNN/ already holds an XML modified
+    // within the rate window, skip this duplicate. Catches multi-browser
+    // races and quick double-fires from the same client (END + run-change
+    // fallback) without burning disk on near-identical snapshots.
+    if (run > 0 && app.auto_report_min_interval_ms > 0) {
+        char run_name[32];
+        std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
+        fs::path run_dir = fs::path(app.auto_report_local_save_dir) / run_name;
+        if (fs::exists(run_dir) && fs::is_directory(run_dir)) {
+            std::time_t now_t = std::time(nullptr);
+            int window_sec = app.auto_report_min_interval_ms / 1000;
+            fs::path most_recent;
+            std::time_t most_recent_t = 0;
+            std::error_code ec;
+            for (auto &entry : fs::directory_iterator(run_dir, ec)) {
+                if (!entry.is_regular_file()) continue;
+                if (entry.path().extension() != ".xml") continue;
+                struct stat st;
+                if (::stat(entry.path().c_str(), &st) == 0 &&
+                    st.st_mtime > most_recent_t)
+                {
+                    most_recent_t = st.st_mtime;
+                    most_recent   = entry.path();
+                }
+            }
+            if (most_recent_t && (now_t - most_recent_t) < window_sec) {
+                std::cerr << "Elog post: server-side dup skip for run "
+                          << run << " (recent: " << most_recent
+                          << ", " << (now_t - most_recent_t) << "s old)\n";
+                return {{"ok", true}, {"skipped", true},
+                        {"detail", "server-side dedup: recent save within "
+                                  + std::to_string(window_sec / 60) + " min"},
+                        {"saved_dir", run_dir.string()},
+                        {"saved_xml", most_recent.string()}};
+            }
+        }
+    }
+
+    auto sr = _saveReportLocally(app.auto_report_local_save_dir, run, xml_body);
+    if (!sr.ok) {
+        std::cerr << "Elog local-save: " << sr.error << "\n";
+        return {{"ok", false},
+                {"error", "local save failed: " + sr.error}};
+    }
+    const std::string saved_dir = sr.dir.string();
+    const std::string saved_xml = sr.xml.string();
+
+    // Dry-run gate: keep the local copy, skip the upload.
+    if (is_auto && !app.auto_report_post_to_elog) {
+        std::cerr << "Elog post: auto-mode dry run (post_to_elog=false)"
+                  << " saved=" << saved_xml << "\n";
+        return {{"ok", true}, {"posted", false}, {"dry_run", true},
+                {"saved_dir", saved_dir}, {"saved_xml", saved_xml},
+                {"status", "dry_run"}};
+    }
+
+    // Save is committed; release the lock so concurrent runs aren't
+    // blocked on the curl upload below.
+    post_lock.unlock();
+
+    // Upload the saved XML — single source of truth.  The file on disk is
+    // byte-identical to what hits elog, so a manual replay can use the
+    // same `curl --upload-file <saved_xml>` command.
     std::string cert_flag;
-    auto &app = activeApp();
     if (!app.elog_cert.empty())
         cert_flag = " --cert '" + app.elog_cert + "' --key '" + app.elog_key + "'";
     std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + cert_flag
-                    + " --upload-file '" + tmp + "' '"
+                    + " --upload-file '" + saved_xml + "' '"
                     + app.elog_url + "/incoming/prad2_report.xml' 2>/dev/null";
     std::string http_code;
     FILE *p = popen(cmd.c_str(), "r");
@@ -196,12 +412,255 @@ json ViewerServer::handleElogPost(const std::string &body)
             http_code.pop_back();
         pclose(p);
     }
-    std::remove(tmp.c_str());
     bool ok = (http_code.find("200") != std::string::npos ||
                http_code.find("201") != std::string::npos);
-    std::cerr << "Elog post: " << app.elog_url << " -> HTTP " << http_code
-              << (ok ? " OK" : " FAIL") << "\n";
-    return {{"ok", ok}, {"status", http_code}};
+    std::cerr << "Elog post: " << app.elog_url << " <- " << saved_xml
+              << " -> HTTP " << http_code << (ok ? " OK" : " FAIL") << "\n";
+
+    // On-demand auto-post handshake: clear the pending slot and tell
+    // every connected client to drop their "Auto-reporting…" badge.
+    if (is_auto && !request_id.empty()) {
+        std::lock_guard<std::mutex> lk(pending_capture_mtx_);
+        if (pending_capture_ &&
+            pending_capture_->request_id == request_id) {
+            pending_capture_.reset();
+        }
+        json done = {{"type", "auto_capture_done"},
+                     {"run", run}, {"posted", ok},
+                     {"saved_xml", saved_xml}};
+        wsBroadcast(done.dump());
+        appendAutoReportSummary(run, saved_xml, ok, std::string(),
+                                std::string("upload"), std::string());
+    }
+    return {{"ok", ok}, {"posted", ok}, {"status", http_code},
+            {"saved_dir", saved_dir}, {"saved_xml", saved_xml}};
+}
+
+// =========================================================================
+// On-demand auto-report dispatch
+// =========================================================================
+
+namespace {
+// Compose summary.json next to local_save_dir.  Whole-file rewrite per
+// update — the file stays small (one JSON record per run), and atomic
+// O_TRUNC is fine for our cadence.
+fs::path _summaryPath(const std::string &local_save_dir)
+{
+    return fs::path(local_save_dir) / "summary.json";
+}
+
+std::string _isoNowZ()
+{
+    std::time_t t = std::time(nullptr);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+    return std::string(buf);
+}
+}  // namespace
+
+void ViewerServer::checkSaveDirWritable()
+{
+    auto &app = activeApp();
+    save_dir_writable_ = false;
+    if (app.auto_report_local_save_dir.empty()) {
+        std::cerr << "AutoReport: local_save_dir not configured — disabled\n";
+        return;
+    }
+    fs::path dir = app.auto_report_local_save_dir;
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (ec) {
+        std::cerr << "AutoReport: cannot create " << dir
+                  << " (" << ec.message() << ") — disabled\n";
+        return;
+    }
+    fs::path probe = dir / ".prad2_write_check";
+    {
+        std::ofstream f(probe);
+        if (!f) {
+            std::cerr << "AutoReport: " << dir
+                      << " is not writable — disabled\n";
+            return;
+        }
+        f << "ok\n";
+    }
+    fs::remove(probe, ec);
+    save_dir_writable_ = true;
+    std::cerr << "AutoReport: save_dir " << dir << " is writable\n";
+}
+
+void ViewerServer::appendAutoReportSummary(uint32_t run,
+                                           const std::string &saved_xml,
+                                           bool posted,
+                                           const std::string &lognumber,
+                                           const std::string &reason,
+                                           const std::string &error)
+{
+    auto &app = activeApp();
+    if (app.auto_report_local_save_dir.empty()) return;
+    fs::path path = _summaryPath(app.auto_report_local_save_dir);
+    json doc = json::object();
+    {
+        std::ifstream f(path);
+        if (f) {
+            std::stringstream ss; ss << f.rdbuf();
+            auto parsed = json::parse(ss.str(), nullptr, false);
+            if (!parsed.is_discarded() && parsed.is_object()) doc = parsed;
+        }
+    }
+    doc["updated"]            = _isoNowZ();
+    doc["auto_post_enabled"]  = app.auto_report_enabled;
+    doc["post_to_elog"]       = app.auto_report_post_to_elog;
+    doc["save_dir_writable"]  = save_dir_writable_;
+    doc["min_interval_ms"]    = app.auto_report_min_interval_ms;
+    if (!doc.contains("runs") || !doc["runs"].is_array())
+        doc["runs"] = json::array();
+
+    json rec = {
+        {"run",       run},
+        {"saved_xml", saved_xml},
+        {"saved_at",  _isoNowZ()},
+        {"posted",    posted},
+        {"lognumber", lognumber},
+        {"reason",    reason},
+    };
+    if (!error.empty()) rec["error"] = error;
+    doc["runs"].push_back(rec);
+
+    std::ofstream f(path, std::ios::trunc);
+    if (!f) {
+        std::cerr << "AutoReport summary: cannot write " << path << "\n";
+        return;
+    }
+    f << doc.dump(2) << "\n";
+}
+
+bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
+                                   const std::string &request_id_in)
+{
+    auto &app = activeApp();
+    if (!app.auto_report_enabled) return false;
+    if (!save_dir_writable_) {
+        std::cerr << "AutoReport: dispatch skipped (save_dir not writable)\n";
+        appendAutoReportSummary(run, std::string(), false, std::string(),
+                                reason, "save_dir not writable");
+        return false;
+    }
+    if (!run) return false;
+
+    // Only clients that advertised the on-demand auto-report
+    // capability via client_hello are eligible.  Old (pre-update) tabs
+    // never appear here so the watchdog won't waste 30 s timing them
+    // out — operators see a clean "no responsive client" record
+    // instead of a long stutter.
+    std::set<websocketpp::connection_hdl,
+             std::owner_less<websocketpp::connection_hdl>> alive;
+    size_t total_clients = 0;
+    {
+        std::lock_guard<std::mutex> lk(ws_mtx_);
+        total_clients = ws_clients_.size();
+        alive = reporter_capable_;
+    }
+    if (alive.empty()) {
+        std::string detail = total_clients
+            ? "no on-demand-capable client (" +
+              std::to_string(total_clients) +
+              " legacy tab(s) connected — refresh required)"
+            : "no connected client";
+        std::cerr << "AutoReport: " << detail << " for run "
+                  << run << " (" << reason << ")\n";
+        appendAutoReportSummary(run, std::string(), false, std::string(),
+                                reason, detail);
+        return false;
+    }
+
+    std::lock_guard<std::mutex> plk(pending_capture_mtx_);
+
+    constexpr int CAPTURE_TIMEOUT_S = 30;
+    std::time_t now_t = std::time(nullptr);
+
+    PendingCapture pc;
+    if (!request_id_in.empty() && pending_capture_ &&
+        pending_capture_->request_id == request_id_in) {
+        // watchdog retry — same request, advance to next candidate
+        pc = *pending_capture_;
+    } else if (pending_capture_ &&
+               (now_t - pending_capture_->started) < CAPTURE_TIMEOUT_S) {
+        // Another capture is already in flight (different request_id);
+        // don't clobber it. Per-run on-disk dedup will absorb any
+        // genuine duplicate when both finish.
+        std::cerr << "AutoReport: dispatch skipped for run " << run
+                  << " — capture for run " << pending_capture_->run
+                  << " (request " << pending_capture_->request_id
+                  << ") still in flight\n";
+        return false;
+    } else {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "%lx-%u", (long)now_t, run);
+        pc.request_id = buf;
+        pc.run        = run;
+        pc.reason     = reason;
+        pc.tried.clear();
+    }
+    pc.started = now_t;
+
+    // First alive client not in pc.tried.
+    websocketpp::connection_hdl chosen;
+    bool found = false;
+    for (auto &h : alive) {
+        if (pc.tried.find(h) == pc.tried.end()) {
+            chosen = h;
+            found  = true;
+            break;
+        }
+    }
+    if (!found) {
+        std::cerr << "AutoReport: all clients exhausted for run " << run
+                  << " (request " << pc.request_id << ")\n";
+        appendAutoReportSummary(run, std::string(), false, std::string(),
+                                reason, "all clients timed out");
+        pending_capture_.reset();
+        return false;
+    }
+    pc.tried.insert(chosen);
+    pending_capture_ = pc;
+
+    json msg = {
+        {"type",       "capture_request"},
+        {"request_id", pc.request_id},
+        {"run",        pc.run},
+        {"reason",     pc.reason},
+    };
+    try {
+        server_->send(chosen, msg.dump(),
+                      websocketpp::frame::opcode::text);
+    } catch (const std::exception &e) {
+        std::cerr << "AutoReport: send failed (" << e.what()
+                  << "), retrying via watchdog\n";
+        return false;
+    }
+    std::cerr << "AutoReport: dispatched capture_request for run " << run
+              << " (request " << pc.request_id
+              << ", attempt " << pc.tried.size() << ")\n";
+    return true;
+}
+
+void ViewerServer::autoReportWatchdog()
+{
+    constexpr int CAPTURE_TIMEOUT_S = 30;
+    std::optional<PendingCapture> stale;
+    {
+        std::lock_guard<std::mutex> lk(pending_capture_mtx_);
+        if (pending_capture_ &&
+            std::time(nullptr) - pending_capture_->started > CAPTURE_TIMEOUT_S)
+        {
+            stale = pending_capture_;
+        }
+    }
+    if (!stale) return;
+    std::cerr << "AutoReport: watchdog timeout for run " << stale->run
+              << " (request " << stale->request_id << ")\n";
+    dispatchCapture(stale->run, stale->reason, stale->request_id);
 }
 
 // =========================================================================

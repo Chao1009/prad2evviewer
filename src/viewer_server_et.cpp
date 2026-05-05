@@ -78,6 +78,11 @@ void ViewerServer::etReaderThread()
     ana.SetTemplateStore(&app_online_.template_store);
     fdec::WaveResult wres;
     uint64_t last_ti_ts = 0;
+    // Track run number observed in the physics stream — provides the
+    // run-change fallback for auto-report when an END control event is
+    // missed. dispatchCapture's per-run dedup catches the duplicate when
+    // both END and run-change fire for the same boundary.
+    uint32_t last_seen_run_ = 0;
 
     // Tagger batch state (local to the thread — only this thread writes it).
     // Pre-allocate enough for TAGGER_BATCH_MAX hits + header.
@@ -184,14 +189,35 @@ void ViewerServer::etReaderThread()
                 if (app_online_.daq_cfg.is_monitoring(ch.GetEvHeader().tag))
                     continue;
 
-                if (app_online_.sync_unix == 0) {
+                {
                     auto et = ch.GetEventType();
                     if (et == EventType::Prestart || et == EventType::Go ||
                         et == EventType::End      || et == EventType::Sync)
                     {
                         const auto &s = ch.Sync();
-                        if (s.unix_time != 0)
+                        if (app_online_.sync_unix == 0 && s.unix_time != 0)
                             app_online_.recordSyncTime(s.unix_time, last_ti_ts);
+                        // Broadcast PRESTART / END so the auto-report mode in
+                        // the UI can clear on PRESTART, and so the server
+                        // can dispatch a capture_request to one connected
+                        // client on END.
+                        if (et == EventType::Prestart || et == EventType::End) {
+                            const char *kind = (et == EventType::Prestart)
+                                ? "prestart" : "end";
+                            json msg = {
+                                {"type", "control_event"},
+                                {"kind", kind},
+                                {"run_number", s.run_number},
+                                {"unix_time", s.unix_time}
+                            };
+                            wsBroadcast(msg.dump());
+                            if (et == EventType::End &&
+                                app_online_.auto_report_enabled &&
+                                s.run_number > 0)
+                            {
+                                dispatchCapture(s.run_number, "end");
+                            }
+                        }
                     }
                 }
 
@@ -225,6 +251,22 @@ void ViewerServer::etReaderThread()
 
                     app_online_.processGemEvent(ssp_evt);
                     app_online_.processEvent(event, ana, wres);
+
+                    // Run-change fallback: if a physics event arrives
+                    // with a run_number we haven't dispatched a capture
+                    // for yet, fire one for the OLD run (the just-ended
+                    // one).  Server-side per-run dedup eats the dup if
+                    // END already triggered.
+                    if (event.info.run_number > 0 &&
+                        event.info.run_number != last_seen_run_)
+                    {
+                        if (last_seen_run_ > 0 &&
+                            app_online_.auto_report_enabled)
+                        {
+                            dispatchCapture(last_seen_run_, "run-change");
+                        }
+                        last_seen_run_ = event.info.run_number;
+                    }
 
                     int seq = app_online_.events_processed.load();
 
@@ -406,13 +448,22 @@ void ViewerServer::monitorStatusPollThread()
                     app_file_.beam_energy_status.poll_sec,  &beam_energy_);
     add("BeamI",    app_file_.beam_current_status.command,
                     app_file_.beam_current_status.poll_sec, &beam_current_);
-    if (metrics.empty()) return;
 
     constexpr int TICK_MS = 100;        // 0.1 s — schedule resolution
+    int auto_wd_in_ds = 50;             // 5 s between auto-report watchdog ticks
     while (running_) {
         while (running_ && !et_active_)
             std::this_thread::sleep_for(std::chrono::milliseconds(TICK_MS * 2));
         if (!running_) break;
+
+        // Auto-report watchdog — re-dispatch a stale capture_request to
+        // the next alive client.  Runs even if no shell metrics are
+        // configured (so the early `if (metrics.empty()) return` was
+        // dropped — both halves share this loop now).
+        if (--auto_wd_in_ds <= 0) {
+            auto_wd_in_ds = 50;
+            autoReportWatchdog();
+        }
 
         for (auto &m : metrics) {
             if (m.next_in_ds > 0) { --m.next_in_ds; continue; }

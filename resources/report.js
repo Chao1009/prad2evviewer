@@ -1,7 +1,15 @@
-// report.js — Report generation: markdown + images
+// report.js — Report generation: markdown body + per-tab PNG screenshots.
 //
-// Produces markdown text + PNG image attachments.
-// Used by both "Download Report" (.md file) and "Post to Elog" (text + attachments).
+// One screenshot per tab (Waveform / LMS / Clustering / GEM / EPICS / Physics)
+// instead of capturing individual plots — captureTabScreenshot() switches to
+// the tab, swaps every visible <canvas> and Plotly plot with a freshly
+// rendered <img>, then composites the cloned DOM through an SVG
+// <foreignObject> wrapper so toolbars, tables, and labels round-trip with
+// their CSS intact.
+//
+// Drives both the Report dropdown (Download / Post to Elog) and the Auto
+// mode in viewer.js (END → post, PRESTART → clear, run-number-change as
+// fallback, hard-rate-limited to once per 15 min).
 //
 // Depends on globals from viewer.js (accessed at runtime, not load time).
 
@@ -17,88 +25,257 @@ function registerReportSection(section){
     reportRegistry.sort((a,b)=>a.order-b.order);
 }
 
+function addAttachment(dataUrl,filename,caption){
+    if(!dataUrl) return;
+    const b64=dataUrl.split(',')[1];
+    if(b64) reportAttachments.push({data:b64,filename,caption,type:'image/png'});
+}
+
 // =========================================================================
-// Capture helpers
+// Whole-tab screenshot
+//
+// Strategy: switch to the target tab, flip the page to the light theme,
+// pre-render every <canvas> + Plotly plot to a data URL on the live DOM
+// (cloneNode loses canvas pixels and Plotly's internal SVG state), clone
+// the panel, replace those nodes with <img> elements, and ship the result
+// through an SVG <foreignObject>.  All same-origin stylesheets are inlined
+// in a <style> tag so layout + theme survive the trip.
 // =========================================================================
 
-// Capture the geo canvas for a given tab at fixed resolution with light theme.
-async function captureGeoForTab(tab){
-    const prev={tab:activeTab,w:geoCanvas.width,h:geoCanvas.height,
-                s:scale,ox:offsetX,oy:offsetY};
-    try{
-        geoCanvas.width=1200; geoCanvas.height=900;
-        canvasW=1200; canvasH=900;
-        activeTab=tab;
-        geoLightTheme=true;
-        fitView(); redrawGeo();
-        return geoCanvas.toDataURL('image/png');
-    }finally{
-        geoLightTheme=false;
-        geoCanvas.width=prev.w; geoCanvas.height=prev.h;
-        canvasW=prev.w; canvasH=prev.h;
-        scale=prev.s; offsetX=prev.ox; offsetY=prev.oy;
-        activeTab=prev.tab;
-        redrawGeo();
+const TAB_SETTLE_MS = 1000;   // post-switch settling for layout + data fetch
+const THEME_SETTLE_MS = 250;  // post-theme-flip settling
+
+// Tabs included in the report, in order. Keys must match data-tab values.
+const REPORT_TABS = [
+    {tab:'dq',      title:'Waveform Data',     filename:'tab_dq.png',      prep:_prepDqTab},
+    {tab:'lms',     title:'Gain Monitoring',   filename:'tab_lms.png',     prep:_prepLmsTab},
+    {tab:'cluster', title:'Clustering',        filename:'tab_cluster.png', prep:null},
+    {tab:'gem',     title:'GEM Detectors',     filename:'tab_gem.png',     prep:null},
+    {tab:'epics',   title:'EPICS Slow Control',filename:'tab_epics.png',   prep:null},
+    {tab:'physics', title:'Physics',           filename:'tab_physics.png', prep:null},
+];
+
+function _wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+// Force the DQ tab to its occupancy view for the screenshot, regardless of
+// what the user is currently looking at.  Returns a restore function.
+function _prepDqTab(){
+    const sel=document.getElementById('color-metric');
+    const prev=sel.value;
+    if(prev!=='occupancy'){
+        sel.value='occupancy';
+        if(typeof syncDqRange==='function') syncDqRange();
+        if(typeof geoDq==='function') geoDq();
+    }
+    return ()=>{
+        if(prev!==sel.value){
+            sel.value=prev;
+            if(typeof syncDqRange==='function') syncDqRange();
+            if(typeof geoDq==='function') geoDq();
+        }
+    };
+}
+
+// Force the LMS tab to RMS/Mean (warning view) for the screenshot. Reference
+// is left to whatever lmsSummaryData was loaded with — _summaryLms() runs
+// before captureTabScreenshot and pulls that data with LMS3 as the
+// reference.  We only flip the dropdown so the toolbar in the screenshot
+// reads "LMS3" alongside the rms_frac coloring.  Restore on return.
+function _prepLmsTab(){
+    const metric=document.getElementById('lms-color-metric');
+    const refSel=document.getElementById('lms-ref-select');
+    const prevMetric=metric.value;
+    const prevRef=refSel.value;
+    if(prevMetric!=='rms_frac'){
+        metric.value='rms_frac';
+        if(typeof geoLms==='function') geoLms();
+    }
+    let lms3='';
+    for(const o of refSel.options) if(o.textContent==='LMS3'){ lms3=o.value; break; }
+    if(lms3 && refSel.value!==lms3){
+        refSel.value=lms3;
+        if(typeof geoLms==='function') geoLms();
+    }
+    return ()=>{
+        if(metric.value!==prevMetric){
+            metric.value=prevMetric;
+            if(typeof geoLms==='function') geoLms();
+        }
+        if(refSel.value!==prevRef){
+            refSel.value=prevRef;
+            if(typeof geoLms==='function') geoLms();
+        }
+    };
+}
+
+function _gatherCss(){
+    const out=[];
+    for(const sh of document.styleSheets){
+        try{ for(const r of sh.cssRules) out.push(r.cssText); }
+        catch(e){ /* CORS-protected sheet — skip */ }
+    }
+    return out.join('\n');
+}
+
+// Mirror live form-control state into attributes so XMLSerializer captures
+// it (cloneNode copies attributes, not properties).
+function _freezeFormState(root){
+    for(const inp of root.querySelectorAll('input')){
+        if(inp.type==='checkbox'||inp.type==='radio'){
+            if(inp.checked) inp.setAttribute('checked','');
+            else inp.removeAttribute('checked');
+        }else{
+            inp.setAttribute('value', inp.value);
+        }
+    }
+    for(const sel of root.querySelectorAll('select')){
+        for(const opt of sel.options){
+            if(opt.selected) opt.setAttribute('selected','');
+            else opt.removeAttribute('selected');
+        }
     }
 }
 
-// Capture a geo view, register as attachment, return markdown image reference.
-async function captureGeo(tab,caption,filename){
-    const img=await captureGeoForTab(tab);
-    addAttachment(img,filename,caption);
-    return `![${caption}](${filename})\n\n`;
+function _pathFromRoot(el, root){
+    const path=[];
+    let n=el;
+    while(n && n!==root){
+        const p=n.parentNode;
+        if(!p) return null;
+        path.unshift([...p.children].indexOf(n));
+        n=p;
+    }
+    return n===root ? path : null;
 }
 
-// Render a Plotly chart off-screen, capture as PNG data URL.
-async function plotToImage(plotFn,w,h){
-    const div=document.createElement('div');
-    div.style.cssText='position:fixed;left:-9999px;width:'+w+'px;height:'+h+'px';
-    document.body.appendChild(div);
-    await plotFn(div);
-    const img=await Plotly.toImage(div,{format:'png',width:w,height:h});
-    Plotly.purge(div);
-    div.remove();
-    return img;
+function _resolveByPath(root, path){
+    let n=root;
+    for(const i of path){
+        if(!n||!n.children||i<0||i>=n.children.length) return null;
+        n=n.children[i];
+    }
+    return n;
 }
 
-// Light-theme Plotly layout.
-const RPL={paper_bgcolor:'#fff',plot_bgcolor:'#fff',
-    font:{family:'Helvetica,Arial,sans-serif',size:11,color:'#222'},
-    margin:{l:50,r:15,t:28,b:36},
-    xaxis:{gridcolor:'#ddd',zerolinecolor:'#bbb',linecolor:'#999',mirror:true},
-    yaxis:{gridcolor:'#ddd',zerolinecolor:'#bbb',linecolor:'#999',mirror:true}};
+// Capture an SVG-foreignObject snapshot of the .main panel for the given tab.
+// Returns a PNG data URL, or null on failure.
+async function captureTabScreenshot(tab){
+    const prevTab = activeTab;
+    if(tab !== activeTab){
+        switchTab(tab);
+        await _wait(TAB_SETTLE_MS);
+    }
+    const prevTheme = currentTheme();
+    if(prevTheme !== 'light'){
+        setTheme('light');
+        await _wait(THEME_SETTLE_MS);
+    }
 
-// Capture a bar histogram, register as attachment, return markdown reference.
-// Returns empty string if no data.
-async function captureHist(bins,binMin,binStep,title,xTitle,color,filename,w,h){
-    if(!bins||!bins.some(b=>b>0)) return '';
+    const tabSpec = REPORT_TABS.find(t=>t.tab===tab);
+    const restore = tabSpec && tabSpec.prep ? tabSpec.prep() : null;
+    if(restore) await _wait(THEME_SETTLE_MS);
+
+    let dataUrl=null;
+    let svgUrl=null;
     try{
-        const img=await plotToImage(async div=>{
-            const x=bins.map((_,i)=>binMin+(i+0.5)*binStep);
-            const entries=bins.reduce((a,b)=>a+b,0);
-            const titleText=entries?`${title} (${entries} entries)`:title;
-            await Plotly.newPlot(div,[{x,y:bins,type:'bar',
-                marker:{color,line:{width:0}}}],
-                {...RPL,title:{text:titleText,font:{size:12,color:'#222'}},
-                 xaxis:{...RPL.xaxis,title:xTitle},
-                 yaxis:{...RPL.yaxis,title:'Counts'},bargap:0.05});
-        },w,h);
-        addAttachment(img,filename,title);
-        return `![${title}](${filename})\n\n`;
-    }catch(e){ return ''; }
-}
+        const root = document.querySelector('.main');
+        const rect = root.getBoundingClientRect();
+        const W = Math.max(800, Math.ceil(rect.width));
+        const H = Math.max(600, Math.ceil(rect.height));
 
-function addAttachment(dataUrl,filename,caption){
-    const b64=dataUrl.split(',')[1];
-    if(b64) reportAttachments.push({data:b64,filename,caption,type:'image/png'});
+        // 1) Snapshot every visible <canvas> + Plotly plot to data URLs.
+        const replacements=[];  // [{path, src, w, h}]
+        for(const c of root.querySelectorAll('canvas')){
+            const r=c.getBoundingClientRect();
+            if(r.width===0||r.height===0) continue;
+            const path=_pathFromRoot(c, root);
+            if(!path) continue;
+            try{ replacements.push({path, src:c.toDataURL('image/png'), w:r.width, h:r.height}); }
+            catch(e){ /* tainted canvas */ }
+        }
+        for(const p of root.querySelectorAll('.js-plotly-plot')){
+            const r=p.getBoundingClientRect();
+            if(r.width===0||r.height===0) continue;
+            const path=_pathFromRoot(p, root);
+            if(!path) continue;
+            try{
+                const url=await Plotly.toImage(p,{format:'png',width:r.width,height:r.height});
+                replacements.push({path, src:url, w:r.width, h:r.height});
+            }catch(e){ /* uninitialised plot */ }
+        }
+
+        // 2) Clone DOM, freeze form state, swap snapshotted nodes for <img>.
+        const clone = root.cloneNode(true);
+        _freezeFormState(clone);
+        clone.style.width=W+'px';
+        clone.style.height=H+'px';
+        clone.style.background='#fff';
+        for(const rep of replacements){
+            const twin=_resolveByPath(clone, rep.path);
+            if(!twin || !twin.parentNode) continue;
+            const img=document.createElement('img');
+            img.setAttribute('src', rep.src);
+            const w=Math.round(rep.w), h=Math.round(rep.h);
+            img.setAttribute('width', String(w));
+            img.setAttribute('height', String(h));
+            img.setAttribute('style',
+                `display:block;width:${w}px;height:${h}px;border:none;margin:0;padding:0`);
+            twin.parentNode.replaceChild(img, twin);
+        }
+
+        // 3) Inline stylesheets + override transient overlays.
+        const cssText=_gatherCss();
+        const overrides=
+            `body{background:#fff!important;}`+
+            `.main{background:#fff!important;overflow:hidden;}`+
+            `.geo-tooltip,.backdrop,.file-dialog,.progress-overlay{display:none!important;}`;
+
+        const xhtml=new XMLSerializer().serializeToString(clone);
+        const svg=
+            `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`+
+              `<foreignObject x="0" y="0" width="${W}" height="${H}">`+
+                `<div xmlns="http://www.w3.org/1999/xhtml" `+
+                     `style="width:${W}px;height:${H}px;background:#fff;color:#000;`+
+                     `font-family:'Consolas','SF Mono',monospace;">`+
+                  `<style>${cssText}\n${overrides}</style>`+
+                  xhtml+
+                `</div>`+
+              `</foreignObject>`+
+            `</svg>`;
+
+        // 4) Render SVG → PNG via Blob URL.
+        const blob=new Blob([svg], {type:'image/svg+xml'});
+        svgUrl=URL.createObjectURL(blob);
+        await new Promise((resolve, reject)=>{
+            const img=new Image();
+            img.onload=()=>{
+                const out=document.createElement('canvas');
+                out.width=W; out.height=H;
+                const ctx=out.getContext('2d');
+                ctx.fillStyle='#fff';
+                ctx.fillRect(0,0,W,H);
+                ctx.drawImage(img, 0, 0, W, H);
+                try{ dataUrl=out.toDataURL('image/png'); resolve(); }
+                catch(e){ reject(e); }
+            };
+            img.onerror=()=>reject(new Error('SVG image load failed'));
+            img.src=svgUrl;
+        });
+    }catch(e){
+        console.error('captureTabScreenshot failed for', tab, e);
+    }finally{
+        if(svgUrl) URL.revokeObjectURL(svgUrl);
+        if(restore) restore();
+        if(prevTheme !== 'light') setTheme(prevTheme);
+        if(prevTab !== activeTab) switchTab(prevTab);
+    }
+    return dataUrl;
 }
 
 // =========================================================================
 // Markdown table helper
 // =========================================================================
 function mdTable(headers,rows,alignments){
-    // headers: ['Col1','Col2',...]
-    // alignments: optional array of 'l','r','c' per column (default 'l')
     const aligns=alignments||headers.map(()=>'l');
     const sepMap={l:':---',r:'---:',c:':---:'};
     let md='| '+headers.join(' | ')+' |\n';
@@ -109,392 +286,146 @@ function mdTable(headers,rows,alignments){
 }
 
 // =========================================================================
-// Report sections
+// Per-tab text summaries
+//
+// Each section grabs whatever metadata the live globals expose and formats
+// a short markdown summary; the visual is provided separately by
+// captureTabScreenshot(tab).
 // =========================================================================
 
-// Helper: temporarily set LMS metric dropdown, capture geo, return md with range info.
-async function captureLmsGeo(metric,caption,filename){
-    const sel=document.getElementById('lms-color-metric');
-    const prev=sel.value;
-    sel.value=metric;
-    try{
-        let md=await captureGeo('lms',caption,filename);
-        const rMin=document.getElementById('lms-range-min-show').textContent;
-        const rMax=document.getElementById('lms-range-max-show').textContent;
-        const useLog=document.getElementById('lms-log-scale').checked;
-        md+=`Color range: ${rMin} – ${rMax} | Scale: ${useLog?'log':'linear'}\n\n`;
-        return md;
-    }finally{ sel.value=prev; }
+async function _summaryDq(){
+    let s='';
+    if(occTotal>0) s+=`Total events: ${occTotal}\n\n`;
+    return s;
 }
 
-// Helper: find the ref index for a given ref channel name (e.g. 'LMS3').
-function findRefIndex(name){
-    const sel=document.getElementById('lms-ref-select');
-    for(const o of sel.options)
-        if(o.textContent===name) return parseInt(o.value);
-    return -1;
-}
-
-// --- Occupancy ---
-registerReportSection({id:'occupancy',title:'Occupancy',order:1,
-    generate:async()=>{
-        const prevMetric=document.getElementById('color-metric').value;
-        document.getElementById('color-metric').value='occupancy';
-        syncDqRange();
-        let md='## Occupancy\n\n';
-        if(occTotal>0) md+=`Total events: ${occTotal}\n\n`;
-        // report color range and scale
-        const useLog=document.getElementById('log-scale').checked;
-        md+=`Color range: ${rangeMin??0} – ${rangeMax??'auto'} | Scale: ${useLog?'log':'linear'}\n\n`;
-        md+=await captureGeo('dq','Occupancy','occupancy.png');
-        document.getElementById('color-metric').value=prevMetric;
-        syncDqRange();
-        return md;
-    }
-});
-
-// --- EPICS ---
-// Capture all EPICS plot slots into a single combined image.
-async function captureEpicsPlots(){
-    const slotW=500, slotH=250;
-    const cols=2, rows=3;
-    const canvas=document.createElement('canvas');
-    canvas.width=cols*slotW; canvas.height=rows*slotH;
-    const ctx=canvas.getContext('2d');
-    ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    for(let s=0;s<EPICS_NUM_SLOTS;s++){
-        const divId='epics-plot-'+s;
-        const col=s%cols, row=Math.floor(s/cols);
-        try{
-            // re-plot into a temp div with light theme for the report
-            const names=epicsSlots[s];
-            if(!names||!names.length) continue;
-            const results=await Promise.all(names.map(n=>
-                fetch(`/api/epics/channel/${encodeURIComponent(n)}`).then(r=>r.json()).catch(()=>null)
-            ));
-            const traces=[];
-            results.forEach((data,i)=>{
-                if(!data||!data.time||!data.time.length) return;
-                traces.push({
-                    x:data.time,y:data.value,type:'scatter',mode:'lines+markers',
-                    name:data.name,
-                    line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
-                    marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
-                });
-            });
-            if(!traces.length) continue;
-            const imgUrl=await plotToImage(async div=>{
-                await Plotly.newPlot(div,traces,{...RPL,
-                    xaxis:{...RPL.xaxis,title:'Time (s)'},
-                    yaxis:{...RPL.yaxis},
-                    showlegend:traces.length>1,
-                    legend:{font:{size:9,color:'#222'},bgcolor:'rgba(255,255,255,0.8)',x:0,y:1},
-                });
-            },slotW,slotH);
-            const img=new Image();
-            await new Promise((resolve,reject)=>{
-                img.onload=resolve; img.onerror=reject;
-                img.src=imgUrl;
-            });
-            ctx.drawImage(img,col*slotW,row*slotH,slotW,slotH);
-        }catch(e){}
-    }
-    return canvas.toDataURL('image/png');
-}
-
-registerReportSection({id:'epics',title:'EPICS Slow Control',order:5,
-    generate:async()=>{
-        let data;
-        try{ data=await fetch('/api/epics/latest').then(r=>r.json()); }catch(e){ return null; }
-        if(!data||!data.channels||!data.channels.length) return null;
-        let md='## EPICS Slow Control\n\n';
-        md+=`EPICS events: ${data.events||0}\n\n`;
-
-        // capture all plot slots as one combined image
-        const hasSlots=epicsSlots.some(s=>s.length>0);
-        if(hasSlots){
-            try{
-                const img=await captureEpicsPlots();
-                addAttachment(img,'epics_plots.png','EPICS Plots');
-                md+=`![EPICS Plots](epics_plots.png)\n\n`;
-            }catch(e){}
-        }
-
-        md+=mdTable(
-            ['Channel','Latest','Mean','Status'],
-            data.channels.map(ch=>{
-                let status='OK';
-                if(ch.count>=epicsMinAvgPts && ch.mean!==0){
-                    const dev=Math.abs(ch.value-ch.mean)/Math.abs(ch.mean);
-                    if(dev>=epicsAlertThresh) status='**JUMPING**';
-                    else if(dev>=epicsWarnThresh) status='**CHANGING**';
-                }else if(ch.count<epicsMinAvgPts){ status='--'; }
-                return [ch.name,ch.value,ch.mean,status];
-            }),['l','r','r','l']
-        );
-        return md;
-    }
-});
-
-// --- Clustering ---
-registerReportSection({id:'cluster',title:'Clustering',order:3,
-    generate:async()=>{
-        if(!clHistBins||!clHistBins.some(b=>b>0)) return null;
-        let md='## Clustering\n\n';
-        md+=await captureHist(clHistBins,clHistMin,clHistStep,
-            `Cluster Energy (${clHistEvents} evts)`,'Energy (MeV)','#ff922b',
-            'cluster_energy.png',800,300);
-        if(rawEnergyBins&&rawEnergyBins.some(b=>b>0))
-            md+=await captureHist(rawEnergyBins,rawEnergyMin,rawEnergyStep,
-                'Raw Energy Sum','ΣE (MeV)','#ffa94d',
-                'raw_energy_sum.png',800,300);
-        md+=await captureHist(nclustBins,nclustMin,nclustStep,
-            'Clusters per Event','# Clusters','#00b4d8',
-            'clusters_per_event.png',500,300);
-        md+=await captureHist(nblocksBins,nblocksMin,nblocksStep,
-            'Blocks per Cluster','# Blocks','#51cf66',
-            'blocks_per_cluster.png',500,300);
-        return md;
-    }
-});
-
-// --- Physics ---
-registerReportSection({id:'physics',title:'Physics',order:6,
-    generate:async()=>{
-        let data,ml,hxy;
-        try{ data=await fetch('/api/physics/energy_angle').then(r=>r.json()); }catch(e){}
-        try{ ml=await fetch('/api/physics/moller').then(r=>r.json()); }catch(e){}
-        try{ hxy=await fetch('/api/physics/hycal_xy').then(r=>r.json()); }catch(e){}
-        if((!data||!data.events)&&(!ml||!ml.total_events)&&(!hxy||!hxy.total_events)) return null;
-
-        let md='## Physics\n\n';
-        const evts=data?.events||ml?.total_events||hxy?.total_events||0;
-        md+=`Events: ${evts}`;
-        if(data?.beam_energy) md+=` | Beam: ${data.beam_energy} MeV`;
-        if(data?.hycal_z) md+=` | HyCal z: ${data.hycal_z/1000}m`;
-        if(ml) md+=` | Møller: ${ml.moller_events}`;
-        if(hxy) md+=` | HyCalXY: ${hxy.events}`;
-        md+='\n\n';
-
-        // HyCal cluster hit XY (single-cluster ep candidates)
-        if(hxy&&hxy.xy_bins&&hxy.xy_bins.length&&hxy.xy_nx&&hxy.events>0){
-            const c=hxy.cuts||{};
-            const fracPct=((c.energy_frac_min||0.9)*100).toFixed(0);
-            md+=`### HyCal Cluster Hits\n\nCuts: Ncl=${c.n_clusters||1}, `
-               +`E ≥ ${fracPct}% of beam, blocks ∈ [${c.nblocks_min||0}, ${c.nblocks_max||0}]\n\n`;
-            try{
-                const img=await plotToImage(async div=>{
-                    const z=[];
-                    for(let iy=0;iy<hxy.xy_ny;iy++)
-                        z.push(hxy.xy_bins.slice(iy*hxy.xy_nx,(iy+1)*hxy.xy_nx).map(v=>v>0?Math.log10(v):null));
-                    const x=[];for(let i=0;i<hxy.xy_nx;i++) x.push(hxy.xy_x_min+(i+0.5)*hxy.xy_x_step);
-                    const y=[];for(let i=0;i<hxy.xy_ny;i++) y.push(hxy.xy_y_min+(i+0.5)*hxy.xy_y_step);
-                    await Plotly.newPlot(div,[{z,x,y,type:'heatmap',colorscale:'Hot',
-                        colorbar:{title:'log₁₀(counts)',titleside:'right'}}],
-                        {...RPL,xaxis:{...RPL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
-                         yaxis:{...RPL.yaxis,title:'Y (mm)'},margin:{l:55,r:80,t:10,b:40}});
-                },600,600);
-                addAttachment(img,'hycal_xy.png','HyCal Cluster Hits');
-                md+=`![HyCal Cluster Hits](hycal_xy.png)\n\n`;
-            }catch(e){}
-        }
-
-        // energy vs angle heatmap + elastic line
-        if(data&&data.bins&&data.bins.length&&data.nx){
-            try{
-                const img=await plotToImage(async div=>{
-                    const z=[];
-                    for(let iy=0;iy<data.ny;iy++)
-                        z.push(data.bins.slice(iy*data.nx,(iy+1)*data.nx).map(v=>v>0?Math.log10(v):null));
-                    const x=[];for(let i=0;i<data.nx;i++) x.push(data.angle_min+(i+0.5)*data.angle_step);
-                    const y=[];for(let i=0;i<data.ny;i++) y.push(data.energy_min+(i+0.5)*data.energy_step);
-                    const traces=[{z,x,y,type:'heatmap',colorscale:'Hot',
-                        colorbar:{title:'log₁₀(counts)',titleside:'right'}}];
-                    if(data.beam_energy>0){
-                        const ex=[],ey=[];
-                        for(let th=data.angle_min+0.1;th<=data.angle_max;th+=0.05){
-                            const e=data.beam_energy/(1+(data.beam_energy/938.272)*(1-Math.cos(th*Math.PI/180)));
-                            if(e>=data.energy_min&&e<=data.energy_max){ex.push(th);ey.push(e);}
-                        }
-                        traces.push({x:ex,y:ey,mode:'lines',line:{color:'#00ff88',width:2,dash:'dot'},
-                            name:'ep elastic'});
-                    }
-                    await Plotly.newPlot(div,traces,
-                        {...RPL,xaxis:{...RPL.xaxis,title:'Scattering Angle (deg)'},
-                         yaxis:{...RPL.yaxis,title:'Energy (MeV)'},margin:{l:55,r:80,t:10,b:40},
-                         showlegend:!!data.beam_energy,legend:{x:0.7,y:0.95,font:{size:10,color:'#aaa'}}});
-                },800,500);
-                addAttachment(img,'energy_vs_angle.png','Energy vs Angle');
-                md+=`![Energy vs Angle](energy_vs_angle.png)\n\n`;
-            }catch(e){}
-        }
-
-        // Møller XY heatmap
-        if(ml&&ml.xy_bins&&ml.xy_bins.length&&ml.xy_nx&&ml.moller_events>0){
-            const cuts=ml.cuts||{};
-            md+=`### Møller Selection\n\nCuts: θ ∈ [${cuts.angle_min}, ${cuts.angle_max}]°, `
-               +`E_sum within ±${((cuts.energy_tolerance||0.1)*100).toFixed(0)}% of beam\n\n`;
-            try{
-                const img=await plotToImage(async div=>{
-                    const z=[];
-                    for(let iy=0;iy<ml.xy_ny;iy++)
-                        z.push(ml.xy_bins.slice(iy*ml.xy_nx,(iy+1)*ml.xy_nx).map(v=>v>0?Math.log10(v):null));
-                    const x=[];for(let i=0;i<ml.xy_nx;i++) x.push(ml.xy_x_min+(i+0.5)*ml.xy_x_step);
-                    const y=[];for(let i=0;i<ml.xy_ny;i++) y.push(ml.xy_y_min+(i+0.5)*ml.xy_y_step);
-                    await Plotly.newPlot(div,[{z,x,y,type:'heatmap',colorscale:'Hot',
-                        colorbar:{title:'log₁₀(counts)',titleside:'right'}}],
-                        {...RPL,xaxis:{...RPL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
-                         yaxis:{...RPL.yaxis,title:'Y (mm)'},margin:{l:55,r:80,t:10,b:40}});
-                },600,600);
-                addAttachment(img,'moller_xy.png','Møller XY Position');
-                md+=`![Møller XY](moller_xy.png)\n\n`;
-            }catch(e){}
-        }
-        return md;
-    }
-});
-
-// --- GEM ---
-registerReportSection({id:'gem',title:'GEM Detectors',order:4,
-    generate:async()=>{
-        let data;
-        try{ data=await fetch('/api/gem/hist').then(r=>r.json()); }catch(e){}
-        let occ;
-        try{ occ=await fetch('/api/gem/occupancy').then(r=>r.json()); }catch(e){}
-
-        const hasHist=data&&((data.nclusters&&data.nclusters.bins&&data.nclusters.bins.some(b=>b>0))||
-                             (data.theta&&data.theta.bins&&data.theta.bins.some(b=>b>0)));
-        const hasOcc=occ&&occ.detectors&&occ.detectors.length>0&&
-                     occ.detectors.some(d=>d.bins&&d.bins.some(b=>b>0));
-        if(!hasHist&&!hasOcc) return null;
-
-        let md='## GEM Detectors\n\n';
-
-        // GEM occupancy heatmaps (combined into one image)
-        if(hasOcc){
-            try{
-                const plotW=400, plotH=300;
-                const nDet=occ.detectors.length;
-                const cols=Math.min(nDet,2), rows=Math.ceil(nDet/cols);
-                const canvas=document.createElement('canvas');
-                canvas.width=cols*plotW; canvas.height=rows*plotH;
-                const ctx=canvas.getContext('2d');
-                ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
-
-                for(let di=0;di<nDet;di++){
-                    const det=occ.detectors[di];
-                    if(!det.bins||!det.bins.some(b=>b>0)) continue;
-                    const col=di%cols, row=Math.floor(di/cols);
-                    const z=[];
-                    for(let iy=0;iy<det.ny;iy++)
-                        z.push(det.bins.slice(iy*det.nx,(iy+1)*det.nx));
-                    const x=[];for(let i=0;i<det.nx;i++) x.push(det.x_min+(i+0.5)*det.x_step);
-                    const y=[];for(let i=0;i<det.ny;i++) y.push(det.y_min+(i+0.5)*det.y_step);
-                    const imgUrl=await plotToImage(async div=>{
-                        await Plotly.newPlot(div,[{z,x,y,type:'heatmap',colorscale:'Hot',
-                            colorbar:{title:'Hits',titleside:'right'}}],
-                            {...RPL,title:{text:det.name||('GEM '+di),font:{size:12,color:'#222'}},
-                             xaxis:{...RPL.xaxis,title:'X (mm)'},
-                             yaxis:{...RPL.yaxis,title:'Y (mm)'},
-                             margin:{l:50,r:70,t:30,b:40}});
-                    },plotW,plotH);
-                    const img=new Image();
-                    await new Promise((resolve,reject)=>{img.onload=resolve;img.onerror=reject;img.src=imgUrl;});
-                    ctx.drawImage(img,col*plotW,row*plotH,plotW,plotH);
-                }
-                const combined=canvas.toDataURL('image/png');
-                addAttachment(combined,'gem_occupancy.png','GEM Occupancy');
-                md+=`![GEM Occupancy](gem_occupancy.png)\n\n`;
-            }catch(e){}
-        }
-
-        // GEM histograms
-        if(data&&data.nclusters&&data.nclusters.bins){
-            md+=await captureHist(data.nclusters.bins,data.nclusters.min,data.nclusters.step,
-                'GEM Clusters per Event','N clusters','#51cf66',
-                'gem_clusters.png',500,300);
-        }
-        if(data&&data.theta&&data.theta.bins){
-            md+=await captureHist(data.theta.bins,data.theta.min,data.theta.step,
-                'GEM Hit Angle','Angle (deg)','#00b4d8',
-                'gem_theta.png',500,300);
-        }
-        return md;
-    }
-});
-
-// --- LMS Monitoring ---
-registerReportSection({id:'lms',title:'LMS Monitoring',order:2,
-    generate:async()=>{
-        // fetch with LMS3 reference
-        const lms3Ref=findRefIndex('LMS3');
-        const refQ=lms3Ref>=0?`?ref=${lms3Ref}`:'';
-        const d=await fetch(`/api/lms/summary${refQ}`).then(r=>r.json());
-        lmsSummaryData=d;
-        const lmsEvents=lmsSummaryData?lmsSummaryData.events||0:0;
-        const tf=lmsSummaryData&&lmsSummaryData.trigger||{};
+async function _summaryLms(){
+    // refresh with LMS3 ref so the warning summary is meaningful
+    const refSel=document.getElementById('lms-ref-select');
+    let lms3=-1;
+    for(const o of refSel.options) if(o.textContent==='LMS3') lms3=parseInt(o.value);
+    const refQ=lms3>=0?`?ref=${lms3}`:'';
+    let d=null;
+    try{ d=await fetch(`/api/lms/summary${refQ}`).then(r=>r.json()); }catch(e){}
+    if(d) lmsSummaryData=d;
+    if(!d || !d.modules || !Object.keys(d.modules).length){
+        const tf=d&&d.trigger||{};
         const trigMask=`accept=0x${(tf.trigger_accept||0).toString(16)} reject=0x${(tf.trigger_reject||0).toString(16)}`;
-        if(!lmsSummaryData||!lmsSummaryData.modules||
-            !Object.keys(lmsSummaryData.modules).length)
-            return `## LMS Monitoring\n\nLMS events received: ${lmsEvents} (trigger mask = ${trigMask})\n\n`;
-        const allEntries=Object.entries(lmsSummaryData.modules)
-            .map(([idx,m])=>({idx:parseInt(idx),...m}));
-
-        // temporarily set ref so geo drawing uses the corrected data
-        const prevRef=g_lmsRefIndex;
-        g_lmsRefIndex=lms3Ref;
-
-        let md='## LMS Monitoring\n\n';
-        const refLabel=lms3Ref>=0?' (ref: LMS3)':'';
-        md+=`LMS events: ${lmsSummaryData.events||0} | `;
-        md+=`Modules: ${allEntries.length}${refLabel}\n\n`;
-
-        // LMS Mean geo view — errors propagate (no silent catch)
-        md+=await captureLmsGeo('mean','LMS Mean','lms_mean.png');
-        // RMS/Mean geo view
-        md+=await captureLmsGeo('rms_frac','RMS / Mean','lms_rms_frac.png');
-
-        // restore ref
-        g_lmsRefIndex=prevRef;
-
-        // build table: all WARN + top N OK by rms/mean
-        allEntries.sort((a,b)=>{
-            if(a.warn!==b.warn) return a.warn?-1:1;
-            const ra=a.mean>0?a.rms/a.mean:0, rb=b.mean>0?b.rms/b.mean:0;
-            return rb-ra;
-        });
-        const warnEntries=allEntries.filter(e=>e.warn);
-        const okEntries=allEntries.filter(e=>!e.warn);
-        const topOk=okEntries.slice(0,5);
-        const tableEntries=[...warnEntries,...topOk];
-
-        const warnCount=warnEntries.length;
-        md+=`### Status Summary\n\n`;
-        md+=`Warnings: **${warnCount}** / ${allEntries.length} modules\n\n`;
-
-        if(tableEntries.length){
-            md+=mdTable(
-                ['Module','Mean','RMS','RMS/Mean %','Count','Status'],
-                tableEntries.map(e=>[
-                    e.name, e.mean.toFixed(1), e.rms.toFixed(2),
-                    (e.mean>0?(e.rms/e.mean*100).toFixed(1):'--')+'%',
-                    e.count, e.warn?'**WARN**':'OK'
-                ]),['l','r','r','r','r','l']
-            );
-            if(okEntries.length>5)
-                md+=`*Showing ${warnCount} warnings + top 5 of ${okEntries.length} OK modules by RMS/Mean*\n\n`;
-        }
-        return md;
+        return `LMS events received: ${d?d.events||0:0} (trigger mask = ${trigMask})\n\n`;
     }
+    const allEntries=Object.entries(d.modules).map(([idx,m])=>({idx:parseInt(idx),...m}));
+    allEntries.sort((a,b)=>{
+        if(a.warn!==b.warn) return a.warn?-1:1;
+        const ra=a.mean>0?a.rms/a.mean:0, rb=b.mean>0?b.rms/b.mean:0;
+        return rb-ra;
+    });
+    const warnEntries=allEntries.filter(e=>e.warn);
+    const okEntries=allEntries.filter(e=>!e.warn);
+    const tableEntries=[...warnEntries, ...okEntries.slice(0,5)];
+
+    let s=`LMS events: ${d.events||0} | Modules: ${allEntries.length} (ref: LMS3)\n\n`;
+    s+=`Warnings: **${warnEntries.length}** / ${allEntries.length} modules\n\n`;
+    if(tableEntries.length){
+        s+=mdTable(
+            ['Module','Mean','RMS','RMS/Mean %','Count','Status'],
+            tableEntries.map(e=>[
+                e.name, e.mean.toFixed(1), e.rms.toFixed(2),
+                (e.mean>0?(e.rms/e.mean*100).toFixed(1):'--')+'%',
+                e.count, e.warn?'**WARN**':'OK'
+            ]),['l','r','r','r','r','l']
+        );
+        if(okEntries.length>5)
+            s+=`*Showing ${warnEntries.length} warnings + top 5 of ${okEntries.length} OK modules by RMS/Mean*\n\n`;
+    }
+    return s;
+}
+
+async function _summaryCluster(){
+    if(!clHistBins||!clHistBins.some(b=>b>0)) return '';
+    const sum=clHistBins.reduce((a,b)=>a+b,0);
+    return `Cluster events: ${clHistEvents||0} | Histogram entries: ${sum}\n\n`;
+}
+
+async function _summaryGem(){
+    let s='';
+    let data;
+    try{ data=await fetch('/api/gem/hist').then(r=>r.json()); }catch(e){ return s; }
+    if(!data) return s;
+    if(data.nclusters && data.nclusters.bins){
+        const total=data.nclusters.bins.reduce((a,b)=>a+b,0);
+        s+=`GEM events: ${total}\n\n`;
+    }
+    return s;
+}
+
+async function _summaryEpics(){
+    let data;
+    try{ data=await fetch('/api/epics/latest').then(r=>r.json()); }catch(e){}
+    if(!data || !data.channels || !data.channels.length) return '';
+    let s=`EPICS events: ${data.events||0}\n\n`;
+    s+=mdTable(
+        ['Channel','Latest','Mean','Status'],
+        data.channels.map(ch=>{
+            let status='OK';
+            if(ch.count>=epicsMinAvgPts && ch.mean!==0){
+                const dev=Math.abs(ch.value-ch.mean)/Math.abs(ch.mean);
+                if(dev>=epicsAlertThresh) status='**JUMPING**';
+                else if(dev>=epicsWarnThresh) status='**CHANGING**';
+            }else if(ch.count<epicsMinAvgPts){ status='--'; }
+            return [ch.name,ch.value,ch.mean,status];
+        }),['l','r','r','l']
+    );
+    return s;
+}
+
+async function _summaryPhysics(){
+    let data, ml, hxy;
+    try{ data=await fetch('/api/physics/energy_angle').then(r=>r.json()); }catch(e){}
+    try{ ml=await fetch('/api/physics/moller').then(r=>r.json()); }catch(e){}
+    try{ hxy=await fetch('/api/physics/hycal_xy').then(r=>r.json()); }catch(e){}
+    if((!data||!data.events) && (!ml||!ml.total_events) && (!hxy||!hxy.total_events)) return '';
+    const evts=data?.events || ml?.total_events || hxy?.total_events || 0;
+    let s=`Events: ${evts}`;
+    if(data?.beam_energy) s+=` | Beam: ${data.beam_energy} MeV`;
+    if(data?.hycal_z) s+=` | HyCal z: ${data.hycal_z/1000}m`;
+    if(ml) s+=` | Møller: ${ml.moller_events}`;
+    if(hxy) s+=` | HyCalXY: ${hxy.events}`;
+    return s+'\n\n';
+}
+
+const _SECTION_SUMMARIES = {
+    dq:      _summaryDq,
+    lms:     _summaryLms,
+    cluster: _summaryCluster,
+    gem:     _summaryGem,
+    epics:   _summaryEpics,
+    physics: _summaryPhysics,
+};
+
+// Register the per-tab sections in display order.
+REPORT_TABS.forEach((t, i)=>{
+    registerReportSection({
+        id:t.tab, title:t.title, order:i+1,
+        generate: async ()=>{
+            const summary = _SECTION_SUMMARIES[t.tab];
+            const summaryMd = summary ? await summary().catch(()=>'') : '';
+            const img = await captureTabScreenshot(t.tab);
+            if(img) addAttachment(img, t.filename, t.title);
+            let md=`## ${t.title}\n\n`;
+            if(summaryMd) md+=summaryMd;
+            if(img) md+=`![${t.title}](${t.filename})\n\n`;
+            return md;
+        }
+    });
 });
 
 // =========================================================================
-// Report generation core
+// Pre-fetch live data the summaries depend on (occupancy / cluster hists)
 // =========================================================================
-
 async function refreshDataForReport(){
     const fetches=[];
+    if(typeof fetchGemResiduals==='function') fetchGemResiduals();
+    if(typeof fetchGemAccum==='function')     fetchGemAccum();
     fetches.push(fetch('/api/occupancy').then(r=>r.json()).then(d=>{
         occData=d.occ||{}; occTcutData=d.occ_tcut||{}; occTotal=d.total||0;
     }).catch(()=>{}));
@@ -518,9 +449,12 @@ async function refreshDataForReport(){
             rawEnergyStep=d.raw_energy.step||20; rawEnergyBins=d.raw_energy.bins;
         }
     }).catch(()=>{}));
-    // LMS section fetches its own data with LMS3 ref
     await Promise.all(fetches);
 }
+
+// =========================================================================
+// Report generation core
+// =========================================================================
 
 // Generate the report. Returns {md, attachments} or null.
 async function generateReport(reportBy,runNumber){
@@ -557,7 +491,6 @@ async function generateReport(reportBy,runNumber){
             const warns=Object.values(lmsSummaryData.modules)
                 .filter(m=>m.warn).map(m=>m.name)
                 .sort((a,b)=>{
-                    // W modules first, then G
                     const ta=a.startsWith('W')?0:1, tb=b.startsWith('W')?0:1;
                     if(ta!==tb) return ta-tb;
                     return a.localeCompare(b,undefined,{numeric:true});
@@ -578,53 +511,7 @@ async function generateReport(reportBy,runNumber){
 }
 
 // =========================================================================
-// Download report (.md + images)
-// =========================================================================
-
-function downloadBlob(blob,filename){
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download=filename;
-    a.style.display='none';
-    document.body.appendChild(a);
-    a.click();
-    // delay removal and revoke to let browser finish saving
-    setTimeout(()=>{a.remove();URL.revokeObjectURL(a.href);},30000);
-}
-
-function b64toBlob(b64,type){
-    const bin=atob(b64);
-    const arr=new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-    return new Blob([arr],{type});
-}
-
-async function downloadReport(){
-    const runNumber=prompt('DAQ Run Number (optional):','');
-    if(runNumber===null) return;  // user cancelled
-    const reportBy=prompt('Report by (your name, optional):','');
-    if(reportBy===null) return;
-    const report=await generateReport(reportBy||'',runNumber||'');
-    if(!report) return;
-    const statusBar=document.getElementById('status-bar');
-    const prefix=runNumber?String(runNumber).padStart(6,'0')+'_':'';
-
-    // download .md file
-    downloadBlob(new Blob([report.md],{type:'text/markdown'}),
-        `${prefix}prad2_report.md`);
-
-    // download each image with delay to avoid browser blocking
-    for(let i=0;i<report.attachments.length;i++){
-        const a=report.attachments[i];
-        await new Promise(r=>setTimeout(r,500));
-        downloadBlob(b64toBlob(a.data,a.type),`${prefix}${a.filename}`);
-    }
-    statusBar.textContent=`Report saved (${1+report.attachments.length} files)`;
-    setTimeout(()=>{statusBar.textContent='Ready';},3000);
-}
-
-// =========================================================================
-// Elog posting
+// Elog XML helpers (used by autoPostReport)
 // =========================================================================
 
 function escXml(s){
@@ -662,108 +549,90 @@ function buildElogXml(title,logbook,author,tags,body,attachments){
     return parts.join('\n');
 }
 
-function showElogDialog(){
-    document.getElementById('elog-backdrop').classList.add('open');
-    document.getElementById('elog-dialog').classList.add('open');
-    document.getElementById('elog-status').textContent='';
+// =========================================================================
+// On-demand capture handler
+// =========================================================================
+// Called by online.js's WS handler when the server sends
+// {type:"capture_request", request_id, run, reason}.  Only the chosen
+// client receives this message — every other tab ignores it.  No client-
+// side dedup or rate-limit logic; the server is the single gatekeeper.
+// =========================================================================
+
+function elogAvailable(){ return !!(elogConfig && elogConfig.url); }
+
+function autoReportTitle(runNumber){
+    const baseTitle='PRad2 Event Monitor Auto Report';
+    return runNumber ? `Run #${runNumber}: ${baseTitle}` : baseTitle;
 }
-function hideElogDialog(){
-    document.getElementById('elog-backdrop').classList.remove('open');
-    document.getElementById('elog-dialog').classList.remove('open');
-}
 
-async function postToElog(){
-    const reportBy=document.getElementById('elog-report-by').value.trim();
-    const runNum=document.getElementById('elog-run').value.trim();
-    const title=document.getElementById('elog-title').value.trim();
-    const logbook=document.getElementById('elog-logbook').value.trim();
-    const tagsStr=document.getElementById('elog-tags').value.trim();
-    const tags=tagsStr?tagsStr.split(',').map(s=>s.trim()).filter(s=>s):[];
-    const statusEl=document.getElementById('elog-status');
-    const submitBtn=document.getElementById('elog-submit');
-    const mainStatus=document.getElementById('status-bar');
+async function handleCaptureRequest(msg){
+    const runNumber = msg && msg.run     || 0;
+    const reason    = msg && msg.reason  || 'auto';
+    const requestId = msg && msg.request_id || '';
+    const fullTitle = autoReportTitle(runNumber);
+    const sb = document.getElementById('status-bar');
 
-    if(!title||!logbook){
-        statusEl.textContent='Title and logbook are required.';
-        statusEl.style.color='#c00';
-        return;
-    }
-    const fullTitle=runNum?`Run ${String(runNum).padStart(6,'0')}: ${title}`:title;
-
-    // disable button during submission
-    submitBtn.disabled=true;
-    submitBtn.textContent='Posting...';
-    statusEl.textContent='Generating report...';
-    statusEl.style.color='var(--dim)';
-
-    const report=await generateReport(reportBy,runNum);
-    if(!report){
-        statusEl.textContent='Failed to generate report.';
-        statusEl.style.color='#c00';
-        submitBtn.disabled=false; submitBtn.textContent='Post';
+    if(!elogAvailable() || !modules.length){
+        if(sb) sb.textContent = `Auto-report skipped: ${
+            !elogAvailable() ? 'elog not configured' : 'no modules loaded'}`;
         return;
     }
 
-    const body=report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
-
-    statusEl.textContent='Posting to elog...';
-    const xml=buildElogXml(fullTitle,logbook,elogConfig.author||'clasrun',tags,body,report.attachments);
+    if(typeof autoSetReporting==='function') autoSetReporting(true);
+    if(sb) sb.textContent = `Auto-report (${reason}, run ${runNumber}): capturing…`;
 
     try{
-        const resp=await fetch('/api/elog/post',{
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({xml})
-        });
-        const result=await resp.json();
-        if(result.ok){
-            statusEl.textContent='Posted successfully!';
-            statusEl.style.color='#080';
-            mainStatus.textContent=`Elog posted: ${fullTitle}`;
-            setTimeout(hideElogDialog,1500);
-            setTimeout(()=>{submitBtn.disabled=false;submitBtn.textContent='Post';},1500);
-        }else{
-            const detail=result.status==='000'?'Server unreachable (check cert/network)'
-                :'HTTP '+result.status+(result.error?' — '+result.error:'');
-            statusEl.textContent='Post failed: '+detail;
-            statusEl.style.color='#c00';
-            mainStatus.textContent='Elog post failed: '+detail;
-            submitBtn.disabled=false; submitBtn.textContent='Post';
+        const reportBy = elogConfig.author || 'auto';
+        const report   = await generateReport(reportBy, runNumber||'');
+        if(!report) {
+            if(sb) sb.textContent = 'Auto-report failed: report generation';
+            return;
         }
-    }catch(err){
-        statusEl.textContent='Network error: '+err.message;
-        statusEl.style.color='#c00';
-        mainStatus.textContent='Elog post error: '+err.message;
-        submitBtn.disabled=false; submitBtn.textContent='Post';
+        const tags = (elogConfig.tags||[]).slice();
+        if(reason && tags.indexOf(reason)<0) tags.push(reason);
+        const body = `*Auto-posted: ${reason}*\n\n`+
+                     report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
+        const xml  = buildElogXml(fullTitle, elogConfig.logbook||'',
+                                  reportBy, tags, body, report.attachments);
+
+        if(sb) sb.textContent = `Auto-report (run ${runNumber}): uploading…`;
+        const resp = await fetch('/api/elog/post', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({xml, auto:true, run_number:runNumber,
+                                  request_id:requestId})
+        });
+        const r = await resp.json();
+        if(r.ok && r.dry_run){
+            if(sb) sb.textContent =
+                `Auto-report saved (dry-run): ${r.saved_xml||r.saved_dir||fullTitle}`;
+        } else if(r.ok && r.skipped){
+            if(sb) sb.textContent = `Auto-report skipped: ${r.detail||fullTitle}`;
+        } else if(r.ok){
+            if(sb) sb.textContent = `Auto-report posted: ${fullTitle}`;
+        } else {
+            if(sb) sb.textContent = `Auto-report failed: ${
+                r.error || ('HTTP '+(r.status||'?'))}`;
+        }
+        // The server's auto_capture_done WS broadcast will also clear the
+        // reporter badge on every client (including this one). Clear it
+        // here too to keep the local UI snappy.
+    } catch(e){
+        if(sb) sb.textContent = `Auto-report error: ${e.message}`;
+    } finally {
+        if(typeof autoSetReporting==='function') autoSetReporting(false);
     }
 }
 
 // =========================================================================
-// Init — called from viewer.js init() with config data
+// Init — called from viewer.js init() with config data. There is no manual
+// report UI anymore: this just stashes the elog config (now nested under
+// auto_report, since auto-mode is the only producer) so autoPostReport
+// has author/logbook/tags to draw from, and forwards the auto_report
+// config block on to viewer.js's applyAutoReportConfig.
 // =========================================================================
 function initReport(data){
-    const reportBtn=document.getElementById('btn-report');
-    const reportMenu=document.getElementById('report-menu');
-    reportBtn.onclick=(e)=>{e.stopPropagation();reportMenu.classList.toggle('open');};
-    document.addEventListener('click',()=>reportMenu.classList.remove('open'));
-    reportMenu.onclick=(e)=>e.stopPropagation();
-    document.getElementById('btn-report-pdf').onclick=()=>{
-        reportMenu.classList.remove('open'); downloadReport();};
-    document.getElementById('btn-report-elog').onclick=()=>{
-        reportMenu.classList.remove('open'); showElogDialog();};
-
-    document.getElementById('elog-dialog-close').onclick=hideElogDialog;
-    document.getElementById('elog-backdrop').onclick=hideElogDialog;
-    document.getElementById('elog-cancel').onclick=hideElogDialog;
-    document.getElementById('elog-submit').onclick=postToElog;
-
-    if(data&&data.elog&&data.elog.url){
-        elogConfig=data.elog;
-        document.getElementById('elog-logbook').value=data.elog.logbook||'';
-        document.getElementById('elog-tags').value=(data.elog.tags||[]).join(', ');
-    } else {
-        const eb=document.getElementById('btn-report-elog');
-        eb.disabled=true;
-        eb.title='Configure "elog" section in monitor_config.json to enable';
-    }
+    const ar = data && data.auto_report;
+    if(ar && ar.elog && ar.elog.url) elogConfig = ar.elog;
+    if(typeof applyAutoReportConfig==='function')
+        applyAutoReportConfig(ar);
 }

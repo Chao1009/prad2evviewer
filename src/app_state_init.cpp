@@ -396,20 +396,40 @@ void AppState::init(const std::string &db_dir,
         std::cerr << "Color ranges: " << color_range_defaults.size() << " entries\n";
     }
 
-    if (mcfg.contains("elog")) {
-        auto &el = mcfg["elog"];
-        if (el.contains("url"))     elog_url     = el["url"];
-        if (el.contains("logbook")) elog_logbook = el["logbook"];
-        if (el.contains("author"))  elog_author  = el["author"];
-        if (el.contains("tags"))
-            for (auto &t : el["tags"]) elog_tags.push_back(t);
-        if (el.contains("cert")) elog_cert = el["cert"];
-        if (el.contains("key"))  elog_key  = el["key"];
-        std::cerr << "Elog      : " << elog_url
-                  << " logbook=" << elog_logbook
-                  << (elog_cert.empty() ? "" : " cert=" + elog_cert)
-                  << "\n";
+    // Auto-report config (the elog block lives nested under auto_report
+    // since elog writes are now driven exclusively by the auto-report
+    // pipeline — no manual Post-to-Elog dialog).
+    if (mcfg.contains("auto_report")) {
+        auto &ar = mcfg["auto_report"];
+        if (ar.contains("enabled"))
+            auto_report_enabled = ar["enabled"].get<bool>();
+        if (ar.contains("post_to_elog"))
+            auto_report_post_to_elog = ar["post_to_elog"].get<bool>();
+        if (ar.contains("local_save_dir"))
+            auto_report_local_save_dir = ar["local_save_dir"].get<std::string>();
+        if (ar.contains("min_interval_ms"))
+            auto_report_min_interval_ms = ar["min_interval_ms"].get<int>();
+        if (ar.contains("elog")) {
+            auto &el = ar["elog"];
+            if (el.contains("url"))     elog_url     = el["url"];
+            if (el.contains("logbook")) elog_logbook = el["logbook"];
+            if (el.contains("author"))  elog_author  = el["author"];
+            if (el.contains("tags"))
+                for (auto &t : el["tags"]) elog_tags.push_back(t);
+            if (el.contains("cert")) elog_cert = el["cert"];
+            if (el.contains("key"))  elog_key  = el["key"];
+        }
     }
+    std::cerr << "AutoReport: enabled=" << (auto_report_enabled ? "ON" : "OFF")
+              << " post_to_elog=" << (auto_report_post_to_elog ? "yes" : "no")
+              << " min_interval_ms=" << auto_report_min_interval_ms
+              << (auto_report_local_save_dir.empty() ? std::string()
+                  : " local_save=" + auto_report_local_save_dir)
+              << "\n";
+    std::cerr << "Elog      : " << elog_url
+              << " logbook=" << elog_logbook
+              << (elog_cert.empty() ? "" : " cert=" + elog_cert)
+              << "\n";
 
     if (mcfg.contains("physics")) {
         auto &ph = mcfg["physics"];

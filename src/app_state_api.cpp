@@ -590,9 +590,15 @@ void AppState::fillConfigJson(json &cfg) const
             {"nblocks_max", hxy_nblocks_max},
         }},
     };
-    cfg["elog"] = {
-        {"url", elog_url}, {"logbook", elog_logbook},
-        {"author", elog_author}, {"tags", elog_tags},
+    cfg["auto_report"] = {
+        {"enabled",         auto_report_enabled},
+        {"post_to_elog",    auto_report_post_to_elog},
+        {"local_save_dir",  auto_report_local_save_dir},
+        {"min_interval_ms", auto_report_min_interval_ms},
+        {"elog", {
+            {"url", elog_url}, {"logbook", elog_logbook},
+            {"author", elog_author}, {"tags", elog_tags},
+        }},
     };
     cfg["epics"] = {
         {"max_history", epics_max_history},

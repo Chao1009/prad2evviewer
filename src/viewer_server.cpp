@@ -181,6 +181,7 @@ void ViewerServer::setupServer(int port)
         {
             std::lock_guard<std::mutex> lk(ws_mtx_);
             ws_clients_.erase(hdl);
+            reporter_capable_.erase(hdl);
         }
         // Always remove from tagger subscribers on disconnect so the gate
         // flips cleanly when the last subscriber drops.
@@ -210,14 +211,14 @@ void ViewerServer::setupServer(int port)
 void ViewerServer::run()
 {
     setupServer(cfg_.port);
+    checkSaveDirWritable();
 
     // start ET reader thread (sleeps until et_active_)
 #ifdef WITH_ET
     et_thread_ = std::thread([this]() { etReaderThread(); });
-    if (!app_file_.livetime_cmd.empty() ||
-        !app_file_.beam_energy_status.command.empty() ||
-        !app_file_.beam_current_status.command.empty())
-        monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
+    // Always spawn the poll thread — it now also drives the auto-report
+    // watchdog, which must run even if no shell metrics are configured.
+    monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
 #endif
 
     // load initial file (blocking)
@@ -260,14 +261,14 @@ int ViewerServer::startAsync(int port)
 {
     if (port != 0) cfg_.port = port;
     setupServer(cfg_.port);
+    checkSaveDirWritable();
 
     // start ET reader thread
 #ifdef WITH_ET
     et_thread_ = std::thread([this]() { etReaderThread(); });
-    if (!app_file_.livetime_cmd.empty() ||
-        !app_file_.beam_energy_status.command.empty() ||
-        !app_file_.beam_current_status.command.empty())
-        monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
+    // Always spawn the poll thread — it now also drives the auto-report
+    // watchdog, which must run even if no shell metrics are configured.
+    monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
 #endif
 
     // load initial file (async)
@@ -358,7 +359,32 @@ void ViewerServer::handleWsMessage(websocketpp::connection_hdl hdl,
         !j.contains("type") || !j["type"].is_string()) return;
     const std::string t = j["type"].get<std::string>();
 
-    if (t == "tagger_subscribe") {
+    if (t == "client_hello") {
+        // The on-demand auto-report rollout: only clients that
+        // advertise the "auto_report" capability are eligible to be
+        // picked by dispatchCapture.  Old (pre-update) tabs never send
+        // this message and stay out of the candidate pool — they keep
+        // receiving every other broadcast unchanged.
+        bool can_capture = false;
+        if (j.contains("capabilities") && j["capabilities"].is_array()) {
+            for (auto &c : j["capabilities"]) {
+                if (c.is_string() && c.get<std::string>() == "auto_report") {
+                    can_capture = true; break;
+                }
+            }
+        }
+        if (can_capture) {
+            std::lock_guard<std::mutex> lk(ws_mtx_);
+            reporter_capable_.insert(hdl);
+        }
+        try {
+            server_->send(hdl,
+                json({{"type", "server_hello"},
+                      {"capabilities", json::array({"auto_report"})}}).dump(),
+                websocketpp::frame::opcode::text);
+        } catch (...) {}
+    }
+    else if (t == "tagger_subscribe") {
         taggerSubscribe(hdl);
         // Acknowledge so the client can confirm its subscription took effect.
         try {
@@ -692,7 +718,8 @@ json ViewerServer::decodeEvent(int ev1)
               return {{"error", "decode error"}}; }
         return {{"event", ev1}, {"channels", json::object()},
                 {"event_number", recon.event_num},
-                {"trigger_bits", recon.trigger_bits}};
+                {"trigger_bits", recon.trigger_bits},
+                {"run_number", recon.run_number}};
     }
 
     auto event_ptr = std::make_unique<fdec::EventData>();

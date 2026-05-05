@@ -18,9 +18,12 @@
 #include <websocketpp/server.hpp>
 
 #include <atomic>
+#include <ctime>
 #include <deque>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <thread>
@@ -134,6 +137,12 @@ private:
     std::thread server_thread_;
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> ws_clients_;
+    // Clients that have advertised the on-demand auto-report protocol via
+    // a client_hello message. Pre-update tabs (no hello sent) stay out of
+    // this set, so dispatchCapture skips them — the watchdog never burns
+    // 30 s on a client that wouldn't know what to do with capture_request.
+    std::set<websocketpp::connection_hdl,
+             std::owner_less<websocketpp::connection_hdl>> reporter_capable_;
     std::mutex ws_mtx_;
 
     void wsBroadcast(const std::string &msg);
@@ -244,4 +253,42 @@ private:
     nlohmann::json buildConfig();
     nlohmann::json handleElogPost(const std::string &body);
     void onHttp(WsServer *srv, websocketpp::connection_hdl hdl);
+
+    // ---- Auto-report dispatch (on-demand) ----------------------------------
+    // The auto-post pipeline is server-driven: on a trigger event (END or
+    // run-number change), the server picks ONE alive WS client, asks it
+    // to capture screenshots + POST, then assembles the report.  Only one
+    // capture is in flight at a time.  If the chosen client doesn't
+    // respond inside ELOG_CAPTURE_TIMEOUT_S, the watchdog forwards the
+    // request to the next alive client.  When all candidates are
+    // exhausted the failure is recorded in summary.json.
+    std::mutex elog_post_mtx_;
+    struct PendingCapture {
+        std::string request_id;
+        uint32_t    run     = 0;
+        std::string reason;
+        std::time_t started = 0;     // unix seconds, last dispatch attempt
+        std::set<websocketpp::connection_hdl,
+                 std::owner_less<websocketpp::connection_hdl>> tried;
+    };
+    std::mutex                   pending_capture_mtx_;
+    std::optional<PendingCapture> pending_capture_;
+    bool save_dir_writable_ = false;
+
+    // Pick an alive WS client (excluding `tried`), dispatch a
+    // capture_request, and update pending_capture_.  Returns false if no
+    // candidate available — caller should record the failure.
+    bool dispatchCapture(uint32_t run, const std::string &reason,
+                         const std::string &request_id_in = "");
+    // Watchdog poll — call periodically (piggy-backed on the monitor
+    // status thread) to retry stale requests.
+    void autoReportWatchdog();
+    // Write/refresh <local_save_dir>/summary.json after a save attempt.
+    void appendAutoReportSummary(uint32_t run, const std::string &saved_xml,
+                                 bool posted, const std::string &lognumber,
+                                 const std::string &reason,
+                                 const std::string &error);
+    // Verify we can write to local_save_dir at startup.  Sets
+    // save_dir_writable_ + logs result.
+    void checkSaveDirWritable();
 };
