@@ -356,6 +356,13 @@ struct AppState {
     float gem_eff_target_sigma_x    = 1.0f;   // mm
     float gem_eff_target_sigma_y    = 1.0f;   // mm
     float gem_eff_target_sigma_z    = 20.0f;  // mm
+    // Per-detector efficiency-vs-position grid: predicted (local_x, local_y)
+    // at each LOO test detector, binned over the detector's active area.
+    // Numerator counts "matched" tests; denominator counts every successful
+    // anchor.  GUI divides per-bin to show local efficiency (where the
+    // overlap region is high vs. low).
+    int gem_eff_grid_nx = 30;
+    int gem_eff_grid_ny = 30;
 
     // EPICS config
     int   epics_max_history = 5000;
@@ -515,6 +522,11 @@ struct AppState {
         bool  z_target_valid  = false;
     };
     GemEffSnapshot gem_eff_snapshot;
+    // Per-detector efficiency-vs-position grid (predicted local coords of the
+    // LOO test point).  Each detector has the same (nx,ny) bin count; bin
+    // step = det.size / N so the grid spans the full active area.
+    std::vector<Histogram2D> gem_eff_grid_num;
+    std::vector<Histogram2D> gem_eff_grid_den;
     // Inferred vertex-z spread (DOCA to z-axis − target_z), one entry per
     // matched event.  Range/step are configurable via
     // monitor_config.json: gem.efficiency.z_target_hist.{min,max,step}.

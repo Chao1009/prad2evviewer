@@ -1251,6 +1251,12 @@ void AppState::initGemEfficiency()
     int n_gem = gem_enabled ? (int)gem_transforms.size() : 0;
     gem_eff_num.assign(n_gem, 0);
     gem_eff_den.assign(n_gem, 0);
+    gem_eff_grid_num.assign(n_gem, Histogram2D{});
+    gem_eff_grid_den.assign(n_gem, Histogram2D{});
+    for (int d = 0; d < n_gem; ++d) {
+        gem_eff_grid_num[d].init(gem_eff_grid_nx, gem_eff_grid_ny);
+        gem_eff_grid_den[d].init(gem_eff_grid_nx, gem_eff_grid_ny);
+    }
     gem_eff_snapshot = GemEffSnapshot{};
     int nbins = (int)std::lround((gem_eff_z_target_max - gem_eff_z_target_min)
                                   / gem_eff_z_target_step);
@@ -1261,6 +1267,8 @@ void AppState::clearGemEfficiency()
 {
     for (auto &n : gem_eff_num) n = 0;
     for (auto &n : gem_eff_den) n = 0;
+    for (auto &h : gem_eff_grid_num) h.clear();
+    for (auto &h : gem_eff_grid_den) h.clear();
     for (int d = 0; d < 4; ++d) {
         gem_eff_diag_call[d] = 0;
         gem_eff_diag_3matched[d] = 0;
@@ -1514,6 +1522,23 @@ void AppState::runGemEfficiency(int event_id,
             }
         }
         if (idx >= 0) gem_eff_num[test_d]++;
+        // Local-coord eff grid: bin the predicted point on test_d's plane.
+        // Predictions outside the active area land in the Histogram2D's
+        // out-of-range branch (no fill), keeping the heatmap aligned with
+        // the dashed detector frame drawn in the GUI.
+        if (test_d < (int)gem_eff_grid_den.size()
+            && test_d < gem_sys.GetNDetectors()) {
+            const auto &det_t = gem_sys.GetDetectors()[test_d];
+            const float xSize = det_t.planes[0].size;
+            const float ySize = det_t.planes[1].size;
+            const float xStep = xSize / gem_eff_grid_nx;
+            const float yStep = ySize / gem_eff_grid_ny;
+            const float xMin  = -xSize * 0.5f;
+            const float yMin  = -ySize * 0.5f;
+            gem_eff_grid_den[test_d].fill(pred_lx, pred_ly, xMin, xStep, yMin, yStep);
+            if (idx >= 0)
+                gem_eff_grid_num[test_d].fill(pred_lx, pred_ly, xMin, xStep, yMin, yStep);
+        }
 
         // Snapshot — record the latest successful LOO test for the GUI.
         snap = GemEffSnapshot{};

@@ -625,7 +625,8 @@ function init(){
     registerPlot('cl-nblocks-hist','cluster', 'Blocks per Cluster');
     for (let d = 0; d < 4; d++)
         registerPlot('gem-resid-' + d, 'cluster', null);
-    registerPlot('gem-eff-xy', 'gem', null);
+    for (let d = 0; d < 4; d++)
+        registerPlot('gem-eff-grid-' + d, 'gem', null);
     registerPlot('gem-eff-zy', 'gem', null);
     setupCopyBtn('btn-copy-cl-hist', ()=>currentClHist);
     setupCopyBtn('btn-copy-cl-rawe', ()=>currentRawEnergyHist);

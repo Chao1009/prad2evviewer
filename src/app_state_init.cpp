@@ -545,6 +545,13 @@ void AppState::init(const std::string &db_dir,
                 if (zh.contains("max"))  gem_eff_z_target_max  = zh["max"];
                 if (zh.contains("step")) gem_eff_z_target_step = zh["step"];
             }
+            if (ge.contains("local_grid")) {
+                auto &lg = ge["local_grid"];
+                if (lg.contains("nx")) gem_eff_grid_nx = lg["nx"];
+                if (lg.contains("ny")) gem_eff_grid_ny = lg["ny"];
+                if (gem_eff_grid_nx < 1) gem_eff_grid_nx = 1;
+                if (gem_eff_grid_ny < 1) gem_eff_grid_ny = 1;
+            }
         }
         std::cerr << "GEM cfg   : match=" << gem_match_nsigma << "σ"
                   << "  efficiency=" << gem_eff_match_nsigma << "σ"

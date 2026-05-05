@@ -178,12 +178,14 @@ function updateGemEfficiency(data) {
         const info = document.getElementById('gem-eff-info');
         if (info) info.textContent = '';
         plotGemEffEmpty();
+        plotGemEffGrid(null);
         plotGemZTargetHist(null);
         return;
     }
     gemEffData = data;
     renderGemEffCards();
     renderGemEffSnapshot();
+    plotGemEffGrid(data);
     plotGemZTargetHist(data.z_target_hist);
 }
 
@@ -260,53 +262,35 @@ function plotGemEffEmpty() {
     plotGemEffView(null);
 }
 
-// Compute lab-frame axis ranges from the detector geometry alone, so the GEM
-// frames + HyCal z are always in view — even before any event arrives.
+// Compute lab-frame Z-Y axis ranges from the detector geometry alone, so
+// the side view always shows every GEM plane + HyCal z, even before any
+// event arrives.
 function gemEffViewRanges() {
     const dets = (gemEffData && gemEffData.detectors) || [];
     const hycalZ = (gemEffData && gemEffData.hycal_z) || 0;
-    let xMin = +Infinity, xMax = -Infinity;
     let yMin = +Infinity, yMax = -Infinity;
     dets.forEach(d => {
         const pos = d.position || [0, 0, 0];
-        if (d.x_size) {
-            xMin = Math.min(xMin, pos[0] - d.x_size / 2);
-            xMax = Math.max(xMax, pos[0] + d.x_size / 2);
-        }
         if (d.y_size) {
             yMin = Math.min(yMin, pos[1] - d.y_size / 2);
             yMax = Math.max(yMax, pos[1] + d.y_size / 2);
         }
     });
-    if (!isFinite(xMin)) { xMin = -300; xMax = 300; }
     if (!isFinite(yMin)) { yMin = -300; yMax = 300; }
-    const xPad = (xMax - xMin) * 0.06;
     const yPad = (yMax - yMin) * 0.06;
     const zMax = (hycalZ > 0 ? hycalZ : 5800) * 1.05;
-    return {
-        xy: { x: [xMin - xPad, xMax + xPad], y: [yMin - yPad, yMax + yPad] },
-        zy: { z: [-100, zMax],               y: [yMin - yPad, yMax + yPad] },
-    };
+    return { zy: { z: [-100, zMax], y: [yMin - yPad, yMax + yPad] } };
 }
 
-// Always-on reference shapes: dashed GEM frame rectangles in XY, dashed
-// vertical lines at each detector's z (and HyCal z) in ZY.
+// Always-on reference shapes for the side view: dashed vertical lines at
+// each detector's z and at HyCal z.
 function gemEffViewShapes() {
     const dets = (gemEffData && gemEffData.detectors) || [];
     const hycalZ = (gemEffData && gemEffData.hycal_z) || 0;
-    const shapesXY = [], shapesZY = [];
+    const shapesZY = [];
     dets.forEach(d => {
         const pos = d.position || [0, 0, 0];
         const c = GEM_COLORS[d.id] || THEME.text;
-        if (d.x_size && d.y_size) {
-            shapesXY.push({
-                type: 'rect', xref: 'x', yref: 'y',
-                x0: pos[0] - d.x_size / 2, x1: pos[0] + d.x_size / 2,
-                y0: pos[1] - d.y_size / 2, y1: pos[1] + d.y_size / 2,
-                line: { color: c, width: 1, dash: 'dash' },
-                fillcolor: 'rgba(0,0,0,0)',
-            });
-        }
         if (pos[2]) {
             shapesZY.push({
                 type: 'line', xref: 'x', yref: 'paper',
@@ -322,24 +306,17 @@ function gemEffViewShapes() {
             line: { color: THEME.text, width: 1, dash: 'dash' },
         });
     }
-    return { shapesXY, shapesZY };
+    return { shapesZY };
 }
 
-// Render both XY and ZY views.  `snap` may be null — in that case the view
-// only shows the GEM frame outlines (XY) and detector / HyCal z markers (ZY).
+// Render the Z-Y side view of the latest matched event.  `snap` may be
+// null — in that case the panel only shows the detector / HyCal z guides.
 function plotGemEffView(snap) {
-    const tracesXY = [], tracesZY = [];
+    const tracesZY = [];
     const hycalZ = (gemEffData && gemEffData.hycal_z) || 5800;
 
     if (snap) {
         // HyCal anchor — square marker
-        tracesXY.push({
-            x: [snap.hycal_lab[0]], y: [snap.hycal_lab[1]],
-            mode: 'markers', type: 'scatter', name: 'HyCal',
-            marker: { symbol: 'square', color: THEME.text, size: 11,
-                      line: { color: THEME.selectBorder, width: 1 } },
-            hovertemplate: 'HyCal<br>x=%{x:.1f}<br>y=%{y:.1f}<extra></extra>',
-        });
         tracesZY.push({
             x: [snap.hycal_lab[2]], y: [snap.hycal_lab[1]],
             mode: 'markers', type: 'scatter', name: 'HyCal',
@@ -349,16 +326,9 @@ function plotGemEffView(snap) {
         });
 
         // Single fit line through the good track (HyCal + matched GEMs).
-        // The dotted line goes from z=0 to HyCal z, drawn in theme text color.
+        // Dotted line from z=0 to HyCal z, drawn in theme text color.
         const fit = snap.fit || {};
         const z0 = 0, z1 = hycalZ;
-        tracesXY.push({
-            x: [fit.ax + fit.bx * z0, fit.ax + fit.bx * z1],
-            y: [fit.ay + fit.by * z0, fit.ay + fit.by * z1],
-            mode: 'lines', type: 'scatter', name: 'Fit',
-            line: { color: THEME.text, width: 1.2, dash: 'dot' },
-            opacity: 0.8, hoverinfo: 'skip',
-        });
         tracesZY.push({
             x: [z0, z1],
             y: [fit.ay + fit.by * z0, fit.ay + fit.by * z1],
@@ -367,19 +337,13 @@ function plotGemEffView(snap) {
             opacity: 0.8, hoverinfo: 'skip',
         });
 
-        // Per-detector overlays:
-        //   used_in_fit==true  → filled circle at hit position (counts as ✓ in numerator)
-        //   used_in_fit==false → only the prediction star (no hit within window)
+        // Per-detector overlays: filled circle at the hit, star at the
+        // prediction (drawn even when no in-window hit, so the user sees
+        // where a missing detector should have fired).
         (snap.dets || []).forEach(d => {
             const R = d.id;
             const c = GEM_COLORS[R] || THEME.text;
             if (d.hit_present && d.hit_lab) {
-                tracesXY.push({
-                    x: [d.hit_lab[0]], y: [d.hit_lab[1]],
-                    mode: 'markers', type: 'scatter', name: 'GEM' + R,
-                    marker: { color: c, size: 8, line: { color: THEME.selectBorder, width: 1 } },
-                    hovertemplate: 'GEM' + R + ' hit<br>x=%{x:.2f}<br>y=%{y:.2f}<extra></extra>',
-                });
                 tracesZY.push({
                     x: [d.hit_lab[2]], y: [d.hit_lab[1]],
                     mode: 'markers', type: 'scatter', name: 'GEM' + R,
@@ -387,17 +351,7 @@ function plotGemEffView(snap) {
                     hovertemplate: 'GEM' + R + ' hit<br>z=%{x:.0f}<br>y=%{y:.2f}<extra></extra>',
                 });
             }
-            // Prediction star — drawn for every detector regardless of whether
-            // it was in the fit, so the user can see where the track *should*
-            // have hit a missing detector.
             if (d.predicted_lab) {
-                tracesXY.push({
-                    x: [d.predicted_lab[0]], y: [d.predicted_lab[1]],
-                    mode: 'markers', type: 'scatter', name: 'Pred G' + R,
-                    marker: { symbol: 'star', color: c, size: 12,
-                              line: { color: THEME.selectBorder, width: 1 } },
-                    hovertemplate: `Pred GEM${R}<br>x=%{x:.2f}<br>y=%{y:.2f}<extra></extra>`,
-                });
                 tracesZY.push({
                     x: [d.predicted_lab[2]], y: [d.predicted_lab[1]],
                     mode: 'markers', type: 'scatter', name: 'Pred G' + R,
@@ -407,28 +361,11 @@ function plotGemEffView(snap) {
                 });
             }
         });
-
-        // Closest-approach point of the fit line to the lab z-axis — the
-        // inferred interaction vertex.  Drawn as a diamond marker on XY (near
-        // origin if the track came from the target).
-        if (typeof snap.z_target_lab === 'number') {
-            const fit = snap.fit || {};
-            const zt  = snap.z_target_lab;
-            const xt  = (fit.ax || 0) + (fit.bx || 0) * zt;
-            const yt  = (fit.ay || 0) + (fit.by || 0) * zt;
-            tracesXY.push({
-                x: [xt], y: [yt],
-                mode: 'markers', type: 'scatter', name: 'Vertex',
-                marker: { symbol: 'diamond-open', color: THEME.text, size: 10,
-                          line: { color: THEME.text, width: 1.5 } },
-                hovertemplate: `Vertex (DOCA)<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=${zt.toFixed(1)}<extra></extra>`,
-            });
-        }
     }
 
     const ranges = gemEffViewRanges();
-    const { shapesXY, shapesZY } = gemEffViewShapes();
-    // Vertical dashed line on the side view at the inferred vertex z.
+    const { shapesZY } = gemEffViewShapes();
+    // Vertical dashed guide at the inferred vertex z.
     if (snap && typeof snap.z_target_lab === 'number') {
         shapesZY.push({
             type: 'line', xref: 'x', yref: 'paper',
@@ -437,14 +374,6 @@ function plotGemEffView(snap) {
         });
     }
 
-    Plotly.react('gem-eff-xy', tracesXY, Object.assign({}, PL_GEM_EFF(), {
-        title: { text: 'Front view (X–Y)', font: { size: 10, color: THEME.text } },
-        xaxis: { title: 'x (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                 range: ranges.xy.x, scaleanchor: 'y', scaleratio: 1 },
-        yaxis: { title: 'y (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                 range: ranges.xy.y },
-        shapes: shapesXY,
-    }), { responsive: true, displayModeBar: false });
     Plotly.react('gem-eff-zy', tracesZY, Object.assign({}, PL_GEM_EFF(), {
         title: { text: 'Side view (Z–Y)', font: { size: 10, color: THEME.text } },
         xaxis: { title: 'z (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border,
@@ -453,6 +382,133 @@ function plotGemEffView(snap) {
                  range: ranges.zy.y },
         shapes: shapesZY,
     }), { responsive: true, displayModeBar: false });
+}
+
+// --- per-detector efficiency-vs-position grid (left of the side view) -------
+// Four heatmaps in a 2x2 layout, one per GEM, showing num/den efficiency over
+// detector-local (x, y).  Bins with zero denominator are masked (rendered as
+// the canvas color) so empty cells don't bias the eye.  Color scale is fixed
+// to [0, 1] so cards comparing tiers stay consistent across detectors.
+const GEM_EFF_GRID_IDS = ['gem-eff-grid-0', 'gem-eff-grid-1',
+                          'gem-eff-grid-2', 'gem-eff-grid-3'];
+
+function plotGemEffGrid(data) {
+    const compactMargin  = { l: 28, r: 8,  t: 18, b: 20 };
+    const compactMarginR = { l: 28, r: 42, t: 18, b: 20 };
+
+    if (!data || !data.enabled) {
+        GEM_EFF_GRID_IDS.forEach(id => {
+            const div = document.getElementById(id);
+            if (div) div.innerHTML = '<div style="color:var(--dim);padding:20px;text-align:center">GEM not enabled</div>';
+        });
+        return;
+    }
+
+    const detectors = data.detectors || [];
+    const dets = GEM_EFF_GRID_IDS.map((_, detId) =>
+        detectors.find(d => d.id === detId));
+
+    GEM_EFF_GRID_IDS.forEach((divId, idx) => {
+        const det = dets[idx];
+        const onRightCol = (idx % 2) === 1;
+        const showBar = onRightCol;
+        const frameColor = GEM_COLORS[idx] || THEME.text;
+        const detName = det && det.name ? det.name : ('GEM' + idx);
+
+        // Always-on dashed detector frame so the active area is visible
+        // even before any event arrives.  Range is pinned to the frame.
+        const shapes = [];
+        let xRange = null, yRange = null;
+        if (det && det.x_size && det.y_size) {
+            shapes.push({
+                type: 'rect', xref: 'x', yref: 'y',
+                x0: -det.x_size / 2, x1: det.x_size / 2,
+                y0: -det.y_size / 2, y1: det.y_size / 2,
+                line: { color: frameColor, width: 1.2, dash: 'dash' },
+                fillcolor: 'rgba(0,0,0,0)',
+            });
+            const padX = det.x_size * 0.04, padY = det.y_size * 0.04;
+            xRange = [-det.x_size / 2 - padX, det.x_size / 2 + padX];
+            yRange = [-det.y_size / 2 - padY, det.y_size / 2 + padY];
+        }
+
+        const layout = Object.assign({}, PL_GEM_EFF(), {
+            title: { text: detName, font: { size: 11, color: frameColor } },
+            xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                     ticks: 'outside', ticklen: 3,
+                     range: xRange, autorange: xRange ? false : true },
+            yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                     ticks: 'outside', ticklen: 3,
+                     range: yRange, autorange: yRange ? false : true,
+                     scaleanchor: 'x', scaleratio: 1 },
+            margin: showBar ? compactMarginR : compactMargin,
+            shapes: shapes,
+        });
+
+        const grid = det && det.eff_grid;
+        if (!grid || !grid.nx || !grid.ny || !grid.den || !grid.num) {
+            Plotly.react(divId,
+                [{ x: [], y: [], z: [[]], type: 'heatmap' }],
+                layout, { responsive: true, displayModeBar: false });
+            return;
+        }
+
+        const nx = grid.nx, ny = grid.ny;
+        const xSize = grid.x_size || (det && det.x_size) || 0;
+        const ySize = grid.y_size || (det && det.y_size) || 0;
+        const xStep = xSize / nx, yStep = ySize / ny;
+        const x0 = -xSize / 2 + xStep / 2;
+        const y0 = -ySize / 2 + yStep / 2;
+        const xArr = Array.from({length: nx}, (_, i) => x0 + i * xStep);
+        const yArr = Array.from({length: ny}, (_, i) => y0 + i * yStep);
+
+        // Per-bin eff = num/den.  null when den==0 so Plotly renders that
+        // cell as transparent (instead of the lowest cmap color), letting
+        // the canvas + dashed frame outline show through.
+        const z = [];
+        let totalDen = 0, totalNum = 0;
+        for (let iy = 0; iy < ny; iy++) {
+            const row = [];
+            for (let ix = 0; ix < nx; ix++) {
+                const k = iy * nx + ix;
+                const den = grid.den[k] || 0;
+                const num = grid.num[k] || 0;
+                totalDen += den; totalNum += num;
+                row.push(den > 0 ? (num / den) : null);
+            }
+            z.push(row);
+        }
+        const titleText = totalDen > 0
+            ? `${detName}  (eff=${(100 * totalNum / totalDen).toFixed(1)}%, n=${totalDen})`
+            : detName;
+        layout.title.text = titleText;
+
+        // Red → yellow → green gradient, fixed at [0, 1] so colors mean
+        // the same thing across detectors and over time.  Tracks the
+        // green/amber/red tiers used by the .gem-eff-card pills above.
+        const trace = {
+            x: xArr, y: yArr, z: z,
+            type: 'heatmap',
+            colorscale: [
+                [0.0, '#d62728'],
+                [0.7, '#ffbb33'],
+                [0.9, '#2ca02c'],
+                [1.0, '#2ca02c'],
+            ],
+            zmin: 0, zmax: 1,
+            zauto: false,
+            hoverongaps: false,
+            hovertemplate: detName + '<br>x=%{x:.0f}<br>y=%{y:.0f}<br>eff=%{z:.2f}<extra></extra>',
+            showscale: showBar,
+        };
+        if (showBar) {
+            trace.colorbar = { thickness: 6, tickfont: { size: 8 },
+                               tickformat: '.1f', len: 0.92 };
+        }
+
+        Plotly.react(divId, [trace], layout,
+                     { responsive: true, displayModeBar: false });
+    });
 }
 
 // --- projected-target-z histogram (right of the 2×2 efficiency cards) ------
@@ -503,7 +559,10 @@ function resizeGem() {
     GEM_OCC_IDS.forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
     });
-    ['gem-eff-xy', 'gem-eff-zy', 'gem-eff-zhist'].forEach(id => {
+    GEM_EFF_GRID_IDS.forEach(id => {
+        try { Plotly.Plots.resize(id); } catch (e) {}
+    });
+    ['gem-eff-zy', 'gem-eff-zhist'].forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
     });
 }
@@ -518,8 +577,10 @@ if (typeof onThemeChange === 'function') {
         if (gemEffData) {
             renderGemEffCards();
             renderGemEffSnapshot();
+            plotGemEffGrid(gemEffData);
         } else {
             plotGemEffEmpty();
+            plotGemEffGrid(null);
             plotGemZTargetHist(null);
         }
     });

@@ -172,6 +172,24 @@ json AppState::apiGemEfficiency() const
             info["position"] = json::array({t.x, t.y, t.z});
             info["tilting"]  = json::array({t.rx, t.ry, t.rz});
         }
+        // Per-detector efficiency-vs-position grid: bins of predicted local
+        // (x,y) at this detector when it served as the LOO test.  Frontend
+        // computes per-bin eff = num/den (masking 0-den bins).
+        if (d < n_dets_runtime
+            && d < (int)gem_eff_grid_num.size()
+            && d < (int)gem_eff_grid_den.size()) {
+            const auto &det = gem_sys.GetDetectors()[d];
+            const auto &gn  = gem_eff_grid_num[d];
+            const auto &gd  = gem_eff_grid_den[d];
+            info["eff_grid"] = {
+                {"nx",     gn.nx},
+                {"ny",     gn.ny},
+                {"x_size", det.planes[0].size},
+                {"y_size", det.planes[1].size},
+                {"num",    gn.bins},
+                {"den",    gd.bins},
+            };
+        }
         detectors.push_back(info);
     }
     json diag = json::array();
