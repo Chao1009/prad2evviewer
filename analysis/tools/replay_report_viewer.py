@@ -63,6 +63,8 @@ class ReportData:
     overall_pass: np.ndarray          # bool, AND across channels
     channels:   dict[str, ChannelSeries] = field(default_factory=dict)
     run_number: Optional[int] = None
+    live_charge: Optional[dict] = None  # the report's "live_charge" block, or
+                                        # None when charge integration is off
 
 
 def load_report(path: str) -> ReportData:
@@ -139,6 +141,10 @@ def load_report(path: str) -> ReportData:
         try: run_number = int(run_number)
         except (TypeError, ValueError): run_number = None
 
+    lc = j.get("live_charge")
+    if not isinstance(lc, dict):
+        lc = None
+
     return ReportData(
         path=path,
         summary=j.get("summary") or {},
@@ -149,6 +155,7 @@ def load_report(path: str) -> ReportData:
         overall_pass=overall,
         channels=channels,
         run_number=run_number,
+        live_charge=lc,
     )
 
 
@@ -236,6 +243,9 @@ def shade_rejected(ax, segs: Iterable[tuple[float, float]],
 
 # ----- Per-row drawing primitives -------------------------------------------
 
+_YLABEL_KW = dict(rotation=0, ha="right", va="center", labelpad=8)
+
+
 def _draw_status_row(ax, report: ReportData, x: np.ndarray) -> None:
     """One step trace per channel, vertically offset by channel index.
     pass = top of band (i+1), fail = bottom (i).  Y-tick labels are the
@@ -251,7 +261,7 @@ def _draw_status_row(ax, report: ReportData, x: np.ndarray) -> None:
     ax.set_yticks([i + 0.5 for i in range(n_ch)])
     ax.set_yticklabels([s.label for s in report.channels.values()])
     ax.set_ylim(-0.15, n_ch + 0.15)
-    ax.set_ylabel("cut status")
+    ax.set_ylabel("cut status", **_YLABEL_KW)
     ax.grid(axis="x", which="major", alpha=0.25)
 
 
@@ -262,16 +272,19 @@ def _draw_livetime_rate(ax_lt, report: ReportData, x: np.ndarray):
     if lt is not None:
         x_lt, y_lt = _finite_xy(x, lt.values)
         ax_lt.plot(x_lt, y_lt, color="C0", lw=1.0)
-        ax_lt.set_ylabel("livetime [%]", color="C0")
+        ax_lt.set_ylabel("livetime\n[%]", color="C0", **_YLABEL_KW)
         ax_lt.tick_params(axis="y", labelcolor="C0")
     else:
-        ax_lt.set_ylabel("livetime [%] (n/a)")
+        ax_lt.set_ylabel("livetime\n[%] (n/a)", **_YLABEL_KW)
 
     rates = compute_datarate_hz(report.evns, report.times)
     x_rt, y_rt = _finite_xy(x, rates)
     ax_rt = ax_lt.twinx()
     ax_rt.plot(x_rt, y_rt, color="C3", lw=1.0)
-    ax_rt.set_ylabel("data rate [Hz]", color="C3")
+    # Right-side label: keep horizontal but anchor on the left side of the
+    # text so it doesn't overlap the next column.
+    ax_rt.set_ylabel("data rate\n[Hz]", color="C3",
+                     rotation=0, ha="left", va="center", labelpad=8)
     ax_rt.tick_params(axis="y", labelcolor="C3")
     ax_lt.grid(axis="x", which="major", alpha=0.25)
     return ax_rt
@@ -291,6 +304,16 @@ def _title_for(report: ReportData) -> str:
     n_slow = summ.get("n_slow_events")
     if n_slow is not None:
         pieces.append(f"{n_slow:,} checkpoints")
+    lc = report.live_charge
+    if isinstance(lc, dict):
+        # value_nC is the canonical key; tolerate the older "value" name
+        # so reports written before the unit assumption was pinned down
+        # still render with a charge label.
+        v = lc.get("value_nC")
+        if not isinstance(v, (int, float)):
+            v = lc.get("value")
+        if isinstance(v, (int, float)):
+            pieces.append(f"Q_live = {v:.3g} nC")
     return " — ".join(pieces) if pieces else os.path.basename(report.path)
 
 
@@ -334,11 +357,15 @@ def render_cli(report: ReportData, out_path: str, x_kind: str) -> None:
         ax = axes[2 + k]
         xx, yy = _finite_xy(x, s.values)
         ax.plot(xx, yy, lw=1.0, color="C2")
-        ax.set_ylabel(s.label, fontsize=9)
+        ax.set_ylabel(s.label, fontsize=9, **_YLABEL_KW)
         ax.grid(axis="x", which="major", alpha=0.25)
         shade_rejected(ax, segs)
 
     axes[-1].set_xlabel(xlabel)
+    # Align horizontal ylabels at a common x-position so every panel's
+    # plot area starts at the same column (constrained_layout sizes the
+    # left margin once for the widest label).
+    fig.align_ylabels(axes)
     fig.suptitle(_title_for(report), fontsize=11)
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
@@ -513,7 +540,7 @@ def run_gui(initial_path: Optional[str]) -> int:
                 for s in sel:
                     xx, yy = _finite_xy(x, s.values)
                     ax_ep.plot(xx, yy, lw=1.0, label=s.label)
-                ax_ep.set_ylabel("EPICS")
+                ax_ep.set_ylabel("EPICS", **_YLABEL_KW)
                 ax_ep.legend(loc="upper right", fontsize=8, ncol=min(len(sel), 4))
                 ax_ep.grid(axis="x", which="major", alpha=0.25)
             else:
@@ -526,6 +553,7 @@ def run_gui(initial_path: Optional[str]) -> int:
             shade_rejected(ax_ep, segs)
 
             axes[-1].set_xlabel(xlabel)
+            self.fig.align_ylabels(axes)
             self.fig.suptitle(_title_for(r), fontsize=11)
             self.canvas.draw_idle()
 

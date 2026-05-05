@@ -112,6 +112,9 @@ a checked-in template):
                              "gated_by": "hallb_IPM2C21A_CUR" },
     "hallb_IPM2C21A_YPOS": { "rel_rms": 3,
                              "gated_by": "hallb_IPM2C21A_CUR" }
+  },
+  "charge": {
+    "beam_current": "hallb_IPM2C21A_CUR"
   }
 }
 ```
@@ -129,16 +132,27 @@ a checked-in template):
   current is above a floor).  The cut itself still applies to every
   checkpoint; only the *statistics* are conditioned.  EPICS-on-EPICS,
   one level deep.
+- `charge.beam_current` — name of the EPICS channel carrying beam
+  current (assumed to publish in **nA**, true for the Hall B IPM
+  scalers).  Enables live-charge integration over kept intervals:
+  each adjacent passing-passing checkpoint pair contributes
+  `live_fraction × Δt × ½(I_i + I_{i+1})` to the running sum, where
+  `live_fraction` is the slice-local DSC2 livetime at the right
+  endpoint and `I` is forward-filled from the named channel.  Pairs
+  with a missing input on either side are skipped, not zero-counted.
+  The reported `live_charge.value_nC` is therefore in **nC** (nA·s).
 
 **Report (`-j`, default `<output_stem>.report.json`).** One JSON entry
 per (cut channel, checkpoint), each with `associated_evn`, the
 TI-tick-relative `associated_timestamp`, the EPICS-native `unix_time`
 (EPICS rows only), the cut's `value`, and a `pass` / `fail` `status`.
 The top level carries a `summary` with overall and per-channel
-pass/fail counts and rates, plus a `stats` block listing each
-`rel_rms` cut's robust centre, σ̂, MAD, gating channels, and
-post-gate sample count.  Suitable for direct ingestion into a per-run
-quality dashboard.
+pass/fail counts and rates, a `stats` block listing each `rel_rms`
+cut's robust centre, σ̂, MAD, gating channels, and post-gate sample
+count, and — when `charge` is configured — a `live_charge` block
+with `value_nC`, the accumulated live time, the beam-current channel
+name, and the count of integrated vs. skipped checkpoint pairs.
+Suitable for direct ingestion into a per-run quality dashboard.
 
 ## Calibration
 

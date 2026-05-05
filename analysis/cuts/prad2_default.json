@@ -10,5 +10,9 @@
         "hallb_IPM2C21A_CUR":  { "abs": { "min": 0.3 } },
         "hallb_IPM2C21A_XPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
         "hallb_IPM2C21A_YPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" }
+    },
+
+    "charge": {
+        "beam_current": "hallb_IPM2C21A_CUR"
     }
 }

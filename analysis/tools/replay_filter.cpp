@@ -114,9 +114,22 @@ struct LivetimeCut {
     ChannelCut  cut;
 };
 
+// Live-charge integration over kept slow-event intervals.  Disabled if no
+// `charge` block is present in the cut JSON; otherwise sums
+//   Σ live_fraction × Δt × ½(I_i + I_{i+1})
+// over each adjacent pair of accepted checkpoints, where live_fraction
+// is the slice-local DSC2 livetime at the right endpoint and I is the
+// configured beam-current EPICS channel.  Output units are
+// (beam_current_unit · seconds).
+struct ChargeCfg {
+    bool        enabled              = false;
+    std::string beam_current_channel;   // EPICS channel name to read
+};
+
 struct CutConfig {
     LivetimeCut                       livetime;
     std::map<std::string, ChannelCut> epics;
+    ChargeCfg                         charge;
     json                              raw;            // echoed in the report
 };
 
@@ -179,6 +192,17 @@ bool load_cuts(const std::string &path, CutConfig &cfg)
             ChannelCut c;
             parse_channel_cut(it.value(), c);
             cfg.epics[it.key()] = c;
+        }
+    }
+
+    // Charge integration is opt-in: the cut JSON must name the EPICS
+    // channel that carries the beam current.  Anything else (e.g. units)
+    // is documented in the report so downstream consumers can convert.
+    if (j.contains("charge") && j["charge"].is_object()) {
+        const auto &cj = j["charge"];
+        if (cj.contains("beam_current") && cj["beam_current"].is_string()) {
+            cfg.charge.enabled = true;
+            cfg.charge.beam_current_channel = cj["beam_current"].get<std::string>();
         }
     }
     return true;
@@ -699,6 +723,9 @@ int run(const std::vector<std::string> &input_files,
     struct Checkpoint {
         int32_t event_number;
         int64_t unix_time;
+        int64_t ti_ticks;        // 0 if unknown — pair contributes no charge
+        double  live_fraction;   // [0, 1] from cur_lt/100, NaN if unset
+        double  beam_current;    // forward-filled, NaN if not seen yet
         bool    overall_pass;
     };
     std::vector<Checkpoint>  timeline;
@@ -802,18 +829,53 @@ int run(const std::vector<std::string> &input_files,
                 overall = false;
             }
         }
-        timeline.push_back({cp_evn, cp_unix, overall});
+        // Live fraction at this checkpoint (forward-filled %, scaled to
+        // [0, 1]); beam current pulled from the configured EPICS channel
+        // also via forward-fill.  Missing values stay NaN so the charge
+        // integration knows to skip the surrounding pair.
+        const double cp_live_fraction = (cur_lt >= 0)
+            ? cur_lt * 0.01 : std::numeric_limits<double>::quiet_NaN();
+        double cp_current = std::numeric_limits<double>::quiet_NaN();
+        if (cuts.charge.enabled) {
+            auto it = cur_eps.find(cuts.charge.beam_current_channel);
+            if (it != cur_eps.end()) cp_current = it->second;
+        }
+
+        timeline.push_back({cp_evn, cp_unix, cp_ticks,
+                            cp_live_fraction, cp_current, overall});
         if (is_sc) scaler_verdict[orig] = overall;
         else       epics_verdict [orig] = overall;
     }
 
     // ---------- Phase 4: build keep-intervals (lo, hi] ----------
+    // Same loop integrates live charge over each kept pair, using the
+    // right-endpoint live fraction (matches the rate-ending-at-endpoint
+    // convention used for `compute_delta_live_pct`) and the average of
+    // the two endpoints' beam currents.  Only pairs where every input
+    // is finite contribute — missing data on either side is treated as
+    // unknown, not zero.
     std::vector<std::pair<int32_t, int32_t>> keep;
+    double live_charge      = 0.0;
+    double live_charge_secs = 0.0;
+    int    n_charge_pairs   = 0;
+    int    n_charge_skipped = 0;
     for (size_t i = 1; i < timeline.size(); ++i) {
-        if (timeline[i - 1].overall_pass && timeline[i].overall_pass) {
-            keep.emplace_back(timeline[i - 1].event_number,
-                              timeline[i    ].event_number);
+        const auto &a = timeline[i - 1];
+        const auto &b = timeline[i];
+        if (!(a.overall_pass && b.overall_pass)) continue;
+        keep.emplace_back(a.event_number, b.event_number);
+        if (!cuts.charge.enabled) continue;
+        if (a.ti_ticks <= 0 || b.ti_ticks <= 0 || b.ti_ticks <= a.ti_ticks
+            || !std::isfinite(b.live_fraction) || b.live_fraction < 0
+            || !std::isfinite(a.beam_current)  || !std::isfinite(b.beam_current)) {
+            ++n_charge_skipped;
+            continue;
         }
+        const double dt = (b.ti_ticks - a.ti_ticks) * TI_TICK_SEC;
+        const double I  = 0.5 * (a.beam_current + b.beam_current);
+        live_charge      += b.live_fraction * dt * I;
+        live_charge_secs += b.live_fraction * dt;
+        ++n_charge_pairs;
     }
     auto is_kept = [&](int32_t evn) -> bool {
         if (keep.empty()) return false;
@@ -1060,6 +1122,23 @@ int run(const std::vector<std::string> &input_files,
         {"per_channel",        per_channel_json},
     };
     report["keep_intervals"] = std::move(keep_intervals);
+
+    // Live-charge integration over kept intervals.  Units: assume the
+    // configured EPICS beam-current channel publishes in nA (true for
+    // hallb_IPM2C21A_CUR and the other Hall B IPM scalers), so
+    // value = Σ live_fraction · Δt · I  ⇒  nA · s = nC.  Also emit the
+    // accumulated live time so the average current is recoverable.
+    if (cuts.charge.enabled) {
+        report["live_charge"] = {
+            {"value_nC",             live_charge},
+            {"unit",                 "nC"},
+            {"beam_current_channel", cuts.charge.beam_current_channel},
+            {"beam_current_unit",    "nA"},
+            {"live_seconds",         live_charge_secs},
+            {"n_pairs_integrated",   n_charge_pairs},
+            {"n_pairs_skipped",      n_charge_skipped},
+        };
+    }
 
     json pts = json::array();
     pts.get_ptr<json::array_t *>()->reserve(report_points.size());
