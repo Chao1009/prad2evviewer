@@ -182,7 +182,28 @@ std::string RootReconDataSource::open(const std::string &path)
 
     prad2::SetReconReadBranches(tree_, ev_);
 
-    std::cerr << "ROOT recon: " << n_entries_ << " events\n";
+    // Run number — recon trees don't carry it per-event, but the standard
+    // filename layout is "prad_NNNNNN.*_recon.root" or "prad_NNNNNN.root";
+    // pull the first numeric token after the last "prad_" if present.
+    run_number_ = 0;
+    const std::string &p = path;
+    size_t slash = p.find_last_of("/\\");
+    std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
+    const std::string prefix = "prad_";
+    size_t pi = base.find(prefix);
+    if (pi != std::string::npos) {
+        size_t i = pi + prefix.size();
+        uint32_t v = 0;
+        while (i < base.size() && base[i] >= '0' && base[i] <= '9') {
+            v = v * 10 + (base[i] - '0');
+            ++i;
+        }
+        if (i > pi + prefix.size()) run_number_ = v;
+    }
+
+    std::cerr << "ROOT recon: " << n_entries_ << " events";
+    if (run_number_) std::cerr << "  run=" << run_number_;
+    std::cerr << "\n";
     return "";
 }
 
@@ -218,6 +239,7 @@ std::string RootReconDataSource::decodeEvent(int index, fdec::EventData &evt,
     evt.info.event_number = ev_.event_num;
     evt.info.trigger_type = ev_.trigger_type;
     evt.info.trigger_bits = ev_.trigger_bits;
+    evt.info.run_number = run_number_;
     evt.info.timestamp = static_cast<uint64_t>(ev_.timestamp);
     if (ssp) ssp->clear();
     return "";
@@ -228,6 +250,7 @@ void RootReconDataSource::fillRecon(ReconEventData &recon) const
     recon.event_num = ev_.event_num;
     recon.trigger_type = ev_.trigger_type;
     recon.trigger_bits = ev_.trigger_bits;
+    recon.run_number = run_number_;
     recon.timestamp = static_cast<uint64_t>(ev_.timestamp);
     recon.clusters.clear();
     for (int i = 0; i < ev_.n_clusters && i < prad2::kMaxClusters; ++i)

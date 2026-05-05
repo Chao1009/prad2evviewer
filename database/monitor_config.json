@@ -181,13 +181,36 @@
             "z_target_hist":          {"min": -50.0, "max": 50.0, "step": 1.0}
         }
     },
-    "elog": {
-        "url": "https://logbooks.jlab.org",
-        "logbook": "PRADLOG",
-        "author": "clasrun",
-        "tags": ["AutoReport", "PRad2"],
-        "cert": "/usr/share/logbook-certs/logbook.cert",
-        "key": "/usr/share/logbook-certs/logbook.key"
+    "auto_report": {
+        "// Master switch for the on-demand auto-report pipeline.  When": "",
+        "// true, the server fires a capture_request to one alive WS": "",
+        "// client on every END (or run-change fallback); that client": "",
+        "// captures + uploads, server saves locally and (if": "",
+        "// post_to_elog) pushes to the logbook.  Operator-controlled,": "",
+        "// no UI toggle.": "",
+        "enabled": true,
+        "// Hard server-side guard. While false, auto-reports are saved": "",
+        "// under local_save_dir but the curl --upload-file step is": "",
+        "// skipped. Flip to true once the saved bodies look correct.": "",
+        "post_to_elog": false,
+        "// Required.  Each capture is mirrored under": "",
+        "// <local_save_dir>/run_NNNNNN/ as report_<UTC>.xml + the PNG": "",
+        "// attachments decoded out of the XML.  An aggregate": "",
+        "// summary.json sits at the top of the dir with one entry per": "",
+        "// auto-post attempt (success or failure).": "",
+        "local_save_dir": "/home/clasrun/prad2_daq/monitor/reports",
+        "// Hard rate limit between auto posts (ms).  Catches": "",
+        "// near-simultaneous duplicate triggers (END + run-change).": "",
+        "min_interval_ms": 300000,
+        "// Logbook target.  Switch to TLOG while testing.": "",
+        "elog": {
+            "url": "https://logbooks.jlab.org",
+            "logbook": "PRADLOG",
+            "author": "clasrun",
+            "tags": ["AutoReport", "PRad2"],
+            "cert": "/home/clasrun/prad2_daq/monitor/keys/elog-cert.pem",
+            "key":  "/home/clasrun/prad2_daq/monitor/keys/elog-key.pem"
+        }
     },
     "color_ranges": {
         "dq:integral":  [0, 10000],

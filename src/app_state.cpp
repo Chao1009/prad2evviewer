@@ -299,7 +299,8 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
     return {{"event", ev_id}, {"channels", channels},
             {"event_number", event.info.event_number},
             {"trigger_type", event.info.trigger_type},
-            {"trigger_bits", event.info.trigger_bits}};
+            {"trigger_bits", event.info.trigger_bits},
+            {"run_number", event.info.run_number}};
 }
 
 json AppState::encodeWaveformJson(fdec::EventData &event, const std::string &chan_key,

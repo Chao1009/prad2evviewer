@@ -170,6 +170,30 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 }
 .clear-all-btn:hover { background:var(--theme-danger); filter:brightness(1.1); }
 
+/* --- auto-report status indicator + transient capture badge --- */
+.auto-status {
+    margin-left:8px; padding:4px 10px; border-radius:3px;
+    border:1px solid var(--border); background:var(--bg);
+    color:var(--dim); font-family:inherit; font-size:12px; font-weight:600;
+    white-space:nowrap;
+}
+.auto-status.on  { color:var(--theme-success); border-color:var(--theme-success); }
+.auto-status.off { color:var(--dim);           border-color:var(--border); }
+/* The same span doubles as a transient "I am the chosen reporter" badge
+   while this client is captioning + uploading.  We light it up green
+   with the existing pulse animation so the operator can see which tab
+   is doing the work. */
+.auto-status.reporting {
+    background:var(--theme-success); color:var(--theme-on-accent);
+    border-color:var(--theme-success);
+    box-shadow:0 0 0 1px var(--theme-success), 0 0 8px 0 var(--theme-success);
+    animation:auto-pulse 1.6s ease-in-out infinite;
+}
+@keyframes auto-pulse {
+    0%,100% { box-shadow:0 0 0 1px var(--theme-success), 0 0 6px 0 var(--theme-success); }
+    50%     { box-shadow:0 0 0 1px var(--theme-success), 0 0 14px 2px var(--theme-success); }
+}
+
 /* --- trigger filter (inline in tab bar, right-aligned) --- */
 .trig-filter-inline {
     display:flex; align-items:center; gap:6px;
@@ -565,22 +589,10 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .physics-cell-top { flex:3; min-height:0; position:relative; }
 .physics-cell-bot { flex:2; min-height:0; position:relative; }
 
-/* --- report dropdown --- */
-.report-dropdown { position:relative; display:inline-block; margin-left:8px; }
+/* --- accent submit button (used by ET / filter / cut dialogs) --- */
 .report-btn { background:var(--theme-accent-strong); border:none; color:var(--theme-on-accent); padding:4px 12px;
     border-radius:3px; cursor:pointer; font-family:inherit; font-size:12px; font-weight:600; }
 .report-btn:hover { background:var(--theme-accent-strong); filter:brightness(0.9); }
-.report-menu { display:none; position:absolute; top:100%; left:0; margin-top:2px;
-    background:var(--panel); border:1px solid var(--border); border-radius:4px;
-    box-shadow:0 4px 16px var(--theme-shadow); z-index:50; min-width:140px; }
-.report-menu.open { display:block; }
-.report-menu button { display:block; width:100%; background:none; border:none; color:var(--text);
-    padding:8px 14px; font-family:inherit; font-size:12px; text-align:left; cursor:pointer; }
-.report-menu button:hover { background:var(--theme-accent-tint-3); }
-.report-menu button:first-child { border-radius:4px 4px 0 0; }
-.report-menu button:last-child { border-radius:0 0 4px 4px; }
-.report-menu button:disabled { color:var(--dim); cursor:default; }
-.report-menu button:disabled:hover { background:none; }
 
 /* --- elog dialog --- */
 .elog-form { padding:14px; }

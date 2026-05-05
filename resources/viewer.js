@@ -5,6 +5,7 @@
 let modules=[], totalEvents=0, currentEvent=1;
 let currentEventNumber=0, currentTriggerBits=0;  // DAQ event number + trigger from last loaded event
 let currentEventKind='physics';                  // 'physics' | 'sync' | 'epics' | 'prestart' | ...
+let currentRunNumber=0;                          // DAQ run number from last loaded event (0 if unknown)
 let triggerBitsDef=[];  // [{bit, mask, name, label}, ...]
 let triggerTypeDef=[];  // [{type, tag, name, label, primary_bit}, ...]
 // per-tab trigger filter masks: { tabName: {accept: mask, reject: mask} }
@@ -170,6 +171,20 @@ function eventKindLabel(kind){
     }
 }
 
+// Header-centre run-number readout. Hidden until we get a non-zero
+// run_number from /api/event/*; updates whenever we advance to a new
+// event with a fresh run number.
+function updateRunDisplay(){
+    const el = document.getElementById('run-display');
+    if(!el) return;
+    if(currentRunNumber > 0){
+        el.textContent = 'Run #'+currentRunNumber;
+        el.style.display = '';
+    } else {
+        el.style.display = 'none';
+    }
+}
+
 function updateStatusBar(){
     const modeTag = mode === 'online' ? ' [LIVE]' : '';
     const trig = decodeTriggerBits(currentTriggerBits);
@@ -288,6 +303,75 @@ function passesTriggerFilter(triggerBits){
     return true;
 }
 
+// =========================================================================
+// Auto Report mode
+// =========================================================================
+// On-demand: server is the trigger and the gatekeeper.  When END (or a
+// run-change fallback) fires, the server picks one alive WS client and
+// sends a 'capture_request' over the WS.  The chosen client (us, if it's
+// our turn) takes screenshots and POSTs them to /api/elog/post; the
+// server saves locally + optionally uploads to elog.
+//
+// This client only:
+//   1. Reflects auto_post_enabled in the header status pill.
+//   2. Lights the same pill green ("Auto-reporting…") while we're the
+//      one running captures.
+//   3. Clears all data on PRESTART (so the new run starts blank).
+
+let autoPostEnabled=false;     // server-controlled, from /api/config
+let autoIsReporting=false;     // true while we're handling a capture_request
+
+function autoStatusEl(){ return document.getElementById('auto-status'); }
+
+function autoUpdateStatus(){
+    const el=autoStatusEl(); if(!el) return;
+    if(autoIsReporting){
+        el.classList.add('reporting');
+        el.classList.remove('on','off');
+        el.textContent='Auto-reporting…';
+        el.title='This browser is capturing + uploading the auto-report';
+        return;
+    }
+    el.classList.remove('reporting');
+    if(autoPostEnabled){
+        el.classList.add('on');  el.classList.remove('off');
+        el.textContent='Auto: ON';
+        el.title='Auto-report ON — server will pick one connected client per run boundary';
+    } else {
+        el.classList.add('off'); el.classList.remove('on');
+        el.textContent='Auto: OFF';
+        el.title='Auto-report disabled in monitor_config.json';
+    }
+}
+
+function autoSetReporting(on){
+    autoIsReporting = !!on;
+    autoUpdateStatus();
+}
+
+// Called from initReport() once /api/config has arrived.
+function applyAutoReportConfig(cfg){
+    if(!cfg) return;
+    autoPostEnabled = !!cfg.enabled;
+    autoUpdateStatus();
+}
+
+// Centralised Clear All — used by both the manual button and the
+// PRESTART control event.
+function doClearAll(){
+    return Promise.all([
+        fetch('/api/hist/clear').then(r=>r.json()),
+        fetch('/api/lms/clear').then(r=>r.json()),
+        fetch('/api/epics/clear').then(r=>r.json()),
+    ]).then(clearFrontend).catch(()=>{
+        document.getElementById('status-bar').textContent='Error clearing data';
+    });
+}
+
+function initAutoReport(){
+    autoUpdateStatus();
+}
+
 let navDirection=1;  // +1=forward, -1=backward (for trigger filter auto-skip)
 
 function loadEventData(reqId, data) {
@@ -321,6 +405,10 @@ function loadEventData(reqId, data) {
     currentEventNumber = data.event_number || 0;
     currentTriggerBits = data.trigger_bits || 0;
     currentEventKind = data.event_kind || 'physics';
+    if (data.run_number) {
+        currentRunNumber = data.run_number;
+        updateRunDisplay();
+    }
     eventChannels = data.channels || {};
     if(mode==='online') sampleCount++;
     updateStatusBar();
@@ -800,16 +888,12 @@ function init(){
     });
 
     // Clear All — resets all tabs' data for new run
-    document.getElementById('btn-clear-all').onclick=()=>{
-        // always clear server-side, then frontend
-        Promise.all([
-            fetch('/api/hist/clear').then(r=>r.json()),
-            fetch('/api/lms/clear').then(r=>r.json()),
-            fetch('/api/epics/clear').then(r=>r.json()),
-        ]).then(clearFrontend).catch(()=>{
-            document.getElementById('status-bar').textContent='Error clearing data';
-        });
-    };
+    document.getElementById('btn-clear-all').onclick=()=>doClearAll();
+
+    // Auto Report toggle — END → post, PRESTART → clear, run-number-change as
+    // fallback. Hard-rate-limited on POST so a buggy run cycling rapidly does
+    // not flood elog. Online-mode only.
+    initAutoReport();
 
     // mode toggle button — opens ET dialog when going online
     document.getElementById('btn-mode-toggle').onclick=()=>{

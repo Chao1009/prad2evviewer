@@ -131,7 +131,19 @@ function connectWebSocket() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
 
-    ws.onopen = () => {};
+    ws.onopen = () => {
+        // Tell the server which protocols this build understands so it
+        // can pick the right candidate for on-demand auto-report.
+        // Pre-update tabs never send this and stay excluded from the
+        // dispatchCapture pool, while still receiving all other
+        // broadcasts unchanged.
+        try {
+            ws.send(JSON.stringify({
+                type: 'client_hello',
+                capabilities: ['auto_report'],
+            }));
+        } catch(e) {}
+    };
     ws.onclose = () => {
         setTimeout(connectWebSocket, 2000);
     };
@@ -219,6 +231,29 @@ function connectWebSocket() {
                     clearFrontend();
                     fetchConfigAndApply();
                 }
+            } else if (msg.type === 'control_event') {
+                // PRESTART → clear all data so the new run starts blank.
+                // END is handled server-side: the server dispatches a
+                // 'capture_request' below to one chosen client.
+                if (msg.kind === 'prestart' && typeof doClearAll === 'function') {
+                    doClearAll();
+                }
+            } else if (msg.type === 'capture_request') {
+                // Server picked us as the on-demand reporter for this
+                // run.  Light the badge, run the capture pipeline, and
+                // POST.  All other clients ignore this message — only
+                // the one whose connection_hdl was selected ever sees it.
+                if (typeof handleCaptureRequest === 'function')
+                    handleCaptureRequest(msg);
+            } else if (msg.type === 'auto_capture_done') {
+                // Authoritative end-of-flow signal from the server.
+                // Drop our reporter badge if we were holding it; status
+                // bar gets a one-line outcome line.
+                if (typeof autoSetReporting === 'function') autoSetReporting(false);
+                const sb = document.getElementById('status-bar');
+                if (sb) sb.textContent = msg.posted
+                    ? `Auto report posted (run ${msg.run||'?'})`
+                    : `Auto report saved locally (run ${msg.run||'?'})`;
             } else if (msg.type === 'gem_threshold_updated') {
                 // Another viewer (or this one) changed the GEM σ — keep
                 // every open tab's input in sync immediately so users

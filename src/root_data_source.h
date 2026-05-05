@@ -80,6 +80,7 @@ private:
     std::unique_ptr<TFile> file_;
     TTree *tree_ = nullptr;
     int n_entries_ = 0;
+    uint32_t run_number_ = 0;   // parsed from filename "prad_NNNNNN.*_recon.root"
     std::mutex mtx_;
 
     // branch read buffer — uses the shared struct from EventData.h
