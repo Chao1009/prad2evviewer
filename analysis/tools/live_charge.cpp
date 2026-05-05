@@ -37,6 +37,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -232,72 +233,14 @@ bool load_epics_root(const std::vector<std::string> &files,
 // file N+1 still get stamped with the last physics event_number from file N
 // rather than -1.  Calls only the cheap Info()/Dsc()/Epics() accessors —
 // no FADC waveform decode.
-
-bool load_from_evio(const std::vector<std::string> &files,
-                    const evc::DaqConfig            &daq_cfg,
-                    std::vector<ScalerRow>          &scalers,
-                    std::vector<EpicsRow>           &epics_rows,
-                    int                              max_events_per_file)
-{
-    evc::EvChannel ch;
-    ch.SetConfig(daq_cfg);
-
-    for (const auto &path : files) {
-        if (ch.OpenAuto(path) != evc::status::success) {
-            std::cerr << "live_charge: cannot open " << path << "\n";
-            return false;
-        }
-        const size_t sc_before = scalers.size();
-        const size_t ep_before = epics_rows.size();
-        int total = 0;
-
-        while (ch.Read() == evc::status::success) {
-            if (max_events_per_file > 0 && total >= max_events_per_file) break;
-            if (!ch.Scan()) continue;
-
-            const auto et = ch.GetEventType();
-
-            if (et == evc::EventType::Epics) {
-                const auto &rec = ch.Epics();
-                if (!rec.present) continue;
-                EpicsRow r;
-                r.event_number = rec.event_number_at_arrival;
-                r.ti_ticks     = static_cast<int64_t>(rec.timestamp_at_arrival);
-                const size_t k_max = std::min(rec.channel.size(), rec.value.size());
-                for (size_t k = 0; k < k_max; ++k)
-                    r.updates[rec.channel[k]] = rec.value[k];
-                epics_rows.push_back(std::move(r));
-                continue;
-            }
-
-            if (et != evc::EventType::Physics) continue;
-
-            ch.SelectEvent(0);
-            const auto &info = ch.Info();
-            const auto &dsc  = ch.Dsc();
-            if (dsc.present) {
-                ScalerRow r;
-                r.event_number = info.event_number;
-                r.ti_ticks     = static_cast<int64_t>(info.timestamp);
-                r.ref_gated    = dsc.ref_gated;
-                r.ref_ungated  = dsc.ref_ungated;
-                std::memcpy(r.trg_gated,   dsc.trg_gated,   DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.trg_ungated, dsc.trg_ungated, DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.tdc_gated,   dsc.tdc_gated,   DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.tdc_ungated, dsc.tdc_ungated, DSC_NCH * sizeof(uint32_t));
-                scalers.push_back(r);
-            }
-            ++total;
-        }
-
-        std::cerr << "  [evio] " << path
-                  << "  events=" << total
-                  << "  +scaler=" << (scalers.size() - sc_before)
-                  << "  +epics="  << (epics_rows.size() - ep_before) << "\n";
-        ch.Close();
-    }
-    return true;
-}
+//
+// At end-of-file we re-run the same `integrate()` arithmetic on just this
+// file's row slice so the per-file log line carries elapsed wall-clock
+// (first→last physics TI tick), live charge, ⟨livetime⟩ and ⟨I⟩ in addition
+// to the raw row counts.  These per-file numbers don't sum exactly to the
+// global Q because each slice loses its own first-pair anchor (delta_lt is
+// undefined for the leading scaler row), but they're a useful per-file
+// signal that's right to a few percent.
 
 // ── Delta-livetime + integration ────────────────────────────────────────────
 
@@ -425,6 +368,108 @@ ChargeResult integrate(const std::vector<ScalerRow> &scalers,
     return r;
 }
 
+bool load_from_evio(const std::vector<std::string> &files,
+                    const evc::DaqConfig            &daq_cfg,
+                    std::vector<ScalerRow>          &scalers,
+                    std::vector<EpicsRow>           &epics_rows,
+                    int                              max_events_per_file,
+                    const std::string               &source,
+                    int                              channel,
+                    const std::string               &beam_current_channel)
+{
+    evc::EvChannel ch;
+    ch.SetConfig(daq_cfg);
+
+    for (const auto &path : files) {
+        if (ch.OpenAuto(path) != evc::status::success) {
+            std::cerr << "live_charge: cannot open " << path << "\n";
+            return false;
+        }
+        const size_t sc_before = scalers.size();
+        const size_t ep_before = epics_rows.size();
+        int      total          = 0;
+        uint64_t first_phys_ts  = 0;
+        uint64_t last_phys_ts   = 0;
+        bool     any_phys       = false;
+
+        while (ch.Read() == evc::status::success) {
+            if (max_events_per_file > 0 && total >= max_events_per_file) break;
+            if (!ch.Scan()) continue;
+
+            const auto et = ch.GetEventType();
+
+            if (et == evc::EventType::Epics) {
+                const auto &rec = ch.Epics();
+                if (!rec.present) continue;
+                EpicsRow r;
+                r.event_number = rec.event_number_at_arrival;
+                r.ti_ticks     = static_cast<int64_t>(rec.timestamp_at_arrival);
+                const size_t k_max = std::min(rec.channel.size(), rec.value.size());
+                for (size_t k = 0; k < k_max; ++k)
+                    r.updates[rec.channel[k]] = rec.value[k];
+                epics_rows.push_back(std::move(r));
+                continue;
+            }
+
+            if (et != evc::EventType::Physics) continue;
+
+            ch.SelectEvent(0);
+            const auto &info = ch.Info();
+            if (info.timestamp > 0) {
+                if (!any_phys) { first_phys_ts = info.timestamp; any_phys = true; }
+                last_phys_ts = info.timestamp;
+            }
+            const auto &dsc  = ch.Dsc();
+            if (dsc.present) {
+                ScalerRow r;
+                r.event_number = info.event_number;
+                r.ti_ticks     = static_cast<int64_t>(info.timestamp);
+                r.ref_gated    = dsc.ref_gated;
+                r.ref_ungated  = dsc.ref_ungated;
+                std::memcpy(r.trg_gated,   dsc.trg_gated,   DSC_NCH * sizeof(uint32_t));
+                std::memcpy(r.trg_ungated, dsc.trg_ungated, DSC_NCH * sizeof(uint32_t));
+                std::memcpy(r.tdc_gated,   dsc.tdc_gated,   DSC_NCH * sizeof(uint32_t));
+                std::memcpy(r.tdc_ungated, dsc.tdc_ungated, DSC_NCH * sizeof(uint32_t));
+                scalers.push_back(r);
+            }
+            ++total;
+        }
+
+        const size_t sc_added = scalers.size() - sc_before;
+        const size_t ep_added = epics_rows.size() - ep_before;
+        const double elapsed_s = any_phys
+            ? double(last_phys_ts - first_phys_ts) * TI_TICK_SEC : 0.0;
+
+        // Per-file slice integration.  Cheap: tens of rows.
+        ChargeResult rf{};
+        if (sc_added > 0 && ep_added > 0) {
+            std::vector<ScalerRow> sc_slice(scalers.begin() + sc_before,
+                                            scalers.end());
+            std::vector<EpicsRow>  ep_slice(epics_rows.begin() + ep_before,
+                                            epics_rows.end());
+            rf = integrate(sc_slice, ep_slice, /*any_good_col=*/false,
+                           source, channel, beam_current_channel);
+        }
+        const double avg_lt = rf.real_seconds > 0
+            ? rf.live_seconds / rf.real_seconds : 0.0;
+        const double avg_I  = rf.live_seconds > 0
+            ? rf.value_nC / rf.live_seconds : 0.0;
+
+        std::cerr << "  [evio] " << path
+                  << "  events="  << total
+                  << "  +scaler=" << sc_added
+                  << "  +epics="  << ep_added
+                  << std::fixed
+                  << "  elapsed=" << std::setprecision(2) << elapsed_s << "s"
+                  << "  Q="       << std::setprecision(3) << rf.value_nC << "nC"
+                  << "  <lt>="    << std::setprecision(4) << avg_lt
+                  << "  <I>="     << std::setprecision(3) << avg_I << "nA"
+                  << std::defaultfloat << "\n";
+        ch.Close();
+    }
+    return true;
+}
+
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
 void print_usage(const char *argv0)
@@ -522,7 +567,8 @@ int main(int argc, char **argv)
         }
         std::cerr << "live_charge: " << evio_inputs.size()
                   << " EVIO file(s) — DAQ config " << daq_config << "\n";
-        if (!load_from_evio(evio_inputs, daq_cfg, scalers, epics_rows, max_events))
+        if (!load_from_evio(evio_inputs, daq_cfg, scalers, epics_rows,
+                            max_events, source, channel, beam_current))
             return 1;
     }
 
