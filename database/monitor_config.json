@@ -197,7 +197,7 @@
         "// Hard server-side guard. While false, auto-reports are saved": "",
         "// under local_save_dir but the curl --upload-file step is": "",
         "// skipped. Flip to true once the saved bodies look correct.": "",
-        "post_to_elog": false,
+        "post_to_elog": true,
         "// Required.  Each capture is mirrored under": "",
         "// <local_save_dir>/run_NNNNNN/ as report_<UTC>.xml + the PNG": "",
         "// attachments decoded out of the XML.  An aggregate": "",
