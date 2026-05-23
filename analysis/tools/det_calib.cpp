@@ -318,10 +318,10 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
     TH1F *vertex_gem[4], *center_gem_x[4], *center_gem_y[4];
     TH2F *center_gem[4], *hits_gem[4];
     for (int d = 0; d < 4; d++) {
-        vertex_gem[d]   = new TH1F(Form("vertex_gem%d",   d), Form("Moller vertex z GEM%d;Z (mm);Counts",    d), 1000, 5200, 6200);
+        vertex_gem[d]   = new TH1F(Form("vertex_gem%d",   d), Form("Moller vertex z GEM%d;Z (mm);Counts",    d), 500, 5200, 6200);
         center_gem[d]   = new TH2F(Form("center_gem%d",   d), Form("Moller center GEM%d;X (mm);Y (mm)",      d),  200, -100,  100, 200, -100, 100);
         center_gem_x[d] = new TH1F(Form("center_gem_x%d", d), Form("Moller center X GEM%d;X (mm);Counts",    d),  400,  -20,   20);
-        center_gem_y[d] = new TH1F(Form("center_gem_y%d", d), Form("Moller center Y GEM%d;Y (mm);Counts",    d),  320,  -20,   20);
+        center_gem_y[d] = new TH1F(Form("center_gem_y%d", d), Form("Moller center Y GEM%d;Y (mm);Counts",    d),  200,  -20,   20);
         hits_gem[d]     = new TH2F(Form("hits_gem%d",     d), Form("Moller hits GEM%d;X (mm);Y (mm)",        d),  400, -400,  400, 400, -400, 400);
     }
 
@@ -421,9 +421,9 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
     float gem_vertex_z[4], gem_center_x[4], gem_center_y[4];
     for (int d = 0; d < 4; d++) {
-        gem_vertex_z[d] = fitAndDraw(vertex_gem[d],   plot_dir + "/gem" + std::to_string(d) + "_vertex_z",  geo.gem_z[d],                  25.f);
-        gem_center_x[d] = fitAndDraw(center_gem_x[d], plot_dir + "/gem" + std::to_string(d) + "_center_x",  geo.gem_x[d] + GEM_shift_x[d],  0.3f);
-        gem_center_y[d] = fitAndDraw(center_gem_y[d], plot_dir + "/gem" + std::to_string(d) + "_center_y",  geo.gem_y[d] + GEM_shift_y[d],  1.0f);
+        gem_vertex_z[d] = fitAndDraw(vertex_gem[d],   plot_dir + "/gem" + std::to_string(d) + "_vertex_z",  geo.gem_z[d],                  50.f);
+        gem_center_x[d] = fitAndDraw(center_gem_x[d], plot_dir + "/gem" + std::to_string(d) + "_center_x",  geo.gem_x[d] + GEM_shift_x[d],  0.5f);
+        gem_center_y[d] = fitAndDraw(center_gem_y[d], plot_dir + "/gem" + std::to_string(d) + "_center_y",  geo.gem_y[d] + GEM_shift_y[d],  3.0f);
     }
 
     std::cerr << "HyCal vertex z: " << hycal_vertex_z << " mm  (survey: " << geo.hycal_z << " mm)\n";
