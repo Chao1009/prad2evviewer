@@ -453,8 +453,8 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
     std::cerr << "\n";
     std::cerr << " GEM positions (calibrated):\n";
     for (int d = 0; d < 4; d++) {
-        std::cerr << "   GEM " << d << ":  x = " << (geo.gem_x[d] + gem_center_x[d] + tx)
-                               << ",  y = " << (geo.gem_y[d] + gem_center_y[d] + ty)
+        std::cerr << "   GEM " << d << ":  x = " << (geo.gem_x[d] - gem_center_x[d] + tx)
+                               << ",  y = " << (geo.gem_y[d] - gem_center_y[d] + ty)
                                << ",  z = " << (gem_vertex_z[d]               + tz) << "\n";
     }
     std::cerr << "========================================\n";
