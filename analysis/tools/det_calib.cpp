@@ -435,6 +435,13 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         std::cerr << "GEM " << d << " center y: " << gem_center_y[d] << " mm  (survey: " << geo.gem_y[d] << " mm)\n";
     }
 
+    float target_delta_z[4];
+    for (int d = 0; d < 4; d++) {
+        target_delta_z[d] = geo.gem_z[d] - gem_vertex_z[d];
+        std::cerr << "target Z position from GEM\n";
+        std::cerr << "  GEM " << d << ": " << target_delta_z[d] << " mm\n";
+    }
+
     // --- summary in HyCal-center frame ---
     // geo.* positions are in beam-center frame (LoadRunConfig subtracted target).
     // HyCal is the reference: its x/y are 0 by definition in this frame.
@@ -450,6 +457,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
     std::cerr << " Beam center (calibrated):\n";
     std::cerr << "   x = " << (tx + hycal_center_x) << "\n";
     std::cerr << "   y = " << (ty + hycal_center_y) << "\n";
+    std::cerr << "   z = " << (target_delta_z[0]+target_delta_z[1] + target_delta_z[2] + target_delta_z[3]) / 4.0 << "\n";
     std::cerr << "\n";
     std::cerr << " GEM positions (calibrated):\n";
     for (int d = 0; d < 4; d++) {
