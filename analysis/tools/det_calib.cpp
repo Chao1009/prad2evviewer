@@ -336,8 +336,13 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         chain.GetEntry(i);
         if (i % 10000 == 0)
             std::cerr << "\r  Event: " << i << " / " << N << std::flush;
-
+        if (ev.n_clusters != 2) continue;
         if (ev.matchNum != 2) continue;
+        if (ev.cl_nblocks[0] < 3 || ev.cl_nblocks[1] < 3) continue;
+        if (ev.cl_x[0] < 20.75f * 2.5f && ev.cl_y[0] < 20.75f * 2.5f) continue;
+        if (ev.cl_x[1] < 20.75f * 2.5f && ev.cl_y[1] < 20.75f * 2.5f) continue;
+        if (ev.cl_x[0] > 20.75f * 16.f || ev.cl_y[0] > 20.75f * 16.f) continue;
+        if (ev.cl_x[1] > 20.75f * 16.f || ev.cl_y[1] > 20.75f * 16.f) continue;
 
         float Epair = ev.mHit_E[0] + ev.mHit_E[1];
         if (geo.Ebeam <= 0.f) {
@@ -351,7 +356,6 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
         float theta1 = atan2(std::sqrt(h_m.first.x*h_m.first.x + h_m.first.y*h_m.first.y), h_m.first.z) * 180.f / M_PI;
         float theta2 = atan2(std::sqrt(h_m.second.x*h_m.second.x + h_m.second.y*h_m.second.y), h_m.second.z) * 180.f / M_PI;
-        if (theta1 < 0.8f || theta2 < 0.8f) continue;
         if (!physics.isMoller_kinematic(theta1, h_m.first.E, theta2, h_m.second.E, geo.Ebeam, 0.035f))
             continue;
         if(fabs(physics.GetMollerPhiDiff(h_m)) > 10.f) continue;
