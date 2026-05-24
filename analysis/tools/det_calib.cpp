@@ -325,6 +325,8 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         hits_gem[d]     = new TH2F(Form("hits_gem%d",     d), Form("Moller hits GEM%d;X (mm);Y (mm)",        d),  400, -400,  400, 400, -400, 400);
     }
 
+    TH2F *E_theta = new TH2F("E_theta", "Moller E vs #theta;#theta (deg);E (MeV)", 120, 0, 6, int(geo.Ebeam)/2, 0, geo.Ebeam);
+
     MollerData hycal_mollers;
     MollerData gem_mollers[4];
 
@@ -359,6 +361,14 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         if (!physics.isMoller_kinematic(theta1, h_m.first.E, theta2, h_m.second.E, geo.Ebeam, 0.035f))
             continue;
         if(fabs(physics.GetMollerPhiDiff(h_m)) > 10.f) continue;
+
+        //add some scattering angle cuts for 0.7GeV
+        if(geo.Ebeam > 0.f && geo.Ebeam < 1000.f) {
+            if(theta1 < 1.5f || theta2 < 1.5f) continue;
+        }
+
+        E_theta->Fill(theta1, h_m.first.E);
+        E_theta->Fill(theta2, h_m.second.E);
 
         hycal_mollers.push_back(h_m);
         hits_hycal->Fill(h_m.first.x,  h_m.first.y);
@@ -476,6 +486,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
     // --- save histograms ---
     TFile outfile(output.c_str(), "RECREATE");
+    E_theta->Write();
     vertex_hycal->Write();   center_hycal->Write();
     center_hycal_x->Write(); center_hycal_y->Write();
     hits_hycal->Write();
