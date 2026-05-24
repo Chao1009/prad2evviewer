@@ -351,7 +351,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
         float theta1 = atan2(std::sqrt(h_m.first.x*h_m.first.x + h_m.first.y*h_m.first.y), h_m.first.z) * 180.f / M_PI;
         float theta2 = atan2(std::sqrt(h_m.second.x*h_m.second.x + h_m.second.y*h_m.second.y), h_m.second.z) * 180.f / M_PI;
-        if (theta1 < 0.9f || theta2 < 0.9f) continue;
+        if (theta1 < 0.8f || theta2 < 0.8f) continue;
         if (!physics.isMoller_kinematic(theta1, h_m.first.E, theta2, h_m.second.E, geo.Ebeam, 0.035f))
             continue;
         if(fabs(physics.GetMollerPhiDiff(h_m)) > 10.f) continue;
@@ -456,9 +456,9 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
     std::cerr << " HyCal z (calibrated):  " << (hycal_vertex_z + tz) << "\n";
     std::cerr << "\n";
     std::cerr << " Beam center (calibrated):\n";
-    std::cerr << "   x = " << (tx + hycal_center_x) << "\n";
-    std::cerr << "   y = " << (ty + hycal_center_y) << "\n";
-    std::cerr << "   z = " << (target_delta_z[0]+target_delta_z[1] + target_delta_z[2] + target_delta_z[3]) / 4.0 << "\n";
+    std::cerr << "   x = " << (tx + hycal_center_x) << "(" << tx << " + " << hycal_center_x << ")\n";
+    std::cerr << "   y = " << (ty + hycal_center_y) << "(" << ty << " + " << hycal_center_y << ")\n";
+    std::cerr << "   z = " << (target_delta_z[0]+target_delta_z[1] + target_delta_z[2] + target_delta_z[3]) / 4.0 << "(" << tz << ")\n";
     std::cerr << "\n";
     std::cerr << " GEM positions (calibrated):\n";
     for (int d = 0; d < 4; d++) {
