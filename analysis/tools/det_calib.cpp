@@ -351,6 +351,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
         float theta1 = atan2(std::sqrt(h_m.first.x*h_m.first.x + h_m.first.y*h_m.first.y), h_m.first.z) * 180.f / M_PI;
         float theta2 = atan2(std::sqrt(h_m.second.x*h_m.second.x + h_m.second.y*h_m.second.y), h_m.second.z) * 180.f / M_PI;
+        if (theta1 < 0.9f || theta2 < 0.9f) continue;
         if (!physics.isMoller_kinematic(theta1, h_m.first.E, theta2, h_m.second.E, geo.Ebeam, 0.035f))
             continue;
         if(fabs(physics.GetMollerPhiDiff(h_m)) > 10.f) continue;
