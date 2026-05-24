@@ -339,10 +339,10 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         if (ev.n_clusters != 2) continue;
         if (ev.matchNum != 2) continue;
         if (ev.cl_nblocks[0] < 3 || ev.cl_nblocks[1] < 3) continue;
-        if (ev.cl_x[0] < 20.75f * 2.5f && ev.cl_y[0] < 20.75f * 2.5f) continue;
-        if (ev.cl_x[1] < 20.75f * 2.5f && ev.cl_y[1] < 20.75f * 2.5f) continue;
-        if (ev.cl_x[0] > 20.75f * 16.f || ev.cl_y[0] > 20.75f * 16.f) continue;
-        if (ev.cl_x[1] > 20.75f * 16.f || ev.cl_y[1] > 20.75f * 16.f) continue;
+        if (fabs(ev.cl_x[0]) < 20.75f * 2.5f && fabs(ev.cl_y[0]) < 20.75f * 2.5f) continue;
+        if (fabs(ev.cl_x[1]) < 20.75f * 2.5f && fabs(ev.cl_y[1]) < 20.75f * 2.5f) continue;
+        if (fabs(ev.cl_x[0]) > 20.75f * 16.f || fabs(ev.cl_y[0]) > 20.75f * 16.f) continue;
+        if (fabs(ev.cl_x[1]) > 20.75f * 16.f || fabs(ev.cl_y[1]) > 20.75f * 16.f) continue;
 
         float Epair = ev.mHit_E[0] + ev.mHit_E[1];
         if (geo.Ebeam <= 0.f) {
