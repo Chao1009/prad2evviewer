@@ -397,6 +397,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
         vertex_hycal->Fill(physics.GetMollerZdistance(hycal_mollers[i], geo.Ebeam));
         if (i >= 1) {
             auto c = physics.GetMollerCenter(hycal_mollers[i-1], hycal_mollers[i]);
+            if(c[0] == c[1] && c[0] == 0.f) continue; // skip zero-center events (likely bad recon)
             center_hycal->Fill(c[0], c[1]);
             center_hycal_x->Fill(c[0]);
             center_hycal_y->Fill(c[1]);
@@ -409,6 +410,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
             vertex_gem[d]->Fill(physics.GetMollerZdistance(gem_mollers[d][i], geo.Ebeam));
             if (i >= 1) {
                 auto c = physics.GetMollerCenter(gem_mollers[d][i-1], gem_mollers[d][i]);
+                if(c[0] == c[1] && c[0] == 0.f) continue; // skip zero-center events (likely bad recon)
                 center_gem[d]->Fill(c[0], c[1]);
                 center_gem_x[d]->Fill(c[0]);
                 center_gem_y[d]->Fill(c[1]);
