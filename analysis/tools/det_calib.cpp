@@ -472,15 +472,20 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
     std::cerr << " HyCal z (calibrated):  " << (hycal_vertex_z + tz) << "\n";
     std::cerr << "\n";
     std::cerr << " Beam center (calibrated):\n";
-    std::cerr << "   x = " << (tx + hycal_center_x) << "(" << tx << " + " << hycal_center_x << ")\n";
-    std::cerr << "   y = " << (ty + hycal_center_y) << "(" << ty << " + " << hycal_center_y << ")\n";
-    std::cerr << "   z = " << (target_delta_z[0]+target_delta_z[1] + target_delta_z[2] + target_delta_z[3]) / 4.0 << "(" << tz << ")\n";
+    std::cerr << "   \"target\": [" << (tx + hycal_center_x)
+              << ", " << (ty + hycal_center_y)
+              << ", " << (target_delta_z[0]+target_delta_z[1]+target_delta_z[2]+target_delta_z[3]) / 4.0
+              << "]\n";
     std::cerr << "\n";
     std::cerr << " GEM positions (calibrated):\n";
     for (int d = 0; d < 4; d++) {
-        std::cerr << "   GEM " << d << ":  x = " << (geo.gem_x[d] - gem_center_x[d] + tx)
-                               << ",  y = " << (geo.gem_y[d] - gem_center_y[d] + ty)
-                               << ",  z = " << (gem_vertex_z[d]               + tz) << "\n";
+        std::cerr << "   {\"id\": " << d
+                  << ", \"position\": [" << (geo.gem_x[d] - gem_center_x[d] + tx)
+                  << ", " << (geo.gem_y[d] - gem_center_y[d] + ty)
+                  << ", " << (gem_vertex_z[d] + tz) << "]"
+                  << ", \"tilting\": [" << geo.gem_tilt_x[d]
+                  << ", " << geo.gem_tilt_y[d]
+                  << ", " << geo.gem_tilt_z[d] << "]}\n";
     }
     std::cerr << "========================================\n";
 
