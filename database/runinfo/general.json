@@ -24,14 +24,14 @@
         "calibration":   {"default_adc2mev": 0.12},
         "target":        [0.70, 1.83, 0.0],
         "hycal": {
-            "position":  [0.0, 0.0, 6282.75], "tilting":   [0.0, 0.0, 0.0]
+            "position":  [0.0, 0.0, 6280.0], "tilting":   [0.0, 0.0, 0.0]
         },
         "gem": {
             "detectors": [
-                {"id": 0, "position": [-228.175, -0.897637, 5820.48], "tilting": [180.0, 0.0,   0.0]},
-                {"id": 1, "position": [227.266, 0.296425, 5865.04], "tilting": [180.0, 0.0, 180.0]},
-                {"id": 2, "position": [-228.169, 0.444298, 5419.28], "tilting": [180.0, 0.0,   0.0]},
-                {"id": 3, "position": [227.443, 0.442964, 5466.75], "tilting": [180.0, 0.0, 180.0]}
+                {"id": 0, "position": [-228.302, -0.715504, 5817.97], "tilting": [180.0, 0.0,   0.0]},
+                {"id": 1, "position": [227.282, 0.276918, 5858.31], "tilting": [180.0, 0.0, 180.0]},
+                {"id": 2, "position": [-228.276, 0.561906, 5415.69], "tilting": [180.0, 0.0,   0.0]},
+                {"id": 3, "position": [227.371, 0.427827, 5461.12], "tilting": [180.0, 0.0, 180.0]}
             ]
         },
         "matching":      {"radius": 8.0, "use_square_cut": false}
@@ -90,9 +90,11 @@
     "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;":                                                   "",
     "// if a run has an entry here, it overrides the target_* fields for that run only.":                                                                                   "",
     "beam_target_positions": [
-        {"from_run": 24185, "target": [1.40699, 0.582474, 0.0]},
-	{"from_run": 24424, "target": [1.40699, 0.582474, 0.0]},
-	{"from_run": 24670, "target": [0.844334, 1.1635, 8.71]},
-	{"from_run": 24685, "target": [0.844334, 1.1635, 8.71]}
+        {"from_run": 24185, "target": [1.40699, 0.582474, -2.92]},
+	{"from_run": 24424, "target": [1.40699, 0.582474, -2.92]},
+	{"from_run": 24489, "target": [1.16005, 0.702111, 0.0]},
+	{"from_run": 24670, "target": [0.844334, 1.1635, 0]},
+	{"from_run": 24685, "target": [0.844334, 1.1635, 0]},
+	{"from_run": 24827, "target": [0.87584, 1.0391, -1.9]}
     ]
 }
