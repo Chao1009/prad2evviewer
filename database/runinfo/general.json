@@ -24,17 +24,17 @@
         "calibration":   {"default_adc2mev": 0.12},
         "target":        [0.70, 1.83, 0.0],
         "hycal": {
-            "position":  [0.0, 0.0, 6269.81], "tilting":   [0.0, 0.0, 0.0]
+            "position":  [0.0, 0.0, 6282.75], "tilting":   [0.0, 0.0, 0.0]
         },
         "gem": {
             "detectors": [
-                {"id": 0, "position": [-228.46, -0.37, 5817.0], "tilting": [180.0, 0.0,   0.0]},
-                {"id": 1, "position": [ 227.05, 0.43, 5853.8], "tilting": [180.0, 0.0, 180.0]},
-                {"id": 2, "position": [-228.4, 0.83, 5414.0], "tilting": [180.0, 0.0,   0.0]},
-                {"id": 3, "position": [ 227.23, 0.63, 5458.0], "tilting": [180.0, 0.0, 180.0]}
+                {"id": 0, "position": [-228.175, -0.897637, 5820.48], "tilting": [180.0, 0.0,   0.0]},
+                {"id": 1, "position": [227.266, 0.296425, 5865.04], "tilting": [180.0, 0.0, 180.0]},
+                {"id": 2, "position": [-228.169, 0.444298, 5419.28], "tilting": [180.0, 0.0,   0.0]},
+                {"id": 3, "position": [227.443, 0.442964, 5466.75], "tilting": [180.0, 0.0, 180.0]}
             ]
         },
-        "matching":      {"radius": 15.0, "use_square_cut": true}
+        "matching":      {"radius": 8.0, "use_square_cut": false}
     },
 
     "configurations": [
@@ -90,6 +90,9 @@
     "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;":                                                   "",
     "// if a run has an entry here, it overrides the target_* fields for that run only.":                                                                                   "",
     "beam_target_positions": [
-        {"from_run": 0, "target": [0.70, 1.83, 0.0]}
+        {"from_run": 24185, "target": [1.40699, 0.582474, 0.0]},
+	{"from_run": 24424, "target": [1.40699, 0.582474, 0.0]},
+	{"from_run": 24670, "target": [0.844334, 1.1635, 8.71]},
+	{"from_run": 24685, "target": [0.844334, 1.1635, 8.71]}
     ]
 }
