@@ -70,7 +70,7 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
                             float HyCal_shift_x, float HyCal_shift_y,
                             const float GEM_shift_x[4], const float GEM_shift_y[4]);
 static float fitAndDraw(TH1F *hist, const std::string &out_path,
-                        float survey_position, float fit_range = 4.f);
+                        float survey_position);
 
 // ── file helpers ──────────────────────────────────────────────────────────
 static std::vector<std::string> collectEvioFiles(const std::string &path)
@@ -432,15 +432,15 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 
     // --- fit and print results ---
     std::string plot_dir = "Poscalib_result/" + run_str;
-    float hycal_vertex_z = fitAndDraw(vertex_hycal,   plot_dir + "/hycal_vertex_z",  geo.hycal_z,              100.f);
-    float hycal_center_x = fitAndDraw(center_hycal_x, plot_dir + "/hycal_center_x",  geo.hycal_x + HyCal_shift_x, 2.f);
-    float hycal_center_y = fitAndDraw(center_hycal_y, plot_dir + "/hycal_center_y",  geo.hycal_y + HyCal_shift_y, 2.f);
+    float hycal_vertex_z = fitAndDraw(vertex_hycal,   plot_dir + "/hycal_vertex_z",  geo.hycal_z);
+    float hycal_center_x = fitAndDraw(center_hycal_x, plot_dir + "/hycal_center_x",  geo.hycal_x + HyCal_shift_x);
+    float hycal_center_y = fitAndDraw(center_hycal_y, plot_dir + "/hycal_center_y",  geo.hycal_y + HyCal_shift_y);
 
     float gem_vertex_z[4], gem_center_x[4], gem_center_y[4];
     for (int d = 0; d < 4; d++) {
-        gem_vertex_z[d] = fitAndDraw(vertex_gem[d],   plot_dir + "/gem" + std::to_string(d) + "_vertex_z",  geo.gem_z[d],                  50.f);
-        gem_center_x[d] = fitAndDraw(center_gem_x[d], plot_dir + "/gem" + std::to_string(d) + "_center_x",  geo.gem_x[d] + GEM_shift_x[d],  0.5f);
-        gem_center_y[d] = fitAndDraw(center_gem_y[d], plot_dir + "/gem" + std::to_string(d) + "_center_y",  geo.gem_y[d] + GEM_shift_y[d],  4.5f);
+        gem_vertex_z[d] = fitAndDraw(vertex_gem[d],   plot_dir + "/gem" + std::to_string(d) + "_vertex_z",  geo.gem_z[d]);
+        gem_center_x[d] = fitAndDraw(center_gem_x[d], plot_dir + "/gem" + std::to_string(d) + "_center_x",  geo.gem_x[d] + GEM_shift_x[d]);
+        gem_center_y[d] = fitAndDraw(center_gem_y[d], plot_dir + "/gem" + std::to_string(d) + "_center_y",  geo.gem_y[d] + GEM_shift_y[d]);
     }
 
     std::cerr << "HyCal vertex z: " << hycal_vertex_z << " mm  (survey: " << geo.hycal_z << " mm)\n";
@@ -500,12 +500,44 @@ static void analyzeMollers(const std::vector<std::string> &recon_files,
 }
 
 // ── fitAndDraw ────────────────────────────────────────────────────────────
+// Fit range is determined automatically from the half-maximum (50%) points:
+// scan outward from the peak bin to find the FWHM, then fit ± 1.5 * HWHM.
 static float fitAndDraw(TH1F *hist, const std::string &out_path,
-                        float survey_position, float fit_range)
+                        float survey_position)
 {
     TCanvas c("", "", 800, 600);
-    float mean = hist->GetBinCenter(hist->GetMaximumBin());
-    hist->Fit("gaus", "rq", "", mean - fit_range, mean + fit_range);
+
+    int    peak_bin = hist->GetMaximumBin();
+    double peak_x   = hist->GetBinCenter(peak_bin);
+    double peak_val = hist->GetMaximum();
+    double half_max = peak_val * 0.5;
+    int    nb       = hist->GetNbinsX();
+
+    // scan left of peak for half-maximum crossing
+    double lo_x = hist->GetBinCenter(1);
+    for (int b = peak_bin - 1; b >= 1; --b) {
+        if (hist->GetBinContent(b) <= half_max) {
+            lo_x = hist->GetBinCenter(b);
+            break;
+        }
+    }
+    // scan right of peak for half-maximum crossing
+    double hi_x = hist->GetBinCenter(nb);
+    for (int b = peak_bin + 1; b <= nb; ++b) {
+        if (hist->GetBinContent(b) <= half_max) {
+            hi_x = hist->GetBinCenter(b);
+            break;
+        }
+    }
+
+    // half-width at half-maximum; guard against degenerate (flat/empty) histograms
+    double hwhm = 0.5 * (hi_x - lo_x);
+    if (hwhm < hist->GetBinWidth(1)) hwhm = hist->GetBinWidth(1);
+
+    double fit_lo = peak_x - 1. * hwhm;
+    double fit_hi = peak_x + 1. * hwhm;
+
+    hist->Fit("gaus", "rq", "", fit_lo, fit_hi);
     hist->Draw();
     TLatex latex;
     latex.SetNDC();
@@ -515,8 +547,9 @@ static float fitAndDraw(TH1F *hist, const std::string &out_path,
         latex.DrawLatex(0.15, 0.85, Form("%.2f mm +- %.2f mm",
                                           gf->GetParameter(1), gf->GetParError(1)));
         latex.DrawLatex(0.15, 0.80, Form("Survey position: %.2f mm", survey_position));
+        latex.DrawLatex(0.15, 0.75, Form("FWHM: %.2f mm", 2.0 * hwhm));
     }
     fs::create_directories(fs::path(out_path).parent_path());
     c.SaveAs((out_path + ".png").c_str());
-    return gf ? gf->GetParameter(1) : mean;
+    return gf ? gf->GetParameter(1) : static_cast<float>(peak_x);
 }
