@@ -138,8 +138,8 @@ int main(int argc, char *argv[]){
         float sigma_ee_0p7 = resolution * e_e_exp_0p7 / sqrt(e_e_exp_0p7/1000.f);
         // Use TSpectrum to find peak nearest to expected energy, then fit Gaussian
         auto findPeak = [](TH1F *h, double Eexp, double sigma) -> float {
-            TSpectrum spec(3);
-            spec.Search(h, 4, "nobackground nodraw", 0.2);
+            TSpectrum spec(5);
+            spec.Search(h, 3, "nobackground nodraw", 0.05);
             int nfound = spec.GetNPeaks();
             double center = Eexp;
             if (nfound > 0) {
