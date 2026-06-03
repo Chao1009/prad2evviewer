@@ -10,6 +10,7 @@
 #include <TTree.h>
 #include <TH1F.h>
 #include <TF1.h>
+#include <TSpectrum.h>
 #include <TGraph.h>
 #include <TLine.h>
 #include <TCanvas.h>
@@ -134,22 +135,31 @@ int main(int argc, char *argv[]){
         float sigma_ee_3p5 = resolution * e_e_exp_3p5 / sqrt(e_e_exp_3p5/1000.f);
         float sigma_ep_0p7 = resolution * e_p_exp_0p7 / sqrt(e_p_exp_0p7/1000.f);
         float sigma_ee_0p7 = resolution * e_e_exp_0p7 / sqrt(e_e_exp_0p7/1000.f);
-        // Fit the energy spectrum with a Gaussian to find the peak position
-        TF1 gaus("gaus", "gaus", e_p_exp_3p5 - 2.*sigma_ep_3p5, e_p_exp_3p5 + 2.*sigma_ep_3p5);
-        hist_3p5->Fit(&gaus,"RQ0");
-        float peak_ep_3p5 = gaus.GetParameter(1);
-        
-        gaus.SetRange(e_e_exp_3p5 - 1.6*sigma_ee_3p5, e_e_exp_3p5 + 1.6*sigma_ee_3p5);
-        hist_3p5->Fit(&gaus,"RQ0");
-        float peak_ee_3p5 = gaus.GetParameter(1);
+        // Use TSpectrum to find peak nearest to expected energy, then fit Gaussian
+        auto findPeak = [](TH1F *h, double Eexp, double sigma) -> float {
+            TSpectrum spec(3);
+            spec.Search(h, 4, "nobackground nodraw", 0.2);
+            int nfound = spec.GetNPeaks();
+            double center = Eexp;
+            if (nfound > 0) {
+                const double *xpeaks = spec.GetPositionX();
+                double best_dist = std::abs(xpeaks[0] - Eexp);
+                center = xpeaks[0];
+                for (int k = 1; k < nfound; ++k) {
+                    double dist = std::abs(xpeaks[k] - Eexp);
+                    if (dist < best_dist) { best_dist = dist; center = xpeaks[k]; }
+                }
+            }
+            TF1 gfit("_gfit_", "gaus", center - 1.5*sigma, center + 1.5*sigma);
+            gfit.SetParameters(h->GetBinContent(h->FindBin(center)), center, sigma);
+            h->Fit(&gfit, "RQ0");
+            return static_cast<float>(gfit.GetParameter(1));
+        };
 
-        gaus.SetRange(e_p_exp_0p7 - 1.6*sigma_ep_0p7, e_p_exp_0p7 + 1.6*sigma_ep_0p7);
-        hist_0p7->Fit(&gaus,"RQ0");
-        float peak_ep_0p7 = gaus.GetParameter(1);
-
-        gaus.SetRange(e_e_exp_0p7 - 1.6*sigma_ee_0p7, e_e_exp_0p7 + 1.6*sigma_ee_0p7);
-        hist_0p7->Fit(&gaus,"RQ0");
-        float peak_ee_0p7 = gaus.GetParameter(1);
+        float peak_ep_3p5 = findPeak(hist_3p5, e_p_exp_3p5, sigma_ep_3p5);
+        float peak_ee_3p5 = findPeak(hist_3p5, e_e_exp_3p5, sigma_ee_3p5);
+        float peak_ep_0p7 = findPeak(hist_0p7, e_p_exp_0p7, sigma_ep_0p7);
+        float peak_ee_0p7 = findPeak(hist_0p7, e_e_exp_0p7, sigma_ee_0p7);
 
         // make a canvas, measured E vs expected E, and save to output file
         TCanvas *c = new TCanvas(Form("c_mod%d", mod_id), Form("Module %d Non-linearity", mod_id), 800, 600);
@@ -205,7 +215,7 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
             float Eexp = physics.ExpectedEnergy(theta, Ebeam, "ep");
             float energy = ev.cl_energy[0];
-            if(std::abs(energy - Eexp) < 3. * resolution * Eexp / sqrt(Eexp/1000.f)) {
+            if(std::abs(energy - Eexp) < 4. * resolution * Eexp / sqrt(Eexp/1000.f)) {
                 energy_hists[mod_id]->Fill(energy);
             }
         }
@@ -223,7 +233,7 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
 
             float energy = ev.cl_energy[j];
 
-            if(std::abs(energy - Eexp) < 3. * resolution * Eexp / sqrt(Eexp/1000.f))
+            if(std::abs(energy - Eexp) < 5. * resolution * Eexp / sqrt(Eexp/1000.f))
                 energy_hists[mod_id]->Fill(energy);
         }
     }
