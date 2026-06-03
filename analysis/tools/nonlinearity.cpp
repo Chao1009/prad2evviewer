@@ -144,9 +144,9 @@ int main(int argc, char *argv[]){
             double center = Eexp;
             if (nfound > 0) {
                 const double *xpeaks = spec.GetPositionX();
-                double best_dist = std::abs(xpeaks[0] - Eexp);
-                center = xpeaks[0];
-                for (int k = 1; k < nfound; ++k) {
+                double best_dist = 9999999.;
+                for (int k = 0; k < nfound; ++k) {
+                    if(xpeaks[k] < Eexp - 3*sigma || xpeaks[k] > Eexp + 3*sigma) continue;
                     double dist = std::abs(xpeaks[k] - Eexp);
                     if (dist < best_dist) { best_dist = dist; center = xpeaks[k]; }
                 }
