@@ -111,6 +111,8 @@ int main(int argc, char *argv[]){
     prad2::SetReconReadBranches(tree2, ev2);
     process_event(tree2, ev2, hycal, energy_hists_0p7, physics, 729.f, max_events);
 
+    TH1F *h_energy_peak_3p5 = new TH1F("h_energy_peak_3p5", "Energy Peak Distribution;Energy (MeV);Counts", 4000, 0, 4000);
+
     // calculate non-linearity module by module and save to output file
     TFile outFile(output.empty() ? "nonlinearity_results.root" : output.c_str(), "RECREATE");
     for (int i = 0; i < hycal.module_count(); i++) {
@@ -168,6 +170,8 @@ int main(int argc, char *argv[]){
         float peak_ep_0p7 = findPeak(hist_0p7, e_p_exp_0p7, sigma_ep_0p7);
         float peak_ee_0p7 = findPeak(hist_0p7, e_e_exp_0p7, sigma_ee_0p7);
 
+        h_energy_peak_3p5->Fill(peak_ep_3p5);
+
         // make a canvas, measured E vs expected E, and save to output file
         TCanvas *c = new TCanvas(Form("c_mod%d", mod_id), Form("Module %d Non-linearity", mod_id), 800, 600);
         c->SetGrid();
@@ -220,7 +224,7 @@ int main(int argc, char *argv[]){
         delete c;
         delete g;
     }
-
+    h_energy_peak_3p5->Write();
     std::cout << "Results saved to " << outFile.GetName() << "\n";
     outFile.Close();
 
