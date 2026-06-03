@@ -139,15 +139,15 @@ int main(int argc, char *argv[]){
         hist_3p5->Fit(&gaus,"RQ0");
         float peak_ep_3p5 = gaus.GetParameter(1);
         
-        gaus.SetRange(e_e_exp_3p5 - 2.*sigma_ee_3p5, e_e_exp_3p5 + 2.*sigma_ee_3p5);
+        gaus.SetRange(e_e_exp_3p5 - 1.6*sigma_ee_3p5, e_e_exp_3p5 + 1.6*sigma_ee_3p5);
         hist_3p5->Fit(&gaus,"RQ0");
         float peak_ee_3p5 = gaus.GetParameter(1);
 
-        gaus.SetRange(e_p_exp_0p7 - 2.*sigma_ep_0p7, e_p_exp_0p7 + 2.*sigma_ep_0p7);
+        gaus.SetRange(e_p_exp_0p7 - 1.6*sigma_ep_0p7, e_p_exp_0p7 + 1.6*sigma_ep_0p7);
         hist_0p7->Fit(&gaus,"RQ0");
         float peak_ep_0p7 = gaus.GetParameter(1);
 
-        gaus.SetRange(e_e_exp_0p7 - 2.*sigma_ee_0p7, e_e_exp_0p7 + 2.*sigma_ee_0p7);
+        gaus.SetRange(e_e_exp_0p7 - 1.6*sigma_ee_0p7, e_e_exp_0p7 + 1.6*sigma_ee_0p7);
         hist_0p7->Fit(&gaus,"RQ0");
         float peak_ee_0p7 = gaus.GetParameter(1);
 
@@ -218,6 +218,8 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
             
             float Eexp = physics.ExpectedEnergy(theta, Ebeam, "ee");
+
+            if(Ebeam - Eexp < 3. * Ebeam*resolution/sqrt(Ebeam/1000.f)) continue; // skip if expected energy is too close to beam energy (likely e-p events)
 
             float energy = ev.cl_energy[j];
 
