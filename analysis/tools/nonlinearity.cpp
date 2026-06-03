@@ -196,7 +196,6 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             break;
         }
 
-        //e-p events selection
         if ( ev.n_clusters == 1) {
             int mod_id = ev.cl_center[0];
             if ( ev.cl_nblocks[0] < 4) continue;
@@ -210,31 +209,20 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
                 energy_hists[mod_id]->Fill(energy);
             }
         }
-        else if ( ev.n_clusters == 2) {
-            int mod_id1 = ev.cl_center[0];
-            int mod_id2 = ev.cl_center[1];
-            float energy1 = ev.cl_energy[0];
-            float energy2 = ev.cl_energy[1];
-            auto mod1 = hycal.module_by_id(mod_id1);
-            auto mod2 = hycal.module_by_id(mod_id2);
-            if ( !mod1 || !mod1->is_pwo4() || !mod2 || !mod2->is_pwo4()) continue; // only look at PbWO4 crystals
-            float x1 = mod1->x, y1 = mod1->y, z1 = ev.cl_z[0];
-            float x2 = mod2->x, y2 = mod2->y, z2 = ev.cl_z[1];
-            float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
-            float theta2 = std::atan2(std::sqrt(x2*x2 + y2*y2), z2) * 180.f / M_PI;
-            float phi1 = physics.GetPhiAngle(x1, y1);
-            float phi2 = physics.GetPhiAngle(x2, y2);
-            float Eexp1 = physics.ExpectedEnergy(theta1, Ebeam, "ee");
-            float Eexp2 = physics.ExpectedEnergy(theta2, Ebeam, "ee");
+        for( int j = 0; j < ev.n_clusters; j++) {
+            int mod_id = ev.cl_center[j];
+            if (ev.cl_nblocks[j] < 3) continue;
+            auto mod = hycal.module_by_id(mod_id);
+            if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
+            float x = mod->x, y = mod->y, z = ev.cl_z[j];
+            float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
+            
+            float Eexp = physics.ExpectedEnergy(theta, Ebeam, "ee");
 
-            if(std::abs(energy1 + energy2 - Ebeam) > 4. * resolution * Ebeam / sqrt(Ebeam/1000.f)) continue;
-            if(std::abs(energy1 - Eexp1) > 3. * resolution * Eexp1 / sqrt(Eexp1/1000.f)) continue;
-            if(std::abs(energy2 - Eexp2) > 3. * resolution * Eexp2 / sqrt(Eexp2/1000.f)) continue;
-            if ( std::abs(fabs(phi1 - phi2) - 180.f) > 10.f ) continue; // expect back-to-back in phi
+            float energy = ev.cl_energy[j];
 
-            // if passed all the cuts, fill the 2D histogram for energy
-            energy_hists[mod_id1]->Fill(energy1);
-            energy_hists[mod_id2]->Fill(energy2);
+            if(std::abs(energy - Eexp) < 3. * resolution * Eexp / sqrt(Eexp/1000.f))
+                energy_hists[mod_id]->Fill(energy);
         }
     }
 }
