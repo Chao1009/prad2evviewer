@@ -13,6 +13,7 @@
 #include <TSpectrum.h>
 #include <TGraph.h>
 #include <TLine.h>
+#include <TLatex.h>
 #include <TCanvas.h>
 #include <TString.h>
 #include <TSystem.h>
@@ -182,7 +183,33 @@ int main(int argc, char *argv[]){
         ref->SetLineStyle(2);
         ref->Draw();
 
+        //fitting use 1st order polynomial, anchored at the 3.5 GeV e-p point
+        // f(x) = peak_ep_3p5 + slope * (x - e_p_exp_3p5)
+        TF1 *fitLine = new TF1("fitLine",
+            [](double *x, double *p){ return p[2] + p[0] * (x[0] - p[1]); },
+            xmin, xmax, 3);
+        fitLine->SetParameter(0, 1.0);
+        fitLine->FixParameter(1, e_p_exp_3p5);
+        fitLine->FixParameter(2, peak_ep_3p5);
+        fitLine->SetLineColor(kBlue);
+        fitLine->SetLineWidth(2);
+        g->Fit(fitLine, "Q");
+        fitLine->Draw("same");
+
+        // draw fit formula and result on the canvas
+        double slope = fitLine->GetParameter(0);
+        double slope_err = fitLine->GetParError(0);
+        TLatex *tex = new TLatex();
+        tex->SetNDC();
+        tex->SetTextSize(0.035);
+        tex->DrawLatex(0.15, 0.82, Form("f(x) = peak_{ep,3.5} + slope #times (x - E_{ep,3.5})"));
+        tex->DrawLatex(0.15, 0.76, Form("slope = %.4f #pm %.4f", slope, slope_err));
+        tex->DrawLatex(0.15, 0.70, Form("E_{ep,3.5} = %.1f MeV,  peak = %.1f MeV",
+                                         (double)e_p_exp_3p5, (double)peak_ep_3p5));
+
         c->Write();
+        delete tex;
+        delete fitLine;
         delete ref;
         delete c;
         delete g;
