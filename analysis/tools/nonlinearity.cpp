@@ -93,7 +93,7 @@ int main(int argc, char *argv[]){
     EventVars_Recon ev;
     prad2::SetReconReadBranches(tree, ev);
 
-    process_event(tree, ev, hycal, energy_hists_3p5, physics, 3485.f);
+    process_event(tree, ev, hycal, energy_hists_3p5, physics, 3485.f, max_events);
 
     // --- repeat for 0.7 GeV data ---
     TChain *chain2 = new TChain("recon");
@@ -189,7 +189,7 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
     for (int i = 0; i < tree->GetEntries(); i++) {
         tree->GetEntry(i);
         if( i % 1000 == 0) {
-            std::cerr << "Processing event " << i << "/" << tree->GetEntries() << "\n";
+            std::cerr << "Processing event " << i << "/" << tree->GetEntries() << "\r" << std::flush;
         }
         if (max_events > 0 && i >= max_events) {
             std::cerr << "Reached max events limit: " << max_events << "\n";
