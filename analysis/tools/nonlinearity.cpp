@@ -153,7 +153,13 @@ int main(int argc, char *argv[]){
             }
             TF1 gfit("_gfit_", "gaus", center - 1.5*sigma, center + 1.5*sigma);
             gfit.SetParameters(h->GetBinContent(h->FindBin(center)), center, sigma);
-            h->Fit(&gfit, "RQ0");
+            h->Fit(&gfit, "RQ0", "", center - 1.5*sigma, center + 1.5*sigma);
+            if (gfit.GetNDF() > 0) {
+                double chi2 = gfit.GetChisquare() / gfit.GetNDF();
+                if (chi2 > 5.) {
+                    std::cerr << "Warning: poor fit quality (chi2/ndf=" << chi2 << ") for peak at " << center << " MeV\n";
+                }
+            }
             return static_cast<float>(gfit.GetParameter(1));
         };
 
