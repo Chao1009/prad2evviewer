@@ -37,7 +37,7 @@ using EventVars_Recon = prad2::ReconEventData;
 
 static std::vector<std::string> collectRootFiles(const std::string &path);
 void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal, 
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam);
+    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1);
 
 float resolution = 0.035; // pre-defined energy resolution
 
@@ -107,7 +107,7 @@ int main(int argc, char *argv[]){
 
     EventVars_Recon ev2;
     prad2::SetReconReadBranches(tree2, ev2);
-    process_event(tree2, ev2, hycal, energy_hists_0p7, physics, 729.f);
+    process_event(tree2, ev2, hycal, energy_hists_0p7, physics, 729.f, max_events);
 
     // calculate non-linearity module by module and save to output file
     TFile outFile(output.empty() ? "nonlinearity_results.root" : output.c_str(), "RECREATE");
@@ -184,12 +184,16 @@ int main(int argc, char *argv[]){
 }
 
 void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal, 
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam)
+    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events)
 {   
     for (int i = 0; i < tree->GetEntries(); i++) {
         tree->GetEntry(i);
         if( i % 1000 == 0) {
             std::cerr << "Processing event " << i << "/" << tree->GetEntries() << "\n";
+        }
+        if (max_events > 0 && i >= max_events) {
+            std::cerr << "Reached max events limit: " << max_events << "\n";
+            break;
         }
 
         //e-p events selection
