@@ -122,6 +122,11 @@ int main(int argc, char *argv[]){
     prad2::SetReconReadBranches(tree2, ev2);
     process_event(tree2, ev2, hycal, energy_hists_0p7, physics, 729.f, max_events);
 
+    std::string calib_file = dbDir + "/" + "calibration/calibration_factor_3p5_June1.json";
+    int nmatched = hycal.LoadCalibration(calib_file);
+    if (nmatched >= 0)
+        std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
+
     TH1F *h_energy_peak_3p5 = new TH1F("h_energy_peak_3p5", "Energy Peak Distribution;Energy (MeV);Counts", 4000, 0, 4000);
 
     // calculate non-linearity module by module and save to output file
@@ -371,10 +376,18 @@ int main(int argc, char *argv[]){
         delete ref;
         delete c;
         delete g;
+
+        // outermost ring or absorber/beam-hole region: no non-linearity correction
+        bool is_outer    = (mod.row == 1-1 || mod.row == 34-1 || mod.column == 1-1 || mod.column == 34-1);
+        bool is_absorber = (mod.row >= 16-1 && mod.row <= 19-1 && mod.column >= 16-1 && mod.column <= 19-1);
+        if (is_outer || is_absorber) nl = 0.0;
+        hycal.SetCalibNonLinearity(mod_id, nl);
     }
     h_energy_peak_3p5->Write();
     std::cout << "Results saved to " << outFile.GetName() << "\n";
     outFile.Close();
+
+    hycal.PrintCalibConstants("new_calibration_NonLinearity.json");
 
 }
 
