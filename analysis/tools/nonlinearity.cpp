@@ -10,7 +10,6 @@
 #include <TTree.h>
 #include <TH1F.h>
 #include <TF1.h>
-#include <TSpectrum.h>
 #include <TGraph.h>
 #include <TLine.h>
 #include <TLatex.h>
@@ -18,6 +17,8 @@
 #include <TString.h>
 #include <TSystem.h>
 #include <TChain.h>
+#include <TMarker.h>
+#include <TLegend.h>
 
 #include <iostream>
 #include <string>
@@ -42,6 +43,14 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
     std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1);
 
 float resolution = 0.035; // pre-defined energy resolution
+
+bool Vetoed(float cl_time, float sci_time, float sci_int){
+    // Simple veto logic: if the cluster time is within a certain window of the scintillator time, and the scintillator signal is above a threshold, we consider it a vetoed event.
+    const float time_shift = 35.f; // ns
+    const float time_window = 7.f; // ns
+    const float int_threshold = 2000.f; // arbitrary units
+    return (fabs(cl_time - sci_time - time_shift) < time_window) && (sci_int > int_threshold);
+}
 
 int main(int argc, char *argv[]){
 
@@ -142,34 +151,62 @@ int main(int argc, char *argv[]){
         float sigma_ep_0p7 = resolution * e_p_exp_0p7 / sqrt(e_p_exp_0p7/1000.f);
         float sigma_ee_0p7 = resolution * e_e_exp_0p7 / sqrt(e_e_exp_0p7/1000.f);
 
-        // Find peak with TSpectrum, fit Gaussian, draw fit on current pad, return peak center.
-        // Must be called after hist->Draw() with the target pad cd()'d.
         int _fit_uid = mod_id * 10;
-        auto fitPeakAndDraw = [&_fit_uid](TH1F *h, double Eexp, double sigma, int color) -> float {
+
+        // Centroid-based Gaussian fit in [Eexp±3σ]:
+        // weighted-average centroid → initial mean; walk from peak bin to 50% height for fit range.
+        auto fitPeakAndDraw = [&](TH1F *h, double Eexp, double sigma, int color) -> float {
             ++_fit_uid;
-            TSpectrum spec(5);
-            spec.Search(h, 4, "nobackground nodraw", 0.03);
-            int nfound = spec.GetNPeaks();
-            int n_in_window = 0;
-            double center = 0.;
-            if (nfound > 0) {
-                const double *xpeaks = spec.GetPositionX();
-                for (int k = 0; k < nfound; ++k) {
-                    if (xpeaks[k] >= Eexp - 4*sigma && xpeaks[k] <= Eexp + 4*sigma) {
-                        ++n_in_window;
-                        center = xpeaks[k];
-                    }
-                }
+            int b0 = std::max(1, h->FindBin(Eexp - 3.*sigma));
+            int b1 = std::min(h->GetNbinsX(), h->FindBin(Eexp + 3.*sigma));
+            double ypad_min = 0;
+            double ypad = h->GetMaximum() * 1.2;
+            // search-window: dashed, full y-axis height
+            TLine *wl = new TLine(Eexp - 3.*sigma, ypad_min, Eexp - 3.*sigma, ypad);
+            wl->SetLineColor(6); wl->SetLineStyle(7); wl->SetLineWidth(2); wl->Draw();
+            TLine *wr = new TLine(Eexp + 3.*sigma, ypad_min, Eexp + 3.*sigma, ypad);
+            wr->SetLineColor(6); wr->SetLineStyle(7); wr->SetLineWidth(2); wr->Draw();
+            // weighted centroid as initial mean
+            double wsum = 0., wpos = 0.;
+            for (int ib = b0; ib <= b1; ++ib) {
+                double c = h->GetBinContent(ib);
+                if (c > 0.) { wsum += c; wpos += c * h->GetBinCenter(ib); }
             }
-            if (n_in_window != 1) return 0.f;
-            TF1 *gfit = new TF1(Form("_gfit_%d", _fit_uid), "gaus",
-                center - 2.*sigma, center + 2.*sigma);
-            gfit->SetParameters(h->GetBinContent(h->FindBin(center)), center, sigma);
-            h->Fit(gfit, "RQ0", "", center - 2.*sigma, center + 2.*sigma);
-            gfit->SetLineColor(color);
-            gfit->SetLineWidth(2);
-            gfit->Draw("same");
-            return static_cast<float>(gfit->GetParameter(1));
+            if (wsum <= 0.) return 0.f;
+            double center = wpos / wsum;
+            // find peak bin (max content) in window
+            int pb = b0;
+            double ph = 0.;
+            for (int ib = b0; ib <= b1; ++ib)
+                if (h->GetBinContent(ib) > ph) { ph = h->GetBinContent(ib); pb = ib; }
+            if (ph <= 0.) return 0.f;
+            // walk from peak bin to 50% threshold for fit range
+            double thr = 0.2 * ph;
+            int lo = pb, hi = pb;
+            while (lo > b0 && h->GetBinContent(lo - 1) > thr) --lo;
+            while (hi < b1 && h->GetBinContent(hi + 1) > thr) ++hi;
+            double fl = h->GetBinLowEdge(lo);
+            double fh = h->GetBinLowEdge(hi + 1);
+            if (fh - fl < 2. * h->GetBinWidth(pb)) return 0.f;
+            // fit-range bracket: solid verticals + dotted cap at 14% pad height
+            double bkh = ypad;
+            TLine *bkl = new TLine(fl, 0., fl, bkh);
+            bkl->SetLineColor(color); bkl->SetLineWidth(2); bkl->Draw();
+            TLine *bkr = new TLine(fh, 0., fh, bkh);
+            bkr->SetLineColor(color); bkr->SetLineWidth(2); bkr->Draw();
+            TLine *bkc = new TLine(fl, bkh, fh, bkh);
+            bkc->SetLineColor(color); bkc->SetLineWidth(1); bkc->SetLineStyle(3); bkc->Draw();
+            // Gaussian fit
+            TF1 *g = new TF1(Form("_gfit_%d", _fit_uid), "gaus", fl, fh);
+            g->SetParameters(ph, center, (fh - fl) / 4.);
+            h->Fit(g, "RQ0", "", fl, fh);
+            g->SetLineColor(color); g->SetLineWidth(3); g->Draw("same");
+            // draw a marker at the fitted center, at Gaussian peak height
+            double fit_mean = center;
+            double fit_amp  = g->GetParameter(0);
+            TMarker *mk = new TMarker(fit_mean, fit_amp, 29); // star symbol
+            mk->SetMarkerColor(color); mk->SetMarkerSize(2.5); mk->Draw();
+            return static_cast<float>(fit_mean);
         };
 
         // --- Draw both beam-energy histograms on a two-pad canvas, save PNG ---
@@ -214,10 +251,11 @@ int main(int argc, char *argv[]){
         hist_0p7->SetLineWidth(2);
         hist_0p7->SetStats(0);
         hist_0p7->Draw("HIST");
-        float peak_ep_0p7 = fitPeakAndDraw(hist_0p7, e_p_exp_0p7, sigma_ep_0p7, kRed);
-        float peak_ee_0p7 = 0.f;
-        if(729. - e_e_exp_0p7 > 6. * 729.*resolution/sqrt(729./1000.f))
+        float peak_ep_0p7 = 0.f, peak_ee_0p7 = 0.f;
+        peak_ep_0p7 = fitPeakAndDraw(hist_0p7, e_p_exp_0p7, sigma_ep_0p7, kRed);
+        if (std::abs(e_p_exp_0p7 - e_e_exp_0p7) > 170.f) {
             peak_ee_0p7 = fitPeakAndDraw(hist_0p7, e_e_exp_0p7, sigma_ee_0p7, kBlue);
+        }
         {
             TLatex lat;
             lat.SetNDC(); lat.SetTextSize(0.050);
@@ -247,14 +285,19 @@ int main(int argc, char *argv[]){
         auto addPoint = [&](double Eexp, float peak) {
             if (peak != 0.f) g->SetPoint(np++, Eexp, peak);
         };
+        float scale = e_p_exp_3p5 / peak_ep_3p5;
+        peak_ep_3p5 *= scale; // convert to GeV for fitting
+        peak_ee_3p5 *= scale;
+        peak_ep_0p7 *= scale;
+        peak_ee_0p7 *= scale;
         addPoint(e_p_exp_3p5, peak_ep_3p5);
         addPoint(e_e_exp_3p5, peak_ee_3p5);
         addPoint(e_p_exp_0p7, peak_ep_0p7);
-        if(729. - e_e_exp_0p7 > 6. * 729.*resolution/sqrt(729./1000.f)) 
+        //if(729. - e_e_exp_0p7 > 6. * 729.*resolution/sqrt(729./1000.f)) 
             addPoint(e_e_exp_0p7, peak_ee_0p7);
         g->SetMarkerStyle(20);
         g->SetMarkerSize(1.5);
-        g->SetTitle(Form("Module W%d Non-linearity;Expected Energy (MeV);Measured Peak Position (MeV)", mod_id-1000));
+        g->SetTitle(Form("Module W%d Non-linearity;E_{incident} (MeV);E_{measure} (MeV)", mod_id-1000));
         g->Draw("AP");
 
         // perfect linearity reference line (y = x)
@@ -263,33 +306,66 @@ int main(int argc, char *argv[]){
         TLine *ref = new TLine(xmin, xmin, xmax, xmax);
         ref->SetLineColor(kRed);
         ref->SetLineStyle(2);
+        ref->SetLineWidth(2);
         ref->Draw();
 
-        //fitting use 1st order polynomial, anchored at the 3.5 GeV e-p point
-        // f(x) = peak_ep_3p5 + slope * (x - e_p_exp_3p5)
+        // fitting: E_incident = E_meas + nl * (E_meas - E_base) /1000.
+        // => E_meas = (E_incident + nl/1000. * E_base) / (1 + nl/1000.)
         TF1 *fitLine = new TF1("fitLine",
-            [](double *x, double *p){ return p[2] + p[0] * (x[0] - p[1]); },
-            xmin, xmax, 3);
-        fitLine->SetParameter(0, 1.0);
-        fitLine->FixParameter(1, e_p_exp_3p5);
-        fitLine->FixParameter(2, peak_ep_3p5);
+            [](double *x, double *p){ return (x[0] + p[0] / 1000. * p[1]) / (1.0 + p[0] / 1000.); },
+            xmin, xmax, 2);
+        fitLine->SetParameter(0, 0.01); // nl ~ small non-linearity
+        fitLine->FixParameter(1, e_p_exp_3p5); // E_base fixed at anchor
         fitLine->SetLineColor(kBlue);
         fitLine->SetLineWidth(2);
         g->Fit(fitLine, "Q");
         fitLine->Draw("same");
 
-        // draw fit formula and result on the canvas
-        double slope = fitLine->GetParameter(0);
-        double slope_err = fitLine->GetParError(0);
+        double nl        = fitLine->GetParameter(0);
+        double nl_err    = fitLine->GetParError(0);
+        double chi2      = fitLine->GetChisquare();
+        int    ndf       = fitLine->GetNDF();
+
         TLatex *tex = new TLatex();
         tex->SetNDC();
         tex->SetTextSize(0.035);
-        tex->DrawLatex(0.15, 0.82, Form("f(x) = peak_{ep,3.5} + slope #times (x - E_{ep,3.5})"));
-        tex->DrawLatex(0.15, 0.76, Form("slope = %.4f #pm %.4f", slope, slope_err));
-        tex->DrawLatex(0.15, 0.70, Form("E_{ep,3.5} = %.1f MeV,  peak = %.1f MeV",
-                                         (double)e_p_exp_3p5, (double)peak_ep_3p5));
+        tex->DrawLatex(0.15, 0.82, "E_{incident} = E_{meas} + nl #times (E_{meas} - E_{base}) / 1000.");
+        tex->DrawLatex(0.15, 0.76, Form("nl = %.4f #pm %.4f", nl, nl_err));
+        tex->DrawLatex(0.15, 0.70, Form("#chi^{2}/ndf = %.2f / %d = %.3f", chi2, ndf, ndf > 0 ? chi2/ndf : 0.));
+        tex->DrawLatex(0.15, 0.64, Form("E_{base} = %.4f GeV", (double)e_p_exp_3p5));
+        // corrected points: E_corr = E_meas + nl * (E_meas - E_base) / 1000.
+        TGraph *gCorr = new TGraph();
+        gCorr->SetMarkerStyle(24); // open circle
+        gCorr->SetMarkerSize(1.0);
+        gCorr->SetMarkerColor(kGreen+2);
+        {
+            int nc = 0;
+            auto addCorrPoint = [&](double Eexp, float peak) {
+                if (peak != 0.f) {
+                    double E_corr = peak + nl / 1000. * (peak - e_p_exp_3p5);
+                    gCorr->SetPoint(nc++, Eexp, E_corr);
+                }
+            };
+            addCorrPoint(e_p_exp_3p5, peak_ep_3p5);
+            addCorrPoint(e_e_exp_3p5, peak_ee_3p5);
+            addCorrPoint(e_p_exp_0p7, peak_ep_0p7);
+            addCorrPoint(e_e_exp_0p7, peak_ee_0p7);
+        }
+        gCorr->Draw("P same");
+
+        // legend
+        TLegend *leg = new TLegend(0.60, 0.15, 0.88, 0.42);
+        leg->SetBorderSize(1);
+        leg->SetTextSize(0.032);
+        leg->AddEntry(g,       "Measured points",           "p");
+        leg->AddEntry(fitLine, "Non-linear fit",            "l");
+        leg->AddEntry(ref,     "Perfect linearity (y = x)", "l");
+        leg->AddEntry(gCorr,   "Corrected points",          "p");
+        leg->Draw();
 
         c->Write();
+        delete leg;
+        delete gCorr;
         delete tex;
         delete fitLine;
         delete ref;
@@ -316,7 +392,7 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             break;
         }
 
-        if ( ev.n_clusters == 1) {
+        /*if ( ev.n_clusters == 1) {
             int mod_id = ev.cl_center[0];
             if ( ev.cl_nblocks[0] < 3) continue;
             auto mod = hycal.module_by_id(mod_id);
@@ -331,6 +407,12 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             }
         }
         if ( ev.n_clusters == 2) {
+            bool match1 = false, match2 = false;
+            match1 = ((ev.matchFlag[0] & (1u << 0)) || (ev.matchFlag[0] & (1u << 1)))
+                  && ((ev.matchFlag[0] & (1u << 2)) || (ev.matchFlag[0] & (1u << 3)));
+            match2 = ((ev.matchFlag[1] & (1u << 0)) || (ev.matchFlag[1] & (1u << 1)))
+                  && ((ev.matchFlag[1] & (1u << 2)) || (ev.matchFlag[1] & (1u << 3)));
+            if (!match1 || !match2) continue; // require both clusters to have a good track match, likely e-e events
             int mod_id_1 = ev.cl_center[0];
             int mod_id_2 = ev.cl_center[1];
             auto mod1 = hycal.module_by_id(mod_id_1);
@@ -338,44 +420,73 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
             if ( !mod1 || !mod1->is_pwo4() || !mod2 || !mod2->is_pwo4()) continue; // only look at PbWO4 crystals
             float x1 = ev.cl_x[0], y1 = ev.cl_y[0], z1 = ev.cl_z[0];
             float x2 = ev.cl_x[1], y2 = ev.cl_y[1], z2 = ev.cl_z[1];
+            if(ev.matchGEMx[0][0] > -900.) {
+                x1 = ev.matchGEMx[0][0]; y1 = ev.matchGEMy[0][0]; z1 = ev.matchGEMz[0][0];
+            }
+            else {
+                x1 = ev.matchGEMx[0][1]; y1 = ev.matchGEMy[0][1]; z1 = ev.matchGEMz[0][1];
+            }
+            if(ev.matchGEMx[1][0] > -900.) {
+                x2 = ev.matchGEMx[1][0]; y2 = ev.matchGEMy[1][0]; z2 = ev.matchGEMz[1][0];
+            }
+            else {
+                x2 = ev.matchGEMx[1][1]; y2 = ev.matchGEMy[1][1]; z2 = ev.matchGEMz[1][1];
+            }
             float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
             float theta2 = std::atan2(std::sqrt(x2*x2 + y2*y2), z2) * 180.f / M_PI;
             float Eexp1 = physics.ExpectedEnergy(theta1, Ebeam, "ee");
             float Eexp2 = physics.ExpectedEnergy(theta2, Ebeam, "ee");
+            if(Eexp1 > Eexp2 && theta1 > theta2) continue;
+            if(Eexp2 > Eexp1 && theta2 > theta1) continue;
             float energy1 = ev.cl_energy[0];
             float energy2 = ev.cl_energy[1];
+            if(energy1 > energy2 && theta1 > theta2) continue;
+            if(energy2 > energy1 && theta2 > theta1) continue;
             float phi1 = physics.GetPhiAngle(x1, y1);
             float phi2 = physics.GetPhiAngle(x2, y2);
             float phi_diff = fabs(phi1 - phi2) - 180.f;
             if (phi_diff < -10.f || phi_diff > 10.f) continue;
-            if ()
-            if(std::abs(energy1 + energy2 - Ebeam) < 4. * resolution * Ebeam / sqrt(Ebeam/1000.f)) {
-                if(std::abs(energy1 - Eexp1) < 4. * resolution * Eexp1 / sqrt(Eexp1/1000.f) &&
-                   std::abs(energy2 - Eexp2) < 4. * resolution * Eexp2 / sqrt(Eexp2/1000.f)) {
+            //if ()
+            if(std::abs(energy1 + energy2 - Ebeam) < 3. * resolution * Ebeam / sqrt(Ebeam/1000.f)) {
+                if(std::abs(energy1 - Eexp1) < 3. * resolution * Eexp1 / sqrt(Eexp1/1000.f) &&
+                   std::abs(energy2 - Eexp2) < 3. * resolution * Eexp2 / sqrt(Eexp2/1000.f)) {
                     energy_hists[mod_id_1]->Fill(energy1);
                     energy_hists[mod_id_2]->Fill(energy2);
                 }
             }
-        }
-
-        /*for( int j = 0; j < ev.n_clusters; j++) {
+        }*/
+        //if (Ebeam < 1000.f && ev.n_clusters != 1) continue;
+        for( int j = 0; j < ev.n_clusters; j++) {
             int mod_id = ev.cl_center[j];
-            if (ev.cl_nblocks[j] < 3) continue;
+            if (ev.cl_nblocks[j] < 4) continue;
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
-            float x = mod->x, y = mod->y, z = ev.cl_z[j];
+
+            // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
+            float xd = (ev.cl_x[j] - (float)mod->x) / (float)mod->size_x;
+            float yd = (ev.cl_y[j] - (float)mod->y) / (float)mod->size_y;
+            if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
+
+            float x = ev.cl_x[j], y = ev.cl_y[j], z = ev.cl_z[j];
             float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
-
-            if (theta < 3.3) continue;
-            
-            float Eexp = physics.ExpectedEnergy(theta, Ebeam, "ee");
-
-            if(Ebeam - Eexp < 6. * Ebeam*resolution/sqrt(Ebeam/1000.f)) continue; // skip if expected energy is too close to beam energy (likely e-p events)
-
             float energy = ev.cl_energy[j];
 
-            if(std::abs(energy - Eexp) < 5. * resolution * Eexp / sqrt(Eexp/1000.f))
-                energy_hists[mod_id]->Fill(energy);
-        }*/
+            bool veto = false;
+                float sci_time, sci_int;
+                for(int k = 0; k < ev.veto_nch; k++){
+                    for(int p = 0; p < ev.veto_npeaks[k]; p++){
+                        sci_time = ev.veto_peak_time[k][p];
+                        sci_int = ev.veto_peak_integral[k][p];
+                        veto = Vetoed(ev.cl_time[j], sci_time, sci_int);
+                        if(veto) break;
+                    }
+                    if(veto) break;
+                }
+                if(theta > 1.8) veto = false;
+
+            if(veto && energy > 550. && Ebeam < 1000.f) continue;
+
+            energy_hists[mod_id]->Fill(energy);
+        }
     }
 }
