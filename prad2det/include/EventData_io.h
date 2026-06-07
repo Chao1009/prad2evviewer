@@ -63,9 +63,9 @@ struct ReconReadStatus {
 inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
 {
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
-    //tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
+    tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
-    //tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
+    tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
 
     // Unified FADC250 channel array (HyCal + Veto + LMS).  Categorisation
     // is via hycal.module_type per channel — HyCal consumers using
@@ -74,9 +74,9 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
     tree->Branch("hycal.nch",         &ev.nch,         "hycal.nch/I");
     tree->Branch("hycal.module_id",   ev.module_id,    "hycal.module_id[hycal.nch]/s");
     tree->Branch("hycal.module_type", ev.module_type,  "hycal.module_type[hycal.nch]/b");
-    //tree->Branch("hycal.nsamples",    ev.nsamples,     "hycal.nsamples[hycal.nch]/b");
-    //tree->Branch("hycal.samples",     ev.samples,
-    //             Form("hycal.samples[hycal.nch][%d]/s", fdec::MAX_SAMPLES));
+    tree->Branch("hycal.nsamples",    ev.nsamples,     "hycal.nsamples[hycal.nch]/b");
+    tree->Branch("hycal.samples",     ev.samples,
+                 Form("hycal.samples[hycal.nch][%d]/s", fdec::MAX_SAMPLES));
     tree->Branch("hycal.gain_factor", ev.gain_factor,  "hycal.gain_factor[hycal.nch]/F");
 
     if (with_peaks) {
@@ -85,11 +85,11 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
         // analyzer ran.  ped_quality is a Q_PED_* bitmask
         // (NOT_CONVERGED / FLOOR_ACTIVE / TOO_FEW_SAMPLES /
         // PULSE_IN_WINDOW / OVERFLOW / TRAILING_WINDOW; see Fadc250Data.h).
-        //tree->Branch("hycal.ped_mean",      ev.ped_mean,       "hycal.ped_mean[hycal.nch]/F");
-        //tree->Branch("hycal.ped_rms",       ev.ped_rms,        "hycal.ped_rms[hycal.nch]/F");
-        //tree->Branch("hycal.ped_nused",     ev.ped_nused,      "hycal.ped_nused[hycal.nch]/b");
-        //tree->Branch("hycal.ped_quality",   ev.ped_quality,    "hycal.ped_quality[hycal.nch]/b");
-        //tree->Branch("hycal.ped_slope",     ev.ped_slope,      "hycal.ped_slope[hycal.nch]/F");
+        tree->Branch("hycal.ped_mean",      ev.ped_mean,       "hycal.ped_mean[hycal.nch]/F");
+        tree->Branch("hycal.ped_rms",       ev.ped_rms,        "hycal.ped_rms[hycal.nch]/F");
+        tree->Branch("hycal.ped_nused",     ev.ped_nused,      "hycal.ped_nused[hycal.nch]/b");
+        tree->Branch("hycal.ped_quality",   ev.ped_quality,    "hycal.ped_quality[hycal.nch]/b");
+        tree->Branch("hycal.ped_slope",     ev.ped_slope,      "hycal.ped_slope[hycal.nch]/F");
         tree->Branch("hycal.npeaks",        ev.npeaks,         "hycal.npeaks[hycal.nch]/b");
         tree->Branch("hycal.peak_height",   ev.peak_height,
                      Form("hycal.peak_height[hycal.nch][%d]/F",   fdec::MAX_PEAKS));
@@ -123,29 +123,29 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
     }
 
     // GEM strip data.
-    //tree->Branch("gem.nch",         &ev.gem_nch,     "gem.nch/I");
-    //tree->Branch("gem.mpd_crate",   ev.mpd_crate,    "gem.mpd_crate[gem.nch]/b");
-    //tree->Branch("gem.mpd_fiber",   ev.mpd_fiber,    "gem.mpd_fiber[gem.nch]/b");
-    //tree->Branch("gem.apv",         ev.apv,          "gem.apv[gem.nch]/b");
-    //tree->Branch("gem.strip",       ev.strip,        "gem.strip[gem.nch]/b");
-    //tree->Branch("gem.ssp_samples", ev.ssp_samples,
+    tree->Branch("gem.nch",         &ev.gem_nch,     "gem.nch/I");
+    tree->Branch("gem.mpd_crate",   ev.mpd_crate,    "gem.mpd_crate[gem.nch]/b");
+    tree->Branch("gem.mpd_fiber",   ev.mpd_fiber,    "gem.mpd_fiber[gem.nch]/b");
+    tree->Branch("gem.apv",         ev.apv,          "gem.apv[gem.nch]/b");
+    tree->Branch("gem.strip",       ev.strip,        "gem.strip[gem.nch]/b");
+    tree->Branch("gem.ssp_samples", ev.ssp_samples,
     //             Form("gem.ssp_samples[gem.nch][%d]/S", ssp::SSP_TIME_SAMPLES));
 
     // Raw 0xE10C SSP trigger bank words.
-    //tree->Branch("ssp_raw", &ev.ssp_raw);
+    tree->Branch("ssp_raw", &ev.ssp_raw);
 
     // Raw 0xE122 VTP bank words.  Flat triple of parallel vectors so ROOT
     // can serialize without a custom dictionary — see RawEventData for
     // the offset/decoding convention.
-    //tree->Branch("vtp_roc_tags", &ev.vtp_roc_tags);
-    //tree->Branch("vtp_nwords",   &ev.vtp_nwords);
-    //tree->Branch("vtp_words",    &ev.vtp_words);
+    tree->Branch("vtp_roc_tags", &ev.vtp_roc_tags);
+    tree->Branch("vtp_nwords",   &ev.vtp_nwords);
+    tree->Branch("vtp_words",    &ev.vtp_words);
 
     // Raw 0xE107 TDC bank words (RF reference + tagger).  Same layout
     // as the vtp_* triple — see RawEventData for the per-hit bit fields.
-    //tree->Branch("tdc_roc_tags", &ev.tdc_roc_tags);
-    //tree->Branch("tdc_nwords",   &ev.tdc_nwords);
-    //tree->Branch("tdc_words",    &ev.tdc_words);
+    tree->Branch("tdc_roc_tags", &ev.tdc_roc_tags);
+    tree->Branch("tdc_nwords",   &ev.tdc_nwords);
+    tree->Branch("tdc_words",    &ev.tdc_words);
 }
 
 // ─────────────────────────────────────────────────────────────────────────
