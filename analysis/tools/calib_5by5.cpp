@@ -223,7 +223,6 @@ int main(int argc, char *argv[])
 
     // ── Process files in rounds: num_threads files per round, 1 file/thread ──
     static constexpr uint32_t TBIT_sum = (1u << 8);
-    static constexpr uint32_t TBIT_lms = (1u << 24);
 
     for (int round = 0; round < num_rounds; ++round) {
         int round_start        = round * num_threads;
@@ -286,8 +285,7 @@ int main(int argc, char *argv[])
                                   << i + 1 << "/" << nentries << "\r" << std::flush;
                     }
 
-                    if (!(ev.trigger_bits & TBIT_sum)) continue;
-                    if (  ev.trigger_bits & TBIT_lms ) continue;
+                    if ((ev.trigger_bits & TBIT_sum) == 0) continue;
 
                     if (ev.nch > 500) continue;
 
