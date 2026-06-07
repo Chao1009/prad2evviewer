@@ -129,7 +129,7 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
     tree->Branch("gem.apv",         ev.apv,          "gem.apv[gem.nch]/b");
     tree->Branch("gem.strip",       ev.strip,        "gem.strip[gem.nch]/b");
     tree->Branch("gem.ssp_samples", ev.ssp_samples,
-    //             Form("gem.ssp_samples[gem.nch][%d]/S", ssp::SSP_TIME_SAMPLES));
+                 Form("gem.ssp_samples[gem.nch][%d]/S", ssp::SSP_TIME_SAMPLES));
 
     // Raw 0xE10C SSP trigger bank words.
     tree->Branch("ssp_raw", &ev.ssp_raw);
