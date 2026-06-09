@@ -432,11 +432,11 @@ int main(int argc, char *argv[])
         "Measured Peak Position;Energy (MeV);Counts", 1000, 0, 5000);
     TH1F *h_recon_sigma = new TH1F("recon_sigma",
         "Reconstructed Cluster Energy Resolution;Sigma (MeV);Counts", 100, 0, 200);
-    TH1F *h_recon_chi2 = new TH1F("recon_chi2/ndf",
+    TH1F *h_recon_chi2 = new TH1F("recon_chi2_ndf",
         "Reconstructed E hist Fit Chi2/ndf;Chi2/ndf;Counts", 100, 0, 50);
     TH1F *ratio_module_all = new TH1F("ratio_all",
         "Ratio of Expected/Measured Peak Position for All Modules;Ratio;Modules", 200, 0, 4);
-    TH2F *module_ratio = new TH2F("#cbar#bar{E_{recon}} - E_{expect}#cbar #/ E_{expect}",
+    TH2F *module_ratio = new TH2F("module_ratio",
         "#cbar#bar{E_{recon}} - E_{expect}#cbar #/ E_{expect}",
         34, -17.*20.75, 17.*20.75, 34, -17.*20.75, 17.*20.75);
 

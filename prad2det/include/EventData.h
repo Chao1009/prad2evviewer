@@ -39,6 +39,16 @@ static constexpr int kMaxGemStrips = ssp::MAX_MPDS * ssp::MAX_APVS_PER_MPD * ssp
 static constexpr int kMaxClusters  = 100;
 static constexpr int kMaxGemHits   = 400;
 
+// ── Front-panel trigger bits ───────────────────────────────────────────────
+//
+// Single source of truth for the FP trigger-bit masks carried in the
+// `trigger_bits` field (multi-bit, from TI master d[5]).  Mind operator
+// precedence when testing — the mask must be parenthesised:
+//   if ((ev.trigger_bits & TBIT_sum) == 0) continue;   // require sum trigger
+static constexpr uint32_t TBIT_sum   = (1u << 8);    // total-energy (sum) trigger
+static constexpr uint32_t TBIT_lms   = (1u << 24);   // LMS light-monitoring
+static constexpr uint32_t TBIT_alpha = (1u << 25);   // alpha / pulser
+
 // ── Module type categorisation ────────────────────────────────────────────
 //
 // Single source of truth at the data-tree level.  Values come from the "t"
