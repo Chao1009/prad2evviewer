@@ -8,13 +8,14 @@
 //
 // Usage: calib_5by5 <input_raw.root|dir> [more files/dirs...]
 //                  [-i iteration] [-o output_root_file]
-//                  [-E Ebeam] [-D daq_config.json] [-n max_events]
-//                  [-j num_threads] [-f (use firmware peaks)]
+//                  [-E Ebeam] [-D daq_config.json] [-c seed_calib.json]
+//                  [-n max_events] [-j num_threads] [-f (use firmware peaks)]
 //   - input_raw.root|dir: input ROOT file(s) or directory with *_raw.root files
 //   - iteration: calibration iteration (default: 1)
 //   - output_root_file: output ROOT file (default: auto from db_dir)
 //   - Ebeam: beam energy in MeV (default: 2100)
 //   - daq_config.json: DAQ config file (default: db_dir/daq_config.json)
+//   - seed_calib.json: iteration-1 input calibration (default: db_dir/calibration/calibration_factor_3p5_June7.json)
 //   - max_events: max total events to process (default: all)
 //   - num_threads: number of parallel threads (default: 4)
 //   - -f: use firmware peak analysis instead of DAQ-mode peaks (default: false)
@@ -101,7 +102,7 @@ int main(int argc, char *argv[])
     TClass::GetClass("TH2F");
 
     // ── Argument parsing ─────────────────────────────────────────────────────
-    std::string output_root_file, daq_config_file;
+    std::string output_root_file, daq_config_file, seed_calib_file;
     int  iteration   = 1;
     int  max_events  = -1;
     int  num_threads = 4;
@@ -116,12 +117,13 @@ int main(int argc, char *argv[])
     if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:E:D:n:j:f")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:E:D:n:j:c:f")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_root_file = optarg; break;
             case 'E': Ebeam            = std::atof(optarg); break;
             case 'D': daq_config_file  = optarg; break;
+            case 'c': seed_calib_file  = optarg; break;
             case 'f': firmware_peaks   = true; break;
             case 'n': max_events       = std::atoi(optarg); break;
             case 'j': num_threads      = std::atoi(optarg); break;
@@ -138,7 +140,7 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: calib_5by5 <input_raw.root|dir> [more...] "
                      "[-i iter] [-o out.root] [-E Ebeam] [-D daq.json] "
-                     "[-n max_events] [-j threads] [-f (use firmware peaks)]\n";
+                     "[-c seed_calib.json] [-n max_events] [-j threads] [-f (use firmware peaks)]\n";
         return 1;
     }
 
@@ -159,7 +161,9 @@ int main(int argc, char *argv[])
 
     std::string input_calib_file, output_calib_file;
     if (iteration == 1)
-        input_calib_file = db_dir + "/calibration/calibration_factor_3p5.json";
+        input_calib_file = !seed_calib_file.empty()
+            ? seed_calib_file
+            : db_dir + "/calibration/calibration_factor_3p5_June7.json";
     else if (iteration > 1)
         input_calib_file = run_out_dir + Form("/calib_iter%d.json", iteration - 1);
     else {
@@ -270,7 +274,7 @@ int main(int argc, char *argv[])
                 prad2::SetRawReadBranches(tree, ev);
 
                 int run_num = get_run_int(root_files[fi]);
-                auto localConfig = LoadRunConfig(db_dir + "/runinfo/2p1_general.json", run_num);
+                auto localConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
                 fdec::HyCalCluster clusterer(res->hycal);
                 fdec::ClusterConfig cl_cfg;
@@ -303,7 +307,9 @@ int main(int argc, char *argv[])
                         if (!mod || !mod->is_hycal()) continue;
                         if(ev.module_id[j] <= 1000) continue; // skip PbGlass modules for this calibration
 
-                        float adc = 0.f;
+                        float adc      = 0.f;
+                        float hit_time = 0.f;
+                        int   peak_n   = 0;
 
                         if(!firmware_peaks){
                             int bestIdx = -1;
@@ -318,21 +324,21 @@ int main(int argc, char *argv[])
                                 }
                             }
                             if (bestIdx < 0) continue;
-                            adc    = ev.peak_integral[j][bestIdx];
-                            adc *= ev.gain_factor[j]; // apply gain factor
-                            int mod_id = ev.module_id[j];
-                            float E = (mod->cal_factor > 0) ? static_cast<float>(mod->energize(adc)) : adc * 0.f;
-                            valid_peaks.push_back({mod_id, E, ev.peak_time[j][bestIdx], ev.npeaks[j]});
+                            adc      = ev.peak_integral[j][bestIdx] * ev.gain_factor[j]; // apply gain factor
+                            hit_time = ev.peak_time[j][bestIdx];
+                            peak_n   = ev.npeaks[j];
                         }
                         else{
                             if(ev.daq_npeaks[j] <= 0) continue;
-                            adc = ev.daq_peak_integral[j][0]; // take the first DAQ peak (should be only one)
+                            adc      = ev.daq_peak_integral[j][0] * ev.gain_factor[j]; // first DAQ peak, gain-corrected
+                            hit_time = ev.daq_peak_time[j][0];
+                            peak_n   = ev.daq_npeaks[j];
                         }
 
                         float energy = (mod->cal_factor > 0)
-                            ? static_cast<float>(mod->energize(adc))
-                            : adc * 0.f;
-                        clusterer.AddHit(mod->index, energy, 0.f); // time info not available in raw branches, set to 0
+                            ? static_cast<float>(mod->energize(adc)) : 0.f;
+                        valid_peaks.push_back({static_cast<int>(ev.module_id[j]), energy, hit_time, peak_n});
+                        clusterer.AddHit(mod->index, energy, 0.f); // clusterer time unused; per-peak time kept in valid_peaks
                     }
 
                     clusterer.FormClusters();
@@ -458,11 +464,11 @@ int main(int argc, char *argv[])
         "Measured Peak Position;Energy (MeV);Counts", 1000, 0, 5000);
     TH1F *h_recon_sigma = new TH1F("recon_sigma",
         "Reconstructed Cluster Energy Resolution;Sigma (MeV);Counts", 100, 0, 200);
-    TH1F *h_recon_chi2 = new TH1F("recon_chi2/ndf",
+    TH1F *h_recon_chi2 = new TH1F("recon_chi2_ndf",
         "Reconstructed E hist Fit Chi2/ndf;Chi2/ndf;Counts", 100, 0, 50);
     TH1F *ratio_module_all = new TH1F("ratio_all",
         "Ratio of Expected/Measured Peak Position for All Modules;Ratio;Modules", 200, 0, 4);
-    TH2F *module_ratio = new TH2F("#cbar#bar{E_{recon}} - E_{expect}#cbar #/ E_{expect}",
+    TH2F *module_ratio = new TH2F("module_ratio",
         "#cbar#bar{E_{recon}} - E_{expect}#cbar #/ E_{expect}",
         34, -17.*20.75, 17.*20.75, 34, -17.*20.75, 17.*20.75);
 

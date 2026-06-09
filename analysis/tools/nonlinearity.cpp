@@ -461,7 +461,7 @@ void process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSys
         if( i % 1000 == 0) {
             std::cerr << "Processing event " << i << "/" << tree->GetEntries() << "\r" << std::flush;
         }
-        if ( ev.trigger_bits & ( 1 << 8) == 0) continue;
+        if ((ev.trigger_bits & (1 << 8)) == 0) continue;
         if (max_events > 0 && i >= max_events) {
             std::cerr << "Reached max events limit: " << max_events << "\n";
             break;
