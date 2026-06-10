@@ -170,6 +170,9 @@ int main(int argc, char *argv[])
         std::cerr << "Invalid iteration number: " << iteration << ". Must be >= 1.\n";
         return 1;
     }
+    if (iteration > 1 && !seed_calib_file.empty())
+        std::cerr << "Warning: -c " << seed_calib_file
+                  << " is ignored for iteration > 1; using " << input_calib_file << "\n";
     output_calib_file = run_out_dir + Form("/calib_iter%d.json", iteration);
 
     if (output_root_file.empty())
@@ -196,6 +199,11 @@ int main(int argc, char *argv[])
         int nmatched = res->hycal.LoadCalibration(input_calib_file);
         std::cerr << "[thread " << tid << "] calibration: "
                   << input_calib_file << " (" << nmatched << " modules)\n";
+        if (nmatched <= 0) {
+            std::cerr << "Failed to load calibration from " << input_calib_file
+                      << "; aborting before processing.\n";
+            return 1;
+        }
 
         int nmod_t = res->hycal.module_count();
         res->module_hists.resize(nmod_t);
@@ -210,7 +218,7 @@ int main(int argc, char *argv[])
         res->h2_energy_theta = std::make_unique<TH2F>(
             Form("h2_energy_theta_%d", tid),
             "Energy vs Theta;Theta (deg);Energy (MeV)",
-            80, 0, 8, 4000, 0, 4000);
+            160, 0, 8, 4000, 0, 4000); // binning must match PhysicsTools' merge target or Add() fails
         res->h2_energy_theta->SetDirectory(nullptr);
         res->hit_pos = std::make_unique<TH2F>(
             Form("hit_pos_%d", tid),
@@ -220,13 +228,12 @@ int main(int argc, char *argv[])
         res->h_E_1cl = std::make_unique<TH1F>(
             Form("one_cluster_energy_%d", tid),
             "Single-cluster Event energy;E (MeV);Counts",
-            250, 0, 5000);
+            1000, 0, 5000); // binning must match the merge target below or Add() fails
         res->h_E_1cl->SetDirectory(nullptr);
         results[tid] = std::move(res);
     }
 
     // ── Process files in rounds: num_threads files per round, 1 file/thread ──
-    static constexpr uint32_t TBIT_sum = (1u << 8);
 
     for (int round = 0; round < num_rounds; ++round) {
         int round_start        = round * num_threads;
@@ -289,7 +296,7 @@ int main(int argc, char *argv[])
                                   << i + 1 << "/" << nentries << "\r" << std::flush;
                     }
 
-                    if ((ev.trigger_bits & TBIT_sum) == 0) continue;
+                    if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
 
                     if (ev.nch > 500) continue;
 
@@ -414,6 +421,11 @@ int main(int argc, char *argv[])
     hycal.Init(db_dir + "/hycal_map.json");
     int nmatched = hycal.LoadCalibration(input_calib_file);
     std::cerr << "Main: calibration loaded (" << nmatched << " modules)\n";
+    if (nmatched <= 0) {
+        std::cerr << "Failed to load calibration from " << input_calib_file
+                  << "; aborting before fitting.\n";
+        return 1;
+    }
 
     analysis::PhysicsTools physics(hycal);
 
