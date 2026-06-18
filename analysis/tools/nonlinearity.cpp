@@ -558,7 +558,7 @@ long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyC
             // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
             float xd = (ev.cl_x[j] - (float)mod->x) / (float)mod->size_x;
             float yd = (ev.cl_y[j] - (float)mod->y) / (float)mod->size_y;
-            //if (std::abs(xd) >= 0.25f || std::abs(yd) >= 0.25f) continue;
+            if (std::abs(xd) >= 0.25f || std::abs(yd) >= 0.25f) continue;
 
             float x = ev.cl_x[j], y = ev.cl_y[j], z = ev.cl_z[j];
             float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;

@@ -37,7 +37,7 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
-    QSizePolicy, QSplitter, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 import matplotlib
 matplotlib.use("QtAgg")
@@ -278,30 +278,72 @@ def fit_nonlinearity_2nd(
 
 
 # =============================================================================
-# Per-module data  (peak keys: ep_3p5, ee_3p5, ep_2p2, ee_2p2, ep_0p7, ee_0p7)
+# Per-module data
 # =============================================================================
 
-_PEAK_KEYS   = ["ep_3p5", "ee_3p5", "ep_2p2", "ee_2p2", "ep_0p7", "ee_0p7"]
-_PEAK_LABELS = {
-    "ep_3p5": "e-p  3.5 GeV",
-    "ee_3p5": "e-e  3.5 GeV",
-    "ep_2p2": "e-p  2.2 GeV",
-    "ee_2p2": "e-e  2.2 GeV",
-    "ep_0p7": "e-p  0.7 GeV",
-    "ee_0p7": "e-e  0.7 GeV",
-}
-_PEAK_EBEAM = {"ep_3p5": 3485.0, "ee_3p5": 3485.0,
-               "ep_2p2": 2239.0, "ee_2p2": 2239.0,
-               "ep_0p7": 729.0, "ee_0p7": 729.0}
-_PEAK_KIND  = {"ep_3p5": "ep",   "ee_3p5": "ee",
-               "ep_2p2": "ep",   "ee_2p2": "ee",
-               "ep_0p7": "ep",  "ee_0p7": "ee"}
-_PEAK_COLOR = {"ep_3p5": "tomato",  "ee_3p5": "cornflowerblue",
-               "ep_2p2": "tomato",  "ee_2p2": "cornflowerblue",
-               "ep_0p7": "tomato",  "ee_0p7": "cornflowerblue"}
-_PEAK_TAG   = {"ep_3p5": "3p5", "ee_3p5": "3p5",
-               "ep_2p2": "2p2", "ee_2p2": "2p2",
-               "ep_0p7": "0p7", "ee_0p7": "0p7"}
+_PEAK_CONFIGS = [
+    {
+        "key": "ep_3p5", "label": "e-p  3.5 GeV", "ebeam": 3485.0,
+        "kind": "ep", "color": "tomato", "tag": "3p5", "energy_label": "3.5 GeV",
+        "root_dir": "energy_3p5GeV", "hist_attr": "hist_3p5", "hist_suffix": "3p5",
+    },
+    {
+        "key": "ep_2p2", "label": "e-p  2.2 GeV", "ebeam": 2239.0,
+        "kind": "ep", "color": "tomato", "tag": "2p2", "energy_label": "2.2 GeV",
+        "root_dir": "energy_2p2GeV", "hist_attr": "hist_2p2", "hist_suffix": "2p2",
+    },
+    {
+        "key": "ep_0p7", "label": "e-p  0.7 GeV", "ebeam": 729.0,
+        "kind": "ep", "color": "tomato", "tag": "0p7", "energy_label": "0.7 GeV",
+        "root_dir": "energy_0p7GeV", "hist_attr": "hist_0p7", "hist_suffix": "0p7",
+    },
+    {
+        "key": "ee_3p5", "label": "e-e  3.5 GeV", "ebeam": 3485.0,
+        "kind": "ee", "color": "cornflowerblue", "tag": "3p5", "energy_label": "3.5 GeV",
+        "root_dir": "energy_3p5GeV", "hist_attr": "hist_3p5", "hist_suffix": "3p5",
+        "skip_if_close_to": "ep_3p5", "min_separation": 170.0,
+    },
+    {
+        "key": "ee_2p2", "label": "e-e  2.2 GeV", "ebeam": 2239.0,
+        "kind": "ee", "color": "cornflowerblue", "tag": "2p2", "energy_label": "2.2 GeV",
+        "root_dir": "energy_2p2GeV", "hist_attr": "hist_2p2", "hist_suffix": "2p2",
+        "skip_if_close_to": "ep_2p2", "min_separation": 170.0,
+    },
+    {
+        "key": "ee_0p7", "label": "e-e  0.7 GeV", "ebeam": 729.0,
+        "kind": "ee", "color": "cornflowerblue", "tag": "0p7", "energy_label": "0.7 GeV",
+        "root_dir": "energy_0p7GeV", "hist_attr": "hist_0p7", "hist_suffix": "0p7",
+        "skip_if_close_to": "ep_0p7", "min_separation": 170.0,
+    },
+]
+_PEAK_KEYS = [cfg["key"] for cfg in _PEAK_CONFIGS]
+_PEAK_BY_KEY = {cfg["key"]: cfg for cfg in _PEAK_CONFIGS}
+_HIST_CONFIGS: List[Dict[str, object]] = []
+_seen_hist_tags = set()
+for _cfg in _PEAK_CONFIGS:
+    if _cfg["tag"] in _seen_hist_tags:
+        continue
+    _seen_hist_tags.add(_cfg["tag"])
+    _HIST_CONFIGS.append(_cfg)
+del _cfg, _seen_hist_tags
+
+
+def peak_cfg(key: str) -> Dict[str, object]:
+    return _PEAK_BY_KEY[key]
+
+
+def hist_for_key(d: "ModuleData", key: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    return getattr(d, str(peak_cfg(key)["hist_attr"]))
+
+
+def should_fit_peak(d: "ModuleData", key: str) -> bool:
+    cfg = peak_cfg(key)
+    other_key = cfg.get("skip_if_close_to")
+    min_sep = cfg.get("min_separation")
+    if isinstance(other_key, str) and isinstance(min_sep, (float, int)):
+        if abs(d.e_exp[other_key] - d.e_exp[key]) <= float(min_sep):
+            return False
+    return True
 
 
 class ModuleData:
@@ -311,13 +353,16 @@ class ModuleData:
         self.name  = name
         self.x     = float(x)
         self.y     = float(y)
+        self.row   = int(row)
+        self.col   = int(col)
         self.theta = math.degrees(math.atan2(math.hypot(x, y), Z_HYCAL))
 
         # expected energies and sigmas
         self.e_exp:     Dict[str, float] = {}
         self.sigma_exp: Dict[str, float] = {}
-        for key in _PEAK_KEYS:
-            E = expected_energy(self.theta, _PEAK_EBEAM[key], _PEAK_KIND[key])
+        for cfg in _PEAK_CONFIGS:
+            key = str(cfg["key"])
+            E = expected_energy(self.theta, float(cfg["ebeam"]), str(cfg["kind"]))
             self.e_exp[key]     = E
             self.sigma_exp[key] = estimate_sigma(E) if E > 0.0 else 1.0
 
@@ -325,9 +370,6 @@ class ModuleData:
         self.peaks:      Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_sigma: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_amp:   Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
-
-        # calibration scale: e_exp["ep_3p5"] / peaks["ep_3p5"]
-        self.scale: float = 1.0
 
         # non-linearity fit result (1st order)
         self.nl:      float = 0.0
@@ -343,41 +385,42 @@ class ModuleData:
         self.ndf_nl2:    int   = 0
 
         # geometry flags (0-based row/col from JSON)
-        self.is_outer    = (row in (0, 33) or col in (0, 33)) if row >= 0 else False
-        self.is_absorber = (15 <= row <= 18 and 15 <= col <= 18) if row >= 0 else False
+        self.is_absorber = (15 <= self.row <= 18 and 15 <= self.col <= 18) if self.row >= 0 else False
 
         # raw histograms loaded from ROOT (counts, edges)
-        self.hist_3p5: Optional[Tuple[np.ndarray, np.ndarray]] = None
-        self.hist_2p2: Optional[Tuple[np.ndarray, np.ndarray]] = None
-        self.hist_0p7: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        for cfg in _HIST_CONFIGS:
+            setattr(self, str(cfg["hist_attr"]), None)
 
-    def scaled(self, key: str) -> float:
-        """Return peak value scaled by calibration factor."""
-        return self.peaks[key] * self.scale
+    def measured_peak(self, key: str) -> float:
+        """Return measured peak value used by the C++ non-linearity fit."""
+        return self.peaks[key]
 
-    def recompute_scale(self) -> None:
-        """Recompute calibration scale from ep_3p5 anchor peak."""
-        p = self.peaks.get("ep_3p5", 0.0)
-        E = self.e_exp.get("ep_3p5", 0.0)
-        self.scale = E / p if (p > 0.0 and E > 0.0) else 1.0
+    def is_outer_layer(self, layers: int) -> bool:
+        if layers <= 0 or self.row < 0 or self.col < 0:
+            return False
+        return (
+            self.row < layers or self.row >= 34 - layers
+            or self.col < layers or self.col >= 34 - layers
+        )
 
     def linearity_xy(self) -> Tuple[np.ndarray, np.ndarray]:
-        """Return (E_expected, E_rec_scaled) arrays for all valid peaks."""
+        """Return (E_expected, E_rec) arrays for all valid measured peaks."""
         xs, ys = [], []
         for key in _PEAK_KEYS:
-            p = self.scaled(key)
+            p = self.measured_peak(key)
             if p > 0.0:
                 xs.append(self.e_exp[key])
                 ys.append(p)
         return np.array(xs), np.array(ys)
 
-    def refit_nl(self) -> None:
-        """Re-run the 1st and 2nd order non-linearity fits from current scaled peaks."""
+    def refit_nl(self, outer_zero_layers: int = 1) -> None:
+        """Re-run the 1st and 2nd order non-linearity fits from current measured peaks."""
         E_exp, E_rec = self.linearity_xy()
         E_base = self.e_exp["ep_3p5"]
+        force_zero = self.is_outer_layer(outer_zero_layers) or self.is_absorber
         if len(E_exp) >= 2 and E_base > 0.0:
             nl, err, chi2, ndf = fit_nonlinearity(E_exp, E_rec, E_base)
-            self.nl      = nl if not (self.is_outer or self.is_absorber) else 0.0
+            self.nl      = nl if not force_zero else 0.0
             self.nl_err  = err
             self.chi2_nl = chi2
             self.ndf_nl  = ndf
@@ -387,9 +430,9 @@ class ModuleData:
         if len(E_exp) >= 3 and E_base > 0.0:
             nl1, nl1_err, nl2, nl2_err, chi2_2, ndf_2 = fit_nonlinearity_2nd(
                 E_exp, E_rec, E_base, nl1_init=self.nl)
-            self.nl2_1     = nl1 if not (self.is_outer or self.is_absorber) else 0.0
+            self.nl2_1     = nl1 if not force_zero else 0.0
             self.nl2_1_err = nl1_err
-            self.nl2_2     = nl2 if not (self.is_outer or self.is_absorber) else 0.0
+            self.nl2_2     = nl2 if not force_zero else 0.0
             self.nl2_2_err = nl2_err
             self.chi2_nl2  = chi2_2
             self.ndf_nl2   = ndf_2
@@ -461,26 +504,18 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
     if root_path is not None and root_path.is_file() and HAS_UPROOT:
         try:
             with uproot.open(str(root_path)) as f:
-                dir3 = f.get("energy_3p5GeV")
-                dir2 = f.get("energy_2p2GeV")
-                dir0 = f.get("energy_0p7GeV")
+                root_dirs = {
+                    str(cfg["tag"]): f.get(str(cfg["root_dir"]))
+                    for cfg in _HIST_CONFIGS
+                }
                 for name, d in data.items():
-                    if dir3 is not None:
+                    for cfg in _HIST_CONFIGS:
+                        root_dir = root_dirs.get(str(cfg["tag"]))
+                        if root_dir is None:
+                            continue
                         try:
-                            h = dir3[f"h_energy_{name}_3p5"]
-                            d.hist_3p5 = h.to_numpy()
-                        except Exception:
-                            pass
-                    if dir2 is not None:
-                        try:
-                            h = dir2[f"h_energy_{name}_2p2"]
-                            d.hist_2p2 = h.to_numpy()
-                        except Exception:
-                            pass
-                    if dir0 is not None:
-                        try:
-                            h = dir0[f"h_energy_{name}_0p7"]
-                            d.hist_0p7 = h.to_numpy()
+                            h = root_dir[f"h_energy_{name}_{cfg['hist_suffix']}"]
+                            setattr(d, str(cfg["hist_attr"]), h.to_numpy())
                         except Exception:
                             pass
         except Exception as e:
@@ -490,59 +525,39 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
 
     # Fit all peaks
     for d in data.values():
-        if d.hist_3p5 is not None:
-            counts, edges = d.hist_3p5
-            for key in ("ep_3p5", "ee_3p5"):
-                E, sig = d.e_exp[key], d.sigma_exp[key]
-                if E > 0.0:
-                    mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
-                    d.peaks[key]      = mu
-                    d.peak_sigma[key] = sigma_f
-                    d.peak_amp[key]   = amp
+        for key in _PEAK_KEYS:
+            if not should_fit_peak(d, key):
+                continue
+            hist = hist_for_key(d, key)
+            if hist is None:
+                continue
+            counts, edges = hist
+            E, sig = d.e_exp[key], d.sigma_exp[key]
+            if E > 0.0:
+                mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
+                d.peaks[key]      = mu
+                d.peak_sigma[key] = sigma_f
+                d.peak_amp[key]   = amp
 
-        if d.hist_2p2 is not None:
-            counts, edges = d.hist_2p2
-            for key in ("ep_2p2", "ee_2p2"):
-                E, sig = d.e_exp[key], d.sigma_exp[key]
-                if E > 0.0:
-                    mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
-                    d.peaks[key]      = mu
-                    d.peak_sigma[key] = sigma_f
-                    d.peak_amp[key]   = amp
-
-        if d.hist_0p7 is not None:
-            counts, edges = d.hist_0p7
-            for key in ("ep_0p7", "ee_0p7"):
-                E, sig = d.e_exp[key], d.sigma_exp[key]
-                # Skip ee_0p7 when peaks overlap (same cut as nonlinearity.cpp)
-                if key == "ee_0p7" and abs(d.e_exp["ep_0p7"] - E) <= 170.0:
-                    continue
-                if E > 0.0:
-                    mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
-                    d.peaks[key]      = mu
-                    d.peak_sigma[key] = sigma_f
-                    d.peak_amp[key]   = amp
-
-        d.recompute_scale()
         d.refit_nl()
 
     return data
 
 
 # =============================================================================
-# Matplotlib canvas  (6 peak histograms on top row + 1 large linearity plot)
+# Matplotlib canvas  (2x3 peak histograms + 1 large linearity plot)
 # =============================================================================
 
 class TripleCanvas(FigureCanvas):
     def __init__(self):
         fc = THEME.CANVAS
         self.fig = Figure(facecolor=fc)
-        # Top row: 6 individual peak histograms; bottom: linearity (2× height)
-        gs = self.fig.add_gridspec(2, 6, height_ratios=[1, 2],
-                                   hspace=0.65, wspace=0.50,
+        # Peak histograms: top row e-p, second row e-e; columns 3.5, 2.2, 0.7 GeV.
+        gs = self.fig.add_gridspec(3, 3, height_ratios=[1, 1, 2],
+                                   hspace=0.60, wspace=0.42,
                                    left=0.07, right=0.97, top=0.96, bottom=0.07)
-        self.axes: List = [self.fig.add_subplot(gs[0, i]) for i in range(6)]
-        self.axes.append(self.fig.add_subplot(gs[1, :]))
+        self.axes: List = [self.fig.add_subplot(gs[r, c]) for r in range(2) for c in range(3)]
+        self.axes.append(self.fig.add_subplot(gs[2, :]))
         for ax in self.axes:
             ax.set_facecolor(fc)
         super().__init__(self.fig)
@@ -623,6 +638,18 @@ class NLViewerWindow(QMainWindow):
         ])
         self._mode_cb.currentIndexChanged.connect(self._on_mode_changed)
         top.addWidget(self._mode_cb)
+
+        top.addSpacing(12)
+        top.addWidget(QLabel("Zero outer W layers:"))
+        self._outer_layer_spin = QSpinBox()
+        self._outer_layer_spin.setRange(0, 17)
+        self._outer_layer_spin.setValue(1)
+        self._outer_layer_spin.setFixedWidth(54)
+        self._outer_layer_spin.setToolTip(
+            "Set non-linearity coefficients to 0 for this many outer W-module layers.\n"
+            "0 keeps all non-absorber W modules fitted; 1 matches the historical behavior.")
+        self._outer_layer_spin.valueChanged.connect(self._on_outer_layers_changed)
+        top.addWidget(self._outer_layer_spin)
 
         top.addSpacing(12)
         self._scan_btn = QPushButton("▶ Scan")
@@ -773,6 +800,7 @@ class NLViewerWindow(QMainWindow):
         self._file_lbl.setText(f"Loading {path.name} …")
         QApplication.processEvents()
         self._data   = load_all(path)
+        self._refit_all_nl()
         self._cur    = None
         self._file_lbl.setText(str(path))
         self._mod_lbl.setText("← click a W module on the map")
@@ -804,6 +832,28 @@ class NLViewerWindow(QMainWindow):
         Forces an auto range-reset."""
         self._current_map_mode = ""   # flag: treat as mode change
         self._refresh_map()
+
+    def _outer_zero_layers(self) -> int:
+        return int(self._outer_layer_spin.value())
+
+    def _refit_all_nl(self):
+        layers = self._outer_zero_layers()
+        for d in self._data.values():
+            d.refit_nl(layers)
+
+    def _on_outer_layers_changed(self, _value: int):
+        if not self._data:
+            return
+        self._refit_all_nl()
+        self._refresh_map()
+        if self._cur is not None:
+            self._draw_module(self._cur)
+            self._mod_lbl.setText(
+                f"Module: {self._cur.name}   θ={self._cur.theta:.3f}°   "
+                f"nl = {self._cur.nl:.4f} ± {self._cur.nl_err:.4f}   "
+                f"χ²/ndf = {self._cur.chi2_nl:.2f}/{self._cur.ndf_nl}")
+        self._status_lbl.setText(
+            f"Outer {self._outer_zero_layers()} W layer(s) set to nl=0.")
 
     def _refresh_map(self):
         """Update map values.  Auto-resets the colour range only when the
@@ -868,6 +918,15 @@ class NLViewerWindow(QMainWindow):
         self._span_range = {k: None for k in _PEAK_KEYS}
         self._range_lbl.setText("(auto — drag to set)")
         self._clear_range_btn.setEnabled(False)
+        d = self._cur
+        if d is None:
+            return
+        any_ok = self._refit_current_peaks(quiet_skip=True)
+        if any_ok:
+            d.refit_nl(self._outer_zero_layers())
+            self._refresh_map()
+        self._draw_module(d)
+        self._status_lbl.setText("Fit ranges cleared; peaks refit with auto windows.")
 
     # ── drawing ────────────────────────────────────────────────────────────
 
@@ -886,12 +945,12 @@ class NLViewerWindow(QMainWindow):
             for sp in ax.spines.values():
                 sp.set_color(THEME.BORDER)
 
-        # 6 individual peak histograms on top row
-        ebeam_lbl = {"3p5": "3.5 GeV", "2p2": "2.2 GeV", "0p7": "0.7 GeV"}
+        # 2x3 peak histograms: e-p row, e-e row; columns 3.5, 2.2, 0.7 GeV.
         for i, key in enumerate(_PEAK_KEYS):
             self._draw_energy_hist_single(axes[i], d, key)
+            cfg = peak_cfg(key)
             self._canvas._style(axes[i],
-                title=f"{_PEAK_LABELS[key]}  ({ebeam_lbl[_PEAK_TAG[key]]})",
+                title=f"{cfg['label']}  ({cfg['energy_label']})",
                 xlabel="E (MeV)", ylabel="Counts")
 
         # Large linearity plot on bottom row
@@ -903,8 +962,8 @@ class NLViewerWindow(QMainWindow):
 
     def _draw_energy_hist_single(self, ax, d: ModuleData, key: str):
         """Draw histogram for one peak key with x-range [Eexp ± 8σ]."""
-        tag  = _PEAK_TAG[key]
-        hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
+        cfg = peak_cfg(key)
+        hist = hist_for_key(d, key)
         if hist is None:
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes, color=THEME.TEXT_DIM, fontsize=8)
@@ -912,7 +971,7 @@ class NLViewerWindow(QMainWindow):
 
         counts, edges = hist
         centers = 0.5 * (edges[:-1] + edges[1:])
-        color = _PEAK_COLOR[key]
+        color = str(cfg["color"])
         Eexp  = d.e_exp[key]
         sig   = d.sigma_exp[key]
 
@@ -963,10 +1022,10 @@ class NLViewerWindow(QMainWindow):
     def _draw_linearity(self, ax, d: ModuleData):
         E_base = d.e_exp["ep_3p5"]
 
-        # Collect valid (key, E_exp, E_rec_scaled) pairs
+        # Collect valid (key, E_exp, E_rec) pairs
         pts: List[Tuple[str, float, float]] = []
         for key in _PEAK_KEYS:
-            p = d.scaled(key)
+            p = d.measured_peak(key)
             if p > 0.0:
                 pts.append((key, d.e_exp[key], p))
 
@@ -1004,12 +1063,13 @@ class NLViewerWindow(QMainWindow):
 
         # Scatter: measured points
         for key, xe, ye_rec in pts:
+            cfg = peak_cfg(key)
             ratio = ye_rec / xe if xe > 0 else 0.0
-            ax.scatter(ye_rec, ratio, color=_PEAK_COLOR[key], s=70, zorder=5,
+            ax.scatter(ye_rec, ratio, color=str(cfg["color"]), s=70, zorder=5,
                        edgecolors="white", linewidths=0.5)
-            ax.annotate(_PEAK_LABELS[key], xy=(ye_rec, ratio),
+            ax.annotate(str(cfg["label"]), xy=(ye_rec, ratio),
                         xytext=(6, 4), textcoords="offset points",
-                        color=_PEAK_COLOR[key], fontsize=6.5)
+                        color=str(cfg["color"]), fontsize=6.5)
 
         # Corrected points — 1st order: E_corr = E_rec / (1 + nl*(E_rec-E_base)/1000)
         if E_base > 0.0 and len(pts) >= 2:
@@ -1018,7 +1078,7 @@ class NLViewerWindow(QMainWindow):
                 E_corr = ye_rec / denom if denom != 0.0 else ye_rec
                 ratio_corr = E_corr / xe if xe > 0 else 0.0
                 ax.scatter(E_corr, ratio_corr, color="limegreen", s=55, zorder=6,
-                           marker="o", edgecolors="white", linewidths=0.5)
+                           marker="s", edgecolors="white", linewidths=0.5)
 
         # Corrected points — 2nd order
         if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 >= 0:
@@ -1031,9 +1091,9 @@ class NLViewerWindow(QMainWindow):
                            marker="s", edgecolors="white", linewidths=0.5)
 
         # Dummy legend entries for point types
-        ax.scatter([], [], color="tomato",         s=50, label="e-p (meas.)")
-        ax.scatter([], [], color="cornflowerblue", s=50, label="e-e (meas.)")
-        ax.scatter([], [], color="limegreen",      s=50, marker="o", label="corrected (1st)")
+        ax.scatter([], [], color="tomato",         s=50, marker="o", label="e-p (meas.)")
+        ax.scatter([], [], color="cornflowerblue", s=50, marker="o", label="e-e (meas.)")
+        ax.scatter([], [], color="limegreen",      s=50, marker="s", label="corrected (1st)")
         ax.scatter([], [], color="orange",         s=50, marker="s", label="corrected (2nd)")
 
         # Fit result annotation
@@ -1082,8 +1142,7 @@ class NLViewerWindow(QMainWindow):
         Must be called after every canvas redraw (axes are recreated)."""
         self._span_selectors.clear()
         for ax, key in zip(self._canvas.axes[:6], _PEAK_KEYS):
-            tag  = _PEAK_TAG[key]
-            hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
+            hist = hist_for_key(d, key)
             if hist is None:
                 continue
             sel = SpanSelector(
@@ -1101,16 +1160,16 @@ class NLViewerWindow(QMainWindow):
     def _on_span_select(self, key: str, xmin: float, xmax: float):
         if xmax - xmin < 1.0:
             return
-        self._span_range[key] = (xmin, xmax)
-        self._range_lbl.setText(
-            f"{_PEAK_LABELS.get(key, key)}:  [{xmin:.1f},  {xmax:.1f}] MeV")
-        self._clear_range_btn.setEnabled(True)
-        ok = self._do_refit_peak(key)
         d = self._cur
         if d is None:
             return
+        self._span_range[key] = (xmin, xmax)
+        self._range_lbl.setText(
+            f"{peak_cfg(key)['label']}:  [{xmin:.1f},  {xmax:.1f}] MeV")
+        self._clear_range_btn.setEnabled(True)
+        ok = self._do_refit_peak(key)
         if ok:
-            d.refit_nl()
+            d.refit_nl(self._outer_zero_layers())
             self._refresh_map()
         self._draw_module(d)
         self._mod_lbl.setText(
@@ -1120,15 +1179,16 @@ class NLViewerWindow(QMainWindow):
 
     # ── re-fit actions ─────────────────────────────────────────────────────
 
-    def _do_refit_peak(self, key: str) -> bool:
+    def _do_refit_peak(self, key: str, quiet_skip: bool = False) -> bool:
         """Fit peak for *key*. Returns True on success. Does NOT redraw."""
         d = self._cur
         if d is None:
             return False
-        tag  = _PEAK_TAG[key]
-        hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
+        cfg = peak_cfg(key)
+        hist = hist_for_key(d, key)
         if hist is None:
-            self._status_lbl.setText(f"No histogram for {_PEAK_LABELS[key]}.")
+            if not quiet_skip:
+                self._status_lbl.setText(f"No histogram for {cfg['label']}.")
             return False
         Eexp = d.e_exp[key]
         sig  = d.sigma_exp[key]
@@ -1136,7 +1196,11 @@ class NLViewerWindow(QMainWindow):
             return False
         counts, edges = hist
         span = self._span_range.get(key)
-        if span is not None and HAS_SCIPY:
+        if span is not None:
+            if not HAS_SCIPY:
+                if not quiet_skip:
+                    self._status_lbl.setText("Manual range fit requires scipy.")
+                return False
             xmin, xmax = span
             centers = 0.5 * (edges[:-1] + edges[1:])
             mask = (centers >= xmin) & (centers <= xmax) & (counts > 0)
@@ -1162,19 +1226,31 @@ class NLViewerWindow(QMainWindow):
                 return False
             range_note = f"  (drag [{xmin:.0f}, {xmax:.0f}] MeV)"
         else:
+            if not should_fit_peak(d, key):
+                if not quiet_skip:
+                    self._status_lbl.setText(
+                        f"{cfg['label']} skipped in auto fit: expected peaks overlap. Drag a range to fit manually.")
+                return False
             mu, sigma_f, amp = fit_peak_full(counts, edges, Eexp, sig)
             range_note = f"  (auto [{Eexp - 6*sig:.0f}, {Eexp + 6*sig:.0f}] MeV)"
         if mu <= 0.0:
-            self._status_lbl.setText(
-                f"Fit FAILED for {_PEAK_LABELS[key]}{range_note}.")
+            if not quiet_skip:
+                self._status_lbl.setText(
+                    f"Fit FAILED for {cfg['label']}{range_note}.")
             return False
         d.peaks[key]      = mu
         d.peak_sigma[key] = sigma_f
         d.peak_amp[key]   = amp
-        d.recompute_scale()
-        self._status_lbl.setText(
-            f"{_PEAK_LABELS[key]}: μ={mu:.2f} MeV, σ={sigma_f:.2f} MeV{range_note}")
+        if not quiet_skip:
+            self._status_lbl.setText(
+                f"{cfg['label']}: μ={mu:.2f} MeV, σ={sigma_f:.2f} MeV{range_note}")
         return True
+
+    def _refit_current_peaks(self, quiet_skip: bool = False) -> bool:
+        any_ok = False
+        for key in _PEAK_KEYS:
+            any_ok |= self._do_refit_peak(key, quiet_skip=quiet_skip)
+        return any_ok
 
     def _do_refit_all_peaks(self):
         """Refit all 6 peaks with auto windows (clears manual ranges)."""
@@ -1182,11 +1258,9 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return
         self._span_range = {k: None for k in _PEAK_KEYS}
-        any_ok = False
-        for key in _PEAK_KEYS:
-            any_ok |= self._do_refit_peak(key)
+        any_ok = self._refit_current_peaks(quiet_skip=True)
         if any_ok:
-            d.refit_nl()
+            d.refit_nl(self._outer_zero_layers())
             self._refresh_map()
             self._draw_module(d)
             self._mod_lbl.setText(
@@ -1202,7 +1276,7 @@ class NLViewerWindow(QMainWindow):
 
         Workflow:
           1. Ask user to select a *base* calibration JSON (for factor/base_energy values).
-          2. Patch non_linear field for every W module that has a valid nl result.
+          2. Patch W-module non_linear/base_energy fields from current fits.
           3. Save as a new file (same dir, same name with _nonLinear suffix, or user-chosen path).
         """
         if not self._data:
@@ -1228,17 +1302,57 @@ class NLViewerWindow(QMainWindow):
             self._status_lbl.setText(f"Failed to read {src_path.name}: {exc}")
             return
 
+        if not isinstance(entries, list):
+            self._status_lbl.setText(
+                f"{src_path.name} is not a calibration JSON array.")
+            return
+
+        named_entries = [e for e in entries if isinstance(e, dict) and "name" in e]
+        if not named_entries:
+            self._status_lbl.setText(
+                f"{src_path.name} has no entries with a module name.")
+            return
+        calib_like_entries = [
+            e for e in named_entries
+            if "factor" in e and "base_energy" in e
+        ]
+        if not calib_like_entries:
+            self._status_lbl.setText(
+                f"{src_path.name} does not look like a calibration JSON (missing factor/base_energy).")
+            return
+
         # ── Step 2: patch non_linear / nl0 / nl1 / nl2 ───────────────────────
         n_patched = 0
+        n_skipped = 0
         for entry in entries:
+            if not isinstance(entry, dict):
+                n_skipped += 1
+                continue
             name = entry.get("name", "")
+            if not isinstance(name, str) or not name.startswith("W"):
+                continue
             d = self._data.get(name)
-            if d is not None and d.nl != 0.0:
-                entry["non_linear"] = round(float(d.nl), 6)
-                entry["nl0"] = round(float(d.nl), 6)
-                entry["nl1"] = round(float(d.nl2_1), 6)
-                entry["nl2"] = round(float(d.nl2_2), 6)
-                n_patched += 1
+            if d is None:
+                n_skipped += 1
+                continue
+
+            has_fit = d.ndf_nl > 0
+            force_zero = d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber
+            if not (has_fit or force_zero):
+                n_skipped += 1
+                continue
+
+            entry["base_energy"] = round(float(d.e_exp["ep_3p5"]), 6)
+            entry["non_linear"] = round(float(d.nl), 6)
+            entry["nl0"] = round(float(d.nl), 6)
+            entry["nl1"] = round(float(d.nl2_1), 6)
+            entry["nl2"] = round(float(d.nl2_2), 6)
+            n_patched += 1
+
+        if n_patched == 0:
+            self._status_lbl.setText(
+                f"No W modules were patched from {src_path.name}; check the base JSON and fit results.")
+            return
 
         # ── Step 3: choose output path ────────────────────────────────────────
         stem = src_path.stem
@@ -1255,7 +1369,7 @@ class NLViewerWindow(QMainWindow):
             with open(out_path, "w") as f:
                 json.dump(entries, f, indent=2)
             self._status_lbl.setText(
-                f"Exported nl for {n_patched} W modules (nl0/nl1/nl2)  →  {Path(out_path).name}")
+                f"Exported nl for {n_patched} W modules; skipped {n_skipped}  →  {Path(out_path).name}")
         except Exception as exc:
             self._status_lbl.setText(f"Save failed: {exc}")
 
@@ -1317,7 +1431,7 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return
 
-        d.refit_nl()
+        d.refit_nl(self._outer_zero_layers())
         self._refresh_map()
         self._draw_module(d)
         self._status_lbl.setText(
