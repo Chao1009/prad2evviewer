@@ -5,11 +5,13 @@ nonlinearity_viewer.py — HyCal PWO4 non-linearity analysis viewer
 
 Reads the ROOT output of prad2ana_nonlinearity:
   energy_3p5GeV/h_energy_{name}_3p5   per-module TH1F at 3.5 GeV
+  energy_2p2GeV/h_energy_{name}_2p2   per-module TH1F at 2.2 GeV
   energy_0p7GeV/h_energy_{name}_0p7   per-module TH1F at 0.7 GeV
 
 Left:  HyCal map (W modules only), coloured by non-linearity parameter nl.
-Right: three stacked plots for the selected module:
+Right: stacked plots for the selected module:
          • 3.5 GeV energy histogram
+         • 2.2 GeV energy histogram
          • 0.7 GeV energy histogram
          • Linearity plot (E_measured vs E_expected)
        Plus controls to re-fit individual peaks and re-run the nl fit.
@@ -276,21 +278,30 @@ def fit_nonlinearity_2nd(
 
 
 # =============================================================================
-# Per-module data  (peak keys: ep_3p5, ee_3p5, ep_0p7, ee_0p7)
+# Per-module data  (peak keys: ep_3p5, ee_3p5, ep_2p2, ee_2p2, ep_0p7, ee_0p7)
 # =============================================================================
 
-_PEAK_KEYS   = ["ep_3p5", "ee_3p5", "ep_0p7", "ee_0p7"]
+_PEAK_KEYS   = ["ep_3p5", "ee_3p5", "ep_2p2", "ee_2p2", "ep_0p7", "ee_0p7"]
 _PEAK_LABELS = {
     "ep_3p5": "e-p  3.5 GeV",
     "ee_3p5": "e-e  3.5 GeV",
+    "ep_2p2": "e-p  2.2 GeV",
+    "ee_2p2": "e-e  2.2 GeV",
     "ep_0p7": "e-p  0.7 GeV",
     "ee_0p7": "e-e  0.7 GeV",
 }
-_PEAK_EBEAM = {"ep_3p5": 3485.0, "ee_3p5": 3485.0, "ep_0p7": 729.0, "ee_0p7": 729.0}
-_PEAK_KIND  = {"ep_3p5": "ep",   "ee_3p5": "ee",   "ep_0p7": "ep",  "ee_0p7": "ee"}
+_PEAK_EBEAM = {"ep_3p5": 3485.0, "ee_3p5": 3485.0,
+               "ep_2p2": 2239.0, "ee_2p2": 2239.0,
+               "ep_0p7": 729.0, "ee_0p7": 729.0}
+_PEAK_KIND  = {"ep_3p5": "ep",   "ee_3p5": "ee",
+               "ep_2p2": "ep",   "ee_2p2": "ee",
+               "ep_0p7": "ep",  "ee_0p7": "ee"}
 _PEAK_COLOR = {"ep_3p5": "tomato",  "ee_3p5": "cornflowerblue",
+               "ep_2p2": "tomato",  "ee_2p2": "cornflowerblue",
                "ep_0p7": "tomato",  "ee_0p7": "cornflowerblue"}
-_PEAK_TAG   = {"ep_3p5": "3p5", "ee_3p5": "3p5", "ep_0p7": "0p7", "ee_0p7": "0p7"}
+_PEAK_TAG   = {"ep_3p5": "3p5", "ee_3p5": "3p5",
+               "ep_2p2": "2p2", "ee_2p2": "2p2",
+               "ep_0p7": "0p7", "ee_0p7": "0p7"}
 
 
 class ModuleData:
@@ -337,6 +348,7 @@ class ModuleData:
 
         # raw histograms loaded from ROOT (counts, edges)
         self.hist_3p5: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        self.hist_2p2: Optional[Tuple[np.ndarray, np.ndarray]] = None
         self.hist_0p7: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
     def scaled(self, key: str) -> float:
@@ -450,12 +462,19 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
         try:
             with uproot.open(str(root_path)) as f:
                 dir3 = f.get("energy_3p5GeV")
+                dir2 = f.get("energy_2p2GeV")
                 dir0 = f.get("energy_0p7GeV")
                 for name, d in data.items():
                     if dir3 is not None:
                         try:
                             h = dir3[f"h_energy_{name}_3p5"]
                             d.hist_3p5 = h.to_numpy()
+                        except Exception:
+                            pass
+                    if dir2 is not None:
+                        try:
+                            h = dir2[f"h_energy_{name}_2p2"]
+                            d.hist_2p2 = h.to_numpy()
                         except Exception:
                             pass
                     if dir0 is not None:
@@ -474,6 +493,16 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
         if d.hist_3p5 is not None:
             counts, edges = d.hist_3p5
             for key in ("ep_3p5", "ee_3p5"):
+                E, sig = d.e_exp[key], d.sigma_exp[key]
+                if E > 0.0:
+                    mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
+                    d.peaks[key]      = mu
+                    d.peak_sigma[key] = sigma_f
+                    d.peak_amp[key]   = amp
+
+        if d.hist_2p2 is not None:
+            counts, edges = d.hist_2p2
+            for key in ("ep_2p2", "ee_2p2"):
                 E, sig = d.e_exp[key], d.sigma_exp[key]
                 if E > 0.0:
                     mu, sigma_f, amp = fit_peak_full(counts, edges, E, sig)
@@ -501,18 +530,18 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
 
 
 # =============================================================================
-# Matplotlib canvas  (4 peak histograms on top row + 1 large linearity plot)
+# Matplotlib canvas  (6 peak histograms on top row + 1 large linearity plot)
 # =============================================================================
 
 class TripleCanvas(FigureCanvas):
     def __init__(self):
         fc = THEME.CANVAS
         self.fig = Figure(facecolor=fc)
-        # Top row: 4 individual peak histograms; bottom: linearity (2× height)
-        gs = self.fig.add_gridspec(2, 4, height_ratios=[1, 2],
+        # Top row: 6 individual peak histograms; bottom: linearity (2× height)
+        gs = self.fig.add_gridspec(2, 6, height_ratios=[1, 2],
                                    hspace=0.65, wspace=0.50,
                                    left=0.07, right=0.97, top=0.96, bottom=0.07)
-        self.axes: List = [self.fig.add_subplot(gs[0, i]) for i in range(4)]
+        self.axes: List = [self.fig.add_subplot(gs[0, i]) for i in range(6)]
         self.axes.append(self.fig.add_subplot(gs[1, :]))
         for ax in self.axes:
             ax.set_facecolor(fc)
@@ -699,7 +728,7 @@ class NLViewerWindow(QMainWindow):
         self._refit_peak_btn = QPushButton("Refit All Peaks")
         self._refit_peak_btn.setEnabled(False)
         self._refit_peak_btn.setToolTip(
-            "Re-run 3-step auto Gaussian fit on all 4 peaks (clears manual drag ranges).\n"
+            "Re-run 3-step auto Gaussian fit on all 6 peaks (clears manual drag ranges).\n"
             "Updates the linearity plot.")
         self._refit_peak_btn.clicked.connect(self._do_refit_all_peaks)
         row1.addWidget(self._refit_peak_btn)
@@ -857,8 +886,8 @@ class NLViewerWindow(QMainWindow):
             for sp in ax.spines.values():
                 sp.set_color(THEME.BORDER)
 
-        # 4 individual peak histograms on top row
-        ebeam_lbl = {"3p5": "3.5 GeV", "0p7": "0.7 GeV"}
+        # 6 individual peak histograms on top row
+        ebeam_lbl = {"3p5": "3.5 GeV", "2p2": "2.2 GeV", "0p7": "0.7 GeV"}
         for i, key in enumerate(_PEAK_KEYS):
             self._draw_energy_hist_single(axes[i], d, key)
             self._canvas._style(axes[i],
@@ -866,8 +895,8 @@ class NLViewerWindow(QMainWindow):
                 xlabel="E (MeV)", ylabel="Counts")
 
         # Large linearity plot on bottom row
-        self._draw_linearity(axes[4], d)
-        self._canvas._style(axes[4], title="Non-linearity",
+        self._draw_linearity(axes[6], d)
+        self._canvas._style(axes[6], title="Non-linearity",
                             xlabel="E_rec (MeV)", ylabel="E_rec / E_exp")
         self._canvas.redraw()
         self._setup_span_selectors(d)
@@ -875,7 +904,7 @@ class NLViewerWindow(QMainWindow):
     def _draw_energy_hist_single(self, ax, d: ModuleData, key: str):
         """Draw histogram for one peak key with x-range [Eexp ± 8σ]."""
         tag  = _PEAK_TAG[key]
-        hist = d.hist_3p5 if tag == "3p5" else d.hist_0p7
+        hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
         if hist is None:
             ax.text(0.5, 0.5, "No data", ha="center", va="center",
                     transform=ax.transAxes, color=THEME.TEXT_DIM, fontsize=8)
@@ -1049,12 +1078,12 @@ class NLViewerWindow(QMainWindow):
     # ── span selector ──────────────────────────────────────────────────────
 
     def _setup_span_selectors(self, d: ModuleData):
-        """Attach SpanSelectors to all 4 peak histogram axes.
+        """Attach SpanSelectors to all 6 peak histogram axes.
         Must be called after every canvas redraw (axes are recreated)."""
         self._span_selectors.clear()
-        for ax, key in zip(self._canvas.axes[:4], _PEAK_KEYS):
+        for ax, key in zip(self._canvas.axes[:6], _PEAK_KEYS):
             tag  = _PEAK_TAG[key]
-            hist = d.hist_3p5 if tag == "3p5" else d.hist_0p7
+            hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
             if hist is None:
                 continue
             sel = SpanSelector(
@@ -1097,7 +1126,7 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return False
         tag  = _PEAK_TAG[key]
-        hist = d.hist_3p5 if tag == "3p5" else d.hist_0p7
+        hist = d.hist_3p5 if tag == "3p5" else d.hist_2p2 if tag == "2p2" else d.hist_0p7
         if hist is None:
             self._status_lbl.setText(f"No histogram for {_PEAK_LABELS[key]}.")
             return False
@@ -1148,7 +1177,7 @@ class NLViewerWindow(QMainWindow):
         return True
 
     def _do_refit_all_peaks(self):
-        """Refit all 4 peaks with auto windows (clears manual ranges)."""
+        """Refit all 6 peaks with auto windows (clears manual ranges)."""
         d = self._cur
         if d is None:
             return
@@ -1164,7 +1193,7 @@ class NLViewerWindow(QMainWindow):
                 f"Module: {d.name}   θ={d.theta:.3f}°   "
                 f"nl={d.nl:.4f}±{d.nl_err:.4f}   "
                 f"χ²/ndf={d.chi2_nl:.2f}/{d.ndf_nl}")
-            self._status_lbl.setText("All 4 peaks refit with auto windows.")
+            self._status_lbl.setText("All 6 peaks refit with auto windows.")
 
     # ── scan ──────────────────────────────────────────────────────────────
 
