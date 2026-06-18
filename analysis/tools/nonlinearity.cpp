@@ -19,6 +19,8 @@
 #include <TChain.h>
 #include <TMarker.h>
 #include <TLegend.h>
+#include <TROOT.h>
+#include <TClass.h>
 
 #include <iostream>
 #include <string>
@@ -27,6 +29,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <algorithm>
+#include <thread>
+#include <mutex>
 #include <unistd.h>
 
 #ifndef DATABASE_DIR
@@ -41,7 +45,8 @@ using EventVars_Recon = prad2::ReconEventData;
 static std::vector<std::string> collectRootFiles(const std::string &path);
 // returns the number of events passing the sum-trigger selection
 long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1);
+    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1,
+    const std::string &label = "", std::mutex *io_mtx = nullptr);
 
 float resolution = 0.035; // pre-defined energy resolution
 
@@ -58,6 +63,12 @@ bool Vetoed(float cl_time, float sci_time, float sci_int){
 }
 
 int main(int argc, char *argv[]){
+    // ROOT multi-thread safety (must be called before ROOT objects are created).
+    ROOT::EnableThreadSafety();
+    TClass::GetClass("TTree");
+    TClass::GetClass("TFile");
+    TClass::GetClass("TBranch");
+    TClass::GetClass("TH1F");
 
     std::string output;
     std::vector<std::string> input_3p5, input_2p2, input_0p7;
@@ -102,56 +113,58 @@ int main(int argc, char *argv[]){
         energy_hists_3p5[m.id] = new TH1F((hname + "_3p5").c_str(), (htitle + " (3.5)").c_str(), 400, 0, 4000);
         energy_hists_2p2[m.id] = new TH1F((hname + "_2p2").c_str(), (htitle + " (2.2)").c_str(), 400, 0, 4000);
         energy_hists_0p7[m.id] = new TH1F((hname + "_0p7").c_str(), (htitle + " (0.7)").c_str(), 400, 0, 4000);
+        energy_hists_3p5[m.id]->SetDirectory(nullptr);
+        energy_hists_2p2[m.id]->SetDirectory(nullptr);
+        energy_hists_0p7[m.id]->SetDirectory(nullptr);
     }
 
-    // --- setup TChain and branches ---
-    TChain *chain = new TChain("recon");
-    for (const auto &f : input_3p5) {
-        chain->Add(f.c_str());
-        std::cerr << "Added file: " << f << "\n";
-    }
-    TTree *tree = chain;
-    if (!tree) {
-        std::cerr << "Cannot find TTree 'recon' in input files\n";
-        return 1;
-    }
+    long long n_sum_3p5 = 0;
+    long long n_sum_2p2 = 0;
+    long long n_sum_0p7 = 0;
+    std::mutex io_mtx;
 
-    EventVars_Recon ev;
-    prad2::SetReconReadBranches(tree, ev);
+    auto run_energy = [&](const std::string &label,
+                          const std::vector<std::string> &inputs,
+                          std::map<int, TH1F*> &energy_hists,
+                          float Ebeam,
+                          long long &n_sum) {
+        TChain chain("recon");
+        for (const auto &f : inputs) {
+            chain.Add(f.c_str());
+            std::lock_guard<std::mutex> lk(io_mtx);
+            std::cerr << "[" << label << "] Added file: " << f << "\n";
+        }
 
-    long long n_sum_3p5 = process_event(tree, ev, hycal, energy_hists_3p5, physics, E3p5, max_events);
+        EventVars_Recon ev;
+        prad2::SetReconReadBranches(&chain, ev);
+        PhysicsTools local_physics(hycal);
 
-    // --- repeat for 2.2 GeV data ---
-    TChain *chain2 = new TChain("recon");
-    for (const auto &f : input_2p2) {
-        chain2->Add(f.c_str());
-        std::cerr << "Added file: " << f << "\n";
-    }
-    TTree *tree2 = chain2;
-    if (!tree2) {
-        std::cerr << "Cannot find TTree 'recon' in input files\n";
-        return 1;
-    }
+        {
+            std::lock_guard<std::mutex> lk(io_mtx);
+            std::cerr << "[" << label << "] Processing "
+                      << chain.GetEntries() << " event(s)\n";
+        }
+        n_sum = process_event(&chain, ev, hycal, energy_hists, local_physics,
+                              Ebeam, max_events, label, &io_mtx);
+        {
+            std::lock_guard<std::mutex> lk(io_mtx);
+            std::cerr << "[" << label << "] Selected " << n_sum
+                      << " sum-trigger event(s)\n";
+        }
+    };
 
-    EventVars_Recon ev2;
-    prad2::SetReconReadBranches(tree2, ev2);
-    long long n_sum_2p2 = process_event(tree2, ev2, hycal, energy_hists_2p2, physics, E2p2, max_events);
-
-    // --- repeat for 0.7 GeV data ---
-    TChain *chain3 = new TChain("recon");
-    for (const auto &f : input_0p7) {
-        chain3->Add(f.c_str());
-        std::cerr << "Added file: " << f << "\n";
-    }
-    TTree *tree3 = chain3;
-    if (!tree3) {
-        std::cerr << "Cannot find TTree 'recon' in input files\n";
-        return 1;
-    }
-
-    EventVars_Recon ev3;
-    prad2::SetReconReadBranches(tree3, ev3);
-    long long n_sum_0p7 = process_event(tree3, ev3, hycal, energy_hists_0p7, physics, E0p7, max_events);
+    std::vector<std::thread> threads;
+    threads.reserve(3);
+    threads.emplace_back([&]() {
+        run_energy("3.5 GeV", input_3p5, energy_hists_3p5, E3p5, n_sum_3p5);
+    });
+    threads.emplace_back([&]() {
+        run_energy("2.2 GeV", input_2p2, energy_hists_2p2, E2p2, n_sum_2p2);
+    });
+    threads.emplace_back([&]() {
+        run_energy("0.7 GeV", input_0p7, energy_hists_0p7, E0p7, n_sum_0p7);
+    });
+    for (auto &t : threads) t.join();
 
     // a file with no sum-trigger events would silently produce an all-default
     // calibration (every module skipped); refuse to write output in that case
@@ -533,18 +546,32 @@ int main(int argc, char *argv[]){
 }
 
 long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events)
+    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events,
+    const std::string &label, std::mutex *io_mtx)
 {
+    auto log_msg = [&](const std::string &msg, bool flush = false) {
+        if (io_mtx) {
+            std::lock_guard<std::mutex> lk(*io_mtx);
+            std::cerr << msg;
+            if (flush) std::cerr << std::flush;
+        } else {
+            std::cerr << msg;
+            if (flush) std::cerr << std::flush;
+        }
+    };
+
     long long n_accepted = 0;
     for (int i = 0; i < tree->GetEntries(); i++) {
         // entry-count cap; checked before the trigger cut so -n N stops at entry N
         if (max_events > 0 && i >= max_events) {
-            std::cerr << "Reached max events limit: " << max_events << "\n";
+            log_msg("[" + label + "] Reached max events limit: "
+                    + std::to_string(max_events) + "\n");
             break;
         }
         tree->GetEntry(i);
         if( i % 1000 == 0) {
-            std::cerr << "Processing event " << i << "/" << tree->GetEntries() << "\r" << std::flush;
+            log_msg("[" + label + "] Processing event " + std::to_string(i)
+                    + "/" + std::to_string(tree->GetEntries()) + "\r", true);
         }
         if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
         n_accepted++;
@@ -558,7 +585,7 @@ long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyC
             // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
             float xd = (ev.cl_x[j] - (float)mod->x) / (float)mod->size_x;
             float yd = (ev.cl_y[j] - (float)mod->y) / (float)mod->size_y;
-            if (std::abs(xd) >= 0.25f || std::abs(yd) >= 0.25f) continue;
+            if (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f) continue;
 
             float x = ev.cl_x[j], y = ev.cl_y[j], z = ev.cl_z[j];
             float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
