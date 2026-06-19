@@ -1042,6 +1042,47 @@ class NLViewerWindow(QMainWindow):
                 self._range_ctrl.set_range(0.0, 1.0)
         self._map.set_values(values)
 
+    def _sorted_module_names(self) -> List[str]:
+        return sorted(self._data.keys(),
+                      key=lambda n: int(n[1:]) if n[1:].isdigit() else 0)
+
+    def _jump_module(self, step: int):
+        names = self._sorted_module_names()
+        if not names:
+            return
+        if self._scan_timer.isActive():
+            self._stop_scan()
+        cur_name = self._cur.name if self._cur else ""
+        try:
+            idx = names.index(cur_name)
+        except ValueError:
+            idx = -1 if step > 0 else 0
+        idx = (idx + step) % len(names)
+        name = names[idx]
+        self._map._hovered = name
+        self._map.update()
+        self._on_click(name)
+        self._scan_lbl.setText(f"{name}  ({idx + 1}/{len(names)})")
+
+    def keyPressEvent(self, event):
+        focus = QApplication.focusWidget()
+        if isinstance(focus, QLineEdit):
+            super().keyPressEvent(event)
+            return
+        if not event.isAutoRepeat():
+            key = event.key()
+            scan = event.nativeScanCode()
+            virt = event.nativeVirtualKey()
+            if key == Qt.Key.Key_AltGr or scan in (108, 100) or virt in (108, 100):
+                self._jump_module(1)
+                event.accept()
+                return
+            if key == Qt.Key.Key_Alt and (scan in (64, 56) or virt in (64, 56)):
+                self._jump_module(-1)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
     def _on_click(self, name: str):
         if not name:
             return
@@ -1554,8 +1595,7 @@ class NLViewerWindow(QMainWindow):
 
     def _start_scan(self):
         # Build sorted name list from all loaded W modules
-        all_names = sorted(self._data.keys(),
-                           key=lambda n: int(n[1:]) if n[1:].isdigit() else 0)
+        all_names = self._sorted_module_names()
         if not all_names:
             return
         # Start from current module if possible
