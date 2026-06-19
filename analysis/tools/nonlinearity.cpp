@@ -44,7 +44,7 @@ using EventVars_Recon = prad2::ReconEventData;
 
 static std::vector<std::string> collectRootFiles(const std::string &path);
 // returns the number of events passing the sum-trigger selection
-long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
+long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
     std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
 
@@ -75,6 +75,7 @@ int main(int argc, char *argv[]){
     std::string pngDir = "module_hists";
 
     int max_events = -1;
+    bool use_GEM = false;
     {
         std::vector<std::string> *cur = nullptr;
         for (int i = 1; i < argc; ++i) {
@@ -82,6 +83,7 @@ int main(int argc, char *argv[]){
             if (arg == "-a")       { cur = &input_3p5; }
             else if (arg == "-b")  { cur = &input_2p2; }
             else if (arg == "-c")  { cur = &input_0p7; }
+            else if (arg == "-g")  { cur = nullptr; use_GEM = true; }
             else if (arg == "-o")  { cur = nullptr; if (++i < argc) output = argv[i]; }
             else if (arg == "-n")  { cur = nullptr; if (++i < argc) max_events = std::atoi(argv[i]); }
             else if (arg == "-p")  { cur = nullptr; if (++i < argc) pngDir = argv[i]; }
@@ -144,7 +146,7 @@ int main(int argc, char *argv[]){
             std::cerr << "[" << label << "] Processing "
                       << chain.GetEntries() << " event(s)\n";
         }
-        n_sum = process_event(&chain, ev, hycal, energy_hists, local_physics,
+        n_sum = process_event(use_GEM, &chain, ev, hycal, energy_hists, local_physics,
                               Ebeam, max_events, label, &io_mtx);
         {
             std::lock_guard<std::mutex> lk(io_mtx);
@@ -205,7 +207,7 @@ int main(int argc, char *argv[]){
         if (it_0p7 == energy_hists_0p7.end() || !it_0p7->second) continue;
         auto hist_0p7 = it_0p7->second;
 
-        float x = mod.x, y = mod.y, z = 6270.f;
+        float x = mod.x, y = mod.y, z = 6275.f;
         float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
         float e_p_exp_3p5 = physics.ExpectedEnergy(theta, E3p5, "ep");
         float e_e_exp_3p5 = physics.ExpectedEnergy(theta, E3p5, "ee");
@@ -545,7 +547,7 @@ int main(int argc, char *argv[]){
 
 }
 
-long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
+long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
     std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events,
     const std::string &label, std::mutex *io_mtx)
 {
@@ -582,13 +584,45 @@ long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyC
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
 
-            // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
-            float xd = (ev.cl_x[j] - (float)mod->x) / (float)mod->size_x;
-            float yd = (ev.cl_y[j] - (float)mod->y) / (float)mod->size_y;
-            if (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f) continue;
+            float mod_x = (float)mod->x;
+            float mod_y = (float)mod->y;
+            float mod_size_x = (float)mod->size_x;
+            float mod_size_y = (float)mod->size_y;
 
-            float x = ev.cl_x[j], y = ev.cl_y[j], z = ev.cl_z[j];
-            float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
+            float c_x, c_y, c_z;
+            if(!use_GEM){
+                c_x = ev.cl_x[j];
+                c_y = ev.cl_y[j];
+                c_z = ev.cl_z[j];
+            }
+            else{
+                bool match[4] = {false, false, false, false};
+                for(int d = 0; d < 4; d++){
+                    if(ev.matchFlag[j] & 1 << d) match[d] = true;
+                }
+                if( (match[0] || match[1]) && (match[2] || match[3]) ){
+                    if(match[0]) { c_x = ev.matchGEMx[j][0]; c_y = ev.matchGEMy[j][0]; c_z = ev.matchGEMz[j][0]; }
+                    else { c_x = ev.matchGEMx[j][1]; c_y = ev.matchGEMy[j][1]; c_z = ev.matchGEMz[j][1]; }
+                    //projection onto the HyCal module plane
+                    float scale = 6275.f / c_z;
+                    c_x *= scale;
+                    c_y *= scale;
+                    c_z = 6275.f; // project onto the HyCal module plane
+                }
+                else{
+                    c_x = -999.f;
+                    c_y = -999.f;
+                    c_z = -999.f;
+                }
+                
+            }
+
+            // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
+            float xd = (c_x - mod_x) / mod_size_x;
+            float yd = (c_y - mod_y) / mod_size_y;
+            if (std::abs(xd) >= 0.2f || std::abs(yd) >= 0.2f) continue;
+
+            float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), 6275.f) * 180.f / M_PI;
             float energy = ev.cl_energy[j];
 
             bool veto = false;

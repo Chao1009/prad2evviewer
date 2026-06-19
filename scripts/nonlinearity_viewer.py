@@ -35,7 +35,7 @@ import numpy as np
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QApplication, QButtonGroup, QComboBox, QFileDialog, QGridLayout, QGroupBox,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
     QSizePolicy, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
@@ -370,6 +370,9 @@ class ModuleData:
         self.peaks:      Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_sigma: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_amp:   Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
+        self.peak_enabled: Dict[str, bool] = {k: True for k in _PEAK_KEYS}
+        self.manual_peaks: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
+        self.fit_order: str = "2nd"
 
         # non-linearity fit result (1st order)
         self.nl:      float = 0.0
@@ -393,6 +396,8 @@ class ModuleData:
 
     def measured_peak(self, key: str) -> float:
         """Return measured peak value used by the C++ non-linearity fit."""
+        if self.manual_peaks.get(key, 0.0) > 0.0:
+            return self.manual_peaks[key]
         return self.peaks[key]
 
     def is_outer_layer(self, layers: int) -> bool:
@@ -407,6 +412,8 @@ class ModuleData:
         """Return (E_expected, E_rec) arrays for all valid measured peaks."""
         xs, ys = [], []
         for key in _PEAK_KEYS:
+            if not self.peak_enabled.get(key, True):
+                continue
             p = self.measured_peak(key)
             if p > 0.0:
                 xs.append(self.e_exp[key])
@@ -597,6 +604,10 @@ class NLViewerWindow(QMainWindow):
             k: None for k in _PEAK_KEYS}
         self._span_selectors: List = []   # keep references to avoid GC
 
+        self._peak_use_cb: Dict[str, QCheckBox] = {}
+        self._peak_center_edit: Dict[str, QLineEdit] = {}
+        self._fit_order_cb: Optional[QComboBox] = None
+
         # scan state
         self._scan_timer  = QTimer(self)
         self._scan_timer.setInterval(500)   # ms per module
@@ -677,7 +688,7 @@ class NLViewerWindow(QMainWindow):
         top.addSpacing(12)
         self._export_btn = QPushButton("↩ Export nl → JSON")
         self._export_btn.setToolTip(
-            "Read a base calibration JSON, fill in non_linear values from the current\n"
+            "Read a base calibration JSON, fill in nl1/nl2 values from the current\n"
             "analysis results, and save a new JSON in the current directory.")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export_nl)
@@ -771,8 +782,55 @@ class NLViewerWindow(QMainWindow):
         self._refit_nl_btn.clicked.connect(self._do_refit_nl)
         row1.addWidget(self._refit_nl_btn)
 
+        row1.addSpacing(12)
+        row1.addWidget(QLabel("Export fit:"))
+        self._fit_order_cb = QComboBox()
+        self._fit_order_cb.addItems(["2nd order", "1st order"])
+        self._fit_order_cb.setEnabled(False)
+        self._fit_order_cb.setToolTip(
+            "Coefficient order used when exporting JSON for this module.\n"
+            "2nd order writes nl1/nl2 from the 2nd-order fit.\n"
+            "1st order writes nl1 from the 1st-order fit and nl2 = 0.")
+        self._fit_order_cb.currentIndexChanged.connect(self._on_fit_order_changed)
+        row1.addWidget(self._fit_order_cb)
+
         row1.addStretch()
         lay.addLayout(row1)
+
+        peak_grid = QGridLayout()
+        peak_grid.setHorizontalSpacing(8)
+        peak_grid.setVerticalSpacing(2)
+        for idx, key in enumerate(_PEAK_KEYS):
+            cfg = peak_cfg(key)
+            cell = QWidget()
+            cell_lay = QHBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(3)
+
+            use_cb = QCheckBox("Use")
+            use_cb.setChecked(True)
+            use_cb.setEnabled(False)
+            use_cb.setToolTip("Include this peak point in the linearity fit.")
+            use_cb.toggled.connect(lambda checked, _key=key: self._on_peak_use_changed(_key, checked))
+
+            center_edit = QLineEdit()
+            center_edit.setPlaceholderText("μ MeV")
+            center_edit.setFixedWidth(62)
+            center_edit.setEnabled(False)
+            center_edit.setToolTip("Manual peak center in MeV. Leave empty to use the fitted peak.")
+            center_edit.editingFinished.connect(lambda _key=key: self._on_peak_center_edit(_key))
+
+            label = QLabel(str(cfg["label"]).replace("  ", " "))
+            label.setStyleSheet(f"color: {cfg['color']}; font-size: 10px;")
+            cell_lay.addWidget(label)
+            cell_lay.addWidget(use_cb)
+            cell_lay.addWidget(center_edit)
+            cell_lay.addStretch()
+
+            self._peak_use_cb[key] = use_cb
+            self._peak_center_edit[key] = center_edit
+            peak_grid.addWidget(cell, idx // 3, idx % 3)
+        lay.addLayout(peak_grid)
 
         self._status_lbl = QLabel("(select a module first)")
         self._status_lbl.setFont(QFont("Monospace", 9))
@@ -796,6 +854,96 @@ class NLViewerWindow(QMainWindow):
         self._scan_btn.setEnabled(bool(self._data))
         self._export_btn.setEnabled(bool(self._data))
 
+    def _set_peak_controls_enabled(self, enabled: bool):
+        for key in _PEAK_KEYS:
+            self._peak_use_cb[key].setEnabled(enabled)
+            self._peak_center_edit[key].setEnabled(enabled)
+        if self._fit_order_cb is not None:
+            self._fit_order_cb.setEnabled(enabled)
+
+    def _sync_peak_controls(self, d: Optional[ModuleData]):
+        enabled = d is not None
+        self._set_peak_controls_enabled(enabled)
+        for key in _PEAK_KEYS:
+            cb = self._peak_use_cb[key]
+            edit = self._peak_center_edit[key]
+            cb.blockSignals(True)
+            edit.blockSignals(True)
+            if d is None:
+                cb.setChecked(True)
+                edit.setText("")
+            else:
+                cb.setChecked(d.peak_enabled.get(key, True))
+                manual = d.manual_peaks.get(key, 0.0)
+                edit.setText(f"{manual:.2f}" if manual > 0.0 else "")
+            cb.blockSignals(False)
+            edit.blockSignals(False)
+        if self._fit_order_cb is not None:
+            self._fit_order_cb.blockSignals(True)
+            if d is None:
+                self._fit_order_cb.setCurrentIndex(0)
+            else:
+                self._fit_order_cb.setCurrentIndex(1 if d.fit_order == "1st" else 0)
+            self._fit_order_cb.blockSignals(False)
+
+    def _refresh_current_fit_display(self, status: Optional[str] = None):
+        d = self._cur
+        if d is None:
+            return
+        d.refit_nl(self._outer_zero_layers())
+        self._refresh_map()
+        self._draw_module(d)
+        self._mod_lbl.setText(
+            f"Module: {d.name}   θ={d.theta:.3f}°   "
+            f"nl = {d.nl:.4f} ± {d.nl_err:.4f}   "
+            f"χ²/ndf = {d.chi2_nl:.2f}/{d.ndf_nl}")
+        if status is not None:
+            self._status_lbl.setText(status)
+
+    def _on_peak_use_changed(self, key: str, checked: bool):
+        d = self._cur
+        if d is None:
+            return
+        d.peak_enabled[key] = bool(checked)
+        self._refresh_current_fit_display(
+            f"{peak_cfg(key)['label']} {'included in' if checked else 'removed from'} linearity fit.")
+
+    def _on_peak_center_edit(self, key: str):
+        d = self._cur
+        if d is None:
+            return
+        text = self._peak_center_edit[key].text().strip()
+        if not text:
+            d.manual_peaks[key] = 0.0
+            self._refresh_current_fit_display(
+                f"{peak_cfg(key)['label']} manual center cleared; using fitted peak.")
+            return
+        try:
+            value = float(text)
+        except ValueError:
+            self._peak_center_edit[key].setText(
+                f"{d.manual_peaks[key]:.2f}" if d.manual_peaks.get(key, 0.0) > 0.0 else "")
+            self._status_lbl.setText("Manual peak center must be a number in MeV.")
+            return
+        if value <= 0.0:
+            d.manual_peaks[key] = 0.0
+            self._peak_center_edit[key].setText("")
+            self._refresh_current_fit_display(
+                f"{peak_cfg(key)['label']} manual center cleared; using fitted peak.")
+            return
+        d.manual_peaks[key] = value
+        self._peak_center_edit[key].setText(f"{value:.2f}")
+        self._refresh_current_fit_display(
+            f"{peak_cfg(key)['label']} center manually set to {value:.2f} MeV.")
+
+    def _on_fit_order_changed(self, _idx: int):
+        d = self._cur
+        if d is None or self._fit_order_cb is None:
+            return
+        d.fit_order = "1st" if self._fit_order_cb.currentIndex() == 1 else "2nd"
+        self._status_lbl.setText(
+            f"{d.name} export will use {self._fit_order_cb.currentText()} coefficients.")
+
     def _load(self, path: Path):
         self._file_lbl.setText(f"Loading {path.name} …")
         QApplication.processEvents()
@@ -806,6 +954,7 @@ class NLViewerWindow(QMainWindow):
         self._mod_lbl.setText("← click a W module on the map")
         self._refit_peak_btn.setEnabled(False)
         self._refit_nl_btn.setEnabled(False)
+        self._sync_peak_controls(None)
         self._status_lbl.setText("")
         self._span_range = {k: None for k in _PEAK_KEYS}
 
@@ -910,6 +1059,7 @@ class NLViewerWindow(QMainWindow):
         self._mod_lbl.setText(info)
         self._refit_peak_btn.setEnabled(True)
         self._refit_nl_btn.setEnabled(True)
+        self._sync_peak_controls(d)
         self._status_lbl.setText("")
         self._draw_module(d)
 
@@ -982,6 +1132,9 @@ class NLViewerWindow(QMainWindow):
 
         ax.step(centers, counts, where="mid",
                 color=THEME.TEXT, linewidth=0.9, alpha=0.85)
+        visible = (centers >= xlo) & (centers <= xhi)
+        ymax = float(counts[visible].max()) if np.any(visible) else float(counts.max())
+        ax.set_ylim(0.0, max(1.0, ymax * 1.15))
 
         # Drag-selected span range band
         span = self._span_range.get(key)
@@ -1007,7 +1160,8 @@ class NLViewerWindow(QMainWindow):
         mu   = d.peaks[key]
         amp  = d.peak_amp[key]
         sigf = d.peak_sigma[key]
-        if mu > 0.0 and amp > 0.0 and sigf > 0.0:
+        manual_mu = d.manual_peaks.get(key, 0.0)
+        if manual_mu <= 0.0 and mu > 0.0 and amp > 0.0 and sigf > 0.0:
             xg = np.linspace(max(xlo, mu - 4.0 * sigf),
                              min(xhi, mu + 4.0 * sigf), 300)
             yg = _gauss(xg, amp, mu, sigf)
@@ -1018,6 +1172,15 @@ class NLViewerWindow(QMainWindow):
                         color=color, fontsize=7, ha="center", va="bottom")
         elif Eexp > 0.0:
             ax.axvline(Eexp, color=color, linewidth=1.0, linestyle=":", alpha=0.5)
+        if manual_mu > 0.0:
+            ax.axvline(manual_mu, color=color, linewidth=1.5, linestyle="--", alpha=0.9)
+            ax.annotate(f"manual {manual_mu:.1f}",
+                        xy=(manual_mu, ax.get_ylim()[1] * 0.82),
+                        xytext=(0, 0), textcoords="offset points",
+                        color=color, fontsize=7, ha="center", va="bottom")
+        if not d.peak_enabled.get(key, True):
+            ax.text(0.03, 0.92, "excluded", transform=ax.transAxes,
+                    fontsize=7, color=THEME.TEXT_DIM, ha="left", va="top")
 
     def _draw_linearity(self, ax, d: ModuleData):
         E_base = d.e_exp["ep_3p5"]
@@ -1025,6 +1188,8 @@ class NLViewerWindow(QMainWindow):
         # Collect valid (key, E_exp, E_rec) pairs
         pts: List[Tuple[str, float, float]] = []
         for key in _PEAK_KEYS:
+            if not d.peak_enabled.get(key, True):
+                continue
             p = d.measured_peak(key)
             if p > 0.0:
                 pts.append((key, d.e_exp[key], p))
@@ -1276,7 +1441,7 @@ class NLViewerWindow(QMainWindow):
 
         Workflow:
           1. Ask user to select a *base* calibration JSON (for factor/base_energy values).
-          2. Patch W-module non_linear/base_energy fields from current fits.
+          2. Patch W-module nl1/nl2/base_energy fields from current fits.
           3. Save as a new file (same dir, same name with _nonLinear suffix, or user-chosen path).
         """
         if not self._data:
@@ -1321,7 +1486,7 @@ class NLViewerWindow(QMainWindow):
                 f"{src_path.name} does not look like a calibration JSON (missing factor/base_energy).")
             return
 
-        # ── Step 2: patch non_linear / nl0 / nl1 / nl2 ───────────────────────
+        # ── Step 2: patch nl1 / nl2 ──────────────────────────────────────────
         n_patched = 0
         n_skipped = 0
         for entry in entries:
@@ -1343,10 +1508,14 @@ class NLViewerWindow(QMainWindow):
                 continue
 
             entry["base_energy"] = round(float(d.e_exp["ep_3p5"]), 6)
-            entry["non_linear"] = round(float(d.nl), 6)
-            entry["nl0"] = round(float(d.nl), 6)
-            entry["nl1"] = round(float(d.nl2_1), 6)
-            entry["nl2"] = round(float(d.nl2_2), 6)
+            if force_zero:
+                nl1, nl2 = 0.0, 0.0
+            elif d.fit_order == "1st":
+                nl1, nl2 = d.nl, 0.0
+            else:
+                nl1, nl2 = d.nl2_1, d.nl2_2
+            entry["nl1"] = round(float(nl1), 6)
+            entry["nl2"] = round(float(nl2), 6)
             n_patched += 1
 
         if n_patched == 0:
@@ -1369,7 +1538,7 @@ class NLViewerWindow(QMainWindow):
             with open(out_path, "w") as f:
                 json.dump(entries, f, indent=2)
             self._status_lbl.setText(
-                f"Exported nl for {n_patched} W modules; skipped {n_skipped}  →  {Path(out_path).name}")
+                f"Exported nl1/nl2 for {n_patched} W modules; skipped {n_skipped}  →  {Path(out_path).name}")
         except Exception as exc:
             self._status_lbl.setText(f"Save failed: {exc}")
 
