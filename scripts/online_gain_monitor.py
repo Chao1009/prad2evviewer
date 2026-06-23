@@ -63,6 +63,8 @@ DEFAULT_REPLAY_THREADS = 50
 DEFAULT_THEME = "light"
 DEFAULT_RUNS_SHOWN = 5
 DEFAULT_GAIN_DROP_WARN_PCT = 3.0
+DEFAULT_MAX_DOWNLOAD_EVIO = 10
+DEFAULT_QUEUE_CAP_EVIO = 100
 
 QUANTITIES = [
     ("gain_norm_W", "Gain / Ref Gain"),
@@ -191,6 +193,10 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
         if "gain_corr" not in f:
             raise RuntimeError(f"No gain_corr tree in {path}")
         t = f["gain_corr"]
+        event_start = t["event_num_start"].array(library="np")
+        event_end = t["event_num_end"].array(library="np")
+        if len(event_start) == 0:
+            raise RuntimeError(f"No batch entries in gain_corr tree: {path}")
         gain_w = t["gain_W"].array(library="np")
         gain_corr_w = t["gain_corr_W"].array(library="np")
         gain_w_ref = (
@@ -201,8 +207,8 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
         return GainData(
             run_number=run_number,
             path=path,
-            event_start=t["event_num_start"].array(library="np"),
-            event_end=t["event_num_end"].array(library="np"),
+            event_start=event_start,
+            event_end=event_end,
             gain_w=gain_w,
             gain_w_ref=gain_w_ref,
             gain_corr_w=gain_corr_w,
@@ -690,9 +696,17 @@ class OnlineGainMonitor(QMainWindow):
         root.setSpacing(6)
 
         top_widget = QWidget()
-        top = QHBoxLayout(top_widget)
+        top_rows = QVBoxLayout(top_widget)
+        top_rows.setContentsMargins(0, 0, 0, 0)
+        top_rows.setSpacing(4)
+        top_row1 = QWidget()
+        top_row2 = QWidget()
+        top = QHBoxLayout(top_row1)
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(5)
+        top2 = QHBoxLayout(top_row2)
+        top2.setContentsMargins(0, 0, 0, 0)
+        top2.setSpacing(5)
         title = QLabel("ONLINE LMS GAIN MONITOR")
         title.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
         title.setStyleSheet(themed(f"color:{THEME.ACCENT};"))
@@ -738,6 +752,20 @@ class OnlineGainMonitor(QMainWindow):
         self._evio_skip.setFixedWidth(70)
         top.addWidget(self._evio_skip)
 
+        top.addWidget(self._label("max evio"))
+        self._max_download_evio = QSpinBox()
+        self._max_download_evio.setRange(1, 100000)
+        self._max_download_evio.setValue(DEFAULT_MAX_DOWNLOAD_EVIO)
+        self._max_download_evio.setFixedWidth(75)
+        top.addWidget(self._max_download_evio)
+
+        top.addWidget(self._label("queue cap"))
+        self._queue_cap_evio = QSpinBox()
+        self._queue_cap_evio.setRange(1, 1000000)
+        self._queue_cap_evio.setValue(DEFAULT_QUEUE_CAP_EVIO)
+        self._queue_cap_evio.setFixedWidth(85)
+        top.addWidget(self._queue_cap_evio)
+
         top.addWidget(self._label("runs shown"))
         self._runs_shown = QSpinBox()
         self._runs_shown.setRange(1, 999)
@@ -753,31 +781,31 @@ class OnlineGainMonitor(QMainWindow):
         self._threads.setFixedWidth(60)
         top.addWidget(self._threads)
 
-        top.addWidget(self._label("ref run"))
+        top2.addWidget(self._label("ref run"))
         self._ref_run = QSpinBox()
         self._ref_run.setRange(-1, 999999)
         self._ref_run.setValue(-1)
         self._ref_run.setSpecialValueText("auto")
         self._ref_run.setFixedWidth(90)
-        top.addWidget(self._ref_run)
+        top2.addWidget(self._ref_run)
 
         self._ref_file_btn = self._button("Ref File", THEME.ACCENT, self._browse_ref_gain_file)
-        top.addWidget(self._ref_file_btn)
+        top2.addWidget(self._ref_file_btn)
 
-        top.addWidget(self._label("quantity"))
+        top2.addWidget(self._label("quantity"))
         self._quantity = QComboBox()
         self._quantity.addItems([label for _, label in QUANTITIES])
         self._quantity.currentIndexChanged.connect(self._refresh_views)
-        top.addWidget(self._quantity)
+        top2.addWidget(self._quantity)
 
-        top.addWidget(self._label("map range"))
+        top2.addWidget(self._label("map range"))
         self._change_range = QComboBox()
         self._change_range.addItems([label for label, _ in CHANGE_RANGE_CHOICES])
         self._change_range.setCurrentIndex(len(CHANGE_RANGE_CHOICES) - 1)
         self._change_range.currentIndexChanged.connect(self._refresh_views)
-        top.addWidget(self._change_range)
+        top2.addWidget(self._change_range)
 
-        top.addWidget(self._label("drop warn"))
+        top2.addWidget(self._label("drop warn"))
         self._drop_warn = QDoubleSpinBox()
         self._drop_warn.setRange(0.0, 100.0)
         self._drop_warn.setDecimals(1)
@@ -785,14 +813,14 @@ class OnlineGainMonitor(QMainWindow):
         self._drop_warn.setValue(DEFAULT_GAIN_DROP_WARN_PCT)
         self._drop_warn.setSuffix(" %")
         self._drop_warn.setFixedWidth(85)
-        top.addWidget(self._drop_warn)
+        top2.addWidget(self._drop_warn)
 
-        top.addWidget(self._label("ref"))
+        top2.addWidget(self._label("ref"))
         self._ref = QComboBox()
         self._ref.addItems(REF_CHOICES)
         self._ref.setCurrentIndex(3)
         self._ref.currentIndexChanged.connect(self._refresh_views)
-        top.addWidget(self._ref)
+        top2.addWidget(self._ref)
 
         self._norm_first5 = QCheckBox("first 5 -> 1")
         self._norm_first5.setFont(QFont("Consolas", 10))
@@ -801,22 +829,24 @@ class OnlineGainMonitor(QMainWindow):
             f"QCheckBox::indicator{{width:14px;height:14px;}}"
         ))
         self._norm_first5.stateChanged.connect(self._refresh_views)
-        top.addWidget(self._norm_first5)
+        top2.addWidget(self._norm_first5)
 
-        top.addWidget(self._label("ratio tol"))
+        top2.addWidget(self._label("ratio tol"))
         self._ref_ratio_tol = QSpinBox()
         self._ref_ratio_tol.setRange(0, 100)
         self._ref_ratio_tol.setValue(DEFAULT_REF_RATIO_BAD_PCT)
         self._ref_ratio_tol.setSuffix(" %")
         self._ref_ratio_tol.setFixedWidth(80)
         self._ref_ratio_tol.valueChanged.connect(self._refresh_views)
-        top.addWidget(self._ref_ratio_tol)
+        top2.addWidget(self._ref_ratio_tol)
 
-        top.addStretch()
+        top2.addStretch()
         self._status = QLabel("Idle")
         self._status.setFont(QFont("Consolas", 10))
         self._status.setStyleSheet(themed(f"color:{THEME.TEXT_DIM};"))
-        top.addWidget(self._status)
+        top2.addWidget(self._status)
+        top_rows.addWidget(top_row1)
+        top_rows.addWidget(top_row2)
         root.addWidget(self._hscroll(top_widget))
 
         dirs_widget = QWidget()
@@ -1073,6 +1103,8 @@ HOST={shlex.quote(host)}
 REMOTE_BASE={shlex.quote(remote_base.rstrip('/'))}
 STORAGE_BASE={shlex.quote(storage_base)}
 EVIO_SKIP={self._evio_skip.value()}
+MAX_DOWNLOAD_EVIO={self._max_download_evio.value()}
+QUEUE_CAP_EVIO={self._queue_cap_evio.value()}
 echo "Download settings: storage=$STORAGE_BASE"
 
 REMOTE_RUNS=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_BASE\" 2>/dev/null | grep -E \"^prad_[0-9]{{6}}$\" | sort'" || true)
@@ -1104,6 +1136,10 @@ ALREADY=0
 QUEUED=0
 SKIPPED_SAMPLE=0
 EVIO_INDEX=0
+PENDING_TOTAL=$(find "$STORAGE_BASE/replay_queue" "$STORAGE_BASE/evio" -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$PENDING_TOTAL" -ge "$QUEUE_CAP_EVIO" ]; then
+    echo "Pending EVIO queue cap reached: $PENDING_TOTAL/$QUEUE_CAP_EVIO; pausing downloads until replay clears files."
+fi
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
@@ -1130,20 +1166,26 @@ while IFS= read -r f; do
     elif [ -f "$LOCAL_DIR/$f" ]; then
         ALREADY=$((ALREADY+1))
     else
-        if [ "$COPIED" -ge 50 ]; then
-            echo "Reached 50 files limit, stopping download for now."
+        if [ "$PENDING_TOTAL" -ge "$QUEUE_CAP_EVIO" ]; then
+            echo "Pending EVIO queue cap reached: $PENDING_TOTAL/$QUEUE_CAP_EVIO; stopping download for now."
+            break
+        fi
+        if [ "$COPIED" -ge "$MAX_DOWNLOAD_EVIO" ]; then
+            echo "Reached $MAX_DOWNLOAD_EVIO files limit, stopping download for now."
             break
         fi
             
         echo "Copying $f"
         scp "$HOST:$REMOTE_DIR/$f" "$LOCAL_DIR/"
         COPIED=$((COPIED+1))
+        PENDING_TOTAL=$((PENDING_TOTAL+1))
     fi
 done <<< "$ALL_FILES"
 
 LOCAL_COUNT=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
 LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
-echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED sampled_skip=$SKIPPED_SAMPLE lms=$LMS_COUNT"
+PENDING_TOTAL=$(find "$STORAGE_BASE/replay_queue" "$STORAGE_BASE/evio" -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
+echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED pending=$PENDING_TOTAL/$QUEUE_CAP_EVIO sampled_skip=$SKIPPED_SAMPLE lms=$LMS_COUNT"
 if [ "$LOCAL_COUNT" -gt 0 ]; then
     SNAP_DIR="$QUEUE_ROOT/$(date +%Y%m%d_%H%M%S)_$$"
     mkdir -p "$SNAP_DIR"
@@ -1199,7 +1241,14 @@ exit 0
         self._enqueue_existing_replay_snapshots()
         self._start_next_replay()
         if self._stop_btn.isEnabled():
-            self._timer.start(self._interval.value() * 1000)
+            if self._pending_evio_count() >= self._queue_cap_evio.value():
+                self._append(
+                    f"Pending EVIO cap reached; next scan delayed by {self._interval.value()} s.",
+                    "warn",
+                )
+                self._timer.start(self._interval.value() * 1000)
+            else:
+                QTimer.singleShot(0, self._scan_once)
 
     def _on_replay_finished(self, code, status):
         color = "ok" if code == 0 else "error"
@@ -1209,6 +1258,13 @@ exit 0
         self._active_replay_snapshots.clear()
         self._load_root()
         self._start_next_replay()
+        if (
+            self._stop_btn.isEnabled()
+            and self._download_process.state() == QProcess.ProcessState.NotRunning
+            and self._pending_evio_count() < self._queue_cap_evio.value()
+        ):
+            self._timer.stop()
+            QTimer.singleShot(0, self._scan_once)
 
     def _enqueue_replay_snapshot(self, run: int, snapshot: Path) -> bool:
         snapshot = snapshot.resolve()
@@ -1238,6 +1294,15 @@ exit 0
                     added += 1
         if added:
             self._append(f"Recovered {added} replay snapshot(s) from disk queue.", "warn")
+
+    def _pending_evio_count(self) -> int:
+        storage_base = Path(self._storage_base.text().strip() or STORAGE_BASE).expanduser()
+        total = 0
+        for sub in ("replay_queue", "evio"):
+            root = storage_base / sub
+            if root.exists():
+                total += sum(1 for p in root.rglob("*.evio.*") if p.is_file())
+        return total
 
     def _start_next_replay(self):
         if self._replay_process.state() != QProcess.ProcessState.NotRunning:
@@ -1380,7 +1445,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         self._runs_data = dict(sorted(loaded.items()))
         self._data = self._runs_data[max(self._runs_data)]
         nbatches = sum(d.nbatches for d in self._runs_data.values())
-        showing = min(self._runs_shown.value(), len(self._runs_data))
+        showing = min(self._runs_shown.value(), sum(1 for d in self._runs_data.values() if d.nbatches > 0))
         miss = f" | missing {len(missing)} run(s)" if missing else ""
         self._status.setText(
             f"{len(self._runs_data)} run(s) loaded, showing {showing}, {nbatches} batches{miss}"
@@ -1420,7 +1485,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         self._known_runs.update(self._runs_data.keys())
         self._data = self._runs_data[max(self._runs_data)]
         nbatches = sum(d.nbatches for d in self._runs_data.values())
-        showing = min(self._runs_shown.value(), len(self._runs_data))
+        showing = min(self._runs_shown.value(), sum(1 for d in self._runs_data.values() if d.nbatches > 0))
         self._run_edit.setText(" ".join(f"{r:06d}" for r in self._runs_data.keys()))
         self._status.setText(
             f"Loaded {len(self._runs_data)} run(s), showing {showing}, {nbatches} batches from {folder}"
@@ -1465,7 +1530,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if not self._runs_data:
             return {}
         limit = self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
-        runs = sorted(self._runs_data)[-limit:]
+        runs = [run for run in sorted(self._runs_data) if self._runs_data[run].nbatches > 0][-limit:]
         return {run: self._runs_data[run] for run in runs}
 
     def _visible_quantity_arrays(self, runs_data: Dict[int, GainData]):
