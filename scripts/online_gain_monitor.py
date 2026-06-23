@@ -680,6 +680,7 @@ class OnlineGainMonitor(QMainWindow):
         self._queued_snapshots: set[Path] = set()
         self._active_replay_snapshots: List[Path] = []
         self._scan_copied_count = 0
+        self._scan_floor_run: Optional[int] = None
         self._download_process = QProcess(self)
         self._download_process.readyReadStandardOutput.connect(self._on_stdout)
         self._download_process.readyReadStandardError.connect(self._on_stderr)
@@ -1094,8 +1095,10 @@ class OnlineGainMonitor(QMainWindow):
         self._out_root.setText(str(out_root))
 
     def _start(self):
-        if not self._parse_runs():
+        seed_runs = self._parse_runs()
+        if not seed_runs:
             return
+        self._scan_floor_run = min(seed_runs)
         self._opened_output_folder = None
         self._update_paths_from_run()
         self._start_btn.setEnabled(False)
@@ -1133,7 +1136,7 @@ class OnlineGainMonitor(QMainWindow):
         remote_base = self._remote_base.text().strip() or REMOTE_BASE
         storage_base = self._storage_base.text().strip() or STORAGE_BASE
 
-        seed_run = min(seed_runs)
+        seed_run = max(min(seed_runs), self._scan_floor_run or min(seed_runs))
         explicit_runs = " ".join(str(r) for r in seed_runs)
         bash = f"""
 set -u
@@ -1150,6 +1153,7 @@ echo "Download settings: storage=$STORAGE_BASE"
 REMOTE_RUNS=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_BASE\" 2>/dev/null | grep -E \"^prad_[0-9]{{6}}$\" | sort'" || true)
 RUNS=""
 for r in $EXPLICIT_RUNS; do
+    [ "$r" -lt "$SEED_RUN" ] && continue
     case " $RUNS " in *" $r "*) ;; *) RUNS="$RUNS $r" ;; esac
 done
 while IFS= read -r d; do
@@ -1331,9 +1335,21 @@ exit 0
             return False
         if not snapshot.exists() or not snapshot.is_dir():
             return False
+        self._advance_scan_floor(run)
         self._queued_snapshots.add(snapshot)
         self._replay_queue.append((run, snapshot))
         return True
+
+    def _advance_scan_floor(self, run: int):
+        if self._scan_floor_run is not None and run <= self._scan_floor_run:
+            return
+        previous = self._scan_floor_run
+        self._scan_floor_run = run
+        if previous is not None:
+            self._append(
+                f"Scan advanced to run {run:06d}; runs before it will no longer be scanned.",
+                "ok",
+            )
 
     def _enqueue_existing_replay_snapshots(self):
         storage_base = Path(self._storage_base.text().strip() or STORAGE_BASE).expanduser()
@@ -1374,6 +1390,7 @@ exit 0
             self._append(f"Replay snapshot missing, skipped: {snapshot}", "warn")
         else:
             return
+        self._advance_scan_floor(run)
         snapshots = [snapshot]
         kept_queue: List[Tuple[int, Path]] = []
         for qrun, qsnap in self._replay_queue:
