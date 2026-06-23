@@ -68,10 +68,11 @@ static void usage()
         "Usage: replay_gainCorr_update <evio_file_or_dir> [...] -w lms_work_dir\n"
         "       [-o gain_corr.root] [-f max_files] [-j threads]\n"
         "       [-c daq_config.json] [-d hycal_map.json]\n"
-        "       [-b batch_size (4000)] [-r ref_run]\n"
+        "       [-b batch_size (1000)] [-r ref_run] [-R ref_gain_file.dat]\n"
         "\n"
         "  -w  directory for persistent per-file *_lms.root files (REQUIRED)\n"
-        "  -o  output gain_corr.root (default: <db>/gain_factor/gain_correction/prad_RUN_gain_corr.root)\n";
+        "  -o  output gain_corr.root (default: <db>/gain_factor/gain_correction/prad_RUN_gain_corr.root)\n"
+        "  -R  explicit reference gain file; overrides -r/default ref run\n";
 }
 
 int main(int argc, char *argv[])
@@ -92,11 +93,12 @@ int main(int argc, char *argv[])
     std::string gain_out;
     int max_files   = -1;
     int num_threads = 4;
-    int batch_size  = 4000;
+    int batch_size  = 1000;
     int ref_run     = -1;
+    std::string ref_gain_file;
 
     int opt;
-    while ((opt = getopt(argc, argv, "w:o:f:c:d:j:b:r:")) != -1) {
+    while ((opt = getopt(argc, argv, "w:o:f:c:d:j:b:r:R:")) != -1) {
         switch (opt) {
             case 'w': work_dir    = optarg; break;
             case 'o': gain_out    = optarg; break;
@@ -106,6 +108,7 @@ int main(int argc, char *argv[])
             case 'j': num_threads = std::atoi(optarg); break;
             case 'b': batch_size  = std::atoi(optarg); break;
             case 'r': ref_run     = std::atoi(optarg); break;
+            case 'R': ref_gain_file = optarg; break;
             default:
                 usage();
                 return 1;
@@ -215,17 +218,23 @@ int main(int argc, char *argv[])
         return replay_errors.load() > 0 ? 1 : 0;
     }
 
-    auto ref_tbl = prad2::LoadRefGain(gRunConfig.gain_data_dir + "/ref_gain", ref_run);
+    auto ref_tbl = ref_gain_file.empty()
+        ? prad2::LoadRefGain(gRunConfig.gain_data_dir + "/ref_gain", ref_run)
+        : prad2::LoadRefGainFile(ref_gain_file);
     if (!ref_tbl.loaded) {
         std::cerr << "Warning: reference gain table not loaded"
                   << " (ref_run=" << ref_run
-                  << ", dir=" << gRunConfig.gain_data_dir << ")\n";
+                  << ", dir=" << gRunConfig.gain_data_dir
+                  << ", file=" << ref_gain_file << ")\n";
     }
+    if (!ref_gain_file.empty() && ref_tbl.run_number >= 0)
+        ref_run = ref_tbl.run_number;
 
     std::cout << "\n=== Gain correction update ===\n"
               << "  LMS files  : " << lms_files.size() << "\n"
               << "  Batch size : " << batch_size << " LMS events\n"
               << "  Ref run    : " << ref_run << "\n"
+              << "  Ref file   : " << (ref_gain_file.empty() ? "(auto)" : ref_gain_file) << "\n"
               << "  Output     : " << gain_out << "\n";
 
     bool ok = ComputeGainCorrections(lms_files, gain_out, batch_size, ref_run, ref_tbl);

@@ -34,8 +34,8 @@ except ImportError:
 from PyQt6.QtCore import QProcess, QTimer, Qt
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QLabel, QLineEdit, QMessageBox, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QTextEdit, QVBoxLayout, QWidget,
 )
 
@@ -58,14 +58,17 @@ REMOTE_HOST = "clondaq2"
 REMOTE_BASE = "/data/stage2"
 STORAGE_BASE = "/data/gain_monitor"
 DEFAULT_INTERVAL_S = 30
-DEFAULT_BATCH_SIZE = 2000
+DEFAULT_BATCH_SIZE = 1000
 DEFAULT_REPLAY_THREADS = 50
 DEFAULT_THEME = "light"
 DEFAULT_RUNS_SHOWN = 5
+DEFAULT_GAIN_DROP_WARN_PCT = 3.0
 
 QUANTITIES = [
     ("gain_norm_W", "Gain / Ref Gain"),
     ("gain_W", "Current Gain"),
+    ("gain_change", "Change"),
+    ("gain_long_change", "Long Change"),
 ]
 REF_CHOICES = ["Ref1", "Ref2", "Ref3", "Avg"]
 REF_COLORS = [
@@ -81,6 +84,15 @@ CHART_TEXT_DIM = QColor("#57606a")
 CHART_GRID = QColor("#d8dee4")
 CHART_BORDER = QColor("#8c959f")
 CHART_LEGEND_BG = QColor(255, 255, 255, 230)
+CHANGE_STOPS = [
+    (0.00, (5, 10, 24)),
+    (0.25, (29, 78, 216)),
+    (0.50, (34, 197, 94)),
+    (0.75, (245, 158, 11)),
+    (1.00, (220, 38, 38)),
+]
+CHANGE_DEFAULT_RANGE = 0.10
+CHANGE_RANGE_CHOICES = [("3%", 0.03), ("5%", 0.05), ("10%", 0.10)]
 
 GAIN_CORR_FILE_RE = re.compile(r"^prad_(\d{6})_gain_corr(?:\.|。)root$")
 
@@ -207,6 +219,22 @@ def positive_avg(vals) -> float:
     return sum(good) / len(good) if good else math.nan
 
 
+def finite_avg(vals) -> float:
+    good = [float(v) for v in vals if math.isfinite(float(v))]
+    return sum(good) / len(good) if good else math.nan
+
+
+def masked_mean(samples: List[object], masks: List[List[bool]]):
+    if not samples:
+        return None
+    arr = np.asarray(samples, dtype=float)
+    mask = np.asarray(masks, dtype=bool)
+    valid = mask[:, None, :] & np.isfinite(arr) & (arr > 0.0)
+    vals = np.where(valid, arr, np.nan)
+    with np.errstate(invalid="ignore"):
+        return np.nanmean(vals, axis=0)
+
+
 def ref_ratio_ok(value: float, center: float, bad_rel: float) -> bool:
     return (
         math.isfinite(value) and value > 0.0
@@ -263,14 +291,27 @@ class GainMapWidget(HyCalMapWidget):
     def __init__(self, parent=None):
         super().__init__(parent, enable_zoom_pan=True, include_lms=False)
         self._selected: Optional[str] = None
+        self._change_mode = False
 
     def set_selected(self, name: Optional[str]):
         self._selected = name
         self.update()
 
+    def set_change_mode(self, enabled: bool):
+        self._change_mode = enabled
+        self.update()
+
+    def palette_stops(self):
+        return CHANGE_STOPS if self._change_mode else super().palette_stops()
+
+    def _colorbar_center_text(self) -> str:
+        return "down  stable  up" if self._change_mode else super()._colorbar_center_text()
+
     def _fmt_value(self, v: float) -> str:
         if not math.isfinite(v):
             return "nan"
+        if self._change_mode:
+            return f"{v * 100:+.2f}%"
         return f"{v:.4f}"
 
     def _tooltip_text(self, name: str) -> str:
@@ -604,6 +645,8 @@ class OnlineGainMonitor(QMainWindow):
         self._runs_data: Dict[int, GainData] = {}
         self._known_runs: set[int] = set()
         self._opened_output_folder: Optional[Path] = None
+        self._ref_gain_file: Optional[Path] = None
+        self._last_gain_drop_warning_key: Optional[Tuple[int, int, float]] = None
         self._replay_queue: List[Tuple[int, Path]] = []
         self._download_process = QProcess(self)
         self._download_process.readyReadStandardOutput.connect(self._on_stdout)
@@ -686,6 +729,13 @@ class OnlineGainMonitor(QMainWindow):
         self._batch.setFixedWidth(95)
         top.addWidget(self._batch)
 
+        top.addWidget(self._label("evio skip"))
+        self._evio_skip = QSpinBox()
+        self._evio_skip.setRange(0, 999)
+        self._evio_skip.setValue(0)
+        self._evio_skip.setFixedWidth(70)
+        top.addWidget(self._evio_skip)
+
         top.addWidget(self._label("runs shown"))
         self._runs_shown = QSpinBox()
         self._runs_shown.setRange(1, 999)
@@ -709,11 +759,31 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_run.setFixedWidth(90)
         top.addWidget(self._ref_run)
 
+        self._ref_file_btn = self._button("Ref File", THEME.ACCENT, self._browse_ref_gain_file)
+        top.addWidget(self._ref_file_btn)
+
         top.addWidget(self._label("quantity"))
         self._quantity = QComboBox()
         self._quantity.addItems([label for _, label in QUANTITIES])
         self._quantity.currentIndexChanged.connect(self._refresh_views)
         top.addWidget(self._quantity)
+
+        top.addWidget(self._label("map range"))
+        self._change_range = QComboBox()
+        self._change_range.addItems([label for label, _ in CHANGE_RANGE_CHOICES])
+        self._change_range.setCurrentIndex(len(CHANGE_RANGE_CHOICES) - 1)
+        self._change_range.currentIndexChanged.connect(self._refresh_views)
+        top.addWidget(self._change_range)
+
+        top.addWidget(self._label("drop warn"))
+        self._drop_warn = QDoubleSpinBox()
+        self._drop_warn.setRange(0.0, 100.0)
+        self._drop_warn.setDecimals(1)
+        self._drop_warn.setSingleStep(0.5)
+        self._drop_warn.setValue(DEFAULT_GAIN_DROP_WARN_PCT)
+        self._drop_warn.setSuffix(" %")
+        self._drop_warn.setFixedWidth(85)
+        top.addWidget(self._drop_warn)
 
         top.addWidget(self._label("ref"))
         self._ref = QComboBox()
@@ -721,6 +791,15 @@ class OnlineGainMonitor(QMainWindow):
         self._ref.setCurrentIndex(3)
         self._ref.currentIndexChanged.connect(self._refresh_views)
         top.addWidget(self._ref)
+
+        self._norm_first5 = QCheckBox("first 5 -> 1")
+        self._norm_first5.setFont(QFont("Consolas", 10))
+        self._norm_first5.setStyleSheet(themed(
+            f"QCheckBox{{color:{THEME.TEXT_DIM};spacing:4px;}}"
+            f"QCheckBox::indicator{{width:14px;height:14px;}}"
+        ))
+        self._norm_first5.stateChanged.connect(self._refresh_views)
+        top.addWidget(self._norm_first5)
 
         top.addWidget(self._label("ratio tol"))
         self._ref_ratio_tol = QSpinBox()
@@ -872,12 +951,12 @@ class OnlineGainMonitor(QMainWindow):
 
     def _style_inputs(self):
         ss = themed(
-            f"QLineEdit,QSpinBox,QComboBox{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"QLineEdit,QSpinBox,QDoubleSpinBox,QComboBox{{background:{THEME.PANEL};color:{THEME.TEXT};"
             f"border:1px solid {THEME.BORDER};border-radius:3px;padding:2px 5px;"
             "font-family:Consolas;font-size:10pt;}"
             f"QComboBox QAbstractItemView{{background:{THEME.PANEL};color:{THEME.TEXT};"
             f"selection-background-color:{THEME.ACCENT_STRONG};}}")
-        for cls in (QLineEdit, QSpinBox, QComboBox):
+        for cls in (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox):
             for w in self.findChildren(cls):
                 w.setStyleSheet(ss)
 
@@ -897,6 +976,20 @@ class OnlineGainMonitor(QMainWindow):
             return
         self._opened_output_folder = Path(d)
         self._load_output_folder(self._opened_output_folder)
+
+    def _browse_ref_gain_file(self):
+        start = str(self._ref_gain_file.parent if self._ref_gain_file else DB_DIR / "gain_factor" / "ref_gain")
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select reference gain file",
+            start,
+            "Reference gain (*.dat);;All files (*)",
+        )
+        if not path:
+            return
+        self._ref_gain_file = Path(path)
+        self._ref_file_btn.setText(f"Ref: {self._ref_gain_file.name}")
+        self._append(f"Using reference gain file: {self._ref_gain_file}", "ok")
 
     def _parse_runs(self) -> List[int]:
         text = self._run_edit.text().strip()
@@ -973,6 +1066,7 @@ EXPLICIT_RUNS={shlex.quote(explicit_runs)}
 HOST={shlex.quote(host)}
 REMOTE_BASE={shlex.quote(remote_base.rstrip('/'))}
 STORAGE_BASE={shlex.quote(storage_base)}
+EVIO_SKIP={self._evio_skip.value()}
 echo "Download settings: storage=$STORAGE_BASE"
 
 REMOTE_RUNS=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_BASE\" 2>/dev/null | grep -E \"^prad_[0-9]{{6}}$\" | sort'" || true)
@@ -1002,12 +1096,24 @@ REMOTE_COUNT=$(printf '%s\\n' "$ALL_FILES" | grep -c '\\.evio\\.' || true)
 COPIED=0
 ALREADY=0
 QUEUED=0
+SKIPPED_SAMPLE=0
+EVIO_INDEX=0
 while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
         *.evio.*) ;;
         *) continue ;;
     esac
+    TAKE=1
+    if [ "$EVIO_SKIP" -gt 0 ]; then
+        MOD=$((EVIO_INDEX % (EVIO_SKIP + 1)))
+        if [ "$MOD" -ne 0 ]; then TAKE=0; fi
+    fi
+    EVIO_INDEX=$((EVIO_INDEX+1))
+    if [ "$TAKE" -eq 0 ]; then
+        SKIPPED_SAMPLE=$((SKIPPED_SAMPLE+1))
+        continue
+    fi
     LMS_NAME="${{f/.evio/}}_lms.root"
     if [ -f "$WORK_DIR/$LMS_NAME" ]; then
         echo "Already replayed: $f (skipping download)"
@@ -1031,7 +1137,7 @@ done <<< "$ALL_FILES"
 
 LOCAL_COUNT=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
 LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
-echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED lms=$LMS_COUNT"
+echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED sampled_skip=$SKIPPED_SAMPLE lms=$LMS_COUNT"
 if [ "$LOCAL_COUNT" -gt 0 ]; then
     SNAP_DIR="$QUEUE_ROOT/$(date +%Y%m%d_%H%M%S)_$$"
     mkdir -p "$SNAP_DIR"
@@ -1120,7 +1226,9 @@ exit 0
             )
 
         ref_arg = ""
-        if self._ref_run.value() >= 0:
+        if self._ref_gain_file is not None:
+            ref_arg = f" -R {shlex.quote(str(self._ref_gain_file))}"
+        elif self._ref_run.value() >= 0:
             ref_arg = f" -r {self._ref_run.value()}"
 
         bash = f"""
@@ -1221,6 +1329,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             f"{len(self._runs_data)} run(s) loaded, showing {showing}, {nbatches} batches{miss}"
         )
         self._refresh_views()
+        self._check_gain_drop_warning()
 
     def _load_output_folder(self, folder: Path):
         if not folder.exists() or not folder.is_dir():
@@ -1283,12 +1392,148 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             return np.where(data.gain_w_ref > 0.0, data.gain_w / data.gain_w_ref, np.nan)
         return data.gain_w
 
+    def _base_gain_array(self, data: GainData):
+        return np.where(data.gain_w_ref > 0.0, data.gain_w / data.gain_w_ref, np.nan)
+
+    def _is_change_quantity(self) -> bool:
+        return self._quantity.currentIndex() >= 2
+
+    def _change_map_range(self) -> float:
+        idx = self._change_range.currentIndex() if hasattr(self, "_change_range") else len(CHANGE_RANGE_CHOICES) - 1
+        if idx < 0 or idx >= len(CHANGE_RANGE_CHOICES):
+            return CHANGE_DEFAULT_RANGE
+        return CHANGE_RANGE_CHOICES[idx][1]
+
     def _visible_runs_data(self) -> Dict[int, GainData]:
         if not self._runs_data:
             return {}
         limit = self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
         runs = sorted(self._runs_data)[-limit:]
         return {run: self._runs_data[run] for run in runs}
+
+    def _visible_quantity_arrays(self, runs_data: Dict[int, GainData]):
+        arrays = {
+            run: np.asarray(self._quantity_array(data), dtype=float).copy()
+            for run, data in runs_data.items()
+        }
+        if not arrays or not self._norm_first5.isChecked():
+            return arrays
+
+        first_batches = []
+        remaining = 5
+        for run in sorted(runs_data):
+            arr = arrays[run]
+            if arr.size == 0:
+                continue
+            take = min(remaining, arr.shape[0])
+            if take > 0:
+                first_batches.append(arr[:take])
+                remaining -= take
+            if remaining <= 0:
+                break
+        if not first_batches:
+            return arrays
+
+        base_samples = np.concatenate(first_batches, axis=0)
+        valid = np.where(np.isfinite(base_samples) & (base_samples > 0.0), base_samples, np.nan)
+        with np.errstate(invalid="ignore"):
+            baseline = np.nanmean(valid, axis=0)
+        baseline = np.where(np.isfinite(baseline) & (baseline > 0.0), baseline, np.nan)
+        for run in arrays:
+            arrays[run] = arrays[run] / baseline
+        return arrays
+
+    def _visible_base_gain_arrays(self, runs_data: Dict[int, GainData]):
+        return {
+            run: np.asarray(self._base_gain_array(data), dtype=float).copy()
+            for run, data in runs_data.items()
+        }
+
+    def _flatten_batches(self, runs_data: Dict[int, GainData], arrays_by_run, masks_by_run):
+        batches = []
+        for run, data in sorted(runs_data.items()):
+            arr = arrays_by_run[run]
+            masks = masks_by_run.get(run, [])
+            for b in range(data.nbatches):
+                mask = masks[b] if b < len(masks) else [False, False, False]
+                batches.append((run, b, arr[b], mask))
+        return batches
+
+    def _change_array(self, runs_data: Dict[int, GainData], masks_by_run):
+        arrays_by_run = self._visible_base_gain_arrays(runs_data)
+        batches = self._flatten_batches(runs_data, arrays_by_run, masks_by_run)
+        if len(batches) < 2:
+            return None
+
+        if self._quantity.currentIndex() == 2:
+            return self._short_change_array_from_batches(batches)
+
+        n = min(5, len(batches))
+        early = batches[:n]
+        late = batches[-n:]
+        early_mean = masked_mean([b[2] for b in early], [b[3] for b in early])
+        late_mean = masked_mean([b[2] for b in late], [b[3] for b in late])
+        if early_mean is None or late_mean is None:
+            return None
+        valid = np.isfinite(early_mean) & np.isfinite(late_mean) & (early_mean > 0.0)
+        return np.where(valid, (late_mean - early_mean) / early_mean, np.nan)
+
+    def _short_change_array_from_batches(self, batches):
+        if len(batches) < 2:
+            return None
+        current = batches[-1][2]
+        current_mask = batches[-1][3]
+        prev = batches[max(0, len(batches) - 6):-1]
+        baseline = masked_mean([b[2] for b in prev], [b[3] for b in prev])
+        if baseline is None:
+            return None
+        valid = (
+            np.asarray(current_mask, dtype=bool)[None, :]
+            & np.isfinite(current)
+            & np.isfinite(baseline)
+            & (baseline > 0.0)
+        )
+        return np.where(valid, (current - baseline) / baseline, np.nan)
+
+    def _short_change_array(self, runs_data: Dict[int, GainData], masks_by_run):
+        arrays_by_run = self._visible_base_gain_arrays(runs_data)
+        batches = self._flatten_batches(runs_data, arrays_by_run, masks_by_run)
+        return self._short_change_array_from_batches(batches)
+
+    def _chart_arrays(self, runs_data: Dict[int, GainData], masks_by_run):
+        if not self._is_change_quantity():
+            return self._visible_quantity_arrays(runs_data)
+
+        base_by_run = self._visible_base_gain_arrays(runs_data)
+        batches = self._flatten_batches(runs_data, base_by_run, masks_by_run)
+        results = {
+            run: np.full_like(base_by_run[run], np.nan, dtype=float)
+            for run in runs_data
+        }
+        if len(batches) < 2:
+            return results
+
+        early_n = min(5, len(batches))
+        early_baseline = masked_mean(
+            [b[2] for b in batches[:early_n]],
+            [b[3] for b in batches[:early_n]],
+        )
+        for i, (run, bidx, current, current_mask) in enumerate(batches):
+            if self._quantity.currentIndex() == 2:
+                prev = batches[max(0, i - 5):i]
+                baseline = masked_mean([b[2] for b in prev], [b[3] for b in prev])
+            else:
+                baseline = early_baseline
+            if baseline is None:
+                continue
+            valid = (
+                np.asarray(current_mask, dtype=bool)[None, :]
+                & np.isfinite(current)
+                & np.isfinite(baseline)
+                & (baseline > 0.0)
+            )
+            results[run][bidx] = np.where(valid, (current - baseline) / baseline, np.nan)
+        return results
 
     def _ref_ratio_centers_and_masks(self) -> Tuple[List[float], Dict[int, List[List[bool]]]]:
         runs_data = self._visible_runs_data()
@@ -1318,11 +1563,25 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         runs_data = self._visible_runs_data()
         if not runs_data:
             return {}
+        _, masks = self._ref_ratio_centers_and_masks()
+        if self._is_change_quantity():
+            change = self._change_array(runs_data, masks)
+            if change is None:
+                return {}
+            ref_idx = self._ref.currentIndex()
+            values: Dict[str, float] = {}
+            for i in range(1156):
+                if ref_idx < 3:
+                    v = float(change[i, ref_idx])
+                else:
+                    v = finite_avg([change[i, j] for j in range(3)])
+                values[f"W{i + 1}"] = v
+            return values
+
         latest_run = max(runs_data)
         data = runs_data[latest_run]
-        arr = self._quantity_array(data)
+        arr = self._visible_quantity_arrays(runs_data)[latest_run]
         latest = arr[-1]
-        _, masks = self._ref_ratio_centers_and_masks()
         mask = masks.get(latest_run, [])[-1] if masks.get(latest_run) else [False, False, False]
         ref_idx = self._ref.currentIndex()
         values: Dict[str, float] = {}
@@ -1337,8 +1596,14 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
     def _refresh_views(self):
         values = self._selected_values_for_batch()
         finite = [v for v in values.values() if math.isfinite(v)]
+        is_change = self._is_change_quantity()
+        self._map.set_change_mode(is_change)
         if finite:
-            lo, hi = min(finite), max(finite)
+            if is_change:
+                span = self._change_map_range()
+                lo, hi = -span, span
+            else:
+                lo, hi = min(finite), max(finite)
             if self._quantity.currentIndex() == 0:
                 lo = min(0.85, lo)
                 hi = max(1.15, hi)
@@ -1352,6 +1617,50 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             self._map.set_values({})
 
         self._refresh_chart()
+
+    def _check_gain_drop_warning(self):
+        runs_data = self._visible_runs_data()
+        if not runs_data:
+            return
+        latest_run = max(runs_data)
+        latest_data = runs_data[latest_run]
+        if latest_data.nbatches < 2:
+            return
+        threshold = self._drop_warn.value() / 100.0
+        if threshold <= 0.0:
+            return
+
+        try:
+            latest_event = int(latest_data.event_end[-1])
+        except Exception:
+            latest_event = latest_data.nbatches
+        key = (latest_run, latest_event, round(threshold, 5))
+        if key == self._last_gain_drop_warning_key:
+            return
+
+        _, masks = self._ref_ratio_centers_and_masks()
+        change = self._short_change_array(runs_data, masks)
+        if change is None:
+            return
+
+        dropped: List[Tuple[str, float]] = []
+        for i in range(1156):
+            v = finite_avg([change[i, j] for j in range(3)])
+            if math.isfinite(v) and v <= -threshold:
+                dropped.append((f"W{i + 1}", v))
+        if not dropped:
+            return
+
+        self._last_gain_drop_warning_key = key
+        dropped.sort(key=lambda item: item[1])
+        names = ", ".join(name for name, _ in dropped[:30])
+        more = "" if len(dropped) <= 30 else f"\n... and {len(dropped) - 30} more"
+        message = (
+            f"{len(dropped)} W module(s) have short-term gain drop > {threshold * 100:.1f}%.\n\n"
+            f"{names}{more}"
+        )
+        self._append(message.replace("\n", " "), "warn")
+        QMessageBox.warning(self, "Gain Drop Warning", message)
 
     def _refresh_chart(self):
         runs_data = self._visible_runs_data()
@@ -1373,8 +1682,9 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         offset = 0.0
         step = float(self._batch.value())
         centers, masks_by_run = self._ref_ratio_centers_and_masks()
+        arrays_by_run = self._chart_arrays(runs_data, masks_by_run)
         for run, data in sorted(runs_data.items()):
-            arr = self._quantity_array(data)
+            arr = arrays_by_run[run]
             start = offset
             for b in range(data.nbatches):
                 offset += step
@@ -1384,7 +1694,8 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                     ref_ratio_values[j].append(float(data.ref_ratio[b, j]))
                     ref_ratio_ok[j].append(mask[j])
                     per_ref_values[j].append(float(arr[b, idx, j]) if mask[j] else math.nan)
-                avg_values.append(positive_avg([arr[b, idx, j] for j in range(3) if mask[j]]))
+                vals = [arr[b, idx, j] for j in range(3) if mask[j]]
+                avg_values.append(finite_avg(vals) if self._is_change_quantity() else positive_avg(vals))
             end = offset
             if end > start:
                 run_spans.append((run, start, end))
@@ -1397,7 +1708,9 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 series.append((REF_CHOICES[j], per_ref_values[j], REF_COLORS[j], False))
             series.append(("Avg", avg_values, REF_COLORS[3], True))
         qlabel = QUANTITIES[self._quantity.currentIndex()][1]
-        default_y = (0.85, 1.15) if quantity_idx == 0 else None
+        if self._norm_first5.isChecked() and not self._is_change_quantity():
+            qlabel += " (first 5 avg = 1)"
+        default_y = (-self._change_map_range(), self._change_map_range()) if self._is_change_quantity() else ((0.85, 1.15) if quantity_idx == 0 else None)
         self._chart.set_data(
             f"{self._selected_module} {qlabel} vs cumulative LMS batch count",
             x, series, run_spans, default_y,
