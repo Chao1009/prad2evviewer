@@ -967,6 +967,11 @@ while IFS= read -r f; do
     elif [ -f "$LOCAL_DIR/$f" ]; then
         ALREADY=$((ALREADY+1))
     else
+        if [ "$COPIED" -ge 50 ]; then
+            echo "Reached 50 files limit, stopping download for now."
+            break
+        fi
+            
         echo "Copying $f"
         scp "$HOST:$REMOTE_DIR/$f" "$LOCAL_DIR/"
         COPIED=$((COPIED+1))
