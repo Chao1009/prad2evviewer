@@ -1167,7 +1167,13 @@ QUEUE_ROOT="$STORAGE_BASE/replay_queue/$RUN_TAG"
 mkdir -p "$LOCAL_DIR" "$WORK_DIR" "$(dirname "$OUT_ROOT")" "$QUEUE_ROOT"
 echo "Scanning $HOST:$REMOTE_DIR"
 ALL_FILES=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_DIR\" 2>/dev/null | sort'" || true)
-REMOTE_COUNT=$(printf '%s\\n' "$ALL_FILES" | grep -c '\\.evio\\.' || true)
+EVIO_FILES=$(printf '%s\\n' "$ALL_FILES" | grep '\\.evio\\.' | sort -V || true)
+REMOTE_COUNT=$(printf '%s\\n' "$EVIO_FILES" | grep -c '\\.evio\\.' || true)
+LATEST_EVIO=$(printf '%s\\n' "$EVIO_FILES" | tail -n 1)
+SAFE_FILES=$(printf '%s\\n' "$EVIO_FILES" | sed '$d')
+if [ -n "$LATEST_EVIO" ]; then
+    echo "Safety hold: newest remote EVIO will not be downloaded: $LATEST_EVIO"
+fi
 COPIED=0
 ALREADY=0
 QUEUED=0
@@ -1211,18 +1217,18 @@ while IFS= read -r f; do
             echo "Reached $MAX_DOWNLOAD_EVIO files limit, stopping download for now."
             break
         fi
-            
+
         echo "Copying $f"
         scp "$HOST:$REMOTE_DIR/$f" "$LOCAL_DIR/"
         COPIED=$((COPIED+1))
         PENDING_TOTAL=$((PENDING_TOTAL+1))
     fi
-done <<< "$ALL_FILES"
+done <<< "$SAFE_FILES"
 
 LOCAL_COUNT=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
 LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
 PENDING_TOTAL=$(find "$STORAGE_BASE/replay_queue" "$STORAGE_BASE/evio" -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
-echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED pending=$PENDING_TOTAL/$QUEUE_CAP_EVIO sampled_skip=$SKIPPED_SAMPLE lms=$LMS_COUNT"
+echo "remote=$REMOTE_COUNT held_latest=$LATEST_EVIO local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED pending=$PENDING_TOTAL/$QUEUE_CAP_EVIO sampled_skip=$SKIPPED_SAMPLE lms=$LMS_COUNT"
 if [ "$LOCAL_COUNT" -gt 0 ]; then
     SNAP_DIR="$QUEUE_ROOT/$(date +%Y%m%d_%H%M%S)_$$"
     mkdir -p "$SNAP_DIR"
