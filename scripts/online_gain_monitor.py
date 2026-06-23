@@ -924,7 +924,7 @@ REMOTE_BASE={shlex.quote(remote_base.rstrip('/'))}
 STORAGE_BASE={shlex.quote(storage_base)}
 echo "Download settings: storage=$STORAGE_BASE"
 
-REMOTE_RUNS=$(ssh "$HOST" "ls '$REMOTE_BASE' 2>/dev/null | grep -E '^prad_[0-9]{{6}}$' | sort" || true)
+REMOTE_RUNS=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_BASE\" 2>/dev/null | grep -E \"^prad_[0-9]{{6}}$\" | sort'" || true)
 RUNS=""
 for r in $EXPLICIT_RUNS; do
     case " $RUNS " in *" $r "*) ;; *) RUNS="$RUNS $r" ;; esac
@@ -946,7 +946,7 @@ OUT_ROOT="$STORAGE_BASE/gain/$RUN_TAG/${{RUN_TAG}}_gain_corr.root"
 QUEUE_ROOT="$STORAGE_BASE/replay_queue/$RUN_TAG"
 mkdir -p "$LOCAL_DIR" "$WORK_DIR" "$(dirname "$OUT_ROOT")" "$QUEUE_ROOT"
 echo "Scanning $HOST:$REMOTE_DIR"
-ALL_FILES=$(ssh "$HOST" "ls '$REMOTE_DIR' 2>/dev/null | sort" || true)
+ALL_FILES=$(ssh "$HOST" "bash -c 'ls \"$REMOTE_DIR\" 2>/dev/null | sort'" || true)
 REMOTE_COUNT=$(printf '%s\\n' "$ALL_FILES" | grep -c '\\.evio\\.' || true)
 COPIED=0
 ALREADY=0
