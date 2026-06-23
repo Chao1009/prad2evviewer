@@ -679,6 +679,7 @@ class OnlineGainMonitor(QMainWindow):
         self._replay_queue: List[Tuple[int, Path]] = []
         self._queued_snapshots: set[Path] = set()
         self._active_replay_snapshots: List[Path] = []
+        self._scan_copied_count = 0
         self._download_process = QProcess(self)
         self._download_process.readyReadStandardOutput.connect(self._on_stdout)
         self._download_process.readyReadStandardError.connect(self._on_stderr)
@@ -1124,6 +1125,8 @@ class OnlineGainMonitor(QMainWindow):
         if self._download_process.state() != QProcess.ProcessState.NotRunning:
             self._append("Previous download scan still running; skipping this tick.", "warn")
             return
+        self._timer.stop()
+        self._scan_copied_count = 0
         self._update_paths_from_run()
 
         host = self._host.text().strip() or REMOTE_HOST
@@ -1274,9 +1277,12 @@ exit 0
                 self._start_next_replay()
             return
         if "__ONLINE_GAIN_STATUS__" in line:
-            m = re.search(r"\brun=(\d+)\b", line)
-            if m:
-                self._known_runs.add(int(m.group(1)))
+            m_run = re.search(r"\brun=(\d+)\b", line)
+            if m_run:
+                self._known_runs.add(int(m_run.group(1)))
+            m_copied = re.search(r"\bcopied=(\d+)\b", line)
+            if m_copied:
+                self._scan_copied_count += int(m_copied.group(1))
 
     def _on_download_finished(self, code, status):
         color = "ok" if code == 0 else "error"
@@ -1284,14 +1290,31 @@ exit 0
         self._enqueue_existing_replay_snapshots()
         self._start_next_replay()
         if self._stop_btn.isEnabled():
+            interval_ms = self._interval.value() * 1000
             if self._pending_evio_count() >= self._queue_cap_evio.value():
                 self._append(
                     f"Pending EVIO cap reached; next scan delayed by {self._interval.value()} s.",
                     "warn",
                 )
-                self._timer.start(self._interval.value() * 1000)
-            else:
+                self._timer.start(interval_ms)
+            elif code != 0:
+                self._append(
+                    f"Download scan failed; retrying in {self._interval.value()} s.",
+                    "warn",
+                )
+                self._timer.start(interval_ms)
+            elif self._scan_copied_count > 0:
+                self._append(
+                    f"Downloaded {self._scan_copied_count} new EVIO file(s); scanning again now.",
+                    "ok",
+                )
                 QTimer.singleShot(0, self._scan_once)
+            else:
+                self._append(
+                    f"No new EVIO files; next scan in {self._interval.value()} s.",
+                    "normal",
+                )
+                self._timer.start(interval_ms)
 
     def _on_replay_finished(self, code, status):
         color = "ok" if code == 0 else "error"
@@ -1301,13 +1324,6 @@ exit 0
         self._active_replay_snapshots.clear()
         self._load_root()
         self._start_next_replay()
-        if (
-            self._stop_btn.isEnabled()
-            and self._download_process.state() == QProcess.ProcessState.NotRunning
-            and self._pending_evio_count() < self._queue_cap_evio.value()
-        ):
-            self._timer.stop()
-            QTimer.singleShot(0, self._scan_once)
 
     def _enqueue_replay_snapshot(self, run: int, snapshot: Path) -> bool:
         snapshot = snapshot.resolve()
