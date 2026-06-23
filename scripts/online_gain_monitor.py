@@ -144,6 +144,13 @@ def configure_cpu_layout() -> Tuple[Optional[int], List[int]]:
     return _CPU_LAYOUT
 
 
+def start_bash_process(proc: QProcess, bash: str, cpu_list: str = ""):
+    if cpu_list:
+        proc.start("taskset", ["-c", cpu_list, "bash", "-lc", bash])
+    else:
+        proc.start("bash", ["-lc", bash])
+
+
 @dataclass
 class GainData:
     run_number: int
@@ -338,6 +345,7 @@ class BatchChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._title = "No module selected"
+        self._x_label = "batch id"
         self._x: List[float] = []
         self._series: List[Tuple[str, List[float], QColor, bool]] = []
         self._run_spans: List[Tuple[int, float, float]] = []
@@ -347,8 +355,10 @@ class BatchChart(QWidget):
 
     def set_data(self, title: str, x: List[float], series: List[Tuple[str, List[float], QColor, bool]],
                  run_spans: Optional[List[Tuple[int, float, float]]] = None,
-                 default_y_range: Optional[Tuple[float, float]] = None):
+                 default_y_range: Optional[Tuple[float, float]] = None,
+                 x_label: str = "batch id"):
         self._title = title
+        self._x_label = x_label
         self._x = x
         self._series = series
         self._run_spans = run_spans or []
@@ -362,7 +372,7 @@ class BatchChart(QWidget):
         p.fillRect(0, 0, w, h, CHART_BG)
 
         pad_l = 64 if w < 420 else 74
-        pad_r, pad_t, pad_b = 12, 46, 34
+        pad_r, pad_t, pad_b = 12, 46, 50
         plot_w = max(1, w - pad_l - pad_r)
         plot_h = max(1, h - pad_t - pad_b)
 
@@ -384,6 +394,8 @@ class BatchChart(QWidget):
         if x_min == x_max:
             x_min -= 1
             x_max += 1
+        x_ticks, x_min, x_max, x_decimals = nice_ticks(x_min, x_max, 7)
+        x_ticks = [t for t in x_ticks if x_min <= t <= x_max]
 
         data_y_min, data_y_max = min(finite_vals), max(finite_vals)
         if self._default_y_range is not None:
@@ -417,8 +429,8 @@ class BatchChart(QWidget):
         for tick in y_ticks:
             yy = sy(tick)
             p.drawLine(pad_l, int(yy), pad_l + plot_w, int(yy))
-        for i in range(6):
-            xx = pad_l + plot_w * i / 5
+        for tick in x_ticks:
+            xx = sx(tick)
             p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
         p.setPen(QPen(CHART_BORDER, 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
@@ -445,8 +457,15 @@ class BatchChart(QWidget):
         for tick in y_ticks:
             yy = sy(tick)
             p.drawText(4, int(yy + 4), tick_label(tick, y_decimals))
-        p.drawText(pad_l, h - 10, f"{int(x_min)}")
-        p.drawText(max(pad_l, pad_l + plot_w - 70), h - 10, f"{int(x_max)}")
+        for tick in x_ticks:
+            xx = sx(tick)
+            label = tick_label(tick, x_decimals)
+            tw = p.fontMetrics().horizontalAdvance(label)
+            p.drawText(int(xx - tw / 2), pad_t + plot_h + 16, label)
+        p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        xlabel = p.fontMetrics().elidedText(self._x_label, Qt.TextElideMode.ElideRight, max(40, plot_w))
+        tw = p.fontMetrics().horizontalAdvance(xlabel)
+        p.drawText(int(pad_l + plot_w / 2 - tw / 2), h - 10, xlabel)
 
         legend_items = []
         for label, values, color, draw_line in self._series:
@@ -671,9 +690,11 @@ class OnlineGainMonitor(QMainWindow):
 
         self._build_ui()
         self._viewer_cpu, self._replay_cpus = configure_cpu_layout()
+        self._download_cpu_list = _format_cpu_list(self._replay_cpus[:1]) if self._replay_cpus else ""
+        self._replay_worker_cpus = self._replay_cpus[1:] if len(self._replay_cpus) > 1 else self._replay_cpus
         if self._replay_cpus and self._viewer_cpu is not None:
             self._append(
-                f"CPU isolation: viewer/download on CPU {self._viewer_cpu}; replay can use {len(self._replay_cpus)} CPU(s).",
+                f"CPU isolation: viewer on CPU {self._viewer_cpu}; download on CPU(s) {self._download_cpu_list or 'all'}; replay can use {len(self._replay_worker_cpus)} CPU(s).",
                 "ok",
             )
         else:
@@ -1203,7 +1224,7 @@ exit 0
 """
         self._status.setText("Scanning...")
         self._append(f"$ auto-scan from run {seed_run:06d}", "cmd")
-        self._download_process.start("bash", ["-lc", bash])
+        start_bash_process(self._download_process, bash, getattr(self, "_download_cpu_list", ""))
 
     def _on_stdout(self):
         proc = self.sender()
@@ -1329,11 +1350,12 @@ exit 0
         _, work_dir, out_root = run_storage_paths(run, storage_base)
         tool = find_update_tool()
         requested_threads = self._threads.value()
-        replay_cpu_capacity = len(self._replay_cpus) if getattr(self, "_replay_cpus", None) else max(1, (os.cpu_count() or 2) - 1)
+        replay_cpus = getattr(self, "_replay_worker_cpus", [])
+        replay_cpu_capacity = len(replay_cpus) if replay_cpus else max(1, (os.cpu_count() or 2) - 2)
         replay_threads = min(requested_threads, max(1, replay_cpu_capacity))
         replay_cpu_list = ""
-        if getattr(self, "_replay_cpus", None) and self._viewer_cpu is not None:
-            replay_cpu_list = _format_cpu_list(self._replay_cpus[:replay_threads])
+        if replay_cpus and self._viewer_cpu is not None:
+            replay_cpu_list = _format_cpu_list(replay_cpus[:replay_threads])
         if replay_threads < requested_threads:
             self._append(
                 f"Replay threads capped at {replay_threads}; one CPU remains dedicated to the viewer/download.",
@@ -1401,7 +1423,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 """
         self._status.setText("Replaying...")
         self._append(f"$ replay {len(snapshots)} queued snapshot(s) for run {run:06d}", "cmd")
-        self._replay_process.start("bash", ["-lc", bash])
+        start_bash_process(self._replay_process, bash, replay_cpu_list)
 
     def _append(self, text: str, kind: str = "normal"):
         colors = {
@@ -1802,14 +1824,12 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         ref_ratio_ok = [[], [], []]
         avg_values: List[float] = []
         offset = 0.0
-        step = float(self._batch.value())
         centers, masks_by_run = self._ref_ratio_centers_and_masks()
         arrays_by_run = self._chart_arrays(runs_data, masks_by_run)
         for run, data in sorted(runs_data.items()):
             arr = arrays_by_run[run]
             start = offset
             for b in range(data.nbatches):
-                offset += step
                 x.append(offset)
                 mask = masks_by_run.get(run, [])[b] if b < len(masks_by_run.get(run, [])) else [False, False, False]
                 for j in range(3):
@@ -1818,9 +1838,10 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                     per_ref_values[j].append(float(arr[b, idx, j]) if mask[j] else math.nan)
                 vals = [arr[b, idx, j] for j in range(3) if mask[j]]
                 avg_values.append(finite_avg(vals) if self._is_change_quantity() else positive_avg(vals))
+                offset += 1.0
             end = offset
             if end > start:
-                run_spans.append((run, start, end))
+                run_spans.append((run, start - 0.5, end - 0.5))
         ref_idx = self._ref.currentIndex()
         series = []
         if ref_idx < 3:
@@ -1833,9 +1854,15 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if self._norm_first5.isChecked() and not self._is_change_quantity():
             qlabel += " (first 5 avg = 1)"
         default_y = (-self._change_map_range(), self._change_map_range()) if self._is_change_quantity() else ((0.85, 1.15) if quantity_idx == 0 else None)
+        batch_seconds = self._batch.value() / 10.0
+        batch_minutes = batch_seconds / 60.0
+        if batch_minutes >= 1.0:
+            xlabel = f"batch id (~{batch_minutes:.1f}min)"
+        else:
+            xlabel = f"batch id (~{batch_seconds:.0f}s)"
         self._chart.set_data(
-            f"{self._selected_module} {qlabel} vs cumulative LMS batch count",
-            x, series, run_spans, default_y,
+            f"{self._selected_module} {qlabel}",
+            x, series, run_spans, default_y, xlabel,
         )
         self._ratio_chart.set_data(x, ref_ratio_values, ref_ratio_ok, run_spans, centers)
 
