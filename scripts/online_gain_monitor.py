@@ -68,9 +68,10 @@ DEFAULT_QUEUE_CAP_EVIO = 100
 
 QUANTITIES = [
     ("gain_norm_W", "Gain / Ref Gain"),
-    ("gain_W", "Current Gain"),
     ("gain_change", "Change"),
     ("gain_long_change", "Long Change"),
+    ("gain_run_change", "Run-to-Run Change"),
+    ("gain_all_run_change", "Current vs All Runs"),
 ]
 REF_CHOICES = ["Ref1", "Ref2", "Ref3", "Avg"]
 REF_COLORS = [
@@ -94,7 +95,6 @@ CHANGE_STOPS = [
     (1.00, (220, 38, 38)),
 ]
 CHANGE_DEFAULT_RANGE = 0.10
-CHANGE_RANGE_CHOICES = [("3%", 0.03), ("5%", 0.05), ("10%", 0.10)]
 
 GAIN_CORR_FILE_RE = re.compile(r"^prad_(\d{6})_gain_corr(?:\.|。)root$")
 
@@ -469,7 +469,11 @@ class BatchChart(QWidget):
 
         legend_items = []
         for label, values, color, draw_line in self._series:
-            pts = [(sx(x), sy(v)) for x, v in zip(self._x, values) if math.isfinite(v)]
+            pts = [
+                (sx(x), sy(v))
+                for x, v in zip(self._x, values)
+                if math.isfinite(v) and y_min <= v <= y_max
+            ]
             if len(pts) < 1:
                 continue
             legend_items.append((label, color, draw_line, pts))
@@ -820,10 +824,14 @@ class OnlineGainMonitor(QMainWindow):
         top2.addWidget(self._quantity)
 
         top2.addWidget(self._label("map range"))
-        self._change_range = QComboBox()
-        self._change_range.addItems([label for label, _ in CHANGE_RANGE_CHOICES])
-        self._change_range.setCurrentIndex(len(CHANGE_RANGE_CHOICES) - 1)
-        self._change_range.currentIndexChanged.connect(self._refresh_views)
+        self._change_range = QDoubleSpinBox()
+        self._change_range.setRange(0.1, 100.0)
+        self._change_range.setDecimals(1)
+        self._change_range.setSingleStep(0.5)
+        self._change_range.setValue(CHANGE_DEFAULT_RANGE * 100.0)
+        self._change_range.setSuffix(" %")
+        self._change_range.setFixedWidth(85)
+        self._change_range.valueChanged.connect(self._refresh_views)
         top2.addWidget(self._change_range)
 
         top2.addWidget(self._label("drop warn"))
@@ -921,6 +929,14 @@ class OnlineGainMonitor(QMainWindow):
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(6)
+        self._run_avg_label = QLabel("Run avg: n/a")
+        self._run_avg_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self._run_avg_label.setStyleSheet(themed(
+            f"QLabel{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"border:1px solid {THEME.BORDER};padding:4px 6px;}}"
+        ))
+        self._run_avg_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        right_lay.addWidget(self._run_avg_label)
         right_lay.addWidget(self._chart, stretch=3)
         right_lay.addWidget(self._ratio_chart, stretch=2)
 
@@ -1536,17 +1552,27 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             return np.where(data.gain_w_ref > 0.0, data.gain_w / data.gain_w_ref, np.nan)
         return data.gain_w
 
+    def _quantity_key(self) -> str:
+        idx = self._quantity.currentIndex()
+        if idx < 0 or idx >= len(QUANTITIES):
+            return QUANTITIES[0][0]
+        return QUANTITIES[idx][0]
+
     def _base_gain_array(self, data: GainData):
         return np.where(data.gain_w_ref > 0.0, data.gain_w / data.gain_w_ref, np.nan)
 
     def _is_change_quantity(self) -> bool:
-        return self._quantity.currentIndex() >= 2
+        return self._quantity_key() in {
+            "gain_change",
+            "gain_long_change",
+            "gain_run_change",
+            "gain_all_run_change",
+        }
 
     def _change_map_range(self) -> float:
-        idx = self._change_range.currentIndex() if hasattr(self, "_change_range") else len(CHANGE_RANGE_CHOICES) - 1
-        if idx < 0 or idx >= len(CHANGE_RANGE_CHOICES):
+        if not hasattr(self, "_change_range"):
             return CHANGE_DEFAULT_RANGE
-        return CHANGE_RANGE_CHOICES[idx][1]
+        return max(0.001, float(self._change_range.value()) / 100.0)
 
     def _visible_runs_data(self) -> Dict[int, GainData]:
         if not self._runs_data:
@@ -1609,8 +1635,16 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if len(batches) < 2:
             return None
 
-        if self._quantity.currentIndex() == 2:
+        quantity = self._quantity_key()
+        if quantity == "gain_change":
             return self._short_change_array_from_batches(batches)
+        if quantity in {"gain_run_change", "gain_all_run_change"}:
+            return self._latest_run_average_change(
+                runs_data,
+                arrays_by_run,
+                masks_by_run,
+                use_all_previous=quantity == "gain_all_run_change",
+            )
 
         n = min(5, len(batches))
         early = batches[:n]
@@ -1621,6 +1655,47 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             return None
         valid = np.isfinite(early_mean) & np.isfinite(late_mean) & (early_mean > 0.0)
         return np.where(valid, (late_mean - early_mean) / early_mean, np.nan)
+
+    def _run_mean_arrays(self, runs_data: Dict[int, GainData], arrays_by_run, masks_by_run):
+        means = {}
+        for run in sorted(runs_data):
+            arr = arrays_by_run[run]
+            masks = masks_by_run.get(run, [])
+            means[run] = masked_mean(
+                [arr[b] for b in range(arr.shape[0])],
+                [masks[b] if b < len(masks) else [False, False, False]
+                 for b in range(arr.shape[0])],
+            )
+        return means
+
+    def _previous_run_baseline(self, runs: List[int], run_means, run_index: int,
+                               use_all_previous: bool):
+        previous = [
+            run_means[run]
+            for run in runs[:run_index]
+            if run_means.get(run) is not None
+        ]
+        if not previous:
+            return None
+        if not use_all_previous:
+            return previous[-1]
+        with np.errstate(invalid="ignore"):
+            return np.nanmean(np.asarray(previous, dtype=float), axis=0)
+
+    def _latest_run_average_change(self, runs_data: Dict[int, GainData], arrays_by_run,
+                                   masks_by_run, use_all_previous: bool):
+        runs = sorted(runs_data)
+        if len(runs) < 2:
+            return None
+        run_means = self._run_mean_arrays(runs_data, arrays_by_run, masks_by_run)
+        current = run_means.get(runs[-1])
+        baseline = self._previous_run_baseline(
+            runs, run_means, len(runs) - 1, use_all_previous,
+        )
+        if current is None or baseline is None:
+            return None
+        valid = np.isfinite(current) & np.isfinite(baseline) & (baseline > 0.0)
+        return np.where(valid, (current - baseline) / baseline, np.nan)
 
     def _short_change_array_from_batches(self, batches):
         if len(batches) < 2:
@@ -1657,13 +1732,40 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if len(batches) < 2:
             return results
 
+        quantity = self._quantity_key()
+        if quantity in {"gain_run_change", "gain_all_run_change"}:
+            runs = sorted(runs_data)
+            run_means = self._run_mean_arrays(runs_data, base_by_run, masks_by_run)
+            use_all_previous = quantity == "gain_all_run_change"
+            for run_index, run in enumerate(runs):
+                baseline = self._previous_run_baseline(
+                    runs, run_means, run_index, use_all_previous,
+                )
+                if baseline is None:
+                    continue
+                arr = base_by_run[run]
+                masks = masks_by_run.get(run, [])
+                for bidx in range(arr.shape[0]):
+                    current = arr[bidx]
+                    current_mask = masks[bidx] if bidx < len(masks) else [False, False, False]
+                    valid = (
+                        np.asarray(current_mask, dtype=bool)[None, :]
+                        & np.isfinite(current)
+                        & np.isfinite(baseline)
+                        & (baseline > 0.0)
+                    )
+                    results[run][bidx] = np.where(
+                        valid, (current - baseline) / baseline, np.nan,
+                    )
+            return results
+
         early_n = min(5, len(batches))
         early_baseline = masked_mean(
             [b[2] for b in batches[:early_n]],
             [b[3] for b in batches[:early_n]],
         )
         for i, (run, bidx, current, current_mask) in enumerate(batches):
-            if self._quantity.currentIndex() == 2:
+            if quantity == "gain_change":
                 prev = batches[max(0, i - 5):i]
                 baseline = masked_mean([b[2] for b in prev], [b[3] for b in prev])
             else:
@@ -1737,30 +1839,77 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             values[f"W{i + 1}"] = v
         return values
 
+    def _run_average_value(self, arr, masks: List[List[bool]]) -> float:
+        ref_idx = self._ref.currentIndex()
+        vals: List[float] = []
+        for b in range(arr.shape[0]):
+            mask = masks[b] if b < len(masks) else [False, False, False]
+            if ref_idx < 3:
+                if not mask[ref_idx]:
+                    continue
+                sample = arr[b, :, ref_idx]
+                vals.extend(float(v) for v in sample if math.isfinite(float(v)))
+            else:
+                for i in range(arr.shape[1]):
+                    refs = [arr[b, i, j] for j in range(3) if mask[j]]
+                    v = finite_avg(refs) if self._is_change_quantity() else positive_avg(refs)
+                    if math.isfinite(v):
+                        vals.append(v)
+        if not self._is_change_quantity():
+            vals = [v for v in vals if v > 0.0]
+        return finite_avg(vals)
+
+    def _fmt_run_average(self, value: float) -> str:
+        if not math.isfinite(value):
+            return "n/a"
+        if self._is_change_quantity():
+            return f"{value * 100:+.2f}%"
+        return f"{value:.4f}"
+
+    def _refresh_run_average_monitor(self):
+        if not hasattr(self, "_run_avg_label"):
+            return
+        runs_data = self._visible_runs_data()
+        if not runs_data:
+            self._run_avg_label.setText("Run avg: n/a")
+            return
+        _, masks_by_run = self._ref_ratio_centers_and_masks()
+        arrays_by_run = self._chart_arrays(runs_data, masks_by_run)
+        runs = sorted(runs_data)
+        run_avgs = {
+            run: self._run_average_value(arrays_by_run[run], masks_by_run.get(run, []))
+            for run in runs
+        }
+        all_vals = [v for v in run_avgs.values() if math.isfinite(v)]
+        all_avg = finite_avg(all_vals)
+        current = runs[-1]
+        previous = runs[-2] if len(runs) >= 2 else None
+        prev_text = f"{previous:06d}: {self._fmt_run_average(run_avgs[previous])}" if previous else "n/a"
+        cur_text = f"{current:06d}: {self._fmt_run_average(run_avgs[current])}"
+        qlabel = QUANTITIES[self._quantity.currentIndex()][1]
+        ref_label = REF_CHOICES[self._ref.currentIndex()]
+        self._run_avg_label.setText(
+            f"Run avg {qlabel} [{ref_label}]   Prev {prev_text}   Current {cur_text}   All {self._fmt_run_average(all_avg)}"
+        )
+
     def _refresh_views(self):
         values = self._selected_values_for_batch()
         finite = [v for v in values.values() if math.isfinite(v)]
         is_change = self._is_change_quantity()
         self._map.set_change_mode(is_change)
         if finite:
+            span = self._change_map_range()
             if is_change:
-                span = self._change_map_range()
                 lo, hi = -span, span
             else:
-                lo, hi = min(finite), max(finite)
-            if self._quantity.currentIndex() == 0:
-                lo = min(0.85, lo)
-                hi = max(1.15, hi)
-            if lo == hi:
-                d = abs(lo) * 0.05 if lo else 1.0
-                lo -= d
-                hi += d
+                lo, hi = 1.0 - span, 1.0 + span
             self._map.set_values(values)
             self._map.set_range(lo, hi)
         else:
             self._map.set_values({})
 
         self._refresh_chart()
+        self._refresh_run_average_monitor()
 
     def _check_gain_drop_warning(self):
         runs_data = self._visible_runs_data()
@@ -1853,7 +2002,8 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         qlabel = QUANTITIES[self._quantity.currentIndex()][1]
         if self._norm_first5.isChecked() and not self._is_change_quantity():
             qlabel += " (first 5 avg = 1)"
-        default_y = (-self._change_map_range(), self._change_map_range()) if self._is_change_quantity() else ((0.85, 1.15) if quantity_idx == 0 else None)
+        span = self._change_map_range()
+        default_y = (-span, span) if self._is_change_quantity() else (1.0 - span, 1.0 + span)
         batch_seconds = self._batch.value() / 10.0
         batch_minutes = batch_seconds / 60.0
         if batch_minutes >= 1.0:
