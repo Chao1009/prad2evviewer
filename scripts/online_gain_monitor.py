@@ -86,6 +86,49 @@ GAIN_CORR_FILE_RE = re.compile(r"^prad_(\d{6})_gain_corr(?:\.|。)root$")
 
 set_theme(DEFAULT_THEME)
 
+_CPU_LAYOUT: Optional[Tuple[Optional[int], List[int]]] = None
+
+
+def _format_cpu_list(cpus: List[int]) -> str:
+    if not cpus:
+        return ""
+    ranges = []
+    start = prev = cpus[0]
+    for cpu in cpus[1:]:
+        if cpu == prev + 1:
+            prev = cpu
+            continue
+        ranges.append(f"{start}-{prev}" if start != prev else str(start))
+        start = prev = cpu
+    ranges.append(f"{start}-{prev}" if start != prev else str(start))
+    return ",".join(ranges)
+
+
+def configure_cpu_layout() -> Tuple[Optional[int], List[int]]:
+    global _CPU_LAYOUT
+    if _CPU_LAYOUT is not None:
+        return _CPU_LAYOUT
+
+    try:
+        available = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        available = list(range(os.cpu_count() or 1))
+
+    if len(available) <= 1 or not hasattr(os, "sched_setaffinity"):
+        _CPU_LAYOUT = (available[0] if available else None, available)
+        return _CPU_LAYOUT
+
+    viewer_cpu = available[0]
+    replay_cpus = available[1:]
+    try:
+        os.sched_setaffinity(0, {viewer_cpu})
+    except OSError:
+        _CPU_LAYOUT = (None, available)
+        return _CPU_LAYOUT
+
+    _CPU_LAYOUT = (viewer_cpu, replay_cpus)
+    return _CPU_LAYOUT
+
 
 @dataclass
 class GainData:
@@ -576,6 +619,14 @@ class OnlineGainMonitor(QMainWindow):
         self._timer.timeout.connect(self._scan_once)
 
         self._build_ui()
+        self._viewer_cpu, self._replay_cpus = configure_cpu_layout()
+        if self._replay_cpus and self._viewer_cpu is not None:
+            self._append(
+                f"CPU isolation: viewer/download on CPU {self._viewer_cpu}; replay can use {len(self._replay_cpus)} CPU(s).",
+                "ok",
+            )
+        else:
+            self._append("CPU isolation unavailable; using thread cap only.", "warn")
         self._map.set_modules(self._modules)
         self._map.set_selected(self._selected_module)
         self._map.moduleClicked.connect(self._on_module_clicked)
@@ -1057,11 +1108,14 @@ exit 0
         _, work_dir, out_root = run_storage_paths(run, storage_base)
         tool = find_update_tool()
         requested_threads = self._threads.value()
-        reserved_threads = max(1, (os.cpu_count() or 2) - 1)
-        replay_threads = min(requested_threads, reserved_threads)
+        replay_cpu_capacity = len(self._replay_cpus) if getattr(self, "_replay_cpus", None) else max(1, (os.cpu_count() or 2) - 1)
+        replay_threads = min(requested_threads, max(1, replay_cpu_capacity))
+        replay_cpu_list = ""
+        if getattr(self, "_replay_cpus", None) and self._viewer_cpu is not None:
+            replay_cpu_list = _format_cpu_list(self._replay_cpus[:replay_threads])
         if replay_threads < requested_threads:
             self._append(
-                f"Replay threads capped at {replay_threads} to leave one CPU for scan/download.",
+                f"Replay threads capped at {replay_threads}; one CPU remains dedicated to the viewer/download.",
                 "warn",
             )
 
@@ -1080,15 +1134,25 @@ OUT_ROOT={shlex.quote(str(out_root))}
 TOOL={shlex.quote(tool)}
 BATCH={self._batch.value()}
 THREADS={replay_threads}
+REPLAY_CPU_LIST={shlex.quote(replay_cpu_list)}
 mkdir -p "$WORK_DIR" "$(dirname "$OUT_ROOT")"
 SNAP_COUNT=$(find "$SNAP_DIR" -maxdepth 1 -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
-echo "Replay settings: run=$RUN_TAG batch=$BATCH replay_threads=$THREADS snapshot_files=$SNAP_COUNT"
+echo "Replay settings: run=$RUN_TAG batch=$BATCH replay_threads=$THREADS replay_cpus=${{REPLAY_CPU_LIST:-all}} snapshot_files=$SNAP_COUNT"
 if [ "$SNAP_COUNT" -eq 0 ]; then
     echo "Empty replay snapshot, removing: $SNAP_DIR"
     rmdir "$SNAP_DIR" 2>/dev/null || true
     exit 0
 fi
-if "$TOOL" "$SNAP_DIR" -w "$WORK_DIR" -o "$OUT_ROOT" -b "$BATCH" -j "$THREADS"{ref_arg}; then
+RUN_CMD=()
+if [ -n "$REPLAY_CPU_LIST" ] && command -v taskset >/dev/null 2>&1; then
+    RUN_CMD+=(taskset -c "$REPLAY_CPU_LIST")
+fi
+RUN_CMD+=(nice -n 10)
+if command -v ionice >/dev/null 2>&1; then
+    RUN_CMD+=(ionice -c2 -n7)
+fi
+RUN_CMD+=("$TOOL")
+if "${{RUN_CMD[@]}}" "$SNAP_DIR" -w "$WORK_DIR" -o "$OUT_ROOT" -b "$BATCH" -j "$THREADS"{ref_arg}; then
     echo "Replay/update succeeded for $RUN_TAG; deleting queued EVIO snapshot."
     case "$SNAP_DIR" in
         "$STORAGE_BASE"/replay_queue/prad_[0-9][0-9][0-9][0-9][0-9][0-9]/*)
