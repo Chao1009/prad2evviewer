@@ -1,0 +1,1367 @@
+#!/usr/bin/env python3
+"""
+Online LMS Gain Monitor (PyQt6)
+===============================
+
+Polls clondaq2 for new EVIO files for a user-selected run, downloads missing
+files, updates LMS gain-correction ROOT output through
+``prad2ana_replay_gainCorr_update``, and displays per-batch W-module gain
+time series.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import re
+import shlex
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+try:
+    import numpy as np
+    import uproot
+    HAS_UPROOT = True
+except ImportError:
+    np = None
+    uproot = None
+    HAS_UPROOT = False
+
+from PyQt6.QtCore import QProcess, QTimer, Qt
+from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
+from PyQt6.QtWidgets import (
+    QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
+    QTextEdit, QVBoxLayout, QWidget,
+)
+
+from hycal_geoview import (
+    HyCalMapWidget,
+    THEME,
+    apply_theme_palette,
+    available_themes,
+    load_modules,
+    set_theme,
+    themed,
+)
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DB_DIR = Path(os.environ.get("PRAD2_DATABASE_DIR", SCRIPT_DIR / ".." / "database")).resolve()
+MODULES_JSON = DB_DIR / "hycal_map.json"
+
+REMOTE_HOST = "clondaq2"
+REMOTE_BASE = "/data/stage2"
+STORAGE_BASE = "/data/gain_monitor"
+DEFAULT_INTERVAL_S = 30
+DEFAULT_BATCH_SIZE = 2000
+DEFAULT_REPLAY_THREADS = 50
+DEFAULT_THEME = "light"
+DEFAULT_RUNS_SHOWN = 5
+
+QUANTITIES = [
+    ("gain_norm_W", "Gain / Ref Gain"),
+    ("gain_W", "Current Gain"),
+]
+REF_CHOICES = ["Ref1", "Ref2", "Ref3", "Avg"]
+REF_COLORS = [
+    QColor("#2997ff"),
+    QColor("#30d158"),
+    QColor("#ff9f0a"),
+    QColor("#bf5af2"),
+]
+DEFAULT_REF_RATIO_BAD_PCT = 20
+CHART_BG = QColor("#ffffff")
+CHART_TEXT = QColor("#1f2328")
+CHART_TEXT_DIM = QColor("#57606a")
+CHART_GRID = QColor("#d8dee4")
+CHART_BORDER = QColor("#8c959f")
+CHART_LEGEND_BG = QColor(255, 255, 255, 230)
+
+GAIN_CORR_FILE_RE = re.compile(r"^prad_(\d{6})_gain_corr(?:\.|。)root$")
+
+set_theme(DEFAULT_THEME)
+
+
+@dataclass
+class GainData:
+    run_number: int
+    path: Path
+    event_start: object
+    event_end: object
+    gain_w: object
+    gain_w_ref: object
+    gain_corr_w: object
+    fit_mean_w_lms: object
+    ref_ratio: object
+
+    @property
+    def nbatches(self) -> int:
+        return int(len(self.event_start))
+
+
+def find_update_tool() -> str:
+    candidates = [
+        shutil.which("prad2ana_replay_gainCorr_update"),
+        str((SCRIPT_DIR / ".." / "build" / "bin" / "prad2ana_replay_gainCorr_update").resolve()),
+        str((SCRIPT_DIR / ".." / "build-clang" / "bin" / "prad2ana_replay_gainCorr_update").resolve()),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return "prad2ana_replay_gainCorr_update"
+
+
+def run_tag(run_number: int) -> str:
+    return f"prad_{run_number:06d}"
+
+
+def run_storage_paths(run_number: int, storage_base: str) -> Tuple[Path, Path, Path]:
+    base = Path(storage_base).expanduser()
+    tag = run_tag(run_number)
+    evio_dir = base / "evio" / tag
+    work_dir = base / "lms" / tag
+    out_root = base / "gain" / tag / f"{tag}_gain_corr.root"
+    return evio_dir, work_dir, out_root
+
+
+def load_gain_root(path: Path, run_number: int) -> GainData:
+    if not HAS_UPROOT:
+        raise RuntimeError("uproot/numpy not installed. Install with: pip install uproot numpy")
+    with uproot.open(str(path)) as f:
+        if "gain_corr" not in f:
+            raise RuntimeError(f"No gain_corr tree in {path}")
+        t = f["gain_corr"]
+        gain_w = t["gain_W"].array(library="np")
+        gain_corr_w = t["gain_corr_W"].array(library="np")
+        gain_w_ref = (
+            t["gain_W_ref"].array(library="np")
+            if "gain_W_ref" in t.keys()
+            else np.where(gain_corr_w > 0.0, gain_w * gain_corr_w, np.nan)
+        )
+        return GainData(
+            run_number=run_number,
+            path=path,
+            event_start=t["event_num_start"].array(library="np"),
+            event_end=t["event_num_end"].array(library="np"),
+            gain_w=gain_w,
+            gain_w_ref=gain_w_ref,
+            gain_corr_w=gain_corr_w,
+            fit_mean_w_lms=t["fit_mean_W_lms"].array(library="np"),
+            ref_ratio=t["refPMT_ratio"].array(library="np"),
+        )
+
+
+def positive_avg(vals) -> float:
+    good = [
+        float(v) for v in vals
+        if math.isfinite(float(v)) and float(v) > 0.0 and float(v) != 1.0
+    ]
+    return sum(good) / len(good) if good else math.nan
+
+
+def ref_ratio_ok(value: float, center: float, bad_rel: float) -> bool:
+    return (
+        math.isfinite(value) and value > 0.0
+        and math.isfinite(center) and center > 0.0
+        and abs(value - center) / center <= bad_rel
+    )
+
+
+def nice_ticks(y_min: float, y_max: float, target: int = 5) -> Tuple[List[float], float, float, int]:
+    if not (math.isfinite(y_min) and math.isfinite(y_max)):
+        return [0.0, 1.0], 0.0, 1.0, 0
+    if y_min == y_max:
+        d = abs(y_min) * 0.05 if y_min else 1.0
+        y_min -= d
+        y_max += d
+    raw_step = abs(y_max - y_min) / max(1, target - 1)
+    if raw_step <= 0.0 or not math.isfinite(raw_step):
+        raw_step = 1.0
+    mag = 10 ** math.floor(math.log10(raw_step))
+    norm = raw_step / mag
+    if norm <= 1.0:
+        step = 1.0 * mag
+    elif norm <= 2.0:
+        step = 2.0 * mag
+    elif norm <= 2.5:
+        step = 2.5 * mag
+    elif norm <= 5.0:
+        step = 5.0 * mag
+    else:
+        step = 10.0 * mag
+    tick_min = math.floor(y_min / step) * step
+    tick_max = math.ceil(y_max / step) * step
+    ticks: List[float] = []
+    cur = tick_min
+    limit = 0
+    while cur <= tick_max + step * 0.5 and limit < 20:
+        ticks.append(0.0 if abs(cur) < step * 1e-6 else cur)
+        cur += step
+        limit += 1
+    step_text = f"{step:.10f}".rstrip("0").rstrip(".")
+    decimals = len(step_text.split(".", 1)[1]) if "." in step_text else 0
+    return ticks, tick_min, tick_max, decimals
+
+
+def tick_label(value: float, decimals: int) -> str:
+    if decimals <= 0:
+        return f"{int(round(value))}"
+    if abs(value) < 0.5 * 10 ** (-decimals):
+        value = 0.0
+    return f"{value:.{decimals}f}"
+
+
+class GainMapWidget(HyCalMapWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent, enable_zoom_pan=True, include_lms=False)
+        self._selected: Optional[str] = None
+
+    def set_selected(self, name: Optional[str]):
+        self._selected = name
+        self.update()
+
+    def _fmt_value(self, v: float) -> str:
+        if not math.isfinite(v):
+            return "nan"
+        return f"{v:.4f}"
+
+    def _tooltip_text(self, name: str) -> str:
+        v = self._values.get(name)
+        if v is None or not math.isfinite(v):
+            return name
+        return f"{name}: {v:.6f}"
+
+    def _paint_overlays(self, p: QPainter, w: int, h: int):
+        super()._paint_overlays(p, w, h)
+        if self._selected and self._selected in self._rects:
+            p.setPen(QPen(QColor(THEME.SELECT_BORDER), 2.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(self._rects[self._selected])
+
+
+class BatchChart(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._title = "No module selected"
+        self._x: List[float] = []
+        self._series: List[Tuple[str, List[float], QColor, bool]] = []
+        self._run_spans: List[Tuple[int, float, float]] = []
+        self._default_y_range: Optional[Tuple[float, float]] = None
+        self.setMinimumSize(220, 180)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_data(self, title: str, x: List[float], series: List[Tuple[str, List[float], QColor, bool]],
+                 run_spans: Optional[List[Tuple[int, float, float]]] = None,
+                 default_y_range: Optional[Tuple[float, float]] = None):
+        self._title = title
+        self._x = x
+        self._series = series
+        self._run_spans = run_spans or []
+        self._default_y_range = default_y_range
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, CHART_BG)
+
+        pad_l = 64 if w < 420 else 74
+        pad_r, pad_t, pad_b = 12, 46, 34
+        plot_w = max(1, w - pad_l - pad_r)
+        plot_h = max(1, h - pad_t - pad_b)
+
+        p.setPen(CHART_TEXT)
+        p.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        title = p.fontMetrics().elidedText(self._title, Qt.TextElideMode.ElideRight, max(40, w - 20))
+        p.drawText(10, 22, title)
+
+        finite_vals: List[float] = []
+        for _, values, _, _ in self._series:
+            finite_vals.extend(v for v in values if math.isfinite(v))
+        if not self._x or not finite_vals:
+            p.setPen(CHART_TEXT_DIM)
+            p.setFont(QFont("Consolas", 12))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No batch data")
+            return
+
+        x_min, x_max = min(0.0, min(self._x)), max(self._x)
+        if x_min == x_max:
+            x_min -= 1
+            x_max += 1
+
+        data_y_min, data_y_max = min(finite_vals), max(finite_vals)
+        if self._default_y_range is not None:
+            y_min = min(self._default_y_range[0], data_y_min)
+            y_max = max(self._default_y_range[1], data_y_max)
+            if data_y_min < self._default_y_range[0]:
+                y_min -= (self._default_y_range[0] - data_y_min) * 0.08
+            if data_y_max > self._default_y_range[1]:
+                y_max += (data_y_max - self._default_y_range[1]) * 0.08
+            y_ticks_all, _, _, y_decimals = nice_ticks(y_min, y_max, 5)
+            y_ticks = [t for t in y_ticks_all if y_min <= t <= y_max]
+        else:
+            y_min, y_max = data_y_min, data_y_max
+            if y_min == y_max:
+                d = abs(y_min) * 0.05 if y_min != 0 else 1.0
+                y_min -= d
+                y_max += d
+            else:
+                d = (y_max - y_min) * 0.12
+                y_min -= d
+                y_max += d
+            y_ticks, y_min, y_max, y_decimals = nice_ticks(y_min, y_max, 5)
+
+        def sx(x):
+            return pad_l + (x - x_min) / (x_max - x_min) * plot_w
+
+        def sy(y):
+            return pad_t + (y_max - y) / (y_max - y_min) * plot_h
+
+        p.setPen(QPen(CHART_GRID, 1))
+        for tick in y_ticks:
+            yy = sy(tick)
+            p.drawLine(pad_l, int(yy), pad_l + plot_w, int(yy))
+        for i in range(6):
+            xx = pad_l + plot_w * i / 5
+            p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
+        p.setPen(QPen(CHART_BORDER, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(pad_l, pad_t, plot_w, plot_h)
+
+        if self._run_spans:
+            dash_pen = QPen(CHART_TEXT_DIM, 1)
+            dash_pen.setStyle(Qt.PenStyle.DashLine)
+            p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+            for run, start, end in self._run_spans:
+                for bx in (start, end):
+                    if x_min <= bx <= x_max:
+                        xx = sx(bx)
+                        p.setPen(dash_pen)
+                        p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
+                mid = (start + end) * 0.5
+                if x_min <= mid <= x_max:
+                    p.setPen(CHART_TEXT_DIM)
+                    label = f"{run:06d}"
+                    p.drawText(int(sx(mid) - 28), pad_t + 18, label)
+
+        p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        p.setPen(CHART_TEXT)
+        for tick in y_ticks:
+            yy = sy(tick)
+            p.drawText(4, int(yy + 4), tick_label(tick, y_decimals))
+        p.drawText(pad_l, h - 10, f"{int(x_min)}")
+        p.drawText(max(pad_l, pad_l + plot_w - 70), h - 10, f"{int(x_max)}")
+
+        legend_items = []
+        for label, values, color, draw_line in self._series:
+            pts = [(sx(x), sy(v)) for x, v in zip(self._x, values) if math.isfinite(v)]
+            if len(pts) < 1:
+                continue
+            legend_items.append((label, color, draw_line, pts))
+            if draw_line:
+                p.setPen(QPen(color, 2.0))
+                for a, b in zip(pts, pts[1:]):
+                    p.drawLine(int(a[0]), int(a[1]), int(b[0]), int(b[1]))
+            p.setBrush(color)
+            for x, y in pts:
+                p.drawEllipse(int(x - 2), int(y - 2), 4, 4)
+
+        if legend_items:
+            p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+            fm = p.fontMetrics()
+            item_w = [fm.horizontalAdvance(label) + 22 for label, _, _, _ in legend_items]
+            total_w = min(sum(item_w) + 12, max(80, plot_w - 12))
+            lx = pad_l + plot_w - total_w - 6
+            ly = pad_t + plot_h - 26
+            lh = 20
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(CHART_LEGEND_BG)
+            p.drawRoundedRect(lx, ly, total_w, lh, 4, 4)
+            p.setPen(QPen(CHART_BORDER, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(lx, ly, total_w, lh, 4, 4)
+            xcur = lx + 8
+            for (label, color, draw_line, _), width in zip(legend_items, item_w):
+                if xcur + width > lx + total_w:
+                    break
+                p.setPen(QPen(color, 2))
+                cy = ly + lh // 2
+                if draw_line:
+                    p.drawLine(xcur, cy, xcur + 12, cy)
+                p.setBrush(color)
+                p.drawEllipse(int(xcur + 5), int(cy - 3), 6, 6)
+                p.setPen(color)
+                p.drawText(int(xcur + 18), int(ly + 14), label)
+                xcur += width
+
+
+class RefRatioChart(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._x: List[float] = []
+        self._ratios: List[List[float]] = [[], [], []]
+        self._ok: List[List[bool]] = [[], [], []]
+        self._run_spans: List[Tuple[int, float, float]] = []
+        self._centers: List[float] = [math.nan, math.nan, math.nan]
+        self.setMinimumSize(220, 240)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def set_data(self, x: List[float], ratios: List[List[float]],
+                 ok: List[List[bool]], run_spans: List[Tuple[int, float, float]],
+                 centers: Optional[List[float]] = None):
+        self._x = x
+        self._ratios = ratios
+        self._ok = ok
+        self._run_spans = run_spans
+        self._centers = centers or [math.nan, math.nan, math.nan]
+        self.update()
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        p.fillRect(0, 0, w, h, CHART_BG)
+
+        p.setPen(CHART_TEXT)
+        p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        p.drawText(8, 18, "Ref PMT LMS/Alpha ratio")
+
+        finite = [
+            v for series in self._ratios for v in series
+            if math.isfinite(v) and v > 0.0
+        ]
+        if not self._x or not finite:
+            p.setPen(CHART_TEXT_DIM)
+            p.setFont(QFont("Consolas", 10))
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No ref ratio data")
+            return
+
+        x_min, x_max = min(0.0, min(self._x)), max(self._x)
+        if x_min == x_max:
+            x_min -= 1.0
+            x_max += 1.0
+        pad_l, pad_r, pad_t, pad_b = 68, 10, 28, 24
+        gap = 28
+        plot_w = max(1, w - pad_l - pad_r)
+        panel_w = max(1, (plot_w - 2 * gap) / 3)
+        plot_h = max(1, h - pad_t - pad_b)
+        y_ranges: List[Tuple[float, float]] = []
+        y_ticks_by_panel: List[List[float]] = []
+        y_decimals: List[int] = []
+        for panel in range(3):
+            vals = [v for v in self._ratios[panel] if math.isfinite(v) and v > 0.0]
+            if not vals:
+                y_ranges.append((0.0, 1.0))
+                y_ticks_by_panel.append([0.0, 0.5, 1.0])
+                y_decimals.append(1)
+                continue
+            y_min, y_max = min(vals), max(vals)
+            center = self._centers[panel] if panel < len(self._centers) else math.nan
+            if math.isfinite(center) and center > 0.0:
+                y_min = min(y_min, center)
+                y_max = max(y_max, center)
+            if y_min == y_max:
+                d = abs(y_min) * 0.02 if y_min else 1.0
+                y_min -= d
+                y_max += d
+            else:
+                d = (y_max - y_min) * 0.15
+                y_min -= d
+                y_max += d
+            ticks, y_min, y_max, decimals = nice_ticks(y_min, y_max, 4)
+            y_ranges.append((y_min, y_max))
+            y_ticks_by_panel.append(ticks)
+            y_decimals.append(decimals)
+
+        def sx(panel, x):
+            base = pad_l + panel * (panel_w + gap)
+            return base + (x - x_min) / (x_max - x_min) * panel_w
+
+        def sy(panel, y):
+            y_min, y_max = y_ranges[panel]
+            return pad_t + (y_max - y) / (y_max - y_min) * plot_h
+
+        dash_pen = QPen(CHART_TEXT_DIM, 1)
+        dash_pen.setStyle(Qt.PenStyle.DashLine)
+        bad_pen = QPen(QColor(THEME.DANGER), 1.6)
+        center_pen = QPen(CHART_TEXT_DIM, 1)
+        center_pen.setStyle(Qt.PenStyle.DotLine)
+        for panel in range(3):
+            x0 = pad_l + panel * (panel_w + gap)
+            p.setPen(QPen(CHART_GRID, 1))
+            for i in range(6):
+                xx = x0 + panel_w * i / 5
+                p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
+            p.setPen(QPen(CHART_BORDER, 1))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRect(int(x0), pad_t, int(panel_w), plot_h)
+            if panel > 0:
+                p.drawLine(int(x0 - gap / 2), pad_t, int(x0 - gap / 2), pad_t + plot_h)
+            p.setPen(REF_COLORS[panel])
+            p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+            p.drawText(int(x0 + 6), pad_t + 14, REF_CHOICES[panel])
+            p.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+            for tick in y_ticks_by_panel[panel]:
+                yy = sy(panel, tick)
+                p.setPen(QPen(CHART_GRID, 1))
+                p.drawLine(int(x0), int(yy), int(x0 + panel_w), int(yy))
+                p.setPen(CHART_TEXT)
+                p.drawText(int(x0 + 4), int(yy - 3), tick_label(tick, y_decimals[panel]))
+            center = self._centers[panel] if panel < len(self._centers) else math.nan
+            if math.isfinite(center) and center > 0.0:
+                yy = sy(panel, center)
+                p.setPen(center_pen)
+                p.drawLine(int(x0), int(yy), int(x0 + panel_w), int(yy))
+                p.setPen(CHART_TEXT_DIM)
+                p.drawText(int(x0 + panel_w - 58), pad_t + plot_h - 4, f"avg {center:.3g}")
+
+            pts = []
+            for x, y, ok in zip(self._x, self._ratios[panel], self._ok[panel]):
+                if not (math.isfinite(y) and y > 0.0):
+                    continue
+                px, py = sx(panel, x), sy(panel, y)
+                pts.append((px, py, ok))
+            p.setPen(QPen(REF_COLORS[panel], 1.3))
+            last_good = None
+            for px, py, ok in pts:
+                if ok and last_good is not None:
+                    p.drawLine(int(last_good[0]), int(last_good[1]), int(px), int(py))
+                last_good = (px, py) if ok else None
+            for px, py, ok in pts:
+                if ok:
+                    p.setPen(QPen(REF_COLORS[panel], 1))
+                    p.setBrush(REF_COLORS[panel])
+                    p.drawEllipse(int(px - 2), int(py - 2), 4, 4)
+                else:
+                    p.setPen(bad_pen)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    p.drawLine(int(px - 4), int(py - 4), int(px + 4), int(py + 4))
+                    p.drawLine(int(px - 4), int(py + 4), int(px + 4), int(py - 4))
+
+            p.setPen(dash_pen)
+            for _, start, end in self._run_spans:
+                for bx in (start, end):
+                    if x_min <= bx <= x_max:
+                        xx = sx(panel, bx)
+                        p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
+
+
+class OnlineGainMonitor(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self._modules = load_modules(MODULES_JSON)
+        self._selected_module = "W1"
+        self._data: Optional[GainData] = None
+        self._runs_data: Dict[int, GainData] = {}
+        self._known_runs: set[int] = set()
+        self._opened_output_folder: Optional[Path] = None
+        self._replay_queue: List[Tuple[int, Path]] = []
+        self._download_process = QProcess(self)
+        self._download_process.readyReadStandardOutput.connect(self._on_stdout)
+        self._download_process.readyReadStandardError.connect(self._on_stderr)
+        self._download_process.finished.connect(self._on_download_finished)
+        self._replay_process = QProcess(self)
+        self._replay_process.readyReadStandardOutput.connect(self._on_stdout)
+        self._replay_process.readyReadStandardError.connect(self._on_stderr)
+        self._replay_process.finished.connect(self._on_replay_finished)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self._scan_once)
+
+        self._build_ui()
+        self._map.set_modules(self._modules)
+        self._map.set_selected(self._selected_module)
+        self._map.moduleClicked.connect(self._on_module_clicked)
+        self._update_paths_from_run()
+
+    def _build_ui(self):
+        self.setWindowTitle("Online LMS Gain Monitor")
+        self.resize(1400, 850)
+        self.setMinimumSize(760, 520)
+        apply_theme_palette(self)
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
+
+        top_widget = QWidget()
+        top = QHBoxLayout(top_widget)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(5)
+        title = QLabel("ONLINE LMS GAIN MONITOR")
+        title.setFont(QFont("Consolas", 14, QFont.Weight.Bold))
+        title.setStyleSheet(themed(f"color:{THEME.ACCENT};"))
+        top.addWidget(title)
+
+        top.addWidget(self._label("Start run"))
+        self._run_edit = QLineEdit("")
+        self._run_edit.setPlaceholderText("24929")
+        self._run_edit.setMinimumWidth(150)
+        self._run_edit.editingFinished.connect(self._update_paths_from_run)
+        top.addWidget(self._run_edit)
+
+        self._start_btn = self._button("Start", THEME.SUCCESS, self._start)
+        self._stop_btn = self._button("Stop", THEME.DANGER, self._stop)
+        self._stop_btn.setEnabled(False)
+        self._scan_btn = self._button("Scan Now", THEME.ACCENT, self._scan_once)
+        self._open_folder_btn = self._button("Open Folder", THEME.WARN, self._open_output_folder)
+        top.addWidget(self._start_btn)
+        top.addWidget(self._stop_btn)
+        top.addWidget(self._scan_btn)
+        top.addWidget(self._open_folder_btn)
+
+        top.addWidget(self._label("every"))
+        self._interval = QSpinBox()
+        self._interval.setRange(5, 3600)
+        self._interval.setValue(DEFAULT_INTERVAL_S)
+        self._interval.setSuffix(" s")
+        self._interval.setFixedWidth(80)
+        top.addWidget(self._interval)
+
+        top.addWidget(self._label("batch"))
+        self._batch = QSpinBox()
+        self._batch.setRange(100, 100000)
+        self._batch.setValue(DEFAULT_BATCH_SIZE)
+        self._batch.setSingleStep(100)
+        self._batch.setFixedWidth(95)
+        top.addWidget(self._batch)
+
+        top.addWidget(self._label("runs shown"))
+        self._runs_shown = QSpinBox()
+        self._runs_shown.setRange(1, 999)
+        self._runs_shown.setValue(DEFAULT_RUNS_SHOWN)
+        self._runs_shown.setFixedWidth(70)
+        self._runs_shown.valueChanged.connect(self._refresh_views)
+        top.addWidget(self._runs_shown)
+
+        top.addWidget(self._label("threads"))
+        self._threads = QSpinBox()
+        self._threads.setRange(1, 1024)
+        self._threads.setValue(DEFAULT_REPLAY_THREADS)
+        self._threads.setFixedWidth(60)
+        top.addWidget(self._threads)
+
+        top.addWidget(self._label("ref run"))
+        self._ref_run = QSpinBox()
+        self._ref_run.setRange(-1, 999999)
+        self._ref_run.setValue(-1)
+        self._ref_run.setSpecialValueText("auto")
+        self._ref_run.setFixedWidth(90)
+        top.addWidget(self._ref_run)
+
+        top.addWidget(self._label("quantity"))
+        self._quantity = QComboBox()
+        self._quantity.addItems([label for _, label in QUANTITIES])
+        self._quantity.currentIndexChanged.connect(self._refresh_views)
+        top.addWidget(self._quantity)
+
+        top.addWidget(self._label("ref"))
+        self._ref = QComboBox()
+        self._ref.addItems(REF_CHOICES)
+        self._ref.setCurrentIndex(3)
+        self._ref.currentIndexChanged.connect(self._refresh_views)
+        top.addWidget(self._ref)
+
+        top.addWidget(self._label("ratio tol"))
+        self._ref_ratio_tol = QSpinBox()
+        self._ref_ratio_tol.setRange(0, 100)
+        self._ref_ratio_tol.setValue(DEFAULT_REF_RATIO_BAD_PCT)
+        self._ref_ratio_tol.setSuffix(" %")
+        self._ref_ratio_tol.setFixedWidth(80)
+        self._ref_ratio_tol.valueChanged.connect(self._refresh_views)
+        top.addWidget(self._ref_ratio_tol)
+
+        top.addStretch()
+        self._status = QLabel("Idle")
+        self._status.setFont(QFont("Consolas", 10))
+        self._status.setStyleSheet(themed(f"color:{THEME.TEXT_DIM};"))
+        top.addWidget(self._status)
+        root.addWidget(self._hscroll(top_widget))
+
+        dirs_widget = QWidget()
+        dirs = QHBoxLayout(dirs_widget)
+        dirs.setContentsMargins(0, 0, 0, 0)
+        dirs.setSpacing(5)
+        self._host = self._path_edit(REMOTE_HOST)
+        self._remote_base = self._path_edit(REMOTE_BASE)
+        self._storage_base = self._path_edit(STORAGE_BASE)
+        self._work_dir = self._path_edit("")
+        self._out_root = self._path_edit("")
+        self._work_dir.setReadOnly(True)
+        self._out_root.setReadOnly(True)
+        dirs.addWidget(self._label("host"))
+        dirs.addWidget(self._host, 1)
+        dirs.addWidget(self._label("remote"))
+        dirs.addWidget(self._remote_base, 2)
+        dirs.addWidget(self._label("storage base"))
+        dirs.addWidget(self._storage_base, 3)
+        browse_base = self._button("...", THEME.TEXT, self._browse_base)
+        browse_base.setFixedWidth(30)
+        dirs.addWidget(browse_base)
+        dirs.addWidget(self._label("preview work"))
+        dirs.addWidget(self._work_dir, 3)
+        dirs.addWidget(self._label("preview out"))
+        dirs.addWidget(self._out_root, 3)
+        root.addWidget(self._hscroll(dirs_widget))
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        self._map = GainMapWidget()
+        self._map.setMinimumWidth(220)
+        self._chart = BatchChart()
+        self._ratio_chart = RefRatioChart()
+        self._log = QTextEdit()
+        self._log.setReadOnly(True)
+        self._log.document().setMaximumBlockCount(4000)
+        self._log.setStyleSheet(themed(
+            f"QTextEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"border:1px solid {THEME.BORDER};font-family:Consolas;font-size:9pt;}}"))
+
+        left = QWidget()
+        left.setMinimumWidth(260)
+        left_lay = QVBoxLayout(left)
+        left_lay.setContentsMargins(0, 0, 0, 0)
+        left_lay.setSpacing(6)
+        left_lay.addWidget(self._map, stretch=4)
+        left_lay.addWidget(self._log, stretch=2)
+
+        right = QWidget()
+        right.setMinimumWidth(420)
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(6)
+        right_lay.addWidget(self._chart, stretch=3)
+        right_lay.addWidget(self._ratio_chart, stretch=2)
+
+        splitter.addWidget(left)
+        splitter.addWidget(right)
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 4)
+        splitter.setStretchFactor(1, 6)
+        splitter.setSizes([560, 840])
+        root.addWidget(splitter, stretch=1)
+
+        self._style_inputs()
+        file_menu = self.menuBar().addMenu("File")
+        open_action = QAction("Open Output Folder...", self)
+        open_action.triggered.connect(self._open_output_folder)
+        file_menu.addAction(open_action)
+        reload_action = QAction("Reload ROOT", self)
+        reload_action.triggered.connect(self._load_root)
+        file_menu.addAction(reload_action)
+
+    def _label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFont(QFont("Consolas", 10))
+        lbl.setStyleSheet(themed(f"color:{THEME.TEXT_DIM};"))
+        lbl.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        return lbl
+
+    def _path_edit(self, text: str) -> QLineEdit:
+        edit = QLineEdit(text)
+        edit.setMinimumWidth(70)
+        edit.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        return edit
+
+    def _button(self, text: str, color: str, slot):
+        btn = QPushButton(text)
+        btn.clicked.connect(slot)
+        btn.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        btn.setStyleSheet(
+            f"QPushButton{{background:{THEME.BUTTON};color:{color};"
+            f"border:1px solid {THEME.BORDER};border-radius:3px;padding:4px 10px;}}"
+            f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};}}"
+            f"QPushButton:disabled{{color:{THEME.TEXT_MUTED};}}")
+        return btn
+
+    def _hscroll(self, widget: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        widget.setStyleSheet(themed(f"QWidget{{background:{THEME.BG};}}"))
+        scroll.setWidget(widget)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        scroll.setMinimumHeight(widget.sizeHint().height() + 4)
+        scroll.viewport().setStyleSheet(themed(f"background:{THEME.BG};"))
+        scroll.setStyleSheet(themed(f"""
+            QScrollArea {{
+                background: {THEME.BG};
+                border: none;
+            }}
+            QScrollBar:horizontal {{
+                background: {THEME.BG};
+                height: 12px;
+                margin: 0px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: {THEME.BORDER};
+                min-width: 32px;
+            }}
+            QScrollBar::add-line:horizontal,
+            QScrollBar::sub-line:horizontal {{
+                width: 0px;
+                height: 0px;
+            }}
+            QScrollBar::add-page:horizontal,
+            QScrollBar::sub-page:horizontal {{
+                background: transparent;
+            }}
+        """))
+        return scroll
+
+    def _style_inputs(self):
+        ss = themed(
+            f"QLineEdit,QSpinBox,QComboBox{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"border:1px solid {THEME.BORDER};border-radius:3px;padding:2px 5px;"
+            "font-family:Consolas;font-size:10pt;}"
+            f"QComboBox QAbstractItemView{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"selection-background-color:{THEME.ACCENT_STRONG};}}")
+        for cls in (QLineEdit, QSpinBox, QComboBox):
+            for w in self.findChildren(cls):
+                w.setStyleSheet(ss)
+
+    def _browse_base(self):
+        d = QFileDialog.getExistingDirectory(self, "Select storage base directory")
+        if d:
+            self._storage_base.setText(d)
+            self._opened_output_folder = None
+            self._work_dir.clear()
+            self._out_root.clear()
+            self._update_paths_from_run()
+
+    def _open_output_folder(self):
+        start = str(self._opened_output_folder or Path(self._storage_base.text().strip() or STORAGE_BASE))
+        d = QFileDialog.getExistingDirectory(self, "Select gain_corr output folder", start)
+        if not d:
+            return
+        self._opened_output_folder = Path(d)
+        self._load_output_folder(self._opened_output_folder)
+
+    def _parse_runs(self) -> List[int]:
+        text = self._run_edit.text().strip()
+        if not text:
+            return []
+        runs: List[int] = []
+        for tok in re.split(r"[,\s]+", text):
+            if not tok:
+                continue
+            if not tok.isdigit():
+                self._append(f"Run number must be numeric: {tok}", "error")
+                return []
+            runs.append(int(tok))
+        return runs
+
+    def _parse_run(self) -> Optional[int]:
+        runs = self._parse_runs()
+        return runs[0] if runs else None
+
+    def _runs_to_load(self) -> List[int]:
+        runs = set(self._parse_runs())
+        runs.update(self._known_runs)
+        return sorted(runs)
+
+    def _update_paths_from_run(self):
+        run = self._parse_run()
+        if run is None:
+            return
+        storage = self._storage_base.text().strip() or STORAGE_BASE
+        _, work_dir, out_root = run_storage_paths(run, storage)
+        self._work_dir.setText(str(work_dir))
+        self._out_root.setText(str(out_root))
+
+    def _start(self):
+        if not self._parse_runs():
+            return
+        self._opened_output_folder = None
+        self._update_paths_from_run()
+        self._start_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._scan_once()
+
+    def _stop(self):
+        self._timer.stop()
+        if self._download_process.state() != QProcess.ProcessState.NotRunning:
+            self._download_process.kill()
+        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
+            self._replay_process.kill()
+        self._replay_queue.clear()
+        self._start_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        self._status.setText("Stopped")
+
+    def _scan_once(self):
+        seed_runs = self._parse_runs()
+        if not seed_runs:
+            return
+        self._opened_output_folder = None
+        if self._download_process.state() != QProcess.ProcessState.NotRunning:
+            self._append("Previous download scan still running; skipping this tick.", "warn")
+            return
+        self._update_paths_from_run()
+
+        host = self._host.text().strip() or REMOTE_HOST
+        remote_base = self._remote_base.text().strip() or REMOTE_BASE
+        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+
+        seed_run = min(seed_runs)
+        explicit_runs = " ".join(str(r) for r in seed_runs)
+        bash = f"""
+set -u
+SEED_RUN={seed_run}
+EXPLICIT_RUNS={shlex.quote(explicit_runs)}
+HOST={shlex.quote(host)}
+REMOTE_BASE={shlex.quote(remote_base.rstrip('/'))}
+STORAGE_BASE={shlex.quote(storage_base)}
+echo "Download settings: storage=$STORAGE_BASE"
+
+REMOTE_RUNS=$(ssh "$HOST" "ls '$REMOTE_BASE' 2>/dev/null | grep -E '^prad_[0-9]{{6}}$' | sort" || true)
+RUNS=""
+for r in $EXPLICIT_RUNS; do
+    case " $RUNS " in *" $r "*) ;; *) RUNS="$RUNS $r" ;; esac
+done
+while IFS= read -r d; do
+    [ -z "$d" ] && continue
+    R=${{d#prad_}}
+    N=$((10#$R))
+    [ "$N" -lt "$SEED_RUN" ] && continue
+    case " $RUNS " in *" $N "*) ;; *) RUNS="$RUNS $N" ;; esac
+done <<< "$REMOTE_RUNS"
+
+for RUN in $RUNS; do
+RUN_TAG=$(printf 'prad_%06d' "$RUN")
+REMOTE_DIR="$REMOTE_BASE/$RUN_TAG"
+LOCAL_DIR="$STORAGE_BASE/evio/$RUN_TAG"
+WORK_DIR="$STORAGE_BASE/lms/$RUN_TAG"
+OUT_ROOT="$STORAGE_BASE/gain/$RUN_TAG/${{RUN_TAG}}_gain_corr.root"
+QUEUE_ROOT="$STORAGE_BASE/replay_queue/$RUN_TAG"
+mkdir -p "$LOCAL_DIR" "$WORK_DIR" "$(dirname "$OUT_ROOT")" "$QUEUE_ROOT"
+echo "Scanning $HOST:$REMOTE_DIR"
+ALL_FILES=$(ssh "$HOST" "ls '$REMOTE_DIR' 2>/dev/null | sort" || true)
+REMOTE_COUNT=$(printf '%s\\n' "$ALL_FILES" | grep -c '\\.evio\\.' || true)
+COPIED=0
+ALREADY=0
+QUEUED=0
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    case "$f" in
+        *.evio.*) ;;
+        *) continue ;;
+    esac
+    LMS_NAME="${{f/.evio/}}_lms.root"
+    if [ -f "$WORK_DIR/$LMS_NAME" ]; then
+        echo "Already replayed: $f (skipping download)"
+        ALREADY=$((ALREADY+1))
+    elif find "$QUEUE_ROOT" -type f -name "$f" -print -quit | grep -q .; then
+        echo "Already queued: $f (skipping download)"
+        QUEUED=$((QUEUED+1))
+    elif [ -f "$LOCAL_DIR/$f" ]; then
+        ALREADY=$((ALREADY+1))
+    else
+        echo "Copying $f"
+        scp "$HOST:$REMOTE_DIR/$f" "$LOCAL_DIR/"
+        COPIED=$((COPIED+1))
+    fi
+done <<< "$ALL_FILES"
+
+LOCAL_COUNT=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
+LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
+echo "remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED already=$ALREADY queued=$QUEUED lms=$LMS_COUNT"
+if [ "$LOCAL_COUNT" -gt 0 ]; then
+    SNAP_DIR="$QUEUE_ROOT/$(date +%Y%m%d_%H%M%S)_$$"
+    mkdir -p "$SNAP_DIR"
+    find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' -exec mv -t "$SNAP_DIR" {{}} +
+    SNAP_COUNT=$(find "$SNAP_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
+    echo "Queued $SNAP_COUNT EVIO file(s) for replay: $SNAP_DIR"
+    echo "__ONLINE_GAIN_QUEUE__ run=$RUN snapshot=$SNAP_DIR"
+else
+    echo "No new local EVIO files queued."
+fi
+LOCAL_COUNT=$(find "$LOCAL_DIR" -maxdepth 1 -type f -name '*.evio.*' | wc -l | tr -d ' ')
+echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=$REMOTE_COUNT local=$LOCAL_COUNT copied=$COPIED lms=$LMS_COUNT out=$OUT_ROOT"
+done
+exit 0
+"""
+        self._status.setText("Scanning...")
+        self._append(f"$ auto-scan from run {seed_run:06d}", "cmd")
+        self._download_process.start("bash", ["-lc", bash])
+
+    def _on_stdout(self):
+        proc = self.sender()
+        if proc is None:
+            return
+        text = bytes(proc.readAllStandardOutput()).decode(errors="replace")
+        for line in text.splitlines():
+            self._record_status_line(line)
+            self._append(line)
+
+    def _on_stderr(self):
+        proc = self.sender()
+        if proc is None:
+            return
+        text = bytes(proc.readAllStandardError()).decode(errors="replace")
+        for line in text.splitlines():
+            self._append(line, "error")
+
+    def _record_status_line(self, line: str):
+        if "__ONLINE_GAIN_QUEUE__" in line:
+            m_run = re.search(r"\brun=(\d+)\b", line)
+            m_snap = re.search(r"\bsnapshot=(.+)$", line)
+            if m_run and m_snap:
+                self._replay_queue.append((int(m_run.group(1)), Path(m_snap.group(1).strip())))
+                self._start_next_replay()
+            return
+        if "__ONLINE_GAIN_STATUS__" in line:
+            m = re.search(r"\brun=(\d+)\b", line)
+            if m:
+                self._known_runs.add(int(m.group(1)))
+
+    def _on_download_finished(self, code, status):
+        color = "ok" if code == 0 else "error"
+        self._append(f"[download scan finished: exit {code}]", color)
+        if self._stop_btn.isEnabled():
+            self._timer.start(self._interval.value() * 1000)
+
+    def _on_replay_finished(self, code, status):
+        color = "ok" if code == 0 else "error"
+        self._append(f"[replay finished: exit {code}]", color)
+        self._load_root()
+        self._start_next_replay()
+
+    def _start_next_replay(self):
+        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
+            return
+        while self._replay_queue:
+            run, snapshot = self._replay_queue.pop(0)
+            if snapshot.exists():
+                break
+            self._append(f"Replay snapshot missing, skipped: {snapshot}", "warn")
+        else:
+            return
+
+        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+        _, work_dir, out_root = run_storage_paths(run, storage_base)
+        tool = find_update_tool()
+        requested_threads = self._threads.value()
+        reserved_threads = max(1, (os.cpu_count() or 2) - 1)
+        replay_threads = min(requested_threads, reserved_threads)
+        if replay_threads < requested_threads:
+            self._append(
+                f"Replay threads capped at {replay_threads} to leave one CPU for scan/download.",
+                "warn",
+            )
+
+        ref_arg = ""
+        if self._ref_run.value() >= 0:
+            ref_arg = f" -r {self._ref_run.value()}"
+
+        bash = f"""
+set -u
+RUN={run}
+RUN_TAG=$(printf 'prad_%06d' "$RUN")
+SNAP_DIR={shlex.quote(str(snapshot))}
+STORAGE_BASE={shlex.quote(storage_base)}
+WORK_DIR={shlex.quote(str(work_dir))}
+OUT_ROOT={shlex.quote(str(out_root))}
+TOOL={shlex.quote(tool)}
+BATCH={self._batch.value()}
+THREADS={replay_threads}
+mkdir -p "$WORK_DIR" "$(dirname "$OUT_ROOT")"
+SNAP_COUNT=$(find "$SNAP_DIR" -maxdepth 1 -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
+echo "Replay settings: run=$RUN_TAG batch=$BATCH replay_threads=$THREADS snapshot_files=$SNAP_COUNT"
+if [ "$SNAP_COUNT" -eq 0 ]; then
+    echo "Empty replay snapshot, removing: $SNAP_DIR"
+    rmdir "$SNAP_DIR" 2>/dev/null || true
+    exit 0
+fi
+if "$TOOL" "$SNAP_DIR" -w "$WORK_DIR" -o "$OUT_ROOT" -b "$BATCH" -j "$THREADS"{ref_arg}; then
+    echo "Replay/update succeeded for $RUN_TAG; deleting queued EVIO snapshot."
+    case "$SNAP_DIR" in
+        "$STORAGE_BASE"/replay_queue/prad_[0-9][0-9][0-9][0-9][0-9][0-9]/*)
+            rm -rf "$SNAP_DIR"
+            ;;
+        *)
+            echo "Refusing to delete unexpected snapshot path: $SNAP_DIR" >&2
+            ;;
+    esac
+else
+    echo "ERROR: gain update failed for $RUN_TAG; keeping snapshot $SNAP_DIR" >&2
+    exit 1
+fi
+LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
+echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT out=$OUT_ROOT"
+"""
+        self._status.setText("Replaying...")
+        self._append(f"$ replay queued EVIO for run {run:06d}: {snapshot}", "cmd")
+        self._replay_process.start("bash", ["-lc", bash])
+
+    def _append(self, text: str, kind: str = "normal"):
+        colors = {
+            "normal": THEME.TEXT,
+            "cmd": THEME.TEXT_DIM,
+            "warn": THEME.WARN,
+            "error": THEME.DANGER,
+            "ok": THEME.SUCCESS,
+        }
+        safe = (
+            text.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+        )
+        self._log.moveCursor(self._log.textCursor().MoveOperation.End)
+        self._log.insertHtml(f"<span style='color:{colors.get(kind, THEME.TEXT)}'>{safe}</span><br>")
+        self._log.moveCursor(self._log.textCursor().MoveOperation.End)
+
+    def _load_root(self):
+        if self._opened_output_folder is not None:
+            self._load_output_folder(self._opened_output_folder)
+            return
+        runs = self._runs_to_load()
+        if not runs:
+            return
+        storage = self._storage_base.text().strip() or STORAGE_BASE
+        loaded: Dict[int, GainData] = {}
+        missing: List[int] = []
+        for run in runs:
+            _, _, path = run_storage_paths(run, storage)
+            if not path.exists():
+                missing.append(run)
+                continue
+            try:
+                loaded[run] = load_gain_root(path, run)
+            except Exception as exc:
+                self._append(f"Run {run:06d}: {exc}", "error")
+        if not loaded:
+            self._status.setText("No gain_corr.root yet")
+            return
+        self._runs_data = dict(sorted(loaded.items()))
+        self._data = self._runs_data[max(self._runs_data)]
+        nbatches = sum(d.nbatches for d in self._runs_data.values())
+        showing = min(self._runs_shown.value(), len(self._runs_data))
+        miss = f" | missing {len(missing)} run(s)" if missing else ""
+        self._status.setText(
+            f"{len(self._runs_data)} run(s) loaded, showing {showing}, {nbatches} batches{miss}"
+        )
+        self._refresh_views()
+
+    def _load_output_folder(self, folder: Path):
+        if not folder.exists() or not folder.is_dir():
+            self._status.setText("Output folder not found")
+            self._append(f"Output folder not found: {folder}", "error")
+            return
+        files: List[Tuple[int, Path]] = []
+        for path in sorted(folder.rglob("*gain_corr*root")):
+            if not path.is_file():
+                continue
+            m = GAIN_CORR_FILE_RE.match(path.name)
+            if not m:
+                continue
+            files.append((int(m.group(1)), path))
+        if not files:
+            self._status.setText("No gain_corr ROOT files")
+            self._append(f"No prad_XXXXXX_gain_corr.root files under {folder}", "warn")
+            return
+
+        loaded: Dict[int, GainData] = {}
+        for run, path in files:
+            try:
+                loaded[run] = load_gain_root(path, run)
+            except Exception as exc:
+                self._append(f"{path}: {exc}", "error")
+        if not loaded:
+            self._status.setText("No readable gain_corr ROOT files")
+            return
+
+        self._runs_data = dict(sorted(loaded.items()))
+        self._known_runs.update(self._runs_data.keys())
+        self._data = self._runs_data[max(self._runs_data)]
+        nbatches = sum(d.nbatches for d in self._runs_data.values())
+        showing = min(self._runs_shown.value(), len(self._runs_data))
+        self._run_edit.setText(" ".join(f"{r:06d}" for r in self._runs_data.keys()))
+        self._status.setText(
+            f"Loaded {len(self._runs_data)} run(s), showing {showing}, {nbatches} batches from {folder}"
+        )
+        self._append(f"Loaded {len(self._runs_data)} gain_corr file(s) from {folder}", "ok")
+        self._refresh_views()
+
+    def _on_module_clicked(self, name: str):
+        if name:
+            self._selected_module = name
+            self._map.set_selected(name)
+            self._refresh_views()
+
+    def _module_index(self, name: str) -> Optional[int]:
+        m = re.match(r"^W(\d+)$", name)
+        if not m:
+            return None
+        idx = int(m.group(1)) - 1
+        return idx if 0 <= idx < 1156 else None
+
+    def _ref_ratio_bad_rel(self) -> float:
+        return float(self._ref_ratio_tol.value()) / 100.0
+
+    def _quantity_array(self, data: GainData):
+        if self._quantity.currentIndex() == 0:
+            return np.where(data.gain_w_ref > 0.0, data.gain_w / data.gain_w_ref, np.nan)
+        return data.gain_w
+
+    def _visible_runs_data(self) -> Dict[int, GainData]:
+        if not self._runs_data:
+            return {}
+        limit = self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
+        runs = sorted(self._runs_data)[-limit:]
+        return {run: self._runs_data[run] for run in runs}
+
+    def _ref_ratio_centers_and_masks(self) -> Tuple[List[float], Dict[int, List[List[bool]]]]:
+        runs_data = self._visible_runs_data()
+        centers: List[float] = []
+        for j in range(3):
+            vals: List[float] = []
+            for data in runs_data.values():
+                for b in range(data.nbatches):
+                    v = float(data.ref_ratio[b, j])
+                    if math.isfinite(v) and v > 0.0:
+                        vals.append(v)
+            centers.append(sum(vals) / len(vals) if vals else math.nan)
+
+        bad_rel = self._ref_ratio_bad_rel()
+        masks: Dict[int, List[List[bool]]] = {}
+        for run, data in runs_data.items():
+            run_masks: List[List[bool]] = []
+            for b in range(data.nbatches):
+                run_masks.append([
+                    ref_ratio_ok(float(data.ref_ratio[b, j]), centers[j], bad_rel)
+                    for j in range(3)
+                ])
+            masks[run] = run_masks
+        return centers, masks
+
+    def _selected_values_for_batch(self) -> Dict[str, float]:
+        runs_data = self._visible_runs_data()
+        if not runs_data:
+            return {}
+        latest_run = max(runs_data)
+        data = runs_data[latest_run]
+        arr = self._quantity_array(data)
+        latest = arr[-1]
+        _, masks = self._ref_ratio_centers_and_masks()
+        mask = masks.get(latest_run, [])[-1] if masks.get(latest_run) else [False, False, False]
+        ref_idx = self._ref.currentIndex()
+        values: Dict[str, float] = {}
+        for i in range(1156):
+            if ref_idx < 3:
+                v = float(latest[i, ref_idx]) if mask[ref_idx] else math.nan
+            else:
+                v = positive_avg([latest[i, j] for j in range(3) if mask[j]])
+            values[f"W{i + 1}"] = v
+        return values
+
+    def _refresh_views(self):
+        values = self._selected_values_for_batch()
+        finite = [v for v in values.values() if math.isfinite(v)]
+        if finite:
+            lo, hi = min(finite), max(finite)
+            if self._quantity.currentIndex() == 0:
+                lo = min(0.85, lo)
+                hi = max(1.15, hi)
+            if lo == hi:
+                d = abs(lo) * 0.05 if lo else 1.0
+                lo -= d
+                hi += d
+            self._map.set_values(values)
+            self._map.set_range(lo, hi)
+        else:
+            self._map.set_values({})
+
+        self._refresh_chart()
+
+    def _refresh_chart(self):
+        runs_data = self._visible_runs_data()
+        if not runs_data:
+            self._chart.set_data("No data", [], [])
+            self._ratio_chart.set_data([], [[], [], []], [[], [], []], [])
+            return
+        idx = self._module_index(self._selected_module)
+        if idx is None:
+            self._chart.set_data("Select a W module", [], [])
+            return
+        quantity_idx = self._quantity.currentIndex()
+        x: List[float] = []
+        run_spans: List[Tuple[int, float, float]] = []
+        per_ref_values = [[], [], []]
+        ref_ratio_values = [[], [], []]
+        ref_ratio_ok = [[], [], []]
+        avg_values: List[float] = []
+        offset = 0.0
+        step = float(self._batch.value())
+        centers, masks_by_run = self._ref_ratio_centers_and_masks()
+        for run, data in sorted(runs_data.items()):
+            arr = self._quantity_array(data)
+            start = offset
+            for b in range(data.nbatches):
+                offset += step
+                x.append(offset)
+                mask = masks_by_run.get(run, [])[b] if b < len(masks_by_run.get(run, [])) else [False, False, False]
+                for j in range(3):
+                    ref_ratio_values[j].append(float(data.ref_ratio[b, j]))
+                    ref_ratio_ok[j].append(mask[j])
+                    per_ref_values[j].append(float(arr[b, idx, j]) if mask[j] else math.nan)
+                avg_values.append(positive_avg([arr[b, idx, j] for j in range(3) if mask[j]]))
+            end = offset
+            if end > start:
+                run_spans.append((run, start, end))
+        ref_idx = self._ref.currentIndex()
+        series = []
+        if ref_idx < 3:
+            series.append((REF_CHOICES[ref_idx], per_ref_values[ref_idx], REF_COLORS[ref_idx], False))
+        else:
+            for j in range(3):
+                series.append((REF_CHOICES[j], per_ref_values[j], REF_COLORS[j], False))
+            series.append(("Avg", avg_values, REF_COLORS[3], True))
+        qlabel = QUANTITIES[self._quantity.currentIndex()][1]
+        default_y = (0.85, 1.15) if quantity_idx == 0 else None
+        self._chart.set_data(
+            f"{self._selected_module} {qlabel} vs cumulative LMS batch count",
+            x, series, run_spans, default_y,
+        )
+        self._ratio_chart.set_data(x, ref_ratio_values, ref_ratio_ok, run_spans, centers)
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        if self._download_process.state() != QProcess.ProcessState.NotRunning:
+            self._download_process.kill()
+            self._download_process.waitForFinished(2000)
+        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
+            self._replay_process.kill()
+            self._replay_process.waitForFinished(2000)
+        super().closeEvent(event)
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Online PyQt6 LMS gain monitor")
+    parser.add_argument("--theme", choices=available_themes(), default=DEFAULT_THEME)
+    parser.add_argument("run", nargs="*", help="initial run number(s)")
+    args = parser.parse_args(argv)
+
+    set_theme(args.theme)
+    app = QApplication(sys.argv[:1])
+    win = OnlineGainMonitor()
+    if args.run:
+        win._run_edit.setText(" ".join(args.run))
+        win._update_paths_from_run()
+        win._load_root()
+    win.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
