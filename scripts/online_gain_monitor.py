@@ -648,6 +648,8 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_gain_file: Optional[Path] = None
         self._last_gain_drop_warning_key: Optional[Tuple[int, int, float]] = None
         self._replay_queue: List[Tuple[int, Path]] = []
+        self._queued_snapshots: set[Path] = set()
+        self._active_replay_snapshots: List[Path] = []
         self._download_process = QProcess(self)
         self._download_process.readyReadStandardOutput.connect(self._on_stdout)
         self._download_process.readyReadStandardError.connect(self._on_stderr)
@@ -1030,6 +1032,8 @@ class OnlineGainMonitor(QMainWindow):
         self._update_paths_from_run()
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
+        self._enqueue_existing_replay_snapshots()
+        self._start_next_replay()
         self._scan_once()
 
     def _stop(self):
@@ -1039,6 +1043,8 @@ class OnlineGainMonitor(QMainWindow):
         if self._replay_process.state() != QProcess.ProcessState.NotRunning:
             self._replay_process.kill()
         self._replay_queue.clear()
+        self._queued_snapshots.clear()
+        self._active_replay_snapshots.clear()
         self._start_btn.setEnabled(True)
         self._stop_btn.setEnabled(False)
         self._status.setText("Stopped")
@@ -1179,7 +1185,7 @@ exit 0
             m_run = re.search(r"\brun=(\d+)\b", line)
             m_snap = re.search(r"\bsnapshot=(.+)$", line)
             if m_run and m_snap:
-                self._replay_queue.append((int(m_run.group(1)), Path(m_snap.group(1).strip())))
+                self._enqueue_replay_snapshot(int(m_run.group(1)), Path(m_snap.group(1).strip()))
                 self._start_next_replay()
             return
         if "__ONLINE_GAIN_STATUS__" in line:
@@ -1190,14 +1196,48 @@ exit 0
     def _on_download_finished(self, code, status):
         color = "ok" if code == 0 else "error"
         self._append(f"[download scan finished: exit {code}]", color)
+        self._enqueue_existing_replay_snapshots()
+        self._start_next_replay()
         if self._stop_btn.isEnabled():
             self._timer.start(self._interval.value() * 1000)
 
     def _on_replay_finished(self, code, status):
         color = "ok" if code == 0 else "error"
         self._append(f"[replay finished: exit {code}]", color)
+        for snapshot in self._active_replay_snapshots:
+            self._queued_snapshots.discard(snapshot)
+        self._active_replay_snapshots.clear()
         self._load_root()
         self._start_next_replay()
+
+    def _enqueue_replay_snapshot(self, run: int, snapshot: Path) -> bool:
+        snapshot = snapshot.resolve()
+        if snapshot in self._queued_snapshots:
+            return False
+        if not snapshot.exists() or not snapshot.is_dir():
+            return False
+        self._queued_snapshots.add(snapshot)
+        self._replay_queue.append((run, snapshot))
+        return True
+
+    def _enqueue_existing_replay_snapshots(self):
+        storage_base = Path(self._storage_base.text().strip() or STORAGE_BASE).expanduser()
+        queue_root = storage_base / "replay_queue"
+        if not queue_root.exists():
+            return
+        added = 0
+        for run_dir in sorted(queue_root.glob("prad_[0-9][0-9][0-9][0-9][0-9][0-9]")):
+            if not run_dir.is_dir():
+                continue
+            try:
+                run = int(run_dir.name.split("_", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            for snapshot in sorted(p for p in run_dir.iterdir() if p.is_dir()):
+                if self._enqueue_replay_snapshot(run, snapshot):
+                    added += 1
+        if added:
+            self._append(f"Recovered {added} replay snapshot(s) from disk queue.", "warn")
 
     def _start_next_replay(self):
         if self._replay_process.state() != QProcess.ProcessState.NotRunning:
@@ -1206,9 +1246,19 @@ exit 0
             run, snapshot = self._replay_queue.pop(0)
             if snapshot.exists():
                 break
+            self._queued_snapshots.discard(snapshot)
             self._append(f"Replay snapshot missing, skipped: {snapshot}", "warn")
         else:
             return
+        snapshots = [snapshot]
+        kept_queue: List[Tuple[int, Path]] = []
+        for qrun, qsnap in self._replay_queue:
+            if qrun == run and qsnap.exists():
+                snapshots.append(qsnap)
+            else:
+                kept_queue.append((qrun, qsnap))
+        self._replay_queue = kept_queue
+        self._active_replay_snapshots = snapshots
 
         storage_base = self._storage_base.text().strip() or STORAGE_BASE
         _, work_dir, out_root = run_storage_paths(run, storage_base)
@@ -1231,11 +1281,12 @@ exit 0
         elif self._ref_run.value() >= 0:
             ref_arg = f" -r {self._ref_run.value()}"
 
+        snapshot_args = " ".join(shlex.quote(str(p)) for p in snapshots)
         bash = f"""
 set -u
 RUN={run}
 RUN_TAG=$(printf 'prad_%06d' "$RUN")
-SNAP_DIR={shlex.quote(str(snapshot))}
+SNAP_DIRS=({snapshot_args})
 STORAGE_BASE={shlex.quote(storage_base)}
 WORK_DIR={shlex.quote(str(work_dir))}
 OUT_ROOT={shlex.quote(str(out_root))}
@@ -1244,11 +1295,15 @@ BATCH={self._batch.value()}
 THREADS={replay_threads}
 REPLAY_CPU_LIST={shlex.quote(replay_cpu_list)}
 mkdir -p "$WORK_DIR" "$(dirname "$OUT_ROOT")"
-SNAP_COUNT=$(find "$SNAP_DIR" -maxdepth 1 -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
-echo "Replay settings: run=$RUN_TAG batch=$BATCH replay_threads=$THREADS replay_cpus=${{REPLAY_CPU_LIST:-all}} snapshot_files=$SNAP_COUNT"
+SNAP_COUNT=0
+for d in "${{SNAP_DIRS[@]}}"; do
+    C=$(find "$d" -maxdepth 1 -type f -name '*.evio.*' 2>/dev/null | wc -l | tr -d ' ')
+    SNAP_COUNT=$((SNAP_COUNT + C))
+done
+echo "Replay settings: run=$RUN_TAG batch=$BATCH replay_threads=$THREADS replay_cpus=${{REPLAY_CPU_LIST:-all}} snapshots=${{#SNAP_DIRS[@]}} snapshot_files=$SNAP_COUNT"
 if [ "$SNAP_COUNT" -eq 0 ]; then
-    echo "Empty replay snapshot, removing: $SNAP_DIR"
-    rmdir "$SNAP_DIR" 2>/dev/null || true
+    echo "Empty replay snapshots, removing empty directories."
+    for d in "${{SNAP_DIRS[@]}}"; do rmdir "$d" 2>/dev/null || true; done
     exit 0
 fi
 RUN_CMD=()
@@ -1260,25 +1315,27 @@ if command -v ionice >/dev/null 2>&1; then
     RUN_CMD+=(ionice -c2 -n7)
 fi
 RUN_CMD+=("$TOOL")
-if "${{RUN_CMD[@]}}" "$SNAP_DIR" -w "$WORK_DIR" -o "$OUT_ROOT" -b "$BATCH" -j "$THREADS"{ref_arg}; then
-    echo "Replay/update succeeded for $RUN_TAG; deleting queued EVIO snapshot."
-    case "$SNAP_DIR" in
-        "$STORAGE_BASE"/replay_queue/prad_[0-9][0-9][0-9][0-9][0-9][0-9]/*)
-            rm -rf "$SNAP_DIR"
-            ;;
-        *)
-            echo "Refusing to delete unexpected snapshot path: $SNAP_DIR" >&2
-            ;;
-    esac
+if "${{RUN_CMD[@]}}" -w "$WORK_DIR" -o "$OUT_ROOT" -b "$BATCH" -j "$THREADS"{ref_arg} "${{SNAP_DIRS[@]}}"; then
+    echo "Replay/update succeeded for $RUN_TAG; deleting queued EVIO snapshots."
+    for d in "${{SNAP_DIRS[@]}}"; do
+        case "$d" in
+            "$STORAGE_BASE"/replay_queue/prad_[0-9][0-9][0-9][0-9][0-9][0-9]/*)
+                rm -rf "$d"
+                ;;
+            *)
+                echo "Refusing to delete unexpected snapshot path: $d" >&2
+                ;;
+        esac
+    done
 else
-    echo "ERROR: gain update failed for $RUN_TAG; keeping snapshot $SNAP_DIR" >&2
+    echo "ERROR: gain update failed for $RUN_TAG; keeping snapshots" >&2
     exit 1
 fi
 LMS_COUNT=$(find "$WORK_DIR" -maxdepth 1 -type f -name '*_lms.root' | wc -l | tr -d ' ')
 echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT out=$OUT_ROOT"
 """
         self._status.setText("Replaying...")
-        self._append(f"$ replay queued EVIO for run {run:06d}: {snapshot}", "cmd")
+        self._append(f"$ replay {len(snapshots)} queued snapshot(s) for run {run:06d}", "cmd")
         self._replay_process.start("bash", ["-lc", bash])
 
     def _append(self, text: str, kind: str = "normal"):
