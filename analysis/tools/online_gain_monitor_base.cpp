@@ -1,5 +1,5 @@
 //=============================================================================
-// replay_gainCorr_update — incremental EVIO→LMS replay plus gain-corr update
+// online_gain_monitor_base — incremental EVIO→LMS replay plus gain-corr update
 //
 // This tool is intended for online monitoring.  It preserves intermediate
 // *_lms.root files and skips Phase-1 replay for EVIO files whose LMS output
