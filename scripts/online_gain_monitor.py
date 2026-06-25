@@ -5,7 +5,7 @@ Online LMS Gain Monitor (PyQt6)
 
 Polls clondaq2 for new EVIO files for a user-selected run, downloads missing
 files, updates LMS gain-correction ROOT output through
-``prad2ana_replay_gainCorr_update``, and displays per-batch W-module gain
+``prad2ana_online_gain_monitor_base``, and displays per-batch W-module gain
 time series.
 """
 
@@ -178,14 +178,14 @@ class GainData:
 
 def find_update_tool() -> str:
     candidates = [
-        shutil.which("prad2ana_replay_gainCorr_update"),
-        str((SCRIPT_DIR / ".." / "build" / "bin" / "prad2ana_replay_gainCorr_update").resolve()),
-        str((SCRIPT_DIR / ".." / "build-clang" / "bin" / "prad2ana_replay_gainCorr_update").resolve()),
+        shutil.which("prad2ana_online_gain_monitor_base"),
+        str((SCRIPT_DIR / ".." / "build" / "bin" / "prad2ana_online_gain_monitor_base").resolve()),
+        str((SCRIPT_DIR / ".." / "build-clang" / "bin" / "prad2ana_online_gain_monitor_base").resolve()),
     ]
     for c in candidates:
         if c and os.path.exists(c):
             return c
-    return "prad2ana_replay_gainCorr_update"
+    return "prad2ana_online_gain_monitor_base"
 
 
 def run_tag(run_number: int) -> str:

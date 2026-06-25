@@ -65,7 +65,7 @@ static std::vector<std::string> collectLMSFiles(const std::string &path)
 static void usage()
 {
     std::cerr <<
-        "Usage: replay_gainCorr_update <evio_file_or_dir> [...] -w lms_work_dir\n"
+        "Usage: prad2ana_online_gain_monitor_base <evio_file_or_dir> [...] -w lms_work_dir\n"
         "       [-o gain_corr.root] [-f max_files] [-j threads]\n"
         "       [-c daq_config.json] [-d hycal_map.json]\n"
         "       [-b batch_size (1000)] [-r ref_run] [-R ref_gain_file.dat]\n"
