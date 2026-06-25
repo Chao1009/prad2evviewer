@@ -218,9 +218,9 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
     prad2::SetRawWriteBranches(tree, ev, write_peaks);
 }
 
-void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev)
+void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode = false)
 {
-    prad2::SetReconWriteBranches(tree, ev);
+    prad2::SetReconWriteBranches(tree, ev, x17_mode);
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
@@ -1210,7 +1210,7 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
     // create TTree and branches for reconstructed data
     TTree *tree = new TTree("recon", "X17 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev);
+    setupReconBranches(tree, *ev, true); // true indicates X17 mode
 
     // Side trees — see Process() above for the design.  The recon path
     // writes the same scalers / epics records so analysis joining keeps

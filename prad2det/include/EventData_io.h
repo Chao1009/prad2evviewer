@@ -240,7 +240,7 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 // ─────────────────────────────────────────────────────────────────────────
 // Recon tree — write
 // ─────────────────────────────────────────────────────────────────────────
-inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool is_x17 = false)
+inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode)
 {
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
@@ -293,7 +293,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool is_x17 =
     tree->Branch("gem_y_mTbin",  ev.gem_y_mTbin,   "gem_y_mTbin[n_gem_hits]/b");
 
     // Veto + LMS soft-peak summaries.
-    if(!is_x17){
+    if(!x17_mode) {
         tree->Branch("veto_nch",         &ev.veto_nch,         "veto_nch/I");
         tree->Branch("veto_id",          ev.veto_id,           "veto_id[veto_nch]/b");
         tree->Branch("veto_npeaks",      ev.veto_npeaks,       "veto_npeaks[veto_nch]/I");

@@ -82,7 +82,7 @@ private:
     void setupBranches(TTree *tree, EventVars &ev, bool write_peaks);
     void clearEvent(EventVars &ev);
 
-    void setupReconBranches(TTree *tree, EventVars_Recon &ev);
+    void setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode);
     void clearReconEvent(EventVars_Recon &ev);
 
     void setupLMSBranches(TTree *tree, LMSEventVars &ev);
