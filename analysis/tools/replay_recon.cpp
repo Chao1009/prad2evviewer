@@ -369,11 +369,11 @@ int main(int argc, char *argv[])
                         continue;
                     }
 
-                    for (const auto &input : job.inputs) {
+                    for (const auto &remove_files : job.inputs) {
                         std::error_code ec;
-                        if (!std::filesystem::remove(input, ec) || ec) {
+                        if (!std::filesystem::remove(remove_files, ec) || ec) {
                             std::lock_guard<std::mutex> lk(io_mtx);
-                            std::cerr << "  failed to remove merged input " << input;
+                            std::cerr << "  failed to remove merged input " << remove_files;
                             if (ec)
                                 std::cerr << ": " << ec.message();
                             std::cerr << "\n";
