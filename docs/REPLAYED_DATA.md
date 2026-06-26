@@ -16,6 +16,11 @@ indexing with `events`/`recon`.  Join them by `event_number`
 below.  `runinfo` is run-scoped (one row per CODA control event:
 PRESTART / GO / END), with no row-level join key.
 
+`prad2ana_replay_recon` writes one per-split `_recon.root` first, then
+by default merges successful split outputs with `hadd` in groups of 80
+as `prad_<run>_recon_<batch>.root`.  Use `-m 0` to disable merged
+outputs, or `-m N` to change the number of split files per merged file.
+
 # `events` tree (raw)
 
 Written by `prad2ana_replay_rawdata`.  Per-event scalars and per-channel

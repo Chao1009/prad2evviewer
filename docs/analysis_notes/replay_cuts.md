@@ -83,7 +83,9 @@ prad2ana_replay_recon /data/evio/prad_024327 \
 The recon output is what physics analyses normally consume; the raw
 output is mostly for diagnostics or if you need access to the FADC
 samples that the recon step has already collapsed into clusters. Pick
-one — there is no need to run both.
+one — there is no need to run both. By default replay recon also merges
+successful split outputs in groups of 80 with `hadd`; add `-m 0` if a
+cut workflow should keep only the per-split `_recon.root` files.
 
 ---
 

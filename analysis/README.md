@@ -29,6 +29,9 @@ Both replay programs are multi-threaded; point them at one or more EVIO
 files (or a directory of segments) and tune parallelism with `-j`.
 Output goes to `<output_dir>/<input_stem>_raw.root` (`replay_rawdata`)
 or `_recon.root` (`replay_recon`), one ROOT file per input EVIO segment.
+`replay_recon` also runs `hadd` after replay by default, merging every 80
+successful split outputs into `prad_<run>_recon_<batch>.root`; pass
+`-m 0` to disable this, or `-m N` to choose a different group size.
 Each output file carries a per-event main tree (`events` or `recon`)
 and two slow-control side trees (`scalers` from DSC2, `epics` from
 0x001F text banks); see [REPLAYED_DATA.md](../docs/REPLAYED_DATA.md)
@@ -60,13 +63,15 @@ the offline reconstruction matches what the live monitor produces.
 prad2ana_replay_recon <evio_or_dir> [more...] -o <output_dir> \
     [-f max_files] [-n max_events] [-j num_threads] \
     [-c daq_config.json] [-d hycal_map.json] \
-    [-g gem_pedestal.json] [-z zerosup_threshold] [-p]
+    [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files] [-p]
 ```
 
 `-p` here selects **PRad-I data format** (no GEM, ADC1881M Fastbus
 pedestals) — different semantics from the same flag on
 `replay_rawdata`.  `-g` overrides the GEM pedestal file from
-`runinfo`; `-z` overrides the zero-suppression sigma threshold.
+`runinfo`; `-z` overrides the zero-suppression sigma threshold. `-m`
+sets how many split `_recon.root` files go into each merged `hadd`
+output; the default is 80, and `-m 0` leaves only the per-split files.
 
 ### replay_filter
 
