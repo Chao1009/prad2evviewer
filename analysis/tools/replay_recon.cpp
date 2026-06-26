@@ -366,6 +366,19 @@ int main(int argc, char *argv[])
                         std::lock_guard<std::mutex> lk(io_mtx);
                         std::cerr << "  hadd failed with code " << rc << " for " << job.output << "\n";
                         errors++;
+                        continue;
+                    }
+
+                    for (const auto &input : job.inputs) {
+                        std::error_code ec;
+                        if (!std::filesystem::remove(input, ec) || ec) {
+                            std::lock_guard<std::mutex> lk(io_mtx);
+                            std::cerr << "  failed to remove merged input " << input;
+                            if (ec)
+                                std::cerr << ": " << ec.message();
+                            std::cerr << "\n";
+                            errors++;
+                        }
                     }
                 }
             });
