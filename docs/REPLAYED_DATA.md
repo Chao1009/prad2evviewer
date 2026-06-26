@@ -21,6 +21,12 @@ by default merges successful split outputs with `hadd` in groups of 80
 as `prad_<run>_recon_<batch>.root`.  Use `-m 0` to disable merged
 outputs, or `-m N` to change the number of split files per merged file.
 
+When `prad2ana_replay_filter` receives multiple replay ROOT files, it
+writes one filtered ROOT per input by inserting `_filter` before the
+final `.root`.  It also writes a run-level `prad_<run>_epics.root`
+containing only `scalers`, `epics`, and `runinfo`, plus one run-level
+JSON report.
+
 # `events` tree (raw)
 
 Written by `prad2ana_replay_rawdata`.  Per-event scalars and per-channel

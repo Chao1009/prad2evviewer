@@ -75,18 +75,25 @@ output; the default is 80, and `-m 0` leaves only the per-split files.
 
 ### replay_filter
 
-Applies slow-control quality cuts to a replayed run and writes a single
-ROOT file containing only the physics events bracketed by two adjacent
-passing slow-event checkpoints.
+Applies slow-control quality cuts to a replayed run.  With one input it
+writes one filtered ROOT file; with multiple inputs, `-o` is an output
+directory and one filtered ROOT is written per input file.
 
 ```bash
 prad2ana_replay_filter <input.root> [more.root ...] \
-    -o <output.root> -c <cuts.json> [-j <report.json>] [-r <run_num>]
+    -o <output.root|output_dir> -c <cuts.json> \
+    [-j <report.json>] [-r <run_num>] [-t threads]
 ```
 
 Inputs may be either `replay_rawdata` (`events`) or `replay_recon`
 (`recon`) outputs; the tree name is auto-detected and preserved.  All
-splits of a run can be passed in a single invocation.
+splits of a run can be passed in a single invocation.  Multi-input
+filtered output names are derived by inserting `_filter` before the final
+`.root`, e.g. `prad_024327.evio.00040_recon.root` becomes
+`prad_024327.evio.00040_recon_filter.root`.  The filter also writes one
+run-level slow-control file, `prad_<run>_epics.root`, containing only
+`scalers`, `epics`, and `runinfo`, plus one run-level JSON report.
+`-t` controls the number of parallel output workers.
 
 **Algorithm.** The DSC2 livetime (from the `scalers` tree) and the
 EPICS slow-control values (from the `epics` tree) form a merged
