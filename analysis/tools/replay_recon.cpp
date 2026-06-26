@@ -14,7 +14,7 @@
 //   -d  HyCal map file (default: <db>/hycal_map.json)
 //   -g  GEM pedestal file
 //   -z  zero-suppression threshold override
-//   -m  merge this many split ROOT files per hadd output (default: 80; 0 disables)
+//   -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)
 //=============================================================================
 
 #include "Replay.h"
@@ -190,7 +190,7 @@ int main(int argc, char *argv[])
     float zerosup_override = 0.f;
     int max_files = -1;
     int num_threads = 4;
-    int merge_batch_size = 80;
+    int merge_batch_size = 62;
     bool prad1 = false;
 
     std::string db_dir = prad2::resolve_data_dir(
@@ -232,7 +232,7 @@ int main(int argc, char *argv[])
         std::cerr << "  -d  HyCal map JSON (default: <db>/hycal_map.json)\n";
         std::cerr << "  -g  GEM pedestal JSON\n";
         std::cerr << "  -z  zero-suppression threshold override\n";
-        std::cerr << "  -m  merge this many split ROOT files per hadd output (default: 80; 0 disables)\n";
+        std::cerr << "  -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)\n";
         std::cerr << "  -p  PRad1 mode (no GEM)\n";
         return 1;
     }

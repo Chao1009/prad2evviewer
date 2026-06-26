@@ -6,7 +6,7 @@
 #   Prompts for run number, then:
 #     1. Counts EVIO files in /cache/clas12/rg-o/data/prad_<RUN>/
 #     2. Runs prad2ana_replay_recon; by default, recon ROOTs are merged in
-#        groups of 80 into prad_<RUN>_recon_<NNN>.root
+#        groups of 62 into prad_<RUN>_recon_<NNN>.root
 #     3. Runs prad2ana_replay_filter on all recon ROOTs and writes the
 #        corresponding *_filter.root files directly under the run output dir
 #     4. Runs prad2ana_live_charge over all filtered ROOTs together
@@ -25,10 +25,10 @@ CACHE_BASE="${CACHE_BASE:-/cache/clas12/rg-o/data}"
 
 # Default output base directory (can be overridden by user input)
 OUTPUT_BASE="${OUTPUT_BASE:-./}"
-REPLAY_CORES="${REPLAY_CORES:-50}"
+REPLAY_CORES="${REPLAY_CORES:-15}"
 REPLAY_ZERO_SUPPRESS="${REPLAY_ZERO_SUPPRESS:-5}"
 REPLAY_MAX_FILES="${REPLAY_MAX_FILES:-10000}"
-REPLAY_MERGE_FILES="${REPLAY_MERGE_FILES:-80}"
+REPLAY_MERGE_FILES="${REPLAY_MERGE_FILES:-62}"
 DEFAULT_CUTS="${DEFAULT_CUTS:-${PRAD2_SOFT}/analysis/cuts/prad2_default.json}"
 
 # ---------------------------------------------------------------------------
