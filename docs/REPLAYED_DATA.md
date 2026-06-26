@@ -23,9 +23,12 @@ outputs, or `-m N` to change the number of split files per merged file.
 
 When `prad2ana_replay_filter` receives multiple replay ROOT files, it
 writes one filtered ROOT per input by inserting `_filter` before the
-final `.root`.  It also writes a run-level `prad_<run>_epics.root`
-containing only `scalers`, `epics`, and `runinfo`, plus one run-level
-JSON report.
+final `.root`.  For example, `prad_024327_recon_000.root` becomes
+`prad_024327_recon_000_filter.root`.  It also writes a run-level
+`prad_<run>_epics.root` containing only `scalers`, `epics`, and
+`runinfo`, plus one run-level JSON report.  The shell replay pipeline
+writes these products side by side in `<output_base>/prad_<run>/`, with
+no filter subdirectory.
 
 # `events` tree (raw)
 

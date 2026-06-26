@@ -32,6 +32,10 @@ or `_recon.root` (`replay_recon`), one ROOT file per input EVIO segment.
 `replay_recon` also runs `hadd` after replay by default, merging every 80
 successful split outputs into `prad_<run>_recon_<batch>.root`; pass
 `-m 0` to disable this, or `-m N` to choose a different group size.
+The shell pipeline scripts use those merged recon files as the downstream
+inputs, keep all run products directly in `<output_base>/prad_<run>/`, and
+reuse one CPU count for `replay_recon -j`, `replay_filter -t`, and
+`quick_check -j`.
 Each output file carries a per-event main tree (`events` or `recon`)
 and two slow-control side trees (`scalers` from DSC2, `epics` from
 0x001F text banks); see [REPLAYED_DATA.md](../docs/REPLAYED_DATA.md)
@@ -93,7 +97,11 @@ filtered output names are derived by inserting `_filter` before the final
 `prad_024327.evio.00040_recon_filter.root`.  The filter also writes one
 run-level slow-control file, `prad_<run>_epics.root`, containing only
 `scalers`, `epics`, and `runinfo`, plus one run-level JSON report.
-`-t` controls the number of parallel output workers.
+For multi-input filtering, a typical run directory therefore contains
+`prad_<run>_recon_<batch>.root`, matching
+`prad_<run>_recon_<batch>_filter.root`, `prad_<run>_epics.root`, and
+`prad_<run>_filter_report.json` side by side. `-t` controls the number
+of parallel output workers.
 
 **Algorithm.** The DSC2 livetime (from the `scalers` tree) and the
 EPICS slow-control values (from the `epics` tree) form a merged
@@ -219,14 +227,15 @@ its event/timestamp) and its `summary` counts, `keep_intervals`, and
 ### live_charge
 
 Standalone live-charge integrator.  Reads the `scalers` and `epics`
-side trees from any replayed ROOT file — `replay_rawdata`,
+side trees from one or more replayed ROOT files — `replay_rawdata`,
 `replay_recon`, or `replay_filter` output — and accumulates
 `Σ live_fraction · Δt · ½(I_i + I_{i+1})` over adjacent slow-event
 checkpoints.  When the trees carry replay_filter's per-row `good`
 bool, only passing-passing pairs contribute (post-cut live charge);
 otherwise every adjacent pair contributes (total live charge over
 the run).  Beam current is assumed to publish in nA, so the result
-is reported in **nC**.
+is reported in **nC**.  In the standard replay pipeline, pass all
+`*_filter.root` files for the run in one invocation.
 
 ```bash
 prad2ana_live_charge <input.root> [more.root ...] \
