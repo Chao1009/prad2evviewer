@@ -190,6 +190,116 @@ int main(int argc, char *argv[]){
         std::cerr << "Failed to create output ROOT file: " << output_path << '\n';
         return 1;
     }
+
+    // Fit each cell's energy-ratio distribution and save one compact row per
+    // cell.  The correction factor converts a reconstructed energy back to
+    // the expected scale, hence correction = 1 / fitted mean.
+    constexpr Long64_t kMinFitEntries = 30;
+    const double expected_ratio_sigma = resolution / std::sqrt(E3p5 / 1000.);
+
+    TTree fit_results("fit_results", "Per-cell energy-ratio Gaussian fit results");
+
+    int module_id = 0;
+    std::string module_name;
+    int row = 0;
+    int col = 0;
+    Long64_t entries = 0;
+    double histogram_mean = 0.;
+    double fit_mean = 0.;
+    double fit_mean_error = 0.;
+    double fit_sigma = 0.;
+    double fit_sigma_error = 0.;
+    double chi2_ndf = 0.;
+    double correction = 0.;
+    double correction_error = 0.;
+    int root_fit_status = -1;
+    bool fit_valid = false;
+
+    fit_results.Branch("module_id", &module_id);
+    fit_results.Branch("module_name", &module_name);
+    fit_results.Branch("row", &row);
+    fit_results.Branch("col", &col);
+    fit_results.Branch("entries", &entries);
+    fit_results.Branch("histogram_mean", &histogram_mean);
+    fit_results.Branch("fit_mean", &fit_mean);
+    fit_results.Branch("fit_mean_error", &fit_mean_error);
+    fit_results.Branch("fit_sigma", &fit_sigma);
+    fit_results.Branch("fit_sigma_error", &fit_sigma_error);
+    fit_results.Branch("chi2_ndf", &chi2_ndf);
+    fit_results.Branch("correction", &correction);
+    fit_results.Branch("correction_error", &correction_error);
+    fit_results.Branch("root_fit_status", &root_fit_status);
+    fit_results.Branch("fit_valid", &fit_valid);
+
+    Long64_t successful_fits = 0;
+    for (auto &[id, grid] : energy_hists) {
+        module_id = id;
+        const auto module = hycal.module_by_id(module_id);
+        module_name = module ? module->name : "";
+
+        for (row = 0; row < kGridSize; ++row) {
+            for (col = 0; col < kGridSize; ++col) {
+                TH1F *hist = grid[row][col];
+                entries = static_cast<Long64_t>(hist->GetEntries());
+                histogram_mean = hist->GetMean();
+                fit_mean = 0.;
+                fit_mean_error = 0.;
+                fit_sigma = 0.;
+                fit_sigma_error = 0.;
+                chi2_ndf = 0.;
+                correction = 0.;
+                correction_error = 0.;
+                root_fit_status = -1;
+                fit_valid = false;
+
+                if (entries >= kMinFitEntries) {
+                    const double peak = hist->GetXaxis()->GetBinCenter(hist->GetMaximumBin());
+                    const double fit_lo = std::fmax(hist->GetXaxis()->GetXmin(),
+                                                    peak - 2.5 * expected_ratio_sigma);
+                    const double fit_hi = std::fmin(hist->GetXaxis()->GetXmax(),
+                                                    peak + 2.5 * expected_ratio_sigma);
+                    const std::string fit_name = "f_energy_ratio_" + module_name + "_r"
+                        + std::to_string(row) + "_c" + std::to_string(col);
+                    TF1 gaussian(fit_name.c_str(), "gaus", fit_lo, fit_hi);
+                    gaussian.SetParameters(hist->GetMaximum(), peak, expected_ratio_sigma);
+                    gaussian.SetParLimits(1, fit_lo, fit_hi);
+                    gaussian.SetParLimits(2, 0.25 * hist->GetBinWidth(1), 0.1);
+
+                    // N keeps the short-lived TF1 out of the histogram ownership list;
+                    // all persistent fit information is recorded in fit_results.
+                    root_fit_status = hist->Fit(&gaussian, "RQL0N");
+                    const double mean = gaussian.GetParameter(1);
+                    const double mean_error = gaussian.GetParError(1);
+                    const double sigma = std::fabs(gaussian.GetParameter(2));
+                    const double sigma_error = gaussian.GetParError(2);
+
+                    fit_valid = root_fit_status == 0
+                        && std::isfinite(mean) && mean > 0.
+                        && std::isfinite(mean_error) && mean_error >= 0.
+                        && std::isfinite(sigma) && sigma > 0.
+                        && std::isfinite(sigma_error) && sigma_error >= 0.;
+                    if (fit_valid) {
+                        fit_mean = mean;
+                        fit_mean_error = mean_error;
+                        fit_sigma = sigma;
+                        fit_sigma_error = sigma_error;
+                        chi2_ndf = gaussian.GetNDF() > 0
+                            ? gaussian.GetChisquare() / gaussian.GetNDF() : 0.;
+                        correction = 1. / fit_mean;
+                        correction_error = fit_mean_error / (fit_mean * fit_mean);
+                        ++successful_fits;
+                    }
+                }
+                fit_results.Fill();
+            }
+        }
+    }
+
+    std::cerr << "Fitted " << successful_fits << "/" << fit_results.GetEntries()
+              << " module cells successfully.\n";
+
+    fit_results.Write();
+         
     for (auto &[module_id, grid] : energy_hists) {
         (void)module_id;
         for (auto &row : grid)
@@ -197,6 +307,7 @@ int main(int argc, char *argv[]){
                 hist->Write();
     }
     output_file.Close();
+    return 0;
 }
 
 long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
