@@ -49,6 +49,9 @@
 #include <TClass.h>
 #include <TDirectory.h>
 
+#include <nlohmann/json.hpp>
+
+#include <fstream>
 #include <iostream>
 #include <array>
 #include <map>
@@ -79,6 +82,16 @@ struct ExpectedEnergies {
 using ExpectedEnergyGrid = std::array<std::array<ExpectedEnergies, kGridSize>, kGridSize>;
 using ExpectedEnergyMap = std::map<int, ExpectedEnergyGrid>;
 
+// Per-cell fit outcome stored in memory for JSON export.
+struct CellFitData {
+    double expected_ep = 0.;
+    double expected_ee = 0.;
+    double correction  = 1.;   // raw (uncapped) value; 0 means not fitted
+    bool   fit_valid   = false;
+};
+using FitDataGrid   = std::array<std::array<CellFitData, kGridSize>, kGridSize>;
+using FitDataByName = std::map<std::string, FitDataGrid>; // module_name → 5×5
+
 // Per-energy-run state: histograms, expected energies, and metadata.
 struct EnergyRun {
     std::string label;           // human-readable tag, e.g. "3.5GeV"
@@ -87,6 +100,7 @@ struct EnergyRun {
     std::vector<std::string> input_paths;
     EnergyHistMap energy_hists;
     ExpectedEnergyMap expected_energies;
+    FitDataByName fit_data;      // populated by write_energy_run(), used for JSON
 };
 
 // ---------------------------------------------------------------------------
@@ -94,6 +108,9 @@ struct EnergyRun {
 // ---------------------------------------------------------------------------
 void init_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal);
 void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory *dir);
+void write_corr_json(const std::vector<EnergyRun> &runs,
+                     const fdec::HyCalSystem &hycal,
+                     const std::string &path);
 long long process_event(TTree *tree, const EventVars_Recon &ev,
                         const fdec::HyCalSystem &hycal,
                         EnergyHistMap &energy_hists, float Ebeam,
@@ -122,6 +139,7 @@ int main(int argc, char *argv[])
     // --- parse command line arguments ---
     std::vector<std::string> inputs_a, inputs_b, inputs_c;
     std::string output_path;
+    std::string json_path;
     int max_events = -1;
 
     for (int i = 1; i < argc; ++i) {
@@ -145,6 +163,12 @@ int main(int argc, char *argv[])
                 return 1;
             }
             output_path = argv[i];
+        } else if (arg == "-j") {
+            if (++i >= argc) {
+                std::cerr << "-j requires an output JSON file.\n";
+                return 1;
+            }
+            json_path = argv[i];
         } else if (arg == "-n") {
             if (++i >= argc) {
                 std::cerr << "-n requires a maximum event count.\n";
@@ -165,7 +189,7 @@ int main(int argc, char *argv[])
         std::cerr << "At least one of -a / -b / -c must be specified.\n"
                   << "Usage: " << argv[0]
                   << " [-a 3.5GeV_files...] [-b 2.2GeV_files...]"
-                     " [-c 0.7GeV_files...] -o output.root [-n max_events]\n";
+                     " [-c 0.7GeV_files...] -o output.root [-j output.json] [-n max_events]\n";
         return 1;
     }
     if (output_path.empty()) {
@@ -241,6 +265,10 @@ int main(int argc, char *argv[])
     }
 
     output_file.Close();
+
+    if (!json_path.empty())
+        write_corr_json(runs, hycal, json_path);
+
     return 0;
 }
 
@@ -250,8 +278,9 @@ int main(int argc, char *argv[])
 // ---------------------------------------------------------------------------
 void init_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal)
 {
-    const float xmax  = run.beam_energy * 1.25f;
-    const int   nbins = std::max(50, static_cast<int>(xmax / 10.f));
+    const float xmax     = run.beam_energy * 1.25f;
+    const float bin_width = (run.beam_energy < 1000.f) ? 5.f : 10.f;
+    const int   nbins    = std::max(50, static_cast<int>(xmax / bin_width));
 
     for (int i = 0; i < hycal.module_count(); ++i) {
         const auto &module = hycal.module(i);
@@ -408,6 +437,14 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
                         ++successful_fits;
                     }
                 }
+
+                // Store fit outcome for JSON export.
+                auto &cd       = run.fit_data[module_name][row][col];
+                cd.expected_ep = expected_energy_ep;
+                cd.expected_ee = expected_energy_ee;
+                cd.correction  = correction;
+                cd.fit_valid   = fit_valid;
+
                 fit_results.Fill();
             }
         }
@@ -513,4 +550,189 @@ long long process_event(TTree *tree, const EventVars_Recon &ev,
 
     log_msg("[" + label + "] Done. Accepted events: " + std::to_string(n_accepted) + "\n");
     return n_accepted;
+}
+
+// ---------------------------------------------------------------------------
+// write_corr_json – export per-cell correction factors to a JSON file.
+//
+// Output guarantees:
+//   • Every eligible module is written, sorted by module ID (ascending).
+//   • All three beam-energy subdirs (3p5GeV / 2p2GeV / 0p7GeV) are always
+//     present even if that energy was not processed: expected energies are
+//     computed from detector geometry, corrections default to 1.0.
+//   • 5×5 grids are written as compact rows: [v0, v1, v2, v3, v4]
+//
+// Correction caps:
+//   fit not valid / no entries → 1.0
+//   correction > 1.08          → 1.08
+//   correction < 0.92          → 0.92
+// ---------------------------------------------------------------------------
+void write_corr_json(const std::vector<EnergyRun> &runs,
+                     const fdec::HyCalSystem &hycal,
+                     const std::string &path)
+{
+    constexpr double kCapHi = 1.08;
+    constexpr double kCapLo = 0.92;
+
+    auto cap = [](double corr, bool valid) -> double {
+        constexpr double hi = 1.08, lo = 0.92;
+        if (!valid || corr <= 0. || !std::isfinite(corr)) return 1.;
+        return std::max(lo, std::min(hi, corr));
+    };
+
+    // Number formatter: removes trailing zeros, always keeps ≥ 1 decimal.
+    auto fmt = [](double v, int max_dec) -> std::string {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.*f", max_dec, v);
+        std::string s = buf;
+        const auto dot = s.find('.');
+        if (dot != std::string::npos) {
+            auto last = s.find_last_not_of('0');
+            if (last == dot) last = dot + 1;
+            s.resize(last + 1);
+        }
+        return s;
+    };
+
+    // Standard beam-energy configs – always written in this fixed order.
+    struct EConfig { std::string subdir; float beam_energy; };
+    const std::vector<EConfig> kEnergies = {
+        {"3p5GeV", E3p5},
+        {"2p2GeV", E2p2},
+        {"0p7GeV", E0p7},
+    };
+
+    // Lookup: subdir → run fit_data.
+    std::map<std::string, const FitDataByName*> run_map;
+    for (const auto &run : runs)
+        run_map[run.subdir] = &run.fit_data;
+
+    // Build name→id map from hycal, then id→name (sorted) from fit_data.
+    std::map<std::string, int> name_to_id;
+    for (int i = 0; i < hycal.module_count(); ++i) {
+        const auto &m = hycal.module(i);
+        name_to_id[std::string(m.name)] = m.id;
+    }
+    std::map<int, std::string> id_to_name;   // integer-sorted by module ID
+    for (const auto &run : runs) {
+        for (const auto &[mod_name, ignored] : run.fit_data) {
+            auto it = name_to_id.find(mod_name);
+            if (it != name_to_id.end())
+                id_to_name[it->second] = mod_name;
+        }
+    }
+
+    // Compute expected ep/ee for a single cell from detector geometry.
+    auto cell_exp = [&](const auto &m, int r, int c, float Ebeam)
+        -> std::pair<double, double>
+    {
+        const double cx = m.x + (c + 0.5) / kGridSize * m.size_x - 0.5 * m.size_x;
+        const double cy = m.y + 0.5 * m.size_y - (r + 0.5) / kGridSize * m.size_y;
+        const double theta = std::atan2(std::hypot(cx, cy), kHyCalZ) * 180. / M_PI;
+        return {PhysicsTools::ExpectedEnergy(theta, Ebeam, "ep"),
+                PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee")};
+    };
+
+    std::ofstream out(path);
+    if (!out) {
+        std::cerr << "Cannot write JSON: " << path << "\n";
+        return;
+    }
+
+    using Mat5 = std::array<std::array<double, kGridSize>, kGridSize>;
+
+    // Write a 5×5 matrix with compact rows at fixed nesting depth:
+    //   key at 8-space indent → rows at 10-space indent → closing ] at 8 spaces.
+    auto write_mat5 = [&](const Mat5 &mat, int dec) {
+        out << "[\n";
+        for (int r = 0; r < kGridSize; ++r) {
+            out << "          [";
+            for (int c = 0; c < kGridSize; ++c) {
+                if (c > 0) out << ", ";
+                out << fmt(mat[r][c], dec);
+            }
+            out << "]";
+            if (r < kGridSize - 1) out << ",";
+            out << "\n";
+        }
+        out << "        ]";
+    };
+
+    out << "{\n";
+    bool first_mod = true;
+
+    for (const auto &[mod_id, mod_name] : id_to_name) {
+        if (!first_mod) out << ",\n";
+        first_mod = false;
+        out << "  \"" << mod_name << "\": {\n";
+
+        const auto *mod_ptr = hycal.module_by_id(mod_id);
+
+        bool first_e = true;
+        for (const auto &ec : kEnergies) {
+            if (!first_e) out << ",\n";
+            first_e = false;
+            out << "    \"" << ec.subdir << "\": {\n";
+
+            Mat5 ep_exp{}, ee_exp{}, corr_mat{};
+            for (auto &row : corr_mat) row.fill(1.0);   // default: identity
+
+            // Try to use stored fit results for this energy.
+            bool has_fit = false;
+            auto sd_it = run_map.find(ec.subdir);
+            if (sd_it != run_map.end()) {
+                auto mod_it = sd_it->second->find(mod_name);
+                if (mod_it != sd_it->second->end()) {
+                    for (int r = 0; r < kGridSize; ++r) {
+                        for (int c = 0; c < kGridSize; ++c) {
+                            const auto &cd = mod_it->second[r][c];
+                            ep_exp[r][c]   = cd.expected_ep;
+                            ee_exp[r][c]   = cd.expected_ee;
+                            corr_mat[r][c] = cap(cd.correction, cd.fit_valid);
+                        }
+                    }
+                    has_fit = true;
+                }
+            }
+            // Fall back to geometry-derived expected energies for missing runs.
+            if (!has_fit && mod_ptr) {
+                for (int r = 0; r < kGridSize; ++r) {
+                    for (int c = 0; c < kGridSize; ++c) {
+                        auto [ep, ee] = cell_exp(*mod_ptr, r, c, ec.beam_energy);
+                        ep_exp[r][c] = ep;
+                        ee_exp[r][c] = ee;
+                        // corr_mat already set to 1.0
+                    }
+                }
+            }
+
+            // Round values before writing.
+            for (int r = 0; r < kGridSize; ++r) {
+                for (int c = 0; c < kGridSize; ++c) {
+                    ep_exp[r][c]   = std::round(ep_exp[r][c]   * 10.)    / 10.;
+                    ee_exp[r][c]   = std::round(ee_exp[r][c]   * 10.)    / 10.;
+                    corr_mat[r][c] = std::round(corr_mat[r][c] * 10000.) / 10000.;
+                }
+            }
+
+            // ep section
+            out << "      \"ep\": {\n";
+            out << "        \"correction\": ";      write_mat5(corr_mat, 4); out << ",\n";
+            out << "        \"expected_energy\": "; write_mat5(ep_exp,   1); out << "\n";
+            out << "      },\n";
+
+            // ee section
+            out << "      \"ee\": {\n";
+            out << "        \"correction\": ";      write_mat5(corr_mat, 4); out << ",\n";
+            out << "        \"expected_energy\": "; write_mat5(ee_exp,   1); out << "\n";
+            out << "      }\n";
+
+            out << "    }";
+        }
+        out << "\n  }";
+    }
+    out << "\n}\n";
+
+    std::cerr << "Written correction JSON (" << id_to_name.size()
+              << " modules) to " << path << "\n";
 }
