@@ -75,7 +75,20 @@
 		{
 			"from_run":    25200,
 			"beam_energy": 2239.51
-		}
+		},
+        {
+            "// from here, start the X17 experimental runs": "",
+
+            "from_run":    25540,
+			"beam_energy": 2239.51,
+            "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
+            "time_cuts":   {"hc_time_window": [0.0, 400.0]},
+            "gain_factor": {
+                "data_dir": "",
+                "ref_run":  25547
+            },
+            "matching":    {"radius": 15.0, "use_square_cut": false, "energy_dependent": false, "sigma": 5.0}
+        }
     ],
 
     "// Per-run GEM pedestals + common-mode range.  Bumping pedestals on a":                                                          "",
@@ -88,7 +101,8 @@
         {"from_run": 24177, "pedestal_file": "gem_peds/gem_ped_24177.dat", "common_mode_file": "gem_peds/CommonModeRange_24177.txt"},
         {"from_run": 24436, "pedestal_file": "gem_peds/gem_ped_24436.dat", "common_mode_file": "gem_peds/CommonModeRange_24436.txt"},
         {"from_run": 24495, "pedestal_file": "gem_peds/gem_ped_24495.dat", "common_mode_file": "gem_peds/CommonModeRange_24495.txt"},
-        {"from_run": 24535, "pedestal_file": "gem_peds/gem_ped_24535.dat", "common_mode_file": "gem_peds/CommonModeRange_24535.txt"}
+        {"from_run": 24535, "pedestal_file": "gem_peds/gem_ped_24535.dat", "common_mode_file": "gem_peds/CommonModeRange_24535.txt"},
+        {"from_run": 25540, "pedestal_file": "gem_peds/gem_ped_25533.dat", "common_mode_file": "gem_peds/CommonModeRange_25533.txt"}
     ],
 
     "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;":                                                   "",
@@ -101,6 +115,7 @@
 	{"from_run": 24653, "target": [0.255953, 1.37095, -2.34]},
 	{"from_run": 24670, "target": [0.844334, 1.1635, 0]},
 	{"from_run": 24685, "target": [0.844334, 1.1635, 0]},
-	{"from_run": 24827, "target": [0.87584, 1.0391, -1.9]}
+	{"from_run": 24827, "target": [0.87584, 1.0391, -1.9]},
+    {"from_run": 25540, "target": [0.0, 0.0, -1275.0]}
     ]
 }
