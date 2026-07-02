@@ -398,43 +398,73 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
                 }
 
                 if (entries >= kMinFitEntries && expected_energy_ep > 0.) {
-                    const double expected_sigma = resolution * expected_energy_ep
-                        / std::sqrt(expected_energy_ep / 1000.);
-                    const double fit_lo = std::fmax(hist->GetXaxis()->GetXmin(),
-                                                    expected_energy_ep - 2. * expected_sigma);
-                    const double fit_hi = std::fmin(hist->GetXaxis()->GetXmax(),
-                                                    expected_energy_ep + 2. * expected_sigma);
-                    const std::string fit_name = "f_energy_" + module_name + "_r"
-                        + std::to_string(row) + "_c" + std::to_string(col);
-                    TF1 gaussian(fit_name.c_str(), "gaus", fit_lo, fit_hi);
-                    gaussian.SetParameters(hist->GetMaximum(), expected_energy_ep, expected_sigma);
-                    gaussian.SetParLimits(1, fit_lo, fit_hi);
-                    gaussian.SetParLimits(2, 0.25 * hist->GetBinWidth(1),
-                                          5. * expected_sigma);
+                    // Three-stage fit matching nonlinearity.cpp:
+                    //   1. Weighted centroid in [Eexp ± 6σ]
+                    //   2. Gaussian fit in [mean ± 3σ]
+                    //   3. Final Gaussian fit in [mean ± 2σ]
+                    auto estimateSigma = [](double E) -> double {
+                        return (E > 0.) ? E * 0.035 / std::sqrt(E / 1000.) : 1.;
+                    };
+                    const double expected_sigma = estimateSigma(expected_energy_ep);
 
-                    // "N" keeps the short-lived TF1 out of the histogram ownership list.
-                    root_fit_status = hist->Fit(&gaussian, "RQL0N");
-                    const double mean        = gaussian.GetParameter(1);
-                    const double mean_error  = gaussian.GetParError(1);
-                    const double sigma       = std::fabs(gaussian.GetParameter(2));
-                    const double sigma_error = gaussian.GetParError(2);
+                    // Stage 1: weighted centroid within [Eexp ± 6σ]
+                    const int b0 = std::max(1,
+                        hist->FindBin(expected_energy_ep - 6. * expected_sigma));
+                    const int b1 = std::min(hist->GetNbinsX(),
+                        hist->FindBin(expected_energy_ep + 6. * expected_sigma));
+                    double wsum = 0., wpos = 0.;
+                    for (int ib = b0; ib <= b1; ++ib) {
+                        double c = hist->GetBinContent(ib);
+                        if (c > 0.) { wsum += c; wpos += c * hist->GetBinCenter(ib); }
+                    }
+                    if (wsum > 0.) {
+                        double mean_seed = wpos / wsum;
 
-                    fit_valid = root_fit_status == 0
-                        && std::isfinite(mean)        && mean > 0.
-                        && std::isfinite(mean_error)  && mean_error >= 0.
-                        && std::isfinite(sigma)       && sigma > 0.
-                        && std::isfinite(sigma_error) && sigma_error >= 0.;
-                    if (fit_valid) {
-                        fit_mean         = mean;
-                        fit_mean_error   = mean_error;
-                        fit_sigma        = sigma;
-                        fit_sigma_error  = sigma_error;
-                        chi2_ndf         = gaussian.GetNDF() > 0
-                            ? gaussian.GetChisquare() / gaussian.GetNDF() : 0.;
-                        correction       = expected_energy_ep / fit_mean;
-                        correction_error = expected_energy_ep * fit_mean_error
-                            / (fit_mean * fit_mean);
-                        ++successful_fits;
+                        // Stage 2: first Gaussian fit [mean_seed ± 3σ]
+                        double sig_seed = estimateSigma(mean_seed);
+                        {
+                            const std::string fn1 = "_f1_" + module_name + "_r"
+                                + std::to_string(row) + "_c" + std::to_string(col);
+                            TF1 g1(fn1.c_str(), "gaus",
+                                   mean_seed - 3. * sig_seed,
+                                   mean_seed + 3. * sig_seed);
+                            g1.SetParameters(hist->GetMaximum(), mean_seed, sig_seed);
+                            hist->Fit(&g1, "RQ0N");
+                            mean_seed = g1.GetParameter(1);
+                        }
+
+                        // Stage 3: final Gaussian fit [mean ± 2σ]
+                        sig_seed = estimateSigma(mean_seed);
+                        const std::string fit_name = "f_energy_" + module_name + "_r"
+                            + std::to_string(row) + "_c" + std::to_string(col);
+                        TF1 gaussian(fit_name.c_str(), "gaus",
+                                     mean_seed - 2. * sig_seed,
+                                     mean_seed + 2. * sig_seed);
+                        gaussian.SetParameters(hist->GetMaximum(), mean_seed, sig_seed);
+                        root_fit_status = hist->Fit(&gaussian, "RQL0N");
+
+                        const double mean        = gaussian.GetParameter(1);
+                        const double mean_error  = gaussian.GetParError(1);
+                        const double sigma       = std::fabs(gaussian.GetParameter(2));
+                        const double sigma_error = gaussian.GetParError(2);
+
+                        fit_valid = root_fit_status == 0
+                            && std::isfinite(mean)        && mean > 0.
+                            && std::isfinite(mean_error)  && mean_error >= 0.
+                            && std::isfinite(sigma)       && sigma > 0.
+                            && std::isfinite(sigma_error) && sigma_error >= 0.;
+                        if (fit_valid) {
+                            fit_mean         = mean;
+                            fit_mean_error   = mean_error;
+                            fit_sigma        = sigma;
+                            fit_sigma_error  = sigma_error;
+                            chi2_ndf         = gaussian.GetNDF() > 0
+                                ? gaussian.GetChisquare() / gaussian.GetNDF() : 0.;
+                            correction       = expected_energy_ep / fit_mean;
+                            correction_error = expected_energy_ep * fit_mean_error
+                                / (fit_mean * fit_mean);
+                            ++successful_fits;
+                        }
                     }
                 }
 
