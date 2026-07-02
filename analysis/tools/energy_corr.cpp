@@ -1,10 +1,10 @@
 // energy_corr.cpp : to correct the reconstructed energy non-uniformity depending on
 // the position of the cluster within the calorimeter modules.
 //
-// Measure the ratio of the reconstructed energy to the expected energy for different
-// positions within each module. For example, each module can be divided into a grid,
+// Measure the reconstructed-energy response at different positions within each
+// module and compare its fitted peak with the expected energy. Each module is divided into a grid,
 // First try to a grid of 5 by 5, the map is below, could be saved into a 2D array of 1D hist
-// for each module, each cell in the 5x5 grid, you can fill a 1D histogram with the energy ratio for that cell.
+// with one reconstructed-energy histogram for each cell in the 5x5 grid.
 // column   0   1   2   3   4
 // row     +---+---+---+---+---+     beam top  ^
 //  0      |   |   |   |   |   |               |
@@ -20,7 +20,7 @@
 // 3. Need a histogram map
 //    This map will hold the 1D histograms for each module and each cell in the 5x5 grid.
 //    The key can be the module number, and the value can be 2D array of 25 histograms (for the 5x5 grid).
-// 3. Fill the corresponding 1D histogram for the energy ratio in the 5x5 grid cell.
+// 3. Fill the corresponding 1D reconstructed-energy histogram for the 5x5 grid cell.
 // 4. After processing all events, fit the histograms to get the correction factors to correct the energy non-uniformity.
 
 #include "PhysicsTools.h"
@@ -69,8 +69,15 @@ constexpr int kGridSize = 5;
 using HistGrid = std::array<std::array<TH1F*, kGridSize>, kGridSize>;
 using EnergyHistMap = std::map<int, HistGrid>;
 
+struct ExpectedEnergies {
+    double ep = 0.;
+    double ee = 0.;
+};
+using ExpectedEnergyGrid = std::array<std::array<ExpectedEnergies, kGridSize>, kGridSize>;
+using ExpectedEnergyMap = std::map<int, ExpectedEnergyGrid>;
+
 long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    EnergyHistMap &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1,
+    EnergyHistMap &energy_hists, float Ebeam, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
 
 float resolution = 0.035; // pre-defined energy resolution
@@ -78,6 +85,7 @@ float resolution = 0.035; // pre-defined energy resolution
 float E3p5 = 3485.41f; // Energy for 3.5 GeV beam
 float E2p2 = 2239.51f; // Energy for 2.2 GeV beam
 float E0p7 = 728.9f;  // Energy for 0.7 GeV beam
+constexpr float kHyCalZ = 6269.f; // HyCal distance from the target, mm
 
 bool Vetoed(float cl_time, float sci_time, float sci_int){
     // Simple veto logic: if the cluster time is within a certain window of the scintillator time, and the scintillator signal is above a threshold, we consider it a vetoed event.
@@ -143,10 +151,10 @@ int main(int argc, char *argv[]){
     // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
-    PhysicsTools physics(hycal);
 
     // One 5x5 histogram grid for each PbWO4 module.
     EnergyHistMap energy_hists;
+    ExpectedEnergyMap expected_energies;
     for (int i = 0; i < hycal.module_count(); ++i) {
         const auto &module = hycal.module(i);
         if (!module.is_pwo4()) continue;
@@ -157,13 +165,27 @@ int main(int argc, char *argv[]){
         auto &grid = energy_hists[module.id];
         for (int row = 0; row < kGridSize; ++row) {
             for (int col = 0; col < kGridSize; ++col) {
-                const std::string name = "h_energy_ratio_" + module.name + "_r"
+                const std::string name = "h_energy_" + module.name + "_r"
                     + std::to_string(row) + "_c" + std::to_string(col);
-                const std::string title = module.name + " energy ratio, cell ("
+                const std::string title = module.name + " energy distribution, cell ("
                     + std::to_string(row) + ", " + std::to_string(col)
-                    + ");E_{reconstructed}/E_{expected};Counts";
-                grid[row][col] = new TH1F(name.c_str(), title.c_str(), 80, 0.8, 1.2);
+                    + ");E_{reconstructed};Counts";
+                grid[row][col] = new TH1F(name.c_str(), title.c_str(), 420, 0, 4200);
                 grid[row][col]->SetDirectory(nullptr);
+
+                // Use the geometric center of this cell.  row 0 is at the
+                // top of the module and col 0 is at the left.
+                const double cell_x = module.x
+                    + (static_cast<double>(col) + 0.5) / kGridSize * module.size_x
+                    - 0.5 * module.size_x;
+                const double cell_y = module.y
+                    + 0.5 * module.size_y
+                    - (static_cast<double>(row) + 0.5) / kGridSize * module.size_y;
+                const double theta = std::atan2(std::hypot(cell_x, cell_y), kHyCalZ)
+                    * 180. / M_PI;
+                auto &expected = expected_energies[module.id][row][col];
+                expected.ep = PhysicsTools::ExpectedEnergy(theta, E3p5, "ep");
+                expected.ee = PhysicsTools::ExpectedEnergy(theta, E3p5, "ee");
             }
         }
     }
@@ -183,7 +205,7 @@ int main(int argc, char *argv[]){
     EventVars_Recon ev;
     prad2::SetReconReadBranches(&tree, ev);
 
-    process_event(&tree, ev, hycal, energy_hists, physics, E3p5, max_events, "3.5GeV");
+    process_event(&tree, ev, hycal, energy_hists, E3p5, max_events, "3.5GeV");
 
     TFile output_file(output_path.c_str(), "RECREATE");
     if (output_file.IsZombie()) {
@@ -191,13 +213,12 @@ int main(int argc, char *argv[]){
         return 1;
     }
 
-    // Fit each cell's energy-ratio distribution and save one compact row per
-    // cell.  The correction factor converts a reconstructed energy back to
-    // the expected scale, hence correction = 1 / fitted mean.
+    // Fit each cell's reconstructed-energy distribution around that cell's
+    // fixed expected elastic e-p energy.  The correction factor converts
+    // reconstructed energy back to the expected scale.
     constexpr Long64_t kMinFitEntries = 30;
-    const double expected_ratio_sigma = resolution / std::sqrt(E3p5 / 1000.);
 
-    TTree fit_results("fit_results", "Per-cell energy-ratio Gaussian fit results");
+    TTree fit_results("fit_results", "Per-cell reconstructed-energy Gaussian fit results");
 
     int module_id = 0;
     std::string module_name;
@@ -205,6 +226,8 @@ int main(int argc, char *argv[]){
     int col = 0;
     Long64_t entries = 0;
     double histogram_mean = 0.;
+    double expected_energy_ep = 0.;
+    double expected_energy_ee = 0.;
     double fit_mean = 0.;
     double fit_mean_error = 0.;
     double fit_sigma = 0.;
@@ -221,6 +244,8 @@ int main(int argc, char *argv[]){
     fit_results.Branch("col", &col);
     fit_results.Branch("entries", &entries);
     fit_results.Branch("histogram_mean", &histogram_mean);
+    fit_results.Branch("expected_energy_ep", &expected_energy_ep);
+    fit_results.Branch("expected_energy_ee", &expected_energy_ee);
     fit_results.Branch("fit_mean", &fit_mean);
     fit_results.Branch("fit_mean_error", &fit_mean_error);
     fit_results.Branch("fit_sigma", &fit_sigma);
@@ -242,6 +267,8 @@ int main(int argc, char *argv[]){
                 TH1F *hist = grid[row][col];
                 entries = static_cast<Long64_t>(hist->GetEntries());
                 histogram_mean = hist->GetMean();
+                expected_energy_ep = 0.;
+                expected_energy_ee = 0.;
                 fit_mean = 0.;
                 fit_mean_error = 0.;
                 fit_sigma = 0.;
@@ -252,18 +279,27 @@ int main(int argc, char *argv[]){
                 root_fit_status = -1;
                 fit_valid = false;
 
-                if (entries >= kMinFitEntries) {
-                    const double peak = hist->GetXaxis()->GetBinCenter(hist->GetMaximumBin());
+                const auto expected_it = expected_energies.find(module_id);
+                if (expected_it != expected_energies.end()) {
+                    const auto &expected = expected_it->second[row][col];
+                    expected_energy_ep = expected.ep;
+                    expected_energy_ee = expected.ee;
+                }
+
+                if (entries >= kMinFitEntries && expected_energy_ep > 0.) {
+                    const double expected_sigma = resolution * expected_energy_ep
+                        / std::sqrt(expected_energy_ep / 1000.);
                     const double fit_lo = std::fmax(hist->GetXaxis()->GetXmin(),
-                                                    peak - 2.5 * expected_ratio_sigma);
+                                                    expected_energy_ep - 2. * expected_sigma);
                     const double fit_hi = std::fmin(hist->GetXaxis()->GetXmax(),
-                                                    peak + 2.5 * expected_ratio_sigma);
-                    const std::string fit_name = "f_energy_ratio_" + module_name + "_r"
+                                                    expected_energy_ep + 2. * expected_sigma);
+                    const std::string fit_name = "f_energy_" + module_name + "_r"
                         + std::to_string(row) + "_c" + std::to_string(col);
                     TF1 gaussian(fit_name.c_str(), "gaus", fit_lo, fit_hi);
-                    gaussian.SetParameters(hist->GetMaximum(), peak, expected_ratio_sigma);
+                    gaussian.SetParameters(hist->GetMaximum(), expected_energy_ep, expected_sigma);
                     gaussian.SetParLimits(1, fit_lo, fit_hi);
-                    gaussian.SetParLimits(2, 0.25 * hist->GetBinWidth(1), 0.1);
+                    gaussian.SetParLimits(2, 0.25 * hist->GetBinWidth(1),
+                                          5. * expected_sigma);
 
                     // N keeps the short-lived TF1 out of the histogram ownership list;
                     // all persistent fit information is recorded in fit_results.
@@ -285,8 +321,9 @@ int main(int argc, char *argv[]){
                         fit_sigma_error = sigma_error;
                         chi2_ndf = gaussian.GetNDF() > 0
                             ? gaussian.GetChisquare() / gaussian.GetNDF() : 0.;
-                        correction = 1. / fit_mean;
-                        correction_error = fit_mean_error / (fit_mean * fit_mean);
+                        correction = expected_energy_ep / fit_mean;
+                        correction_error = expected_energy_ep * fit_mean_error
+                            / (fit_mean * fit_mean);
                         ++successful_fits;
                     }
                 }
@@ -311,7 +348,7 @@ int main(int argc, char *argv[]){
 }
 
 long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    EnergyHistMap &energy_hists, PhysicsTools &physics, float Ebeam, int max_events,
+    EnergyHistMap &energy_hists, float Ebeam, int max_events,
     const std::string &label, std::mutex *io_mtx)
 {
     auto log_msg = [&](const std::string &msg, bool flush = false) {
@@ -341,51 +378,49 @@ long long process_event( TTree *tree, const EventVars_Recon &ev, const fdec::HyC
         if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
         n_accepted++;
 
-        if (ev.n_clusters != 1) continue;
+        for (int j = 0; j < ev.n_clusters; j++) {
+            int mod_id = ev.cl_center[j];
+            if (ev.cl_nblocks[j] <= 3) continue;
+            auto mod = hycal.module_by_id(mod_id);
+            if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
+            auto hist_it = energy_hists.find(mod_id);
+            if (hist_it == energy_hists.end()) continue; // excluded during histogram setup
 
-        int mod_id = ev.cl_center[0];
-        if (ev.cl_nblocks[0] <= 3) continue;
-        auto mod = hycal.module_by_id(mod_id);
-        if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
-        auto hist_it = energy_hists.find(mod_id);
-        if (hist_it == energy_hists.end()) continue; // excluded during histogram setup
+            float mod_x = (float)mod->x;
+            float mod_y = (float)mod->y;
+            float mod_size_x = (float)mod->size_x;
+            float mod_size_y = (float)mod->size_y;
 
-        float mod_x = (float)mod->x;
-        float mod_y = (float)mod->y;
-        float mod_size_x = (float)mod->size_x;
-        float mod_size_y = (float)mod->size_y;
+            float c_x = ev.cl_x[j], c_y = ev.cl_y[j], c_z = ev.cl_z[j];
 
-        float c_x = ev.cl_x[0], c_y = ev.cl_y[0], c_z = ev.cl_z[0];
+            // hit in a single module grid
+            float xd = (c_x - mod_x) / mod_size_x;
+            float yd = (c_y - mod_y) / mod_size_y;
 
-        // hit in a single module grid
-        float xd = (c_x - mod_x) / mod_size_x;
-        float yd = (c_y - mod_y) / mod_size_y;
+            float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), c_z) * 180.f / M_PI;
+            float energy = ev.cl_energy[j];
 
-        float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), c_z) * 180.f / M_PI;
-        float energy = ev.cl_energy[0];
-
-        bool veto = false;
-            float sci_time, sci_int;
-            for(int k = 0; k < ev.veto_nch; k++){
-                for(int p = 0; p < ev.veto_npeaks[k]; p++){
-                    sci_time = ev.veto_peak_time[k][p];
-                    sci_int = ev.veto_peak_integral[k][p];
-                    veto = Vetoed(ev.cl_time[0], sci_time, sci_int);
+            bool veto = false;
+                float sci_time, sci_int;
+                for(int k = 0; k < ev.veto_nch; k++){
+                    for(int p = 0; p < ev.veto_npeaks[k]; p++){
+                        sci_time = ev.veto_peak_time[k][p];
+                        sci_int = ev.veto_peak_integral[k][p];
+                        veto = Vetoed(ev.cl_time[j], sci_time, sci_int);
+                        if(veto) break;
+                    }
                     if(veto) break;
                 }
-                if(veto) break;
-            }
-            if(theta > 1.3) veto = false;
+                if(theta > 1.3) veto = false;
 
-        if(veto && energy > 600. && Ebeam < 1000.f) continue;
+            if(veto && energy > 600. && Ebeam < 1000.f) continue;
 
-        const int col = static_cast<int>(std::floor((xd + 0.5f) * kGridSize));
-        const int row = static_cast<int>(std::floor((0.5f - yd) * kGridSize));
-        if (row < 0 || row >= kGridSize || col < 0 || col >= kGridSize) continue;
+            const int col = static_cast<int>(std::floor((xd + 0.5f) * kGridSize));
+            const int row = static_cast<int>(std::floor((0.5f - yd) * kGridSize));
+            if (row < 0 || row >= kGridSize || col < 0 || col >= kGridSize) continue;
 
-        const float expected_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ep");
-        if (expected_energy <= 0.f) continue;
-        hist_it->second[row][col]->Fill(energy / expected_energy);
+            hist_it->second[row][col]->Fill(energy);
+        }
     }
     return n_accepted;
 }
