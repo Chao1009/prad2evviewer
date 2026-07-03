@@ -15,7 +15,7 @@
 //   -g  GEM pedestal file
 //   -z  zero-suppression threshold override
 //   -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)
-//   -x17  run the X17 reconstruction path
+//   -x17  run the X17 reconstruction path (default without a mode option: PRad2)
 //=============================================================================
 
 #include "Replay.h"
@@ -243,7 +243,7 @@ int main(int argc, char *argv[])
         std::cerr << "  -g  GEM pedestal JSON\n";
         std::cerr << "  -z  zero-suppression threshold override\n";
         std::cerr << "  -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)\n";
-        std::cerr << "  -p  PRad1 mode (no GEM)\n";
+        std::cerr << "  default  PRad2 mode\n";
         std::cerr << "  -prad1  PRad-1 mode (no GEM)\n";
         std::cerr << "  -x17  run the X17 reconstruction path\n";
         return 1;
@@ -252,6 +252,7 @@ int main(int argc, char *argv[])
         std::cerr << "Options -prad1 and -x17 cannot be used together\n";
         return 1;
     }
+    std::cout << "Replay mode: " << (x17 ? "X17" : prad1 ? "PRad1" : "PRad2") << "\n";
     if (merge_batch_size < 0)
         merge_batch_size = 0;
     int num_files = static_cast<int>(evio_files.size());
