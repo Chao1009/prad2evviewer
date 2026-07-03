@@ -241,30 +241,36 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
 
 
 def _parse_lms_dat(path: Path) -> Optional[np.ndarray]:
-    """Parse prad_XXXXXX_LMS.dat; return ref gain array [1156, 3] = W_peak / LMS_j_peak."""
-    lms_peaks: Dict[str, float] = {}
+    """Parse prad_XXXXXX_LMS.dat; return ref gain array [1156, 3].
+
+    The .dat file columns are:
+      0:Name  1:lms_peak  2:lms_sigma  3:lms_chi2/ndf  4:g1  5:g2  6:g3
+
+    For W module rows, columns 4-6 (g1/g2/g3) store the reference gain values
+    corresponding to Ref PMT 1/2/3, in the same units as gain_W in the ROOT file.
+    Dividing gain_W by these values gives a ratio ~1 for an unchanged gain.
+    """
+    entries: Dict[str, List[float]] = {}
     try:
         with open(path) as f:
             for line in f:
                 parts = line.split()
-                if len(parts) < 2 or parts[0] == "Name":
+                if len(parts) < 7 or parts[0] == "Name":
                     continue
                 try:
-                    lms_peaks[parts[0]] = float(parts[1])
-                except ValueError:
+                    entries[parts[0]] = [float(parts[4]), float(parts[5]), float(parts[6])]
+                except (ValueError, IndexError):
                     continue
     except OSError:
         return None
-    lms_ref = [lms_peaks.get(f"LMS{j + 1}", 0.0) for j in range(3)]
-    if any(v <= 0.0 for v in lms_ref):
-        return None
     result = np.full((1156, 3), np.nan, dtype=float)
     for i in range(1156):
-        peak = lms_peaks.get(f"W{i + 1}", 0.0)
-        if peak <= 0.0:
+        vals = entries.get(f"W{i + 1}")
+        if vals is None:
             continue
-        for j, lms_j in enumerate(lms_ref):
-            result[i, j] = peak / lms_j
+        for j in range(3):
+            if vals[j] > 0.0:
+                result[i, j] = vals[j]
     return result
 
 
