@@ -317,7 +317,7 @@ def load_root(root_path: Path) -> Dict[str, ModuleData]:
                     continue
                 sd = f[subdir]
 
-                # ── ep fits from TTree (C++ code only stores ep fit) ──
+                # ── ep fits from TTree ──
                 if "fit_results" in sd:
                     t = sd["fit_results"]
                     try:
@@ -336,6 +336,16 @@ def load_root(root_path: Path) -> Dict[str, ModuleData]:
                     mean_a  = t["fit_mean"].array(library="np")
                     sigma_a = t["fit_sigma"].array(library="np")
 
+                    # ee fit branches — present only in newer ROOT files
+                    try:
+                        corr_ee_a  = t["correction_ee"].array(library="np")
+                        valid_ee_a = t["fit_valid_ee"].array(library="np")
+                        mean_ee_a  = t["fit_mean_ee"].array(library="np")
+                        sigma_ee_a = t["fit_sigma_ee"].array(library="np")
+                        has_ee_branch = True
+                    except Exception:
+                        has_ee_branch = False
+
                     for i in range(len(mod_names)):
                         name = mod_names[i]
                         if name not in data:
@@ -345,15 +355,29 @@ def load_root(root_path: Path) -> Dict[str, ModuleData]:
                         cell.expected_ep = float(ep_a[i])
                         cell.expected_ee = float(ee_a[i])
                         cell.entries     = int(ent_a[i])
-                        raw = float(corr_a[i])
+
+                        # ep
+                        raw_ep = float(corr_a[i])
                         cell.fit_valid_ep = bool(valid_a[i])
-                        cell.corr_raw_ep  = raw
-                        if cell.fit_valid_ep and raw > 0. and math.isfinite(raw):
+                        cell.corr_raw_ep  = raw_ep
+                        if cell.fit_valid_ep and raw_ep > 0. and math.isfinite(raw_ep):
                             cell.fit_mean_ep  = float(mean_a[i])
                             cell.fit_sigma_ep = float(sigma_a[i])
-                            cell.corr_ep = max(CORR_CAP_LO, min(CORR_CAP_HI, raw))
+                            cell.corr_ep = max(CORR_CAP_LO, min(CORR_CAP_HI, raw_ep))
                         else:
                             cell.corr_ep = 1.0
+
+                        # ee (from TTree if available)
+                        if has_ee_branch:
+                            raw_ee = float(corr_ee_a[i])
+                            cell.fit_valid_ee = bool(valid_ee_a[i])
+                            cell.corr_raw_ee  = raw_ee
+                            if cell.fit_valid_ee and raw_ee > 0. and math.isfinite(raw_ee):
+                                cell.fit_mean_ee  = float(mean_ee_a[i])
+                                cell.fit_sigma_ee = float(sigma_ee_a[i])
+                                cell.corr_ee = max(CORR_CAP_LO, min(CORR_CAP_HI, raw_ee))
+                            else:
+                                cell.corr_ee = 1.0
 
                 # ── per-cell histograms ──
                 for key_obj in sd:
@@ -377,14 +401,16 @@ def load_root(root_path: Path) -> Dict[str, ModuleData]:
                     except Exception:
                         pass
 
-                # ── auto-fit ee peaks (C++ stores only ep fit results) ──
-                n_ee_ok = 0
+                # ── refit all cells on load (ep + ee) using 3-stage method ──
+                n_ep_ok = n_ee_ok = 0
                 for mod in data.values():
                     for cell in mod.energies[subdir].cells.values():
-                        if cell.hist_counts is not None and cell.expected_ee > 0.:
-                            if cell.refit("ee"):
+                        if cell.hist_counts is not None:
+                            if cell.expected_ep > 0. and cell.refit("ep"):
+                                n_ep_ok += 1
+                            if cell.expected_ee > 0. and cell.refit("ee"):
                                 n_ee_ok += 1
-                print(f"[{subdir}] ee auto-fit: {n_ee_ok} cells successful",
+                print(f"[{subdir}] refit on load: ep={n_ep_ok} ee={n_ee_ok}",
                       file=sys.stderr)
 
     except Exception as ex:

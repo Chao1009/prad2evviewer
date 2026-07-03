@@ -84,10 +84,12 @@ using ExpectedEnergyMap = std::map<int, ExpectedEnergyGrid>;
 
 // Per-cell fit outcome stored in memory for JSON export.
 struct CellFitData {
-    double expected_ep = 0.;
-    double expected_ee = 0.;
-    double correction  = 1.;   // raw (uncapped) value; 0 means not fitted
-    bool   fit_valid   = false;
+    double expected_ep   = 0.;
+    double expected_ee   = 0.;
+    double correction_ep = 1.;   // raw (uncapped); 0 means not fitted
+    double correction_ee = 1.;
+    bool   fit_valid_ep  = false;
+    bool   fit_valid_ee  = false;
 };
 using FitDataGrid   = std::array<std::array<CellFitData, kGridSize>, kGridSize>;
 using FitDataByName = std::map<std::string, FitDataGrid>; // module_name → 5×5
@@ -347,6 +349,16 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
     double      correction_error   = 0.;
     int         root_fit_status    = -1;
     bool        fit_valid          = false;
+    // ee fit results
+    double      fit_mean_ee           = 0.;
+    double      fit_mean_error_ee     = 0.;
+    double      fit_sigma_ee          = 0.;
+    double      fit_sigma_error_ee    = 0.;
+    double      chi2_ndf_ee           = 0.;
+    double      correction_ee         = 0.;
+    double      correction_error_ee   = 0.;
+    int         root_fit_status_ee    = -1;
+    bool        fit_valid_ee          = false;
 
     fit_results.Branch("module_id",          &module_id);
     fit_results.Branch("module_name",        &module_name);
@@ -365,6 +377,15 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
     fit_results.Branch("correction_error",   &correction_error);
     fit_results.Branch("root_fit_status",    &root_fit_status);
     fit_results.Branch("fit_valid",          &fit_valid);
+    fit_results.Branch("fit_mean_ee",         &fit_mean_ee);
+    fit_results.Branch("fit_mean_error_ee",   &fit_mean_error_ee);
+    fit_results.Branch("fit_sigma_ee",        &fit_sigma_ee);
+    fit_results.Branch("fit_sigma_error_ee",  &fit_sigma_error_ee);
+    fit_results.Branch("chi2_ndf_ee",         &chi2_ndf_ee);
+    fit_results.Branch("correction_ee",       &correction_ee);
+    fit_results.Branch("correction_error_ee", &correction_error_ee);
+    fit_results.Branch("root_fit_status_ee",  &root_fit_status_ee);
+    fit_results.Branch("fit_valid_ee",        &fit_valid_ee);
 
     Long64_t successful_fits = 0;
 
@@ -389,6 +410,15 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
                 correction_error   = 0.;
                 root_fit_status    = -1;
                 fit_valid          = false;
+                fit_mean_ee           = 0.;
+                fit_mean_error_ee     = 0.;
+                fit_sigma_ee          = 0.;
+                fit_sigma_error_ee    = 0.;
+                chi2_ndf_ee           = 0.;
+                correction_ee         = 0.;
+                correction_error_ee   = 0.;
+                root_fit_status_ee    = -1;
+                fit_valid_ee          = false;
 
                 const auto expected_it = run.expected_energies.find(module_id);
                 if (expected_it != run.expected_energies.end()) {
@@ -468,12 +498,71 @@ void write_energy_run(EnergyRun &run, const fdec::HyCalSystem &hycal, TDirectory
                     }
                 }
 
+                // ── ee fit (independent 3-stage, centred at expected_energy_ee) ──
+                if (entries >= kMinFitEntries && expected_energy_ee > 0.) {
+                    auto estimateSigEe = [](double E) -> double {
+                        return (E > 0.) ? E * 0.035 / std::sqrt(E / 1000.) : 1.;
+                    };
+                    const double sig_exp_ee = estimateSigEe(expected_energy_ee);
+                    const int be0 = std::max(1,
+                        hist->FindBin(expected_energy_ee - 6. * sig_exp_ee));
+                    const int be1 = std::min(hist->GetNbinsX(),
+                        hist->FindBin(expected_energy_ee + 6. * sig_exp_ee));
+                    double wsum_ee = 0., wpos_ee = 0.;
+                    for (int ib = be0; ib <= be1; ++ib) {
+                        double cv = hist->GetBinContent(ib);
+                        if (cv > 0.) { wsum_ee += cv; wpos_ee += cv * hist->GetBinCenter(ib); }
+                    }
+                    if (wsum_ee > 0.) {
+                        double ms_ee = wpos_ee / wsum_ee;
+                        double ss_ee = estimateSigEe(ms_ee);
+                        {
+                            const std::string fn_ee1 = "_f1ee_" + module_name + "_r"
+                                + std::to_string(row) + "_c" + std::to_string(col);
+                            TF1 g1ee(fn_ee1.c_str(), "gaus",
+                                     ms_ee - 3.*ss_ee, ms_ee + 3.*ss_ee);
+                            g1ee.SetParameters(hist->GetMaximum(), ms_ee, ss_ee);
+                            hist->Fit(&g1ee, "RQ0N");
+                            ms_ee = g1ee.GetParameter(1);
+                        }
+                        ss_ee = estimateSigEe(ms_ee);
+                        const std::string fn_ee = "fee_" + module_name + "_r"
+                            + std::to_string(row) + "_c" + std::to_string(col);
+                        TF1 gee(fn_ee.c_str(), "gaus",
+                                ms_ee - 2.*ss_ee, ms_ee + 2.*ss_ee);
+                        gee.SetParameters(hist->GetMaximum(), ms_ee, ss_ee);
+                        root_fit_status_ee = hist->Fit(&gee, "RQL0N");
+                        const double me   = gee.GetParameter(1);
+                        const double mee  = gee.GetParError(1);
+                        const double se   = std::fabs(gee.GetParameter(2));
+                        const double see  = gee.GetParError(2);
+                        fit_valid_ee = root_fit_status_ee == 0
+                            && std::isfinite(me)  && me  > 0.
+                            && std::isfinite(mee) && mee >= 0.
+                            && std::isfinite(se)  && se  > 0.
+                            && std::isfinite(see) && see >= 0.;
+                        if (fit_valid_ee) {
+                            fit_mean_ee        = me;
+                            fit_mean_error_ee  = mee;
+                            fit_sigma_ee       = se;
+                            fit_sigma_error_ee = see;
+                            chi2_ndf_ee        = gee.GetNDF() > 0
+                                ? gee.GetChisquare() / gee.GetNDF() : 0.;
+                            correction_ee      = expected_energy_ee / fit_mean_ee;
+                            correction_error_ee= expected_energy_ee * fit_mean_error_ee
+                                / (fit_mean_ee * fit_mean_ee);
+                        }
+                    }
+                }
+
                 // Store fit outcome for JSON export.
-                auto &cd       = run.fit_data[module_name][row][col];
-                cd.expected_ep = expected_energy_ep;
-                cd.expected_ee = expected_energy_ee;
-                cd.correction  = correction;
-                cd.fit_valid   = fit_valid;
+                auto &cd           = run.fit_data[module_name][row][col];
+                cd.expected_ep     = expected_energy_ep;
+                cd.expected_ee     = expected_energy_ee;
+                cd.correction_ep   = correction;
+                cd.correction_ee   = correction_ee;
+                cd.fit_valid_ep    = fit_valid;
+                cd.fit_valid_ee    = fit_valid_ee;
 
                 fit_results.Fill();
             }
@@ -704,8 +793,9 @@ void write_corr_json(const std::vector<EnergyRun> &runs,
             first_e = false;
             out << "    \"" << ec.subdir << "\": {\n";
 
-            Mat5 ep_exp{}, ee_exp{}, corr_mat{};
-            for (auto &row : corr_mat) row.fill(1.0);   // default: identity
+            Mat5 ep_exp{}, ee_exp{}, corr_mat{}, corr_ee_mat{};
+            for (auto &row : corr_mat)    row.fill(1.0);   // default: identity
+            for (auto &row : corr_ee_mat) row.fill(1.0);
 
             // Try to use stored fit results for this energy.
             bool has_fit = false;
@@ -715,10 +805,11 @@ void write_corr_json(const std::vector<EnergyRun> &runs,
                 if (mod_it != sd_it->second->end()) {
                     for (int r = 0; r < kGridSize; ++r) {
                         for (int c = 0; c < kGridSize; ++c) {
-                            const auto &cd = mod_it->second[r][c];
-                            ep_exp[r][c]   = cd.expected_ep;
-                            ee_exp[r][c]   = cd.expected_ee;
-                            corr_mat[r][c] = cap(cd.correction, cd.fit_valid);
+                            const auto &cd    = mod_it->second[r][c];
+                            ep_exp[r][c]      = cd.expected_ep;
+                            ee_exp[r][c]      = cd.expected_ee;
+                            corr_mat[r][c]    = cap(cd.correction_ep, cd.fit_valid_ep);
+                            corr_ee_mat[r][c] = cap(cd.correction_ee, cd.fit_valid_ee);
                         }
                     }
                     has_fit = true;
@@ -739,9 +830,10 @@ void write_corr_json(const std::vector<EnergyRun> &runs,
             // Round values before writing.
             for (int r = 0; r < kGridSize; ++r) {
                 for (int c = 0; c < kGridSize; ++c) {
-                    ep_exp[r][c]   = std::round(ep_exp[r][c]   * 10.)    / 10.;
-                    ee_exp[r][c]   = std::round(ee_exp[r][c]   * 10.)    / 10.;
-                    corr_mat[r][c] = std::round(corr_mat[r][c] * 10000.) / 10000.;
+                    ep_exp[r][c]      = std::round(ep_exp[r][c]      * 10.)    / 10.;
+                    ee_exp[r][c]      = std::round(ee_exp[r][c]      * 10.)    / 10.;
+                    corr_mat[r][c]    = std::round(corr_mat[r][c]    * 10000.) / 10000.;
+                    corr_ee_mat[r][c] = std::round(corr_ee_mat[r][c] * 10000.) / 10000.;
                 }
             }
 
@@ -753,8 +845,8 @@ void write_corr_json(const std::vector<EnergyRun> &runs,
 
             // ee section
             out << "      \"ee\": {\n";
-            out << "        \"correction\": ";      write_mat5(corr_mat, 4); out << ",\n";
-            out << "        \"expected_energy\": "; write_mat5(ee_exp,   1); out << "\n";
+            out << "        \"correction\": ";      write_mat5(corr_ee_mat, 4); out << ",\n";
+            out << "        \"expected_energy\": "; write_mat5(ee_exp,      1); out << "\n";
             out << "      }\n";
 
             out << "    }";
