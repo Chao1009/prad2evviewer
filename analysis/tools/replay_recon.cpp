@@ -208,7 +208,7 @@ int main(int argc, char *argv[])
     };
 
     int opt;
-    while ((opt = getopt_long_only(argc, argv, "o:f:c:d:j:g:z:m",
+    while ((opt = getopt_long_only(argc, argv, "o:f:c:d:j:g:z:m:",
                                    long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
