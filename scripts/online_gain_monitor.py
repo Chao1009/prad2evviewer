@@ -759,6 +759,7 @@ class OnlineGainMonitor(QMainWindow):
         self._known_runs: set[int] = set()
         self._opened_output_folder: Optional[Path] = None
         self._ref_gain_file: Optional[Path] = None
+        self._ref_file_gain_array: Optional[np.ndarray] = None
         self._ref_gain_cache: Dict[int, Optional[np.ndarray]] = {}
         self._last_gain_drop_warning_key: Optional[Tuple[int, int, float]] = None
         self._replay_queue: List[Tuple[int, Path]] = []
@@ -1163,6 +1164,15 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_gain_file = Path(path)
         self._ref_file_btn.setText(f"Ref: {self._ref_gain_file.name}")
         self._append(f"Using reference gain file: {self._ref_gain_file}", "ok")
+        self._ref_file_gain_array = _parse_lms_dat(self._ref_gain_file)
+        if self._ref_file_gain_array is None:
+            self._append(f"Warning: failed to parse ref gain from {self._ref_gain_file.name}", "warn")
+        else:
+            self._append(f"Ref gain loaded: {int(np.sum(np.isfinite(self._ref_file_gain_array[:, 0])))} valid W modules", "ok")
+        self._ref_gain_cache.clear()
+        self._view_context = None
+        if hasattr(self, "_runs_data") and self._runs_data:
+            self._refresh_views()
 
     def _on_ref_run_changed(self):
         self._ref_gain_cache.clear()
@@ -1171,12 +1181,17 @@ class OnlineGainMonitor(QMainWindow):
             self._refresh_views()
 
     def _get_ref_run_gain(self) -> Optional[np.ndarray]:
-        """Return ref gain array [1156, 3] for the manually selected ref run, or None.
+        """Return ref gain array [1156, 3], or None (use embedded gain_W_ref).
 
         Priority:
-          1. prad_XXXXXX_LMS.dat in DB_DIR/gain_factor/ref_gain/ (W_peak/LMS_j_peak)
-          2. Average gain_W from gain_corr.root in storage
+          1. Explicitly selected .dat file via Ref File button
+          2. prad_XXXXXX_LMS.dat in DB_DIR/gain_factor/ref_gain/ for ref run spinbox
+          3. Average gain_W from gain_corr.root in storage
         """
+        # Priority 1: directly selected ref gain file
+        if self._ref_gain_file is not None:
+            return self._ref_file_gain_array
+
         ref_run_num = self._ref_run.value()
         if ref_run_num < 0:
             return None
