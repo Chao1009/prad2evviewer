@@ -240,6 +240,34 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
         )
 
 
+def _parse_lms_dat(path: Path) -> Optional[np.ndarray]:
+    """Parse prad_XXXXXX_LMS.dat; return ref gain array [1156, 3] = W_peak / LMS_j_peak."""
+    lms_peaks: Dict[str, float] = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2 or parts[0] == "Name":
+                    continue
+                try:
+                    lms_peaks[parts[0]] = float(parts[1])
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    lms_ref = [lms_peaks.get(f"LMS{j + 1}", 0.0) for j in range(3)]
+    if any(v <= 0.0 for v in lms_ref):
+        return None
+    result = np.full((1156, 3), np.nan, dtype=float)
+    for i in range(1156):
+        peak = lms_peaks.get(f"W{i + 1}", 0.0)
+        if peak <= 0.0:
+            continue
+        for j, lms_j in enumerate(lms_ref):
+            result[i, j] = peak / lms_j
+    return result
+
+
 class GainRootLoader(QObject):
     finished = pyqtSignal(object, object)
 
@@ -731,6 +759,7 @@ class OnlineGainMonitor(QMainWindow):
         self._known_runs: set[int] = set()
         self._opened_output_folder: Optional[Path] = None
         self._ref_gain_file: Optional[Path] = None
+        self._ref_gain_cache: Dict[int, Optional[np.ndarray]] = {}
         self._last_gain_drop_warning_key: Optional[Tuple[int, int, float]] = None
         self._replay_queue: List[Tuple[int, Path]] = []
         self._queued_snapshots: set[Path] = set()
@@ -886,6 +915,7 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_run.setValue(-1)
         self._ref_run.setSpecialValueText("auto")
         self._ref_run.setFixedWidth(90)
+        self._ref_run.valueChanged.connect(self._on_ref_run_changed)
         top2.addWidget(self._ref_run)
 
         self._ref_file_btn = self._button("Ref File", THEME.ACCENT, self._browse_ref_gain_file)
@@ -1133,6 +1163,57 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_gain_file = Path(path)
         self._ref_file_btn.setText(f"Ref: {self._ref_gain_file.name}")
         self._append(f"Using reference gain file: {self._ref_gain_file}", "ok")
+
+    def _on_ref_run_changed(self):
+        self._ref_gain_cache.clear()
+        self._view_context = None
+        if hasattr(self, "_runs_data") and self._runs_data:
+            self._refresh_views()
+
+    def _get_ref_run_gain(self) -> Optional[np.ndarray]:
+        """Return ref gain array [1156, 3] for the manually selected ref run, or None.
+
+        Priority:
+          1. prad_XXXXXX_LMS.dat in DB_DIR/gain_factor/ref_gain/ (W_peak/LMS_j_peak)
+          2. Average gain_W from gain_corr.root in storage
+        """
+        ref_run_num = self._ref_run.value()
+        if ref_run_num < 0:
+            return None
+        if ref_run_num in self._ref_gain_cache:
+            return self._ref_gain_cache[ref_run_num]
+
+        # 1. Try .dat file
+        dat_path = DB_DIR / "gain_factor" / "ref_gain" / f"prad_{ref_run_num:06d}_LMS.dat"
+        if dat_path.exists():
+            result = _parse_lms_dat(dat_path)
+            if result is not None:
+                self._ref_gain_cache[ref_run_num] = result
+                self._append(f"Loaded ref gain from {dat_path.name}", "ok")
+                return result
+            self._append(f"Failed to parse ref gain file: {dat_path.name}", "warn")
+
+        # 2. Fall back to gain_corr.root
+        storage = self._storage_base.text().strip() or STORAGE_BASE
+        _, _, path = run_storage_paths(ref_run_num, storage)
+        if not path.exists():
+            self._append(f"Ref run {ref_run_num:06d}: no .dat or gain_corr.root found", "warn")
+            self._ref_gain_cache[ref_run_num] = None
+            return None
+        try:
+            ref_data = load_gain_root(path, ref_run_num)
+        except Exception as exc:
+            self._append(f"Failed to load ref run {ref_run_num:06d}: {exc}", "error")
+            self._ref_gain_cache[ref_run_num] = None
+            return None
+        arr = np.asarray(ref_data.gain_w, dtype=float)
+        valid = np.isfinite(arr) & (arr > 0.0)
+        count = np.sum(valid, axis=0)
+        total = np.sum(np.where(valid, arr, 0.0), axis=0)
+        result = safe_divide(total, count, count > 0)
+        self._ref_gain_cache[ref_run_num] = result
+        self._append(f"Loaded ref gain from run {ref_run_num:06d}: {path.name}", "ok")
+        return result
 
     def _runs_shown_changed(self):
         if self._opened_output_folder is not None:
@@ -1812,6 +1893,11 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
     def _quantity_array(self, data: GainData):
         if self._quantity.currentIndex() == 0:
+            ref_gain = self._get_ref_run_gain()
+            if ref_gain is not None:
+                gain_w = np.asarray(data.gain_w, dtype=float)
+                valid = np.isfinite(gain_w) & np.isfinite(ref_gain) & (ref_gain > 0.0)
+                return safe_divide(gain_w, ref_gain, valid)
             valid = (
                 np.isfinite(data.gain_w)
                 & np.isfinite(data.gain_w_ref)
@@ -1827,6 +1913,11 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         return QUANTITIES[idx][0]
 
     def _base_gain_array(self, data: GainData):
+        ref_gain = self._get_ref_run_gain()
+        if ref_gain is not None:
+            gain_w = np.asarray(data.gain_w, dtype=float)
+            valid = np.isfinite(gain_w) & np.isfinite(ref_gain) & (ref_gain > 0.0)
+            return safe_divide(gain_w, ref_gain, valid)
         valid = (
             np.isfinite(data.gain_w)
             & np.isfinite(data.gain_w_ref)
