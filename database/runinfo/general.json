@@ -81,11 +81,11 @@
 
             "from_run":    25540,
 			"beam_energy": 2239.51,
-            "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
-            "time_cuts":   {"hc_time_window": [0.0, 400.0]},
+            "calibration": {"file": "calibration/x17_25560.json"},
+            "time_cuts":   {"hc_time_window": [130, 200.0]},
             "gain_factor": {
                 "data_dir": "",
-                "ref_run":  24827
+                "ref_run":  25560
             },
             "// 25560 is the reference run for the 1st X17 calibration": "",
             "// reuse PRad2 calibration, the ref_gain run is 24827": "",
