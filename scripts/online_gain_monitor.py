@@ -23,6 +23,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 try:
     import numpy as np
@@ -71,6 +72,7 @@ DEFAULT_RUNS_SHOWN = 5
 DEFAULT_GAIN_DROP_WARN_PCT = 3.0
 DEFAULT_MAX_DOWNLOAD_EVIO = 10
 DEFAULT_QUEUE_CAP_EVIO = 100
+NEW_YORK_TZ = ZoneInfo("America/New_York")
 LOG_MAX_BLOCKS = 1500
 LOG_FLUSH_MS = 100
 MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
@@ -571,7 +573,7 @@ class BatchChart(QWidget):
         for tick in x_ticks:
             xx = sx(tick)
             if self._x_mode == "unix":
-                label = datetime.fromtimestamp(tick).strftime("%Y-%m-%d\n%H:%M")
+                label = datetime.fromtimestamp(tick, NEW_YORK_TZ).strftime("%Y-%m-%d\n%H:%M")
                 label_x = max(pad_l, min(int(xx - 62), pad_l + plot_w - 124))
                 p.drawText(
                     label_x, pad_t + plot_h + 4, 124, 34,
@@ -2606,7 +2608,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         span = self._change_map_range()
         default_y = (-span, span) if self._is_change_quantity() else (1.0 - span, 1.0 + span)
         if x_mode == "unix":
-            xlabel = "local date / time"
+            xlabel = "New York date / time (ET)"
         elif x_mode == "minutes":
             xlabel = "minutes from first valid batch"
         else:
