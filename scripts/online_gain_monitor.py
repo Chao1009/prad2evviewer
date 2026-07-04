@@ -806,6 +806,7 @@ class OnlineGainMonitor(QMainWindow):
         self._queued_snapshots: set[Path] = set()
         self._active_replay_snapshots: List[Path] = []
         self._active_replay_file_count = 0
+        self._reanalyze_pending = False
         self._scan_copied_count = 0
         self._scan_floor_run: Optional[int] = None
         self._last_pending_evio_count = 0
@@ -824,10 +825,18 @@ class OnlineGainMonitor(QMainWindow):
         self._replay_process.readyReadStandardOutput.connect(self._on_stdout)
         self._replay_process.readyReadStandardError.connect(self._on_stderr)
         self._replay_process.finished.connect(self._on_replay_finished)
+        self._reanalyze_process = QProcess(self)
+        self._reanalyze_process.readyReadStandardOutput.connect(self._on_stdout)
+        self._reanalyze_process.readyReadStandardError.connect(self._on_stderr)
+        self._reanalyze_process.finished.connect(self._on_reanalyze_finished)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.timeout.connect(self._scan_once)
+        self._batch_reanalyze_timer = QTimer(self)
+        self._batch_reanalyze_timer.setSingleShot(True)
+        self._batch_reanalyze_timer.setInterval(600)
+        self._batch_reanalyze_timer.timeout.connect(self._reanalyze_lms)
 
         self._build_ui()
         self._log_buffer: List[Tuple[str, str]] = []
@@ -912,7 +921,10 @@ class OnlineGainMonitor(QMainWindow):
         self._batch.setValue(DEFAULT_BATCH_SIZE)
         self._batch.setSingleStep(100)
         self._batch.setFixedWidth(95)
+        self._batch.valueChanged.connect(self._schedule_batch_reanalysis)
         top.addWidget(self._batch)
+        self._reanalyze_btn = self._button("Re-analyze", THEME.ACCENT, self._reanalyze_lms)
+        top.addWidget(self._reanalyze_btn)
 
         top.addWidget(self._label("evio skip"))
         self._evio_skip = QSpinBox()
@@ -1350,10 +1362,14 @@ class OnlineGainMonitor(QMainWindow):
 
     def _stop(self):
         self._timer.stop()
+        self._batch_reanalyze_timer.stop()
+        self._reanalyze_pending = False
         if self._download_process.state() != QProcess.ProcessState.NotRunning:
             self._download_process.kill()
         if self._replay_process.state() != QProcess.ProcessState.NotRunning:
             self._replay_process.kill()
+        if self._reanalyze_process.state() != QProcess.ProcessState.NotRunning:
+            self._reanalyze_process.kill()
         self._replay_queue.clear()
         self._queued_snapshots.clear()
         self._active_replay_snapshots.clear()
@@ -1598,7 +1614,10 @@ exit 0
             )
         self._active_replay_file_count = 0
         self._load_root()
-        self._start_next_replay()
+        if self._reanalyze_pending:
+            self._reanalyze_lms()
+        else:
+            self._start_next_replay()
 
     def _enqueue_replay_snapshot(self, run: int, snapshot: Path) -> bool:
         snapshot = snapshot.resolve()
@@ -1651,8 +1670,82 @@ exit 0
     def _pending_evio_count(self) -> int:
         return self._last_pending_evio_count
 
+    def _schedule_batch_reanalysis(self, _value=None):
+        self._batch_reanalyze_timer.start()
+
+    def _reanalyze_lms(self):
+        self._batch_reanalyze_timer.stop()
+        if (
+            self._replay_process.state() != QProcess.ProcessState.NotRunning
+            or self._reanalyze_process.state() != QProcess.ProcessState.NotRunning
+        ):
+            self._reanalyze_pending = True
+            self._status.setText("Re-analysis queued")
+            return
+
+        self._reanalyze_pending = False
+        runs = sorted(self._visible_runs_data())
+        if not runs:
+            runs = sorted(set(self._parse_runs()))
+        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+        jobs: List[Tuple[int, Path, Path]] = []
+        for run in runs:
+            _, work_dir, out_root = run_storage_paths(run, storage_base)
+            if work_dir.is_dir() and any(work_dir.glob("*_lms.root")):
+                jobs.append((run, work_dir, out_root))
+        if not jobs:
+            self._status.setText("No LMS ROOT files to re-analyze")
+            self._append("No existing *_lms.root files found for the selected run(s).", "warn")
+            self._start_next_replay()
+            return
+
+        tool = find_update_tool()
+        ref_arg = ""
+        if self._ref_gain_file is not None:
+            ref_arg = f" -R {shlex.quote(str(self._ref_gain_file))}"
+        elif self._ref_run.value() >= 0:
+            ref_arg = f" -r {self._ref_run.value()}"
+
+        commands = []
+        for run, work_dir, out_root in jobs:
+            commands.append(
+                f'echo "Re-analyzing run {run:06d}: batch={self._batch.value()}"\n'
+                f'mkdir -p {shlex.quote(str(out_root.parent))}\n'
+                f'nice -n 10 {shlex.quote(tool)} -a '
+                f'-w {shlex.quote(str(work_dir))} '
+                f'-o {shlex.quote(str(out_root))} '
+                f'-b {self._batch.value()}{ref_arg}'
+            )
+        bash = "set -euo pipefail\n" + "\n".join(commands)
+
+        self._reanalyze_btn.setEnabled(False)
+        self._status.setText("Re-analyzing LMS ROOT files...")
+        self._append(
+            f"$ re-analyze {len(jobs)} run(s) with batch size {self._batch.value()}",
+            "cmd",
+        )
+        replay_cpus = getattr(self, "_replay_worker_cpus", [])
+        cpu_list = _format_cpu_list(replay_cpus[:1]) if replay_cpus else ""
+        start_bash_process(self._reanalyze_process, bash, cpu_list)
+
+    def _on_reanalyze_finished(self, code, status):
+        self._consume_process_output(self._reanalyze_process, is_stderr=False, final=True)
+        self._consume_process_output(self._reanalyze_process, is_stderr=True, final=True)
+        self._reanalyze_btn.setEnabled(True)
+        color = "ok" if code == 0 else "error"
+        self._append(f"[re-analysis finished: exit {code}]", color)
+        self._status.setText("Re-analysis finished" if code == 0 else "Re-analysis failed")
+        self._load_root()
+        if self._reanalyze_pending:
+            self._reanalyze_lms()
+        else:
+            self._start_next_replay()
+
     def _start_next_replay(self):
-        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
+        if (
+            self._replay_process.state() != QProcess.ProcessState.NotRunning
+            or self._reanalyze_process.state() != QProcess.ProcessState.NotRunning
+        ):
             return
         while self._replay_queue:
             run, snapshot = self._replay_queue.pop(0)
@@ -2531,6 +2624,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
     def closeEvent(self, event):
         self._timer.stop()
+        self._batch_reanalyze_timer.stop()
         self._maintenance_timer.stop()
         self._log_flush_timer.stop()
         self._flush_log()
@@ -2540,6 +2634,9 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if self._replay_process.state() != QProcess.ProcessState.NotRunning:
             self._replay_process.kill()
             self._replay_process.waitForFinished(2000)
+        if self._reanalyze_process.state() != QProcess.ProcessState.NotRunning:
+            self._reanalyze_process.kill()
+            self._reanalyze_process.waitForFinished(2000)
         if self._root_load_thread is not None:
             self._root_load_thread.requestInterruption()
             self._root_load_thread.quit()
