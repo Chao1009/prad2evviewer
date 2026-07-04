@@ -385,7 +385,7 @@ def nice_ticks(y_min: float, y_max: float, target: int = 5) -> Tuple[List[float]
     ticks: List[float] = []
     cur = tick_min
     limit = 0
-    while cur <= tick_max + step * 0.5 and limit < 20:
+    while cur <= tick_max + step * 0.5 and limit < 40:
         ticks.append(0.0 if abs(cur) < step * 1e-6 else cur)
         cur += step
         limit += 1
@@ -506,7 +506,7 @@ class BatchChart(QWidget):
         if x_min == x_max:
             x_min -= 1
             x_max += 1
-        x_tick_target = max(3, min(6, plot_w // 130)) if self._x_mode == "unix" else 7
+        x_tick_target = max(10, min(20, plot_w // 45)) if self._x_mode == "unix" else 24
         x_ticks, x_min, x_max, x_decimals = nice_ticks(x_min, x_max, x_tick_target)
         x_ticks = [t for t in x_ticks if x_min <= t <= x_max]
 
@@ -518,7 +518,7 @@ class BatchChart(QWidget):
                 y_min -= (self._default_y_range[0] - data_y_min) * 0.08
             if data_y_max > self._default_y_range[1]:
                 y_max += (data_y_max - self._default_y_range[1]) * 0.08
-            y_ticks_all, _, _, y_decimals = nice_ticks(y_min, y_max, 5)
+            y_ticks_all, _, _, y_decimals = nice_ticks(y_min, y_max, 24)
             y_ticks = [t for t in y_ticks_all if y_min <= t <= y_max]
         else:
             y_min, y_max = data_y_min, data_y_max
@@ -530,7 +530,7 @@ class BatchChart(QWidget):
                 d = (y_max - y_min) * 0.12
                 y_min -= d
                 y_max += d
-            y_ticks, y_min, y_max, y_decimals = nice_ticks(y_min, y_max, 5)
+            y_ticks, y_min, y_max, y_decimals = nice_ticks(y_min, y_max, 24)
 
         def sx(x):
             return pad_l + (x - x_min) / (x_max - x_min) * plot_w
@@ -573,10 +573,11 @@ class BatchChart(QWidget):
         for tick in x_ticks:
             xx = sx(tick)
             if self._x_mode == "unix":
-                label = datetime.fromtimestamp(tick, NEW_YORK_TZ).strftime("%Y-%m-%d\n%H:%M")
-                label_x = max(pad_l, min(int(xx - 62), pad_l + plot_w - 124))
+                p.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+                label = datetime.fromtimestamp(tick, NEW_YORK_TZ).strftime("%m-%d\n%H:%M")
+                label_x = max(pad_l, min(int(xx - 25), pad_l + plot_w - 50))
                 p.drawText(
-                    label_x, pad_t + plot_h + 4, 124, 34,
+                    label_x, pad_t + plot_h + 4, 50, 30,
                     Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
                     label,
                 )
@@ -714,7 +715,7 @@ class RefRatioChart(QWidget):
                 d = (y_max - y_min) * 0.15
                 y_min -= d
                 y_max += d
-            ticks, y_min, y_max, decimals = nice_ticks(y_min, y_max, 4)
+            ticks, y_min, y_max, decimals = nice_ticks(y_min, y_max, 20)
             y_ranges.append((y_min, y_max))
             y_ticks_by_panel.append(ticks)
             y_decimals.append(decimals)
@@ -735,8 +736,8 @@ class RefRatioChart(QWidget):
         for panel in range(3):
             x0 = pad_l + panel * (panel_w + gap)
             p.setPen(QPen(CHART_GRID, 1))
-            for i in range(6):
-                xx = x0 + panel_w * i / 5
+            for i in range(21):
+                xx = x0 + panel_w * i / 20
                 p.drawLine(int(xx), pad_t, int(xx), pad_t + plot_h)
             p.setPen(QPen(CHART_BORDER, 1))
             p.setBrush(Qt.BrushStyle.NoBrush)
