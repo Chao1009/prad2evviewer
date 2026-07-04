@@ -19,6 +19,7 @@ import re
 import shlex
 import shutil
 import sys
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -39,7 +40,7 @@ except ImportError:
 from PyQt6.QtCore import QObject, QProcess, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
+    QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QHBoxLayout,
     QLabel, QLineEdit, QMessageBox, QMainWindow, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter,
     QTextEdit, QVBoxLayout, QWidget,
 )
@@ -165,6 +166,7 @@ class GainData:
     path: Path
     event_start: object
     event_end: object
+    unix_time: object
     gain_w: object
     gain_w_ref: object
     gain_corr_w: object
@@ -218,6 +220,11 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
         t = f["gain_corr"]
         event_start = t["event_num_start"].array(library="np")
         event_end = t["event_num_end"].array(library="np")
+        unix_time = (
+            t["unix_time"].array(library="np")
+            if "unix_time" in t.keys()
+            else np.zeros(len(event_start), dtype=np.uint32)
+        )
         if len(event_start) == 0:
             raise RuntimeError(f"No batch entries in gain_corr tree: {path}")
         gain_w = t["gain_W"].array(library="np")
@@ -232,6 +239,7 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
             path=path,
             event_start=event_start,
             event_end=event_end,
+            unix_time=unix_time,
             gain_w=gain_w,
             gain_w_ref=gain_w_ref,
             gain_corr_w=gain_corr_w,
@@ -436,6 +444,7 @@ class BatchChart(QWidget):
         super().__init__(parent)
         self._title = "No module selected"
         self._x_label = "batch id"
+        self._x_mode = "batch"
         self._x: List[float] = []
         self._series: List[Tuple[str, List[float], QColor, bool]] = []
         self._run_spans: List[Tuple[int, float, float]] = []
@@ -446,9 +455,10 @@ class BatchChart(QWidget):
     def set_data(self, title: str, x: List[float], series: List[Tuple[str, List[float], QColor, bool]],
                  run_spans: Optional[List[Tuple[int, float, float]]] = None,
                  default_y_range: Optional[Tuple[float, float]] = None,
-                 x_label: str = "batch id"):
+                 x_label: str = "batch id", x_mode: str = "batch"):
         self._title = title
         self._x_label = x_label
+        self._x_mode = x_mode
         self._x = x
         self._series = series
         self._run_spans = run_spans or []
@@ -462,7 +472,8 @@ class BatchChart(QWidget):
         p.fillRect(0, 0, w, h, CHART_BG)
 
         pad_l = 64 if w < 420 else 74
-        pad_r, pad_t, pad_b = 12, 46, 50
+        pad_r, pad_t = 12, 46
+        pad_b = 72 if self._x_mode == "unix" else 50
         plot_w = max(1, w - pad_l - pad_r)
         plot_h = max(1, h - pad_t - pad_b)
 
@@ -473,18 +484,26 @@ class BatchChart(QWidget):
 
         finite_vals: List[float] = []
         for _, values, _, _ in self._series:
-            finite_vals.extend(v for v in values if math.isfinite(v))
-        if not self._x or not finite_vals:
+            finite_vals.extend(
+                v for x, v in zip(self._x, values)
+                if math.isfinite(x) and math.isfinite(v)
+            )
+        finite_x = [x for x in self._x if math.isfinite(x)]
+        if not finite_x or not finite_vals:
             p.setPen(CHART_TEXT_DIM)
             p.setFont(QFont("Consolas", 12))
-            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No batch data")
+            message = "No Unix time data" if self._x_mode in {"unix", "minutes"} else "No batch data"
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, message)
             return
 
-        x_min, x_max = min(0.0, min(self._x)), max(self._x)
+        x_min, x_max = min(finite_x), max(finite_x)
+        if self._x_mode != "unix":
+            x_min = min(0.0, x_min)
         if x_min == x_max:
             x_min -= 1
             x_max += 1
-        x_ticks, x_min, x_max, x_decimals = nice_ticks(x_min, x_max, 7)
+        x_tick_target = max(3, min(6, plot_w // 130)) if self._x_mode == "unix" else 7
+        x_ticks, x_min, x_max, x_decimals = nice_ticks(x_min, x_max, x_tick_target)
         x_ticks = [t for t in x_ticks if x_min <= t <= x_max]
 
         data_y_min, data_y_max = min(finite_vals), max(finite_vals)
@@ -549,9 +568,18 @@ class BatchChart(QWidget):
             p.drawText(4, int(yy + 4), tick_label(tick, y_decimals))
         for tick in x_ticks:
             xx = sx(tick)
-            label = tick_label(tick, x_decimals)
-            tw = p.fontMetrics().horizontalAdvance(label)
-            p.drawText(int(xx - tw / 2), pad_t + plot_h + 16, label)
+            if self._x_mode == "unix":
+                label = datetime.fromtimestamp(tick).strftime("%Y-%m-%d\n%H:%M")
+                label_x = max(pad_l, min(int(xx - 62), pad_l + plot_w - 124))
+                p.drawText(
+                    label_x, pad_t + plot_h + 4, 124, 34,
+                    Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                    label,
+                )
+            else:
+                label = tick_label(tick, x_decimals)
+                tw = p.fontMetrics().horizontalAdvance(label)
+                p.drawText(int(xx - tw / 2), pad_t + plot_h + 16, label)
         p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
         xlabel = p.fontMetrics().elidedText(self._x_label, Qt.TextElideMode.ElideRight, max(40, plot_w))
         tw = p.fontMetrics().horizontalAdvance(xlabel)
@@ -562,7 +590,7 @@ class BatchChart(QWidget):
             pts = [
                 (sx(x), sy(v))
                 for x, v in zip(self._x, values)
-                if math.isfinite(v) and y_min <= v <= y_max
+                if math.isfinite(x) and math.isfinite(v) and y_min <= v <= y_max
             ]
             if len(pts) < 1:
                 continue
@@ -608,6 +636,7 @@ class RefRatioChart(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._x: List[float] = []
+        self._x_mode = "batch"
         self._ratios: List[List[float]] = [[], [], []]
         self._ok: List[List[bool]] = [[], [], []]
         self._run_spans: List[Tuple[int, float, float]] = []
@@ -617,8 +646,9 @@ class RefRatioChart(QWidget):
 
     def set_data(self, x: List[float], ratios: List[List[float]],
                  ok: List[List[bool]], run_spans: List[Tuple[int, float, float]],
-                 centers: Optional[List[float]] = None):
+                 centers: Optional[List[float]] = None, x_mode: str = "batch"):
         self._x = x
+        self._x_mode = x_mode
         self._ratios = ratios
         self._ok = ok
         self._run_spans = run_spans
@@ -636,16 +666,19 @@ class RefRatioChart(QWidget):
         p.drawText(8, 18, "Ref PMT LMS/Alpha ratio")
 
         finite = [
-            v for series in self._ratios for v in series
-            if math.isfinite(v) and v > 0.0
+            v for series in self._ratios for x, v in zip(self._x, series)
+            if math.isfinite(x) and math.isfinite(v) and v > 0.0
         ]
-        if not self._x or not finite:
+        finite_x = [x for x in self._x if math.isfinite(x)]
+        if not finite_x or not finite:
             p.setPen(CHART_TEXT_DIM)
             p.setFont(QFont("Consolas", 10))
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No ref ratio data")
             return
 
-        x_min, x_max = min(0.0, min(self._x)), max(self._x)
+        x_min, x_max = min(finite_x), max(finite_x)
+        if self._x_mode != "unix":
+            x_min = min(0.0, x_min)
         if x_min == x_max:
             x_min -= 1.0
             x_max += 1.0
@@ -726,7 +759,7 @@ class RefRatioChart(QWidget):
 
             pts = []
             for x, y, ok in zip(self._x, self._ratios[panel], self._ok[panel]):
-                if not (math.isfinite(y) and y > 0.0):
+                if not (math.isfinite(x) and math.isfinite(y) and y > 0.0):
                     continue
                 px, py = sx(panel, x), sy(panel, y)
                 pts.append((px, py, ok))
@@ -760,6 +793,7 @@ class OnlineGainMonitor(QMainWindow):
         super().__init__()
         self._modules = load_modules(MODULES_JSON)
         self._selected_module = "W1"
+        self._x_axis_mode = "batch"
         self._data: Optional[GainData] = None
         self._runs_data: Dict[int, GainData] = {}
         self._known_runs: set[int] = set()
@@ -1048,6 +1082,33 @@ class OnlineGainMonitor(QMainWindow):
         ))
         self._run_avg_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         right_lay.addWidget(self._run_avg_label)
+
+        axis_bar = QWidget()
+        axis_lay = QHBoxLayout(axis_bar)
+        axis_lay.setContentsMargins(0, 0, 0, 0)
+        axis_lay.setSpacing(4)
+        axis_lay.addStretch()
+        axis_lay.addWidget(self._label("X axis"))
+        self._x_axis_group = QButtonGroup(self)
+        self._x_axis_group.setExclusive(True)
+        self._x_axis_buttons: Dict[str, QPushButton] = {}
+        for mode, text in (("batch", "Batch ID"), ("unix", "Date/Time"), ("minutes", "Minutes")):
+            btn = QPushButton(text)
+            btn.setCheckable(True)
+            btn.setChecked(mode == self._x_axis_mode)
+            btn.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+            btn.setStyleSheet(themed(
+                f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT_DIM};"
+                f"border:1px solid {THEME.BORDER};border-radius:3px;padding:3px 8px;}}"
+                f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};}}"
+                f"QPushButton:checked{{background:{THEME.ACCENT};color:white;"
+                f"border-color:{THEME.ACCENT};}}"
+            ))
+            btn.clicked.connect(lambda checked, m=mode: checked and self._set_x_axis_mode(m))
+            self._x_axis_group.addButton(btn)
+            self._x_axis_buttons[mode] = btn
+            axis_lay.addWidget(btn)
+        right_lay.addWidget(axis_bar)
         right_lay.addWidget(self._chart, stretch=3)
         right_lay.addWidget(self._ratio_chart, stretch=2)
 
@@ -2330,6 +2391,12 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         self._refresh_chart()
         self._refresh_run_average_monitor()
 
+    def _set_x_axis_mode(self, mode: str):
+        if mode not in {"batch", "unix", "minutes"}:
+            return
+        self._x_axis_mode = mode
+        self._refresh_chart()
+
     def _check_gain_drop_warning(self):
         runs_data = self._visible_runs_data()
         if not runs_data:
@@ -2390,12 +2457,33 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         ref_ratio_values = [[], [], []]
         ref_ratio_ok = [[], [], []]
         avg_values: List[float] = []
+        x_mode = self._x_axis_mode
+        valid_unix_times = [
+            float(value)
+            for data in runs_data.values()
+            for value in np.asarray(data.unix_time).reshape(-1)
+            if math.isfinite(float(value)) and float(value) > 0.0
+        ]
+        unix_origin = min(valid_unix_times) if valid_unix_times else math.nan
         offset = 0.0
         for run, data in sorted(runs_data.items()):
             arr = arrays_by_run[run]
             start = offset
+            run_x: List[float] = []
             for b in range(data.nbatches):
-                x.append(offset)
+                if x_mode == "batch":
+                    x_value = offset
+                else:
+                    unix_value = float(data.unix_time[b]) if b < len(data.unix_time) else 0.0
+                    if not math.isfinite(unix_value) or unix_value <= 0.0:
+                        x_value = math.nan
+                    elif x_mode == "minutes":
+                        x_value = (unix_value - unix_origin) / 60.0
+                    else:
+                        x_value = unix_value
+                x.append(x_value)
+                if math.isfinite(x_value):
+                    run_x.append(x_value)
                 mask = masks_by_run.get(run, [])[b] if b < len(masks_by_run.get(run, [])) else [False, False, False]
                 for j in range(3):
                     ref_ratio_values[j].append(float(data.ref_ratio[b, j]))
@@ -2405,8 +2493,10 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 avg_values.append(finite_avg(vals) if self._is_change_quantity() else positive_avg(vals))
                 offset += 1.0
             end = offset
-            if end > start:
+            if x_mode == "batch" and end > start:
                 run_spans.append((run, start - 0.5, end - 0.5))
+            elif run_x:
+                run_spans.append((run, min(run_x), max(run_x)))
         ref_idx = self._ref.currentIndex()
         series = []
         if ref_idx < 3:
@@ -2420,17 +2510,24 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             qlabel += " (first 5 avg = 1)"
         span = self._change_map_range()
         default_y = (-span, span) if self._is_change_quantity() else (1.0 - span, 1.0 + span)
-        batch_seconds = self._batch.value() / 10.0
-        batch_minutes = batch_seconds / 60.0
-        if batch_minutes >= 1.0:
-            xlabel = f"batch id (~{batch_minutes:.1f}min)"
+        if x_mode == "unix":
+            xlabel = "local date / time"
+        elif x_mode == "minutes":
+            xlabel = "minutes from first valid batch"
         else:
-            xlabel = f"batch id (~{batch_seconds:.0f}s)"
+            batch_seconds = self._batch.value() / 10.0
+            batch_minutes = batch_seconds / 60.0
+            if batch_minutes >= 1.0:
+                xlabel = f"batch id (~{batch_minutes:.1f}min)"
+            else:
+                xlabel = f"batch id (~{batch_seconds:.0f}s)"
         self._chart.set_data(
             f"{self._selected_module} {qlabel}",
-            x, series, run_spans, default_y, xlabel,
+            x, series, run_spans, default_y, xlabel, x_mode,
         )
-        self._ratio_chart.set_data(x, ref_ratio_values, ref_ratio_ok, run_spans, centers)
+        self._ratio_chart.set_data(
+            x, ref_ratio_values, ref_ratio_ok, run_spans, centers, x_mode,
+        )
 
     def closeEvent(self, event):
         self._timer.stop()

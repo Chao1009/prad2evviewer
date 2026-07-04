@@ -14,10 +14,13 @@
 #include "GainCorrCompute.h"
 
 #include <TClass.h>
+#include <TFile.h>
 #include <TROOT.h>
+#include <TTree.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <getopt.h>
@@ -60,6 +63,34 @@ static std::vector<std::string> collectLMSFiles(const std::string &path)
     }
     std::sort(files.begin(), files.end());
     return files;
+}
+
+static bool reportBatchTimeCoverage(const std::string &path)
+{
+    TFile file(path.c_str(), "READ");
+    if (file.IsZombie()) {
+        std::cerr << "Cannot reopen gain output for time-axis validation: "
+                  << path << "\n";
+        return false;
+    }
+    auto *tree = file.Get<TTree>("gain_corr");
+    if (!tree || !tree->GetBranch("unix_time")) {
+        std::cerr << "Gain output is missing gain_corr/unix_time: " << path << "\n";
+        return false;
+    }
+
+    uint32_t unix_time = 0;
+    tree->SetBranchAddress("unix_time", &unix_time);
+    Long64_t valid = 0;
+    for (Long64_t i = 0; i < tree->GetEntries(); ++i) {
+        tree->GetEntry(i);
+        if (unix_time > 0) ++valid;
+    }
+    std::cout << "  Batch time  : " << valid << "/" << tree->GetEntries()
+              << " batch(es) have Unix time\n";
+    if (tree->GetEntries() > 0 && valid == 0)
+        std::cerr << "Warning: no valid EPICS/scaler time anchors; date/time axes will be empty.\n";
+    return true;
 }
 
 static void usage()
@@ -238,6 +269,7 @@ int main(int argc, char *argv[])
               << "  Output     : " << gain_out << "\n";
 
     bool ok = ComputeGainCorrections(lms_files, gain_out, batch_size, ref_run, ref_tbl);
+    if (ok) ok = reportBatchTimeCoverage(gain_out);
     std::cout << "All done.\n";
     return (!ok || replay_errors.load() > 0) ? 1 : 0;
 }
