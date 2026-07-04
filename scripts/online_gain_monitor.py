@@ -614,7 +614,9 @@ class BatchChart(QWidget):
             item_w = [fm.horizontalAdvance(label) + 22 for label, _, _, _ in legend_items]
             total_w = min(sum(item_w) + 12, max(80, plot_w - 12))
             lx = pad_l + plot_w - total_w - 6
-            ly = pad_t + plot_h - 26
+            # Keep the Ref1/Ref2/Ref3 legend outside the plotting rectangle,
+            # in the chart header's upper-right corner.
+            ly = 5
             lh = 20
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(CHART_LEGEND_BG)
