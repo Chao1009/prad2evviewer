@@ -179,13 +179,15 @@ class GainData:
 
 
 def find_update_tool() -> str:
+    # Prefer the executable built from the same source tree as this GUI.
+    # A PATH installation may be older and lack newer options such as -a.
     candidates = [
-        shutil.which("prad2ana_online_gain_monitor_base"),
         str((SCRIPT_DIR / ".." / "build" / "bin" / "prad2ana_online_gain_monitor_base").resolve()),
         str((SCRIPT_DIR / ".." / "build-clang" / "bin" / "prad2ana_online_gain_monitor_base").resolve()),
+        shutil.which("prad2ana_online_gain_monitor_base"),
     ]
     for c in candidates:
-        if c and os.path.exists(c):
+        if c and os.path.isfile(c) and os.access(c, os.X_OK):
             return c
     return "prad2ana_online_gain_monitor_base"
 
@@ -1721,7 +1723,7 @@ exit 0
         self._reanalyze_btn.setEnabled(False)
         self._status.setText("Re-analyzing LMS ROOT files...")
         self._append(
-            f"$ re-analyze {len(jobs)} run(s) with batch size {self._batch.value()}",
+            f"$ {tool} -a  # re-analyze {len(jobs)} run(s), batch size {self._batch.value()}",
             "cmd",
         )
         replay_cpus = getattr(self, "_replay_worker_cpus", [])
