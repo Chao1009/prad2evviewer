@@ -73,9 +73,15 @@ DEFAULT_GAIN_DROP_WARN_PCT = 3.0
 DEFAULT_MAX_DOWNLOAD_EVIO = 10
 DEFAULT_QUEUE_CAP_EVIO = 100
 NEW_YORK_TZ = ZoneInfo("America/New_York")
-LOG_MAX_BLOCKS = 1500
-LOG_FLUSH_MS = 100
-MAINTENANCE_INTERVAL_MS = 5 * 60 * 1000
+LOG_MAX_BLOCKS = 200
+LOG_BUFFER_LIMIT = 250
+LOG_FLUSH_MS = 200
+MAINTENANCE_INTERVAL_MS = 60 * 1000
+QUIET_PROCESS_PREFIXES = (
+    "Already replayed:",
+    "Already queued:",
+    "Safety hold:",
+)
 
 QUANTITIES = [
     ("gain_norm_W", "Gain / Ref Gain"),
@@ -402,6 +408,17 @@ def tick_label(value: float, decimals: int) -> str:
     return f"{value:.{decimals}f}"
 
 
+def decimate_points(points, max_points: int):
+    """Bound paint work while retaining the first and last samples."""
+    if len(points) <= max_points:
+        return points
+    step = max(1, math.ceil((len(points) - 1) / max(1, max_points - 1)))
+    reduced = points[::step]
+    if reduced[-1] != points[-1]:
+        reduced.append(points[-1])
+    return reduced
+
+
 class GainMapWidget(HyCalMapWidget):
     def __init__(self, parent=None):
         super().__init__(parent, enable_zoom_pan=True, include_lms=False)
@@ -597,6 +614,7 @@ class BatchChart(QWidget):
                 for x, v in zip(self._x, values)
                 if math.isfinite(x) and math.isfinite(v) and y_min <= v <= y_max
             ]
+            pts = decimate_points(pts, max(100, plot_w * 2))
             if len(pts) < 1:
                 continue
             legend_items.append((label, color, draw_line, pts))
@@ -770,6 +788,7 @@ class RefRatioChart(QWidget):
                     continue
                 px, py = sx(panel, x), sy(panel, y)
                 pts.append((px, py, ok))
+            pts = decimate_points(pts, max(80, int(panel_w) * 2))
             p.setPen(QPen(REF_COLORS[panel], 1.3))
             last_good = None
             for px, py, ok in pts:
@@ -984,7 +1003,7 @@ class OnlineGainMonitor(QMainWindow):
         top2.addWidget(self._label("quantity"))
         self._quantity = QComboBox()
         self._quantity.addItems([label for _, label in QUANTITIES])
-        self._quantity.currentIndexChanged.connect(self._refresh_views)
+        self._quantity.currentIndexChanged.connect(self._invalidate_and_refresh_views)
         top2.addWidget(self._quantity)
 
         top2.addWidget(self._label("map range"))
@@ -1021,7 +1040,7 @@ class OnlineGainMonitor(QMainWindow):
             f"QCheckBox{{color:{THEME.TEXT_DIM};spacing:4px;}}"
             f"QCheckBox::indicator{{width:14px;height:14px;}}"
         ))
-        self._norm_first5.stateChanged.connect(self._refresh_views)
+        self._norm_first5.stateChanged.connect(self._invalidate_and_refresh_views)
         top2.addWidget(self._norm_first5)
 
         top2.addWidget(self._label("ratio tol"))
@@ -1030,7 +1049,7 @@ class OnlineGainMonitor(QMainWindow):
         self._ref_ratio_tol.setValue(DEFAULT_REF_RATIO_BAD_PCT)
         self._ref_ratio_tol.setSuffix(" %")
         self._ref_ratio_tol.setFixedWidth(80)
-        self._ref_ratio_tol.valueChanged.connect(self._refresh_views)
+        self._ref_ratio_tol.valueChanged.connect(self._invalidate_and_refresh_views)
         top2.addWidget(self._ref_ratio_tol)
 
         top2.addStretch()
@@ -1076,6 +1095,7 @@ class OnlineGainMonitor(QMainWindow):
         self._log = QTextEdit()
         self._log.setReadOnly(True)
         self._log.document().setMaximumBlockCount(LOG_MAX_BLOCKS)
+        self._log.setMaximumHeight(125)
         self._log.setStyleSheet(themed(
             f"QTextEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
             f"border:1px solid {THEME.BORDER};font-family:Consolas;font-size:9pt;}}"))
@@ -1553,6 +1573,8 @@ exit 0
                 continue
             if not is_stderr:
                 self._record_status_line(line)
+                if line.startswith(QUIET_PROCESS_PREFIXES):
+                    continue
             self._append(line, "error" if is_stderr else "normal")
 
     def _record_status_line(self, line: str):
@@ -1785,14 +1807,20 @@ exit 0
         requested_threads = self._threads.value()
         replay_cpus = getattr(self, "_replay_worker_cpus", [])
         replay_cpu_capacity = len(replay_cpus) if replay_cpus else max(1, (os.cpu_count() or 2) - 2)
-        replay_threads = min(requested_threads, max(1, replay_cpu_capacity))
+        replay_threads = min(
+            requested_threads,
+            max(1, replay_cpu_capacity),
+            max(1, self._active_replay_file_count),
+        )
         replay_cpu_list = ""
         if replay_cpus and self._viewer_cpu is not None:
             replay_cpu_list = _format_cpu_list(replay_cpus[:replay_threads])
         if replay_threads < requested_threads:
             self._append(
-                f"Replay threads capped at {replay_threads}; one CPU remains dedicated to the viewer/download.",
-                "warn",
+                f"Replay uses {replay_threads}/{requested_threads} configured threads "
+                f"for {self._active_replay_file_count} queued file(s); "
+                "unused workers are not created.",
+                "normal",
             )
 
         ref_arg = ""
@@ -1872,8 +1900,8 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             .replace(">", "&gt;")
         )
         self._log_buffer.append((safe, colors.get(kind, THEME.TEXT)))
-        if len(self._log_buffer) > 1000:
-            del self._log_buffer[:-1000]
+        if len(self._log_buffer) > LOG_BUFFER_LIMIT:
+            del self._log_buffer[:-LOG_BUFFER_LIMIT]
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start(LOG_FLUSH_MS)
 
@@ -1998,6 +2026,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         self._status.setText(
             f"{len(self._runs_data)} run(s), {nbatches} batches loaded from {label}{miss}"
         )
+        self._view_context = None
         self._refresh_views()
         self._check_gain_drop_warning()
         self._root_load_context = None
@@ -2061,7 +2090,10 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if name:
             self._selected_module = name
             self._map.set_selected(name)
-            self._refresh_views()
+            # The selected module only changes the time-series chart. Map
+            # values, gain arrays and run averages are unchanged, so avoid a
+            # full view refresh on this latency-sensitive click path.
+            self._refresh_chart()
 
     def _module_index(self, name: str) -> Optional[int]:
         m = re.match(r"^W(\d+)$", name)
@@ -2129,7 +2161,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
     def _visible_quantity_arrays(self, runs_data: Dict[int, GainData]):
         arrays = {
-            run: np.asarray(self._quantity_array(data), dtype=float).copy()
+            run: np.asarray(self._quantity_array(data), dtype=float)
             for run, data in runs_data.items()
         }
         if not arrays or not self._norm_first5.isChecked():
@@ -2162,7 +2194,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
     def _visible_base_gain_arrays(self, runs_data: Dict[int, GainData]):
         return {
-            run: np.asarray(self._base_gain_array(data), dtype=float).copy()
+            run: np.asarray(self._base_gain_array(data), dtype=float)
             for run, data in runs_data.items()
         }
 
@@ -2294,19 +2326,17 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 if baseline is None:
                     continue
                 arr = base_by_run[run]
-                masks = masks_by_run.get(run, [])
-                for bidx in range(arr.shape[0]):
-                    current = arr[bidx]
-                    current_mask = masks[bidx] if bidx < len(masks) else [False, False, False]
-                    valid = (
-                        np.asarray(current_mask, dtype=bool)[None, :]
-                        & np.isfinite(current)
-                        & np.isfinite(baseline)
-                        & (baseline > 0.0)
-                    )
-                    results[run][bidx] = safe_divide(
-                        current - baseline, baseline, valid,
-                    )
+                masks = np.asarray(masks_by_run.get(run, []), dtype=bool)
+                if masks.shape != (arr.shape[0], 3):
+                    continue
+                valid = (
+                    masks[:, None, :] & np.isfinite(arr)
+                    & np.isfinite(baseline)[None, :, :]
+                    & (baseline[None, :, :] > 0.0)
+                )
+                results[run] = safe_divide(
+                    arr - baseline[None, :, :], baseline[None, :, :], valid,
+                )
             return results
 
         early_n = min(5, len(batches))
@@ -2314,47 +2344,64 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             [b[2] for b in batches[:early_n]],
             [b[3] for b in batches[:early_n]],
         )
-        for i, (run, bidx, current, current_mask) in enumerate(batches):
-            if quantity == "gain_change":
-                prev = batches[max(0, i - 5):i]
-                baseline = masked_mean([b[2] for b in prev], [b[3] for b in prev])
-            else:
-                baseline = early_baseline
-            if baseline is None:
-                continue
+        ordered_runs = sorted(runs_data)
+        values = np.concatenate([base_by_run[run] for run in ordered_runs], axis=0)
+        ref_masks = np.concatenate(
+            [np.asarray(masks_by_run.get(run, []), dtype=bool) for run in ordered_runs],
+            axis=0,
+        )
+        if quantity == "gain_change":
+            sample_valid = ref_masks[:, None, :] & np.isfinite(values) & (values > 0.0)
+            sample_values = np.where(sample_valid, values, 0.0)
+            sums = np.concatenate(
+                [np.zeros((1,) + values.shape[1:], dtype=float), np.cumsum(sample_values, axis=0)],
+                axis=0,
+            )
+            counts = np.concatenate(
+                [np.zeros((1,) + values.shape[1:], dtype=np.int64), np.cumsum(sample_valid, axis=0)],
+                axis=0,
+            )
+            ends = np.arange(values.shape[0])
+            starts = np.maximum(0, ends - 5)
+            window_count = counts[ends] - counts[starts]
+            baseline = safe_divide(
+                sums[ends] - sums[starts], window_count, window_count > 0,
+            )
+        else:
+            baseline = np.broadcast_to(early_baseline, values.shape) if early_baseline is not None else None
+        if baseline is not None:
             valid = (
-                np.asarray(current_mask, dtype=bool)[None, :]
-                & np.isfinite(current)
-                & np.isfinite(baseline)
-                & (baseline > 0.0)
+                ref_masks[:, None, :] & np.isfinite(values)
+                & np.isfinite(baseline) & (baseline > 0.0)
             )
-            results[run][bidx] = safe_divide(
-                current - baseline, baseline, valid,
-            )
+            changes = safe_divide(values - baseline, baseline, valid)
+            offset = 0
+            for run in ordered_runs:
+                size = base_by_run[run].shape[0]
+                results[run] = changes[offset:offset + size]
+                offset += size
         return results
 
-    def _ref_ratio_centers_and_masks(self) -> Tuple[List[float], Dict[int, List[List[bool]]]]:
+    def _ref_ratio_centers_and_masks(self):
         runs_data = self._visible_runs_data()
-        centers: List[float] = []
-        for j in range(3):
-            vals: List[float] = []
-            for data in runs_data.values():
-                for b in range(data.nbatches):
-                    v = float(data.ref_ratio[b, j])
-                    if math.isfinite(v) and v > 0.0:
-                        vals.append(v)
-            centers.append(sum(vals) / len(vals) if vals else math.nan)
-
+        ratios = [np.asarray(data.ref_ratio, dtype=float) for data in runs_data.values()]
+        stacked = np.concatenate(ratios, axis=0) if ratios else np.empty((0, 3))
+        valid = np.isfinite(stacked) & (stacked > 0.0)
+        counts = np.sum(valid, axis=0)
+        centers_array = safe_divide(
+            np.sum(np.where(valid, stacked, 0.0), axis=0), counts, counts > 0,
+        )
+        centers = centers_array.tolist()
         bad_rel = self._ref_ratio_bad_rel()
-        masks: Dict[int, List[List[bool]]] = {}
+        masks = {}
         for run, data in runs_data.items():
-            run_masks: List[List[bool]] = []
-            for b in range(data.nbatches):
-                run_masks.append([
-                    ref_ratio_ok(float(data.ref_ratio[b, j]), centers[j], bad_rel)
-                    for j in range(3)
-                ])
-            masks[run] = run_masks
+            values = np.asarray(data.ref_ratio, dtype=float)
+            center_valid = np.isfinite(centers_array) & (centers_array > 0.0)
+            masks[run] = (
+                np.isfinite(values) & (values > 0.0) & center_valid[None, :]
+                & (np.abs(values - centers_array[None, :])
+                   <= bad_rel * centers_array[None, :])
+            )
         return centers, masks
 
     def _get_view_context(self):
@@ -2410,35 +2457,41 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if latest is None:
             return {}
         ref_idx = self._ref.currentIndex()
-        values: Dict[str, float] = {}
-        for i in range(1156):
-            if ref_idx < 3:
-                v = float(latest[i, ref_idx])
-            else:
-                refs = [latest[i, j] for j in range(3)]
-                v = finite_avg(refs) if self._is_change_quantity() else positive_avg(refs)
-            values[f"W{i + 1}"] = v
-        return values
+        if ref_idx < 3:
+            selected = np.asarray(latest[:, ref_idx], dtype=float)
+        else:
+            latest = np.asarray(latest, dtype=float)
+            valid = np.isfinite(latest)
+            if not self._is_change_quantity():
+                valid &= (latest > 0.0) & (latest != 1.0)
+            count = np.sum(valid, axis=1)
+            selected = safe_divide(
+                np.sum(np.where(valid, latest, 0.0), axis=1), count, count > 0,
+            )
+        return {f"W{i + 1}": float(value) for i, value in enumerate(selected)}
 
-    def _run_average_value(self, arr, masks: List[List[bool]]) -> float:
+    def _run_average_value(self, arr, masks) -> float:
         ref_idx = self._ref.currentIndex()
-        vals: List[float] = []
-        for b in range(arr.shape[0]):
-            mask = masks[b] if b < len(masks) else [False, False, False]
-            if ref_idx < 3:
-                if not mask[ref_idx]:
-                    continue
-                sample = arr[b, :, ref_idx]
-                vals.extend(float(v) for v in sample if math.isfinite(float(v)))
-            else:
-                for i in range(arr.shape[1]):
-                    refs = [arr[b, i, j] for j in range(3) if mask[j]]
-                    v = finite_avg(refs) if self._is_change_quantity() else positive_avg(refs)
-                    if math.isfinite(v):
-                        vals.append(v)
+        values = np.asarray(arr, dtype=float)
+        batch_masks = np.asarray(masks, dtype=bool)
+        if values.size == 0 or batch_masks.shape != (values.shape[0], 3):
+            return math.nan
+        if ref_idx < 3:
+            sample = values[:, :, ref_idx]
+            valid = np.isfinite(sample) & batch_masks[:, ref_idx, None]
+            if not self._is_change_quantity():
+                valid &= sample > 0.0
+            return float(np.mean(sample[valid])) if np.any(valid) else math.nan
+
+        valid = np.isfinite(values) & batch_masks[:, None, :]
         if not self._is_change_quantity():
-            vals = [v for v in vals if v > 0.0]
-        return finite_avg(vals)
+            valid &= (values > 0.0) & (values != 1.0)
+        count = np.sum(valid, axis=2)
+        per_module = safe_divide(
+            np.sum(np.where(valid, values, 0.0), axis=2), count, count > 0,
+        )
+        finite = np.isfinite(per_module)
+        return float(np.mean(per_module[finite])) if np.any(finite) else math.nan
 
     def _fmt_run_average(self, value: float) -> str:
         if not math.isfinite(value):
@@ -2471,8 +2524,11 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             f"Run avg {qlabel} [{ref_label}]   Prev {prev_text}   Current {cur_text}   All {self._fmt_run_average(all_avg)}"
         )
 
-    def _refresh_views(self):
+    def _invalidate_and_refresh_views(self):
         self._view_context = None
+        self._refresh_views()
+
+    def _refresh_views(self):
         values = self._selected_values_for_batch()
         finite = [v for v in values.values() if math.isfinite(v)]
         is_change = self._is_change_quantity()
@@ -2517,16 +2573,21 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if key == self._last_gain_drop_warning_key:
             return
 
-        _, masks = self._ref_ratio_centers_and_masks()
+        _, _, masks, _ = self._get_view_context()
         change = self._short_change_array(runs_data, masks)
         if change is None:
             return
 
-        dropped: List[Tuple[str, float]] = []
-        for i in range(1156):
-            v = finite_avg([change[i, j] for j in range(3)])
-            if math.isfinite(v) and v <= -threshold:
-                dropped.append((f"W{i + 1}", v))
+        valid = np.isfinite(change)
+        count = np.sum(valid, axis=1)
+        module_change = safe_divide(
+            np.sum(np.where(valid, change, 0.0), axis=1), count, count > 0,
+        )
+        dropped = [
+            (f"W{i + 1}", float(value))
+            for i, value in enumerate(module_change)
+            if math.isfinite(float(value)) and value <= -threshold
+        ]
         if not dropped:
             return
 
