@@ -599,8 +599,34 @@ static bool processFile(const std::string &path,
                 float x3 = ev.cl_x[2], y3 = ev.cl_y[2], z3 = ev.cl_z[2];
                 float E1 = ev.cl_energy[0], E2 = ev.cl_energy[1], E3 = ev.cl_energy[2];
 
+                float t1 = ev.cl_time[0], t2 = ev.cl_time[1], t3 = ev.cl_time[2];
+
+                if(std::fabs(t1 - t2) > 16.f || std::fabs(t1 - t3) > 16.f || std::fabs(t2 - t3) > 16.f)
+                    continue;
+
                 out.h_3cl_totalE->Fill(E1 + E2 + E3);
                 if (std::fabs(E1 + E2 + E3 - Ebeam) > 250.f) continue;
+
+                // Pt x and Pt y calculation
+                auto get_pt = [](float x, float y, float z, float energy) {
+                    constexpr float electron_mass = 0.51099895f; // MeV
+                    const float norm = std::sqrt(x*x + y*y + z*z);
+                    if (norm <= 0.f || energy < electron_mass)
+                        return std::pair<float, float>{0.f, 0.f};
+                    const float p = std::sqrt(std::max(
+                        0.f, energy*energy - electron_mass*electron_mass));
+                    return std::pair<float, float>{p*x/norm, p*y/norm};
+                };
+                const auto [px1, py1] = get_pt(x1, y1, z1, E1);
+                const auto [px2, py2] = get_pt(x2, y2, z2, E2);
+                const auto [px3, py3] = get_pt(x3, y3, z3, E3);
+                const float ptx = px1 + px2 + px3;
+                const float pty = py1 + py2 + py3;
+                out.h_3cl_ptx->Fill(ptx);
+                out.h_3cl_pty->Fill(pty);
+
+                if(std::fabs(ptx) > 5.f || std::fabs(pty) > 5.f)
+                    continue;
 
                 out.h_3cl_E->Fill(E1);
                 out.h_3cl_E->Fill(E2);
@@ -627,23 +653,6 @@ static bool processFile(const std::string &path,
                 if (std::isfinite(mass2)) out.h_3cl_mass->Fill(mass2);
                 if (std::isfinite(mass3)) out.h_3cl_mass->Fill(mass3);
 
-                // Pt x and Pt y calculation
-                auto get_pt = [](float x, float y, float z, float energy) {
-                    constexpr float electron_mass = 0.51099895f; // MeV
-                    const float norm = std::sqrt(x*x + y*y + z*z);
-                    if (norm <= 0.f || energy < electron_mass)
-                        return std::pair<float, float>{0.f, 0.f};
-                    const float p = std::sqrt(std::max(
-                        0.f, energy*energy - electron_mass*electron_mass));
-                    return std::pair<float, float>{p*x/norm, p*y/norm};
-                };
-                const auto [px1, py1] = get_pt(x1, y1, z1, E1);
-                const auto [px2, py2] = get_pt(x2, y2, z2, E2);
-                const auto [px3, py3] = get_pt(x3, y3, z3, E3);
-                const float ptx = px1 + px2 + px3;
-                const float pty = py1 + py2 + py3;
-                out.h_3cl_ptx->Fill(ptx);
-                out.h_3cl_pty->Fill(pty);
             }
 
             //loop over GEM matched results
