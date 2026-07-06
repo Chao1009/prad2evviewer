@@ -647,7 +647,7 @@ static bool processFile(const std::string &path,
             }
 
             //loop over GEM matched results
-            if (ev.matchNum == 3 && ev.n_clusters == 3) {
+            if (ev.matchNum == 3) {
                 float x1 = ev.mHit_gx[0][1], y1 = ev.mHit_gy[0][1], z1 = ev.mHit_gz[0][1];
                 float x2 = ev.mHit_gx[1][1], y2 = ev.mHit_gy[1][1], z2 = ev.mHit_gz[1][1];
                 float x3 = ev.mHit_gx[2][1], y3 = ev.mHit_gy[2][1], z3 = ev.mHit_gz[2][1];
