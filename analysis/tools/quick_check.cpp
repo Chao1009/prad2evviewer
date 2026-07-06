@@ -653,8 +653,6 @@ static bool processFile(const std::string &path,
                 float x3 = ev.mHit_gx[2][1], y3 = ev.mHit_gy[2][1], z3 = ev.mHit_gz[2][1];
                 float E1 = ev.mHit_E[0], E2 = ev.mHit_E[1], E3 = ev.mHit_E[2];
 
-
-
                 //project to HyCal plane
                 float scale1 = ev.mHit_z[0] / z1;
                 float scale2 = ev.mHit_z[1] / z2;
@@ -666,7 +664,7 @@ static bool processFile(const std::string &path,
 
                 float t1 = ev.cl_time[0], t2 = ev.cl_time[1], t3 = ev.cl_time[2];
                 bool time_cut = false;
-                if(std::fabs(t1 - t2) > 16.f || std::fabs(t1 - t3) > 16.f || std::fabs(t2 - t3) > 16.f)
+                if(std::fabs(t1 - t2) < 16.f && std::fabs(t1 - t3) < 16.f && std::fabs(t2 - t3) < 16.f)
                     time_cut = true;
 
                 out.h_3cl_totalE_gem->Fill(E1 + E2 + E3);
