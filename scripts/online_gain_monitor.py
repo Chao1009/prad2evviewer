@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import math
 import os
 import re
@@ -290,6 +291,39 @@ def _parse_lms_dat(path: Path) -> Optional[np.ndarray]:
             if vals[j] > 0.0:
                 result[i, j] = vals[j]
     return result
+
+
+def build_gain_summary_groups(path: Path) -> Dict[str, List[int]]:
+    """Return W-array indices for the absorber region and two open rings."""
+    with open(path) as stream:
+        entries = json.load(stream)
+    grouped = {"under absorber": [], "open layer 1": [], "open layer 2": []}
+    positioned = []
+    for entry in entries:
+        name = entry.get("n", "")
+        geo = entry.get("geo", {})
+        if not name.startswith("W") or "row" not in geo or "col" not in geo:
+            continue
+        try:
+            index = int(name[1:]) - 1
+        except ValueError:
+            continue
+        row, col = int(geo["row"]), int(geo["col"])
+        # The absorber covers rows/columns 15..18. Each open layer is the
+        # next Chebyshev ring around that square.
+        distance = max(max(15 - row, 0, row - 18), max(15 - col, 0, col - 18))
+        if distance == 0:
+            group = "under absorber"
+        elif distance == 1:
+            group = "open layer 1"
+        elif distance == 2:
+            group = "open layer 2"
+        else:
+            continue
+        positioned.append((group, row, col, index))
+    for group, _, _, index in sorted(positioned, key=lambda item: (item[0], item[1], item[2])):
+        grouped[group].append(index)
+    return grouped
 
 
 class GainRootLoader(QObject):
@@ -818,12 +852,15 @@ class OnlineGainMonitor(QMainWindow):
     def __init__(self):
         super().__init__()
         self._modules = load_modules(MODULES_JSON)
+        self._gain_summary_groups = build_gain_summary_groups(MODULES_JSON)
         self._selected_module = "W1"
         self._x_axis_mode = "batch"
         self._data: Optional[GainData] = None
         self._runs_data: Dict[int, GainData] = {}
         self._known_runs: set[int] = set()
         self._opened_output_folder: Optional[Path] = None
+        self._folder_gain_files: Dict[int, Path] = {}
+        self._updating_run_range = False
         self._ref_gain_file: Optional[Path] = None
         self._ref_file_gain_array: Optional[np.ndarray] = None
         self._ref_gain_cache: Dict[int, Optional[np.ndarray]] = {}
@@ -980,6 +1017,10 @@ class OnlineGainMonitor(QMainWindow):
         self._runs_shown.setFixedWidth(70)
         self._runs_shown.valueChanged.connect(self._runs_shown_changed)
         top.addWidget(self._runs_shown)
+        self._valid_runs_count = QLabel("0 loaded")
+        self._valid_runs_count.setFont(QFont("Consolas", 9))
+        self._valid_runs_count.setStyleSheet(themed(f"color:{THEME.TEXT_DIM};"))
+        top.addWidget(self._valid_runs_count)
 
         top.addWidget(self._label("threads"))
         self._threads = QSpinBox()
@@ -999,6 +1040,20 @@ class OnlineGainMonitor(QMainWindow):
 
         self._ref_file_btn = self._button("Ref File", THEME.ACCENT, self._browse_ref_gain_file)
         top2.addWidget(self._ref_file_btn)
+
+        top2.addWidget(self._label("start run"))
+        self._display_run_start = QComboBox()
+        self._display_run_start.setMinimumWidth(92)
+        self._display_run_start.setEnabled(False)
+        self._display_run_start.currentIndexChanged.connect(self._display_run_range_changed)
+        top2.addWidget(self._display_run_start)
+
+        top2.addWidget(self._label("end run"))
+        self._display_run_end = QComboBox()
+        self._display_run_end.setMinimumWidth(92)
+        self._display_run_end.setEnabled(False)
+        self._display_run_end.currentIndexChanged.connect(self._display_run_range_changed)
+        top2.addWidget(self._display_run_end)
 
         top2.addWidget(self._label("quantity"))
         self._quantity = QComboBox()
@@ -1121,6 +1176,22 @@ class OnlineGainMonitor(QMainWindow):
         ))
         self._run_avg_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         right_lay.addWidget(self._run_avg_label)
+
+        self._gain_summary = QTextEdit()
+        self._gain_summary.setReadOnly(True)
+        self._gain_summary.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self._gain_summary.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._gain_summary.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._gain_summary.setFixedHeight(82)
+        self._gain_summary.setFont(QFont("Consolas", 9))
+        self._gain_summary.setPlainText(
+            "under absorber: n/a\nopen layer 1: n/a\nopen layer 2: n/a"
+        )
+        self._gain_summary.setStyleSheet(themed(
+            f"QTextEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
+            f"border:1px solid {THEME.BORDER};padding:3px 5px;}}"
+        ))
+        right_lay.addWidget(self._gain_summary)
 
         axis_bar = QWidget()
         axis_lay = QHBoxLayout(axis_bar)
@@ -1245,6 +1316,8 @@ class OnlineGainMonitor(QMainWindow):
         if d:
             self._storage_base.setText(d)
             self._opened_output_folder = None
+            self._folder_gain_files = {}
+            self._set_folder_run_choices([], preserve=False)
             self._work_dir.clear()
             self._out_root.clear()
             self._update_paths_from_run()
@@ -1254,8 +1327,7 @@ class OnlineGainMonitor(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Select gain_corr output folder", start)
         if not d:
             return
-        self._opened_output_folder = Path(d)
-        self._load_output_folder(self._opened_output_folder)
+        self._load_output_folder(Path(d))
 
     def _browse_ref_gain_file(self):
         start = str(self._ref_gain_file.parent if self._ref_gain_file else DB_DIR / "gain_factor" / "ref_gain")
@@ -1342,6 +1414,65 @@ class OnlineGainMonitor(QMainWindow):
         else:
             self._load_root()
 
+    def _set_folder_run_choices(self, runs: List[int], preserve: bool = True):
+        old_start = self._display_run_start.currentData() if preserve else None
+        old_end = self._display_run_end.currentData() if preserve else None
+        self._updating_run_range = True
+        try:
+            for combo in (self._display_run_start, self._display_run_end):
+                combo.clear()
+                for run in runs:
+                    combo.addItem(f"{run:06d}", run)
+                combo.setEnabled(bool(runs))
+            if not runs:
+                return
+            default_start = runs[max(0, len(runs) - self._runs_shown.value())]
+            start = old_start if old_start in self._folder_gain_files else default_start
+            end = old_end if old_end in self._folder_gain_files else runs[-1]
+            if start > end:
+                start, end = end, start
+            self._display_run_start.setCurrentIndex(runs.index(start))
+            self._display_run_end.setCurrentIndex(runs.index(end))
+        finally:
+            self._updating_run_range = False
+
+    def _display_run_range_changed(self):
+        if self._updating_run_range or self._opened_output_folder is None:
+            return
+        start = self._display_run_start.currentData()
+        end = self._display_run_end.currentData()
+        if start is None or end is None:
+            return
+        self._updating_run_range = True
+        try:
+            if start > end:
+                if self.sender() is self._display_run_start:
+                    self._display_run_end.setCurrentIndex(self._display_run_start.currentIndex())
+                else:
+                    self._display_run_start.setCurrentIndex(self._display_run_end.currentIndex())
+        finally:
+            self._updating_run_range = False
+        self._load_selected_folder_runs()
+
+    def _load_selected_folder_runs(self):
+        if not self._folder_gain_files:
+            return
+        start = self._display_run_start.currentData()
+        end = self._display_run_end.currentData()
+        if start is None or end is None:
+            return
+        files = [
+            (run, path)
+            for run, path in sorted(self._folder_gain_files.items())
+            if start <= run <= end
+        ]
+        self._run_edit.setText(" ".join(f"{run:06d}" for run, _ in files))
+        self._request_root_load(
+            files,
+            str(self._opened_output_folder),
+            limit=max(1, len(files)),
+        )
+
     def _parse_runs(self) -> List[int]:
         text = self._run_edit.text().strip()
         if not text:
@@ -1380,6 +1511,8 @@ class OnlineGainMonitor(QMainWindow):
             return
         self._scan_floor_run = min(seed_runs)
         self._opened_output_folder = None
+        self._folder_gain_files = {}
+        self._set_folder_run_choices([], preserve=False)
         self._update_paths_from_run()
         self._start_btn.setEnabled(False)
         self._stop_btn.setEnabled(True)
@@ -1920,7 +2053,11 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
     def _maintenance(self):
         self._flush_log()
-        keep = max(DEFAULT_RUNS_SHOWN, self._runs_shown.value())
+        keep = (
+            len(self._runs_data)
+            if self._opened_output_folder is not None
+            else max(DEFAULT_RUNS_SHOWN, self._runs_shown.value())
+        )
         retained = sorted(self._runs_data)[-keep:]
         retained_set = set(retained)
         if len(retained_set) < len(self._runs_data):
@@ -1937,9 +2074,9 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         gc.collect(0)
 
     def _request_root_load(self, files: List[Tuple[int, Path]], label: str,
-                           missing: int = 0):
+                           missing: int = 0, limit: Optional[int] = None):
         by_run = {run: path for run, path in files}
-        limit = max(1, self._runs_shown.value())
+        limit = max(1, self._runs_shown.value() if limit is None else limit)
         selected = sorted(by_run.items())[-limit:]
         if not selected:
             self._status.setText("No gain_corr.root yet")
@@ -2022,6 +2159,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 self._root_signatures.pop(run, None)
         self._data = self._runs_data[max(self._runs_data)]
         nbatches = sum(data.nbatches for data in self._runs_data.values())
+        self._valid_runs_count.setText(f"{len(self._runs_data)} loaded")
         miss = f" | missing {missing} run(s)" if missing else ""
         self._status.setText(
             f"{len(self._runs_data)} run(s), {nbatches} batches loaded from {label}{miss}"
@@ -2043,23 +2181,37 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if self._opened_output_folder is not None:
             self._load_output_folder(self._opened_output_folder)
             return
-        runs = self._runs_to_load()
-        if not runs:
-            return
         storage = self._storage_base.text().strip() or STORAGE_BASE
-        files: List[Tuple[int, Path]] = []
-        missing: List[int] = []
-        limit = max(1, self._runs_shown.value())
-        for run in reversed(runs):
-            _, _, path = run_storage_paths(run, storage)
-            if not path.exists():
-                missing.append(run)
+        files_by_run: Dict[int, Path] = {}
+
+        # Discover actual output files first. Run-number gaps must not consume
+        # the "runs shown" limit.
+        gain_dir = Path(storage).expanduser() / "gain"
+        for path in gain_dir.glob("prad_*/prad_*_gain_corr.root"):
+            if not path.is_file():
                 continue
-            files.append((run, path))
-            if len(files) >= limit:
-                break
+            match = GAIN_CORR_FILE_RE.match(path.name)
+            if match:
+                files_by_run[int(match.group(1))] = path
+
+        # Also cover explicit/just-discovered runs when a nonstandard layout
+        # or a newly-created file has not appeared in the directory scan yet.
+        missing: List[int] = []
+        for run in self._runs_to_load():
+            if run in files_by_run:
+                continue
+            _, _, path = run_storage_paths(run, storage)
+            if path.is_file():
+                files_by_run[run] = path
+            else:
+                missing.append(run)
+
+        limit = max(1, self._runs_shown.value())
+        files = sorted(files_by_run.items())[-limit:]
+        if not files:
+            self._valid_runs_count.setText("0 loaded")
         self._request_root_load(
-            list(reversed(files)), "monitor storage", len(missing),
+            files, "monitor storage", len(missing),
         )
 
     def _load_output_folder(self, folder: Path):
@@ -2067,24 +2219,30 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             self._status.setText("Output folder not found")
             self._append(f"Output folder not found: {folder}", "error")
             return
-        files: List[Tuple[int, Path]] = []
+        files_by_run: Dict[int, Path] = {}
         for path in sorted(folder.rglob("*gain_corr*root")):
             if not path.is_file():
                 continue
             m = GAIN_CORR_FILE_RE.match(path.name)
             if not m:
                 continue
-            files.append((int(m.group(1)), path))
-        if not files:
+            files_by_run[int(m.group(1))] = path
+        if not files_by_run:
+            self._folder_gain_files = {}
+            self._set_folder_run_choices([], preserve=False)
+            self._valid_runs_count.setText("0 loaded")
             self._status.setText("No gain_corr ROOT files")
             self._append(f"No prad_XXXXXX_gain_corr.root files under {folder}", "warn")
             return
 
-        self._known_runs.update(run for run, _ in files)
-        selected_runs = sorted({run for run, _ in files})[-max(1, self._runs_shown.value()):]
-        self._run_edit.setText(" ".join(f"{run:06d}" for run in selected_runs))
+        previous_folder = self._opened_output_folder
+        self._opened_output_folder = folder
+        self._folder_gain_files = files_by_run
+        runs = sorted(files_by_run)
+        self._known_runs.update(runs)
+        self._set_folder_run_choices(runs, preserve=previous_folder == folder)
         self._append(f"Loading gain_corr files from {folder}", "ok")
-        self._request_root_load(files, str(folder))
+        self._load_selected_folder_runs()
 
     def _on_module_clicked(self, name: str):
         if name:
@@ -2155,7 +2313,11 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
     def _visible_runs_data(self) -> Dict[int, GainData]:
         if not self._runs_data:
             return {}
-        limit = self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
+        limit = (
+            len(self._runs_data)
+            if self._opened_output_folder is not None
+            else self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
+        )
         runs = [run for run in sorted(self._runs_data) if self._runs_data[run].nbatches > 0][-limit:]
         return {run: self._runs_data[run] for run in runs}
 
@@ -2524,6 +2686,75 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             f"Run avg {qlabel} [{ref_label}]   Prev {prev_text}   Current {cur_text}   All {self._fmt_run_average(all_avg)}"
         )
 
+    def _refresh_gain_summary(self):
+        if not hasattr(self, "_gain_summary"):
+            return
+        runs_data, _, masks_by_run, _ = self._get_view_context()
+        labels = ("under absorber", "open layer 1", "open layer 2")
+        if not runs_data:
+            self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in labels))
+            return
+
+        remaining = 5
+        samples = []
+        sample_masks = []
+        ref_gain = self._get_ref_run_gain()
+        for run in reversed(sorted(runs_data)):
+            data = runs_data[run]
+            take = min(remaining, data.nbatches)
+            if take <= 0:
+                continue
+            gain = np.asarray(data.gain_w[-take:], dtype=float)
+            if ref_gain is not None:
+                valid = np.isfinite(gain) & np.isfinite(ref_gain)[None, :, :] & (ref_gain[None, :, :] > 0.0)
+                ratio = safe_divide(gain, ref_gain[None, :, :], valid)
+            else:
+                embedded_ref = np.asarray(data.gain_w_ref[-take:], dtype=float)
+                valid = np.isfinite(gain) & np.isfinite(embedded_ref) & (embedded_ref > 0.0)
+                ratio = safe_divide(gain, embedded_ref, valid)
+            masks = np.asarray(masks_by_run.get(run, []), dtype=bool)
+            if masks.shape != (data.nbatches, 3):
+                masks = np.zeros((data.nbatches, 3), dtype=bool)
+            samples.append(ratio)
+            sample_masks.append(masks[-take:])
+            remaining -= take
+            if remaining == 0:
+                break
+
+        if not samples:
+            self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in labels))
+            return
+        values = np.concatenate(list(reversed(samples)), axis=0)
+        masks = np.concatenate(list(reversed(sample_masks)), axis=0)
+        ref_index = self._ref.currentIndex()
+        if ref_index < 3:
+            selected = values[:, :, ref_index]
+            valid = np.isfinite(selected) & (selected > 0.0) & masks[:, ref_index, None]
+            count = np.sum(valid, axis=0)
+            module_means = safe_divide(
+                np.sum(np.where(valid, selected, 0.0), axis=0), count, count > 0,
+            )
+        else:
+            valid = (
+                np.isfinite(values) & (values > 0.0) & (values != 1.0)
+                & masks[:, None, :]
+            )
+            count = np.sum(valid, axis=(0, 2))
+            module_means = safe_divide(
+                np.sum(np.where(valid, values, 0.0), axis=(0, 2)), count, count > 0,
+            )
+
+        lines = []
+        for label in labels:
+            numbers = [
+                f"{float(module_means[index]):.4f}"
+                if 0 <= index < len(module_means) and math.isfinite(float(module_means[index]))
+                else "nan"
+                for index in self._gain_summary_groups[label]
+            ]
+            lines.append(f"{label}: {' '.join(numbers)}")
+        self._gain_summary.setPlainText("\n".join(lines))
+
     def _invalidate_and_refresh_views(self):
         self._view_context = None
         self._refresh_views()
@@ -2546,6 +2777,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
         self._refresh_chart()
         self._refresh_run_average_monitor()
+        self._refresh_gain_summary()
 
     def _set_x_axis_mode(self, mode: str):
         if mode not in {"batch", "unix", "minutes"}:
