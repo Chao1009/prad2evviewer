@@ -2746,12 +2746,14 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
         lines = []
         for label in labels:
-            numbers = [
-                f"{float(module_means[index]):.4f}"
-                if 0 <= index < len(module_means) and math.isfinite(float(module_means[index]))
-                else "nan"
+            group_values = [
+                float(module_means[index])
                 for index in self._gain_summary_groups[label]
+                if 0 <= index < len(module_means)
             ]
+            finite_values = sorted(value for value in group_values if math.isfinite(value))
+            numbers = [f"{value:.4f}" for value in finite_values]
+            numbers.extend("nan" for value in group_values if not math.isfinite(value))
             lines.append(f"{label}: {' '.join(numbers)}")
         self._gain_summary.setPlainText("\n".join(lines))
 

@@ -346,8 +346,8 @@ It follows the currently selected quantity and reference choice.
 
 The three-line box above the charts lists per-module `gain / reference gain`
 averages over the latest five visible batches. Rows cover the modules under
-the central absorber, the first open ring, and the second open ring; values
-within each row follow detector row/column order and omit module names.
+the central absorber, the first open ring, and the second open ring; finite
+values within each row are sorted from smallest to largest and omit module names.
 
 ### Log and status
 
