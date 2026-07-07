@@ -284,6 +284,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "3-Cluster Pty - Cut;Pty (MeV);Counts", 200, -50, 50);
 
     // use gem matching to cut the 3-cluster events
+    r->h_3cl_cluster_gem_num = std::make_unique<TH1F>( "3cl_cluster_gem_num",
+        "GEM-matched Cluster Number;Number of Clusters;Counts", 20, 0, 20);
     r->h2_3cl_hits_gem = std::make_unique<TH2F>("3cl_hits_gem",
         "3-Cluster Hit positions hycal with GEM matching;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
     r->h2_3cl_E_angle_gem = std::make_unique<TH2F>("3cl_E_angle_gem",
@@ -710,7 +712,7 @@ static bool processFile(const std::string &path,
                     if(gem_matched_count == 3) {
                         int d;
                         if(gem[2]) d = 2; else d = 3;
-                        x3 = ev.matchGEMx[j][d], y3 = ev.matchGEMy[j][d], z3 = ev.matchGEMz[j][d], E3 = ev.cl_energy[j], t1 = ev.cl_time[j];
+                        x3 = ev.matchGEMx[j][d], y3 = ev.matchGEMy[j][d], z3 = ev.matchGEMz[j][d], E3 = ev.cl_energy[j], t3 = ev.cl_time[j];
                     }
                 }
             }
