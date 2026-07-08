@@ -99,7 +99,7 @@ int main(int argc, char *argv[])
     TClass::GetClass("TBranch");
 
     std::string daq_config, daq_map, gem_ped_file, output_dir, run_config;
-    float zerosup_override = 0.f;
+    float zerosup_override = 5.f;
     int  max_files   = -1;
     int  num_threads = 4;
     int  max_events  = -1;
@@ -229,7 +229,149 @@ int main(int argc, char *argv[])
         std::cout << "  GEM " << det << ": " << gem_mollers[det].size()
                   << " Moller events\n";
 
-    // TODO: analyze the combined hycal_mollers and gem_mollers data.
+    //Creat the histgrams
+    TH2F *h2_hycal_hits = new TH2F("h2_hycal_hits", "HyCal Hits", 720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem0_hits  = new TH2F("h2_gem0_hits",  "GEM0 Hits",  720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem1_hits  = new TH2F("h2_gem1_hits",  "GEM1 Hits",  720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem2_hits  = new TH2F("h2_gem2_hits",  "GEM2 Hits",  720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem3_hits  = new TH2F("h2_gem3_hits",  "GEM3 Hits",  720, -360, 360, 720, -360, 360);
+
+    TH2F *h2_hycal_mollerCenter = new TH2F("h2_hycal_mollerCenterX", "HyCal Moller Center X", 720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem0_mollerCenter  = new TH2F("h2_gem0_mollerCenter",   "GEM0 Moller Center",    720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem1_mollerCenter  = new TH2F("h2_gem1_mollerCenter",   "GEM1 Moller Center",    720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem2_mollerCenter  = new TH2F("h2_gem2_mollerCenter",   "GEM2 Moller Center",    720, -360, 360, 720, -360, 360);
+    TH2F *h2_gem3_mollerCenter  = new TH2F("h2_gem3_mollerCenter",   "GEM3 Moller Center",    720, -360, 360, 720, -360, 360);
+
+    TH1F *h1_hycal_mollerCenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   200, -50, 50);
+    TH1F *h1_hycal_mollerCenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   200, -50, 50);
+    TH1F *h1_hycal_mollerZdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 1000, 0, 10000);
+
+    TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem0_mollerCenterY   = new TH1F("h1_gem0_mollerCenterY",   "GEM0 Moller Center Y",   200, -50, 50);
+    TH1F *h1_gem0_mollerZdistance = new TH1F("h1_gem0_mollerZdistance", "GEM0 Moller Z distance", 1000, 0, 10000);
+
+    TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem1_mollerCenterY   = new TH1F("h1_gem1_mollerCenterY",   "GEM1 Moller Center Y",   200, -50, 50);
+    TH1F *h1_gem1_mollerZdistance = new TH1F("h1_gem1_mollerZdistance", "GEM1 Moller Z distance", 1000, 0, 10000);
+
+    TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem2_mollerCenterY   = new TH1F("h1_gem2_mollerCenterY",   "GEM2 Moller Center Y",   200, -50, 50);
+    TH1F *h1_gem2_mollerZdistance = new TH1F("h1_gem2_mollerZdistance", "GEM2 Moller Z distance", 1000, 0, 10000);
+
+    TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem3_mollerCenterY   = new TH1F("h1_gem3_mollerCenterY",   "GEM3 Moller Center Y",   200, -50, 50);
+    TH1F *h1_gem3_mollerZdistance = new TH1F("h1_gem3_mollerZdistance", "GEM3 Moller Z distance", 1000, 0, 10000);
+
+    TH1F *h1_phi_diff_hycal_gem0 = new TH1F("h1_phi_diff_hycal_gem0", "Phi Difference HyCal-GEM0", 40, -10, 10);
+    TH1F *h1_phi_diff_hycal_gem1 = new TH1F("h1_phi_diff_hycal_gem1", "Phi Difference HyCal-GEM1", 40, -10, 10);
+    TH1F *h1_phi_diff_hycal_gem2 = new TH1F("h1_phi_diff_hycal_gem2", "Phi Difference HyCal-GEM2", 40, -10, 10);
+    TH1F *h1_phi_diff_hycal_gem3 = new TH1F("h1_phi_diff_hycal_gem3", "Phi Difference HyCal-GEM3", 40, -10, 10);
+
+    auto fill_moller_data = [&](const MollerData &mollers, TH2F *hits,
+                                TH2F *centers, TH1F *center_x,
+                                TH1F *center_y, TH1F *z_distance) {
+        const size_t n = mollers.size();
+        for (size_t i = 0; i < n; ++i) {
+            const MollerEvent &event = mollers[i];
+            hits->Fill(event.first.x, event.first.y);
+            hits->Fill(event.second.x, event.second.y);
+            z_distance->Fill(PhysicsTools::GetMollerZdistance(event, gRunConfig.Ebeam));
+
+            if (i == 0) continue;
+            auto center = PhysicsTools::GetMollerCenter(mollers[i - 1], event);
+            centers->Fill(center[0], center[1]);
+            center_x->Fill(center[0]);
+            center_y->Fill(center[1]);
+
+            if (i > 1) {
+                center = PhysicsTools::GetMollerCenter(mollers[i - 2], event);
+                centers->Fill(center[0], center[1]);
+                center_x->Fill(center[0]);
+                center_y->Fill(center[1]);
+            }
+        }
+    };
+
+    fill_moller_data(hycal_mollers, h2_hycal_hits, h2_hycal_mollerCenter,
+                     h1_hycal_mollerCenterX, h1_hycal_mollerCenterY,
+                     h1_hycal_mollerZdistance);
+
+    std::array<TH2F *, 4> gem_hits = {
+        h2_gem0_hits, h2_gem1_hits, h2_gem2_hits, h2_gem3_hits};
+    std::array<TH2F *, 4> gem_centers = {
+        h2_gem0_mollerCenter, h2_gem1_mollerCenter,
+        h2_gem2_mollerCenter, h2_gem3_mollerCenter};
+    std::array<TH1F *, 4> gem_center_x = {
+        h1_gem0_mollerCenterX, h1_gem1_mollerCenterX,
+        h1_gem2_mollerCenterX, h1_gem3_mollerCenterX};
+    std::array<TH1F *, 4> gem_center_y = {
+        h1_gem0_mollerCenterY, h1_gem1_mollerCenterY,
+        h1_gem2_mollerCenterY, h1_gem3_mollerCenterY};
+    std::array<TH1F *, 4> gem_z_distance = {
+        h1_gem0_mollerZdistance, h1_gem1_mollerZdistance,
+        h1_gem2_mollerZdistance, h1_gem3_mollerZdistance};
+    std::array<TH1F *, 4> hycal_gem_phi = {
+        h1_phi_diff_hycal_gem0, h1_phi_diff_hycal_gem1,
+        h1_phi_diff_hycal_gem2, h1_phi_diff_hycal_gem3};
+
+    auto track_phi_diff = [](const DataPoint &hc, const DataPoint &gem) {
+        float diff = PhysicsTools::GetPhiAngle(gem.x, gem.y) - PhysicsTools::GetPhiAngle(hc.x, hc.y);
+        return diff;
+    };
+
+    for (size_t det = 0; det < gem_mollers.size(); ++det) {
+        const MollerData &gm = gem_mollers[det];
+        fill_moller_data(gm, gem_hits[det], gem_centers[det],
+                         gem_center_x[det], gem_center_y[det],
+                         gem_z_distance[det]);
+
+        const size_t n_pair = std::min(hycal_mollers.size(), gm.size());
+        TH1F *phi_hist = hycal_gem_phi[det];
+        for (size_t i = 0; i < n_pair; ++i) {
+            const MollerEvent &hc = hycal_mollers[i];
+            const MollerEvent &gem = gm[i];
+            phi_hist->Fill(track_phi_diff(hc.first, gem.first));
+            phi_hist->Fill(track_phi_diff(hc.second, gem.second));
+        }
+    }
+
+    fs::create_directories(output_dir);
+    const std::string run_tag = run_num >= 0 ? std::to_string(run_num) : "unknown";
+    const std::string output_root =
+        (fs::path(output_dir) / ("det_calib_run" + run_tag + ".root")).string();
+    TFile outfile(output_root.c_str(), "RECREATE");
+    h2_hycal_hits->Write();
+    h2_gem0_hits->Write();
+    h2_gem1_hits->Write();
+    h2_gem2_hits->Write();
+    h2_gem3_hits->Write();
+    h2_hycal_mollerCenter->Write();
+    h2_gem0_mollerCenter->Write();
+    h2_gem1_mollerCenter->Write();
+    h2_gem2_mollerCenter->Write();
+    h2_gem3_mollerCenter->Write();
+    h1_hycal_mollerCenterX->Write();
+    h1_hycal_mollerCenterY->Write();
+    h1_hycal_mollerZdistance->Write();
+    h1_gem0_mollerCenterX->Write();
+    h1_gem0_mollerCenterY->Write();
+    h1_gem0_mollerZdistance->Write();
+    h1_gem1_mollerCenterX->Write();
+    h1_gem1_mollerCenterY->Write();
+    h1_gem1_mollerZdistance->Write();
+    h1_gem2_mollerCenterX->Write();
+    h1_gem2_mollerCenterY->Write();
+    h1_gem2_mollerZdistance->Write();
+    h1_gem3_mollerCenterX->Write();
+    h1_gem3_mollerCenterY->Write();
+    h1_gem3_mollerZdistance->Write();
+    h1_phi_diff_hycal_gem0->Write();
+    h1_phi_diff_hycal_gem1->Write();
+    h1_phi_diff_hycal_gem2->Write();
+    h1_phi_diff_hycal_gem3->Write();
+    outfile.Close();
+    std::cout << "Histograms written to " << output_root << "\n";
+
     return errors.load() == 0 ? 0 : 1;
 }
 
