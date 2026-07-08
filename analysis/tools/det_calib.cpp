@@ -2,19 +2,12 @@
 //=============================================================================
 // det_calib — detector position calibration via Møller scattering
 //
-// Phase 1: replay EVIO files (multi-threaded) → per-file *_recon.root
-// Phase 2: chain all *_recon.root, select Møller events, fit vertex-z and
-//          beam-center distributions for HyCal and each GEM plane.
+// Process: Read evio files, decode and reconstruct, judge if it's 
+// Moller events, analyze and fill histgroams, find out the detector alignment
 //
 // Usage:
 //   det_calib <evio_file_or_dir> [more files/dirs...]
 //             -o output_dir
-//             [-f max_files] [-j num_threads] [-n max_events]
-//             [-c daq_config.json] [-d hycal_map.json]
-//             [-g gem_pedestal_file] [-z zerosup_threshold]
-//             [--hx val] [--hy val]
-//             [--g0x val] [--g0y val] ... [--g3x val] [--g3y val]
-//             [-s]  save intermediate *_recon.root files (default: delete)
 //=============================================================================
 
 #include "Replay.h"
@@ -24,6 +17,10 @@
 #include "EventData_io.h"
 #include "ConfigSetup.h"
 #include "InstallPaths.h"
+#include "MatchingTools.h"
+#include "PipelineBuilder.h"
+#include "PulseTemplateStore.h"
+#include "gain_factor.h"
 
 #include <TClass.h>
 #include <TROOT.h>
@@ -39,6 +36,7 @@
 #include <TF1.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <cstdlib>
@@ -48,6 +46,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifndef DATABASE_DIR
@@ -61,16 +60,17 @@ using EventVars_Recon = prad2::ReconEventData;
 
 // ── forward declarations ──────────────────────────────────────────────────
 static std::vector<std::string> collectEvioFiles(const std::string &path);
-static std::string makeOutputFile(const std::string &evio_path);
-static void analyzeMollers(const std::vector<std::string> &recon_files,
-                            const std::string &output,
-                            const std::string &run_str,
-                            RunConfig &geo,
-                            int max_events,
-                            float HyCal_shift_x, float HyCal_shift_y,
-                            const float GEM_shift_x[4], const float GEM_shift_y[4]);
-static float fitAndDraw(TH1F *hist, const std::string &out_path,
-                        float survey_position);
+static bool ProcessEVIO(const std::string &input_evio,
+                        RunConfig &run_config,
+                        const std::string &db_dir,
+                        const std::string &run_config_file,
+                        const std::string &daq_config_file,
+                        const std::string &hycal_map_file,
+                        const std::string &gem_ped_file,
+                        float zerosup_override,
+                        int max_events,
+                        MollerData &hycal_mollers,
+                        std::array<MollerData, 4> &gem_mollers);
 
 // ── file helpers ──────────────────────────────────────────────────────────
 static std::vector<std::string> collectEvioFiles(const std::string &path)
@@ -89,20 +89,11 @@ static std::vector<std::string> collectEvioFiles(const std::string &path)
     return files;
 }
 
-static std::string makeOutputFile(const std::string &evio_path)
-{
-    std::string out = fs::path(evio_path).filename().string();
-    auto pos = out.find(".evio");
-    if (pos != std::string::npos)
-        out = out.substr(0, pos) + out.substr(pos + 5);
-    out += "_recon.root";
-    return out;
-}
-
 // ── Main ──────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
     ROOT::EnableThreadSafety();
+    TH1::AddDirectory(kFALSE);
     TClass::GetClass("TTree");
     TClass::GetClass("TFile");
     TClass::GetClass("TBranch");
@@ -112,34 +103,9 @@ int main(int argc, char *argv[])
     int  max_files   = -1;
     int  num_threads = 4;
     int  max_events  = -1;
-    bool save_recon  = false;
 
-    float HyCal_shift_x    = 0.f;
-    float HyCal_shift_y    = 0.f;
-    float GEM_shift_x[4]   = {0.f, 0.f, 0.f, 0.f};
-    float GEM_shift_y[4]   = {0.f, 0.f, 0.f, 0.f};
-
-    enum {
-        OPT_HX=256, OPT_HY,
-        OPT_G0X, OPT_G0Y, OPT_G1X, OPT_G1Y,
-        OPT_G2X, OPT_G2Y, OPT_G3X, OPT_G3Y
-    };
-    static const struct option long_opts[] = {
-        {"hx",  required_argument, nullptr, OPT_HX},
-        {"hy",  required_argument, nullptr, OPT_HY},
-        {"g0x", required_argument, nullptr, OPT_G0X},
-        {"g0y", required_argument, nullptr, OPT_G0Y},
-        {"g1x", required_argument, nullptr, OPT_G1X},
-        {"g1y", required_argument, nullptr, OPT_G1Y},
-        {"g2x", required_argument, nullptr, OPT_G2X},
-        {"g2y", required_argument, nullptr, OPT_G2Y},
-        {"g3x", required_argument, nullptr, OPT_G3X},
-        {"g3y", required_argument, nullptr, OPT_G3Y},
-        {nullptr, 0, nullptr, 0}
-    };
-
-    int longidx = 0, opt;
-    while ((opt = getopt_long(argc, argv, "o:f:n:j:c:C:d:g:z:s", long_opts, &longidx)) != -1) {
+    int opt;
+    while ((opt = getopt(argc, argv, "o:f:n:j:c:C:d:g:z:")) != -1) {
         switch (opt) {
             case 'o': output_dir       = optarg; break;
             case 'f': max_files        = std::atoi(optarg); break;
@@ -150,17 +116,7 @@ int main(int argc, char *argv[])
             case 'd': daq_map          = optarg; break;
             case 'g': gem_ped_file     = optarg; break;
             case 'z': zerosup_override = std::atof(optarg); break;
-            case 's': save_recon       = true; break;
-            case OPT_HX:  HyCal_shift_x  = std::atof(optarg); break;
-            case OPT_HY:  HyCal_shift_y  = std::atof(optarg); break;
-            case OPT_G0X: GEM_shift_x[0] = std::atof(optarg); break;
-            case OPT_G0Y: GEM_shift_y[0] = std::atof(optarg); break;
-            case OPT_G1X: GEM_shift_x[1] = std::atof(optarg); break;
-            case OPT_G1Y: GEM_shift_y[1] = std::atof(optarg); break;
-            case OPT_G2X: GEM_shift_x[2] = std::atof(optarg); break;
-            case OPT_G2Y: GEM_shift_y[2] = std::atof(optarg); break;
-            case OPT_G3X: GEM_shift_x[3] = std::atof(optarg); break;
-            case OPT_G3Y: GEM_shift_y[3] = std::atof(optarg); break;
+            default: return 1;
         }
     }
 
@@ -176,10 +132,7 @@ int main(int argc, char *argv[])
             "Usage: det_calib <evio_file_or_dir> [more files/dirs...] -o output_dir\n"
             "       [-f max_files] [-j threads] [-n max_events]\n"
             "       [-C daq_config.json] [-d hycal_map.json]\n"
-            "       [-c run_config.json] [-g gem_ped_file] [-z zerosup]\n"
-            "       [-s] (save intermediate *_recon.root; default: delete)\n"
-            "       [--hx val] [--hy val]                  HyCal shift (mm)\n"
-            "       [--g0x val] [--g0y val] .. [--g3x val] [--g3y val]  GEM shift (mm)\n";
+            "       [-c run_config.json] [-g gem_pedestal.json]\n";
         return 1;
     }
 
@@ -196,365 +149,428 @@ int main(int argc, char *argv[])
     if (run_config.empty()) run_config = db_dir + "/runinfo/general.json";
 
     int run_num = get_run_int(evio_files[0]);
-    std::string run_str = get_run_str(evio_files[0]);
     gRunConfig = LoadRunConfig(run_config, run_num);
 
-    std::cout << "=== Phase 1: EVIO replay ===\n"
-              << "  Files   : " << num_files << "\n"
-              << "  Threads : " << num_threads << "\n"
-              << "  Output  : " << output_dir << "\n"
-              << "  DAQ cfg : " << daq_config << "\n"
-              << "  HyCal   : " << daq_map << "\n";
-
-    // ── Phase 1: multi-threaded EVIO → _recon.root ───────────────────────
-    std::atomic<int>         next_file{0};
-    std::mutex               io_mtx;
-    std::atomic<int>         replay_errors{0};
-    std::vector<std::string> recon_out_files;
-    std::mutex               out_files_mtx;
+    // Each worker writes only to the result slot belonging to its EVIO file.
+    // This avoids locking the (potentially large) Moller vectors while events
+    // are being reconstructed.  The main thread merges the slots after all
+    // workers have finished.
+    std::vector<MollerData> hycal_results(num_files);
+    std::vector<std::array<MollerData, 4>> gem_results(num_files);
+    std::vector<char> processed_ok(num_files, 0);
+    std::atomic<int> next_file{0};
+    std::atomic<int> errors{0};
+    std::mutex io_mtx;
 
     auto worker = [&]() {
-        analysis::Replay replay;
-        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadHyCalMap(daq_map);
-
         while (true) {
-            int idx = next_file.fetch_add(1);
+            const int idx = next_file.fetch_add(1);
             if (idx >= num_files) break;
 
-            std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.ProcessWithRecon(evio_files[idx], out, gRunConfig, db_dir,
-                                              daq_config, gem_ped_file, zerosup_override);
+            RunConfig file_config = gRunConfig;
+            const bool ok = ProcessEVIO(
+                evio_files[idx], file_config, db_dir, run_config, daq_config,
+                daq_map, gem_ped_file, zerosup_override, max_events,
+                hycal_results[idx], gem_results[idx]);
+            processed_ok[idx] = ok ? 1 : 0;
 
-            std::lock_guard<std::mutex> lk(io_mtx);
+            std::lock_guard<std::mutex> lock(io_mtx);
             if (ok) {
                 std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                          << evio_files[idx] << " -> " << out << "\n";
-                std::lock_guard<std::mutex> lk2(out_files_mtx);
-                recon_out_files.push_back(out);
+                          << evio_files[idx] << ": "
+                          << hycal_results[idx].size() << " HyCal Mollers\n";
             } else {
-                std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
-                          << evio_files[idx] << "\n";
-                replay_errors++;
+                ++errors;
+                std::cerr << "  [" << (idx + 1) << "/" << num_files
+                          << "] FAILED: " << evio_files[idx] << "\n";
             }
         }
     };
 
-    {
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads);
-        for (int i = 0; i < num_threads; ++i)
-            threads.emplace_back(worker);
-        for (auto &t : threads) t.join();
-    }
+    std::cout << "Processing " << num_files << " EVIO files with "
+              << num_threads << " threads\n";
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+    for (int i = 0; i < num_threads; ++i)
+        threads.emplace_back(worker);
+    for (auto &thread : threads)
+        thread.join();
 
-    std::cout << "Phase 1 done: " << num_files << " files, "
-              << replay_errors.load() << " errors\n";
-
-    if (recon_out_files.empty()) {
-        std::cerr << "No recon files produced; aborting.\n";
-        return replay_errors.load() > 0 ? 1 : 0;
-    }
-    std::sort(recon_out_files.begin(), recon_out_files.end());
-
-    // ── Phase 2: Møller selection and detector calibration ───────────────
-    std::cout << "\n=== Phase 2: Møller analysis ===\n";
-    std::string calib_out = output_dir + "/prad_" + run_str + "_posCalib.root";
-    analyzeMollers(recon_out_files, calib_out, run_str, gRunConfig,
-                   max_events, HyCal_shift_x, HyCal_shift_y, GEM_shift_x, GEM_shift_y);
-
-    // ── Clean up intermediate recon files ────────────────────────────────
-    if (!save_recon) {
-        std::cout << "\n=== Cleaning up intermediate recon files ===\n";
-        int n_del = 0;
-        for (const auto &f : recon_out_files) {
-            std::error_code ec;
-            fs::remove(f, ec);
-            if (!ec) { ++n_del; }
-            else std::cerr << "  Warning: cannot remove " << f << ": " << ec.message() << "\n";
-        }
-        std::cout << "  Deleted " << n_del << " file(s).\n";
-    }
-
-    std::cout << "All done.\n";
-    return replay_errors.load() > 0 ? 1 : 0;
-}
-
-// ── Phase 2: Møller analysis ──────────────────────────────────────────────
-static void analyzeMollers(const std::vector<std::string> &recon_files,
-                            const std::string &output,
-                            const std::string &run_str,
-                            RunConfig &geo,
-                            int max_events,
-                            float HyCal_shift_x, float HyCal_shift_y,
-                            const float GEM_shift_x[4], const float GEM_shift_y[4])
-{
-    // --- init detector system ---
-    fdec::HyCalSystem hycal;
-    hycal.Init(prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR) + "/hycal_map.json");
-    PhysicsTools physics(hycal);
-
-    // --- setup TChain ---
-    TChain chain("recon");
-    for (const auto &f : recon_files) {
-        chain.Add(f.c_str());
-        std::cout << "  + " << f << "\n";
-    }
-    std::cout << "  Total entries: " << chain.GetEntries() << "\n";
-
-    EventVars_Recon ev;
-    prad2::SetReconReadBranches(&chain, ev);
-
-    // --- output histograms ---
-    TH1F *vertex_hycal   = new TH1F("vertex_hycal",   "Moller vertex z HyCal;Z (mm);Counts",         600,  5600, 6800);
-    TH2F *center_hycal   = new TH2F("center_hycal",   "Moller center HyCal;X (mm);Y (mm)",            200,  -100,  100, 200, -100, 100);
-    TH1F *center_hycal_x = new TH1F("center_hycal_x", "Moller center X HyCal;X (mm);Counts",         320,   -20,   20);
-    TH1F *center_hycal_y = new TH1F("center_hycal_y", "Moller center Y HyCal;Y (mm);Counts",         320,   -20,   20);
-    TH2F *hits_hycal     = new TH2F("hits_hycal",     "Moller hits HyCal;X (mm);Y (mm)",             400,  -400,  400, 400, -400, 400);
-
-    TH1F *vertex_gem[4], *center_gem_x[4], *center_gem_y[4];
-    TH2F *center_gem[4], *hits_gem[4];
-    for (int d = 0; d < 4; d++) {
-        vertex_gem[d]   = new TH1F(Form("vertex_gem%d",   d), Form("Moller vertex z GEM%d;Z (mm);Counts",    d), 500, 5200, 6200);
-        center_gem[d]   = new TH2F(Form("center_gem%d",   d), Form("Moller center GEM%d;X (mm);Y (mm)",      d),  200, -100,  100, 200, -100, 100);
-        center_gem_x[d] = new TH1F(Form("center_gem_x%d", d), Form("Moller center X GEM%d;X (mm);Counts",    d),  400,  -20,   20);
-        center_gem_y[d] = new TH1F(Form("center_gem_y%d", d), Form("Moller center Y GEM%d;Y (mm);Counts",    d),  100,  -20,   20);
-        hits_gem[d]     = new TH2F(Form("hits_gem%d",     d), Form("Moller hits GEM%d;X (mm);Y (mm)",        d),  400, -400,  400, 400, -400, 400);
-    }
-
-    TH2F *E_theta = new TH2F("E_theta", "Moller E vs #theta;#theta (deg);E (MeV)", 120, 0, 6, int(geo.Ebeam)/2, 0, geo.Ebeam);
-
+    // Aggregate in input-file order, so results are deterministic regardless
+    // of the order in which worker threads completed.
     MollerData hycal_mollers;
-    MollerData gem_mollers[4];
-
-    // --- event loop: select Møller events ---
-    Long64_t N = chain.GetEntries();
-    if (max_events > 0 && max_events < (int)N) N = max_events;
-
-    for (Long64_t i = 0; i < N; i++) {
-        chain.GetEntry(i);
-        if (i % 10000 == 0)
-            std::cerr << "\r  Event: " << i << " / " << N << std::flush;
-        if (ev.n_clusters != 2) continue;
-        if (ev.matchNum != 2) continue;
-        if (ev.cl_nblocks[0] < 3 || ev.cl_nblocks[1] < 3) continue;
-        if (fabs(ev.cl_x[0]) < 20.75f * 2.5f && fabs(ev.cl_y[0]) < 20.75f * 2.5f) continue;
-        if (fabs(ev.cl_x[1]) < 20.75f * 2.5f && fabs(ev.cl_y[1]) < 20.75f * 2.5f) continue;
-        if (fabs(ev.cl_x[0]) > 20.75f * 16.f || fabs(ev.cl_y[0]) > 20.75f * 16.f) continue;
-        if (fabs(ev.cl_x[1]) > 20.75f * 16.f || fabs(ev.cl_y[1]) > 20.75f * 16.f) continue;
-
-        float Epair = ev.mHit_E[0] + ev.mHit_E[1];
-        if (geo.Ebeam <= 0.f) {
-            std::cerr << "\nError: Ebeam not set, cannot apply Moller energy cut.\n";
-            break;
-        }
-
-        MollerEvent h_m(
-            {ev.mHit_x[0], ev.mHit_y[0], ev.mHit_z[0], ev.mHit_E[0]},
-            {ev.mHit_x[1], ev.mHit_y[1], ev.mHit_z[1], ev.mHit_E[1]});
-
-        float theta1 = atan2(std::sqrt(h_m.first.x*h_m.first.x + h_m.first.y*h_m.first.y), h_m.first.z) * 180.f / M_PI;
-        float theta2 = atan2(std::sqrt(h_m.second.x*h_m.second.x + h_m.second.y*h_m.second.y), h_m.second.z) * 180.f / M_PI;
-        if (!physics.isMoller_kinematic(theta1, h_m.first.E, theta2, h_m.second.E, geo.Ebeam, 0.035f))
-            continue;
-        if(fabs(physics.GetMollerPhiDiff(h_m)) > 10.f) continue;
-
-        //add some scattering angle cuts for 0.7GeV
-        if(geo.Ebeam > 0.f && geo.Ebeam < 1000.f) {
-            if(theta1 < 1.5f || theta2 < 1.5f) continue;
-        }
-
-        E_theta->Fill(theta1, h_m.first.E);
-        E_theta->Fill(theta2, h_m.second.E);
-
-        hycal_mollers.push_back(h_m);
-        hits_hycal->Fill(h_m.first.x,  h_m.first.y);
-        hits_hycal->Fill(h_m.second.x, h_m.second.y);
-
-        // upstream GEM: both hits on the same chamber
-        if (ev.mHit_gid[0][0] == ev.mHit_gid[1][0]) {
-            int det_id = ev.mHit_gid[0][0];
-            if (det_id >= 0 && det_id < 4) {
-                gem_mollers[det_id].push_back(MollerEvent(
-                    {ev.mHit_gx[0][0], ev.mHit_gy[0][0], ev.mHit_gz[0][0], ev.mHit_E[0]},
-                    {ev.mHit_gx[1][0], ev.mHit_gy[1][0], ev.mHit_gz[1][0], ev.mHit_E[1]}));
-            }
-        }
-
-        // downstream GEM: both hits on the same chamber
-        if (ev.mHit_gid[0][1] == ev.mHit_gid[1][1]) {
-            int det_id = ev.mHit_gid[0][1];
-            if (det_id >= 0 && det_id < 4) {
-                gem_mollers[det_id].push_back(MollerEvent(
-                    {ev.mHit_gx[0][1], ev.mHit_gy[0][1], ev.mHit_gz[0][1], ev.mHit_E[0]},
-                    {ev.mHit_gx[1][1], ev.mHit_gy[1][1], ev.mHit_gz[1][1], ev.mHit_E[1]}));
-            }
-        }
+    std::array<MollerData, 4> gem_mollers;
+    size_t total_hycal = 0;
+    std::array<size_t, 4> total_gem{};
+    for (int i = 0; i < num_files; ++i) {
+        if (!processed_ok[i]) continue;
+        total_hycal += hycal_results[i].size();
+        for (size_t det = 0; det < gem_mollers.size(); ++det)
+            total_gem[det] += gem_results[i][det].size();
     }
-    std::cerr << "\n";
+    hycal_mollers.reserve(total_hycal);
+    for (size_t det = 0; det < gem_mollers.size(); ++det)
+        gem_mollers[det].reserve(total_gem[det]);
 
-    std::cerr << "Summary of selected Moller events:\n";
-    std::cerr << "  HyCal: " << hycal_mollers.size() << "\n";
-    for (int d = 0; d < 4; d++)
-        std::cerr << "  GEM " << d << ": " << gem_mollers[d].size() << "\n";
-
-    // --- fill histograms ---
-    TransformDetData(hycal_mollers, HyCal_shift_x, HyCal_shift_y, 0.f);
-    for (size_t i = 0; i < hycal_mollers.size(); i++) {
-        vertex_hycal->Fill(physics.GetMollerZdistance(hycal_mollers[i], geo.Ebeam));
-        if (i >= 1) {
-            auto c = physics.GetMollerCenter(hycal_mollers[i-1], hycal_mollers[i]);
-            if(c[0] == c[1] && c[0] == 0.f) continue; // skip zero-center events (likely bad recon)
-            center_hycal->Fill(c[0], c[1]);
-            center_hycal_x->Fill(c[0]);
-            center_hycal_y->Fill(c[1]);
+    for (int i = 0; i < num_files; ++i) {
+        if (!processed_ok[i]) continue;
+        hycal_mollers.insert(hycal_mollers.end(),
+                             hycal_results[i].begin(), hycal_results[i].end());
+        for (size_t det = 0; det < gem_mollers.size(); ++det) {
+            gem_mollers[det].insert(gem_mollers[det].end(),
+                                    gem_results[i][det].begin(),
+                                    gem_results[i][det].end());
         }
     }
 
-    for (int d = 0; d < 4; d++) {
-        TransformDetData(gem_mollers[d], GEM_shift_x[d], GEM_shift_y[d], 0.f);
-        for (size_t i = 0; i < gem_mollers[d].size(); i++) {
-            vertex_gem[d]->Fill(physics.GetMollerZdistance(gem_mollers[d][i], geo.Ebeam));
-            if (i >= 1) {
-                auto c = physics.GetMollerCenter(gem_mollers[d][i-1], gem_mollers[d][i]);
-                if(c[0] == c[1] && c[0] == 0.f) continue; // skip zero-center events (likely bad recon)
-                center_gem[d]->Fill(c[0], c[1]);
-                center_gem_x[d]->Fill(c[0]);
-                center_gem_y[d]->Fill(c[1]);
-            }
-            hits_gem[d]->Fill(gem_mollers[d][i].first.x,  gem_mollers[d][i].first.y);
-            hits_gem[d]->Fill(gem_mollers[d][i].second.x, gem_mollers[d][i].second.y);
-        }
-    }
+    std::cout << "Collected " << hycal_mollers.size()
+              << " HyCal Moller events\n";
+    for (size_t det = 0; det < gem_mollers.size(); ++det)
+        std::cout << "  GEM " << det << ": " << gem_mollers[det].size()
+                  << " Moller events\n";
 
-    // --- fit and print results ---
-    std::string plot_dir = "Poscalib_result/" + run_str;
-    float hycal_vertex_z = fitAndDraw(vertex_hycal,   plot_dir + "/hycal_vertex_z",  geo.hycal_z);
-    float hycal_center_x = fitAndDraw(center_hycal_x, plot_dir + "/hycal_center_x",  geo.hycal_x + HyCal_shift_x);
-    float hycal_center_y = fitAndDraw(center_hycal_y, plot_dir + "/hycal_center_y",  geo.hycal_y + HyCal_shift_y);
-
-    float gem_vertex_z[4], gem_center_x[4], gem_center_y[4];
-    for (int d = 0; d < 4; d++) {
-        gem_vertex_z[d] = fitAndDraw(vertex_gem[d],   plot_dir + "/gem" + std::to_string(d) + "_vertex_z",  geo.gem_z[d]);
-        gem_center_x[d] = fitAndDraw(center_gem_x[d], plot_dir + "/gem" + std::to_string(d) + "_center_x",  geo.gem_x[d] + GEM_shift_x[d]);
-        gem_center_y[d] = fitAndDraw(center_gem_y[d], plot_dir + "/gem" + std::to_string(d) + "_center_y",  geo.gem_y[d] + GEM_shift_y[d]);
-    }
-
-    std::cerr << "HyCal vertex z: " << hycal_vertex_z << " mm  (survey: " << geo.hycal_z << " mm)\n";
-    std::cerr << "HyCal center x: " << hycal_center_x << " mm  (survey: " << geo.hycal_x << " mm)\n";
-    std::cerr << "HyCal center y: " << hycal_center_y << " mm  (survey: " << geo.hycal_y << " mm)\n";
-    for (int d = 0; d < 4; d++) {
-        std::cerr << "GEM " << d << " vertex z: " << gem_vertex_z[d] << " mm  (survey: " << geo.gem_z[d] << " mm)\n";
-        std::cerr << "GEM " << d << " center x: " << gem_center_x[d] << " mm  (survey: " << geo.gem_x[d] << " mm)\n";
-        std::cerr << "GEM " << d << " center y: " << gem_center_y[d] << " mm  (survey: " << geo.gem_y[d] << " mm)\n";
-    }
-
-    float target_delta_z[4];
-    for (int d = 0; d < 4; d++) {
-        target_delta_z[d] = geo.gem_z[d] - gem_vertex_z[d];
-        std::cerr << "target Z position from GEM\n";
-        std::cerr << "  GEM " << d << ": " << target_delta_z[d] << " mm\n";
-    }
-
-    // --- summary in HyCal-center frame ---
-    // geo.* positions are in beam-center frame (LoadRunConfig subtracted target).
-    // HyCal is the reference: its x/y are 0 by definition in this frame.
-    // Beam center in HyCal frame = target + Moller-center correction.
-    // GEM positions in HyCal frame = beam-frame position + target offset.
-    const float tx = geo.target_x, ty = geo.target_y, tz = geo.target_z;
-    std::cerr << "\n";
-    std::cerr << "========================================\n";
-    std::cerr << " Summary in HyCal-center frame (mm)\n";
-    std::cerr << "========================================\n";
-    std::cerr << " HyCal z (calibrated):  " << (hycal_vertex_z + tz) << "\n";
-    std::cerr << "\n";
-    std::cerr << " Beam center (calibrated):\n";
-    std::cerr << "   \"target\": [" << (tx + hycal_center_x)
-              << ", " << (ty + hycal_center_y)
-              << ", " << (target_delta_z[0]+target_delta_z[1]+target_delta_z[2]+target_delta_z[3]) / 4.0
-              << "]\n";
-    std::cerr << "\n";
-    std::cerr << " GEM positions (calibrated):\n";
-    for (int d = 0; d < 4; d++) {
-        std::cerr << "   {\"id\": " << d
-                  << ", \"position\": [" << (geo.gem_x[d] - gem_center_x[d] + tx)
-                  << ", " << (geo.gem_y[d] - gem_center_y[d] + ty)
-                  << ", " << (gem_vertex_z[d] + tz) << "]"
-                  << ", \"tilting\": [" << geo.gem_tilt_x[d]
-                  << ", " << geo.gem_tilt_y[d]
-                  << ", " << geo.gem_tilt_z[d] << "]}\n";
-    }
-    std::cerr << "========================================\n";
-
-    // --- save histograms ---
-    TFile outfile(output.c_str(), "RECREATE");
-    E_theta->Write();
-    vertex_hycal->Write();   center_hycal->Write();
-    center_hycal_x->Write(); center_hycal_y->Write();
-    hits_hycal->Write();
-    for (int d = 0; d < 4; d++) {
-        vertex_gem[d]->Write();   center_gem[d]->Write();
-        center_gem_x[d]->Write(); center_gem_y[d]->Write();
-        hits_gem[d]->Write();
-    }
-    outfile.Close();
-    std::cerr << "Calibration histograms saved to " << output << "\n";
+    // TODO: analyze the combined hycal_mollers and gem_mollers data.
+    return errors.load() == 0 ? 0 : 1;
 }
 
-// ── fitAndDraw ────────────────────────────────────────────────────────────
-// Fit range is determined automatically from the half-maximum (50%) points:
-// scan outward from the peak bin to find the FWHM, then fit ± 1.5 * HWHM.
-static float fitAndDraw(TH1F *hist, const std::string &out_path,
-                        float survey_position)
+static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
+                                const std::string &db_dir,
+                                const std::string &run_config_file,
+                                const std::string &daq_config_file,
+                                const std::string &hycal_map_file,
+                                const std::string &gem_ped_file,
+                                const float zerosup_override,
+                                const int max_events,
+                                MollerData &hycal_mollers,
+                                std::array<MollerData, 4> &gem_mollers)
 {
-    TCanvas c("", "", 800, 600);
+    fdec::HyCalSystem                 hycal;
+    gem::GemSystem                    gem_sys;
+    fdec::ClusterConfig               cluster_cfg;
+    prad2::HyCalTimeCuts              hc_time_cuts;
+    DetectorTransform                 hycal_transform;
+    std::array<DetectorTransform, 4>  gem_transforms;
+    std::unordered_map<int, int>      roc_to_crate;
 
-    int    peak_bin = hist->GetMaximumBin();
-    double peak_x   = hist->GetBinCenter(peak_bin);
-    double peak_val = hist->GetMaximum();
-    double half_max = peak_val * 0.5;
-    int    nb       = hist->GetNbinsX();
+    prad2::Pipeline pipeline;
+    try {
+        pipeline = prad2::PipelineBuilder()
+            .set_database_dir(db_dir)
+            .set_daq_config(daq_config_file)
+            .set_runinfo(run_config_file)
+            .set_hycal_map(hycal_map_file)
+            .set_gem_pedestal(gem_ped_file)
+            .set_run_number_from_evio(input_evio)
+            .set_log_stream(&std::cerr)
+            .build();
+    } catch (const std::exception &e) {
+        std::cerr << "Replay: setup failed for " << input_evio
+                  << ": " << e.what() << "\n";
+        return false;
+    }
 
-    // scan left of peak for half-maximum crossing
-    double lo_x = hist->GetBinCenter(1);
-    for (int b = peak_bin - 1; b >= 1; --b) {
-        if (hist->GetBinContent(b) <= half_max) {
-            lo_x = hist->GetBinCenter(b);
-            break;
+    evc::DaqConfig daq_cfg = std::move(pipeline.daq_cfg);
+    gRunConfig      = pipeline.run_cfg;
+    hycal            = std::move(pipeline.hycal);
+    gem_sys          = std::move(pipeline.gem);
+    cluster_cfg      = pipeline.hycal_cluster_cfg;
+    hc_time_cuts     = std::move(pipeline.hycal_time_cuts);
+    hycal_transform  = pipeline.hycal_transform;
+    gem_transforms   = pipeline.gem_transforms;
+
+    // ROC→crate map from the same DAQ config the builder consumed.
+    for (const auto &re : daq_cfg.roc_tags) {
+        if (re.crate < 0) continue;
+        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
+        roc_to_crate[re.tag] = re.crate;
+    }
+
+    if (zerosup_override > 0.f)
+        gem_sys.SetZeroSupThreshold(zerosup_override);
+
+    fdec::HyCalCluster   clusterer(hycal);
+    clusterer.SetConfig(cluster_cfg);
+    gem::GemCluster      gem_clusterer;
+    MatchingTools        matching;
+    matching.SetMatchRange(gRunConfig.matching_radius);
+    matching.SetSquareSelection(gRunConfig.matching_use_square);
+    matching.SetEnergyDependent(gRunConfig.matching_energy_dependent);
+    matching.SetMatchSigma(gRunConfig.matching_sigma);
+    PhysicsTools physics(hycal);
+    //open EVIO file and output ROOT file
+    evc::EvChannel ch;
+    ch.SetConfig(daq_cfg);
+
+    if (ch.OpenAuto(input_evio) != evc::status::success) {
+        std::cerr << "Replay: cannot open " << input_evio << "\n";
+        return false;
+    }
+
+    auto ev = std::make_unique<EventVars_Recon>();
+
+    //initialize tools for event decoder and cluster reconstruction
+    auto event = std::make_unique<fdec::EventData>();
+    auto ssp_evt = std::make_unique<ssp::SspEventData>();
+    fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
+    fdec::PulseTemplateStore template_store;
+    if (daq_cfg.wave_cfg.nnls_deconv.enabled
+        && !daq_cfg.wave_cfg.nnls_deconv.template_file.empty()) {
+        template_store.LoadFromFile(
+            db_dir + "/" + daq_cfg.wave_cfg.nnls_deconv.template_file,
+            daq_cfg.wave_cfg);
+    }
+    ana.SetTemplateStore(&template_store);
+    fdec::WaveResult wres;
+
+    int total = 0;
+    int processed_events = 0;
+
+    int run_num = get_run_int(input_evio);
+    std::string gain_data_dir = gRunConfig.gain_data_dir;
+    if (gain_data_dir.empty())
+        gain_data_dir = db_dir + "/gain_factor";
+    else if (!fs::path(gain_data_dir).is_absolute())
+        gain_data_dir = db_dir + "/" + gain_data_dir;
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
+        gain_data_dir + "/gain_correction", run_num);
+
+    // Per-detector lab transforms — set up by either branch of the detector
+    // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).
+    const auto &hc_xform = hycal_transform;
+    const auto &g_xform  = gem_transforms;
+
+    while ((max_events <= 0 || processed_events < max_events)
+           && ch.Read() == evc::status::success) {
+        if (!ch.Scan()) continue;
+
+        for (int ie = 0; ie < ch.GetNEvents(); ++ie) {
+            if (max_events > 0 && processed_events >= max_events) break;
+            event->clear();
+            ssp_evt->clear();
+            clusterer.Clear();
+            if (!ch.DecodeEvent(ie, *event, ssp_evt.get())) continue;
+            ++processed_events;
+
+            *ev = EventVars_Recon{};
+            ev->event_num    = event->info.event_number;
+            ev->trigger_bits = event->info.trigger_bits;
+
+            bool is_sum      = (ev->trigger_bits & prad2::TBIT_sum)   != 0;
+            if (!is_sum) continue;
+
+            // Per-event gain correction (time-series lookup by event number).
+            const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
+
+            // decode FADC250 and reconstruct HyCal data
+            int nch = 0;
+            for (int r = 0; r < event->nrocs; ++r) {
+                auto &roc = event->rocs[r];
+                if (!roc.present) continue;
+                auto cit = roc_to_crate.find(roc.tag);
+                if (cit == roc_to_crate.end()) continue;
+                int crate = cit->second;
+                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+                    if (!roc.slots[s].present) continue;
+                    for (int c = 0; c < 64; ++c) { //should be 16, a bigger number to adapt PRad1 data
+                        if (!(roc.slots[s].channel_mask & (1ull << c))) continue;
+                        auto &cd = roc.slots[s].channels[c];
+                        if (cd.nsamples <= 0) continue;
+
+                        const auto *mod = hycal.module_by_daq(crate, s, c);
+                        if (!mod || !mod->is_hycal()) continue;
+                        // Per-ID gain correction: average of LMS 2/3 channels.
+                        const float gain = (mod->id > 1000)
+                            ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
+                            : gain_corr.g[mod->id].avg;
+
+                        ana.SetChannelKey(roc.tag, s, c);
+                        ana.Analyze(cd.samples, cd.nsamples, wres);
+                        if (wres.npeaks <= 0) continue;
+
+                        const auto hc_win = hc_time_cuts.at(mod->index);
+                        if (cluster_cfg.seed_time_window > 0.f) {
+                            // Multi-pulse mode: push every peak inside the trigger
+                            // window into the clusterer; the seed-anchored timing
+                            // coincidence cut is applied inside HyCalCluster.
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                const auto &pk = wres.peaks[p];
+                                if (pk.time <= hc_win.lo) continue;
+                                if (pk.time >= hc_win.hi) continue;
+                                float adc = pk.integral * gain;
+                                float energy = static_cast<float>(mod->energize(adc));
+                                clusterer.AddHit(mod->index, energy, pk.time);
+                                ev->total_energy += energy;
+                                nch++;
+                            }
+                        } else {
+                            // Legacy: pick the largest in-window peak as the single
+                            // module hit, time field unused downstream.
+                            int bestIdx = -1;
+                            float bestHeight = -1.f;
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                const auto &pk = wres.peaks[p];
+                                if (pk.time > hc_win.lo &&
+                                    pk.time < hc_win.hi &&
+                                    pk.height > bestHeight) {
+                                    bestHeight = pk.height;
+                                    bestIdx = p;
+                                }
+                            }
+                            if (bestIdx < 0) continue;
+                            float adc = wres.peaks[bestIdx].integral * gain;
+                            float energy = static_cast<float>(mod->energize(adc));
+                            clusterer.AddHit(mod->index, energy, wres.peaks[bestIdx].time);
+                            ev->total_energy += energy;
+                            nch++;
+                        }
+                    }
+                }
+            }
+            if(nch > 200) continue; // too many hits, likely noise, skip the event
+
+            clusterer.FormClusters();
+            std::vector<fdec::ClusterHit> hits;
+            clusterer.ReconstructHits(hits);
+            //HyCal event reconstrued
+            ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
+            for (int i = 0; i < ev->n_clusters; ++i) {
+                ev->cl_nblocks[i] = hits[i].nblocks;
+                ev->cl_time[i]    = hits[i].time;
+                //transform the cluster positions to the lab coordinate
+                HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
+                    hits[i].energy, static_cast<uint16_t>(hits[i].center_id), hits[i].flag};
+                analysis::ApplyToLab(hc_xform, local_hit);
+                GetProjection(local_hit, gRunConfig.hycal_z);
+                ev->cl_x[i] = local_hit.x;
+                ev->cl_y[i] = local_hit.y;
+                ev->cl_z[i] = local_hit.z;
+                ev->cl_energy[i] = local_hit.energy;
+                ev->cl_linear_corr[i] = hits[i].linear_corr;
+                ev->cl_center[i] = local_hit.center_id;
+                ev->cl_flag[i] = local_hit.flag;
+            }
+
+            //decode GEM data and reconstruct GEM hits
+            if(gem_sys.GetNDetectors() > 0){
+                gem_sys.Clear();
+                gem_sys.ProcessEvent(*ssp_evt);
+                gem_sys.Reconstruct(gem_clusterer);
+                auto &all_hits = gem_sys.GetAllHits();
+                ev->n_gem_hits = 0;
+                for (const auto &h : all_hits) {
+                    if (ev->n_gem_hits >= prad2::kMaxGemHits) break;
+                    if (h.det_id < 0 || h.det_id >= 4) continue;
+                    const int i = ev->n_gem_hits++;
+                    ev->det_id[i] = h.det_id;
+                    ev->gem_x_charge[i] = h.x_charge;
+                    ev->gem_y_charge[i] = h.y_charge;
+                    ev->gem_x_peak[i] = h.x_peak;
+                    ev->gem_y_peak[i] = h.y_peak;
+                    ev->gem_x_size[i] = h.x_size;
+                    ev->gem_y_size[i] = h.y_size;
+                    ev->gem_x_mTbin[i] = h.x_max_timebin;
+                    ev->gem_y_mTbin[i] = h.y_max_timebin;
+                    //transform the GEM hit positions to the lab coordinate
+                    GEMHit local_hit = {h.x, h.y, 0.f, static_cast<uint8_t>(h.det_id)};
+                    int d = local_hit.det_id;
+                    if (d >= 0 && d < 4) {
+                        analysis::ApplyToLab(g_xform[d], local_hit);
+                    }
+                    ev->gem_x[i] = local_hit.x;
+                    ev->gem_y[i] = local_hit.y;
+                    ev->gem_z[i] = local_hit.z;
+                }
+
+                // Perform matching between HyCal clusters and GEM hits
+                //store all the hits on HyCal and GEMs in this event
+                std::vector<HCHit> hc_hits;
+                std::vector<GEMHit> gem_hits[4]; // separate vector for each GEM
+                for (int i = 0; i < ev->n_clusters; ++i)
+                    hc_hits.push_back({ev->cl_x[i], ev->cl_y[i], ev->cl_z[i], ev->cl_energy[i], ev->cl_center[i], ev->cl_flag[i]});
+                for (int i = 0; i < ev->n_gem_hits; ++i) {
+                    const int det_id = ev->det_id[i];
+                    if (det_id < 0 || det_id >= 4) continue;
+                    gem_hits[det_id].push_back(GEMHit{
+                        ev->gem_x[i], ev->gem_y[i], ev->gem_z[i],
+                        static_cast<uint8_t>(det_id)});
+                }
+                
+                // already transform to the coordinates
+
+                std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
+                std::vector<MatchHit_perChamber> matched_hits_chamber = matching.MatchPerChamber(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]); 
+                
+                for (const auto &m : matched_hits_chamber) {
+                    const int cl_idx = m.hycal_idx;
+                    if (cl_idx < 0 || cl_idx >= prad2::kMaxClusters) continue;
+                    for(int j = 0; j < 4; j++){
+                        ev->matchGEMx[cl_idx][j] = m.gem_hits[j][0];
+                        ev->matchGEMy[cl_idx][j] = m.gem_hits[j][1];
+                        ev->matchGEMz[cl_idx][j] = m.gem_hits[j][2];
+                    }
+                    ev->matchFlag[cl_idx] = m.mflag;
+                }
+
+                ev->matchNum = std::min((int)matched_hits.size(), prad2::kMaxClusters);
+                for (int i = 0; i < ev->matchNum; i++){
+                    // save the matched GEM hit (must 2 matchings) info in mHit_ arrays for quick check
+                    ev->mHit_E[i] = matched_hits[i].hycal_hit.energy;
+                    ev->mHit_x[i] = matched_hits[i].hycal_hit.x;
+                    ev->mHit_y[i] = matched_hits[i].hycal_hit.y;
+                    ev->mHit_z[i] = matched_hits[i].hycal_hit.z;
+                    for(int j = 0; j < 2; j++) {
+                        ev->mHit_gx[i][j] =  matched_hits[i].gem[j].x;
+                        ev->mHit_gy[i][j] =  matched_hits[i].gem[j].y;
+                        ev->mHit_gz[i][j] =  matched_hits[i].gem[j].z;
+                        ev->mHit_gid[i][j] = matched_hits[i].gem[j].det_id; // placeholder for GEM hit ID if needed
+                    }
+                }
+            }
+
+            // select events and analyze
+            if (ev->n_clusters != 2) continue;
+            if (ev->matchNum != 2) continue;
+            if (ev->cl_nblocks[0] < 3 || ev->cl_nblocks[1] < 3) continue;
+            if (std::fabs(ev->cl_x[0]) < 20.75f * 2.5f && std::fabs(ev->cl_y[0]) < 20.75f * 2.5f) continue;
+            if (std::fabs(ev->cl_x[1]) < 20.75f * 2.5f && std::fabs(ev->cl_y[1]) < 20.75f * 2.5f) continue;
+            if (std::fabs(ev->cl_x[0]) > 20.75f * 16.f || std::fabs(ev->cl_y[0]) > 20.75f * 16.f) continue;
+            if (std::fabs(ev->cl_x[1]) > 20.75f * 16.f || std::fabs(ev->cl_y[1]) > 20.75f * 16.f) continue;
+
+            MollerEvent m_hc(
+                {ev->cl_x[0], ev->cl_y[0], ev->cl_z[0], ev->cl_energy[0]},
+                {ev->cl_x[1], ev->cl_y[1], ev->cl_z[1], ev->cl_energy[1]});
+
+            constexpr float kRadToDeg = 57.29577951308232f;
+            float theta1 = std::atan2(std::hypot(m_hc.first.x, m_hc.first.y), m_hc.first.z) * kRadToDeg;
+            float theta2 = std::atan2(std::hypot(m_hc.second.x, m_hc.second.y), m_hc.second.z) * kRadToDeg;
+            if (!physics.isMoller_kinematic(theta1, m_hc.first.E,
+                                            theta2, m_hc.second.E,
+                                            gRunConfig.Ebeam, 0.035f))
+                continue;
+            if (std::fabs(physics.GetMollerPhiDiff(m_hc)) > 6.f) continue;
+
+            //add some scattering angle cuts for 0.7GeV
+            if(gRunConfig.Ebeam > 0.f && gRunConfig.Ebeam < 1000.f) {
+                if(theta1 < 1.5f || theta2 < 1.5f) continue;
+            }
+
+            hycal_mollers.push_back(m_hc);
+
+            for(int did = 0; did < 4; did ++){
+                if (((ev->matchFlag[0] & (1u << did)) != 0)
+                    && ((ev->matchFlag[1] & (1u << did)) != 0)) {
+                    gem_mollers[did].push_back(MollerEvent(
+                        {ev->matchGEMx[0][did], ev->matchGEMy[0][did], ev->matchGEMz[0][did], ev->cl_energy[0]},
+                        {ev->matchGEMx[1][did], ev->matchGEMy[1][did], ev->matchGEMz[1][did], ev->cl_energy[1]}));
+                }
+            }
+
+            total++;
+            if (total % 1000 == 0)
+                std::cerr << "\rFind: " << total << " moller events on HyCal" << std::flush;
         }
     }
-    // scan right of peak for half-maximum crossing
-    double hi_x = hist->GetBinCenter(nb);
-    for (int b = peak_bin + 1; b <= nb; ++b) {
-        if (hist->GetBinContent(b) <= half_max) {
-            hi_x = hist->GetBinCenter(b);
-            break;
-        }
-    }
+    std::cerr << "\rReplay: " << total << " moller events reconstructed on HyCal\n";
 
-    // half-width at half-maximum; guard against degenerate (flat/empty) histograms
-    double hwhm = 0.5 * (hi_x - lo_x);
-    if (hwhm < hist->GetBinWidth(1)) hwhm = hist->GetBinWidth(1);
-
-    double fit_lo = peak_x - 1. * hwhm;
-    double fit_hi = peak_x + 1. * hwhm;
-
-    hist->Fit("gaus", "rq", "", fit_lo, fit_hi);
-    hist->Draw();
-    TLatex latex;
-    latex.SetNDC();
-    latex.SetTextSize(0.04f);
-    TF1 *gf = hist->GetFunction("gaus");
-    if (gf) {
-        latex.DrawLatex(0.15, 0.85, Form("%.2f mm +- %.2f mm",
-                                          gf->GetParameter(1), gf->GetParError(1)));
-        latex.DrawLatex(0.15, 0.80, Form("Survey position: %.2f mm", survey_position));
-        latex.DrawLatex(0.15, 0.75, Form("FWHM: %.2f mm", 2.0 * hwhm));
-    }
-    fs::create_directories(fs::path(out_path).parent_path());
-    c.SaveAs((out_path + ".png").c_str());
-    return gf ? gf->GetParameter(1) : static_cast<float>(peak_x);
+    return true;
 }
