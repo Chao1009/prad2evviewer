@@ -41,6 +41,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <getopt.h>
 #include <iostream>
 #include <mutex>
@@ -244,23 +246,23 @@ int main(int argc, char *argv[])
 
     TH1F *h1_hycal_mollerCenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   200, -50, 50);
     TH1F *h1_hycal_mollerCenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   200, -50, 50);
-    TH1F *h1_hycal_mollerZdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 1000, 0, 10000);
+    TH1F *h1_hycal_mollerZdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 4000, 0, 10000);
 
     TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   200, -50, 50);
     TH1F *h1_gem0_mollerCenterY   = new TH1F("h1_gem0_mollerCenterY",   "GEM0 Moller Center Y",   200, -50, 50);
-    TH1F *h1_gem0_mollerZdistance = new TH1F("h1_gem0_mollerZdistance", "GEM0 Moller Z distance", 1000, 0, 10000);
+    TH1F *h1_gem0_mollerZdistance = new TH1F("h1_gem0_mollerZdistance", "GEM0 Moller Z distance", 4000, 0, 10000);
 
     TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   200, -50, 50);
     TH1F *h1_gem1_mollerCenterY   = new TH1F("h1_gem1_mollerCenterY",   "GEM1 Moller Center Y",   200, -50, 50);
-    TH1F *h1_gem1_mollerZdistance = new TH1F("h1_gem1_mollerZdistance", "GEM1 Moller Z distance", 1000, 0, 10000);
+    TH1F *h1_gem1_mollerZdistance = new TH1F("h1_gem1_mollerZdistance", "GEM1 Moller Z distance", 4000, 0, 10000);
 
     TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   200, -50, 50);
     TH1F *h1_gem2_mollerCenterY   = new TH1F("h1_gem2_mollerCenterY",   "GEM2 Moller Center Y",   200, -50, 50);
-    TH1F *h1_gem2_mollerZdistance = new TH1F("h1_gem2_mollerZdistance", "GEM2 Moller Z distance", 1000, 0, 10000);
+    TH1F *h1_gem2_mollerZdistance = new TH1F("h1_gem2_mollerZdistance", "GEM2 Moller Z distance", 4000, 0, 10000);
 
     TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   200, -50, 50);
     TH1F *h1_gem3_mollerCenterY   = new TH1F("h1_gem3_mollerCenterY",   "GEM3 Moller Center Y",   200, -50, 50);
-    TH1F *h1_gem3_mollerZdistance = new TH1F("h1_gem3_mollerZdistance", "GEM3 Moller Z distance", 1000, 0, 10000);
+    TH1F *h1_gem3_mollerZdistance = new TH1F("h1_gem3_mollerZdistance", "GEM3 Moller Z distance", 4000, 0, 10000);
 
     TH1F *h1_phi_diff_hycal_gem0 = new TH1F("h1_phi_diff_hycal_gem0", "Phi Difference HyCal-GEM0", 40, -10, 10);
     TH1F *h1_phi_diff_hycal_gem1 = new TH1F("h1_phi_diff_hycal_gem1", "Phi Difference HyCal-GEM1", 40, -10, 10);
@@ -333,6 +335,200 @@ int main(int argc, char *argv[])
             phi_hist->Fill(track_phi_diff(hc.first, gem.first));
             phi_hist->Fill(track_phi_diff(hc.second, gem.second));
         }
+    }
+
+    fs::create_directories(output_dir);
+    const std::string fit_run_tag = run_num >= 0 ? std::to_string(run_num) : "unknown";
+    const fs::path fit_plot_dir =
+        fs::path(output_dir) / ("det_calib_run" + fit_run_tag + "_fits");
+    fs::create_directories(fit_plot_dir);
+
+    struct PeakFitResult {
+        std::string detector;
+        std::string parameter;
+        TH1F *hist = nullptr;
+        double entries = 0.;
+        double center = 0.;
+        double fwhm = 0.;
+        double sigma = 0.;
+        double left = 0.;
+        double right = 0.;
+        double peak = 0.;
+        bool ok = false;
+    };
+
+    auto extract_peak = [](TH1F *hist, const std::string &detector,
+                           const std::string &parameter) {
+        PeakFitResult result;
+        result.detector = detector;
+        result.parameter = parameter;
+        result.hist = hist;
+        if (!hist || hist->GetEntries() <= 0.) return result;
+
+        const int nbins = hist->GetNbinsX();
+        const int max_bin = hist->GetMaximumBin();
+        const double peak = hist->GetBinContent(max_bin);
+        if (nbins <= 0 || peak <= 0.) return result;
+
+        const double half_peak = 0.5 * peak;
+        int left_bin = max_bin;
+        while (left_bin > 1 && hist->GetBinContent(left_bin) >= half_peak)
+            --left_bin;
+
+        int right_bin = max_bin;
+        while (right_bin < nbins && hist->GetBinContent(right_bin) >= half_peak)
+            ++right_bin;
+
+        auto crossing = [&](int bin0, int bin1) {
+            const double x0 = hist->GetXaxis()->GetBinCenter(bin0);
+            const double x1 = hist->GetXaxis()->GetBinCenter(bin1);
+            const double y0 = hist->GetBinContent(bin0);
+            const double y1 = hist->GetBinContent(bin1);
+            if (std::abs(y1 - y0) < 1e-12) return 0.5 * (x0 + x1);
+            double frac = (half_peak - y0) / (y1 - y0);
+            frac = std::max(0.0, std::min(1.0, frac));
+            return x0 + frac * (x1 - x0);
+        };
+
+        const bool left_at_edge = left_bin == 1 &&
+                                  hist->GetBinContent(left_bin) >= half_peak;
+        const bool right_at_edge = right_bin == nbins &&
+                                   hist->GetBinContent(right_bin) >= half_peak;
+        result.left = left_at_edge
+            ? hist->GetXaxis()->GetBinLowEdge(1)
+            : crossing(left_bin, left_bin + 1);
+        result.right = right_at_edge
+            ? hist->GetXaxis()->GetBinUpEdge(nbins)
+            : crossing(right_bin - 1, right_bin);
+        result.center = hist->GetXaxis()->GetBinCenter(max_bin);
+        result.fwhm = std::max(0.0, result.right - result.left);
+        if (result.fwhm <= 0.)
+            result.fwhm = hist->GetXaxis()->GetBinWidth(max_bin);
+        result.sigma = result.fwhm / 2.354820045;
+        result.entries = hist->GetEntries();
+        result.peak = peak;
+        result.ok = true;
+        return result;
+    };
+
+    std::vector<PeakFitResult> fit_results;
+    fit_results.reserve(19);
+    gROOT->SetBatch(kTRUE);
+    TCanvas fit_canvas("c_det_calib_fit", "Detector calibration fit", 900, 650);
+
+    auto fit_draw_save = [&](TH1F *hist, const std::string &detector,
+                             const std::string &parameter) {
+        PeakFitResult result = extract_peak(hist, detector, parameter);
+        fit_results.push_back(result);
+
+        fit_canvas.Clear();
+        if (hist) hist->Draw();
+        TLatex latex;
+        latex.SetNDC(true);
+        latex.SetTextSize(0.035);
+        if (result.ok) {
+            TF1 *peak_shape = new TF1(
+                (std::string(hist->GetName()) + "_fwhm_peak").c_str(),
+                "gaus", result.left, result.right);
+            peak_shape->SetParameters(result.peak, result.center, result.sigma);
+            peak_shape->SetLineColor(kRed + 1);
+            peak_shape->SetLineWidth(2);
+            hist->GetListOfFunctions()->Add(peak_shape);
+            peak_shape->Draw("same");
+            latex.DrawLatex(0.15, 0.84, Form("center = %.4g", result.center));
+            latex.DrawLatex(0.15, 0.79, Form("FWHM = %.4g", result.fwhm));
+        } else {
+            latex.DrawLatex(0.15, 0.84, "No peak found");
+        }
+        if (hist) {
+            const std::string png =
+                (fit_plot_dir / (std::string(hist->GetName()) + ".png")).string();
+            fit_canvas.SaveAs(png.c_str());
+        }
+        return result;
+    };
+
+    PeakFitResult hycal_fit_x =
+        fit_draw_save(h1_hycal_mollerCenterX, "HyCal", "center_x_mm");
+    PeakFitResult hycal_fit_y =
+        fit_draw_save(h1_hycal_mollerCenterY, "HyCal", "center_y_mm");
+    PeakFitResult hycal_fit_z =
+        fit_draw_save(h1_hycal_mollerZdistance, "HyCal", "z_distance_mm");
+    std::array<PeakFitResult, 4> gem_fit_x;
+    std::array<PeakFitResult, 4> gem_fit_y;
+    std::array<PeakFitResult, 4> gem_fit_z;
+    std::array<PeakFitResult, 4> gem_fit_phi;
+    for (size_t det = 0; det < gem_center_x.size(); ++det) {
+        const std::string det_name = "GEM" + std::to_string(det);
+        gem_fit_x[det] = fit_draw_save(gem_center_x[det], det_name, "center_x_mm");
+        gem_fit_y[det] = fit_draw_save(gem_center_y[det], det_name, "center_y_mm");
+        gem_fit_z[det] = fit_draw_save(gem_z_distance[det], det_name, "z_distance_mm");
+        gem_fit_phi[det] =
+            fit_draw_save(hycal_gem_phi[det], det_name, "phi_hycal_gem_deg");
+    }
+
+    const fs::path fit_log_path =
+        fs::path(output_dir) / ("det_calib_run" + fit_run_tag + "_fit_summary.txt");
+    std::ofstream fit_log(fit_log_path.string());
+    auto write_fit_table = [&](std::ostream &os) {
+        os << std::left
+           << std::setw(10) << "Detector"
+           << std::setw(20) << "Parameter"
+           << std::right
+           << std::setw(12) << "Entries"
+           << std::setw(14) << "Center"
+           << std::setw(14) << "FWHM"
+           << std::setw(14) << "Sigma"
+           << std::setw(12) << "Status" << '\n';
+        os << std::fixed << std::setprecision(4);
+        for (const PeakFitResult &result : fit_results) {
+            os << std::left
+               << std::setw(10) << result.detector
+               << std::setw(20) << result.parameter
+               << std::right
+               << std::setw(12) << result.entries
+               << std::setw(14) << result.center
+               << std::setw(14) << result.fwhm
+               << std::setw(14) << result.sigma
+               << std::setw(12) << (result.ok ? "ok" : "empty") << '\n';
+        }
+    };
+    auto write_position_summary = [&](std::ostream &os) {
+        os << "\nPeak-center detector calibration parameters\n";
+        os << std::left
+           << std::setw(10) << "Detector"
+           << std::right
+           << std::setw(14) << "x_mm"
+           << std::setw(14) << "y_mm"
+           << std::setw(14) << "z_mm"
+           << std::setw(14) << "phi_deg" << '\n';
+        os << std::fixed << std::setprecision(4);
+        os << std::left << std::setw(10) << "HyCal" << std::right
+           << std::setw(14) << hycal_fit_x.center
+           << std::setw(14) << hycal_fit_y.center
+           << std::setw(14) << hycal_fit_z.center
+           << std::setw(14) << 0.0 << '\n';
+        for (size_t det = 0; det < gem_fit_x.size(); ++det) {
+            os << std::left << std::setw(10) << ("GEM" + std::to_string(det))
+               << std::right
+               << std::setw(14) << gem_fit_x[det].center
+               << std::setw(14) << gem_fit_y[det].center
+               << std::setw(14) << gem_fit_z[det].center
+               << std::setw(14) << gem_fit_phi[det].center << '\n';
+        }
+    };
+
+    std::cout << "Detector position calibration fit summary:\n";
+    write_fit_table(std::cout);
+    write_position_summary(std::cout);
+    if (fit_log.is_open()) {
+        fit_log << "Detector position calibration fit summary\n";
+        write_fit_table(fit_log);
+        write_position_summary(fit_log);
+        std::cout << "Fit summary written to " << fit_log_path << "\n";
+    } else {
+        std::cerr << "Warning: cannot write fit summary to "
+                  << fit_log_path << "\n";
     }
 
     fs::create_directories(output_dir);
