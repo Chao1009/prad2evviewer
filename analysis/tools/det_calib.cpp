@@ -60,6 +60,24 @@ namespace fs = std::filesystem;
 
 using EventVars_Recon = prad2::ReconEventData;
 
+struct TaggedMollerEvent {
+    DataPoint first;
+    DataPoint second;
+    int event_num = -1;
+
+    TaggedMollerEvent() = default;
+    TaggedMollerEvent(const DataPoint &first_, const DataPoint &second_,
+                      int event_num_)
+        : first(first_), second(second_), event_num(event_num_) {}
+};
+
+using TaggedMollerData = std::vector<TaggedMollerEvent>;
+
+static MollerEvent ToMollerEvent(const TaggedMollerEvent &event)
+{
+    return MollerEvent(event.first, event.second);
+}
+
 // ── forward declarations ──────────────────────────────────────────────────
 static std::vector<std::string> collectEvioFiles(const std::string &path);
 static bool ProcessEVIO(const std::string &input_evio,
@@ -71,8 +89,8 @@ static bool ProcessEVIO(const std::string &input_evio,
                         const std::string &gem_ped_file,
                         float zerosup_override,
                         int max_events,
-                        MollerData &hycal_mollers,
-                        std::array<MollerData, 4> &gem_mollers);
+                        TaggedMollerData &hycal_mollers,
+                        std::array<TaggedMollerData, 4> &gem_mollers);
 
 // ── file helpers ──────────────────────────────────────────────────────────
 static std::vector<std::string> collectEvioFiles(const std::string &path)
@@ -157,8 +175,8 @@ int main(int argc, char *argv[])
     // This avoids locking the (potentially large) Moller vectors while events
     // are being reconstructed.  The main thread merges the slots after all
     // workers have finished.
-    std::vector<MollerData> hycal_results(num_files);
-    std::vector<std::array<MollerData, 4>> gem_results(num_files);
+    std::vector<TaggedMollerData> hycal_results(num_files);
+    std::vector<std::array<TaggedMollerData, 4>> gem_results(num_files);
     std::vector<char> processed_ok(num_files, 0);
     std::atomic<int> next_file{0};
     std::atomic<int> errors{0};
@@ -200,8 +218,8 @@ int main(int argc, char *argv[])
 
     // Aggregate in input-file order, so results are deterministic regardless
     // of the order in which worker threads completed.
-    MollerData hycal_mollers;
-    std::array<MollerData, 4> gem_mollers;
+    TaggedMollerData hycal_mollers;
+    std::array<TaggedMollerData, 4> gem_mollers;
     size_t total_hycal = 0;
     std::array<size_t, 4> total_gem{};
     for (int i = 0; i < num_files; ++i) {
@@ -248,19 +266,19 @@ int main(int argc, char *argv[])
     TH1F *h1_hycal_mollerCenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   400, -50, 50);
     TH1F *h1_hycal_mollerZdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   400, -50, 50);
+    TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   800, -50, 50);
     TH1F *h1_gem0_mollerCenterY   = new TH1F("h1_gem0_mollerCenterY",   "GEM0 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem0_mollerZdistance = new TH1F("h1_gem0_mollerZdistance", "GEM0 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   400, -50, 50);
+    TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   800, -50, 50);
     TH1F *h1_gem1_mollerCenterY   = new TH1F("h1_gem1_mollerCenterY",   "GEM1 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem1_mollerZdistance = new TH1F("h1_gem1_mollerZdistance", "GEM1 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   400, -50, 50);
+    TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   800, -50, 50);
     TH1F *h1_gem2_mollerCenterY   = new TH1F("h1_gem2_mollerCenterY",   "GEM2 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem2_mollerZdistance = new TH1F("h1_gem2_mollerZdistance", "GEM2 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   400, -50, 50);
+    TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   800, -50, 50);
     TH1F *h1_gem3_mollerCenterY   = new TH1F("h1_gem3_mollerCenterY",   "GEM3 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem3_mollerZdistance = new TH1F("h1_gem3_mollerZdistance", "GEM3 Moller Z distance", 4000, 0, 10000);
 
@@ -269,18 +287,20 @@ int main(int argc, char *argv[])
     TH1F *h1_phi_diff_hycal_gem2 = new TH1F("h1_phi_diff_hycal_gem2", "Phi Difference HyCal-GEM2", 80, -20, 20);
     TH1F *h1_phi_diff_hycal_gem3 = new TH1F("h1_phi_diff_hycal_gem3", "Phi Difference HyCal-GEM3", 80, -20, 20);
 
-    auto fill_moller_data = [&](const MollerData &mollers, TH2F *hits,
+    auto fill_moller_data = [&](const TaggedMollerData &mollers, TH2F *hits,
                                 TH2F *centers, TH1F *center_x,
                                 TH1F *center_y, TH1F *z_distance) {
         const size_t n = mollers.size();
         for (size_t i = 0; i < n; ++i) {
-            const MollerEvent &event = mollers[i];
+            const TaggedMollerEvent &event = mollers[i];
+            const MollerEvent current = ToMollerEvent(event);
             hits->Fill(event.first.x, event.first.y);
             hits->Fill(event.second.x, event.second.y);
-            z_distance->Fill(PhysicsTools::GetMollerZdistance(event, gRunConfig.Ebeam));
+            z_distance->Fill(PhysicsTools::GetMollerZdistance(current, gRunConfig.Ebeam));
 
             if (i == 0) continue;
-            auto center = PhysicsTools::GetMollerCenter(mollers[i - 1], event);
+            MollerEvent previous = ToMollerEvent(mollers[i - 1]);
+            auto center = PhysicsTools::GetMollerCenter(previous, current);
             if(center[0] != 0 || center[1] != 0) {
                 centers->Fill(center[0], center[1]);
                 center_x->Fill(center[0]);
@@ -288,7 +308,8 @@ int main(int argc, char *argv[])
             }
 
             if (i > 1) {
-                center = PhysicsTools::GetMollerCenter(mollers[i - 2], event);
+                previous = ToMollerEvent(mollers[i - 2]);
+                center = PhysicsTools::GetMollerCenter(previous, current);
                 if(center[0] != 0 || center[1] != 0) {
                     centers->Fill(center[0], center[1]);
                     center_x->Fill(center[0]);
@@ -325,17 +346,22 @@ int main(int argc, char *argv[])
         return diff;
     };
 
+    std::unordered_map<int, const TaggedMollerEvent *> hycal_by_event;
+    hycal_by_event.reserve(hycal_mollers.size());
+    for (const TaggedMollerEvent &hc : hycal_mollers)
+        hycal_by_event.emplace(hc.event_num, &hc);
+
     for (size_t det = 0; det < gem_mollers.size(); ++det) {
-        const MollerData &gm = gem_mollers[det];
+        const TaggedMollerData &gm = gem_mollers[det];
         fill_moller_data(gm, gem_hits[det], gem_centers[det],
                          gem_center_x[det], gem_center_y[det],
                          gem_z_distance[det]);
 
-        const size_t n_pair = std::min(hycal_mollers.size(), gm.size());
         TH1F *phi_hist = hycal_gem_phi[det];
-        for (size_t i = 0; i < n_pair; ++i) {
-            const MollerEvent &hc = hycal_mollers[i];
-            const MollerEvent &gem = gm[i];
+        for (const TaggedMollerEvent &gem : gm) {
+            const auto hc_it = hycal_by_event.find(gem.event_num);
+            if (hc_it == hycal_by_event.end()) continue;
+            const TaggedMollerEvent &hc = *hc_it->second;
             phi_hist->Fill(track_phi_diff(hc.first, gem.first));
             phi_hist->Fill(track_phi_diff(hc.second, gem.second));
         }
@@ -618,8 +644,8 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
                                 const std::string &gem_ped_file,
                                 const float zerosup_override,
                                 const int max_events,
-                                MollerData &hycal_mollers,
-                                std::array<MollerData, 4> &gem_mollers)
+                                TaggedMollerData &hycal_mollers,
+                                std::array<TaggedMollerData, 4> &gem_mollers)
 {
     fdec::HyCalSystem                 hycal;
     gem::GemSystem                    gem_sys;
@@ -931,14 +957,17 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
                 if(theta1 < 1.5f || theta2 < 1.5f) continue;
             }
 
-            hycal_mollers.push_back(m_hc);
+            hycal_mollers.emplace_back(m_hc.first, m_hc.second, ev->event_num);
 
             for(int did = 0; did < 4; did ++){
                 if (((ev->matchFlag[0] & (1u << did)) != 0)
                     && ((ev->matchFlag[1] & (1u << did)) != 0)) {
-                    gem_mollers[did].push_back(MollerEvent(
-                        {ev->matchGEMx[0][did], ev->matchGEMy[0][did], ev->matchGEMz[0][did], ev->cl_energy[0]},
-                        {ev->matchGEMx[1][did], ev->matchGEMy[1][did], ev->matchGEMz[1][did], ev->cl_energy[1]}));
+                    gem_mollers[did].emplace_back(
+                        DataPoint(ev->matchGEMx[0][did], ev->matchGEMy[0][did],
+                                  ev->matchGEMz[0][did], ev->cl_energy[0]),
+                        DataPoint(ev->matchGEMx[1][did], ev->matchGEMy[1][did],
+                                  ev->matchGEMz[1][did], ev->cl_energy[1]),
+                        ev->event_num);
                 }
             }
 
