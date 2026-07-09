@@ -244,30 +244,30 @@ int main(int argc, char *argv[])
     TH2F *h2_gem2_mollerCenter  = new TH2F("h2_gem2_mollerCenter",   "GEM2 Moller Center",    720, -360, 360, 720, -360, 360);
     TH2F *h2_gem3_mollerCenter  = new TH2F("h2_gem3_mollerCenter",   "GEM3 Moller Center",    720, -360, 360, 720, -360, 360);
 
-    TH1F *h1_hycal_mollerCenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   200, -50, 50);
-    TH1F *h1_hycal_mollerCenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   200, -50, 50);
+    TH1F *h1_hycal_mollerCenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   400, -50, 50);
+    TH1F *h1_hycal_mollerCenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   400, -50, 50);
     TH1F *h1_hycal_mollerZdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem0_mollerCenterX   = new TH1F("h1_gem0_mollerCenterX",   "GEM0 Moller Center X",   400, -50, 50);
     TH1F *h1_gem0_mollerCenterY   = new TH1F("h1_gem0_mollerCenterY",   "GEM0 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem0_mollerZdistance = new TH1F("h1_gem0_mollerZdistance", "GEM0 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem1_mollerCenterX   = new TH1F("h1_gem1_mollerCenterX",   "GEM1 Moller Center X",   400, -50, 50);
     TH1F *h1_gem1_mollerCenterY   = new TH1F("h1_gem1_mollerCenterY",   "GEM1 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem1_mollerZdistance = new TH1F("h1_gem1_mollerZdistance", "GEM1 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem2_mollerCenterX   = new TH1F("h1_gem2_mollerCenterX",   "GEM2 Moller Center X",   400, -50, 50);
     TH1F *h1_gem2_mollerCenterY   = new TH1F("h1_gem2_mollerCenterY",   "GEM2 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem2_mollerZdistance = new TH1F("h1_gem2_mollerZdistance", "GEM2 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   200, -50, 50);
+    TH1F *h1_gem3_mollerCenterX   = new TH1F("h1_gem3_mollerCenterX",   "GEM3 Moller Center X",   400, -50, 50);
     TH1F *h1_gem3_mollerCenterY   = new TH1F("h1_gem3_mollerCenterY",   "GEM3 Moller Center Y",   200, -50, 50);
     TH1F *h1_gem3_mollerZdistance = new TH1F("h1_gem3_mollerZdistance", "GEM3 Moller Z distance", 4000, 0, 10000);
 
-    TH1F *h1_phi_diff_hycal_gem0 = new TH1F("h1_phi_diff_hycal_gem0", "Phi Difference HyCal-GEM0", 40, -10, 10);
-    TH1F *h1_phi_diff_hycal_gem1 = new TH1F("h1_phi_diff_hycal_gem1", "Phi Difference HyCal-GEM1", 40, -10, 10);
-    TH1F *h1_phi_diff_hycal_gem2 = new TH1F("h1_phi_diff_hycal_gem2", "Phi Difference HyCal-GEM2", 40, -10, 10);
-    TH1F *h1_phi_diff_hycal_gem3 = new TH1F("h1_phi_diff_hycal_gem3", "Phi Difference HyCal-GEM3", 40, -10, 10);
+    TH1F *h1_phi_diff_hycal_gem0 = new TH1F("h1_phi_diff_hycal_gem0", "Phi Difference HyCal-GEM0", 80, -20, 20);
+    TH1F *h1_phi_diff_hycal_gem1 = new TH1F("h1_phi_diff_hycal_gem1", "Phi Difference HyCal-GEM1", 80, -20, 20);
+    TH1F *h1_phi_diff_hycal_gem2 = new TH1F("h1_phi_diff_hycal_gem2", "Phi Difference HyCal-GEM2", 80, -20, 20);
+    TH1F *h1_phi_diff_hycal_gem3 = new TH1F("h1_phi_diff_hycal_gem3", "Phi Difference HyCal-GEM3", 80, -20, 20);
 
     auto fill_moller_data = [&](const MollerData &mollers, TH2F *hits,
                                 TH2F *centers, TH1F *center_x,
@@ -281,15 +281,19 @@ int main(int argc, char *argv[])
 
             if (i == 0) continue;
             auto center = PhysicsTools::GetMollerCenter(mollers[i - 1], event);
-            centers->Fill(center[0], center[1]);
-            center_x->Fill(center[0]);
-            center_y->Fill(center[1]);
-
-            if (i > 1) {
-                center = PhysicsTools::GetMollerCenter(mollers[i - 2], event);
+            if(center[0] != 0 || center[1] != 0) {
                 centers->Fill(center[0], center[1]);
                 center_x->Fill(center[0]);
                 center_y->Fill(center[1]);
+            }
+
+            if (i > 1) {
+                center = PhysicsTools::GetMollerCenter(mollers[i - 2], event);
+                if(center[0] != 0 || center[1] != 0) {
+                    centers->Fill(center[0], center[1]);
+                    center_x->Fill(center[0]);
+                    center_y->Fill(center[1]);
+                }
             }
         }
     };
@@ -354,6 +358,7 @@ int main(int argc, char *argv[])
         double left = 0.;
         double right = 0.;
         double peak = 0.;
+        std::string status = "empty";
         bool ok = false;
     };
 
@@ -363,11 +368,14 @@ int main(int argc, char *argv[])
         result.detector = detector;
         result.parameter = parameter;
         result.hist = hist;
+        if (hist) result.entries = hist->GetEntries();
         if (!hist || hist->GetEntries() <= 0.) return result;
 
         const int nbins = hist->GetNbinsX();
         const int max_bin = hist->GetMaximumBin();
         const double peak = hist->GetBinContent(max_bin);
+        result.center = hist->GetXaxis()->GetBinCenter(max_bin);
+        result.peak = peak;
         if (nbins <= 0 || peak <= 0.) return result;
 
         const double half_peak = 0.5 * peak;
@@ -400,14 +408,45 @@ int main(int argc, char *argv[])
         result.right = right_at_edge
             ? hist->GetXaxis()->GetBinUpEdge(nbins)
             : crossing(right_bin - 1, right_bin);
-        result.center = hist->GetXaxis()->GetBinCenter(max_bin);
         result.fwhm = std::max(0.0, result.right - result.left);
         if (result.fwhm <= 0.)
             result.fwhm = hist->GetXaxis()->GetBinWidth(max_bin);
         result.sigma = result.fwhm / 2.354820045;
-        result.entries = hist->GetEntries();
-        result.peak = peak;
-        result.ok = true;
+
+        double fit_lo = result.left;
+        double fit_hi = result.right;
+        const double bin_width = hist->GetXaxis()->GetBinWidth(max_bin);
+        if (hist->GetXaxis()->FindBin(fit_hi) -
+                hist->GetXaxis()->FindBin(fit_lo) + 1 < 3) {
+            fit_lo = result.center - 2.0 * bin_width;
+            fit_hi = result.center + 2.0 * bin_width;
+        }
+        fit_lo = std::max(fit_lo, hist->GetXaxis()->GetXmin());
+        fit_hi = std::min(fit_hi, hist->GetXaxis()->GetXmax());
+
+        TF1 fit_func((std::string(hist->GetName()) + "_gaus_fit").c_str(),
+                     "gaus", fit_lo, fit_hi);
+        fit_func.SetParameters(peak, result.center, std::max(result.sigma, bin_width));
+        fit_func.SetParLimits(0, 0., std::max(peak * 10., 1.));
+        fit_func.SetParLimits(1, fit_lo, fit_hi);
+        fit_func.SetParLimits(2, 0.1 * bin_width, std::max(fit_hi - fit_lo, bin_width));
+
+        const int fit_status = hist->Fit(&fit_func, "QRN");
+        if (fit_status == 0 &&
+            std::isfinite(fit_func.GetParameter(1)) &&
+            std::isfinite(fit_func.GetParameter(2)) &&
+            fit_func.GetParameter(2) > 0.) {
+            result.peak = fit_func.GetParameter(0);
+            result.center = fit_func.GetParameter(1);
+            result.sigma = std::abs(fit_func.GetParameter(2));
+            result.fwhm = 2.354820045 * result.sigma;
+            result.left = result.center - 0.5 * result.fwhm;
+            result.right = result.center + 0.5 * result.fwhm;
+            result.status = "ok";
+            result.ok = true;
+        } else {
+            result.status = "fit-failed";
+        }
         return result;
     };
 
@@ -490,7 +529,7 @@ int main(int argc, char *argv[])
                << std::setw(14) << result.center
                << std::setw(14) << result.fwhm
                << std::setw(14) << result.sigma
-               << std::setw(12) << (result.ok ? "ok" : "empty") << '\n';
+               << std::setw(12) << result.status << '\n';
         }
     };
     auto write_position_summary = [&](std::ostream &os) {
