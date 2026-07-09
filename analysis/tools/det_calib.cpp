@@ -581,6 +581,67 @@ int main(int argc, char *argv[])
                << std::setw(14) << gem_fit_z[det].center
                << std::setw(14) << gem_fit_phi[det].center << '\n';
         }
+
+        const double target_x = gRunConfig.target_x;
+        const double target_y = gRunConfig.target_y;
+        const double target_z = gRunConfig.target_z;
+        const double hycal_json_x = gRunConfig.hycal_x + target_x;
+        const double hycal_json_y = gRunConfig.hycal_y + target_y;
+        const double hycal_dx = hycal_fit_x.ok ? hycal_fit_x.center : 0.;
+        const double hycal_dy = hycal_fit_y.ok ? hycal_fit_y.center : 0.;
+        const double corrected_target_x = target_x + hycal_dx;
+        const double corrected_target_y = target_y + hycal_dy;
+        const double corrected_target_z = 0.;
+        const double corrected_hycal_z =
+            hycal_fit_z.ok ? hycal_fit_z.center : gRunConfig.hycal_z + target_z;
+
+        os << "\nCorrected runinfo geometry snippet\n";
+        os << std::fixed << std::setprecision(6);
+        os << "{\n";
+        if (run_num >= 0)
+            os << "    \"from_run\": " << run_num << ",\n";
+        os << "    \"target\": ["
+           << corrected_target_x << ", "
+           << corrected_target_y << ", "
+           << corrected_target_z << "],\n";
+        os << "    \"hycal\": {\n";
+        os << "        \"position\": ["
+           << hycal_json_x << ", "
+           << hycal_json_y << ", "
+           << corrected_hycal_z << "], "
+           << "\"tilting\": ["
+           << gRunConfig.hycal_tilt_x << ", "
+           << gRunConfig.hycal_tilt_y << ", "
+           << gRunConfig.hycal_tilt_z << "]\n";
+        os << "    },\n";
+        os << "    \"gem\": {\n";
+        os << "        \"detectors\": [\n";
+        for (size_t det = 0; det < gem_fit_x.size(); ++det) {
+            const double old_gem_x = gRunConfig.gem_x[det] + target_x;
+            const double old_gem_y = gRunConfig.gem_y[det] + target_y;
+            const double old_gem_z = gRunConfig.gem_z[det] + target_z;
+            const double corrected_gem_x = gem_fit_x[det].ok
+                ? old_gem_x - gem_fit_x[det].center
+                : old_gem_x;
+            const double corrected_gem_y = gem_fit_y[det].ok
+                ? old_gem_y - gem_fit_y[det].center
+                : old_gem_y;
+            const double corrected_gem_z = gem_fit_z[det].ok
+                ? gem_fit_z[det].center
+                : old_gem_z;
+            os << "            {\"id\": " << det
+               << ", \"position\": ["
+               << corrected_gem_x << ", "
+               << corrected_gem_y << ", "
+               << corrected_gem_z << "], \"tilting\": ["
+               << gRunConfig.gem_tilt_x[det] << ", "
+               << gRunConfig.gem_tilt_y[det] << ", "
+               << gRunConfig.gem_tilt_z[det] << "]}";
+            os << (det + 1 == gem_fit_x.size() ? "\n" : ",\n");
+        }
+        os << "        ]\n";
+        os << "    }\n";
+        os << "}\n";
     };
 
     std::cout << "Detector position calibration fit summary:\n";
