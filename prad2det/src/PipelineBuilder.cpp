@@ -347,6 +347,9 @@ Pipeline PipelineBuilder::build()
             out.target_pos_res[1] = m["target_pos_res"][1].get<float>();
             out.target_pos_res[2] = m["target_pos_res"][2].get<float>();
         }
+        if (m.contains("match_method") && m["match_method"].is_number_integer()) {
+            out.match_method = m["match_method"].get<int>();
+        }
     }
     out.hycal.SetPositionResolutionParams(
         out.hycal_pos_res[0], out.hycal_pos_res[1], out.hycal_pos_res[2]);

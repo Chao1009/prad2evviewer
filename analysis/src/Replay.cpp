@@ -590,6 +590,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     DetectorTransform                 hycal_transform;
     std::array<DetectorTransform, 4>  gem_transforms;
     std::unordered_map<int, int>      roc_to_crate;
+    int                               match_method = 1;
 
     if (prad1) {
         // Legacy PRad-1 setup — no GEM, ADC1881M pedestals.
@@ -658,6 +659,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
         hc_rf_offsets    = std::move(pipeline.hycal_rf_offsets);
         hycal_transform  = pipeline.hycal_transform;
         gem_transforms   = pipeline.gem_transforms;
+        match_method     = pipeline.match_method;
 
         // ROC→crate map from the same daq_cfg the builder consumed.
         for (const auto &re : daq_cfg_.roc_tags) {
@@ -675,7 +677,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
     gem::GemCluster      gem_clusterer;
-    MatchingTools        matching;
+    MatchingTools        matching(match_method);
     //open EVIO file and output ROOT file
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
@@ -1193,7 +1195,7 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
     gem::GemCluster      gem_clusterer;
-    MatchingTools        matching;
+    MatchingTools        matching(pipeline.match_method);
     //open EVIO file and output ROOT file
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);

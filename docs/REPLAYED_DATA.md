@@ -353,6 +353,13 @@ when you want a fixed-shape `[n_clusters][4]` view.
 `match_num` ≤ 100. Convenient `[match_num][2]` view for analyses that only
 care about clusters confirmed on at least two GEM planes.
 
+The pair-selection strategy is configured by
+`database/reconstruction_config.json:matching.match_method`
+(parsed via `PipelineBuilder`): `1` uses legacy `PostMatch`
+(closest-to-HyCal per upstream/downstream pair), while other values
+use `PostMatch_upgrade` (upstream-downstream pair minimising inter-plane
+projected `deltaR`).
+
 | Branch | Type | Meaning |
 |---|---|---|
 | `match_num` | `int`                  | Number of clusters with ≥2 GEMs matched |

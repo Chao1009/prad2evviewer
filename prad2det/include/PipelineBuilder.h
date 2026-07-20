@@ -89,6 +89,7 @@ struct Pipeline {
     std::array<float, 3>               hycal_pos_res  = {2.6f, 0.f, 0.f};
     std::vector<float>                 gem_pos_res    = {0.1f, 0.1f, 0.1f, 0.1f};
     std::array<float, 3>               target_pos_res = {1.f, 1.f, 20.f};
+    int                                match_method   = 1; // 1=closest to hycal cluster, other= minimum deltaR between 2 GEM hits
 
     // GEM file-side hardware crate ID -> logical crate ID, derived from
     // daq_cfg.roc_tags entries with type=="gem".  Exposed so callers

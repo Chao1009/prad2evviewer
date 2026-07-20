@@ -378,6 +378,8 @@ public:
 ### `MatchingTools` methods
 
 ```cpp
+explicit MatchingTools(int postMatchMethod = 1);
+
 std::vector<MatchHit> Match(
     std::vector<HCHit> &hycalHits,
     const std::vector<GEMHit> &gem1, const std::vector<GEMHit> &gem2,
@@ -391,6 +393,11 @@ std::vector<MatchHit_perChamber> MatchPerChamber(
 void SetMatchRange     (float range);   // mm; default 15
 void SetSquareSelection(bool sq);       // true = square cut, false = circular
 ```
+
+`postMatchMethod` is typically supplied from
+`prad2::Pipeline::match_method` (loaded by `PipelineBuilder` from
+`reconstruction_config.json:matching.match_method`).
+`1` selects legacy `PostMatch`(closest to hycal cluster); other values select `PostMatch_upgrade`(optimized matching algorithm, minimizes deltaR between 2 GEM hits).
 
 ---
 

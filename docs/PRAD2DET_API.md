@@ -364,6 +364,7 @@ server, Python bindings) share the same wiring.
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |
 | `gem_pos_res` | per-detector σ (mm) |
 | `target_pos_res[3]` | (σx, σy, σz) at target |
+| `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (`1` = legacy `PostMatch` (closest to hycal cluster), other = `PostMatch_upgrade` (optimized matching algorithm, minimizes deltaR between 2 GEM hits)) |
 | `gem_crate_remap` | derived from `daq_cfg.roc_tags[type=="gem"]` |
 | `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
 

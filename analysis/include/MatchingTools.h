@@ -9,6 +9,7 @@
 #include <vector>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 
 namespace analysis {
 
@@ -71,7 +72,7 @@ class MatchHit_perChamber
 class MatchingTools
 {
 public:
-    MatchingTools() = default;
+    explicit MatchingTools(int postMatchMethod = 1);
 
     std::vector<MatchHit> Match(const std::vector<analysis::HCHit> &hycalHits,
                             const std::vector<analysis::GEMHit> &gem1_hits,
@@ -97,11 +98,13 @@ private:
 
     float matchSigma_ = 1.f;   // mm, used for energy-dependent matching
     bool  energyDependent_ = false;
+    int   postMatchMethod_ = 1;
 
     float ProjectionDistance(const analysis::HCHit &h, const analysis::GEMHit &g) const;
     float ProjectionDistance(const analysis::GEMHit &g1, const analysis::GEMHit &g2, float ref_z) const;
     bool  PreMatch(const analysis::HCHit &hycal, const analysis::GEMHit &gem) const;
     void  PostMatch(MatchHit &h) const;
+    void  PostMatch_upgrade(MatchHit &h) const;
 };
 
 } // namespace analysis
