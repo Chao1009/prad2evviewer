@@ -339,9 +339,6 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
     std::vector<MatchHit_perChamber> result;
     result.reserve(hycalHits.size());
 
-    // per-chamber sets of already-claimed GEM hits (pointer identity)
-    std::set<const analysis::GEMHit *> used[4];
-
     for (size_t i = 0; i < hycalHits.size(); ++i) {
         const auto &hit = hycalHits[i];
         MatchHit_perChamber mhit(hit);
@@ -353,9 +350,15 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
 
             for (const auto &g : *planes[d]) {
                 if (!PreMatch(hit, g)) continue;
-                if (used[d].count(&g)) continue; // already claimed by a higher-energy cluster
                 mhit.gem_hits[d].push_back(analysis::GEMHit{g.x, g.y, g.z, g.det_id});
             }
+            // sort the matched GEM hits by distance to the HyCal hit
+            std::sort(mhit.gem_hits[d].begin(), mhit.gem_hits[d].end(),
+                      [this, &hit](const analysis::GEMHit &a, const analysis::GEMHit &b){
+                          float da = ProjectionDistance(hit, a);
+                          float db = ProjectionDistance(hit, b);
+                          return da < db;
+                      });
         }
         if (!mhit.gem_hits[0].empty()) fdec::set_bit(mhit.mflag, kGEM1Match);
         if (!mhit.gem_hits[1].empty()) fdec::set_bit(mhit.mflag, kGEM2Match);
