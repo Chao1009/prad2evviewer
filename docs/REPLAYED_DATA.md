@@ -337,16 +337,16 @@ an offline-calibrated MeV energy.
 
 ### Per-cluster HyCal↔GEM match (all 4 GEMs)
 
-For each HyCal cluster, the closest GEM hit on each of the 4 detectors
-within the matching window is recorded (or `0`/`NaN` if none).  Use this
-when you want a fixed-shape `[n_clusters][4]` view.
+For each HyCal cluster, all GEM hits within the matching window are kept
+separately for each detector. This supports multiple candidates per chamber.
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `matchFlag` | `uint32[n_clusters]`    | Per-cluster match flags (which GEMs matched) |
-| `matchGEMx` | `float[n_clusters][4]`  | Matched GEM x (det 0..3) |
-| `matchGEMy` | `float[n_clusters][4]`  | Matched GEM y |
-| `matchGEMz` | `float[n_clusters][4]`  | Matched GEM z |
+| `matchFlag` | `uint32[n_clusters]`                     | Per-cluster match flags (which GEMs matched) |
+| `matchGEM0` | `vector<array<float,3>>[n_clusters]`     | GEM det-0 match list; each item is `{x,y,z}` |
+| `matchGEM1` | `vector<array<float,3>>[n_clusters]`     | GEM det-1 match list; each item is `{x,y,z}` |
+| `matchGEM2` | `vector<array<float,3>>[n_clusters]`     | GEM det-2 match list; each item is `{x,y,z}` |
+| `matchGEM3` | `vector<array<float,3>>[n_clusters]`     | GEM det-3 match list; each item is `{x,y,z}` |
 
 ### Quick-access matched pairs (clusters with ≥2 GEMs matched)
 
@@ -371,6 +371,7 @@ projected `deltaR`).
 | `mHit_gy`   | `float[match_num][2]`  | First 2 matched GEM y |
 | `mHit_gz`   | `float[match_num][2]`  | First 2 matched GEM z |
 | `mHit_gid`  | `float[match_num][2]`  | det_id (0..3) of those 2 GEM hits |
+| `mHit_cl_index` | `uint8_t[match_num]`  | Index of the corresponding HyCal cluster for the matched GEM hits |
 
 ### GEM reconstructed hits
 

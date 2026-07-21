@@ -160,6 +160,7 @@ void Replay::clearReconEvent(EventVars_Recon &ev)
     ev.n_gem_hits = 0;
     ev.matchNum = 0;
     std::fill(std::begin(ev.matchFlag), std::end(ev.matchFlag), 0);
+    ev.clear_match_lists();
     ev.veto_nch = 0;
     ev.lms_nch = 0;
     ev.ssp_raw.clear();
@@ -1087,9 +1088,9 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                 int cl_idx = m.hycal_idx;
                 if( cl_idx != i) std::cerr << "Warning: cluster index mismatch in matched_hits_chamber: " << cl_idx << " vs " << i << "\n";
                 for(int j = 0; j < 4; j++){
-                    ev->matchGEMx[i][j] = m.gem_hits[j][0];
-                    ev->matchGEMy[i][j] = m.gem_hits[j][1];
-                    ev->matchGEMz[i][j] = m.gem_hits[j][2];
+                    for (const auto &gh : m.gem_hits[j]) {
+                        ev->add_match(i, j, gh.x, gh.y, gh.z);
+                    }
                 }
                 ev->matchFlag[i] = 0;
                 ev->matchFlag[i] = m.mflag;
@@ -1108,6 +1109,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                     ev->mHit_gz[i][j] =  matched_hits[i].gem[j].z;
                     ev->mHit_gid[i][j] = matched_hits[i].gem[j].det_id; // placeholder for GEM hit ID if needed
                 }
+                ev->mHit_cl_index[i] = matched_hits[i].hycal_idx;
             }
 
         } //end of if(PRad1)
@@ -1585,9 +1587,9 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                     int cl_idx = m.hycal_idx;
                     if( cl_idx != i) std::cerr << "Warning: cluster index mismatch in matched_hits_chamber: " << cl_idx << " vs " << i << "\n";
                     for(int j = 0; j < 4; j++){
-                        ev->matchGEMx[i][j] = m.gem_hits[j][0];
-                        ev->matchGEMy[i][j] = m.gem_hits[j][1];
-                        ev->matchGEMz[i][j] = m.gem_hits[j][2];
+                        for (const auto &gh : m.gem_hits[j]) {
+                            ev->add_match(i, j, gh.x, gh.y, gh.z);
+                        }
                     }
                     ev->matchFlag[i] = 0;
                     ev->matchFlag[i] = m.mflag;
@@ -1606,6 +1608,7 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                         ev->mHit_gz[i][j] =  matched_hits[i].gem[j].z;
                         ev->mHit_gid[i][j] = matched_hits[i].gem[j].det_id; // placeholder for GEM hit ID if needed
                     }
+                    ev->mHit_cl_index[i] = matched_hits[i].hycal_idx;
                 }
             }
             tree->Fill();

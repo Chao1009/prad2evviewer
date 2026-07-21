@@ -968,9 +968,9 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
                     const int cl_idx = m.hycal_idx;
                     if (cl_idx < 0 || cl_idx >= prad2::kMaxClusters) continue;
                     for(int j = 0; j < 4; j++){
-                        ev->matchGEMx[cl_idx][j] = m.gem_hits[j][0];
-                        ev->matchGEMy[cl_idx][j] = m.gem_hits[j][1];
-                        ev->matchGEMz[cl_idx][j] = m.gem_hits[j][2];
+                        for (const auto &gh : m.gem_hits[j]) {
+                            ev->add_match(cl_idx, j, gh.x, gh.y, gh.z);
+                        }
                     }
                     ev->matchFlag[cl_idx] = m.mflag;
                 }
@@ -1023,11 +1023,12 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
             for(int did = 0; did < 4; did ++){
                 if (((ev->matchFlag[0] & (1u << did)) != 0)
                     && ((ev->matchFlag[1] & (1u << did)) != 0)) {
+                    float x0, y0, z0, x1, y1, z1;
+                    if (!ev->first_match(0, did, x0, y0, z0)) continue;
+                    if (!ev->first_match(1, did, x1, y1, z1)) continue;
                     gem_mollers[did].emplace_back(
-                        DataPoint(ev->matchGEMx[0][did], ev->matchGEMy[0][did],
-                                  ev->matchGEMz[0][did], ev->cl_energy[0]),
-                        DataPoint(ev->matchGEMx[1][did], ev->matchGEMy[1][did],
-                                  ev->matchGEMz[1][did], ev->cl_energy[1]),
+                        DataPoint(x0, y0, z0, ev->cl_energy[0]),
+                        DataPoint(x1, y1, z1, ev->cl_energy[1]),
                         ev->event_num);
                 }
             }

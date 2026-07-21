@@ -934,28 +934,28 @@ static bool processFile(const std::string &path,
                     if(gem_matched_count == 1) {
                         int d;
                         if(gem[2]) d = 2; else d = 3;
-                        x1u = ev.matchGEMx[j][d], y1u = ev.matchGEMy[j][d], z1u = ev.matchGEMz[j][d], E1 = ev.cl_energy[j], t1 = ev.cl_time[j];
+                        ev.first_match(j, d, x1u, y1u, z1u); E1 = ev.cl_energy[j], t1 = ev.cl_time[j];
                         x1 = x1u, y1 = y1u, z1 = z1u;
                         if(gem[0]) d = 0; else d = 1;
-                        x1d = ev.matchGEMx[j][d], y1d = ev.matchGEMy[j][d], z1d = ev.matchGEMz[j][d];
+                        ev.first_match(j, d, x1d, y1d, z1d);
                         index1 = j;
                     }
                     if(gem_matched_count == 2) {
                         int d;
                         if(gem[2]) d = 2; else d = 3;
-                        x2u = ev.matchGEMx[j][d], y2u = ev.matchGEMy[j][d], z2u = ev.matchGEMz[j][d], E2 = ev.cl_energy[j], t2 = ev.cl_time[j];
+                        ev.first_match(j, d, x2u, y2u, z2u); E2 = ev.cl_energy[j], t2 = ev.cl_time[j];
                         x2 = x2u, y2 = y2u, z2 = z2u;
                         if(gem[0]) d = 0; else d = 1;
-                        x2d = ev.matchGEMx[j][d], y2d = ev.matchGEMy[j][d], z2d = ev.matchGEMz[j][d];
+                        ev.first_match(j, d, x2d, y2d, z2d);
                         index2 = j;
                     }
                     if(gem_matched_count == 3) {
                         int d;
                         if(gem[2]) d = 2; else d = 3;
-                        x3u = ev.matchGEMx[j][d], y3u = ev.matchGEMy[j][d], z3u = ev.matchGEMz[j][d], E3 = ev.cl_energy[j], t3 = ev.cl_time[j];
+                        ev.first_match(j, d, x3u, y3u, z3u); E3 = ev.cl_energy[j], t3 = ev.cl_time[j];
                         x3 = x3u, y3 = y3u, z3 = z3u;
                         if(gem[0]) d = 0; else d = 1;
-                        x3d = ev.matchGEMx[j][d], y3d = ev.matchGEMy[j][d], z3d = ev.matchGEMz[j][d];
+                        ev.first_match(j, d, x3d, y3d, z3d);
                         index3 = j;
                     }
                 }

@@ -20,6 +20,7 @@
 #include "TdcData.h"       // RfTimeData::MAX_HITS_PER_CH
 #include "VtpData.h"       // vtp::MAX_PRAD_CLUSTERS
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -208,9 +209,12 @@ struct ReconEventData {
     uint32_t cl_flag[kMaxClusters]    = {};
     // Matching results
     uint32_t matchFlag[kMaxClusters] = {};
-    float    matchGEMx[kMaxClusters][4] = {};
-    float    matchGEMy[kMaxClusters][4] = {};
-    float    matchGEMz[kMaxClusters][4] = {};
+    // Matched GEM hits for each of the 4 GEM planes (x, y, z coordinates in the array<float, 3>)
+    // along with the HyCal cluster
+    std::vector< std::array<float, 3> > matchGEM0[kMaxClusters] = {};
+    std::vector< std::array<float, 3> > matchGEM1[kMaxClusters] = {};
+    std::vector< std::array<float, 3> > matchGEM2[kMaxClusters] = {};
+    std::vector< std::array<float, 3> > matchGEM3[kMaxClusters] = {};
     int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
@@ -222,6 +226,7 @@ struct ReconEventData {
     float    mHit_gy[kMaxClusters][2] = {};
     float    mHit_gz[kMaxClusters][2] = {};
     float    mHit_gid[kMaxClusters][2] = {}; //det_id for matched GEM hits
+    uint8_t    mHit_cl_index[kMaxClusters] = {}; // index of the matched HyCal cluster
 
     // GEM reconstructed hits
     int        n_gem_hits = 0;
@@ -293,6 +298,57 @@ struct ReconEventData {
     // database/hycal_rf_offsets/*.json have already been applied and the
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
+
+    using MatchList = std::vector<std::array<float, 3>>;
+
+    MatchList &match_list(int cl_idx, int det_id)
+    {
+        static MatchList empty;
+        if (cl_idx < 0 || cl_idx >= kMaxClusters) return empty;
+        if (det_id == 0) return matchGEM0[cl_idx];
+        if (det_id == 1) return matchGEM1[cl_idx];
+        if (det_id == 2) return matchGEM2[cl_idx];
+        if (det_id == 3) return matchGEM3[cl_idx];
+        return empty;
+    }
+
+    const MatchList &match_list(int cl_idx, int det_id) const
+    {
+        static const MatchList empty;
+        if (cl_idx < 0 || cl_idx >= kMaxClusters) return empty;
+        if (det_id == 0) return matchGEM0[cl_idx];
+        if (det_id == 1) return matchGEM1[cl_idx];
+        if (det_id == 2) return matchGEM2[cl_idx];
+        if (det_id == 3) return matchGEM3[cl_idx];
+        return empty;
+    }
+
+    void clear_match_lists()
+    {
+        for (int i = 0; i < kMaxClusters; ++i) {
+            matchGEM0[i].clear();
+            matchGEM1[i].clear();
+            matchGEM2[i].clear();
+            matchGEM3[i].clear();
+        }
+    }
+
+    void add_match(int cl_idx, int det_id, float x, float y, float z)
+    {
+        auto &list = match_list(cl_idx, det_id);
+        if (det_id < 0 || det_id > 3 || cl_idx < 0 || cl_idx >= kMaxClusters) return;
+        list.push_back({x, y, z});
+    }
+
+    bool first_match(int cl_idx, int det_id, float &x, float &y, float &z) const
+    {
+        const auto &list = match_list(cl_idx, det_id);
+        if (list.empty()) return false;
+        x = list.front()[0];
+        y = list.front()[1];
+        z = list.front()[2];
+        return true;
+    }
 };
 
 // ── Scaler ("scalers" tree) ──────────────────────────────────────────────

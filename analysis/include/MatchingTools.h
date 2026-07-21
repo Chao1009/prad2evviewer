@@ -52,7 +52,7 @@ class MatchHit
         // --- added for matching logic ----------------------------------------
         analysis::GEMHit gem[2];       // best-matched upstream and downstream GEM hits
         uint32_t   mflag = 0;     //E.g. 0101 matching flags (see MatchFlag enum)
-        uint16_t    hycal_idx = 0; // index into original hycal vector
+        uint8_t    hycal_idx = 0; // index into original hycal vector
 };
 
 class MatchHit_perChamber
@@ -64,9 +64,10 @@ class MatchHit_perChamber
             : hycal_hit(hycal_hit){}
 
         // --- added for matching logic ----------------------------------------
-        float gem_hits[4][3] = {}; // store the best matches for each GEM chamber, format: [det_id][x/y/z]
+        // store all the hits in the matching radius for each GEM chamber, format: [hits_n][x/y/z]
+        std::vector<analysis::GEMHit> gem_hits[4];
         uint32_t   mflag = 0;     // matching flag
-        uint16_t    hycal_idx = 0; // index into original hycal vector
+        uint8_t    hycal_idx = 0; // index into original hycal vector
 };
 
 class MatchingTools

@@ -754,9 +754,9 @@ int main(int argc, char *argv[])
             if (cl_idx < 0 || cl_idx >= ev->n_clusters)
                 continue;
             for (int d = 0; d < 4; ++d) {
-                ev->matchGEMx[cl_idx][d] = m.gem_hits[d][0];
-                ev->matchGEMy[cl_idx][d] = m.gem_hits[d][1];
-                ev->matchGEMz[cl_idx][d] = m.gem_hits[d][2];
+                for (const auto &gh : m.gem_hits[d]) {
+                    ev->add_match(cl_idx, d, gh.x, gh.y, gh.z);
+                }
             }
             ev->matchFlag[cl_idx] = m.mflag;
         }

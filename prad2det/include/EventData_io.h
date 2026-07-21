@@ -262,9 +262,10 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
 
     // Per-cluster HyCal↔GEM matches (one row per HyCal cluster, 4 GEMs).
     tree->Branch("matchFlag", ev.matchFlag, "matchFlag[n_clusters]/i");
-    tree->Branch("matchGEMx", ev.matchGEMx, "matchGEMx[n_clusters][4]/F");
-    tree->Branch("matchGEMy", ev.matchGEMy, "matchGEMy[n_clusters][4]/F");
-    tree->Branch("matchGEMz", ev.matchGEMz, "matchGEMz[n_clusters][4]/F");
+    tree->Branch("matchGEM0", &ev.matchGEM0);
+    tree->Branch("matchGEM1", &ev.matchGEM1);
+    tree->Branch("matchGEM2", &ev.matchGEM2);
+    tree->Branch("matchGEM3", &ev.matchGEM3);
 
     // Quick-access matched pairs (clusters with ≥2 GEMs matched).
     tree->Branch("match_num", &ev.matchNum, "match_num/I");
@@ -276,6 +277,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("mHit_gy", ev.mHit_gy, "mHit_gy[match_num][2]/F");
     tree->Branch("mHit_gz", ev.mHit_gz, "mHit_gz[match_num][2]/F");
     tree->Branch("mHit_gid", ev.mHit_gid, "mHit_gid[match_num][2]/F");
+    tree->Branch("mHit_cl_index", ev.mHit_cl_index, "mHit_cl_index[match_num]/b");
 
     // GEM hits (lab frame, per-detector plane).
     tree->Branch("n_gem_hits",   &ev.n_gem_hits,   "n_gem_hits/I");
@@ -374,9 +376,10 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_per_cl_match = (tree->GetBranch("matchFlag") != nullptr);
     if (s.has_per_cl_match) {
         bind("matchFlag", ev.matchFlag);
-        bind("matchGEMx", ev.matchGEMx);
-        bind("matchGEMy", ev.matchGEMy);
-        bind("matchGEMz", ev.matchGEMz);
+        if (tree->GetBranch("matchGEM0")) tree->SetBranchAddress("matchGEM0", &ev.matchGEM0);
+        if (tree->GetBranch("matchGEM1")) tree->SetBranchAddress("matchGEM1", &ev.matchGEM1);
+        if (tree->GetBranch("matchGEM2")) tree->SetBranchAddress("matchGEM2", &ev.matchGEM2);
+        if (tree->GetBranch("matchGEM3")) tree->SetBranchAddress("matchGEM3", &ev.matchGEM3);
     }
 
     s.has_match_num = (tree->GetBranch("match_num") != nullptr);
@@ -390,6 +393,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
         bind("mHit_gy", ev.mHit_gy);
         bind("mHit_gz", ev.mHit_gz);
         bind("mHit_gid", ev.mHit_gid);
+        bind("mHit_cl_index", ev.mHit_cl_index);
     }
 
     bind("n_gem_hits",   &ev.n_gem_hits);

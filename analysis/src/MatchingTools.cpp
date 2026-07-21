@@ -300,7 +300,7 @@ std::vector<MatchHit> MatchingTools::Match(
 
         result.emplace_back(hit, cand1, cand2, cand3, cand4);
         MatchHit &mhit = result.back();
-        mhit.hycal_idx = i;
+        mhit.hycal_idx = static_cast<uint8_t>(i);
 
         // resolve best match and set flags
         if (postMatchMethod_ == 1) PostMatch(mhit);
@@ -335,7 +335,6 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
     const std::vector<analysis::GEMHit> &gem4) const
 {
     const std::vector<const std::vector<analysis::GEMHit> *> planes = {&gem1, &gem2, &gem3, &gem4};
-    constexpr float kNoMatch = -999.f;
 
     std::vector<MatchHit_perChamber> result;
     result.reserve(hycalHits.size());
@@ -346,14 +345,7 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
     for (size_t i = 0; i < hycalHits.size(); ++i) {
         const auto &hit = hycalHits[i];
         MatchHit_perChamber mhit(hit);
-        mhit.hycal_idx = static_cast<uint16_t>(i);
-
-        // initialise all chambers to no-match
-        for (int d = 0; d < 4; ++d) {
-            mhit.gem_hits[d][0] = kNoMatch;
-            mhit.gem_hits[d][1] = kNoMatch;
-            mhit.gem_hits[d][2] = kNoMatch;
-        }
+        mhit.hycal_idx = static_cast<uint8_t>(i);
 
         for (int d = 0; d < 4; ++d) {
             float best_dist = 1e9f;
@@ -362,24 +354,13 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
             for (const auto &g : *planes[d]) {
                 if (!PreMatch(hit, g)) continue;
                 if (used[d].count(&g)) continue; // already claimed by a higher-energy cluster
-                float dist = ProjectionDistance(hit, g);
-                if (dist < best_dist) {
-                    best_dist = dist;
-                    best = &g;
-                }
-            }
-
-            if (best) {
-                used[d].insert(best);
-                mhit.gem_hits[d][0] = best->x;
-                mhit.gem_hits[d][1] = best->y;
-                mhit.gem_hits[d][2] = best->z;
-                if(d==0) fdec::set_bit(mhit.mflag, kGEM1Match);
-                if(d==1) fdec::set_bit(mhit.mflag, kGEM2Match);
-                if(d==2) fdec::set_bit(mhit.mflag, kGEM3Match);
-                if(d==3) fdec::set_bit(mhit.mflag, kGEM4Match);
+                mhit.gem_hits[d].push_back(analysis::GEMHit{g.x, g.y, g.z, g.det_id});
             }
         }
+        if (!mhit.gem_hits[0].empty()) fdec::set_bit(mhit.mflag, kGEM1Match);
+        if (!mhit.gem_hits[1].empty()) fdec::set_bit(mhit.mflag, kGEM2Match);
+        if (!mhit.gem_hits[2].empty()) fdec::set_bit(mhit.mflag, kGEM3Match);
+        if (!mhit.gem_hits[3].empty()) fdec::set_bit(mhit.mflag, kGEM4Match);
 
         result.push_back(mhit);
     }
