@@ -50,7 +50,7 @@ struct RawReadStatus {
 
 struct ReconReadStatus {
     bool has_match_num  = false;   // mHit_* quick-access arrays
-    bool has_per_cl_match = false; // matchFlag / matchGEM*
+    bool has_per_cl_match = false; // matchFlag / match_det_id / match_gem_*
     bool has_veto       = false;
     bool has_lms        = false;
     bool has_ssp_raw    = false;
@@ -260,12 +260,12 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("cl_time",    ev.cl_time,     "cl_time[n_clusters]/F");
     tree->Branch("cl_flag",    ev.cl_flag,     "cl_flag[n_clusters]/i");
 
-    // Per-cluster HyCal↔GEM matches (one row per HyCal cluster, 4 GEMs).
+    // Per-cluster HyCal↔GEM matches (parallel vectors per cluster).
     tree->Branch("matchFlag", ev.matchFlag, "matchFlag[n_clusters]/i");
-    tree->Branch("matchGEM0", &ev.matchGEM0);
-    tree->Branch("matchGEM1", &ev.matchGEM1);
-    tree->Branch("matchGEM2", &ev.matchGEM2);
-    tree->Branch("matchGEM3", &ev.matchGEM3);
+    tree->Branch("match_det_id", &ev.match_det_id);
+    tree->Branch("match_gem_x",  &ev.match_gem_x);
+    tree->Branch("match_gem_y",  &ev.match_gem_y);
+    tree->Branch("match_gem_z",  &ev.match_gem_z);
 
     // Quick-access matched pairs (clusters with ≥2 GEMs matched).
     tree->Branch("match_num", &ev.matchNum, "match_num/I");
@@ -376,10 +376,10 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_per_cl_match = (tree->GetBranch("matchFlag") != nullptr);
     if (s.has_per_cl_match) {
         bind("matchFlag", ev.matchFlag);
-        if (tree->GetBranch("matchGEM0")) tree->SetBranchAddress("matchGEM0", &ev.matchGEM0);
-        if (tree->GetBranch("matchGEM1")) tree->SetBranchAddress("matchGEM1", &ev.matchGEM1);
-        if (tree->GetBranch("matchGEM2")) tree->SetBranchAddress("matchGEM2", &ev.matchGEM2);
-        if (tree->GetBranch("matchGEM3")) tree->SetBranchAddress("matchGEM3", &ev.matchGEM3);
+        bind("match_det_id", &ev.match_det_id);
+        bind("match_gem_x",  &ev.match_gem_x);
+        bind("match_gem_y",  &ev.match_gem_y);
+        bind("match_gem_z",  &ev.match_gem_z);
     }
 
     s.has_match_num = (tree->GetBranch("match_num") != nullptr);

@@ -1092,7 +1092,6 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                         ev->add_match(i, j, gh.x, gh.y, gh.z);
                     }
                 }
-                ev->matchFlag[i] = 0;
                 ev->matchFlag[i] = m.mflag;
             }
 
@@ -1591,7 +1590,6 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                             ev->add_match(i, j, gh.x, gh.y, gh.z);
                         }
                     }
-                    ev->matchFlag[i] = 0;
                     ev->matchFlag[i] = m.mflag;
                 }
 

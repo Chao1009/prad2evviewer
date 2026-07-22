@@ -72,14 +72,6 @@ enum ModuleType : uint8_t {
     MOD_LMS     = 4,   // LMS reference PMTs (LMSPin, LMS1..3)
 };
 
-// ── GEM match hits record ────────────────────────────────────────────────────
-// Lightweight struct for storing GEM hit matches across all clusters
-struct GEMMatchHit {
-    float x;         // GEM hit X position
-    float y;         // GEM hit Y position
-    float z;         // GEM hit Z position
-};
-
 // ── Raw replay ("events" tree) ───────────────────────────────────────────
 //
 // One flat FADC250 channel array.  HyCal, Veto, and LMS channels all live
@@ -216,12 +208,13 @@ struct ReconEventData {
     uint32_t cl_flag[kMaxClusters]    = {};
     // Matching results
     uint32_t matchFlag[kMaxClusters] = {};
-    // Matched GEM hits for each of the 4 GEM planes (x, y, z coordinates in GEMMatchHit)
-    // along with the HyCal cluster
-    std::vector<GEMMatchHit> matchGEM0[kMaxClusters] = {};
-    std::vector<GEMMatchHit> matchGEM1[kMaxClusters] = {};
-    std::vector<GEMMatchHit> matchGEM2[kMaxClusters] = {};
-    std::vector<GEMMatchHit> matchGEM3[kMaxClusters] = {};
+    // Flattened GEM matches across all clusters/chambers (ROOT-native vectors,
+    // no custom dictionary required). Entry k in these parallel vectors is one
+    // matched GEM hit with owning cluster and detector plane.
+    std::vector<uint8_t>  match_det_id[kMaxClusters];
+    std::vector<float>    match_gem_x[kMaxClusters];
+    std::vector<float>    match_gem_y[kMaxClusters];
+    std::vector<float>    match_gem_z[kMaxClusters];
     int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
@@ -306,55 +299,38 @@ struct ReconEventData {
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
 
-    using MatchList = std::vector<GEMMatchHit>;
-
-    MatchList &match_list(int cl_idx, int det_id)
-    {
-        static MatchList empty;
-        if (cl_idx < 0 || cl_idx >= kMaxClusters) return empty;
-        if (det_id == 0) return matchGEM0[cl_idx];
-        if (det_id == 1) return matchGEM1[cl_idx];
-        if (det_id == 2) return matchGEM2[cl_idx];
-        if (det_id == 3) return matchGEM3[cl_idx];
-        return empty;
-    }
-
-    const MatchList &match_list(int cl_idx, int det_id) const
-    {
-        static const MatchList empty;
-        if (cl_idx < 0 || cl_idx >= kMaxClusters) return empty;
-        if (det_id == 0) return matchGEM0[cl_idx];
-        if (det_id == 1) return matchGEM1[cl_idx];
-        if (det_id == 2) return matchGEM2[cl_idx];
-        if (det_id == 3) return matchGEM3[cl_idx];
-        return empty;
-    }
-
     void clear_match_lists()
     {
         for (int i = 0; i < kMaxClusters; ++i) {
-            matchGEM0[i].clear();
-            matchGEM1[i].clear();
-            matchGEM2[i].clear();
-            matchGEM3[i].clear();
+            match_det_id[i].clear();
+            match_gem_x[i].clear();
+            match_gem_y[i].clear();
+            match_gem_z[i].clear();
         }
     }
 
     void add_match(int cl_idx, int det_id, float x, float y, float z)
     {
-        auto &list = match_list(cl_idx, det_id);
         if (det_id < 0 || det_id > 3 || cl_idx < 0 || cl_idx >= kMaxClusters) return;
-        list.push_back({x, y, z});
+        match_det_id[cl_idx].push_back(static_cast<uint8_t>(det_id));
+        match_gem_x[cl_idx].push_back(x);
+        match_gem_y[cl_idx].push_back(y);
+        match_gem_z[cl_idx].push_back(z);
     }
 
     bool first_match(int cl_idx, int det_id, float &x, float &y, float &z) const
     {
-        const auto &list = match_list(cl_idx, det_id);
-        if (list.empty()) return false;
-        x = list.front().x;
-        y = list.front().y;
-        z = list.front().z;
-        return true;
+        if (cl_idx < 0 || cl_idx >= kMaxClusters || det_id < 0 || det_id > 3) return false;
+        const auto n = match_det_id[cl_idx].size();
+        for (size_t i = 0; i < n; ++i) {
+            if (match_det_id[cl_idx][i] == static_cast<uint8_t>(det_id)) {
+                x = match_gem_x[cl_idx][i];
+                y = match_gem_y[cl_idx][i];
+                z = match_gem_z[cl_idx][i];
+                return true;
+            }
+        }
+        return false;
     }
 };
 

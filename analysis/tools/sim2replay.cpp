@@ -272,11 +272,8 @@ int main (int argc, char *argv[])
         std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
 
         // save transformed HyCal positions for all clusters (regardless of match)
+        ev->clear_match_lists();
         for (int i = 0; i < ev->n_clusters; ++i) {
-            ev->matchGEM0[i].clear();
-            ev->matchGEM1[i].clear();
-            ev->matchGEM2[i].clear();
-            ev->matchGEM3[i].clear();
             ev->matchFlag[i] = 0;
         }
         ev->matchNum = std::min((int)matched_hits.size(), prad2::kMaxClusters);
