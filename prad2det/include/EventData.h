@@ -211,10 +211,11 @@ struct ReconEventData {
     // Flattened GEM matches across all clusters/chambers (ROOT-native vectors,
     // no custom dictionary required). Entry k in these parallel vectors is one
     // matched GEM hit with owning cluster and detector plane.
-    std::vector<uint8_t>  match_det_id[kMaxClusters];
-    std::vector<float>    match_gem_x[kMaxClusters];
-    std::vector<float>    match_gem_y[kMaxClusters];
-    std::vector<float>    match_gem_z[kMaxClusters];
+    std::vector<uint16_t> match_cl_idx;
+    std::vector<uint8_t>  match_det_id;
+    std::vector<float>    match_gem_x;
+    std::vector<float>    match_gem_y;
+    std::vector<float>    match_gem_z;
     int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
@@ -301,32 +302,33 @@ struct ReconEventData {
 
     void clear_match_lists()
     {
-        for (int i = 0; i < kMaxClusters; ++i) {
-            match_det_id[i].clear();
-            match_gem_x[i].clear();
-            match_gem_y[i].clear();
-            match_gem_z[i].clear();
-        }
+        match_cl_idx.clear();
+        match_det_id.clear();
+        match_gem_x.clear();
+        match_gem_y.clear();
+        match_gem_z.clear();
     }
 
     void add_match(int cl_idx, int det_id, float x, float y, float z)
     {
         if (det_id < 0 || det_id > 3 || cl_idx < 0 || cl_idx >= kMaxClusters) return;
-        match_det_id[cl_idx].push_back(static_cast<uint8_t>(det_id));
-        match_gem_x[cl_idx].push_back(x);
-        match_gem_y[cl_idx].push_back(y);
-        match_gem_z[cl_idx].push_back(z);
+        match_cl_idx.push_back(static_cast<uint16_t>(cl_idx));
+        match_det_id.push_back(static_cast<uint8_t>(det_id));
+        match_gem_x.push_back(x);
+        match_gem_y.push_back(y);
+        match_gem_z.push_back(z);
     }
 
     bool first_match(int cl_idx, int det_id, float &x, float &y, float &z) const
     {
         if (cl_idx < 0 || cl_idx >= kMaxClusters || det_id < 0 || det_id > 3) return false;
-        const auto n = match_det_id[cl_idx].size();
+        const auto n = match_cl_idx.size();
         for (size_t i = 0; i < n; ++i) {
-            if (match_det_id[cl_idx][i] == static_cast<uint8_t>(det_id)) {
-                x = match_gem_x[cl_idx][i];
-                y = match_gem_y[cl_idx][i];
-                z = match_gem_z[cl_idx][i];
+            if (match_cl_idx[i] == static_cast<uint16_t>(cl_idx)
+                && match_det_id[i] == static_cast<uint8_t>(det_id)) {
+                x = match_gem_x[i];
+                y = match_gem_y[i];
+                z = match_gem_z[i];
                 return true;
             }
         }

@@ -50,7 +50,7 @@ struct RawReadStatus {
 
 struct ReconReadStatus {
     bool has_match_num  = false;   // mHit_* quick-access arrays
-    bool has_per_cl_match = false; // matchFlag / match_det_id / match_gem_*
+    bool has_per_cl_match = false; // matchFlag / match_cl_idx / match_det_id / match_gem_*
     bool has_veto       = false;
     bool has_lms        = false;
     bool has_ssp_raw    = false;
@@ -260,7 +260,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("cl_time",    ev.cl_time,     "cl_time[n_clusters]/F");
     tree->Branch("cl_flag",    ev.cl_flag,     "cl_flag[n_clusters]/i");
 
-    // Per-cluster HyCal↔GEM matches (parallel vectors per cluster).
+    // Flattened HyCal↔GEM matches across all clusters/chambers.
     tree->Branch("matchFlag", ev.matchFlag, "matchFlag[n_clusters]/i");
     tree->Branch("match_det_id", &ev.match_det_id);
     tree->Branch("match_gem_x",  &ev.match_gem_x);
