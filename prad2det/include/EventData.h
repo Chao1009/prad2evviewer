@@ -20,7 +20,6 @@
 #include "TdcData.h"       // RfTimeData::MAX_HITS_PER_CH
 #include "VtpData.h"       // vtp::MAX_PRAD_CLUSTERS
 
-#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -71,6 +70,14 @@ enum ModuleType : uint8_t {
     MOD_PbWO4   = 2,
     MOD_VETO    = 3,   // Veto scintillators (V1..V4)
     MOD_LMS     = 4,   // LMS reference PMTs (LMSPin, LMS1..3)
+};
+
+// ── GEM match hits record ────────────────────────────────────────────────────
+// Lightweight struct for storing GEM hit matches across all clusters
+struct GEMMatchHit {
+    float x;         // GEM hit X position
+    float y;         // GEM hit Y position
+    float z;         // GEM hit Z position
 };
 
 // ── Raw replay ("events" tree) ───────────────────────────────────────────
@@ -209,12 +216,12 @@ struct ReconEventData {
     uint32_t cl_flag[kMaxClusters]    = {};
     // Matching results
     uint32_t matchFlag[kMaxClusters] = {};
-    // Matched GEM hits for each of the 4 GEM planes (x, y, z coordinates in the array<float, 3>)
+    // Matched GEM hits for each of the 4 GEM planes (x, y, z coordinates in GEMMatchHit)
     // along with the HyCal cluster
-    std::vector< std::array<float, 3> > matchGEM0[kMaxClusters] = {};
-    std::vector< std::array<float, 3> > matchGEM1[kMaxClusters] = {};
-    std::vector< std::array<float, 3> > matchGEM2[kMaxClusters] = {};
-    std::vector< std::array<float, 3> > matchGEM3[kMaxClusters] = {};
+    std::vector<GEMMatchHit> matchGEM0[kMaxClusters] = {};
+    std::vector<GEMMatchHit> matchGEM1[kMaxClusters] = {};
+    std::vector<GEMMatchHit> matchGEM2[kMaxClusters] = {};
+    std::vector<GEMMatchHit> matchGEM3[kMaxClusters] = {};
     int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
@@ -299,7 +306,7 @@ struct ReconEventData {
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
 
-    using MatchList = std::vector<std::array<float, 3>>;
+    using MatchList = std::vector<GEMMatchHit>;
 
     MatchList &match_list(int cl_idx, int det_id)
     {
@@ -344,9 +351,9 @@ struct ReconEventData {
     {
         const auto &list = match_list(cl_idx, det_id);
         if (list.empty()) return false;
-        x = list.front()[0];
-        y = list.front()[1];
-        z = list.front()[2];
+        x = list.front().x;
+        y = list.front().y;
+        z = list.front().z;
         return true;
     }
 };
