@@ -262,7 +262,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
 
     // Flattened HyCal↔GEM matches across all clusters/chambers.
     tree->Branch("matchFlag", ev.matchFlag, "matchFlag[n_clusters]/i");
-    tree->Branch("match_cl_index", &ev.match_cl_index);
+    tree->Branch("match_cl_idx", &ev.match_cl_idx);
     tree->Branch("match_det_id", &ev.match_det_id);
     tree->Branch("match_gem_x",  &ev.match_gem_x);
     tree->Branch("match_gem_y",  &ev.match_gem_y);
@@ -377,7 +377,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_per_cl_match = (tree->GetBranch("matchFlag") != nullptr);
     if (s.has_per_cl_match) {
         bind("matchFlag", ev.matchFlag);
-        bind("match_cl_index", ev.match_cl_index);
+        bind("match_cl_idx", &ev.match_cl_idx);
         bind("match_det_id", &ev.match_det_id);
         bind("match_gem_x",  &ev.match_gem_x);
         bind("match_gem_y",  &ev.match_gem_y);
