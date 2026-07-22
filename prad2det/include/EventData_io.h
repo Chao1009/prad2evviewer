@@ -59,6 +59,33 @@ struct ReconReadStatus {
     bool has_rf         = false;   // rf_n_a/b + rf_ns_a/b + cl_dt_rf
 };
 
+// Holder for ROOT vector-branch pointer-to-pointer binding.
+// Keep one instance alive for as long as GetEntry is called.
+struct ReconMatchVectorBindings {
+    std::vector<uint16_t> *match_cl_idx = nullptr;
+    std::vector<uint8_t>  *match_det_id = nullptr;
+    std::vector<float>    *match_gem_x  = nullptr;
+    std::vector<float>    *match_gem_y  = nullptr;
+    std::vector<float>    *match_gem_z  = nullptr;
+};
+
+inline void BindReconMatchVectorBranches(TTree *tree,
+                                         ReconEventData &ev,
+                                         ReconMatchVectorBindings &b)
+{
+    b.match_cl_idx = &ev.match_cl_idx;
+    b.match_det_id = &ev.match_det_id;
+    b.match_gem_x  = &ev.match_gem_x;
+    b.match_gem_y  = &ev.match_gem_y;
+    b.match_gem_z  = &ev.match_gem_z;
+
+    if (tree->GetBranch("match_cl_idx")) tree->SetBranchAddress("match_cl_idx", &b.match_cl_idx);
+    if (tree->GetBranch("match_det_id")) tree->SetBranchAddress("match_det_id", &b.match_det_id);
+    if (tree->GetBranch("match_gem_x"))  tree->SetBranchAddress("match_gem_x",  &b.match_gem_x);
+    if (tree->GetBranch("match_gem_y"))  tree->SetBranchAddress("match_gem_y",  &b.match_gem_y);
+    if (tree->GetBranch("match_gem_z"))  tree->SetBranchAddress("match_gem_z",  &b.match_gem_z);
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // Raw "events" tree — write
 // ─────────────────────────────────────────────────────────────────────────
@@ -277,7 +304,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("mHit_gx", ev.mHit_gx, "mHit_gx[match_num][2]/F");
     tree->Branch("mHit_gy", ev.mHit_gy, "mHit_gy[match_num][2]/F");
     tree->Branch("mHit_gz", ev.mHit_gz, "mHit_gz[match_num][2]/F");
-    tree->Branch("mHit_gid", ev.mHit_gid, "mHit_gid[match_num][2]/F");
+    tree->Branch("mHit_gid", ev.mHit_gid, "mHit_gid[match_num][2]/b");
     tree->Branch("mHit_cl_index", ev.mHit_cl_index, "mHit_cl_index[match_num]/b");
 
     // GEM hits (lab frame, per-detector plane).
@@ -377,11 +404,9 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_per_cl_match = (tree->GetBranch("matchFlag") != nullptr);
     if (s.has_per_cl_match) {
         bind("matchFlag", ev.matchFlag);
-        bind("match_cl_idx", &ev.match_cl_idx);
-        bind("match_det_id", &ev.match_det_id);
-        bind("match_gem_x",  &ev.match_gem_x);
-        bind("match_gem_y",  &ev.match_gem_y);
-        bind("match_gem_z",  &ev.match_gem_z);
+        // match_* vectors use ROOT pointer-to-pointer binding.
+        // Call BindReconMatchVectorBranches(...) with a held
+        // ReconMatchVectorBindings instance at the call site.
     }
 
     s.has_match_num = (tree->GetBranch("match_num") != nullptr);

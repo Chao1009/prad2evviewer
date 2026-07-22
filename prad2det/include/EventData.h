@@ -226,7 +226,7 @@ struct ReconEventData {
     float    mHit_gx[kMaxClusters][2] = {};
     float    mHit_gy[kMaxClusters][2] = {};
     float    mHit_gz[kMaxClusters][2] = {};
-    float    mHit_gid[kMaxClusters][2] = {}; //det_id for matched GEM hits
+    uint8_t    mHit_gid[kMaxClusters][2] = {}; //det_id for matched GEM hits
     uint8_t    mHit_cl_index[kMaxClusters] = {}; // index of the matched HyCal cluster
 
     // GEM reconstructed hits
