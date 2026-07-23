@@ -161,19 +161,19 @@ int main(int argc, char *argv[])
     TH1F *h1_deltaX_hycal_1000MeV = new TH1F("h1_deltaX_hycal_1000MeV", "Delta X Between GEMs and HyCal for 1000 MeV;#DeltaX [mm];Entries", bin_num, bin_lo, bin_hi);
     TH1F *h1_deltaY_hycal_1000MeV = new TH1F("h1_deltaY_hycal_1000MeV", "Delta Y Between GEMs and HyCal for 1000 MeV;#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi);
     TH2F *h2_deltaXY_hycal_1000MeV = new TH2F("h2_deltaXY_hycal_1000MeV", "Delta X vs Delta Y Between GEMs and HyCal for 1000 MeV;#DeltaX [mm];#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi, bin_num, bin_lo, bin_hi);
-    TH1F *h1_deltaX_gem_2000MeV = new TH1F("h1_deltaX_gem_2000MeV", "Delta X Between GEMs for 2000 MeV;#DeltaX [mm];Entries", bin_num, bin_lo, bin_hi);
-    TH1F *h1_deltaY_gem_2000MeV = new TH1F("h1_deltaY_gem_2000MeV", "Delta Y Between GEMs for 2000 MeV;#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi);
-    TH2F *h2_deltaXY_gem_2000MeV = new TH2F("h2_deltaXY_gem_2000MeV", "Delta X vs Delta Y Between GEMs for 2000 MeV;#DeltaX [mm];#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi, bin_num, bin_lo, bin_hi);
-    TH1F *h1_deltaX_hycal_2000MeV = new TH1F("h1_deltaX_hycal_2000MeV", "Delta X Between GEMs and HyCal for 2000 MeV;#DeltaX [mm];Entries", bin_num, bin_lo, bin_hi);
-    TH1F *h1_deltaY_hycal_2000MeV = new TH1F("h1_deltaY_hycal_2000MeV", "Delta Y Between GEMs and HyCal for 2000 MeV;#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi);
-    TH2F *h2_deltaXY_hycal_2000MeV = new TH2F("h2_deltaXY_hycal_2000MeV", "Delta X vs Delta Y Between GEMs and HyCal for 2000 MeV;#DeltaX [mm];#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi, bin_num, bin_lo, bin_hi);
-    TH1F *h1_Nhits_matched_100MeV[4], *h1_Nhits_matched_300MeV[4], *h1_Nhits_matched_500MeV[4], *h1_Nhits_matched_1000MeV[4], *h1_Nhits_matched_2000MeV[4];
+    TH1F *h1_deltaX_gem_1500MeV = new TH1F("h1_deltaX_gem_1500MeV", "Delta X Between GEMs for 1500 MeV;#DeltaX [mm];Entries", bin_num, bin_lo, bin_hi);
+    TH1F *h1_deltaY_gem_1500MeV = new TH1F("h1_deltaY_gem_1500MeV", "Delta Y Between GEMs for 1500 MeV;#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi);
+    TH2F *h2_deltaXY_gem_1500MeV = new TH2F("h2_deltaXY_gem_1500MeV", "Delta X vs Delta Y Between GEMs for 1500 MeV;#DeltaX [mm];#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi, bin_num, bin_lo, bin_hi);
+    TH1F *h1_deltaX_hycal_1500MeV = new TH1F("h1_deltaX_hycal_1500MeV", "Delta X Between GEMs and HyCal for 1500 MeV;#DeltaX [mm];Entries", bin_num, bin_lo, bin_hi);
+    TH1F *h1_deltaY_hycal_1500MeV = new TH1F("h1_deltaY_hycal_1500MeV", "Delta Y Between GEMs and HyCal for 1500 MeV;#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi);
+    TH2F *h2_deltaXY_hycal_1500MeV = new TH2F("h2_deltaXY_hycal_1500MeV", "Delta X vs Delta Y Between GEMs and HyCal for 1500 MeV;#DeltaX [mm];#DeltaY [mm];Entries", bin_num, bin_lo, bin_hi, bin_num, bin_lo, bin_hi);
+    TH1F *h1_Nhits_matched_100MeV[4], *h1_Nhits_matched_300MeV[4], *h1_Nhits_matched_500MeV[4], *h1_Nhits_matched_1000MeV[4], *h1_Nhits_matched_1500MeV[4];
     for (int i = 0; i < 4; i++) {
         h1_Nhits_matched_100MeV[i] = new TH1F(Form("h1_Nhits_matched_100MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 100 MeV;N_{hits};Entries", i), 30, 0, 30);
         h1_Nhits_matched_300MeV[i] = new TH1F(Form("h1_Nhits_matched_300MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 300 MeV;N_{hits};Entries", i), 30, 0, 30);
         h1_Nhits_matched_500MeV[i] = new TH1F(Form("h1_Nhits_matched_500MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 500 MeV;N_{hits};Entries", i), 30, 0, 30);
         h1_Nhits_matched_1000MeV[i] = new TH1F(Form("h1_Nhits_matched_1000MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 1000 MeV;N_{hits};Entries", i), 30, 0, 30);
-        h1_Nhits_matched_2000MeV[i] = new TH1F(Form("h1_Nhits_matched_2000MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 2000 MeV;N_{hits};Entries", i), 30, 0, 30);
+        h1_Nhits_matched_1500MeV[i] = new TH1F(Form("h1_Nhits_matched_1500MeV_%d", i), Form("Number of Hits in Matching Radius for GEM %d at 1500 MeV;N_{hits};Entries", i), 30, 0, 30);
     }
 
     // event loop
@@ -231,7 +231,35 @@ int main(int argc, char *argv[])
                 }
             }
         }
-        if(is_3cluster){
+        if(is_3cluster && ev.matchNum == 3){
+            float x[3], y[3], z[3], E[3];
+            for (int i = 0; i < 3; ++i) {
+                x[i] = ev.mHit_x[i];
+                y[i] = ev.mHit_y[i];
+                z[i] = ev.mHit_z[i];
+                E[i] = ev.mHit_E[i];
+            }
+            // Pt x and Pt y calculation
+            auto get_pt = [](float x, float y, float z, float energy) {
+                constexpr float electron_mass = 0.51099895f; // MeV
+                const float norm = std::sqrt(x*x + y*y + z*z);
+                if (norm <= 0.f || energy < electron_mass)
+                    return std::pair<float, float>{0.f, 0.f};
+                const float p = std::sqrt(std::max(
+                    0.f, energy*energy - electron_mass*electron_mass));
+                return std::pair<float, float>{p*x/norm, p*y/norm};
+            };
+            const auto [px1, py1] = get_pt(x[0], y[0], z[0], E[0]);
+            const auto [px2, py2] = get_pt(x[1], y[1], z[1], E[1]);
+            const auto [px3, py3] = get_pt(x[2], y[2], z[2], E[2]);
+            const float ptx = px1 + px2 + px3;
+            const float pty = py1 + py2 + py3;
+
+            if(std::fabs(E[0] + E[1] + E[2] - gRunConfig.Ebeam) > 250.f || sqrt(ptx*ptx + pty*pty) > 5.f)
+                continue;
+            if(E[0] < 70.f || E[1] < 70.f || E[2] < 70.f || E[0] > 1800.f || E[1] > 1800.f || E[2] > 1800.f)
+                continue;
+
             for(int j = 0; j < ev.matchNum; ++j) {
                 // Process each of the clusters
                 const int cl_idx = static_cast<int>(ev.mHit_cl_index[j]);
@@ -260,14 +288,14 @@ int main(int argc, char *argv[])
                     }
                 }
                 
-                if(fabs(ev.cl_energy[cl_idx] - 2000.) < 3. * 0.033 * sqrt(2000. * 1000.)) {
-                    h1_deltaX_gem_2000MeV->Fill(dx_gem);
-                    h1_deltaY_gem_2000MeV->Fill(dy_gem);
-                    h2_deltaXY_gem_2000MeV->Fill(dx_gem, dy_gem);
-                    h2_deltaXY_hycal_2000MeV->Fill(dx_hc, dy_hc);
-                    h1_deltaX_hycal_2000MeV->Fill(dx_hc);
-                    h1_deltaY_hycal_2000MeV->Fill(dy_hc);
-                    for (int k = 0; k < 4; ++k) if(N_matched[k] > 0) h1_Nhits_matched_2000MeV[k]->Fill(N_matched[k]);
+                if(fabs(ev.cl_energy[cl_idx] - 1500.) < 3. * 0.033 * sqrt(1500. * 1000.)) {
+                    h1_deltaX_gem_1500MeV->Fill(dx_gem);
+                    h1_deltaY_gem_1500MeV->Fill(dy_gem);
+                    h2_deltaXY_gem_1500MeV->Fill(dx_gem, dy_gem);
+                    h2_deltaXY_hycal_1500MeV->Fill(dx_hc, dy_hc);
+                    h1_deltaX_hycal_1500MeV->Fill(dx_hc);
+                    h1_deltaY_hycal_1500MeV->Fill(dy_hc);
+                    for (int k = 0; k < 4; ++k) {if(N_matched[k] > 0) h1_Nhits_matched_1500MeV[k]->Fill(N_matched[k]);}
                 }
                 if(fabs(ev.cl_energy[cl_idx] - 1000.) < 3. * 0.033 * sqrt(1000. * 1000.)) {
                     h1_deltaX_gem_1000MeV->Fill(dx_gem);
@@ -276,7 +304,7 @@ int main(int argc, char *argv[])
                     h1_deltaX_hycal_1000MeV->Fill(dx_hc);
                     h1_deltaY_hycal_1000MeV->Fill(dy_hc);
                     h2_deltaXY_hycal_1000MeV->Fill(dx_hc, dy_hc);
-                    for (int k = 0; k < 4; ++k) if(N_matched[k] > 0) h1_Nhits_matched_1000MeV[k]->Fill(N_matched[k]);
+                    for (int k = 0; k < 4; ++k) {if(N_matched[k] > 0) h1_Nhits_matched_1000MeV[k]->Fill(N_matched[k]);}
                 }
                 if(fabs(ev.cl_energy[cl_idx] - 500.) < 3. * 0.033 * sqrt(500. * 1000.)) {
                     h1_deltaX_gem_500MeV->Fill(dx_gem);
@@ -285,7 +313,7 @@ int main(int argc, char *argv[])
                     h1_deltaX_hycal_500MeV->Fill(dx_hc);
                     h1_deltaY_hycal_500MeV->Fill(dy_hc);
                     h2_deltaXY_hycal_500MeV->Fill(dx_hc, dy_hc);
-                    for (int k = 0; k < 4; ++k) if(N_matched[k] > 0) h1_Nhits_matched_500MeV[k]->Fill(N_matched[k]);
+                    for (int k = 0; k < 4; ++k) {if(N_matched[k] > 0) h1_Nhits_matched_500MeV[k]->Fill(N_matched[k]);}
                 }
                 if(fabs(ev.cl_energy[cl_idx] - 300.) < 3. * 0.033 * sqrt(300. * 1000.)) {
                     h1_deltaX_gem_300MeV->Fill(dx_gem);
@@ -294,7 +322,7 @@ int main(int argc, char *argv[])
                     h1_deltaX_hycal_300MeV->Fill(dx_hc);
                     h1_deltaY_hycal_300MeV->Fill(dy_hc);
                     h2_deltaXY_hycal_300MeV->Fill(dx_hc, dy_hc);
-                    for (int k = 0; k < 4; ++k) if(N_matched[k] > 0) h1_Nhits_matched_300MeV[k]->Fill(N_matched[k]);
+                    for (int k = 0; k < 4; ++k) {if(N_matched[k] > 0) h1_Nhits_matched_300MeV[k]->Fill(N_matched[k]);}
                 }
                 if(fabs(ev.cl_energy[cl_idx] - 100.) < 3. * 0.033 * sqrt(100. * 1000.)) {
                     h1_deltaX_gem_100MeV->Fill(dx_gem);
@@ -303,7 +331,7 @@ int main(int argc, char *argv[])
                     h1_deltaX_hycal_100MeV->Fill(dx_hc);
                     h1_deltaY_hycal_100MeV->Fill(dy_hc);
                     h2_deltaXY_hycal_100MeV->Fill(dx_hc, dy_hc);
-                    for (int k = 0; k < 4; ++k) if(N_matched[k] > 0) h1_Nhits_matched_100MeV[k]->Fill(N_matched[k]);
+                    for (int k = 0; k < 4; ++k) {if(N_matched[k] > 0) h1_Nhits_matched_100MeV[k]->Fill(N_matched[k]);}
                 }
             }
         }
@@ -324,12 +352,12 @@ int main(int argc, char *argv[])
     }
     output_file->mkdir("energy_bins");
     output_file->cd("energy_bins");
-    h1_deltaX_gem_2000MeV->Write();
-    h1_deltaY_gem_2000MeV->Write();
-    h2_deltaXY_gem_2000MeV->Write();
-    h1_deltaX_hycal_2000MeV->Write();
-    h1_deltaY_hycal_2000MeV->Write();
-    h2_deltaXY_hycal_2000MeV->Write();
+    h1_deltaX_gem_1500MeV->Write();
+    h1_deltaY_gem_1500MeV->Write();
+    h2_deltaXY_gem_1500MeV->Write();
+    h1_deltaX_hycal_1500MeV->Write();
+    h1_deltaY_hycal_1500MeV->Write();
+    h2_deltaXY_hycal_1500MeV->Write();
     h1_deltaX_gem_1000MeV->Write();
     h1_deltaY_gem_1000MeV->Write();
     h2_deltaXY_gem_1000MeV->Write();
@@ -355,24 +383,11 @@ int main(int argc, char *argv[])
     h1_deltaY_hycal_100MeV->Write();
     h2_deltaXY_hycal_100MeV->Write();
     for (int k = 0; k < 4; ++k) {
-        h1_Nhits_matched_2000MeV[k]->Write();
+        h1_Nhits_matched_1500MeV[k]->Write();
         h1_Nhits_matched_1000MeV[k]->Write();
         h1_Nhits_matched_500MeV[k]->Write();
         h1_Nhits_matched_300MeV[k]->Write();
         h1_Nhits_matched_100MeV[k]->Write();
-    }
-
-    // Print a concise summary so users can verify content without opening ROOT.
-    for (int j = 0; j < 4; ++j) {
-        int nonzero_bins = 0;
-        for (int b = 1; b <= h1_Nhits_matched[j]->GetNbinsX(); ++b) {
-            if (h1_Nhits_matched[j]->GetBinContent(b) > 0) nonzero_bins++;
-        }
-        std::cerr << "Summary h1_Nhits_matched_" << j
-                  << ": entries=" << h1_Nhits_matched[j]->GetEntries()
-                  << ", mean=" << h1_Nhits_matched[j]->GetMean()
-                  << ", nonzero_bins=" << nonzero_bins
-                  << "\n";
     }
 
     output_file->Close();
