@@ -404,7 +404,7 @@ int main(int argc, char *argv[])
         result.peak = peak;
         if (nbins <= 0 || peak <= 0.) return result;
 
-        const double half_peak = 0.5 * peak;
+        const double half_peak = 0.8 * peak;
         int left_bin = max_bin;
         while (left_bin > 1 && hist->GetBinContent(left_bin) >= half_peak)
             --left_bin;
@@ -1000,23 +1000,24 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
             if (std::fabs(ev->cl_x[0]) > 20.75f * 16.f || std::fabs(ev->cl_y[0]) > 20.75f * 16.f) continue;
             if (std::fabs(ev->cl_x[1]) > 20.75f * 16.f || std::fabs(ev->cl_y[1]) > 20.75f * 16.f) continue;
 
+            constexpr float kRadToDeg = 57.29577951308232f;
+            float theta1 = std::atan2(std::hypot(ev->cl_x[0], ev->cl_y[0]), ev->cl_z[0]) * kRadToDeg;
+            float theta2 = std::atan2(std::hypot(ev->cl_x[1], ev->cl_y[1]), ev->cl_z[1]) * kRadToDeg;
+            float phi1 = std::atan2(ev->cl_y[0], ev->cl_x[0]) * kRadToDeg;
+            float phi2 = std::atan2(ev->cl_y[1], ev->cl_x[1]) * kRadToDeg;
+
+            // only select Moller events that back-to-back with the same energy
+            if (std::fabs(ev->cl_energy[0] - gRunConfig.Ebeam/2.f) > 0.035f * sqrt(gRunConfig.Ebeam/2.f*1000.f)) continue;
+            if (std::fabs(ev->cl_energy[1] - gRunConfig.Ebeam/2.f) > 0.035f * sqrt(gRunConfig.Ebeam/2.f*1000.f)) continue;
+            if (std::fabs(ev->cl_energy[0] + ev->cl_energy[1] - gRunConfig.Ebeam) > 0.035f * sqrt(gRunConfig.Ebeam*1000.f)) continue;
+            if (std::fabs(phi1 - phi2) - 180.f > 10.f) continue;
+            if (std::fabs(theta1 - theta2) > 0.3f) continue;
+
+            //TODO: here fill hists (delta theta, delta phi, delta energy, hit positions)
+
             MollerEvent m_hc(
                 {ev->cl_x[0], ev->cl_y[0], ev->cl_z[0], ev->cl_energy[0]},
                 {ev->cl_x[1], ev->cl_y[1], ev->cl_z[1], ev->cl_energy[1]});
-
-            constexpr float kRadToDeg = 57.29577951308232f;
-            float theta1 = std::atan2(std::hypot(m_hc.first.x, m_hc.first.y), m_hc.first.z) * kRadToDeg;
-            float theta2 = std::atan2(std::hypot(m_hc.second.x, m_hc.second.y), m_hc.second.z) * kRadToDeg;
-            if (!physics.isMoller_kinematic(theta1, m_hc.first.E,
-                                            theta2, m_hc.second.E,
-                                            gRunConfig.Ebeam, 0.035f))
-                continue;
-            if (std::fabs(physics.GetMollerPhiDiff(m_hc)) > 6.f) continue;
-
-            //add some scattering angle cuts for 0.7GeV
-            if(gRunConfig.Ebeam > 0.f && gRunConfig.Ebeam < 1000.f) {
-                if(theta1 < 1.5f || theta2 < 1.5f) continue;
-            }
 
             hycal_mollers.emplace_back(m_hc.first, m_hc.second, ev->event_num);
 
@@ -1032,6 +1033,8 @@ static bool ProcessEVIO (const std::string &input_evio, RunConfig &gRunConfig,
                         ev->event_num);
                 }
             }
+
+            // 
 
             total++;
             if (total % 1000 == 0)
