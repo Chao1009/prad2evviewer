@@ -208,9 +208,14 @@ struct ReconEventData {
     uint32_t cl_flag[kMaxClusters]    = {};
     // Matching results
     uint32_t matchFlag[kMaxClusters] = {};
-    float    matchGEMx[kMaxClusters][4] = {};
-    float    matchGEMy[kMaxClusters][4] = {};
-    float    matchGEMz[kMaxClusters][4] = {};
+    // Flattened GEM matches across all clusters/chambers (ROOT-native vectors,
+    // no custom dictionary required). Entry k in these parallel vectors is one
+    // matched GEM hit with owning cluster and detector plane.
+    std::vector<uint16_t> match_cl_idx;
+    std::vector<uint8_t>  match_det_id;
+    std::vector<float>    match_gem_x;
+    std::vector<float>    match_gem_y;
+    std::vector<float>    match_gem_z;
     int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
@@ -221,7 +226,8 @@ struct ReconEventData {
     float    mHit_gx[kMaxClusters][2] = {};
     float    mHit_gy[kMaxClusters][2] = {};
     float    mHit_gz[kMaxClusters][2] = {};
-    float    mHit_gid[kMaxClusters][2] = {}; //det_id for matched GEM hits
+    uint8_t    mHit_gid[kMaxClusters][2] = {}; //det_id for matched GEM hits
+    uint8_t    mHit_cl_index[kMaxClusters] = {}; // index of the matched HyCal cluster
 
     // GEM reconstructed hits
     int        n_gem_hits = 0;
@@ -293,6 +299,41 @@ struct ReconEventData {
     // database/hycal_rf_offsets/*.json have already been applied and the
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
+
+    void clear_match_lists()
+    {
+        match_cl_idx.clear();
+        match_det_id.clear();
+        match_gem_x.clear();
+        match_gem_y.clear();
+        match_gem_z.clear();
+    }
+
+    void add_match(int cl_idx, int det_id, float x, float y, float z)
+    {
+        if (det_id < 0 || det_id > 3 || cl_idx < 0 || cl_idx >= kMaxClusters) return;
+        match_cl_idx.push_back(static_cast<uint16_t>(cl_idx));
+        match_det_id.push_back(static_cast<uint8_t>(det_id));
+        match_gem_x.push_back(x);
+        match_gem_y.push_back(y);
+        match_gem_z.push_back(z);
+    }
+
+    bool first_match(int cl_idx, int det_id, float &x, float &y, float &z) const
+    {
+        if (cl_idx < 0 || cl_idx >= kMaxClusters || det_id < 0 || det_id > 3) return false;
+        const auto n = match_cl_idx.size();
+        for (size_t i = 0; i < n; ++i) {
+            if (match_cl_idx[i] == static_cast<uint16_t>(cl_idx)
+                && match_det_id[i] == static_cast<uint8_t>(det_id)) {
+                x = match_gem_x[i];
+                y = match_gem_y[i];
+                z = match_gem_z[i];
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 // ── Scaler ("scalers" tree) ──────────────────────────────────────────────

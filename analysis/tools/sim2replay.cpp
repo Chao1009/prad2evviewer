@@ -272,23 +272,19 @@ int main (int argc, char *argv[])
         std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
 
         // save transformed HyCal positions for all clusters (regardless of match)
+        ev->clear_match_lists();
         for (int i = 0; i < ev->n_clusters; ++i) {
-            for (int j = 0; j < 2; j++) {
-                ev->matchGEMx[i][j] = -999.f;
-                ev->matchGEMy[i][j] = -999.f;
-                ev->matchGEMz[i][j] = -999.f;
-            }
             ev->matchFlag[i] = 0;
         }
         ev->matchNum = std::min((int)matched_hits.size(), prad2::kMaxClusters);
         for (int i = 0; i < ev->matchNum; i++) {
             int cl_idx = matched_hits[i].hycal_idx;
             ev->matchFlag[cl_idx] = matched_hits[i].mflag;
-            for (int j = 0; j < 2; j++) {
-                ev->matchGEMx[cl_idx][j] = matched_hits[i].gem[j].x;
-                ev->matchGEMy[cl_idx][j] = matched_hits[i].gem[j].y;
-                ev->matchGEMz[cl_idx][j] = matched_hits[i].gem[j].z;
-            }
+            for (int j = 0; j < 2; j++)
+                ev->add_match(cl_idx, matched_hits[i].gem[j].det_id,
+                              matched_hits[i].gem[j].x,
+                              matched_hits[i].gem[j].y,
+                              matched_hits[i].gem[j].z);
             // quick access arrays
             ev->mHit_E[i]  = matched_hits[i].hycal_hit.energy;
             ev->mHit_x[i]  = matched_hits[i].hycal_hit.x;

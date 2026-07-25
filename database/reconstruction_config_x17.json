@@ -55,6 +55,8 @@
         "hycal_pos_res": [3.6, 0.0, 0.0],
         "// gem_pos_res = per-detector sigma in mm (ordered by detector id 0..3).": "",
         "// gem_pos_res is high now (supposed to be < 0.1 mm) to include coordinate shifts.": "",
-        "gem_pos_res":   [0.5, 0.5, 0.5, 0.5]
+        "gem_pos_res":   [0.5, 0.5, 0.5, 0.5],
+        "// match_method: 1 = closest to hycal cluster, other = minimum deltaR between 2 GEM hits.": "",
+        "match_method": 2
     }
 }

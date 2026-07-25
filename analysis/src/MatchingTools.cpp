@@ -20,6 +20,11 @@
 
 namespace analysis {
 
+MatchingTools::MatchingTools(int postMatchMethod)
+{
+    postMatchMethod_ = postMatchMethod;
+}
+
 // ============================================================================
 // Projection
 // ============================================================================
@@ -178,6 +183,65 @@ void MatchingTools::PostMatch(MatchHit &h) const
 }
 
 // ============================================================================
+// Post-match upgraded: sort candidates per plane, set flags, pick best GEM hit
+// Acquire the hits also matched between 2 GEM planes
+// ============================================================================
+
+void MatchingTools::PostMatch_upgrade(MatchHit &h) const
+{
+    if( (h.gem1_hits.empty() && h.gem2_hits.empty() ) ||
+        (h.gem3_hits.empty() && h.gem4_hits.empty() ) )
+        return; // require at least one match in both upstream and downstream pairs
+
+    // sort each plane's candidates by projection distance (closest first)
+    auto by_dist = [this, &h](const analysis::GEMHit &a, const analysis::GEMHit &b) {
+        return ProjectionDistance(h.hycal_hit, a) < ProjectionDistance(h.hycal_hit, b);
+    };
+    std::sort(h.gem1_hits.begin(), h.gem1_hits.end(), by_dist);
+    std::sort(h.gem2_hits.begin(), h.gem2_hits.end(), by_dist);
+    std::sort(h.gem3_hits.begin(), h.gem3_hits.end(), by_dist);
+    std::sort(h.gem4_hits.begin(), h.gem4_hits.end(), by_dist);
+
+    //start from the closest candidate on upstream GEM planes (gem4 -> gem3)
+    //for each hits on upstream GEM planes, loop over the sorted candidates on downstream GEM planes to find the best match
+    //get a straightline from target to the upstream GEM hit, and project it to the downstream GEM planes to find the closest match
+    //save the deltaR between the projected upstream hit and the downstream hit, finnaly find the best match by deltaR
+    float best_deltaR = std::numeric_limits<float>::max();
+    analysis::GEMHit best_gem_down{}, best_gem_up{};
+
+    auto check_pair = [&](const analysis::GEMHit &up, const analysis::GEMHit &down) {
+        float deltaR = ProjectionDistance(up, down, down.z);
+        if (deltaR < best_deltaR) {
+            best_deltaR = deltaR;
+            best_gem_up = up;
+            best_gem_down = down;
+        }
+    };
+
+    // scan upstream candidates in priority order: GEM4 first, then GEM3
+    for (const auto &up : h.gem4_hits) {
+        for (const auto &down : h.gem1_hits) check_pair(up, down);
+        for (const auto &down : h.gem2_hits) check_pair(up, down);
+    }
+    for (const auto &up : h.gem3_hits) {
+        for (const auto &down : h.gem1_hits) check_pair(up, down);
+        for (const auto &down : h.gem2_hits) check_pair(up, down);
+    }
+
+    if (best_deltaR == std::numeric_limits<float>::max()) return;
+
+    h.gem[0] = best_gem_down;
+    h.gem[1] = best_gem_up;
+
+    // set match flag for downstream pair
+    if (h.gem[0].det_id == 0) fdec::set_bit(h.mflag, kGEM1Match);
+    else if (h.gem[0].det_id == 1) fdec::set_bit(h.mflag, kGEM2Match);
+
+    // set match flag for upstream pair
+    if (h.gem[1].det_id == 2) fdec::set_bit(h.mflag, kGEM3Match);
+    else if (h.gem[1].det_id == 3) fdec::set_bit(h.mflag, kGEM4Match);
+}
+// ============================================================================
 // Main matching — adapted from PRadDetMatch::Match for 4 GEM planes
 // ============================================================================
 
@@ -236,10 +300,11 @@ std::vector<MatchHit> MatchingTools::Match(
 
         result.emplace_back(hit, cand1, cand2, cand3, cand4);
         MatchHit &mhit = result.back();
-        mhit.hycal_idx = i;
+        mhit.hycal_idx = static_cast<uint8_t>(i);
 
         // resolve best match and set flags
-        PostMatch(mhit);
+        if (postMatchMethod_ == 1) PostMatch(mhit);
+        else PostMatch_upgrade(mhit);
 
         // mark the winning GEM hit in each flagged plane as used
         if (fdec::test_bit(mhit.mflag, kGEM1Match))
@@ -270,25 +335,14 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
     const std::vector<analysis::GEMHit> &gem4) const
 {
     const std::vector<const std::vector<analysis::GEMHit> *> planes = {&gem1, &gem2, &gem3, &gem4};
-    constexpr float kNoMatch = -999.f;
 
     std::vector<MatchHit_perChamber> result;
     result.reserve(hycalHits.size());
 
-    // per-chamber sets of already-claimed GEM hits (pointer identity)
-    std::set<const analysis::GEMHit *> used[4];
-
     for (size_t i = 0; i < hycalHits.size(); ++i) {
         const auto &hit = hycalHits[i];
         MatchHit_perChamber mhit(hit);
-        mhit.hycal_idx = static_cast<uint16_t>(i);
-
-        // initialise all chambers to no-match
-        for (int d = 0; d < 4; ++d) {
-            mhit.gem_hits[d][0] = kNoMatch;
-            mhit.gem_hits[d][1] = kNoMatch;
-            mhit.gem_hits[d][2] = kNoMatch;
-        }
+        mhit.hycal_idx = static_cast<uint8_t>(i);
 
         for (int d = 0; d < 4; ++d) {
             float best_dist = 1e9f;
@@ -296,25 +350,20 @@ std::vector<MatchHit_perChamber> MatchingTools::MatchPerChamber(
 
             for (const auto &g : *planes[d]) {
                 if (!PreMatch(hit, g)) continue;
-                if (used[d].count(&g)) continue; // already claimed by a higher-energy cluster
-                float dist = ProjectionDistance(hit, g);
-                if (dist < best_dist) {
-                    best_dist = dist;
-                    best = &g;
-                }
+                mhit.gem_hits[d].push_back(analysis::GEMHit{g.x, g.y, g.z, g.det_id});
             }
-
-            if (best) {
-                used[d].insert(best);
-                mhit.gem_hits[d][0] = best->x;
-                mhit.gem_hits[d][1] = best->y;
-                mhit.gem_hits[d][2] = best->z;
-                if(d==0) fdec::set_bit(mhit.mflag, kGEM1Match);
-                if(d==1) fdec::set_bit(mhit.mflag, kGEM2Match);
-                if(d==2) fdec::set_bit(mhit.mflag, kGEM3Match);
-                if(d==3) fdec::set_bit(mhit.mflag, kGEM4Match);
-            }
+            // sort the matched GEM hits by distance to the HyCal hit
+            std::sort(mhit.gem_hits[d].begin(), mhit.gem_hits[d].end(),
+                      [this, &hit](const analysis::GEMHit &a, const analysis::GEMHit &b){
+                          float da = ProjectionDistance(hit, a);
+                          float db = ProjectionDistance(hit, b);
+                          return da < db;
+                      });
         }
+        if (!mhit.gem_hits[0].empty()) fdec::set_bit(mhit.mflag, kGEM1Match);
+        if (!mhit.gem_hits[1].empty()) fdec::set_bit(mhit.mflag, kGEM2Match);
+        if (!mhit.gem_hits[2].empty()) fdec::set_bit(mhit.mflag, kGEM3Match);
+        if (!mhit.gem_hits[3].empty()) fdec::set_bit(mhit.mflag, kGEM4Match);
 
         result.push_back(mhit);
     }

@@ -601,8 +601,8 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     if(ev.matchFlag[j] & 1 << d) match[d] = true;
                 }
                 if( (match[0] || match[1]) && (match[2] || match[3]) ){
-                    if(match[0]) { c_x = ev.matchGEMx[j][0]; c_y = ev.matchGEMy[j][0]; c_z = ev.matchGEMz[j][0]; }
-                    else { c_x = ev.matchGEMx[j][1]; c_y = ev.matchGEMy[j][1]; c_z = ev.matchGEMz[j][1]; }
+                    if(match[0]) ev.first_match(j, 0, c_x, c_y, c_z);
+                    else ev.first_match(j, 1, c_x, c_y, c_z);
                     //projection onto the HyCal module plane
                     float scale = 6275.f / c_z;
                     c_x *= scale;
