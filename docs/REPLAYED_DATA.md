@@ -338,40 +338,41 @@ an offline-calibrated MeV energy.
 ### Per-cluster HyCal↔GEM match (all 4 GEMs)
 
 For each HyCal cluster, all GEM hits within the matching window are kept
-separately for each detector. This supports multiple candidates per chamber.
+separately for each detector using flattened ROOT-native vectors. This supports
+multiple matched candidates per chamber without requiring custom dictionaries.
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `matchFlag` | `uint32[n_clusters]`                     | Per-cluster match flags (which GEMs matched) |
-| `matchGEM0` | `vector<array<float,3>>[n_clusters]`     | GEM det-0 match list; each item is `{x,y,z}` |
-| `matchGEM1` | `vector<array<float,3>>[n_clusters]`     | GEM det-1 match list; each item is `{x,y,z}` |
-| `matchGEM2` | `vector<array<float,3>>[n_clusters]`     | GEM det-2 match list; each item is `{x,y,z}` |
-| `matchGEM3` | `vector<array<float,3>>[n_clusters]`     | GEM det-3 match list; each item is `{x,y,z}` |
+| `matchFlag` | `uint32[n_clusters]`   | Per-cluster match flags (bitmask: bit 0..3 = matched on GEM 0..3) |
+| `match_cl_idx` | `vector<uint16_t>`    | HyCal cluster index for each matched GEM hit |
+| `match_det_id` | `vector<uint8_t>`     | GEM detector ID (0..3) for each matched hit |
+| `match_gem_x`  | `vector<float>`       | GEM hit x coordinate (lab frame, mm) |
+| `match_gem_y`  | `vector<float>`       | GEM hit y coordinate (lab frame, mm) |
+| `match_gem_z`  | `vector<float>`       | GEM hit z coordinate (lab frame, mm) |
+
+The parallel vectors (`match_cl_idx`, `match_det_id`, `match_gem_x/y/z`) form a flat list where entry `k` represents one matched GEM hit with its owning HyCal cluster index and detector plane.
 
 ### Quick-access matched pairs (clusters with ≥2 GEMs matched)
 
-`match_num` ≤ 100. Convenient `[match_num][2]` view for analyses that only
-care about clusters confirmed on at least two GEM planes.
-
-The pair-selection strategy is configured by
-`database/reconstruction_config.json:matching.match_method`
-(parsed via `PipelineBuilder`): `1` uses legacy `PostMatch`
-(closest-to-HyCal per upstream/downstream pair), while other values
-use `PostMatch_upgrade` (upstream-downstream pair minimising inter-plane
-projected `deltaR`).
+Convenient `[match_num][2]` view for analyses that only care about clusters
+confirmed on at least two GEM planes. Pair selection uses the strategy
+configured in `database/reconstruction_config.json:matching.match_method`
+(parsed via `PipelineBuilder`): `1` uses legacy `PostMatch` (closest-to-HyCal
+per upstream/downstream pair), while other values use `PostMatch_upgrade`
+(upstream-downstream pair minimising inter-plane projected `deltaR`).
 
 | Branch | Type | Meaning |
 |---|---|---|
 | `match_num` | `int`                  | Number of clusters with ≥2 GEMs matched |
 | `mHit_E`    | `float[match_num]`     | HyCal cluster energy (MeV) |
-| `mHit_x`    | `float[match_num]`     | HyCal cluster x |
-| `mHit_y`    | `float[match_num]`     | HyCal cluster y |
-| `mHit_z`    | `float[match_num]`     | HyCal cluster z |
-| `mHit_gx`   | `float[match_num][2]`  | First 2 matched GEM x |
-| `mHit_gy`   | `float[match_num][2]`  | First 2 matched GEM y |
-| `mHit_gz`   | `float[match_num][2]`  | First 2 matched GEM z |
-| `mHit_gid`  | `float[match_num][2]`  | det_id (0..3) of those 2 GEM hits |
-| `mHit_cl_index` | `uint8_t[match_num]`  | Index of the corresponding HyCal cluster for the matched GEM hits |
+| `mHit_x`    | `float[match_num]`     | HyCal cluster x (lab frame, mm) |
+| `mHit_y`    | `float[match_num]`     | HyCal cluster y (lab frame, mm) |
+| `mHit_z`    | `float[match_num]`     | HyCal cluster z (lab frame, mm) |
+| `mHit_gx`   | `float[match_num][2]`  | First 2 matched GEM x coordinates (lab frame, mm) |
+| `mHit_gy`   | `float[match_num][2]`  | First 2 matched GEM y coordinates (lab frame, mm) |
+| `mHit_gz`   | `float[match_num][2]`  | First 2 matched GEM z coordinates (lab frame, mm) |
+| `mHit_gid`  | `uint8_t[match_num][2]` | GEM detector IDs (0..3) for those 2 matched hits |
+| `mHit_cl_index` | `uint8_t[match_num]`  | Index of the corresponding HyCal cluster (redundant with reconstruction logic) |
 
 ### GEM reconstructed hits
 
