@@ -212,12 +212,12 @@ int main(int argc, char *argv[])
     // Moller center X, Y, and vertex Z distance histograms
     TH1F *h1_hycal_CenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   800, -50, 50);
     TH1F *h1_hycal_CenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   800, -50, 50);
-    TH1F *h1_hycal_Zdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 4000, 0, 10000);
+    TH1F *h1_hycal_Zdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 1200, 5000, 8000);
     TH1F *h1_gem_CenterX[4], *h1_gem_CenterY[4], *h1_gem_Zdistance[4];
     for (int i = 0; i < 4; ++i) {
         h1_gem_CenterX[i]   = new TH1F(Form("h1_gem%d_mollerCenterX", i),   Form("GEM%d Moller Center X", i),   1600, -50, 50);
         h1_gem_CenterY[i]   = new TH1F(Form("h1_gem%d_mollerCenterY", i),   Form("GEM%d Moller Center Y", i),   200, -50, 50);
-        h1_gem_Zdistance[i] = new TH1F(Form("h1_gem%d_mollerZdistance", i), Form("GEM%d Moller Z distance", i), 4000, 0, 10000);
+        h1_gem_Zdistance[i] = new TH1F(Form("h1_gem%d_mollerZdistance", i), Form("GEM%d Moller Z distance", i), 1200, 5000, 8000);
     }
     // Phi difference between HyCal and GEMs
     TH1F *h1_phi_diff_hycal_gem[4];
