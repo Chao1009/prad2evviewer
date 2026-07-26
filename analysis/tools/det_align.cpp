@@ -200,10 +200,10 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 4; ++i)
         h2_gem_hits[i] = new TH2F(Form("h2_gem%d_hits", i), Form("GEM%d Hits", i), 720, -360, 360, 720, -360, 360);
     // Energy vs angle histograms
-    TH2F *h2_hycal_energy_vs_angle = new TH2F("h2_hycal_energy_vs_angle", "HyCal Energy vs Angle", 35, 0.5, 4, 230*4, 0, 2300);
+    TH2F *h2_hycal_energy_vs_angle = new TH2F("h2_hycal_energy_vs_angle", "HyCal Energy vs Angle", 35*2, 0.5, 4, 230*4, 0, 2300);
     TH2F *h2_gem_energy_vs_angle[4];
     for (int i = 0; i < 4; ++i)
-        h2_gem_energy_vs_angle[i] = new TH2F(Form("h2_gem%d_energy_vs_angle", i), Form("GEM%d Energy vs Angle", i), 35, 0.5, 4, 230*4, 0, 2300);
+        h2_gem_energy_vs_angle[i] = new TH2F(Form("h2_gem%d_energy_vs_angle", i), Form("GEM%d Energy vs Angle", i), 35*2, 0.5, 4, 230*4, 0, 2300);
     // Moller center position histograms
     TH2F *h2_hycal_Center = new TH2F("h2_hycal_mollerCenterX", "HyCal Moller Center X", 720, -360, 360, 720, -360, 360);
     TH2F *h2_gem_Center[4];
@@ -222,7 +222,7 @@ int main(int argc, char *argv[])
     // Phi difference between HyCal and GEMs
     TH1F *h1_phi_diff_hycal_gem[4];
     for (int i = 0; i < 4; ++i)
-        h1_phi_diff_hycal_gem[i] = new TH1F(Form("h1_phi_diff_hycal_gem%d", i), Form("Phi Difference HyCal-GEM%d", i), 100, -10, 10);
+        h1_phi_diff_hycal_gem[i] = new TH1F(Form("h1_phi_diff_hycal_gem%d", i), Form("Phi Difference HyCal-GEM%d", i), 200, -10, 10);
     // internal layer detector alignment histograms(2 chambers in the same layer, overlap region)
     TH1F *h1_deltaX_gem_up = new TH1F("h1_deltaX_gem_up", "Delta X GEM Up", 400, -20, 20);
     TH1F *h1_deltaX_gem_down = new TH1F("h1_deltaX_gem_down", "Delta X GEM Down", 400, -20, 20);
@@ -250,8 +250,8 @@ int main(int argc, char *argv[])
         float hc_phi[2] = {static_cast<float>(std::atan2(hc_y[0], hc_x[0]) * 180.0 / M_PI), static_cast<float>(std::atan2(hc_y[1], hc_x[1]) * 180.0 / M_PI)};
         h2_hycal_hits->Fill(hc_x[0], hc_y[0]);
         h2_hycal_hits->Fill(hc_x[1], hc_y[1]);
-        h2_hycal_energy_vs_angle->Fill(hc_energy[0], hc_theta[0]);
-        h2_hycal_energy_vs_angle->Fill(hc_energy[1], hc_theta[1]);
+        h2_hycal_energy_vs_angle->Fill(hc_theta[0], hc_energy[0]);
+        h2_hycal_energy_vs_angle->Fill(hc_theta[1], hc_energy[1]);
         h1_hycal_Zdistance->Fill(hc_z_distance);
         if(i >= 3) {
             auto center = PhysicsTools::GetMollerCenter(all_events[i-1].HC_moller, thisEvent.HC_moller);
@@ -467,6 +467,8 @@ static bool ProcessFile(const std::string &input_root,
 
     EventVars_Recon ev;
     prad2::SetReconReadBranches(tree, ev);
+    prad2::ReconMatchVectorBindings match_bindings;
+    prad2::BindReconMatchVectorBranches(tree, ev, match_bindings);
     Long64_t n = tree->GetEntries();
 
     for (Long64_t i = 0; i < n; ++i) {
