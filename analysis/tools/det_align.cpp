@@ -210,30 +210,30 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 4; ++i)
         h2_gem_Center[i] = new TH2F(Form("h2_gem%d_mollerCenter", i), Form("GEM%d Moller Center", i), 720, -360, 360, 720, -360, 360);
     // Moller center X, Y, and vertex Z distance histograms
-    TH1F *h1_hycal_CenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   400, -50, 50);
-    TH1F *h1_hycal_CenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   400, -50, 50);
+    TH1F *h1_hycal_CenterX   = new TH1F("h1_hycal_mollerCenterX",   "HyCal Moller Center X",   800, -50, 50);
+    TH1F *h1_hycal_CenterY   = new TH1F("h1_hycal_mollerCenterY",   "HyCal Moller Center Y",   800, -50, 50);
     TH1F *h1_hycal_Zdistance = new TH1F("h1_hycal_mollerZdistance", "HyCal Moller Z distance", 4000, 0, 10000);
     TH1F *h1_gem_CenterX[4], *h1_gem_CenterY[4], *h1_gem_Zdistance[4];
     for (int i = 0; i < 4; ++i) {
-        h1_gem_CenterX[i]   = new TH1F(Form("h1_gem%d_mollerCenterX", i),   Form("GEM%d Moller Center X", i),   800, -50, 50);
+        h1_gem_CenterX[i]   = new TH1F(Form("h1_gem%d_mollerCenterX", i),   Form("GEM%d Moller Center X", i),   1600, -50, 50);
         h1_gem_CenterY[i]   = new TH1F(Form("h1_gem%d_mollerCenterY", i),   Form("GEM%d Moller Center Y", i),   200, -50, 50);
         h1_gem_Zdistance[i] = new TH1F(Form("h1_gem%d_mollerZdistance", i), Form("GEM%d Moller Z distance", i), 4000, 0, 10000);
     }
     // Phi difference between HyCal and GEMs
     TH1F *h1_phi_diff_hycal_gem[4];
     for (int i = 0; i < 4; ++i)
-        h1_phi_diff_hycal_gem[i] = new TH1F(Form("h1_phi_diff_hycal_gem%d", i), Form("Phi Difference HyCal-GEM%d", i), 200, -10, 10);
+        h1_phi_diff_hycal_gem[i] = new TH1F(Form("h1_phi_diff_hycal_gem%d", i), Form("Phi Difference HyCal-GEM%d", i), 400, -10, 10);
     // internal layer detector alignment histograms(2 chambers in the same layer, overlap region)
     TH1F *h1_deltaX_gem_up = new TH1F("h1_deltaX_gem_up", "Delta X GEM Up", 400, -20, 20);
     TH1F *h1_deltaX_gem_down = new TH1F("h1_deltaX_gem_down", "Delta X GEM Down", 400, -20, 20);
     TH1F *h1_deltaY_gem_up = new TH1F("h1_deltaY_gem_up", "Delta Y GEM Up", 400, -20, 20);
     TH1F *h1_deltaY_gem_down = new TH1F("h1_deltaY_gem_down", "Delta Y GEM Down", 400, -20, 20);
-    TH1F *h1_deltaPhi_gem_up = new TH1F("h1_deltaPhi_gem_up", "Delta Phi GEM Up", 400, -20, 20);
-    TH1F *h1_deltaPhi_gem_down = new TH1F("h1_deltaPhi_gem_down", "Delta Phi GEM Down", 200, -10, 10);
+    TH1F *h1_deltaPhi_gem_up = new TH1F("h1_deltaPhi_gem_up", "Delta Phi GEM Up", 400, -10, 10);
+    TH1F *h1_deltaPhi_gem_down = new TH1F("h1_deltaPhi_gem_down", "Delta Phi GEM Down", 400, -10, 10);
     // 2 layers GEM alignment histograms
     TH1F *h1_deltaX_gem_layer = new TH1F("h1_deltaX_gem_layer", "Delta X GEM Layer", 400, -20, 20);
     TH1F *h1_deltaY_gem_layer = new TH1F("h1_deltaY_gem_layer", "Delta Y GEM Layer", 400, -20, 20);
-    TH1F *h1_deltaPhi_gem_layer = new TH1F("h1_deltaPhi_gem_layer", "Delta Phi GEM Layer", 200, -10, 10);
+    TH1F *h1_deltaPhi_gem_layer = new TH1F("h1_deltaPhi_gem_layer", "Delta Phi GEM Layer", 400, -10, 10);
     // ----- Up to here are just translational alignment histograms, next will be global roll histograms (pitch, yaw, roll)
     
     // analysis and filling of histograms will be done here
@@ -384,10 +384,10 @@ static double extract_peak(TH1F *hist)
     const double peak = hist->GetBinContent(max_bin);
     if (peak <= 0.0) return 0.0;
     
-    const double half_peak = 0.8 * peak;
+    const double half_peak = 0.7 * peak;
     const int nbins = hist->GetNbinsX();
     
-    // Find left and right edges at 80% of peak
+    // Find left and right edges at 70% of peak
     int left_bin = max_bin, right_bin = max_bin;
     while (left_bin > 1 && hist->GetBinContent(left_bin) >= half_peak) --left_bin;
     while (right_bin < nbins && hist->GetBinContent(right_bin) >= half_peak) ++right_bin;
@@ -396,7 +396,7 @@ static double extract_peak(TH1F *hist)
     auto crossing = [hist](int bin0, int bin1) {
         if (std::abs(hist->GetBinContent(bin1) - hist->GetBinContent(bin0)) < 1e-12)
             return hist->GetXaxis()->GetBinCenter(bin0);
-        double frac = (0.8 * hist->GetBinContent(hist->GetMaximumBin()) - hist->GetBinContent(bin0)) /
+        double frac = (0.7 * hist->GetBinContent(hist->GetMaximumBin()) - hist->GetBinContent(bin0)) /
                       (hist->GetBinContent(bin1) - hist->GetBinContent(bin0));
         frac = std::max(0.0, std::min(1.0, frac));
         return hist->GetXaxis()->GetBinCenter(bin0) + frac * hist->GetXaxis()->GetBinWidth(bin0);
