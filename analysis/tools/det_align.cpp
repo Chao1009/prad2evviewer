@@ -295,6 +295,8 @@ int main(int argc, char *argv[])
             h2_gem_hits[j]->Fill(gem_x[j][0], gem_y[j][0]);
             h2_gem_hits[j]->Fill(gem_x[j][1], gem_y[j][1]);
             h1_gem_Zdistance[j]->Fill(gem_z_distance[j]);
+            h2_gem_energy_vs_angle[j]->Fill(gem_theta[j][0], gem_energy[j][0]);
+            h2_gem_energy_vs_angle[j]->Fill(gem_theta[j][1], gem_energy[j][1]);
             // Moller center positions - find up to 3 previous events with valid GEM data for this chamber
             int count = 0;
             for (int k = i - 1; k >= 0 && count < 3; --k) {
@@ -352,6 +354,11 @@ int main(int argc, char *argv[])
     const std::string output_root = fs::path(output_dir) / "alignment_histograms.root";
     std::unique_ptr<TFile> out_file(TFile::Open(output_root.c_str(), "RECREATE"));
     if (out_file && !out_file->IsZombie()) {
+        h2_hycal_energy_vs_angle->Write();
+        h2_gem_energy_vs_angle[0]->Write();
+        h2_gem_energy_vs_angle[1]->Write();
+        h2_gem_energy_vs_angle[2]->Write();
+        h2_gem_energy_vs_angle[3]->Write();
         h2_hycal_hits->Write();
         h1_hycal_CenterX->Write();
         h1_hycal_CenterY->Write();
@@ -557,7 +564,12 @@ static bool ProcessFile(const std::string &input_root,
         if (std::abs(E2 - expectE2) > 3.0 * sigma2) continue;
 
         EventWithMoller thisEvent;
-        MollerEvent m_hycal, m_gem[4], m_gemUp, m_gemDown;
+        MollerEvent m_hycal, m_gemUp, m_gemDown;
+        std::array<MollerEvent, 4> m_gem;
+        // Initialize all m_gem entries to zero-energy Moller events
+        for (int d = 0; d < 4; ++d) {
+            m_gem[d] = MollerEvent(DataPoint(0, 0, 0, 0), DataPoint(0, 0, 0, 0));
+        }
 
         m_hycal = MollerEvent(
             DataPoint(ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], ev.cl_energy[0]),
