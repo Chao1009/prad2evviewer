@@ -363,7 +363,10 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
     if (!cfg.contains("configurations") || !cfg["configurations"].is_array())
         cfg["configurations"] = nlohmann::json::array();
 
+    // Keep both keys for compatibility: `from_run` is the preferred key,
+    // `run_number` is a legacy alias still accepted by LoadRunConfig.
     nlohmann::json entry;
+    entry["from_run"]                        = run_num;
     entry["run_number"]                      = run_num;
     entry["beam_energy"]                     = geo.Ebeam;
     entry["calibration"]["file"]             = geo.energy_calib_file;
@@ -393,6 +396,8 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
         entry["time_cuts"]["hycal_rf_offsets"] = geo.hycal_rf_offset_file;
     entry["matching"]["radius"]          = geo.matching_radius;
     entry["matching"]["use_square_cut"]  = geo.matching_use_square;
+    entry["matching"]["energy_dependent"] = geo.matching_energy_dependent;
+    entry["matching"]["sigma"]            = geo.matching_sigma;
     if (!geo.gain_data_dir.empty() || geo.gain_ref_run >= 0) {
         if (!geo.gain_data_dir.empty()) entry["gain_factor"]["data_dir"] = geo.gain_data_dir;
         if (geo.gain_ref_run >= 0)      entry["gain_factor"]["ref_run"]  = geo.gain_ref_run;
@@ -400,8 +405,13 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
 
     auto &arr = cfg["configurations"];
     bool replaced = false;
+    auto entry_from_run = [](const nlohmann::json &e) -> int {
+        if (e.contains("from_run"))   return e["from_run"].get<int>();
+        if (e.contains("run_number")) return e["run_number"].get<int>();
+        return -1;
+    };
     for (auto &e : arr) {
-        if (e.contains("run_number") && e["run_number"].get<int>() == run_num) {
+        if (entry_from_run(e) == run_num) {
             // Merge entry into e field-by-field: existing keys are updated
             // in-place (preserving their original position); new keys are
             // appended at the end.
@@ -414,8 +424,10 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
     if (!replaced) arr.push_back(entry);
 
     std::sort(arr.begin(), arr.end(), [](const nlohmann::json &a, const nlohmann::json &b) {
-        int ra = a.contains("run_number") ? a["run_number"].get<int>() : -1;
-        int rb = b.contains("run_number") ? b["run_number"].get<int>() : -1;
+     int ra = a.contains("from_run")   ? a["from_run"].get<int>()
+         : a.contains("run_number") ? a["run_number"].get<int>() : -1;
+     int rb = b.contains("from_run")   ? b["from_run"].get<int>()
+         : b.contains("run_number") ? b["run_number"].get<int>() : -1;
         return ra < rb;
     });
 

@@ -71,6 +71,14 @@ inline void ApplyToLab(const DetectorTransform &xform, Hit &h)
     xform.toLab(h.x, h.y, h.z, lx, ly, lz);
     h.x = lx; h.y = ly; h.z = lz;
 }
+template <typename Hit>
+inline void ApplyToLocal(const DetectorTransform &xform, Hit &h)
+{
+    float dx, dy, dz;
+    xform.labToLocal(h.x, h.y, h.z, dx, dy, dz);
+    h.x = dx; h.y = dy; h.z = dz;
+}
+
 
 // MollerData is a translation-only calibration shift — used by det_calib to
 // apply per-detector alignment offsets to fitted Moller pairs.  Not a
