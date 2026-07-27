@@ -289,6 +289,37 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
             }
         }
 
+        // --- linear interpolation constant fraction discrimination ---
+        // For large pulses, use a simple digital CFD time on the raw
+        // pedsub samples; if crossing search or interpolation fails,
+        // fall back to quadratic peak-time interpolation above.
+        float t_pickoff = raw_pos + t_subsample;
+        if (raw_height > 100.0f) {
+            constexpr float cfd_fraction = 0.4f;
+            const float v_thr = cfd_fraction * raw_height;
+            bool cfd_ok = false;
+
+            // Scan the rising edge from integration-left bound (future
+            // p.left) up to the peak position: v[j] < fA <= v[j+1].
+            // Keep the last valid crossing so the pickoff stays nearest
+            // to the peak if small pre-rise oscillations exist.
+            for (int j = int_left; j < raw_pos; ++j) {
+                const float v0 = static_cast<float>(raw[j])     - ped_mean;
+                const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
+                if (v0 < v_thr && v1 >= v_thr) {
+                    const float dv = v1 - v0;
+                    if (dv > 1e-6f) {
+                        const float frac = (v_thr - v0) / dv;
+                        t_pickoff = j + std::max(0.0f, std::min(1.0f, frac));
+                        cfd_ok = true;
+                    }
+                }
+            }
+
+            if (!cfd_ok)
+                t_pickoff = raw_pos + t_subsample;
+        }
+
         // --- pile-up detection ---
         // Flag this peak (and the matching previously-found peak) when
         // their integration windows touch or overlap within
@@ -312,7 +343,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         p.right    = int_right;
         p.height   = raw_height;
         p.integral = integral;
-        p.time     = (raw_pos + t_subsample) * 1e3f / cfg.clk_mhz;  // ns
+        p.time     = t_pickoff * 1e3f / cfg.clk_mhz;  // ns
         p.overflow = (raw[raw_pos] >= cfg.overflow);
         p.quality  = my_quality;
         pk_range[result.npeaks][0] = left;
