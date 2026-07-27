@@ -5,6 +5,269 @@
 
 using namespace fdec;
 
+namespace {
+
+inline float log_normal_pulse_value(float t, float ped_mean, float A,
+                                    float t0, float mu, float sigma)
+{
+    if (!(sigma > 0.0f) || t <= t0) return ped_mean;
+    const float dt = t - t0;
+    const float z = (std::log(dt) - mu) / sigma;
+    return ped_mean + A * std::exp(-0.5f * z * z);
+}
+
+inline float log_normal_cfd_time_sample(float t0, float mu, float sigma,
+                                        float cfd_fraction)
+{
+    if (!(cfd_fraction > 0.0f) || !(cfd_fraction < 1.0f))
+        return std::numeric_limits<float>::quiet_NaN();
+    const float root_term = std::sqrt(-2.0f * std::log(cfd_fraction));
+    return t0 + std::exp(mu - sigma * root_term);
+}
+
+inline float local_cholesky(const float *M, float *L, int K)
+{
+    float min_pivot_sq = std::numeric_limits<float>::infinity();
+    for (int i = 0; i < K; ++i) {
+        for (int j = 0; j <= i; ++j) {
+            float sum = M[i * K + j];
+            for (int k = 0; k < j; ++k)
+                sum -= L[i * K + k] * L[j * K + k];
+            if (i == j) {
+                if (sum <= 0.0f) return -1.0f;
+                if (sum < min_pivot_sq) min_pivot_sq = sum;
+                L[i * K + j] = std::sqrt(sum);
+            } else {
+                L[i * K + j] = sum / L[j * K + j];
+            }
+        }
+        for (int j = i + 1; j < K; ++j) L[i * K + j] = 0.0f;
+    }
+    return min_pivot_sq;
+}
+
+inline void local_chol_solve(const float *L, const float *b, float *x, int K)
+{
+    float y[8] = {0.0f};
+    for (int i = 0; i < K; ++i) {
+        float s = b[i];
+        for (int k = 0; k < i; ++k) s -= L[i * K + k] * y[k];
+        y[i] = s / L[i * K + i];
+    }
+    for (int i = K - 1; i >= 0; --i) {
+        float s = y[i];
+        for (int k = i + 1; k < K; ++k) s -= L[k * K + i] * x[k];
+        x[i] = s / L[i * K + i];
+    }
+}
+
+struct LogNormalFitResult {
+    bool  ok = false;
+    float t_cfd_sample = 0.0f;
+    float chi2_per_dof = std::numeric_limits<float>::infinity();
+};
+
+inline LogNormalFitResult fit_log_normal_cfd(const uint16_t *raw, int nsamples,
+                                             int fit_left_bound, int raw_pos,
+                                             float cfd_fraction,
+                                             float ped_mean, float ped_rms)
+{
+    LogNormalFitResult res;
+    if (!raw || nsamples <= 0 || raw_pos < 0 || raw_pos >= nsamples) return res;
+    if (!(cfd_fraction > 0.0f) || !(cfd_fraction < 1.0f)) return res;
+
+    const int fit_start = std::max(0, fit_left_bound - 5);
+    const int fit_stop  = std::min(nsamples - 1, raw_pos + 3);
+    const int nfit = fit_stop - fit_start + 1;
+    if (nfit < 8) return res;
+
+    const float raw_height = static_cast<float>(raw[raw_pos]) - ped_mean;
+    const float v_thr = cfd_fraction * raw_height;
+    int cfd_left_sample = -1;
+    for (int j = fit_left_bound; j < raw_pos; ++j) {
+        const float v0 = static_cast<float>(raw[j])     - ped_mean;
+        const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
+        if (v0 < v_thr && v1 >= v_thr)
+            cfd_left_sample = j;
+    }
+    if (cfd_left_sample < 0) return res;
+
+    constexpr int NPAR = 4;
+    float t[MAX_SAMPLES];
+    float y[MAX_SAMPLES];
+    for (int i = 0; i < nfit; ++i) {
+        const int idx = fit_start + i;
+        t[i] = static_cast<float>(idx);
+        y[i] = static_cast<float>(raw[idx]);
+    }
+
+    const float peak_time = static_cast<float>(raw_pos);
+    const float A_guess = std::max(static_cast<float>(raw[raw_pos]) - ped_mean, 1.0f);
+
+    float p[NPAR] = {
+        A_guess,
+        std::max(0.0f, peak_time - 15.0f / 4.0f),
+        2.5f,
+        0.6f,
+    };
+    float p_lo[NPAR] = {
+        0.0f,
+        std::max(0.0f, t[0] - 12.0f / 4.0f),
+        1.0f,
+        0.2f,
+    };
+    float p_hi[NPAR] = {
+        3.0f * A_guess,
+        peak_time - 1.0e-3f,
+        4.0f,
+        1.5f,
+    };
+    for (int j = 0; j < NPAR; ++j)
+        p[j] = std::clamp(p[j], p_lo[j], p_hi[j]);
+
+    const float sigma_fit = std::max(ped_rms, 1.0f);
+    const float inv_sigma2 = 1.0f / (sigma_fit * sigma_fit);
+    const int dof = std::max(1, nfit - NPAR);
+
+    auto eval_chi2 = [&](const float *params) -> float {
+        if (!(params[0] > 0.0f) || !(params[3] > 0.0f) || !(params[1] < peak_time))
+            return std::numeric_limits<float>::infinity();
+        float chi2 = 0.0f;
+        for (int i = 0; i < nfit; ++i) {
+            const float r = y[i] - log_normal_pulse_value(
+                t[i], ped_mean, params[0], params[1], params[2], params[3]);
+            chi2 += r * r;
+        }
+        return (chi2 * inv_sigma2) / static_cast<float>(dof);
+    };
+
+    float chi2 = eval_chi2(p);
+    if (!std::isfinite(chi2)) return res;
+
+    float p_best[NPAR];
+    for (int j = 0; j < NPAR; ++j) p_best[j] = p[j];
+    float chi2_best = chi2;
+
+    constexpr int   MAX_ITER = 60;
+    constexpr float LAMBDA0 = 1.0e-3f;
+    constexpr float LAMBDA_UP = 10.0f;
+    constexpr float LAMBDA_DN = 10.0f;
+    constexpr float LAMBDA_MAX = 1.0e10f;
+    constexpr float STEP_TOL = 1.0e-4f;
+
+    float lambda = LAMBDA0;
+    bool any_accepted = false;
+
+    float r[MAX_SAMPLES];
+    float J[NPAR * MAX_SAMPLES];
+    float A[NPAR * NPAR];
+    float Aug[NPAR * NPAR];
+    float L[NPAR * NPAR];
+    float g[NPAR], delta[NPAR], p_new[NPAR];
+
+    for (int iter = 0; iter < MAX_ITER; ++iter) {
+        for (int i = 0; i < nfit; ++i) {
+            r[i] = y[i] - log_normal_pulse_value(t[i], ped_mean, p[0], p[1], p[2], p[3]);
+        }
+
+        const float h_A     = std::max(1.0e-3f * std::max(std::abs(p[0]), 1.0f), 1.0e-3f);
+        const float h_t0    = 1.0e-3f;
+        const float h_mu    = std::max(1.0e-3f * std::max(std::abs(p[2]), 1.0f), 1.0e-4f);
+        const float h_sigma = std::max(1.0e-3f * std::max(std::abs(p[3]), 1.0f), 1.0e-4f);
+        const float h[NPAR] = {h_A, h_t0, h_mu, h_sigma};
+
+        for (int j = 0; j < NPAR; ++j) {
+            float p_fd[NPAR];
+            for (int k = 0; k < NPAR; ++k) p_fd[k] = p[k];
+            p_fd[j] = std::min(p_hi[j], p[j] + h[j]);
+            const float step = p_fd[j] - p[j];
+            if (!(step > 0.0f)) {
+                for (int i = 0; i < nfit; ++i) J[j * MAX_SAMPLES + i] = 0.0f;
+                continue;
+            }
+            for (int i = 0; i < nfit; ++i) {
+                const float f0 = log_normal_pulse_value(t[i], ped_mean, p[0],    p[1],    p[2],    p[3]);
+                const float fp = log_normal_pulse_value(t[i], ped_mean, p_fd[0], p_fd[1], p_fd[2], p_fd[3]);
+                J[j * MAX_SAMPLES + i] = -(fp - f0) / step;
+            }
+        }
+
+        for (int j = 0; j < NPAR; ++j) {
+            g[j] = 0.0f;
+            for (int k = 0; k < NPAR; ++k) A[j * NPAR + k] = 0.0f;
+        }
+        for (int i = 0; i < nfit; ++i) {
+            for (int j1 = 0; j1 < NPAR; ++j1) {
+                const float jj1 = J[j1 * MAX_SAMPLES + i];
+                g[j1] += jj1 * r[i] * inv_sigma2;
+                for (int j2 = 0; j2 <= j1; ++j2) {
+                    const float jj2 = J[j2 * MAX_SAMPLES + i];
+                    A[j1 * NPAR + j2] += jj1 * jj2 * inv_sigma2;
+                }
+            }
+        }
+        for (int j1 = 0; j1 < NPAR; ++j1)
+            for (int j2 = j1 + 1; j2 < NPAR; ++j2)
+                A[j1 * NPAR + j2] = A[j2 * NPAR + j1];
+
+        for (int j = 0; j < NPAR * NPAR; ++j) Aug[j] = A[j];
+        for (int j = 0; j < NPAR; ++j) Aug[j * NPAR + j] += lambda;
+
+        const float min_pivot_sq = local_cholesky(Aug, L, NPAR);
+        if (min_pivot_sq < 0.0f) {
+            lambda *= LAMBDA_UP;
+            if (lambda > LAMBDA_MAX) break;
+            continue;
+        }
+        local_chol_solve(L, g, delta, NPAR);
+
+        float dpar = 0.0f;
+        for (int j = 0; j < NPAR; ++j) {
+            p_new[j] = std::clamp(p[j] - delta[j], p_lo[j], p_hi[j]);
+            const float scale = std::max(std::abs(p[j]), 1.0e-3f);
+            dpar += std::abs(p_new[j] - p[j]) / scale;
+        }
+
+        const float chi2_new = eval_chi2(p_new);
+        if (std::isfinite(chi2_new) && chi2_new < chi2_best) {
+            chi2_best = chi2_new;
+            for (int j = 0; j < NPAR; ++j) p_best[j] = p_new[j];
+        }
+
+        if (std::isfinite(chi2_new) && chi2_new < chi2) {
+            for (int j = 0; j < NPAR; ++j) p[j] = p_new[j];
+            chi2 = chi2_new;
+            any_accepted = true;
+            lambda = std::max(lambda / LAMBDA_DN, 1.0e-12f);
+            if (dpar < STEP_TOL) break;
+        } else {
+            lambda *= LAMBDA_UP;
+            if (lambda > LAMBDA_MAX) break;
+        }
+    }
+
+    if (!any_accepted && !std::isfinite(chi2_best)) return res;
+
+    const float t_cfd_sample = log_normal_cfd_time_sample(
+        p_best[1], p_best[2], p_best[3], cfd_fraction);
+    const float t_peak_sample = p_best[1] + std::exp(p_best[2]);
+    const float fit_lo_sample = static_cast<float>(fit_start);
+    const float fit_hi_sample = static_cast<float>(raw_pos);
+    const float cfd_lo_sample = static_cast<float>(cfd_left_sample);
+    const float cfd_hi_sample = cfd_lo_sample + 1.0f;
+    if (!std::isfinite(t_cfd_sample) || !std::isfinite(t_peak_sample)) return res;
+    if (!(t_cfd_sample >= fit_lo_sample && t_cfd_sample <= fit_hi_sample)) return res;
+    if (!(t_cfd_sample >= cfd_lo_sample && t_cfd_sample <= cfd_hi_sample)) return res;
+    if (!(t_peak_sample >= fit_lo_sample && t_peak_sample <= static_cast<float>(fit_stop) + 1.0f)) return res;
+
+    res.ok = true;
+    res.t_cfd_sample = t_cfd_sample;
+    res.chi2_per_dof = chi2_best;
+    return res;
+}
+
+} // namespace
+
 // --- triangular-kernel smoothing (your SmoothSpectrum, zero-alloc) ----------
 void WaveAnalyzer::smooth(const uint16_t *raw, int n, float *buf) const
 {
@@ -294,8 +557,8 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // pedsub samples; if crossing search or interpolation fails,
         // fall back to quadratic peak-time interpolation above.
         float t_pickoff = raw_pos + t_subsample;
+        const float cfd_fraction = 0.5f;
         if (raw_height > 80.0f * ped_rms) {
-            constexpr float cfd_fraction = 0.5f;
             const float v_thr = cfd_fraction * raw_height;
             bool cfd_ok = false;
 
@@ -318,6 +581,16 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
 
             if (!cfd_ok)
                 t_pickoff = raw_pos + t_subsample;
+        }
+
+        // Refine the leading-edge time with the local Log-Normal CFD
+        // idea. If the bounded fit becomes
+        // non-physical or unstable, keep the simpler CFD / quadratic fallback.
+        if (raw_height > 80.0f * ped_rms) {
+            const LogNormalFitResult fit = fit_log_normal_cfd(
+                raw, n, int_left, raw_pos, cfd_fraction, ped_mean, ped_rms);
+            if (fit.ok)
+                t_pickoff = fit.t_cfd_sample;
         }
 
         // --- pile-up detection ---
