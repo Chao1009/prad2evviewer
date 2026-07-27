@@ -42,10 +42,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -438,7 +441,42 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
             std::cerr << "Error: cannot write " << tmp << "\n";
             return false;
         }
-        out << cfg.dump(4) << "\n";
+        // Custom JSON dump with 3-decimal precision for floats
+        // First, recursively limit float precision
+        std::function<void(nlohmann::json&)> limit_precision = [&](nlohmann::json& j) {
+            if (j.is_object()) {
+                for (auto& [key, val] : j.items()) {
+                    if (val.is_number_float()) {
+                        double d = val.get<double>();
+                        // Round to 3 decimal places
+                        d = std::round(d * 1000.0) / 1000.0;
+                        j[key] = d;
+                    } else if (val.is_array() || val.is_object()) {
+                        limit_precision(val);
+                    }
+                }
+            } else if (j.is_array()) {
+                for (auto& val : j) {
+                    if (val.is_number_float()) {
+                        double d = val.get<double>();
+                        d = std::round(d * 1000.0) / 1000.0;
+                        val = d;
+                    } else if (val.is_array() || val.is_object()) {
+                        limit_precision(val);
+                    }
+                }
+            }
+        };
+        limit_precision(cfg);
+        
+        std::string output = cfg.dump(4);
+        
+        // Compact arrays with 3 numbers on one line: [ num, num, num ]
+        // Pattern: "[\n    number,\n    number,\n    number\n    ]"
+        std::regex array_pattern(R"(\[\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\s*\])");
+        output = std::regex_replace(output, array_pattern, "[$1, $2, $3]");
+        
+        out << output << "\n";
     }
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::cerr << "Error: failed to rename " << tmp << " -> " << path << "\n";

@@ -78,7 +78,8 @@ static double extract_peak(TH1F *hist);
 static bool ProcessFile(const std::string &input_root,
                         const std::string &db_dir,
                         const RunConfig &gRunConfig, const RunConfig &in_run_config,
-                        std::vector<EventWithMoller> &all_moller_events);
+                        std::vector<EventWithMoller> &all_moller_events,
+                        bool show_progress = false);
 
 
 // ── Main ──────────────────────────────────────────────────────────────────
@@ -90,18 +91,20 @@ int main(int argc, char *argv[])
     TClass::GetClass("TFile");
     TClass::GetClass("TBranch");
 
-    std::string  output_dir, run_config_in, run_config_out;
+    std::string  output_dir, run_config_in, run_config_out_path;
     int  max_files   = -1;
     int  num_threads = 4;
+    int  iter        = 1;
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:f:j:c:r:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:f:j:c:r:i:")) != -1) {
         switch (opt) {
             case 'o': output_dir       = optarg; break;
             case 'f': max_files        = std::atoi(optarg); break;
             case 'j': num_threads      = std::atoi(optarg); break;
             case 'c': run_config_in       = optarg; break;
-            case 'r': run_config_out       = optarg; break;
+            case 'r': run_config_out_path       = optarg; break;
+            case 'i': iter             = std::atoi(optarg); break;
             default: return 1;
         }
     }
@@ -116,8 +119,8 @@ int main(int argc, char *argv[])
     if (recon_files.empty() || output_dir.empty()) {
         std::cerr <<
             "Usage: det_calib <recon_file_or_dir> [more files/dirs...] -o output_dir\n"
-            "       [-f max_files] [-j threads] \n"
-            "       [-c run_config_in.json] [-r run_config_out.json]\n";
+            "       [-f max_files] [-j threads] [-i iteration]\n"
+            "       [-c run_config_in.json] [-r run_config_base_path.json]\n";
         return 1;
     }
 
@@ -133,6 +136,33 @@ int main(int argc, char *argv[])
 
     int run_num = get_run_int(recon_files[0]);
     gRunConfig = LoadRunConfig(run_config, run_num);
+    
+    // Set up config paths with automatic iteration naming
+    // If -r specified, use it as base path; otherwise use output_dir/run_config.json
+    std::string config_base_path;
+    if (!run_config_out_path.empty()) {
+        config_base_path = run_config_out_path;
+    } else {
+        config_base_path = (fs::path(output_dir) / "run_config.json").string();
+    }
+    
+    // Generate input config path for this iteration
+    if (iter == 1) {
+        if (run_config_in.empty()) {
+            run_config_in = run_config;  // use general.json by default
+        }
+    } else {
+        // Use previous iteration's output config as input
+        fs::path base(config_base_path);
+        std::string stem = base.stem().string();
+        std::string ext = base.extension().string();
+        if (ext.empty()) ext = ".json";  // Default to .json if no extension
+        std::string prev_iter_config = (base.parent_path() / 
+                                        (stem + "_iter" + std::to_string(iter - 1) + ext)).string();
+        run_config_in = prev_iter_config;
+        std::cout << "Iteration " << iter << ": using output from iteration " << (iter - 1) << "\n";
+        std::cout << "  Input:  " << run_config_in << "\n";
+    }
 
     RunConfig in_run_config = LoadRunConfig(run_config_in, run_num);
 
@@ -154,7 +184,8 @@ int main(int argc, char *argv[])
             const bool ok = ProcessFile(recon_files[idx],
                                         db_dir,
                                         gRunConfig, in_run_config,
-                                        events_per_file[idx]);
+                                        events_per_file[idx],
+                                        idx == 0);  // show progress only for first file
             processed_ok[idx] = ok ? 1 : 0;
 
             std::lock_guard<std::mutex> lock(io_mtx);
@@ -338,9 +369,70 @@ int main(int argc, char *argv[])
         alignment_params["GEM" + std::to_string(det) + "_z"] = extract_peak(h1_gem_Zdistance[det]);
         alignment_params["phi_diff_" + std::to_string(det)] = extract_peak(h1_phi_diff_hycal_gem[det]);
     }
+
+    // resolve the alignment parameters based on the extracted peak positions
+
+    // the detector position was shifted by the target position when read from the configuration file
+    // So we need to account for this shift, move the detector positions back by the target position
+    in_run_config.hycal_x += in_run_config.target_x;
+    in_run_config.hycal_y += in_run_config.target_y;
+    in_run_config.hycal_z += in_run_config.target_z;
+    for (int det = 0; det < 4; ++det) {
+        in_run_config.gem_z[det] += in_run_config.target_z;
+        in_run_config.gem_x[det] += in_run_config.target_x;
+        in_run_config.gem_y[det] += in_run_config.target_y;
+    }
+
+    // 1. Extract beam position from HyCal X/Y alignment parameters
+    float beam_x = alignment_params["HC_x"];
+    float beam_y = alignment_params["HC_y"];
+    // set target position based on beam position if not already set
+    if(in_run_config.target_x == 0 && in_run_config.target_y == 0) {
+        in_run_config.target_x = beam_x;
+        in_run_config.target_y = beam_y;
+    }
+    // otherwise, shift the target position based on this measured beam position
+    else {
+        in_run_config.target_x += beam_x;
+        in_run_config.target_y += beam_y;
+    }
+
+    // 2. Extract Detector Z position from HyCal/GEMs Z alignment parameter
+    in_run_config.hycal_z = alignment_params["HC_z"];
+    in_run_config.gem_z[0] = alignment_params["GEM0_z"];
+    in_run_config.gem_z[1] = alignment_params["GEM1_z"];
+    in_run_config.gem_z[2] = alignment_params["GEM2_z"];
+    in_run_config.gem_z[3] = alignment_params["GEM3_z"];
+
+    // 3. Extract GEMs X/Y alignment parameters(alignment to HyCal center)
+    // should firstly complete the beam position extraction
+    if(beam_x < 0.1 && beam_y < 0.1) {
+        for (int det = 0; det < 4; ++det) {
+            in_run_config.gem_x[det] -= alignment_params["GEM" + std::to_string(det) + "_x"];
+            in_run_config.gem_y[det] -= alignment_params["GEM" + std::to_string(det) + "_y"];
+        }
+    }
+
+    // 4. Extract GEMs phi alignment(roll rotate around Z axis) parameters (alignment to HyCal coordinate system)
+    // TODO: don't sure which direction is positive for the phi rotation
+    for (int det = 0; det < 4; ++det) {
+        in_run_config.gem_tilt_z[det] -= alignment_params["phi_diff_" + std::to_string(det)];
+    }
+
+    // output the resolved new run_config file
+    // Automatically generate output filename with iteration number
+    fs::path base(config_base_path);
+    std::string stem = base.stem().string();
+    std::string ext = base.extension().string();
+    if (ext.empty()) ext = ".json";  // Default to .json if no extension
+    std::string actual_output_path = (base.parent_path() / 
+                                     (stem + "_iter" + std::to_string(iter) + ext)).string();
+    std::cout << "Iteration " << iter << " output: " << actual_output_path << "\n";
+    WriteRunConfig(actual_output_path, run_num, in_run_config);
     
     // output results and summary
-    const std::string summary_path = fs::path(output_dir) / "alignment_summary.txt";
+    const std::string summary_path = (fs::path(output_dir) / 
+                                     ("alignment_summary_iter" + std::to_string(iter) + ".txt")).string();
     std::ofstream summary(summary_path);
     summary << "Detector Alignment Parameters\n";
     summary << std::string(50, '=') << "\n";
@@ -351,7 +443,8 @@ int main(int argc, char *argv[])
     std::cout << "Alignment summary saved to " << summary_path << "\n";
     
     // write histograms to output file
-    const std::string output_root = fs::path(output_dir) / "alignment_histograms.root";
+    const std::string output_root = (fs::path(output_dir) / 
+                                    ("alignment_histograms_iter" + std::to_string(iter) + ".root")).string();
     std::unique_ptr<TFile> out_file(TFile::Open(output_root.c_str(), "RECREATE"));
     if (out_file && !out_file->IsZombie()) {
         h2_hycal_energy_vs_angle->Write();
@@ -420,7 +513,8 @@ static double extract_peak(TH1F *hist)
 static bool ProcessFile(const std::string &input_root, 
                         const std::string &db_dir,
                         const RunConfig &gRunConfig, const RunConfig &in_run_config,
-                        std::vector<EventWithMoller> &all_moller_events)
+                        std::vector<EventWithMoller> &all_moller_events,
+                        bool show_progress)
 {
     // Implement the file processing logic here
 
@@ -433,6 +527,10 @@ static bool ProcessFile(const std::string &input_root,
     if (!tree) {
         std::cerr << "Cannot find TTree 'recon' in " << input_root << "\n";
         return false;
+    }
+    
+    if (show_progress) {
+        std::cout << "Reading file: " << fs::path(input_root).filename() << "\n";
     }
 
     DetectorTransform                 hycal_transform;
@@ -473,6 +571,15 @@ static bool ProcessFile(const std::string &input_root,
 
     for (Long64_t i = 0; i < n; ++i) {
         tree->GetEntry(i);
+        
+        // Progress display
+        if (show_progress && (i + 1) % 1000 == 0) {
+            int percent = static_cast<int>(100.0 * (i + 1) / n);
+            std::cout << "  [" << std::setw(3) << percent << "%] Event " 
+                      << std::setw(8) << (i + 1) << " / " << n << "\r";
+            std::cout.flush();
+        }
+        
         // Process the event here
 
         // trigger selection
@@ -515,7 +622,7 @@ static bool ProcessFile(const std::string &input_root,
         // do the matching between HyCal hits and GEM hits
         std::vector<MatchHit> matched_hits = matching.Match(hycal_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
         std::vector<MatchHit_perChamber> matched_hits_chamber = matching.MatchPerChamber(hycal_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]); 
-        
+        ev.clear_match_lists();
         for(int i = 0; i < matched_hits_chamber.size(); i++){
             auto &m = matched_hits_chamber[i];
             int cl_idx = m.hycal_idx;
@@ -603,6 +710,9 @@ static bool ProcessFile(const std::string &input_root,
         thisEvent.GEMup_moller = m_gemUp;
         thisEvent.GEMdown_moller = m_gemDown;
         all_moller_events.push_back(thisEvent);
+    }
+    if (show_progress) {
+        std::cout << "\n";  // newline after progress display
     }
     return true;
 }
