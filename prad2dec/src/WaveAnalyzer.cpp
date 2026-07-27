@@ -294,8 +294,8 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // pedsub samples; if crossing search or interpolation fails,
         // fall back to quadratic peak-time interpolation above.
         float t_pickoff = raw_pos + t_subsample;
-        if (raw_height > 100.0f) {
-            constexpr float cfd_fraction = 0.4f;
+        if (raw_height > 80.0f * ped_rms) {
+            constexpr float cfd_fraction = 0.5f;
             const float v_thr = cfd_fraction * raw_height;
             bool cfd_ok = false;
 
@@ -308,7 +308,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
                 const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
                 if (v0 < v_thr && v1 >= v_thr) {
                     const float dv = v1 - v0;
-                    if (dv > 1e-6f) {
+                    if (dv > 6.0f * ped_rms) {
                         const float frac = (v_thr - v0) / dv;
                         t_pickoff = j + std::max(0.0f, std::min(1.0f, frac));
                         cfd_ok = true;
