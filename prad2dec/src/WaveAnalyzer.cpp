@@ -77,14 +77,14 @@ inline LogNormalFitResult fit_log_normal_cfd(const uint16_t *raw, int nsamples,
     if (!(cfd_fraction > 0.0f) || !(cfd_fraction < 1.0f)) return res;
 
     const int fit_start = std::max(0, fit_left_bound - 5);
-    const int fit_stop  = std::min(nsamples - 1, raw_pos + 3);
+    const int fit_stop  = std::min(nsamples - 1, raw_pos + 4);
     const int nfit = fit_stop - fit_start + 1;
     if (nfit < 8) return res;
 
     const float raw_height = static_cast<float>(raw[raw_pos]) - ped_mean;
     const float v_thr = cfd_fraction * raw_height;
     int cfd_left_sample = -1;
-    for (int j = fit_left_bound; j < raw_pos; ++j) {
+    for (int j = fit_left_bound - 2; j < raw_pos; ++j) {
         const float v0 = static_cast<float>(raw[j])     - ped_mean;
         const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
         if (v0 < v_thr && v1 >= v_thr)
@@ -107,20 +107,20 @@ inline LogNormalFitResult fit_log_normal_cfd(const uint16_t *raw, int nsamples,
     float p[NPAR] = {
         A_guess,
         std::max(0.0f, peak_time - 15.0f / 4.0f),
-        2.5f,
+        1.5f,
         0.6f,
     };
     float p_lo[NPAR] = {
         0.0f,
         std::max(0.0f, t[0] - 12.0f / 4.0f),
-        1.0f,
-        0.2f,
+        0.3f,
+        0.1f,
     };
     float p_hi[NPAR] = {
         3.0f * A_guess,
         peak_time - 1.0e-3f,
         4.0f,
-        1.5f,
+        1.0f,
     };
     for (int j = 0; j < NPAR; ++j)
         p[j] = std::clamp(p[j], p_lo[j], p_hi[j]);
@@ -562,11 +562,11 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
             const float v_thr = cfd_fraction * raw_height;
             bool cfd_ok = false;
 
-            // Scan the rising edge from integration-left bound (future
-            // p.left) up to the peak position: v[j] < fA <= v[j+1].
+            // Scan the rising edge from one sample before the integration-left bound (future
+            // p.left - 1) up to the peak position: v[j] < fA <= v[j+1].
             // Keep the last valid crossing so the pickoff stays nearest
             // to the peak if small pre-rise oscillations exist.
-            for (int j = int_left; j < raw_pos; ++j) {
+            for (int j = int_left - 1; j < raw_pos; ++j) {
                 const float v0 = static_cast<float>(raw[j])     - ped_mean;
                 const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
                 if (v0 < v_thr && v1 >= v_thr) {
