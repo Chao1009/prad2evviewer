@@ -1,3 +1,20 @@
+// hycal_module_time_calib
+//
+// Build neighbor-pair HyCal timing delta-t histograms from raw events,
+// fit them with Gaussians, solve a connected-module timing-offset network
+// with weighted least squares, and write both the histograms and the
+// resulting offsets to disk.
+//
+// Usage:
+//   prad2ana_hycal_module_time_calib <input_raw.root|dir> [more...] \
+//       -o <output_prefix> [-n max_events] [-v(validation mode)] [-V validation_file]
+//
+// The output files are derived from the given -o value:
+//   - <output_prefix>.root   : ROOT file containing all pair histograms
+//   - <output_prefix>.json   : JSON file containing resolved offsets
+//
+// Global offsets network resolution algorithm developed by Mingyu Li, implemented and optimized by Yuan Li
+
 #include "Replay.h"
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
@@ -66,21 +83,6 @@ static std::vector<std::string> collectRootFiles(const std::string &path)
     return files;
 }
 
-// hycal_module_time_calib
-//
-// Build neighbor-pair HyCal timing delta-t histograms from raw events,
-// fit them with Gaussians, solve a connected-module timing-offset network
-// with weighted least squares, and write both the histograms and the
-// resulting offsets to disk.
-//
-// Usage:
-//   prad2ana_hycal_module_time_calib <input_raw.root|dir> [more...] \
-//       -o <output_prefix> [-D daq.json] [-n max_events] [-j threads]
-//
-// The output files are derived from the given -o value:
-//   - <output_prefix>.root   : ROOT file containing all pair histograms
-//   - <output_prefix>.json   : JSON file containing resolved offsets
-//
 // ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
@@ -98,12 +100,10 @@ int main(int argc, char *argv[])
     std::string validation_file;
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:E:D:n:j:c:fvV:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:n:vV:")) != -1) {
         switch (opt) {
             case 'o': output_path_name = optarg; break;
-            case 'D': daq_config_file  = optarg; break;
             case 'n': max_events       = std::atoi(optarg); break;
-            case 'j': num_threads      = std::atoi(optarg); break;
             case 'v': validation       = true; break;
             case 'V': validation_file  = optarg; break;
         }
@@ -118,7 +118,7 @@ int main(int argc, char *argv[])
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_module_time_calib <input_raw.root|dir> [more...] "
-                     "[-o ./output_name] [-D daq.json] [-n max_events] [-j threads] "
+                     "[-o ./output_name] [-n max_events] "
                      "[-v(validation mode)] [-V validation_file]\n";
         return 1;
     }
