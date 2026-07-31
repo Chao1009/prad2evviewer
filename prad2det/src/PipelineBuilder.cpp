@@ -11,6 +11,7 @@
 #include <regex>
 #include <sstream>
 #include <stdexcept>
+#include <cctype>
 #include <utility>
 
 using nlohmann::json;
@@ -54,6 +55,22 @@ json parse_json_file(const std::string &path)
     auto j = json::parse(f, nullptr, /*allow_exceptions=*/false,
                          /*ignore_comments=*/true);
     return j.is_discarded() ? json::object() : j;
+}
+
+bool read_json_bool(const json &obj, const char *key, bool def)
+{
+    if (!obj.contains(key)) return def;
+    const auto &v = obj[key];
+    if (v.is_boolean()) return v.get<bool>();
+    if (v.is_number_integer()) return v.get<int>() != 0;
+    if (v.is_string()) {
+        std::string s = v.get<std::string>();
+        std::transform(s.begin(), s.end(), s.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (s == "true" || s == "1" || s == "yes" || s == "on") return true;
+        if (s == "false" || s == "0" || s == "no" || s == "off") return false;
+    }
+    return def;
 }
 
 void apply_gem_cluster_overrides(const json &j, gem::ClusterConfig &cfg)
@@ -108,6 +125,7 @@ PipelineBuilder &PipelineBuilder::set_runinfo(std::string p)           { runinfo
 PipelineBuilder &PipelineBuilder::set_hycal_map(std::string p)         { hycal_map_path_       = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_gem_map(std::string p)           { gem_map_path_         = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_hycal_calib(std::string p)       { hycal_calib_path_     = std::move(p); return *this; }
+PipelineBuilder &PipelineBuilder::set_hycal_time_calib(std::string p)  { hycal_time_calib_path_ = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_hycal_time_cut(std::string p)    { hycal_time_cut_path_  = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_hycal_rf_offset(std::string p)   { hycal_rf_offset_path_ = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_gem_pedestal(std::string p)      { gem_pedestal_path_    = std::move(p); return *this; }
@@ -281,7 +299,44 @@ Pipeline PipelineBuilder::build()
         LOG("[WARN] no HyCal calibration file — energies will be wrong.");
     }
 
-    // --- 7b. HyCal per-module time-cut table -----------------------------
+    // --- 7b. HyCal per-module raw-time calibration table -----------------
+    // Applies offsets directly into HyCalSystem::Module::time_offset so
+    // downstream code can use calib_time = raw_time - mod.time_offset.
+    // This path is reconstruction-wide, so it comes from recon config
+    // (or an explicit builder override), not runinfo.
+    {
+        const bool has_hycal_cfg = recon.contains("hycal") && recon["hycal"].is_object();
+        const bool enable_time_calib = has_hycal_cfg
+            ? read_json_bool(recon["hycal"], "time_calib", true)
+            : true;
+
+        if (!enable_time_calib) {
+            (void)prad2::LoadHyCalTimeCalib("", out.hycal, 0.f);
+            out.hycal_time_calib_path.clear();
+            LOG("[setup] HC t calib: disabled by recon config (hycal.time_calib=false), using 0 ns offsets.");
+        } else {
+            std::string hc_time_calib_path = hycal_time_calib_path_.empty()
+                ? ((has_hycal_cfg
+                    && recon["hycal"].contains("time_calib_file")
+                    && recon["hycal"]["time_calib_file"].is_string())
+                        ? resolve(recon["hycal"]["time_calib_file"].get<std::string>())
+                        : std::string())
+                : resolve(hycal_time_calib_path_);
+            const auto time_calib = prad2::LoadHyCalTimeCalib(
+                hc_time_calib_path, out.hycal, 0.f);
+            out.hycal_time_calib_path = hc_time_calib_path;
+
+            std::ostringstream oss;
+            oss << "[setup] HC t calib: default=" << time_calib.default_off << " ns";
+            if (time_calib.n_overrides > 0) {
+                oss << "  per-module=" << time_calib.n_overrides
+                    << " (" << hc_time_calib_path << ")";
+            }
+            LOG(oss.str());
+        }
+    }
+
+    // --- 7c. HyCal per-module time-cut table -----------------------------
     // Always populate `out.hycal_time_cuts` (uniform default when no file)
     // so per-event callers can use a single code path.  The path comes
     // from runinfo's `time_cuts.hycal_module_file` unless overridden.
@@ -305,7 +360,7 @@ Pipeline PipelineBuilder::build()
         LOG(oss.str());
     }
 
-    // --- 7c. HyCal per-module HyCal→RF offset table ----------------------
+    // --- 7d. HyCal per-module HyCal→RF offset table ----------------------
     // Always populate `out.hycal_rf_offsets` (uniform 0 ns when no file)
     // so the per-event Δt fill uses a single call.  Path comes from
     // runinfo's `time_cuts.hycal_rf_offsets` unless overridden.

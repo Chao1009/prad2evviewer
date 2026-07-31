@@ -33,6 +33,7 @@
 #include "GemSystem.h"
 #include "HyCalCluster.h"    // fdec::ClusterConfig (HyCal clusterer knobs)
 #include "HyCalSystem.h"
+#include "HyCalTimeCalib.h"  // prad2::LoadHyCalTimeCalib (applies mod.time_offset)
 #include "HyCalTimeCuts.h"   // prad2::HyCalTimeCuts (per-module time window)
 #include "HyCalRfOffsets.h"  // prad2::HyCalRfOffsets (per-module RF offset)
 #include "RunInfoConfig.h"
@@ -104,6 +105,7 @@ struct Pipeline {
     std::string                        hycal_map_path;
     std::string                        gem_map_path;
     std::string                        hycal_calib_path;
+    std::string                        hycal_time_calib_path;   // optional per-module raw-time offset file
     std::string                        hycal_time_cut_path;     // optional per-module window file
     std::string                        hycal_rf_offset_path;    // optional per-module RF offset file
     std::string                        gem_pedestal_path;
@@ -142,6 +144,7 @@ public:
     PipelineBuilder &set_hycal_map(std::string p);
     PipelineBuilder &set_gem_map(std::string p);
     PipelineBuilder &set_hycal_calib(std::string p);
+    PipelineBuilder &set_hycal_time_calib(std::string p);
     PipelineBuilder &set_hycal_time_cut(std::string p);
     PipelineBuilder &set_hycal_rf_offset(std::string p);
     PipelineBuilder &set_gem_pedestal(std::string p);
@@ -188,6 +191,7 @@ private:
     std::string hycal_map_path_;
     std::string gem_map_path_;
     std::string hycal_calib_path_;
+    std::string hycal_time_calib_path_;
     std::string hycal_time_cut_path_;
     std::string hycal_rf_offset_path_;
     std::string gem_pedestal_path_;

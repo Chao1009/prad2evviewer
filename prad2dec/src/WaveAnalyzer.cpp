@@ -76,7 +76,7 @@ inline LogNormalFitResult fit_log_normal_cfd(const uint16_t *raw, int nsamples,
     if (!raw || nsamples <= 0 || raw_pos < 0 || raw_pos >= nsamples) return res;
     if (!(cfd_fraction > 0.0f) || !(cfd_fraction < 1.0f)) return res;
 
-    const int fit_start = std::max(0, fit_left_bound - 5);
+    const int fit_start = std::max(0, fit_left_bound - 4);
     const int fit_stop  = std::min(nsamples - 1, raw_pos + 4);
     const int nfit = fit_stop - fit_start + 1;
     if (nfit < 8) return res;
@@ -558,7 +558,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // fall back to quadratic peak-time interpolation above.
         float t_pickoff = raw_pos + t_subsample;
         const float cfd_fraction = 0.5f;
-        if (raw_height > 80.0f * ped_rms) {
+        if (raw_height > 50.0f * ped_rms) {
             const float v_thr = cfd_fraction * raw_height;
             bool cfd_ok = false;
 
@@ -586,7 +586,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // Refine the leading-edge time with the local Log-Normal CFD
         // idea. If the bounded fit becomes
         // non-physical or unstable, keep the simpler CFD / quadratic fallback.
-        if (raw_height > 80.0f * ped_rms) {
+        if (raw_height > 50.0f * ped_rms) {
             const LogNormalFitResult fit = fit_log_normal_cfd(
                 raw, n, int_left, raw_pos, cfd_fraction, ped_mean, ped_rms);
             if (fit.ok)
@@ -629,7 +629,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
 }
 
 // --- main entry point -------------------------------------------------------
-void WaveAnalyzer::Analyze(const uint16_t *samples, int nsamples, WaveResult &result) const
+void WaveAnalyzer::Analyze(const uint16_t *samples, int nsamples, WaveResult &result, float time_offset) const
 {
     result.clear();
     if (!samples || nsamples <= 0 || nsamples > MAX_SAMPLES) return;
@@ -704,6 +704,13 @@ void WaveAnalyzer::Analyze(const uint16_t *samples, int nsamples, WaveResult &re
     // template store and the current channel key — production code that
     // doesn't care about deconv keeps its existing behaviour bit-for-bit.
     applyAutoDeconv(samples, nsamples, result);
+
+    // ── Time offset: add the caller's offset to each peak's time.  This
+    // is a convenience for the caller to avoid having to loop over the
+    // peaks themselves. The offset is in ns, will add the value when you
+    // call Analyze for each waveform.
+    for (int p = 0; p < result.npeaks; ++p)
+        result.peaks[p].time -= time_offset;
 }
 
 void WaveAnalyzer::applyAutoDeconv(const uint16_t *samples, int nsamples,

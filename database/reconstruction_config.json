@@ -7,6 +7,11 @@
 
     "hycal": {
         "// HyCal island clustering — mirrors fdec::ClusterConfig defaults.": "",
+        "// Optional per-module raw-time calibration file, relative to database/.": "",
+        "// Loaded into Module::time_offset by PipelineBuilder before event processing.": "",
+        "// Global switch for applying per-module time offsets. false => all offsets forced to 0 ns.": "",
+        "time_calib": true,
+        "time_calib_file": "hycal_time_offsets/test.json",
         "min_module_energy":  1.0,
         "min_center_energy":  10.0,
         "min_cluster_energy": 50.0,

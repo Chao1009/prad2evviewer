@@ -135,6 +135,8 @@ struct Module {
     double      cal_base_energy = 0.;   // calibration beam energy (MeV)
     double      cal_non_linear_1  = 0.;   // 1st order non-linear correction coefficient
     double      cal_non_linear_2  = 0.;   // 2nd order non-linear correction coefficient
+    // time calibration (per-module)
+    double      time_offset      = 0.;   // time offset (ns), calib_time = raw time - time_offset
 
     // convert ADC value (pedestal-subtracted) to energy in MeV
     double energize(double adc) const {

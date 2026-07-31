@@ -902,6 +902,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 
                         std::string mod_name = moduleName(crate, s, c);
                         if(mod_name.empty()) continue;
+                        const auto *mod = hycal.module_by_daq(crate, s, c);
 
                         if(is_lms || is_alpha) {
                             if(mod_name[0] == 'L'){
@@ -910,7 +911,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                                 if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
                                 else ev->lms_id[lms_nch] = mod_name[3] - '0';
                                 ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
                                 ev->lms_npeaks[lms_nch] = wres.npeaks;
                                 if(wres.npeaks <= 0) continue;
                                 for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
@@ -940,7 +941,6 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                                 veto_nch++;
                             }
                             else{
-                                const auto *mod = hycal.module_by_daq(crate, s, c);
                                 if (!mod || !mod->is_hycal()) continue;
                                 // Per-ID gain correction: average of three LMS channels.
                                 const float gain = (mod->id > 1000)
@@ -957,7 +957,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                                 }
 
                                 ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
                                 if (wres.npeaks <= 0) continue;
 
                                 const auto hc_win = hc_time_cuts.at(mod->index);
@@ -1428,6 +1428,8 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                         std::string mod_name = moduleName(crate, s, c);
                         if(mod_name.empty()) continue;
 
+                        const auto *mod = hycal.module_by_daq(crate, s, c);
+
                         if(is_lms || is_alpha) {
                             if(mod_name[0] == 'L'){
                                 if(mod_name.length() != 4) continue;
@@ -1435,7 +1437,7 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                                 if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
                                 else ev->lms_id[lms_nch] = mod_name[3] - '0';
                                 ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
                                 ev->lms_npeaks[lms_nch] = wres.npeaks;
                                 if(wres.npeaks <= 0) continue;
                                 for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
@@ -1449,7 +1451,6 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                         }
 
                         if(is_sum || is_1cluster || is_2cluster || is_3cluster) {
-                            const auto *mod = hycal.module_by_daq(crate, s, c);
                             if (!mod || !mod->is_hycal()) continue;
                             // Per-ID gain correction: average of LMS 2/3 channels.
                             const float gain = (mod->id > 1000)
@@ -1457,7 +1458,7 @@ bool Replay::ProcessWithReconX17(const std::string &input_evio, const std::strin
                                 : gain_corr.g[mod->id].avg;
 
                             ana.SetChannelKey(roc.tag, s, c);
-                            ana.Analyze(cd.samples, cd.nsamples, wres);
+                            ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
                             if (wres.npeaks <= 0) continue;
 
                             const auto hc_win = hc_time_cuts.at(mod->index);

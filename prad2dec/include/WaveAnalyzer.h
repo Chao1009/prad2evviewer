@@ -142,7 +142,7 @@ public:
     // quality flag.  Any failure path (no template, bad template,
     // singular system) silently leaves the original peaks untouched —
     // production code keeps running without templates.
-    void Analyze(const uint16_t *samples, int nsamples, WaveResult &result) const;
+    void Analyze(const uint16_t *samples, int nsamples, WaveResult &result, float time_offset = 0.f) const;
 
     // Public so callers (and Python bindings) can access just the
     // smoothed buffer for plotting / debugging without re-running the
