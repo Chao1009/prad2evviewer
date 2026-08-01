@@ -272,6 +272,7 @@ int main(int argc, char *argv[])
         int seed_id = hits[0].center_id;
         const auto *seed_mod = hycal.module_by_id(seed_id);
         float seed_time = hits[0].time;
+        if (validation) seed_time -= seed_mod->time_offset;
 
         // Fill all neighboring-module-pair delta-t histograms for this event.
         // For every pair of modules that are both present in the event and are
