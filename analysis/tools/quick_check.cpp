@@ -248,6 +248,7 @@ struct QuickResult {
     std::unique_ptr<TH1F> h_ep_yield;
     std::unique_ptr<TH1F> h_ee_yield;
     std::unique_ptr<TH1F> h_ep_ee_ratio;
+    std::unique_ptr<TH1F> h_ee_tDiff;
 
     std::unique_ptr<TH1F> h_ee_center_x;
     std::unique_ptr<TH1F> h_ee_center_y;
@@ -391,6 +392,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "EE Yield;Scattering Angle (deg);Counts", Nbins, binEdge);
     r->h_ep_ee_ratio = std::make_unique<TH1F>("ep_ee_ratio",
         "EP/EE Yield Ratio;Scattering Angle (deg);Counts", Nbins, binEdge);
+    r->h_ee_tDiff = std::make_unique<TH1F>("ee_tDiff",
+        "EE Time Difference;Time Difference (ns);Counts", 400, -10, 10);
 
     r->h_ee_center_x = std::make_unique<TH1F>("ee_center_x",
         "EE Center X;X (mm);Counts", 800, -20, 20);
@@ -440,7 +443,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_3cl_Pt = std::make_unique<TH2F>("3cl_Pt",
         "3-Cluster Pt hycal;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_3cl_tDiff = std::make_unique<TH1F>("3cl_tDiff",
-        "3-Cluster Time Difference;Time Difference (ns);Counts", 200, -50, 50);
+        "3-Cluster Time Difference;Time Difference (ns);Counts", 200, 0, 20);
 
     r->h2_3cl_hits_cut = std::make_unique<TH2F>("3cl_hits_cut",
         "3-Cluster Hit positions hycal - Cut;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
@@ -461,7 +464,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_3cl_Pt_cut = std::make_unique<TH2F>("3cl_Pt_cut",
         "3-Cluster Pt hycal - Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_3cl_tDiff_cut = std::make_unique<TH1F>("3cl_tDiff_cut",
-        "3-Cluster Time Difference - Cut;Time Difference (ns);Counts", 200, -50, 50);
+        "3-Cluster Time Difference - Cut;Time Difference (ns);Counts", 200, 0, 20);
 
     r->h2_gamma_hits = std::make_unique<TH2F>("gamma_hits",
         "Gamma Channel Hit positions hycal;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
@@ -482,7 +485,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_gamma_Pt = std::make_unique<TH2F>("gamma_Pt",
         "Gamma Channel Pt hycal;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_gamma_tDiff = std::make_unique<TH1F>("gamma_tDiff",
-        "Gamma Channel Time Difference;Time Difference (ns);Counts", 200, -50, 50);
+        "Gamma Channel Time Difference;Time Difference (ns);Counts", 200, 0, 20);
 
     r->h2_gamma_hits_pass = std::make_unique<TH2F>("gamma_hits_pass",
         "Gamma Channel Hit positions hycal - Pass;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
@@ -503,7 +506,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_gamma_Pt_pass = std::make_unique<TH2F>("gamma_Pt_pass",
         "Gamma Channel Pt hycal - Pass;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_gamma_tDiff_pass = std::make_unique<TH1F>("gamma_tDiff_pass",
-        "Gamma Channel Time Difference - Pass;Time Difference (ns);Counts", 200, -50, 50);
+        "Gamma Channel Time Difference - Pass;Time Difference (ns);Counts", 200, 0, 20);
     r->h_gamma_E_gamma_pass = std::make_unique<TH1F>("gamma_E_gamma_pass",
         "Gamma Cluster Energy - Pass;Energy (MeV);Counts", 3750, 0, 2500);
     r->h_gamma_E_electron_pass = std::make_unique<TH1F>("gamma_E_electron_pass",
@@ -535,7 +538,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_3cl_pty_gem = std::make_unique<TH1F>("3cl_pty_gem",
         "3-Cluster Pty with GEM matching;Pty (MeV);Counts", 200, -50, 50);
     r->h_3cl_tDiff_gem = std::make_unique<TH1F>("3cl_tDiff_gem",
-        "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 200, -50, 50);
+        "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 200, 0, 20);
     r->h2_3cl_Pt_gem = std::make_unique<TH2F>("3cl_Pt_gem",
         "3-Cluster Pt hycal with GEM matching;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
 
@@ -560,7 +563,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_3cl_Pt_gem_cut = std::make_unique<TH2F>("3cl_Pt_gem_cut",
         "3-Cluster Pt hycal with GEM matching - Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_3cl_tDiff_gem_cut = std::make_unique<TH1F>("3cl_tDiff_gem_cut",
-        "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 200, -50, 50);
+        "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 200, 0, 20);
     r->h_3cl_Vz_gem_cut = std::make_unique<TH1F>("3cl_Vz_gem_cut",
         "3-Cluster GEM Vertex Z with Cut;Z (mm);Counts", 14000, -5000, 9000);
     r->h2_3cl_Vxy_gem_cut = std::make_unique<TH2F>("3cl_Vxy_gem_cut",
@@ -598,6 +601,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h_ep_yield.get());
     detach(r->h_ee_yield.get());
     detach(r->h_ep_ee_ratio.get());
+    detach(r->h_ee_tDiff.get());
     detach(r->h_ee_center_x.get());
     detach(r->h_ee_center_y.get());
     detach(r->h_ee_vertex_z.get());
@@ -827,100 +831,72 @@ static bool processFile(const std::string &path,
                 }
             }
 
-            //loop over GEM matched results
-            std::vector<analysis::HCHit> moller_Hits_candidate;
-            for (int j = 0; j < ev.matchNum; j++) {
+            //loop over GEM matched hits find e-p events
+            for(int j = 0; j < ev.matchNum; j++) {
                 float x = ev.mHit_gx[j][1];
                 float y = ev.mHit_gy[j][1];
                 float z = ev.mHit_gz[j][1];
                 float E = ev.mHit_E[j];
-                //project to HyCal plane
                 float scale = ev.mHit_z[j] / z;
                 x *= scale;
                 y *= scale;
                 z *= scale;
+
+                if (!inHyCal(x, y)) continue;
+
                 float theta = std::atan(std::sqrt(x*x + y*y) / z) * 180.f / M_PI;
-
-                if(!inHyCal(x, y)) continue;
-
                 float expectE = physics.ExpectedEnergy(theta, Ebeam, "ep");
                 if (fabs(E - expectE) < 3.f * expectE * 0.035f / std::sqrt(E/1000.f)) {
                     out.h2_ep_hits->Fill(x, y);
                     out.h2_ep_E_angle->Fill(theta, E);
                     out.h_ep_yield->Fill(theta);
                 }
-
-                if (E > 60. && E < Ebeam - 0.035 * Ebeam / sqrt(Ebeam/1000.))
-                    moller_Hits_candidate.push_back({x, y, z, E});
             }
 
-            std::sort(moller_Hits_candidate.begin(), moller_Hits_candidate.end(),
-                    [](const analysis::HCHit &a, const analysis::HCHit &b){ return a.energy > b.energy; });
-
-            analysis::MollerData mollerData_event;
-            int nCand = moller_Hits_candidate.size();
-
-            for (int j = 0; j < nCand; j++) {
-                const auto &hit1 = moller_Hits_candidate[j];
-                float theta1 = std::atan2(std::sqrt(hit1.x*hit1.x + hit1.y*hit1.y), hit1.z)
-                            * 180.f / M_PI;
-                for (int k = j + 1; k < nCand; k++) {
-                    const auto &hit2 = moller_Hits_candidate[k];
-                    float theta2 = std::atan2(std::sqrt(hit2.x*hit2.x + hit2.y*hit2.y), hit2.z)
-                                * 180.f / M_PI;
-                    MollerEvent mev(
-                        {hit1.x, hit1.y, hit1.z, hit1.energy},
-                        {hit2.x, hit2.y, hit2.z, hit2.energy});
-                    if (!physics.isMoller_kinematic(theta1, hit1.energy,
-                                                    theta2, hit2.energy,
-                                                    Ebeam, 0.033f))
-                        continue;
-                    if (fabs(physics.GetMollerPhiDiff(mev)) > 10.f) continue;
-                    mollerData_event.push_back(mev);
+            //select GEM matched Moller events 
+            if (ev.matchNum == 2) {
+                // 0 is downstream, 1 is upstream
+                float x[2] = {ev.mHit_gx[0][1], ev.mHit_gx[1][1]};
+                float y[2] = {ev.mHit_gy[0][1], ev.mHit_gy[1][1]};
+                float z[2] = {ev.mHit_gz[0][1], ev.mHit_gz[1][1]};
+                float E[2] = {ev.mHit_E[0], ev.mHit_E[1]};
+                int idx[2] = {ev.mHit_cl_index[0], ev.mHit_cl_index[1]};
+                float time[2] = {ev.cl_time[idx[0]], ev.cl_time[idx[1]]};
+                int mod_id[2] = {ev.cl_center[idx[0]], ev.cl_center[idx[1]]};
+                float scale[2] = {ev.mHit_z[0] / z[0], ev.mHit_z[1] / z[1]};
+                for (int j = 0; j < 2; j++) {
+                    x[j] *= scale[j];
+                    y[j] *= scale[j];
+                    z[j] *= scale[j];
                 }
-            }
+                if (!inHyCal(x[0], y[0]) || !inHyCal(x[1], y[1])) continue;
+                float theta[2] = {
+                    std::atan(std::sqrt(x[0]*x[0] + y[0]*y[0]) / z[0]) * 180.f / static_cast<float>(M_PI),
+                    std::atan(std::sqrt(x[1]*x[1] + y[1]*y[1]) / z[1]) * 180.f / static_cast<float>(M_PI)
+                };
 
-            if (!mollerData_event.empty()) {
-                if (mollerData_event.size() > 1) {
-                    auto getPt = [](const MollerEvent &mev) -> float {
-                        float sin_t1 = std::sqrt(mev.first.x*mev.first.x + mev.first.y*mev.first.y)
-                                    / std::sqrt(mev.first.z*mev.first.z + mev.first.x*mev.first.x + mev.first.y*mev.first.y);
-                        float sin_t2 = std::sqrt(mev.second.x*mev.second.x + mev.second.y*mev.second.y)
-                                    / std::sqrt(mev.second.z*mev.second.z + mev.second.x*mev.second.x + mev.second.y*mev.second.y);
-                        return std::fabs(mev.first.E * sin_t1 - mev.second.E * sin_t2);
-                    };
-                    auto best = std::min_element(
-                        mollerData_event.begin(), mollerData_event.end(),
-                        [&](const MollerEvent &a, const MollerEvent &b) {
-                            return getPt(a) < getPt(b);
-                        });
-                    MollerEvent bestPair = *best;
-                    mollerData_event.clear();
-                    mollerData_event.push_back(bestPair);
-                }
-
-                MollerEvent &mev = mollerData_event.front();
-                out.mollers.push_back(mev);
-                if (out.mollers.size() > 3) out.mollers.erase(out.mollers.begin());
-
-                float t1 = std::atan2(std::sqrt(mev.first.x*mev.first.x + mev.first.y*mev.first.y),
-                                    mev.first.z) * 180.f / M_PI;
-                float t2 = std::atan2(std::sqrt(mev.second.x*mev.second.x + mev.second.y*mev.second.y),
-                                    mev.second.z) * 180.f / M_PI;
-                out.h2_ee_hits->Fill(mev.first.x, mev.first.y);
-                out.h2_ee_hits->Fill(mev.second.x, mev.second.y);
-                out.h2_ee_E_angle->Fill(t1, mev.first.E);
-                out.h2_ee_E_angle->Fill(t2, mev.second.E);
-                out.h_ee_yield->Fill(t1);
-                out.h_ee_yield->Fill(t2);
-
-                float vertex = physics.GetMollerZdistance(mev, Ebeam);
-                out.h_ee_vertex_z->Fill(vertex);
-
-                if (out.mollers.size() > 1) {
-                    auto center = physics.GetMollerCenter(out.mollers[out.mollers.size() - 2], mev);
-                    out.h_ee_center_x->Fill(center[0]);
-                    out.h_ee_center_y->Fill(center[1]);
+                MollerEvent mev({x[0], y[0], z[0], E[0]}, {x[1], y[1], z[1], E[1]});
+                if (physics.isMoller_kinematic(theta[0], E[0], theta[1], E[1], Ebeam, 0.033f)
+                    && fabs(physics.GetMollerPhiDiff(mev)) < 10.f)
+                {
+                    out.mollers.push_back(mev);
+                    if (out.mollers.size() > 3) out.mollers.erase(out.mollers.begin());
+                    out.h2_ee_hits->Fill(x[0], y[0]);
+                    out.h2_ee_hits->Fill(x[1], y[1]);
+                    out.h2_ee_E_angle->Fill(theta[0], E[0]);
+                    out.h2_ee_E_angle->Fill(theta[1], E[1]);
+                    out.h_ee_yield->Fill(theta[0]);
+                    out.h_ee_yield->Fill(theta[1]);
+                    float vertex = physics.GetMollerZdistance(mev, Ebeam);
+                    out.h_ee_vertex_z->Fill(vertex);
+                    float delta_time = time[0] - time[1];
+                    if (mod_id[0] < mod_id[1]) delta_time = -delta_time;
+                    out.h_ee_tDiff->Fill(delta_time);
+                    if (out.mollers.size() > 1) {
+                        auto center = physics.GetMollerCenter(out.mollers[out.mollers.size() - 2], mev);
+                        out.h_ee_center_x->Fill(center[0]);
+                        out.h_ee_center_y->Fill(center[1]);
+                    }
                     if (out.mollers.size() > 2) {
                         auto center2 = physics.GetMollerCenter(out.mollers[out.mollers.size() - 3], mev);
                         out.h_ee_center_x->Fill(center2[0]);
@@ -943,7 +919,7 @@ static bool processFile(const std::string &path,
                 float tDiff = std::max({std::fabs(t1 - t2), std::fabs(t1 - t3), std::fabs(t2 - t3)});
 
                 bool nblocks_ok = true;
-                if(ev.cl_nblocks[0] < 1 || ev.cl_nblocks[1] < 1 || ev.cl_nblocks[2] < 1)
+                if(ev.cl_nblocks[0] < 2 || ev.cl_nblocks[1] < 2 || ev.cl_nblocks[2] < 2)
                     nblocks_ok = false;
 
                 float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
@@ -1055,7 +1031,7 @@ static bool processFile(const std::string &path,
                 float tDiff = std::max({std::fabs(t[0] - t[1]), std::fabs(t[0] - t[2]), std::fabs(t[1] - t[2])});
 
                 bool nblocks_ok = true;
-                if(ev.cl_nblocks[0] < 1 || ev.cl_nblocks[1] < 1 || ev.cl_nblocks[2] < 1)
+                if(ev.cl_nblocks[0] < 2 || ev.cl_nblocks[1] < 2 || ev.cl_nblocks[2] < 2)
                     nblocks_ok = false;
 
                 theta[0] = std::atan2(std::sqrt(x[0]*x[0] + y[0]*y[0]), z[0]) * 180.f / M_PI;
@@ -1182,7 +1158,7 @@ static bool processFile(const std::string &path,
 
             for (int j = 0; j < ev.matchNum; j++) {
                 int idx = ev.mHit_cl_index[j];
-                if(ev.cl_nblocks[idx] < 1) continue;
+                if(ev.cl_nblocks[idx] < 2) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kInnerBound)) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kOuterBound)) continue;
                 if(ev.cl_energy[idx] < 70.f || ev.cl_energy[idx] > 0.75 * Ebeam) continue;
@@ -1196,9 +1172,6 @@ static bool processFile(const std::string &path,
                 const bool has_downstream = gem[0] || gem[1];
                 const bool has_upstream = gem[2] || gem[3];
                 if (!has_downstream || !has_upstream) continue;
-
-                const int u = gem[2] ? 2 : 3;
-                const int d = gem[0] ? 0 : 1;
 
                 Hits hit{};
                 hit.xu = ev.mHit_gx[j][1];
@@ -1605,6 +1578,7 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h_ee_center_x->Add(src.h_ee_center_x.get());
     dst.h_ee_center_y->Add(src.h_ee_center_y.get());
     dst.h_ee_vertex_z->Add(src.h_ee_vertex_z.get());
+    dst.h_ee_tDiff->Add(src.h_ee_tDiff.get());
     dst.h2_ep_hits_hc->Add(src.h2_ep_hits_hc.get());
     dst.h2_ee_hits_hc->Add(src.h2_ee_hits_hc.get());
     dst.h2_ep_E_angle_hc->Add(src.h2_ep_E_angle_hc.get());
@@ -1866,6 +1840,7 @@ int main(int argc, char *argv[])
     if (physics.GetMollerXHist()) physics.GetMollerXHist()->Write();
     if (physics.GetMollerYHist()) physics.GetMollerYHist()->Write();
     if (physics.GetMollerZHist()) physics.GetMollerZHist()->Write();
+    merged->h_ee_tDiff->Write();
     merged->h_ee_invariant_mass->Write();
 
     outfile.cd();

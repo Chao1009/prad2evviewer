@@ -11,7 +11,7 @@
         "// Loaded into Module::time_offset by PipelineBuilder before event processing.": "",
         "// Global switch for applying per-module time offsets. false => all offsets forced to 0 ns.": "",
         "time_calib": true,
-        "time_calib_file": "hycal_time_offsets/test.json",
+        "time_calib_file": "hycal_time_offsets/time_calib.json",
         "min_module_energy":  1.0,
         "min_center_energy":  10.0,
         "min_cluster_energy": 50.0,
@@ -25,7 +25,7 @@
         "// >0 lets HyCalCluster.AddHit be called once per analyzer pulse;": "",
         "// FormClusters then groups neighbour pulses within ±this window of": "",
         "// the seed pulse.": "",
-        "seed_time_window":   16.0
+        "seed_time_window":   2.0
     },
 
     "gem": {

@@ -159,7 +159,7 @@ int main(int argc, char *argv[])
                   << "; aborting before fitting.\n";
         return 1;
     }
-    if (validation_file.empty()) prad2::LoadHyCalTimeCalib(db_dir + "/" + "hycal_time_offsets/test.json", hycal);
+    if (validation_file.empty()) prad2::LoadHyCalTimeCalib(db_dir + "/" + "hycal_time_offsets/time_calib.json", hycal);
     else prad2::LoadHyCalTimeCalib(validation_file, hycal);
     analysis::PhysicsTools physics(hycal);
     fdec::HyCalCluster clusterer(hycal);
@@ -196,6 +196,10 @@ int main(int argc, char *argv[])
     const int nbins = 200;
     const float lo = -10.f;
     const float hi = 10.f;
+
+    // Create histograms for checking.
+    TH1F *h1_seed_dt = new TH1F("h1_seed_dt", "Pulse Delta-t of Seed Module & Neighbors;#Delta t (ns);entries", nbins, lo, hi);
+    TH1F *h1_time_offset = new TH1F("h1_time_offset", "Module Time Offsets;Time Offset (ns);entries", 200, -10, 10);
 
     const int nmod = hycal.module_count();
     for (int m = 0; m < nmod; ++m) {
@@ -265,6 +269,10 @@ int main(int argc, char *argv[])
         if (hits.size() != 1 || hits[0].nblocks <= 3) continue;
         if (hits[0].energy < 0.8 * gRunConfig.Ebeam) continue;
 
+        int seed_id = hits[0].center_id;
+        const auto *seed_mod = hycal.module_by_id(seed_id);
+        float seed_time = hits[0].time;
+
         // Fill all neighboring-module-pair delta-t histograms for this event.
         // For every pair of modules that are both present in the event and are
         // neighbors, compute dt = t_i - t_j and fill the corresponding histogram.
@@ -276,6 +284,14 @@ int main(int argc, char *argv[])
             if (ev.peak_height[j][0] < 100) continue;
             if (validation) event_times[mod->index] = ev.peak_time[j][0] - mod->time_offset;
             else event_times[mod->index] = ev.peak_time[j][0];
+            // Fill the seed-module delta-t histogram for checking.
+            // The seed module is the one with the highest energy in this event.
+            // all the other modules in the 5 by 5 block region are considered to get the delta-t distribution.
+            if (fabs(mod->x - seed_mod->x) < mod->size_x * 2.5f &&
+                fabs(mod->y - seed_mod->y) < mod->size_y * 2.5f) {
+                float dt = event_times[mod->index] - seed_time;
+                h1_seed_dt->Fill(dt);
+            }
         }
 
         for (const auto &[idx1, t1] : event_times) {
@@ -505,6 +521,7 @@ int main(int argc, char *argv[])
                   << " -> offset = " << std::fixed << std::setprecision(4)
                   << kv.second << " ns"
                   << " (err = " << module_offset_errors[kv.first] << ")\n";
+        h1_time_offset->Fill(kv.second);
     }
 
     if (!json_output_path.empty()) {
@@ -632,6 +649,8 @@ int main(int argc, char *argv[])
             }
 
             h_offset_map->Write();
+            h1_seed_dt->Write();
+            h1_time_offset->Write();
 
             for (const auto &row : pair_results) {
                 if (!row.hist) continue;
