@@ -288,7 +288,7 @@ int main(int argc, char *argv[])
             // The seed module is the one with the highest energy in this event.
             // all the other modules in the 5 by 5 block region are considered to get the delta-t distribution.
             if (fabs(mod->x - seed_mod->x) < mod->size_x * 2.5f &&
-                fabs(mod->y - seed_mod->y) < mod->size_y * 2.5f) {
+                fabs(mod->y - seed_mod->y) < mod->size_y * 2.5f && mod->id != seed_mod->id) {
                 float dt = event_times[mod->index] - seed_time;
                 h1_seed_dt->Fill(dt);
             }
