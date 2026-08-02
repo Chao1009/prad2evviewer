@@ -556,9 +556,9 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // For large pulses, use a simple digital CFD time on the raw
         // pedsub samples; if crossing search or interpolation fails,
         // fall back to quadratic peak-time interpolation above.
-        float t_pickoff = raw_pos + t_subsample;
+        float t_pickoff = raw_pos + t_subsample - 1.5f;  // 50% cfd is ~1.5 samples before peak
         const float cfd_fraction = 0.5f;
-        if (raw_height > 50.0f * ped_rms) {
+        if (raw_height > 5.0f * ped_rms) {
             const float v_thr = cfd_fraction * raw_height;
             bool cfd_ok = false;
 
@@ -586,7 +586,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         // Refine the leading-edge time with the local Log-Normal CFD
         // idea. If the bounded fit becomes
         // non-physical or unstable, keep the simpler CFD / quadratic fallback.
-        if (raw_height > 50.0f * ped_rms) {
+        if (raw_height > 10.0f * ped_rms) {
             const LogNormalFitResult fit = fit_log_normal_cfd(
                 raw, n, int_left, raw_pos, cfd_fraction, ped_mean, ped_rms);
             if (fit.ok)
