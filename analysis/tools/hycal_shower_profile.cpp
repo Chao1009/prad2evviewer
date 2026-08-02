@@ -255,9 +255,9 @@ int main(int argc, char *argv[])
         // TODO: Add GEM cluster reconstruction and matching if needed
 
         // select single cluster Mott events
+        if (hits.size() != 1 || hits[0].nblocks < 3) continue;
         float hc_x = hits[0].x, hc_y = hits[0].y, hc_z = gRunConfig.hycal_z;
         float theta = std::atan2(std::sqrt(hc_x * hc_x + hc_y * hc_y), hc_z) * 180.0 / M_PI;
-        if (hits.size() != 1 || hits[0].nblocks < 3) continue;
         if (std::abs(hits[0].energy - gRunConfig.Ebeam) > 3. * 0.033 * std::sqrt(gRunConfig.Ebeam * 1000.)) continue;
         if (theta < 0.7 ) continue; 
 
