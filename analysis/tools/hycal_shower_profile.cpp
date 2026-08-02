@@ -203,7 +203,8 @@ int main(int argc, char *argv[])
         4000, 0, 4000, 4000, 0, 4000);
     TH1F *h1_blocks_1st_layer = new TH1F("h1_blocks_1st_layer", "Number of Fired Modules in 1st Layer;Count;Events", 20, 0, 20);
     TH1F *h1_blocks_2nd_layer = new TH1F("h1_blocks_2nd_layer", "Number of Fired Modules in 2nd Layer;Count;Events", 20, 0, 20);
-    
+    TH1F *h1_time_diff_seed = new TH1F("h1_time_diff_seed", "Time Difference with Seed Module;#Delta t [ns];Events", 200, -10, 10);
+
     // Here loop over the events in the TChain, read channels data, reconstruct clusters, and fill the histograms
     long long nentries = tree.GetEntries();
     for (long long i = 0; i < nentries; ++i) {
@@ -250,9 +251,15 @@ int main(int argc, char *argv[])
         std::vector<fdec::ClusterHit> hits;
         clusterer.ReconstructHits(hits);
 
+        // Here could also reconstruct the GEM parts do matching with HyCal clusters if needed
+        // TODO: Add GEM cluster reconstruction and matching if needed
+
         // select single cluster Mott events
-        if (hits.size() != 1 || hits[0].nblocks <= 3) continue;
+        float hc_x = hits[0].x, hc_y = hits[0].y, hc_z = gRunConfig.hycal_z;
+        float theta = std::atan2(std::sqrt(hc_x * hc_x + hc_y * hc_y), hc_z) * 180.0 / M_PI;
+        if (hits.size() != 1 || hits[0].nblocks < 3) continue;
         if (std::abs(hits[0].energy - gRunConfig.Ebeam) > 3. * 0.033 * std::sqrt(gRunConfig.Ebeam * 1000.)) continue;
+        if (theta < 0.7 ) continue; 
 
         int seed_id = hits[0].center_id;
         const auto *seed_mod = hycal.module_by_id(seed_id);
@@ -298,6 +305,7 @@ int main(int argc, char *argv[])
                 for (int p = 0; p < ev.npeaks[j]; ++p) {
                     float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
                     float dt = peak_time - hits[0].time;
+                    h1_time_diff_seed->Fill(dt);
                     if (std::abs(dt) < dt_max) {
                         n1st_layer++;
                         float energy = static_cast<float>(mod->energize(ev.peak_integral[j][p] * gain));
@@ -317,6 +325,7 @@ int main(int argc, char *argv[])
                 for (int p = 0; p < ev.npeaks[j]; ++p) {
                     float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
                     float dt = peak_time - hits[0].time;
+                    h1_time_diff_seed->Fill(dt);
                     if (std::abs(dt) < dt_max) {
                         n2nd_layer++;
                         float energy = static_cast<float>(mod->energize(ev.peak_integral[j][p] * gain));
@@ -342,6 +351,7 @@ int main(int argc, char *argv[])
     h2_cluster_vs_seed_energy->Write();
     h1_blocks_1st_layer->Write();
     h1_blocks_2nd_layer->Write();
+    h1_time_diff_seed->Write();
     output_file->Close();
 
 }
