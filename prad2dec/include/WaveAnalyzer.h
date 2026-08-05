@@ -16,6 +16,7 @@
 #include "Fadc250Data.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <string>
 
 namespace fdec
@@ -23,11 +24,30 @@ namespace fdec
 
 class PulseTemplateStore;   // forward decl — defined in PulseTemplateStore.h
 
+struct LogNormalFitResult {
+    bool  ok = false;
+    float t_cfd_sample = 0.0f;
+    float chi2_per_dof = std::numeric_limits<float>::infinity();
+    // functional parameters: A, t0, mu, sigma
+    float    A = 0.0f;
+    float    t0 = 0.0f;
+    float    mu = 0.0f;
+    float    sigma = 0.0f;
+};
+
 struct WaveResult {
     Pedestal ped;
     int      npeaks;
     Peak     peaks[MAX_PEAKS];
-    void clear() { ped = {}; npeaks = 0; }
+    LogNormalFitResult peaks_fit[MAX_PEAKS];
+    void clear() {
+        ped = {};
+        npeaks = 0;
+        for (int i = 0; i < MAX_PEAKS; ++i) {
+            peaks[i] = {};
+            peaks_fit[i] = {};
+        }
+    }
 };
 
 struct WaveConfig {
@@ -242,6 +262,19 @@ public:
                                                       float ped, float ped_rms,
                                                       float clk_ns,
                                                       float model_err_floor = 0.01f);
+
+    // ---- Log-normal CFD helpers ---------------------------------------
+    // Public utility used by waveform diagnostics and optional timing studies.
+    static float log_normal_pulse_value(float t, float ped_mean, float A,
+                                        float t0, float mu, float sigma);
+
+    static float log_normal_cfd_time_sample(float t0, float mu, float sigma,
+                                            float cfd_fraction);
+
+    static LogNormalFitResult fit_log_normal_cfd(const float *buf, int nsamples,
+                                                 int fit_left_bound, int raw_pos,
+                                                 float cfd_fraction,
+                                                 float ped_mean, float ped_rms);
 
 
     // Power-user / diagnostic API: explicit NNLS deconvolution against a

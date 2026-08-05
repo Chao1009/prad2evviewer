@@ -20,7 +20,7 @@ namespace analysis {
 
 // Physical constants
 static constexpr float M_PROTON  = 938.272f;   // MeV
-static constexpr float M_ELECTRON = 0.511f;    // MeV
+static constexpr float M_ELECTRON = 0.51099895f;    // MeV
 static constexpr float DEG2RAD = 3.14159265f / 180.f;
 
 PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
