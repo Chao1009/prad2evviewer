@@ -328,6 +328,62 @@ float PhysicsTools::EnergyLoss(float theta_deg, float E)
     return eloss;  // total energy loss in MeV
 }
 
+float PhysicsTools::ExpectedAngle(float measured_energy, float Ebeam, const std::string &type)
+{
+    // Inverse of ExpectedEnergy: given measured energy, calculate scattering angle.
+    // Uses iterative approach to handle energy loss.
+    
+    if (measured_energy <= 0.f || Ebeam <= 0.f) return 0.f;
+    
+    // Initial guess: assume no energy loss
+    float theta_deg = 0.1f;  // start small
+    
+    // Iterate to converge (typically 3-4 iterations)
+    for (int iter = 0; iter < 5; ++iter) {
+        // Energy before energy loss
+        float E_primary = measured_energy + EnergyLoss(theta_deg, measured_energy);
+        
+        // Now solve: given E_primary, find theta such that ExpectedEnergy(theta) = E_primary
+        float theta = theta_deg * DEG2RAD;
+        float gamma = Ebeam / M_ELECTRON;
+        
+        if (type == "ep") {
+            // For e-p: E' = E * M / (M + E*(1 - cos_t))
+            // Rearrange: M + E*(1 - cos_t) = E * M / E'
+            //            1 - cos_t = (E * M / E' - M) / E = M/E * (E/E' - 1)
+            //            cos_t = 1 - (M/E) * (E/E' - 1) = 1 + (M/E) * (1 - E/E')
+            float cos_t = 1.f + (M_PROTON / Ebeam) * (1.f - E_primary / Ebeam);
+            if (cos_t > 1.f) cos_t = 1.f;
+            if (cos_t < -1.f) cos_t = -1.f;
+            theta_deg = std::acos(cos_t) * 180.f / static_cast<float>(TMath::Pi());
+        }
+        else if (type == "ee") {
+            // For Moller: E' = m * [(gamma+1) + (gamma-1)*cos^2(theta)] / [(gamma+1) - (gamma-1)*cos^2(theta)]
+            // Rearrange to solve for cos²(theta):
+            // cos²(theta) = (gamma+1) * (E_primary - m) / [(gamma-1) * (E_primary + m)]
+            // where m = M_ELECTRON
+            
+            float numerator = (gamma + 1.f) * (E_primary - M_ELECTRON);
+            float denominator = (gamma - 1.f) * (E_primary + M_ELECTRON);
+            
+            if (denominator <= 0.f || numerator <= 0.f) return 0.f;
+            
+            float cos2_t = numerator / denominator;
+            if (cos2_t > 1.f) cos2_t = 1.f;
+            if (cos2_t < 0.f) cos2_t = 0.f;
+            
+            float cos_t = std::sqrt(cos2_t);
+            theta_deg = std::acos(cos_t) * 180.f / static_cast<float>(TMath::Pi());
+        }
+        else {
+            return 0.f;
+        }
+    }
+    
+    return theta_deg;
+}
+
+
 bool PhysicsTools::isMoller_kinematic(float theta_deg1, float energy1, float theta_deg2, float energy2, float EBeam, float resolution)
 {
     float expectE1 = ExpectedEnergy(theta_deg1, EBeam, "ee");

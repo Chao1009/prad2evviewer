@@ -266,6 +266,13 @@ int main(int argc, char *argv[])
     TH1F *h1_deltaY_gem_layer = new TH1F("h1_deltaY_gem_layer", "Delta Y GEM Layer", 400, -20, 20);
     TH1F *h1_deltaPhi_gem_layer = new TH1F("h1_deltaPhi_gem_layer", "Delta Phi GEM Layer", 400, -10, 10);
     // ----- Up to here are just translational alignment histograms, next will be global roll histograms (pitch, yaw, roll)
+    // GEM expected position ratios, help to resolve rotational misalignments about X and Y axis
+    TH1F *h1_gem_x_ratio[4], *h1_gem_y_ratio[4];
+    for (int i = 0; i < 4; ++i) {
+        h1_gem_x_ratio[i] = new TH1F(Form("h1_gem%d_x_ratio", i), Form("GEM%d X Ratio", i), 400, 0.8, 1.2);
+        h1_gem_y_ratio[i] = new TH1F(Form("h1_gem%d_y_ratio", i), Form("GEM%d Y Ratio", i), 400, 0.8, 1.2);
+    }
+    TH1F *h1_test_deltaE = new TH1F("h1_test_deltaE", "Delta E HyCal", 400, -1, 1);
     
     // analysis and filling of histograms will be done here
     for (int i = 0; i < all_events.size(); ++i) {
@@ -349,6 +356,71 @@ int main(int argc, char *argv[])
                 h1_phi_diff_hycal_gem[j]->Fill(phi_diff);
             }
         }
+
+        // 3. Calculate expected Y position for GEM hits based on the measured energy and Z/X positions
+        float expected_theta[2] = {PhysicsTools::ExpectedAngle(hc_energy[0], gRunConfig.Ebeam, "ee"),
+                                   PhysicsTools::ExpectedAngle(hc_energy[1], gRunConfig.Ebeam, "ee")};
+        float deltaE[2] = {PhysicsTools::ExpectedEnergy(expected_theta[0], gRunConfig.Ebeam, "ee") - hc_energy[0],
+                           PhysicsTools::ExpectedEnergy(expected_theta[1], gRunConfig.Ebeam, "ee") - hc_energy[1]};
+        h1_test_deltaE->Fill(deltaE[0] / hc_energy[0]);
+        h1_test_deltaE->Fill(deltaE[1] / hc_energy[1]);
+        expected_theta[0] = static_cast<float>(expected_theta[0]) / 180.0 * M_PI;
+        expected_theta[1] = static_cast<float>(expected_theta[1]) / 180.0 * M_PI;
+        float gem_up_x[2] = {thisEvent.GEMup_moller.first.x, thisEvent.GEMup_moller.second.x};
+        float gem_up_y[2] = {thisEvent.GEMup_moller.first.y, thisEvent.GEMup_moller.second.y};
+        float gem_up_z[2] = {thisEvent.GEMup_moller.first.z, thisEvent.GEMup_moller.second.z};
+        float exp_up_r[2] = {gem_up_z[0] * std::tan(expected_theta[0]), gem_up_z[1] * std::tan(expected_theta[1])};
+        float exp_up_y[2] = {std::sqrt(exp_up_r[0]*exp_up_r[0] - gem_up_x[0]*gem_up_x[0]),
+                               std::sqrt(exp_up_r[1]*exp_up_r[1] - gem_up_x[1]*gem_up_x[1])};
+        float exp_up_x[2] = {std::sqrt(exp_up_r[0]*exp_up_r[0] - gem_up_y[0]*gem_up_y[0]),
+                               std::sqrt(exp_up_r[1]*exp_up_r[1] - gem_up_y[1]*gem_up_y[1])};
+        float up_y_ratio[2] = {std::abs(gem_up_y[0]) / exp_up_y[0], std::abs(gem_up_y[1]) / exp_up_y[1]};
+        float up_x_ratio[2] = {std::abs(gem_up_x[0]) / exp_up_x[0], std::abs(gem_up_x[1]) / exp_up_x[1]};
+
+        float gem_down_x[2] = {thisEvent.GEMdown_moller.first.x, thisEvent.GEMdown_moller.second.x};
+        float gem_down_y[2] = {thisEvent.GEMdown_moller.first.y, thisEvent.GEMdown_moller.second.y};
+        float gem_down_z[2] = {thisEvent.GEMdown_moller.first.z, thisEvent.GEMdown_moller.second.z};
+        float exp_down_r[2] = {gem_down_z[0] * std::tan(expected_theta[0]), gem_down_z[1] * std::tan(expected_theta[1])};
+        float exp_down_y[2] = {std::sqrt(exp_down_r[0]*exp_down_r[0] - gem_down_x[0]*gem_down_x[0]),
+                                std::sqrt(exp_down_r[1]*exp_down_r[1] - gem_down_x[1]*gem_down_x[1])};
+        float exp_down_x[2] = {std::sqrt(exp_down_r[0]*exp_down_r[0] - gem_down_y[0]*gem_down_y[0]),
+                                std::sqrt(exp_down_r[1]*exp_down_r[1] - gem_down_y[1]*gem_down_y[1])};
+        float down_y_ratio[2] = {std::abs(gem_down_y[0]) / exp_down_y[0], std::abs(gem_down_y[1]) / exp_down_y[1]};
+        float down_x_ratio[2] = {std::abs(gem_down_x[0]) / exp_down_x[0], std::abs(gem_down_x[1]) / exp_down_x[1]};
+        
+        if (gem_down_x[0] < -20.f) {
+            h1_gem_x_ratio[0]->Fill(down_x_ratio[0]);
+            h1_gem_y_ratio[0]->Fill(down_y_ratio[0]);
+        }
+        if (gem_down_x[1] < -20.f) {
+            h1_gem_x_ratio[0]->Fill(down_x_ratio[1]);
+            h1_gem_y_ratio[0]->Fill(down_y_ratio[1]);
+        }
+        if (gem_down_x[0] > 20.f) {
+            h1_gem_x_ratio[1]->Fill(down_x_ratio[0]);
+            h1_gem_y_ratio[1]->Fill(down_y_ratio[0]);
+        }
+        if (gem_down_x[1] > 20.f) {
+            h1_gem_x_ratio[1]->Fill(down_x_ratio[1]);
+            h1_gem_y_ratio[1]->Fill(down_y_ratio[1]);
+        }
+        if (gem_up_x[0] < -20.f) {
+            h1_gem_x_ratio[2]->Fill(up_x_ratio[0]);
+            h1_gem_y_ratio[2]->Fill(up_y_ratio[0]);
+        }
+        if (gem_up_x[1] < -20.f) {
+            h1_gem_x_ratio[2]->Fill(up_x_ratio[1]);
+            h1_gem_y_ratio[2]->Fill(up_y_ratio[1]);
+        }
+        if (gem_up_x[0] > 20.f) {
+            h1_gem_x_ratio[3]->Fill(up_x_ratio[0]);
+            h1_gem_y_ratio[3]->Fill(up_y_ratio[0]);
+        }
+        if (gem_up_x[1] > 20.f) {
+            h1_gem_x_ratio[3]->Fill(up_x_ratio[1]);
+            h1_gem_y_ratio[3]->Fill(up_y_ratio[1]);
+        }
+        
     }
 
     // fit peak and resolve alignment parameters
@@ -419,6 +491,8 @@ int main(int argc, char *argv[])
         in_run_config.gem_tilt_z[det] -= alignment_params["phi_diff_" + std::to_string(det)];
     }
 
+    //5. TODO: Extract GEMs rotation around X/Y axes (tilt) parameters
+
     // output the resolved new run_config file
     // Automatically generate output filename with iteration number
     fs::path base(config_base_path);
@@ -463,6 +537,11 @@ int main(int argc, char *argv[])
             h1_gem_Zdistance[i]->Write();
             h1_phi_diff_hycal_gem[i]->Write();
         }
+        for (int i = 0; i < 4; ++i) {
+            h1_gem_x_ratio[i]->Write();
+            h1_gem_y_ratio[i]->Write();
+        }
+        h1_test_deltaE->Write();
         out_file->Close();
         std::cout << "Histograms saved to " << output_root << "\n";
     }
