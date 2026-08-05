@@ -64,7 +64,7 @@ static std::string makeDefaultOutput(const std::string &input_path);
 
 bool inHyCal(float xmm, float ymm) {
     const float module = 20.75; // mm
-    return (fabs(xmm) > module * 2. || fabs(ymm) > module * 2.)
+    return (fabs(xmm) > module * 2.2 || fabs(ymm) > module * 2.2)
         && (fabs(xmm) < module * 16. && fabs(ymm) < module * 16.);
 }
 
@@ -98,129 +98,6 @@ static float electronPairInvariantMass(
     const float pz = momentum[0][2] + momentum[1][2];
     const float mass2 = total_energy * total_energy - px * px - py * py - pz * pz;
     return std::sqrt(std::max(0.f, mass2));
-}
-
-struct GEMTrackPair {
-    float xu, yu, zu;
-    float xd, yd, zd;
-};
-
-static bool solveGEMVertex(const GEMTrackPair tracks[3], std::array<float, 3> &vertex)
-{
-    float A[3][3] = {};
-    float b[3] = {};
-
-    for (int i = 0; i < 3; ++i) {
-        const float dx = tracks[i].xd - tracks[i].xu;
-        const float dy = tracks[i].yd - tracks[i].yu;
-        const float dz = tracks[i].zd - tracks[i].zu;
-        const float norm = std::sqrt(dx * dx + dy * dy + dz * dz);
-        if (norm <= 0.f)
-            return false;
-
-        const float ux = dx / norm;
-        const float uy = dy / norm;
-        const float uz = dz / norm;
-        const float p0[3] = {tracks[i].xu, tracks[i].yu, tracks[i].zu};
-
-        const float P[3][3] = {
-            {1.f - ux * ux,     -ux * uy,        -ux * uz},
-            {    -uy * ux, 1.f - uy * uy,        -uy * uz},
-            {    -uz * ux,     -uz * uy,    1.f - uz * uz}
-        };
-
-        for (int r = 0; r < 3; ++r) {
-            for (int c = 0; c < 3; ++c)
-                A[r][c] += P[r][c];
-            b[r] += P[r][0] * p0[0] + P[r][1] * p0[1] + P[r][2] * p0[2];
-        }
-    }
-
-    float M[3][4] = {
-        {A[0][0], A[0][1], A[0][2], b[0]},
-        {A[1][0], A[1][1], A[1][2], b[1]},
-        {A[2][0], A[2][1], A[2][2], b[2]}
-    };
-
-    for (int col = 0; col < 3; ++col) {
-        int pivot = col;
-        for (int row = col + 1; row < 3; ++row) {
-            if (std::fabs(M[row][col]) > std::fabs(M[pivot][col]))
-                pivot = row;
-        }
-        if (std::fabs(M[pivot][col]) < 1e-6f)
-            return false;
-        if (pivot != col) {
-            for (int k = col; k < 4; ++k)
-                std::swap(M[col][k], M[pivot][k]);
-        }
-
-        const float inv = 1.f / M[col][col];
-        for (int k = col; k < 4; ++k)
-            M[col][k] *= inv;
-
-        for (int row = 0; row < 3; ++row) {
-            if (row == col)
-                continue;
-            const float factor = M[row][col];
-            for (int k = col; k < 4; ++k)
-                M[row][k] -= factor * M[col][k];
-        }
-    }
-
-    vertex = {M[0][3], M[1][3], M[2][3]};
-    return std::isfinite(vertex[0]) && std::isfinite(vertex[1]) && std::isfinite(vertex[2]);
-}
-
-static bool isMollerAngleEnergyMatch(const PhysicsTools &physics,
-                                     float theta,
-                                     float energy,
-                                     float ebeam,
-                                     float nsigma = 3.5f)
-{
-    const float expectE = physics.ExpectedEnergy(theta, ebeam, "ee");
-    if (expectE <= 0.f)
-        return false;
-    return std::fabs(energy - expectE)
-           < nsigma * 0.031f * expectE / std::sqrt(expectE / 1000.f);
-}
-
-static bool isMollerPairCandidate(const PhysicsTools &physics,
-                                  float xa, float ya, float za, float Ea, float theta_a,
-                                  float xb, float yb, float zb, float Eb, float theta_b,
-                                  float ebeam)
-{
-    if (!isMollerAngleEnergyMatch(physics, theta_a, Ea, ebeam) ||
-        !isMollerAngleEnergyMatch(physics, theta_b, Eb, ebeam)) {
-        return false;
-    }
-
-    const float sigma_pair = ebeam * 0.035f / std::sqrt(ebeam / 1000.f);
-    if (std::fabs((Ea + Eb) - ebeam) >= 4.f * sigma_pair)
-        return false;
-
-    MollerEvent mev({xa, ya, za, Ea}, {xb, yb, zb, Eb});
-    return std::fabs(physics.GetMollerPhiDiff(mev)) < 10.f;
-}
-
-static bool hasMollerPairInTriplet(const PhysicsTools &physics,
-                                   float x1, float y1, float z1, float E1, float theta1,
-                                   float x2, float y2, float z2, float E2, float theta2,
-                                   float x3, float y3, float z3, float E3, float theta3,
-                                   float ebeam)
-{
-    return isMollerPairCandidate(physics,
-                                 x1, y1, z1, E1, theta1,
-                                 x2, y2, z2, E2, theta2,
-                                 ebeam)
-           || isMollerPairCandidate(physics,
-                                    x1, y1, z1, E1, theta1,
-                                    x3, y3, z3, E3, theta3,
-                                    ebeam)
-           || isMollerPairCandidate(physics,
-                                    x2, y2, z2, E2, theta2,
-                                    x3, y3, z3, E3, theta3,
-                                    ebeam);
 }
 
 const int Nbins = 33;
@@ -464,7 +341,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_3cl_tDiff_gem = std::make_unique<TH1F>("3cl_tDiff_gem",
         "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 200, 0, 20);
     r->h_3cl_dphi_gem = std::make_unique<TH1F>("3cl_dphi_gem",
-        "3-Cluster Phi Difference with GEM matching;#Delta#phi (deg);Counts", 180, 0, 180);
+        "3-Cluster Phi Difference with GEM matching;#Delta#phi (deg);Counts", 360*3, 0, 360);
     r->h2_3cl_Pt_gem = std::make_unique<TH2F>("3cl_Pt_gem",
         "3-Cluster Pt hycal with GEM matching;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
 
@@ -489,7 +366,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_3cl_tDiff_gem_cut = std::make_unique<TH1F>("3cl_tDiff_gem_cut",
         "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 200, 0, 20);
     r->h_3cl_dphi_gem_cut = std::make_unique<TH1F>("3cl_dphi_gem_cut",
-        "3-Cluster Phi Difference with GEM matching - Cut;#Delta#phi (deg);Counts", 180, 0, 180);
+        "3-Cluster Phi Difference with GEM matching - Cut;#Delta#phi (deg);Counts", 360, 0, 360);
 
     detach(r->hit_pos.get());
     detach(r->h_1cl.get());
