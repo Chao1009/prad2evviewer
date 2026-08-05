@@ -28,13 +28,13 @@ float WaveAnalyzer::log_normal_cfd_time_sample(float t0, float mu, float sigma,
     return t0 + std::exp(mu - sigma * root_term);
 }
 
-LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const uint16_t *raw, int nsamples,
+LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const float *buf, int nsamples,
                                                     int fit_left_bound, int raw_pos,
                                                     float cfd_fraction,
                                                     float ped_mean, float ped_rms)
 {
     LogNormalFitResult res;
-    if (!raw || nsamples <= 0 || raw_pos < 0 || raw_pos >= nsamples) return res;
+    if (!buf || nsamples <= 0 || raw_pos < 0 || raw_pos >= nsamples) return res;
     if (!(cfd_fraction > 0.0f) || !(cfd_fraction < 1.0f)) return res;
 
     const int fit_start = std::max(0, fit_left_bound - 4);
@@ -42,12 +42,12 @@ LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const uint16_t *raw, int nsa
     const int nfit = fit_stop - fit_start + 1;
     if (nfit < 8) return res;
 
-    const float raw_height = static_cast<float>(raw[raw_pos]) - ped_mean;
+    const float raw_height = buf[raw_pos] - ped_mean;
     const float v_thr = cfd_fraction * raw_height;
     int cfd_left_sample = -1;
     for (int j = fit_left_bound - 2; j < raw_pos; ++j) {
-        const float v0 = static_cast<float>(raw[j])     - ped_mean;
-        const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
+        const float v0 = buf[j]     - ped_mean;
+        const float v1 = buf[j + 1] - ped_mean;
         if (v0 < v_thr && v1 >= v_thr)
             cfd_left_sample = j;
     }
@@ -59,11 +59,11 @@ LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const uint16_t *raw, int nsa
     for (int i = 0; i < nfit; ++i) {
         const int idx = fit_start + i;
         t[i] = static_cast<float>(idx);
-        y[i] = static_cast<float>(raw[idx]);
+        y[i] = buf[idx];
     }
 
     const float peak_time = static_cast<float>(raw_pos);
-    const float A_guess = std::max(static_cast<float>(raw[raw_pos]) - ped_mean, 1.0f);
+    const float A_guess = std::max(buf[raw_pos] - ped_mean, 1.0f);
 
     float p[NPAR] = {
         A_guess,
@@ -74,14 +74,14 @@ LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const uint16_t *raw, int nsa
     float p_lo[NPAR] = {
         0.0f,
         std::max(0.0f, fit_left_bound - 1.5f),
-        0.2f,
+        0.5f,
         0.1f,
     };
     float p_hi[NPAR] = {
         3.0f * A_guess,
         peak_time - 1.0e-3f,
-        4.0f,
-        1.0f,
+        2.0f,
+        0.9f,
     };
     for (int j = 0; j < NPAR; ++j)
         p[j] = std::clamp(p[j], p_lo[j], p_hi[j]);
@@ -531,8 +531,8 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
             // Keep the last valid crossing so the pickoff stays nearest
             // to the peak if small pre-rise oscillations exist.
             for (int j = int_left - 1; j < raw_pos; ++j) {
-                const float v0 = static_cast<float>(raw[j])     - ped_mean;
-                const float v1 = static_cast<float>(raw[j + 1]) - ped_mean;
+                const float v0 = static_cast<float>(buf[j])     - ped_mean;
+                const float v1 = static_cast<float>(buf[j + 1]) - ped_mean;
                 if (v0 < v_thr && v1 >= v_thr) {
                     const float dv = v1 - v0;
                     if (dv > 1.5f * ped_rms) {
@@ -554,7 +554,7 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
         LogNormalFitResult fit_info;
         if (raw_height > 10.0f * ped_rms) {
             fit_info = fit_log_normal_cfd(
-                raw, n, int_left, raw_pos, cfd_fraction, ped_mean, ped_rms);
+                buf, n, int_left, raw_pos, cfd_fraction, ped_mean, ped_rms);
             if (fit_info.ok) {
                 t_pickoff = fit_info.t_cfd_sample;
                 time_algo = T_PICKOFF_FIT_CFD;

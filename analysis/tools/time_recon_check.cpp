@@ -47,6 +47,7 @@
 #include <TText.h>
 #include <TCanvas.h>
 #include <TF1.h>
+#include <TGraph.h>
 #include <TLatex.h>
 #include <TLine.h>
 #include <TMarker.h>
@@ -226,6 +227,14 @@ int main(int argc, char *argv[])
     TH1F *h1_wave_small_inTime[100], *h1_wave_small_outTime[100];
     TH1F *h1_wave_big[100];
     TH1F *h1_wave_veto_big[100], *h1_wave_veto_small[100];
+    // Fitting parameters for the waveforms
+    TH1F *h1_mu_crystal = new TH1F("h1_mu_crystal", "Fitted Mu for Crystal;Mu [ADC];Counts", 100, 0, 4);
+    TH1F *h1_sigma_crystal = new TH1F("h1_sigma_crystal", "Fitted Sigma for Crystal;Sigma [ADC];Counts", 100, 0, 4);
+    TH1F *h1_chi2_ndf_crystal = new TH1F("h1_chi2_ndf_crystal", "Fitted Chi2/NDF for Crystal;Chi2/NDF [ADC];Counts", 100, 0, 50);
+    TH1F *h1_mu_veto = new TH1F("h1_mu_veto", "Fitted Mu for Veto;Mu [ADC];Counts", 100, 0, 4);
+    TH1F *h1_sigma_veto = new TH1F("h1_sigma_veto", "Fitted Sigma for Veto;Sigma [ADC];Counts", 100, 0, 4);
+    TH1F *h1_chi2_ndf_veto = new TH1F("h1_chi2_ndf_veto", "Fitted Chi2/NDF for Veto;Chi2/NDF [ADC];Counts", 100, 0, 50);
+
     for (int i = 0; i < 100; ++i) {
         h1_wave_small_inTime[i] = new TH1F(Form("h1_wave_small_inTime%d", i), Form("Small In-Time Waveform%d;Samples;ADC", i), 100, -0.5, 99.5);
         h1_wave_small_outTime[i] = new TH1F(Form("h1_wave_small_outTime%d", i), Form("Small Out-Time Waveform%d;Samples;ADC", i), 100, -0.5, 99.5);
@@ -273,6 +282,12 @@ int main(int argc, char *argv[])
         for (int j = 0; j < ev.nch; ++j) {
 
             if (ev.module_id[j] >= 3001 && ev.module_id[j] <= 3004 && ev.npeaks[j] == 1) {
+                if (ev.peak_height[j][0] > 100 && ev.npeaks[j] == 1) {
+                    ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
+                    h1_mu_veto->Fill(wres.peaks_fit[0].mu);
+                    h1_sigma_veto->Fill(wres.peaks_fit[0].sigma);
+                    h1_chi2_ndf_veto->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
+                }
                 // save the waveforms for veto modules
                 if (wave_count_veto_small < 100 && ev.peak_height[j][0] < 50) {
                     auto &wf = stored_wave_veto_small[wave_count_veto_small];
@@ -419,6 +434,10 @@ int main(int argc, char *argv[])
                     wave_count_small_inTime++;
                 }
                 if (ev.peak_height[j][0] > 100) {
+                    ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
+                    h1_mu_crystal->Fill(wres.peaks_fit[0].mu);
+                    h1_sigma_crystal->Fill(wres.peaks_fit[0].sigma);
+                    h1_chi2_ndf_crystal->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
                     if (wave_count_big < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_big[wave_count_big];
@@ -470,7 +489,22 @@ int main(int argc, char *argv[])
             h->SetMarkerSize(0.6);
             h->SetMarkerColor(kBlue + 1);
             h->GetXaxis()->SetRangeUser(20.0, 70.0);
-            h->Draw("PL");
+            h->Draw("P");
+
+            // stack-allocated scratch buffer for smoothed waveform
+            float smoothed[100];
+            ana.smooth(wf.samples.data(), wf.nsamples, smoothed);
+            // draw the smoothed waveform on top of the original histogram
+            std::vector<double> x_vals(wf.nsamples);
+            std::vector<double> y_vals(wf.nsamples);
+            for (int s = 0; s < wf.nsamples; ++s) {
+                x_vals[s] = static_cast<double>(s);
+                y_vals[s] = static_cast<double>(smoothed[s]);
+            }
+            TGraph g_smoothed(wf.nsamples, x_vals.data(), y_vals.data());
+            g_smoothed.SetLineColor(kGreen + 1);
+            g_smoothed.SetLineWidth(2);
+            g_smoothed.Draw("L same");
 
             fdec::WaveResult wave_res;
             ana.Analyze(wf.samples.data(), wf.nsamples, wave_res, 0.0f);
@@ -600,6 +634,12 @@ int main(int argc, char *argv[])
     h1_cluster_energy->Write();
     h1_time_diff_seed->Write();
     h2_height_vs_dtime->Write();
+    h1_mu_crystal->Write();
+    h1_sigma_crystal->Write();
+    h1_chi2_ndf_crystal->Write();
+    h1_mu_veto->Write();
+    h1_sigma_veto->Write();
+    h1_chi2_ndf_veto->Write();
     output_file->cd();
     output_file->mkdir("waveforms_small_inTime");
     for (int i = 0; i < std::min(wave_count_small_inTime, 100); ++i) h1_wave_small_inTime[i]->Write();

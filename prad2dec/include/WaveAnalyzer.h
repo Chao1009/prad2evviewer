@@ -271,7 +271,7 @@ public:
     static float log_normal_cfd_time_sample(float t0, float mu, float sigma,
                                             float cfd_fraction);
 
-    static LogNormalFitResult fit_log_normal_cfd(const uint16_t *raw, int nsamples,
+    static LogNormalFitResult fit_log_normal_cfd(const float *buf, int nsamples,
                                                  int fit_left_bound, int raw_pos,
                                                  float cfd_fraction,
                                                  float ped_mean, float ped_rms);
