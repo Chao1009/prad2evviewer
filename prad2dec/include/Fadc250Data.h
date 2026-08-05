@@ -140,7 +140,16 @@ struct Peak {
     int      left, right;
     bool     overflow;
     uint8_t  quality;
+    uint8_t  time_algo;   // Time pickoff source, see T_PICKOFF_* constants below.
 };
+
+// Soft-analyzer peak time pickoff source.
+// T_PICKOFF_PEAKING_SUBSAMPLE: quadratic-interpolated raw peak position fallback.
+// T_PICKOFF_LINEAR_CFD: linear-interpolation CFD crossing on rising edge.
+// T_PICKOFF_FIT_CFD: log-normal fit CFD refinement.
+constexpr uint8_t T_PICKOFF_PEAKING_SUBSAMPLE = 0;
+constexpr uint8_t T_PICKOFF_LINEAR_CFD        = 1;
+constexpr uint8_t T_PICKOFF_FIT_CFD           = 2;
 
 // Soft-analyzer peak quality bitmask (set by WaveAnalyzer::findPeaks
 // and Analyze).

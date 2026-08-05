@@ -30,6 +30,7 @@
 #include <TChain.h>
 #include <TCanvas.h>
 #include <TROOT.h>
+#include <TLorentzVector.h>
 
 #include <iostream>
 #include <array>
@@ -53,6 +54,8 @@
 using namespace analysis;
 namespace fs = std::filesystem;
 
+constexpr float M_ELECTRON = 0.5109989461; // MeV
+
 // Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
 
@@ -69,7 +72,7 @@ static float electronPairInvariantMass(
     float x1, float y1, float z1, float E1,
     float x2, float y2, float z2, float E2, bool is_gamma = false)
 {
-    float electron_mass = 0.51099895f; // MeV
+    float electron_mass = M_ELECTRON; // MeV
     if (is_gamma) electron_mass = 0.f;
     const float position[2][3] = {{x1, y1, z1}, {x2, y2, z2}};
     const float energy[2] = {E1, E2};
@@ -265,30 +268,7 @@ struct QuickResult {
 
     std::unique_ptr<TH1F> h_ee_invariant_mass;
 
-    // For X17, only HyCal now
-    std::unique_ptr<TH1F> h_3cl_totalE;
-    std::unique_ptr<TH2F> h2_3cl_hits;
-    std::unique_ptr<TH2F> h2_3cl_E_angle;
-    std::unique_ptr<TH1F> h_3cl_E;
-    std::unique_ptr<TH1F> h_3cl_yield;
-    std::unique_ptr<TH1F> h_3cl_mass;
-    std::unique_ptr<TH1F> h_3cl_cluster_num;
-    std::unique_ptr<TH1F> h_3cl_ptx;
-    std::unique_ptr<TH1F> h_3cl_pty;
-    std::unique_ptr<TH2F> h2_3cl_Pt;
-    std::unique_ptr<TH1F> h_3cl_tDiff;
-
-    std::unique_ptr<TH1F> h_3cl_totalE_cut;
-    std::unique_ptr<TH2F> h2_3cl_hits_cut;
-    std::unique_ptr<TH2F> h2_3cl_E_angle_cut;
-    std::unique_ptr<TH1F> h_3cl_E_cut;
-    std::unique_ptr<TH1F> h_3cl_yield_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_cut;
-    std::unique_ptr<TH1F> h_3cl_ptx_cut;
-    std::unique_ptr<TH1F> h_3cl_pty_cut;
-    std::unique_ptr<TH2F> h2_3cl_Pt_cut;
-    std::unique_ptr<TH1F> h_3cl_tDiff_cut;
-
+    // For X17
     // gamma decay channel (e gamma gamma)
     std::unique_ptr<TH1F> h_gamma_totalE;
     std::unique_ptr<TH2F> h2_gamma_hits;
@@ -328,6 +308,7 @@ struct QuickResult {
     std::unique_ptr<TH1F> h_3cl_pty_gem;
     std::unique_ptr<TH2F> h2_3cl_Pt_gem;
     std::unique_ptr<TH1F> h_3cl_tDiff_gem;
+    std::unique_ptr<TH1F> h_3cl_dphi_gem;
 
     std::unique_ptr<TH1F> h_3cl_totalE_gem_cut;
     std::unique_ptr<TH2F> h2_3cl_hits_gem_cut;
@@ -335,24 +316,11 @@ struct QuickResult {
     std::unique_ptr<TH1F> h_3cl_E_gem_cut;
     std::unique_ptr<TH1F> h_3cl_yield_gem_cut;
     std::unique_ptr<TH1F> h_3cl_mass_gem_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_gem_cut_2comb;
     std::unique_ptr<TH1F> h_3cl_ptx_gem_cut;
     std::unique_ptr<TH1F> h_3cl_pty_gem_cut;
     std::unique_ptr<TH2F> h2_3cl_Pt_gem_cut;
     std::unique_ptr<TH1F> h_3cl_tDiff_gem_cut;
-    std::unique_ptr<TH1F> h_3cl_Vz_gem_cut;
-    std::unique_ptr<TH2F> h2_3cl_Vxy_gem_cut;
-
-    //cut step by step
-    std::unique_ptr<TH2F> h_3cl_Pt_totalE_cut;
-    std::unique_ptr<TH2F> h_3cl_Pt_totalE_time_cut;
-    std::unique_ptr<TH2F> h_3cl_Pt_totalE_time_clusterE_cut;
-    std::unique_ptr<TH2F> h_3cl_Pt_totalE_time_clusterE_moller_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_totalE_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_totalE_time_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_totalE_time_clusterE_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_totalE_time_clusterE_Pt_cut;
-    std::unique_ptr<TH1F> h_3cl_mass_totalE_time_clusterE_Pt_moller_cut;
+    std::unique_ptr<TH1F> h_3cl_dphi_gem_cut;
 };
 
 static void detach(TH1 *h)
@@ -421,51 +389,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_ee_invariant_mass = std::make_unique<TH1F>("ee_invariant_mass",
         "EE Invariant Mass;Mass (MeV);Counts", 400, 0, 100);
 
-    //For X17, only HyCal now
-    r->h2_3cl_hits = std::make_unique<TH2F>("3cl_hits",
-        "3-Cluster Hit positions hycal;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
-    r->h2_3cl_E_angle = std::make_unique<TH2F>("3cl_E_angle",
-        "3-Cluster Energy vs Angle hycal;Theta (deg);Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
-    r->h_3cl_E = std::make_unique<TH1F>("3cl_E",
-        "3-Cluster Energy;Energy (MeV);Counts", 3750, 0, 2500);
-    r->h_3cl_totalE = std::make_unique<TH1F>("3cl_totalE",
-        "3-Cluster Total Energy;Total Energy (MeV);Counts", 7500, 0, 5000);
-    r->h_3cl_yield = std::make_unique<TH1F>("3cl_yield",
-        "3-Cluster Yield;Scattering Angle (deg);Counts", Nbins, binEdge);
-    r->h_3cl_mass = std::make_unique<TH1F>("3cl_mass",
-        "3-Cluster Inv. Mass;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_cluster_num = std::make_unique<TH1F>("3cl_cluster_num",
-        "3-Cluster Number;Number of Clusters;Counts", 20, 0, 20);
-    r->h_3cl_ptx = std::make_unique<TH1F>("3cl_ptx",
-        "3-Cluster Ptx;Ptx (MeV);Counts", 200, -50, 50);
-    r->h_3cl_pty = std::make_unique<TH1F>("3cl_pty",
-        "3-Cluster Pty;Pty (MeV);Counts", 200, -50, 50);
-    r->h2_3cl_Pt = std::make_unique<TH2F>("3cl_Pt",
-        "3-Cluster Pt hycal;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_tDiff = std::make_unique<TH1F>("3cl_tDiff",
-        "3-Cluster Time Difference;Time Difference (ns);Counts", 200, 0, 20);
-
-    r->h2_3cl_hits_cut = std::make_unique<TH2F>("3cl_hits_cut",
-        "3-Cluster Hit positions hycal - Cut;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
-    r->h2_3cl_E_angle_cut = std::make_unique<TH2F>("3cl_E_angle_cut",
-        "3-Cluster Energy vs Angle hycal - Cut;Theta (deg);Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
-    r->h_3cl_E_cut = std::make_unique<TH1F>("3cl_E_cut",
-        "3-Cluster Energy - Cut;Energy (MeV);Counts", 3750, 0, 2500);
-    r->h_3cl_totalE_cut = std::make_unique<TH1F>("3cl_totalE_cut",
-        "3-Cluster Total Energy - Cut;Total Energy (MeV);Counts", 7500, 0, 5000);
-    r->h_3cl_yield_cut = std::make_unique<TH1F>("3cl_yield_cut",
-        "3-Cluster Yield - Cut;Scattering Angle (deg);Counts", Nbins, binEdge);
-    r->h_3cl_mass_cut = std::make_unique<TH1F>("3cl_mass_cut",
-        "3-Cluster Inv. Mass - Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_ptx_cut = std::make_unique<TH1F>("3cl_ptx_cut",
-        "3-Cluster Ptx - Cut;Ptx (MeV);Counts", 200, -50, 50);
-    r->h_3cl_pty_cut = std::make_unique<TH1F>("3cl_pty_cut",
-        "3-Cluster Pty - Cut;Pty (MeV);Counts", 200, -50, 50);
-    r->h2_3cl_Pt_cut = std::make_unique<TH2F>("3cl_Pt_cut",
-        "3-Cluster Pt hycal - Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_tDiff_cut = std::make_unique<TH1F>("3cl_tDiff_cut",
-        "3-Cluster Time Difference - Cut;Time Difference (ns);Counts", 200, 0, 20);
-
+    //For X17
     r->h2_gamma_hits = std::make_unique<TH2F>("gamma_hits",
         "Gamma Channel Hit positions hycal;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
     r->h2_gamma_E_angle = std::make_unique<TH2F>("gamma_E_angle",
@@ -539,6 +463,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "3-Cluster Pty with GEM matching;Pty (MeV);Counts", 200, -50, 50);
     r->h_3cl_tDiff_gem = std::make_unique<TH1F>("3cl_tDiff_gem",
         "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 200, 0, 20);
+    r->h_3cl_dphi_gem = std::make_unique<TH1F>("3cl_dphi_gem",
+        "3-Cluster Phi Difference with GEM matching;#Delta#phi (deg);Counts", 180, 0, 180);
     r->h2_3cl_Pt_gem = std::make_unique<TH2F>("3cl_Pt_gem",
         "3-Cluster Pt hycal with GEM matching;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
 
@@ -554,8 +480,6 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "3-Cluster Yield with GEM matching - Cut;Scattering Angle (deg);Counts", Nbins, binEdge);
     r->h_3cl_mass_gem_cut = std::make_unique<TH1F>("3cl_mass_gem_cut",
         "3-Cluster Inv. Mass with GEM matching - Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_mass_gem_cut_2comb = std::make_unique<TH1F>("3cl_mass_gem_cut_2comb",
-        "3-Cluster Inv. Mass with GEM matching - Cut (2 comb with lowest E);Inv. Mass (MeV);Counts", 1000, 0, 100);
     r->h_3cl_ptx_gem_cut = std::make_unique<TH1F>("3cl_ptx_gem_cut",
         "3-Cluster Ptx with GEM matching - Cut;Ptx (MeV);Counts", 200, -50, 50);
     r->h_3cl_pty_gem_cut = std::make_unique<TH1F>("3cl_pty_gem_cut",
@@ -564,29 +488,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "3-Cluster Pt hycal with GEM matching - Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_3cl_tDiff_gem_cut = std::make_unique<TH1F>("3cl_tDiff_gem_cut",
         "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 200, 0, 20);
-    r->h_3cl_Vz_gem_cut = std::make_unique<TH1F>("3cl_Vz_gem_cut",
-        "3-Cluster GEM Vertex Z with Cut;Z (mm);Counts", 14000, -5000, 9000);
-    r->h2_3cl_Vxy_gem_cut = std::make_unique<TH2F>("3cl_Vxy_gem_cut",
-        "3-Cluster GEM Vertex XY with Cut;X (mm);Y (mm)", 800, -40, 40, 800, -40, 40);
-    // step by step cuts
-    r->h_3cl_Pt_totalE_cut = std::make_unique<TH2F>("3cl_Pt_totalE_cut",
-        "3-Cluster Pt with Total Energy Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_Pt_totalE_time_cut = std::make_unique<TH2F>("3cl_Pt_totalE_time_cut",
-        "3-Cluster Pt with Total Energy and Time Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_Pt_totalE_time_clusterE_cut = std::make_unique<TH2F>("3cl_Pt_totalE_time_clusterE_cut",
-        "3-Cluster Pt with Total Energy, Time, and Cluster Energy Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_Pt_totalE_time_clusterE_moller_cut = std::make_unique<TH2F>("3cl_Pt_totalE_time_clusterE_moller_cut",
-        "3-Cluster Pt with Total Energy, Time, Cluster Energy, and Moller Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
-    r->h_3cl_mass_totalE_cut = std::make_unique<TH1F>("3cl_mass_totalE_cut",
-        "3-Cluster Inv. Mass with Total Energy Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_mass_totalE_time_cut = std::make_unique<TH1F>("3cl_mass_totalE_time_cut",
-        "3-Cluster Inv. Mass with Total Energy and Time Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_mass_totalE_time_clusterE_cut = std::make_unique<TH1F>("3cl_mass_totalE_time_clusterE_cut",
-        "3-Cluster Inv. Mass with Total Energy, Time, and Cluster Energy Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_mass_totalE_time_clusterE_Pt_cut = std::make_unique<TH1F>("3cl_mass_totalE_time_clusterE_Pt_cut",
-        "3-Cluster Inv. Mass with Total Energy, Time, Cluster Energy, and Pt Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
-    r->h_3cl_mass_totalE_time_clusterE_Pt_moller_cut = std::make_unique<TH1F>("3cl_mass_totalE_time_clusterE_Pt_moller_cut",
-        "3-Cluster Inv. Mass with Total Energy, Time, Cluster Energy, Pt, and Moller Cut;Inv. Mass (MeV);Counts", 1000, 0, 100);
+    r->h_3cl_dphi_gem_cut = std::make_unique<TH1F>("3cl_dphi_gem_cut",
+        "3-Cluster Phi Difference with GEM matching - Cut;#Delta#phi (deg);Counts", 180, 0, 180);
 
     detach(r->hit_pos.get());
     detach(r->h_1cl.get());
@@ -614,29 +517,6 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h_ee_vertex_z_hc.get());
 
     detach(r->h_ee_invariant_mass.get());
-
-    detach(r->h2_3cl_hits.get());
-    detach(r->h2_3cl_E_angle.get());
-    detach(r->h_3cl_E.get());
-    detach(r->h_3cl_totalE.get());
-    detach(r->h_3cl_yield.get());
-    detach(r->h_3cl_mass.get());
-    detach(r->h_3cl_cluster_num.get());
-    detach(r->h_3cl_ptx.get());
-    detach(r->h_3cl_pty.get());
-    detach(r->h2_3cl_Pt.get());
-    detach(r->h_3cl_tDiff.get());
-
-    detach(r->h2_3cl_hits_cut.get());
-    detach(r->h2_3cl_E_angle_cut.get());
-    detach(r->h_3cl_E_cut.get());
-    detach(r->h_3cl_totalE_cut.get());
-    detach(r->h_3cl_yield_cut.get());
-    detach(r->h_3cl_mass_cut.get());
-    detach(r->h_3cl_ptx_cut.get());
-    detach(r->h_3cl_pty_cut.get());
-    detach(r->h2_3cl_Pt_cut.get());
-    detach(r->h_3cl_tDiff_cut.get());
 
     detach(r->h2_gamma_hits.get());
     detach(r->h2_gamma_E_angle.get());
@@ -676,28 +556,18 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h_3cl_pty_gem.get());
     detach(r->h2_3cl_Pt_gem.get());
     detach(r->h_3cl_tDiff_gem.get());
+    detach(r->h_3cl_dphi_gem.get());
     detach(r->h2_3cl_hits_gem_cut.get());
     detach(r->h2_3cl_E_angle_gem_cut.get());
     detach(r->h_3cl_E_gem_cut.get());
     detach(r->h_3cl_totalE_gem_cut.get());
     detach(r->h_3cl_yield_gem_cut.get());
     detach(r->h_3cl_mass_gem_cut.get());
-    detach(r->h_3cl_mass_gem_cut_2comb.get());
     detach(r->h_3cl_ptx_gem_cut.get());
     detach(r->h_3cl_pty_gem_cut.get());
     detach(r->h2_3cl_Pt_gem_cut.get());
     detach(r->h_3cl_tDiff_gem_cut.get());
-    detach(r->h_3cl_Vz_gem_cut.get());
-    detach(r->h2_3cl_Vxy_gem_cut.get());
-    detach(r->h_3cl_Pt_totalE_cut.get());
-    detach(r->h_3cl_Pt_totalE_time_cut.get());
-    detach(r->h_3cl_Pt_totalE_time_clusterE_cut.get());
-    detach(r->h_3cl_Pt_totalE_time_clusterE_moller_cut.get());
-    detach(r->h_3cl_mass_totalE_cut.get());
-    detach(r->h_3cl_mass_totalE_time_cut.get());
-    detach(r->h_3cl_mass_totalE_time_clusterE_cut.get());
-    detach(r->h_3cl_mass_totalE_time_clusterE_Pt_cut.get());
-    detach(r->h_3cl_mass_totalE_time_clusterE_Pt_moller_cut.get());
+    detach(r->h_3cl_dphi_gem_cut.get());
     return r;
 }
 
@@ -734,25 +604,6 @@ static bool processFile(const std::string &path,
     auto &physics = *out.physics;
     for (Long64_t i = 0; i < n; i++) {
         tree->GetEntry(i);
-
-        auto fill_mass_2comb_lowest_e = [&](float e1, float e2, float e3,
-                                            float m12, float m13, float m23) {
-            int min_idx = 0;
-            float min_e = e1;
-            if (e2 < min_e) { min_e = e2; min_idx = 1; }
-            if (e3 < min_e) { min_idx = 2; }
-
-            if (min_idx == 0) {
-                if (std::isfinite(m12)) out.h_3cl_mass_gem_cut_2comb->Fill(m12);
-                if (std::isfinite(m13)) out.h_3cl_mass_gem_cut_2comb->Fill(m13);
-            } else if (min_idx == 1) {
-                if (std::isfinite(m12)) out.h_3cl_mass_gem_cut_2comb->Fill(m12);
-                if (std::isfinite(m23)) out.h_3cl_mass_gem_cut_2comb->Fill(m23);
-            } else {
-                if (std::isfinite(m13)) out.h_3cl_mass_gem_cut_2comb->Fill(m13);
-                if (std::isfinite(m23)) out.h_3cl_mass_gem_cut_2comb->Fill(m23);
-            }
-        };
 
         // trigger selection
         bool is_3cluster = (ev.trigger_bits & prad2::TBIT_3cl) != 0;
@@ -908,115 +759,6 @@ static bool processFile(const std::string &path,
 
         // x17 trigger selection
         if (is_3cluster) {
-            out.h_3cl_cluster_num->Fill(ev.n_clusters);
-            if(ev.n_clusters == 3) {
-                float x1 = ev.cl_x[0], y1 = ev.cl_y[0], z1 = ev.cl_z[0];
-                float x2 = ev.cl_x[1], y2 = ev.cl_y[1], z2 = ev.cl_z[1];
-                float x3 = ev.cl_x[2], y3 = ev.cl_y[2], z3 = ev.cl_z[2];
-                float E1 = ev.cl_energy[0], E2 = ev.cl_energy[1], E3 = ev.cl_energy[2];
-
-                float t1 = ev.cl_time[0], t2 = ev.cl_time[1], t3 = ev.cl_time[2];
-                float tDiff = std::max({std::fabs(t1 - t2), std::fabs(t1 - t3), std::fabs(t2 - t3)});
-
-                bool nblocks_ok = true;
-                if(ev.cl_nblocks[0] < 2 || ev.cl_nblocks[1] < 2 || ev.cl_nblocks[2] < 2)
-                    nblocks_ok = false;
-
-                float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
-                float theta2 = std::atan2(std::sqrt(x2*x2 + y2*y2), z2) * 180.f / M_PI;
-                float theta3 = std::atan2(std::sqrt(x3*x3 + y3*y3), z3) * 180.f / M_PI;
-
-                float mass1 = electronPairInvariantMass(x1, y1, z1, E1, x2, y2, z2, E2);
-                float mass2 = electronPairInvariantMass(x1, y1, z1, E1, x3, y3, z3, E3);
-                float mass3 = electronPairInvariantMass(x2, y2, z2, E2, x3, y3, z3, E3);
-
-                // Pt x and Pt y calculation
-                auto get_pt = [](float x, float y, float z, float energy) {
-                    constexpr float electron_mass = 0.51099895f; // MeV
-                    const float norm = std::sqrt(x*x + y*y + z*z);
-                    if (norm <= 0.f || energy < electron_mass)
-                        return std::pair<float, float>{0.f, 0.f};
-                    const float p = std::sqrt(std::max(
-                        0.f, energy*energy - electron_mass*electron_mass));
-                    return std::pair<float, float>{p*x/norm, p*y/norm};
-                };
-                const auto [px1, py1] = get_pt(x1, y1, z1, E1);
-                const auto [px2, py2] = get_pt(x2, y2, z2, E2);
-                const auto [px3, py3] = get_pt(x3, y3, z3, E3);
-                const float ptx = px1 + px2 + px3;
-                const float pty = py1 + py2 + py3;
-
-                bool time_cut = false, totalE_cut = false, Pt_cut = false, clusterE_cut = false, inHyCal_cut = false;
-                bool moller_cut = false;
-
-                if(tDiff < 16.f)
-                    time_cut = true;
-                if(E1 + E2 + E3 < Ebeam + 250.f && E1 + E2 + E3 > 0.8 * Ebeam)
-                    totalE_cut = true;
-                if(std::sqrt(ptx*ptx + pty*pty) < 5.f)
-                    Pt_cut = true;
-                if(inHyCal(x1, y1) && inHyCal(x2, y2) && inHyCal(x3, y3))
-                    inHyCal_cut = true;
-                if(E1 > 70.f && E2 > 70.f && E3 > 70.f && E1 < 0.75 * Ebeam && E2 < 0.75 * Ebeam && E3 < 0.75 * Ebeam)
-                    clusterE_cut = true;
-
-                const bool has_moller_pair = hasMollerPairInTriplet(
-                    physics,
-                    x1, y1, z1, E1, theta1,
-                    x2, y2, z2, E2, theta2,
-                    x3, y3, z3, E3, theta3,
-                    Ebeam);
-                //moller_cut = !has_moller_pair;
-                moller_cut = !(isMollerAngleEnergyMatch(physics, theta1, E1, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta2, E2, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta3, E3, Ebeam));
-
-                out.h_3cl_totalE->Fill(E1 + E2 + E3);
-                out.h_3cl_ptx->Fill(ptx);
-                out.h_3cl_pty->Fill(pty);
-                out.h2_3cl_Pt->Fill(ptx, pty);
-                out.h_3cl_tDiff->Fill(tDiff);
-                out.h_3cl_E->Fill(E1);
-                out.h_3cl_E->Fill(E2);
-                out.h_3cl_E->Fill(E3);
-                out.h2_3cl_hits->Fill(x1, y1);
-                out.h2_3cl_hits->Fill(x2, y2);
-                out.h2_3cl_hits->Fill(x3, y3);
-                out.h2_3cl_E_angle->Fill(theta1, E1);
-                out.h2_3cl_E_angle->Fill(theta2, E2);
-                out.h2_3cl_E_angle->Fill(theta3, E3);
-                out.h_3cl_yield->Fill(theta1);
-                out.h_3cl_yield->Fill(theta2);
-                out.h_3cl_yield->Fill(theta3);
-                if (std::isfinite(mass1)) out.h_3cl_mass->Fill(mass1);
-                if (std::isfinite(mass2)) out.h_3cl_mass->Fill(mass2);
-                if (std::isfinite(mass3)) out.h_3cl_mass->Fill(mass3);
-
-                if(nblocks_ok && totalE_cut && time_cut && Pt_cut && inHyCal_cut && clusterE_cut && moller_cut) {
-                    out.h_3cl_tDiff_cut->Fill(tDiff);
-                    out.h_3cl_totalE_cut->Fill(E1 + E2 + E3);
-                    out.h_3cl_ptx_cut->Fill(ptx);
-                    out.h_3cl_pty_cut->Fill(pty);
-                    out.h2_3cl_Pt_cut->Fill(ptx, pty);
-                    out.h_3cl_E_cut->Fill(E1);
-                    out.h_3cl_E_cut->Fill(E2);
-                    out.h_3cl_E_cut->Fill(E3);
-                    out.h2_3cl_hits_cut->Fill(x1, y1);
-                    out.h2_3cl_hits_cut->Fill(x2, y2);
-                    out.h2_3cl_hits_cut->Fill(x3, y3);
-                    out.h2_3cl_E_angle_cut->Fill(theta1, E1);
-                    out.h2_3cl_E_angle_cut->Fill(theta2, E2);
-                    out.h2_3cl_E_angle_cut->Fill(theta3, E3);
-                    out.h_3cl_yield_cut->Fill(theta1);
-                    out.h_3cl_yield_cut->Fill(theta2);
-                    out.h_3cl_yield_cut->Fill(theta3);
-                    if (std::isfinite(mass1)) out.h_3cl_mass_cut->Fill(mass1);
-                    if (std::isfinite(mass2)) out.h_3cl_mass_cut->Fill(mass2);
-                    if (std::isfinite(mass3)) out.h_3cl_mass_cut->Fill(mass3);
-                }
-
-            }
-
             //try to find the gamma decay channel,
             //firstly try on the clean events(only 3 clusters on HyCal)
             if(ev.n_clusters == 3) {
@@ -1031,7 +773,7 @@ static bool processFile(const std::string &path,
                 float tDiff = std::max({std::fabs(t[0] - t[1]), std::fabs(t[0] - t[2]), std::fabs(t[1] - t[2])});
 
                 bool nblocks_ok = true;
-                if(ev.cl_nblocks[0] < 2 || ev.cl_nblocks[1] < 2 || ev.cl_nblocks[2] < 2)
+                if(ev.cl_nblocks[0] <= 2 || ev.cl_nblocks[1] <= 2 || ev.cl_nblocks[2] <= 2)
                     nblocks_ok = false;
 
                 theta[0] = std::atan2(std::sqrt(x[0]*x[0] + y[0]*y[0]), z[0]) * 180.f / M_PI;
@@ -1062,13 +804,13 @@ static bool processFile(const std::string &path,
                 if (gem_ok) {
                     // Pt x and Pt y calculation
                     auto get_pt = [](float x, float y, float z, float energy, bool is_gamma) {
-                        float electron_mass = 0.51099895f; // MeV
-                        if (is_gamma) electron_mass = 0.f;
+                        float mass = M_ELECTRON;
+                        if (is_gamma) mass = 0.f;
                         const float norm = std::sqrt(x*x + y*y + z*z);
-                        if (norm <= 0.f || energy < electron_mass)
+                        if (norm <= 0.f || energy < mass)
                             return std::pair<float, float>{0.f, 0.f};
                         const float p = std::sqrt(std::max(
-                            0.f, energy*energy - electron_mass*electron_mass));
+                            0.f, energy*energy - mass*mass));
                         return std::pair<float, float>{p*x/norm, p*y/norm};
                     };
                     const auto [pxe, pye] = get_pt(x[electron_index], y[electron_index], z[electron_index], E[electron_index], false);
@@ -1082,7 +824,7 @@ static bool processFile(const std::string &path,
 
                     bool time_cut = false, totalE_cut = false, Pt_cut = false, clusterE_cut = false, inHyCal_cut = false;
 
-                    if(tDiff < 16.f)
+                    if(tDiff < 2.f)
                         time_cut = true;
                     if(E[gamma_index1] + E[gamma_index2] + E[electron_index] < Ebeam + 250.f && E[gamma_index1] + E[gamma_index2] + E[electron_index] > 0.8 * Ebeam)
                         totalE_cut = true;
@@ -1143,35 +885,22 @@ static bool processFile(const std::string &path,
                 }
             }
 
-
             //loop over all clusters for GEM matching
             struct Hits{
                 float xu, yu, zu; // upstream
                 float xd, yd, zd; // downstream
                 float x, y, z; // projected to HyCal plane
                 float E, t; // cluster energy and time
-                int index; // cluster index
-                bool gem_matched[4] = {false, false, false, false}; // 0,1 downstream, 2,3 upstream
             };
 
             std::vector<Hits> hits_candidate;
-
+            out.h_3cl_cluster_gem_num->Fill(ev.matchNum);
             for (int j = 0; j < ev.matchNum; j++) {
                 int idx = ev.mHit_cl_index[j];
-                if(ev.cl_nblocks[idx] < 2) continue;
+                if(ev.cl_nblocks[idx] <= 2) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kInnerBound)) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kOuterBound)) continue;
                 if(ev.cl_energy[idx] < 70.f || ev.cl_energy[idx] > 0.75 * Ebeam) continue;
-
-                bool gem[4] = {false, false, false, false}; // 0,1 downstream, 2,3 upstream
-                if ((ev.matchFlag[idx] & 1u << 0) != 0) gem[0] = true;
-                if ((ev.matchFlag[idx] & 1u << 1) != 0) gem[1] = true;
-                if ((ev.matchFlag[idx] & 1u << 2) != 0) gem[2] = true;
-                if ((ev.matchFlag[idx] & 1u << 3) != 0) gem[3] = true;
-
-                const bool has_downstream = gem[0] || gem[1];
-                const bool has_upstream = gem[2] || gem[3];
-                if (!has_downstream || !has_upstream) continue;
 
                 Hits hit{};
                 hit.xu = ev.mHit_gx[j][1];
@@ -1186,373 +915,106 @@ static bool processFile(const std::string &path,
                 hit.z = hit.zu * scale;
                 hit.E = ev.mHit_E[j];
                 hit.t = ev.cl_time[idx];
-                hit.index = j;
-                hit.gem_matched[0] = gem[0];
-                hit.gem_matched[1] = gem[1];
-                hit.gem_matched[2] = gem[2];
-                hit.gem_matched[3] = gem[3];
                 hits_candidate.push_back(hit);
             }
 
-            //HyCal cluster multi-pulse mode may have 2 events in one event
-            //need to check the time to split the clusters into two groups by time
-            //if the time difference is larger than 16 ns, we consider them as two different events
-            //start from the first cluster(already sorted by energy), loop over the rest clusters, if the time
-            //difference is smaller than 16 ns, we consider them as the same event, otherwise we consider them as different events
-
-            int gem_matched_count = 0;
-            float x1 = 0.f, y1 = 0.f, z1 = 0.f, x2 = 0.f, y2 = 0.f, z2 = 0.f, x3 = 0.f, y3 = 0.f, z3 = 0.f;
-            float E1 = 0.f, E2 = 0.f, E3 = 0.f, t1 = 0.f, t2 = 0.f, t3 = 0.f;
-            float x1u = 0.f, y1u = 0.f, z1u = 0.f, x2u = 0.f, y2u = 0.f, z2u = 0.f, x3u = 0.f, y3u = 0.f, z3u = 0.f;
-            float x1d = 0.f, y1d = 0.f, z1d = 0.f, x2d = 0.f, y2d = 0.f, z2d = 0.f, x3d = 0.f, y3d = 0.f, z3d = 0.f;
-            int index1 = -1, index2 = -1, index3 = -1;
-
+            std::vector<Hits> hits;
             std::sort(hits_candidate.begin(), hits_candidate.end(),
                       [](const Hits &a, const Hits &b) { return a.E > b.E; });
+            hits.push_back(hits_candidate[0]);
+            // loop over the candidates to check the timing correlation,
+            // should +-2ns around the highest energy matched cluster which is the 1st in the candidates vector
+            for (int j = 1; j < hits_candidate.size(); j++){
+                if (fabs(hits_candidate[j].t - hits_candidate[0].t) < 2.0f)
+                    hits.push_back(hits_candidate[j]);
+            }
 
-            std::vector<Hits> time_group_1;
-            std::vector<Hits> time_group_2;
-            if (!hits_candidate.empty()) {
-                const float t0 = hits_candidate.front().t;
-                std::vector<Hits> remaining_hits;
-                for (const auto &h : hits_candidate) {
-                    if (std::fabs(h.t - t0) < 16.f)
-                        time_group_1.push_back(h);
-                    else
-                        remaining_hits.push_back(h);
+            if(hits.size() == 3){
+                float dt[2] = {hits[1].t - hits[0].t, hits[2].t - hits[0].t};
+                float totalE = hits[0].E + hits[1].E + hits[2].E;
+                float theta[3] = {std::atan2(std::sqrt(hits[0].x * hits[0].x + hits[0].y * hits[0].y), hits[0].z) * 180.f / M_PI,
+                                  std::atan2(std::sqrt(hits[1].x * hits[1].x + hits[1].y * hits[1].y), hits[1].z) * 180.f / M_PI,
+                                  std::atan2(std::sqrt(hits[2].x * hits[2].x + hits[2].y * hits[2].y), hits[2].z) * 180.f / M_PI};
+
+                // 4-momentum calculation for each single hit and each pair of hits
+                TLorentzVector p[3], p12, p02, p01;
+                for (int k = 0; k < 3; ++k) {
+                    const float norm = std::sqrt(
+                        hits[k].x * hits[k].x + hits[k].y * hits[k].y + hits[k].z * hits[k].z);
+                    const float p_mag = std::sqrt(hits[k].E * hits[k].E - M_ELECTRON * M_ELECTRON);
+                    const float ux = hits[k].x / norm;
+                    const float uy = hits[k].y / norm;
+                    const float uz = hits[k].z / norm;
+                    p[k] = TLorentzVector(p_mag * ux, p_mag * uy, p_mag * uz, hits[k].E);
                 }
 
-                if (!remaining_hits.empty()) {
-                    const float t1 = remaining_hits.front().t;
-                    for (const auto &h : remaining_hits) {
-                        if (std::fabs(h.t - t1) < 16.f)
-                            time_group_2.push_back(h);
+                p12 = p[1] + p[2];
+                p02 = p[0] + p[2];
+                p01 = p[0] + p[1];
+
+                // get the azimuthal angles for each single hit and each pair of hits
+                float phi[3] = {
+                    std::atan2(hits[0].y, hits[0].x) * 180.f / M_PI,
+                    std::atan2(hits[1].y, hits[1].x) * 180.f / M_PI,
+                    std::atan2(hits[2].y, hits[2].x) * 180.f / M_PI
+                };
+                float phi_pair[3] = {
+                    std::atan2(p12.Y(), p12.X()) * 180.f / M_PI,
+                    std::atan2(p02.Y(), p02.X()) * 180.f / M_PI,
+                    std::atan2(p01.Y(), p01.X()) * 180.f / M_PI
+                };
+
+                // Phi difference for each combination (the pair of hits and the remaining single hit)
+                float dphi[3] = {
+                    std::fabs(phi_pair[0] - phi[0]),
+                    std::fabs(phi_pair[1] - phi[1]),
+                    std::fabs(phi_pair[2] - phi[2])
+                };
+
+                // Pt x and Pt y calculation using TLorentzVector
+                float ptx = p[0].Px() + p[1].Px() + p[2].Px();
+                float pty = p[0].Py() + p[1].Py() + p[2].Py();
+
+                // Invariant mass calculation using TLorentzVector for each pair of hits
+                float mass[3];
+                mass[0] = p12.M();
+                mass[1] = p02.M();
+                mass[2] = p01.M();
+
+                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * 0.035 * sqrt(Ebeam * 1000.f);
+                bool Pt_pass = std::sqrt(ptx * ptx + pty * pty) < 5.0f;
+                bool pos_pass = inHyCal(hits[0].x, hits[0].y) && inHyCal(hits[1].x, hits[1].y) && inHyCal(hits[2].x, hits[2].y);
+
+                out.h_3cl_totalE_gem->Fill(totalE);
+                out.h_3cl_tDiff_gem->Fill(dt[0]);
+                out.h_3cl_tDiff_gem->Fill(dt[1]);
+                out.h_3cl_ptx_gem->Fill(ptx);
+                out.h_3cl_pty_gem->Fill(pty);
+                out.h2_3cl_Pt_gem->Fill(ptx, pty);
+                for (int j = 0; j < 3; ++j) {
+                    out.h_3cl_E_gem->Fill(hits[j].E);
+                    out.h2_3cl_hits_gem->Fill(hits[j].x, hits[j].y);
+                    out.h2_3cl_E_angle_gem->Fill(theta[j], hits[j].E);
+                    out.h_3cl_yield_gem->Fill(theta[j]);
+                    out.h_3cl_mass_gem->Fill(mass[j]);
+                    out.h_3cl_dphi_gem->Fill(dphi[j]);
+                }
+                if (totalE_pass && Pt_pass && pos_pass) {
+                    // Fill histograms for events passing all three cuts
+                    out.h_3cl_totalE_gem_cut->Fill(totalE);
+                    out.h_3cl_ptx_gem_cut->Fill(ptx);
+                    out.h_3cl_pty_gem_cut->Fill(pty);
+                    out.h2_3cl_Pt_gem_cut->Fill(ptx, pty);
+                    out.h_3cl_tDiff_gem_cut->Fill(dt[0]);
+                    out.h_3cl_tDiff_gem_cut->Fill(dt[1]);
+                    for (int j = 0; j < 3; ++j) {
+                        out.h_3cl_E_gem_cut->Fill(hits[j].E);
+                        out.h2_3cl_hits_gem_cut->Fill(hits[j].x, hits[j].y);
+                        out.h2_3cl_E_angle_gem_cut->Fill(theta[j], hits[j].E);
+                        out.h_3cl_yield_gem_cut->Fill(theta[j]);
+                        out.h_3cl_mass_gem_cut->Fill(mass[j]);
+                        out.h_3cl_dphi_gem_cut->Fill(dphi[j]);
                     }
-                }
-            }
-            out.h_3cl_cluster_gem_num->Fill(time_group_1.size());
-            if (!time_group_2.empty()) out.h_3cl_cluster_gem_num->Fill(time_group_2.size());
-
-            if (time_group_1.size() == 3) {
-                const Hits &h1 = time_group_1[0];
-                const Hits &h2 = time_group_1[1];
-                const Hits &h3 = time_group_1[2];
-
-                x1 = h1.x; y1 = h1.y; z1 = h1.z; E1 = h1.E; t1 = h1.t; index1 = h1.index;
-                x2 = h2.x; y2 = h2.y; z2 = h2.z; E2 = h2.E; t2 = h2.t; index2 = h2.index;
-                x3 = h3.x; y3 = h3.y; z3 = h3.z; E3 = h3.E; t3 = h3.t; index3 = h3.index;
-
-                x1u = h1.xu; y1u = h1.yu; z1u = h1.zu; x1d = h1.xd; y1d = h1.yd; z1d = h1.zd;
-                x2u = h2.xu; y2u = h2.yu; z2u = h2.zu; x2d = h2.xd; y2d = h2.yd; z2d = h2.zd;
-                x3u = h3.xu; y3u = h3.yu; z3u = h3.zu; x3d = h3.xd; y3d = h3.yd; z3d = h3.zd;
-
-                float tDiff = std::max({std::fabs(t1 - t2), std::fabs(t1 - t3), std::fabs(t2 - t3)});
-
-                float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
-                float theta2 = std::atan2(std::sqrt(x2*x2 + y2*y2), z2) * 180.f / M_PI;
-                float theta3 = std::atan2(std::sqrt(x3*x3 + y3*y3), z3) * 180.f / M_PI;
-
-                const GEMTrackPair gem_tracks[3] = {
-                    {x1u, y1u, z1u, x1d, y1d, z1d},
-                    {x2u, y2u, z2u, x2d, y2d, z2d},
-                    {x3u, y3u, z3u, x3d, y3d, z3d}
-                };
-                std::array<float, 3> gem_vertex = {0.f, 0.f, 0.f};
-                const bool gem_vertex_ok = solveGEMVertex(gem_tracks, gem_vertex);
-                const float vx = gem_vertex_ok ? gem_vertex[0] : -999.f;
-                const float vy = gem_vertex_ok ? gem_vertex[1] : -999.f;
-                const float vz = gem_vertex_ok ? gem_vertex[2] : -9999.f;
-
-                auto rel_coord = [&](float x, float y, float z) {
-                    return std::array<float, 3>{x - vx, y - vy, z - vz};
-                };
-                auto theta_from_vertex = [&](float x, float y, float z) {
-                    const auto rel = rel_coord(x, y, z);
-                    return std::atan2(std::sqrt(rel[0] * rel[0] + rel[1] * rel[1]), rel[2]) * 180.f / M_PI;
-                };
-
-                float mass1 = electronPairInvariantMass(x1, y1, z1, E1, x2, y2, z2, E2);
-                float mass2 = electronPairInvariantMass(x1, y1, z1, E1, x3, y3, z3, E3);
-                float mass3 = electronPairInvariantMass(x2, y2, z2, E2, x3, y3, z3, E3);
-
-                // Pt x and Pt y calculation
-                auto get_pt = [](float x, float y, float z, float energy) {
-                    constexpr float electron_mass = 0.51099895f; // MeV
-                    const float norm = std::sqrt(x*x + y*y + z*z);
-                    if (norm <= 0.f || energy < electron_mass)
-                        return std::pair<float, float>{0.f, 0.f};
-                    const float p = std::sqrt(std::max(
-                        0.f, energy*energy - electron_mass*electron_mass));
-                    return std::pair<float, float>{p*x/norm, p*y/norm};
-                };
-                const auto [px1, py1] = get_pt(x1, y1, z1, E1);
-                const auto [px2, py2] = get_pt(x2, y2, z2, E2);
-                const auto [px3, py3] = get_pt(x3, y3, z3, E3);
-                const float ptx = px1 + px2 + px3;
-                const float pty = py1 + py2 + py3;
-
-                bool time_cut = false, totalE_cut = false, Pt_cut = false, clusterE_cut = false, inHyCal_cut = false;
-
-                bool moller_cut = false;
-                const bool has_moller_pair = hasMollerPairInTriplet(
-                    physics,
-                    x1, y1, z1, E1, theta1,
-                    x2, y2, z2, E2, theta2,
-                    x3, y3, z3, E3, theta3,
-                    Ebeam);
-                //moller_cut = !has_moller_pair;
-                moller_cut = !(isMollerAngleEnergyMatch(physics, theta1, E1, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta2, E2, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta3, E3, Ebeam));
-
-                if(tDiff < 16.f)
-                    time_cut = true;
-                if(E1 + E2 + E3 < Ebeam + 250.f && E1 + E2 + E3 > 0.8 * Ebeam)
-                    totalE_cut = true;
-                if(std::sqrt(ptx*ptx + pty*pty) < 5.f)
-                    Pt_cut = true;
-                if(inHyCal(x1, y1) && inHyCal(x2, y2) && inHyCal(x3, y3))
-                    inHyCal_cut = true;
-                if(E1 > 70.f && E2 > 70.f && E3 > 70.f && E1 < 0.75 * Ebeam && E2 < 0.75 * Ebeam && E3 < 0.75 * Ebeam)
-                    clusterE_cut = true;
-
-                out.h_3cl_totalE_gem->Fill(E1 + E2 + E3);
-                out.h_3cl_tDiff_gem->Fill(tDiff);
-                out.h_3cl_ptx_gem->Fill(ptx);
-                out.h_3cl_pty_gem->Fill(pty);
-                out.h2_3cl_Pt_gem->Fill(ptx, pty);
-                out.h_3cl_E_gem->Fill(E1);
-                out.h_3cl_E_gem->Fill(E2);
-                out.h_3cl_E_gem->Fill(E3);
-                out.h2_3cl_hits_gem->Fill(x1, y1);
-                out.h2_3cl_hits_gem->Fill(x2, y2);
-                out.h2_3cl_hits_gem->Fill(x3, y3);
-                out.h2_3cl_E_angle_gem->Fill(theta1, E1);
-                out.h2_3cl_E_angle_gem->Fill(theta2, E2);
-                out.h2_3cl_E_angle_gem->Fill(theta3, E3);
-                out.h_3cl_yield_gem->Fill(theta1);
-                out.h_3cl_yield_gem->Fill(theta2);
-                out.h_3cl_yield_gem->Fill(theta3);
-                //if (std::isfinite(mass1)) out.h_3cl_mass_gem->Fill(mass1);
-                if (std::isfinite(mass2)) out.h_3cl_mass_gem->Fill(mass2);
-                if (std::isfinite(mass3)) out.h_3cl_mass_gem->Fill(mass3);
-
-                auto fill_mass_step = [&](TH1F *hist) {
-                    //if (std::isfinite(mass1)) hist->Fill(mass1);
-                    if (std::isfinite(mass2)) hist->Fill(mass2);
-                    if (std::isfinite(mass3)) hist->Fill(mass3);
-                };
-
-                if (totalE_cut) {
-                    out.h_3cl_Pt_totalE_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_cut.get());
-                }
-                if (totalE_cut && time_cut) {
-                    out.h_3cl_Pt_totalE_time_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_time_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut) {
-                    out.h_3cl_Pt_totalE_time_clusterE_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut && Pt_cut) {
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_Pt_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut && moller_cut) {
-                    out.h_3cl_Pt_totalE_time_clusterE_moller_cut->Fill(ptx, pty);
-                }
-                if (totalE_cut && time_cut && clusterE_cut && Pt_cut && moller_cut) {
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_Pt_moller_cut.get());
-                }
-
-                if(time_cut && totalE_cut && Pt_cut && clusterE_cut && inHyCal_cut && moller_cut) {
-                    out.h_3cl_totalE_gem_cut->Fill(E1 + E2 + E3);
-                    out.h_3cl_ptx_gem_cut->Fill(ptx);
-                    out.h_3cl_pty_gem_cut->Fill(pty);
-                    out.h2_3cl_Pt_gem_cut->Fill(ptx, pty);
-                    out.h_3cl_Vz_gem_cut->Fill(vz);
-                    out.h2_3cl_Vxy_gem_cut->Fill(vx, vy);
-                    out.h_3cl_E_gem_cut->Fill(E1);
-                    out.h_3cl_E_gem_cut->Fill(E2);
-                    out.h_3cl_E_gem_cut->Fill(E3);
-                    out.h_3cl_tDiff_gem_cut->Fill(tDiff);
-                    out.h2_3cl_hits_gem_cut->Fill(x1, y1);
-                    out.h2_3cl_hits_gem_cut->Fill(x2, y2);
-                    out.h2_3cl_hits_gem_cut->Fill(x3, y3);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta1, E1);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta2, E2);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta3, E3);
-                    out.h_3cl_yield_gem_cut->Fill(theta1);
-                    out.h_3cl_yield_gem_cut->Fill(theta2);
-                    out.h_3cl_yield_gem_cut->Fill(theta3);
-                    if (std::isfinite(mass1)) out.h_3cl_mass_gem_cut->Fill(mass1);
-                    if (std::isfinite(mass2)) out.h_3cl_mass_gem_cut->Fill(mass2);
-                    if (std::isfinite(mass3)) out.h_3cl_mass_gem_cut->Fill(mass3);
-
-                    // Dedicated 2-combination mass spectrum: only combinations
-                    // containing the lowest-energy cluster.
-                    fill_mass_2comb_lowest_e(E1, E2, E3, mass1, mass2, mass3);
-                }
-            }
-            if (time_group_2.size() == 3) {
-                const Hits &h1 = time_group_2[0];
-                const Hits &h2 = time_group_2[1];
-                const Hits &h3 = time_group_2[2];
-
-                x1 = h1.x; y1 = h1.y; z1 = h1.z; E1 = h1.E; t1 = h1.t; index1 = h1.index;
-                x2 = h2.x; y2 = h2.y; z2 = h2.z; E2 = h2.E; t2 = h2.t; index2 = h2.index;
-                x3 = h3.x; y3 = h3.y; z3 = h3.z; E3 = h3.E; t3 = h3.t; index3 = h3.index;
-
-                x1u = h1.xu; y1u = h1.yu; z1u = h1.zu; x1d = h1.xd; y1d = h1.yd; z1d = h1.zd;
-                x2u = h2.xu; y2u = h2.yu; z2u = h2.zu; x2d = h2.xd; y2d = h2.yd; z2d = h2.zd;
-                x3u = h3.xu; y3u = h3.yu; z3u = h3.zu; x3d = h3.xd; y3d = h3.yd; z3d = h3.zd;
-
-                float tDiff = std::max({std::fabs(t1 - t2), std::fabs(t1 - t3), std::fabs(t2 - t3)});
-
-                float theta1 = std::atan2(std::sqrt(x1*x1 + y1*y1), z1) * 180.f / M_PI;
-                float theta2 = std::atan2(std::sqrt(x2*x2 + y2*y2), z2) * 180.f / M_PI;
-                float theta3 = std::atan2(std::sqrt(x3*x3 + y3*y3), z3) * 180.f / M_PI;
-
-                const GEMTrackPair gem_tracks[3] = {
-                    {x1u, y1u, z1u, x1d, y1d, z1d},
-                    {x2u, y2u, z2u, x2d, y2d, z2d},
-                    {x3u, y3u, z3u, x3d, y3d, z3d}
-                };
-                std::array<float, 3> gem_vertex = {0.f, 0.f, 0.f};
-                const bool gem_vertex_ok = solveGEMVertex(gem_tracks, gem_vertex);
-                const float vx = gem_vertex_ok ? gem_vertex[0] : -999.f;
-                const float vy = gem_vertex_ok ? gem_vertex[1] : -999.f;
-                const float vz = gem_vertex_ok ? gem_vertex[2] : -9999.f;
-
-                auto rel_coord = [&](float x, float y, float z) {
-                    return std::array<float, 3>{x - vx, y - vy, z - vz};
-                };
-                auto theta_from_vertex = [&](float x, float y, float z) {
-                    const auto rel = rel_coord(x, y, z);
-                    return std::atan2(std::sqrt(rel[0] * rel[0] + rel[1] * rel[1]), rel[2]) * 180.f / M_PI;
-                };
-
-                float mass1 = electronPairInvariantMass(x1, y1, z1, E1, x2, y2, z2, E2);
-                float mass2 = electronPairInvariantMass(x1, y1, z1, E1, x3, y3, z3, E3);
-                float mass3 = electronPairInvariantMass(x2, y2, z2, E2, x3, y3, z3, E3);
-
-                // Pt x and Pt y calculation
-                auto get_pt = [](float x, float y, float z, float energy) {
-                    constexpr float electron_mass = 0.51099895f; // MeV
-                    const float norm = std::sqrt(x*x + y*y + z*z);
-                    if (norm <= 0.f || energy < electron_mass)
-                        return std::pair<float, float>{0.f, 0.f};
-                    const float p = std::sqrt(std::max(
-                        0.f, energy*energy - electron_mass*electron_mass));
-                    return std::pair<float, float>{p*x/norm, p*y/norm};
-                };
-                const auto [px1, py1] = get_pt(x1, y1, z1, E1);
-                const auto [px2, py2] = get_pt(x2, y2, z2, E2);
-                const auto [px3, py3] = get_pt(x3, y3, z3, E3);
-                const float ptx = px1 + px2 + px3;
-                const float pty = py1 + py2 + py3;
-
-                bool time_cut = false, totalE_cut = false, Pt_cut = false, clusterE_cut = false, inHyCal_cut = false;
-
-                bool moller_cut = false;
-                const bool has_moller_pair = hasMollerPairInTriplet(
-                    physics,
-                    x1, y1, z1, E1, theta1,
-                    x2, y2, z2, E2, theta2,
-                    x3, y3, z3, E3, theta3,
-                    Ebeam);
-                //moller_cut = !has_moller_pair;
-                moller_cut = !(isMollerAngleEnergyMatch(physics, theta1, E1, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta2, E2, Ebeam) ||
-                             isMollerAngleEnergyMatch(physics, theta3, E3, Ebeam));
-
-                if(tDiff < 16.f)
-                    time_cut = true;
-                if(E1 + E2 + E3 < Ebeam + 250.f && E1 + E2 + E3 > 0.8 * Ebeam)
-                    totalE_cut = true;
-                if(std::sqrt(ptx*ptx + pty*pty) < 5.f)
-                    Pt_cut = true;
-                if(inHyCal(x1, y1) && inHyCal(x2, y2) && inHyCal(x3, y3))
-                    inHyCal_cut = true;
-                if(E1 > 70.f && E2 > 70.f && E3 > 70.f && E1 < 0.75 * Ebeam && E2 < 0.75 * Ebeam && E3 < 0.75 * Ebeam)
-                    clusterE_cut = true;
-
-                out.h_3cl_totalE_gem->Fill(E1 + E2 + E3);
-                out.h_3cl_tDiff_gem->Fill(tDiff);
-                out.h_3cl_ptx_gem->Fill(ptx);
-                out.h_3cl_pty_gem->Fill(pty);
-                out.h2_3cl_Pt_gem->Fill(ptx, pty);
-                out.h_3cl_E_gem->Fill(E1);
-                out.h_3cl_E_gem->Fill(E2);
-                out.h_3cl_E_gem->Fill(E3);
-                out.h2_3cl_hits_gem->Fill(x1, y1);
-                out.h2_3cl_hits_gem->Fill(x2, y2);
-                out.h2_3cl_hits_gem->Fill(x3, y3);
-                out.h2_3cl_E_angle_gem->Fill(theta1, E1);
-                out.h2_3cl_E_angle_gem->Fill(theta2, E2);
-                out.h2_3cl_E_angle_gem->Fill(theta3, E3);
-                out.h_3cl_yield_gem->Fill(theta1);
-                out.h_3cl_yield_gem->Fill(theta2);
-                out.h_3cl_yield_gem->Fill(theta3);
-                //if (std::isfinite(mass1)) out.h_3cl_mass_gem->Fill(mass1);
-                if (std::isfinite(mass2)) out.h_3cl_mass_gem->Fill(mass2);
-                if (std::isfinite(mass3)) out.h_3cl_mass_gem->Fill(mass3);
-
-                auto fill_mass_step = [&](TH1F *hist) {
-                    //if (std::isfinite(mass1)) hist->Fill(mass1);
-                    if (std::isfinite(mass2)) hist->Fill(mass2);
-                    if (std::isfinite(mass3)) hist->Fill(mass3);
-                };
-
-                if (totalE_cut) {
-                    out.h_3cl_Pt_totalE_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_cut.get());
-                }
-                if (totalE_cut && time_cut) {
-                    out.h_3cl_Pt_totalE_time_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_time_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut) {
-                    out.h_3cl_Pt_totalE_time_clusterE_cut->Fill(ptx, pty);
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut && Pt_cut) {
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_Pt_cut.get());
-                }
-                if (totalE_cut && time_cut && clusterE_cut && moller_cut) {
-                    out.h_3cl_Pt_totalE_time_clusterE_moller_cut->Fill(ptx, pty);
-                }
-                if (totalE_cut && time_cut && clusterE_cut && Pt_cut && moller_cut) {
-                    fill_mass_step(out.h_3cl_mass_totalE_time_clusterE_Pt_moller_cut.get());
-                }
-
-                if(time_cut && totalE_cut && Pt_cut && clusterE_cut && inHyCal_cut && moller_cut) {
-                    out.h_3cl_totalE_gem_cut->Fill(E1 + E2 + E3);
-                    out.h_3cl_ptx_gem_cut->Fill(ptx);
-                    out.h_3cl_pty_gem_cut->Fill(pty);
-                    out.h2_3cl_Pt_gem_cut->Fill(ptx, pty);
-                    out.h_3cl_Vz_gem_cut->Fill(vz);
-                    out.h2_3cl_Vxy_gem_cut->Fill(vx, vy);
-                    out.h_3cl_E_gem_cut->Fill(E1);
-                    out.h_3cl_E_gem_cut->Fill(E2);
-                    out.h_3cl_E_gem_cut->Fill(E3);
-                    out.h_3cl_tDiff_gem_cut->Fill(tDiff);
-                    out.h2_3cl_hits_gem_cut->Fill(x1, y1);
-                    out.h2_3cl_hits_gem_cut->Fill(x2, y2);
-                    out.h2_3cl_hits_gem_cut->Fill(x3, y3);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta1, E1);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta2, E2);
-                    out.h2_3cl_E_angle_gem_cut->Fill(theta3, E3);
-                    out.h_3cl_yield_gem_cut->Fill(theta1);
-                    out.h_3cl_yield_gem_cut->Fill(theta2);
-                    out.h_3cl_yield_gem_cut->Fill(theta3);
-                    if (std::isfinite(mass1)) out.h_3cl_mass_gem_cut->Fill(mass1);
-                    if (std::isfinite(mass2)) out.h_3cl_mass_gem_cut->Fill(mass2);
-                    if (std::isfinite(mass3)) out.h_3cl_mass_gem_cut->Fill(mass3);
-
-                    // Dedicated 2-combination mass spectrum: only combinations
-                    // containing the lowest-energy cluster.
-                    fill_mass_2comb_lowest_e(E1, E2, E3, mass1, mass2, mass3);
                 }
             }
         }
@@ -1589,29 +1051,6 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h_ee_invariant_mass->Add(src.h_ee_invariant_mass.get());
 
     // X17 three-cluster histograms.
-    dst.h_3cl_totalE->Add(src.h_3cl_totalE.get());
-    dst.h2_3cl_hits->Add(src.h2_3cl_hits.get());
-    dst.h2_3cl_E_angle->Add(src.h2_3cl_E_angle.get());
-    dst.h_3cl_E->Add(src.h_3cl_E.get());
-    dst.h_3cl_yield->Add(src.h_3cl_yield.get());
-    dst.h_3cl_mass->Add(src.h_3cl_mass.get());
-    dst.h_3cl_cluster_num->Add(src.h_3cl_cluster_num.get());
-    dst.h_3cl_ptx->Add(src.h_3cl_ptx.get());
-    dst.h_3cl_pty->Add(src.h_3cl_pty.get());
-    dst.h2_3cl_Pt->Add(src.h2_3cl_Pt.get());
-    dst.h_3cl_tDiff->Add(src.h_3cl_tDiff.get());
-
-    dst.h_3cl_totalE_cut->Add(src.h_3cl_totalE_cut.get());
-    dst.h2_3cl_hits_cut->Add(src.h2_3cl_hits_cut.get());
-    dst.h2_3cl_E_angle_cut->Add(src.h2_3cl_E_angle_cut.get());
-    dst.h_3cl_E_cut->Add(src.h_3cl_E_cut.get());
-    dst.h_3cl_yield_cut->Add(src.h_3cl_yield_cut.get());
-    dst.h_3cl_mass_cut->Add(src.h_3cl_mass_cut.get());
-    dst.h_3cl_ptx_cut->Add(src.h_3cl_ptx_cut.get());
-    dst.h_3cl_pty_cut->Add(src.h_3cl_pty_cut.get());
-    dst.h2_3cl_Pt_cut->Add(src.h2_3cl_Pt_cut.get());
-    dst.h_3cl_tDiff_cut->Add(src.h_3cl_tDiff_cut.get());
-
     dst.h_gamma_totalE->Add(src.h_gamma_totalE.get());
     dst.h2_gamma_hits->Add(src.h2_gamma_hits.get());
     dst.h2_gamma_E_angle->Add(src.h2_gamma_E_angle.get());
@@ -1651,6 +1090,7 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h_3cl_pty_gem->Add(src.h_3cl_pty_gem.get());
     dst.h2_3cl_Pt_gem->Add(src.h2_3cl_Pt_gem.get());
     dst.h_3cl_tDiff_gem->Add(src.h_3cl_tDiff_gem.get());
+    dst.h_3cl_dphi_gem->Add(src.h_3cl_dphi_gem.get());
 
     dst.h_3cl_totalE_gem_cut->Add(src.h_3cl_totalE_gem_cut.get());
     dst.h2_3cl_hits_gem_cut->Add(src.h2_3cl_hits_gem_cut.get());
@@ -1658,23 +1098,11 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h_3cl_E_gem_cut->Add(src.h_3cl_E_gem_cut.get());
     dst.h_3cl_yield_gem_cut->Add(src.h_3cl_yield_gem_cut.get());
     dst.h_3cl_mass_gem_cut->Add(src.h_3cl_mass_gem_cut.get());
-    dst.h_3cl_mass_gem_cut_2comb->Add(src.h_3cl_mass_gem_cut_2comb.get());
     dst.h_3cl_ptx_gem_cut->Add(src.h_3cl_ptx_gem_cut.get());
     dst.h_3cl_pty_gem_cut->Add(src.h_3cl_pty_gem_cut.get());
     dst.h2_3cl_Pt_gem_cut->Add(src.h2_3cl_Pt_gem_cut.get());
     dst.h_3cl_tDiff_gem_cut->Add(src.h_3cl_tDiff_gem_cut.get());
-    dst.h_3cl_Vz_gem_cut->Add(src.h_3cl_Vz_gem_cut.get());
-    dst.h2_3cl_Vxy_gem_cut->Add(src.h2_3cl_Vxy_gem_cut.get());
-    dst.h_3cl_Pt_totalE_cut->Add(src.h_3cl_Pt_totalE_cut.get());
-    dst.h_3cl_Pt_totalE_time_cut->Add(src.h_3cl_Pt_totalE_time_cut.get());
-    dst.h_3cl_Pt_totalE_time_clusterE_cut->Add(src.h_3cl_Pt_totalE_time_clusterE_cut.get());
-    dst.h_3cl_Pt_totalE_time_clusterE_moller_cut->Add(src.h_3cl_Pt_totalE_time_clusterE_moller_cut.get());
-    dst.h_3cl_mass_totalE_cut->Add(src.h_3cl_mass_totalE_cut.get());
-    dst.h_3cl_mass_totalE_time_cut->Add(src.h_3cl_mass_totalE_time_cut.get());
-    dst.h_3cl_mass_totalE_time_clusterE_cut->Add(src.h_3cl_mass_totalE_time_clusterE_cut.get());
-    dst.h_3cl_mass_totalE_time_clusterE_Pt_cut->Add(src.h_3cl_mass_totalE_time_clusterE_Pt_cut.get());
-    dst.h_3cl_mass_totalE_time_clusterE_Pt_moller_cut->Add(src.h_3cl_mass_totalE_time_clusterE_Pt_moller_cut.get());
-
+    dst.h_3cl_dphi_gem_cut->Add(src.h_3cl_dphi_gem_cut.get());
     dst.physics->GetEnergyVsModuleHist()->Add(src.physics->GetEnergyVsModuleHist());
     dst.physics->GetEnergyVsThetaHist()->Add(src.physics->GetEnergyVsThetaHist());
     dst.physics->GetMollerPhiDiffHist()->Add(src.physics->GetMollerPhiDiffHist());
@@ -1844,33 +1272,6 @@ int main(int argc, char *argv[])
     merged->h_ee_invariant_mass->Write();
 
     outfile.cd();
-    outfile.mkdir("x17"); outfile.cd("x17");
-    merged->h_3cl_totalE->Write();
-    merged->h2_3cl_hits->Write();
-    merged->h2_3cl_E_angle->Write();
-    merged->h_3cl_E->Write();
-    merged->h_3cl_yield->Write();
-    merged->h_3cl_mass->Write();
-    merged->h_3cl_cluster_num->Write();
-    merged->h_3cl_ptx->Write();
-    merged->h_3cl_pty->Write();
-    merged->h2_3cl_Pt->Write();
-    merged->h_3cl_tDiff->Write();
-
-    outfile.cd();
-    outfile.mkdir("x17_cut"); outfile.cd("x17_cut");
-    merged->h_3cl_totalE_cut->Write();
-    merged->h2_3cl_hits_cut->Write();
-    merged->h2_3cl_E_angle_cut->Write();
-    merged->h_3cl_E_cut->Write();
-    merged->h_3cl_yield_cut->Write();
-    merged->h_3cl_mass_cut->Write();
-    merged->h_3cl_ptx_cut->Write();
-    merged->h_3cl_pty_cut->Write();
-    merged->h2_3cl_Pt_cut->Write();
-    merged->h_3cl_tDiff_cut->Write();
-
-    outfile.cd();
     outfile.mkdir("x17_gamma"); outfile.cd("x17_gamma");
     merged->h_gamma_totalE->Write();
     merged->h2_gamma_hits->Write();
@@ -1914,6 +1315,7 @@ int main(int argc, char *argv[])
     merged->h_3cl_pty_gem->Write();
     merged->h2_3cl_Pt_gem->Write();
     merged->h_3cl_tDiff_gem->Write();
+    merged->h_3cl_dphi_gem->Write();
 
     outfile.cd();
     outfile.mkdir("x17_gem_cut"); outfile.cd("x17_gem_cut");
@@ -1923,25 +1325,11 @@ int main(int argc, char *argv[])
     merged->h_3cl_E_gem_cut->Write();
     merged->h_3cl_yield_gem_cut->Write();
     merged->h_3cl_mass_gem_cut->Write();
-    merged->h_3cl_mass_gem_cut_2comb->Write();
     merged->h_3cl_ptx_gem_cut->Write();
     merged->h_3cl_pty_gem_cut->Write();
     merged->h2_3cl_Pt_gem_cut->Write();
     merged->h_3cl_tDiff_gem_cut->Write();
-    merged->h_3cl_Vz_gem_cut->Write();
-    merged->h2_3cl_Vxy_gem_cut->Write();
-
-    outfile.cd();
-    outfile.mkdir("x17_gem_cut_steps"); outfile.cd("x17_gem_cut_steps");
-    merged->h_3cl_Pt_totalE_cut->Write();
-    merged->h_3cl_Pt_totalE_time_cut->Write();
-    merged->h_3cl_Pt_totalE_time_clusterE_cut->Write();
-    merged->h_3cl_Pt_totalE_time_clusterE_moller_cut->Write();
-    merged->h_3cl_mass_totalE_cut->Write();
-    merged->h_3cl_mass_totalE_time_cut->Write();
-    merged->h_3cl_mass_totalE_time_clusterE_cut->Write();
-    merged->h_3cl_mass_totalE_time_clusterE_Pt_cut->Write();
-    merged->h_3cl_mass_totalE_time_clusterE_Pt_moller_cut->Write();
+    merged->h_3cl_dphi_gem_cut->Write();
 
     outfile.cd("moller_analysis");
 

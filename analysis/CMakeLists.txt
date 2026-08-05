@@ -32,7 +32,7 @@ target_include_directories(prad2ana
 
 target_link_libraries(prad2ana PUBLIC
     prad2dec prad2det nlohmann_json::nlohmann_json
-    ROOT::Core ROOT::Tree ROOT::TreePlayer ROOT::RIO ROOT::Hist ROOT::Graf ROOT::Gpad ROOT::Spectrum)
+    ROOT::Core ROOT::Tree ROOT::TreePlayer ROOT::RIO ROOT::Hist ROOT::Graf ROOT::Gpad ROOT::Spectrum ROOT::Physics)
 
 set(ANA_DEPS prad2ana)   # tools just link the lib; transitives flow through
 
@@ -74,12 +74,14 @@ add_analysis_tool(nonlinearity tools/nonlinearity.cpp)
 add_analysis_tool(calib_5by5 tools/calib_5by5.cpp)
 add_analysis_tool(hycal_module_time_calib tools/hycal_module_time_calib.cpp)
 add_analysis_tool(hycal_shower_profile tools/hycal_shower_profile.cpp)
+add_analysis_tool(time_recon_check tools/time_recon_check.cpp)
 
 install(TARGETS replay_rawdata replay_gainCorr online_gain_monitor_base replay_recon replay_filter replay_add_hv
                 live_charge epCalib GEM_matching
                 cosmic_test quick_check matching det_calib cosmic_lg sim2replay sim2replay_hc
                 gain_monitor gain_fitter refGain_produce
                 hycal_rf_offset_calib nonlinearity calib_5by5 hycal_module_time_calib hycal_shower_profile
+                time_recon_check
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
