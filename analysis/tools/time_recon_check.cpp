@@ -469,7 +469,7 @@ int main(int argc, char *argv[])
             h->SetMarkerStyle(20);
             h->SetMarkerSize(0.6);
             h->SetMarkerColor(kBlue + 1);
-            h->GetXaxis()->SetRangeUser(30.0, 70.0);
+            h->GetXaxis()->SetRangeUser(20.0, 70.0);
             h->Draw("PL");
 
             fdec::WaveResult wave_res;

@@ -67,14 +67,14 @@ LogNormalFitResult WaveAnalyzer::fit_log_normal_cfd(const uint16_t *raw, int nsa
 
     float p[NPAR] = {
         A_guess,
-        std::max(0.0f, fit_left_bound - 0.2f),
-        1.5f,
-        0.6f,
+        std::max(0.0f, fit_left_bound - 0.5f),
+        1.0f,
+        0.5f,
     };
     float p_lo[NPAR] = {
         0.0f,
-        std::max(0.0f, fit_left_bound - 1.0f),
-        0.3f,
+        std::max(0.0f, fit_left_bound - 1.5f),
+        0.2f,
         0.1f,
     };
     float p_hi[NPAR] = {
