@@ -62,7 +62,8 @@ public:
     // max_events <= 0 means process all. peaks=true adds peak branches.
     bool Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                  const std::string &db_dir,
-                 int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "");
+                 int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "",
+                 bool Ecalib = false, bool noWaveform = false);
 
     bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                             const std::string &db_dir, const std::string &recon_config_file,
@@ -79,7 +80,7 @@ public:
                                 const std::string &db_dir, const std::string &daq_config_file);
 
 private:
-    void setupBranches(TTree *tree, EventVars &ev, bool write_peaks);
+    void setupBranches(TTree *tree, EventVars &ev, bool write_peaks, bool Ecalib, bool noWaveform);
     void clearEvent(EventVars &ev);
 
     void setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode);

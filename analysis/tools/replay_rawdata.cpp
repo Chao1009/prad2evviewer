@@ -3,7 +3,7 @@
 //
 // Usage: replay_rawdata <evio_file_or_dir> [more files/dirs...]
 //                       -o output_dir [-f max_files] [-n max_events] [-p] [-j num_threads]
-//                       [-c daq_config.json] [-d hycal_map.json]
+//                       [-c daq_config.json] [-d hycal_map.json] [--Ecalib] [--noWaveform]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
@@ -11,6 +11,8 @@
 //   -j  number of threads (default: 4)
 //   -c  DAQ configuration file
 //   -d  HyCal map file (default: <db>/hycal_map.json)
+//   --Ecalib  enable Ecalib mode, throw out extra branches to reduce output size
+//   --noWaveform  disable saving raw waveform samples
 //=============================================================================
 
 #include "Replay.h"
@@ -146,6 +148,12 @@ static std::string makeOutputFile(const std::string &evio_path)
     return out;
 }
 
+static const struct option long_options[] = {
+    {"Ecalib", no_argument, nullptr, 1000},
+    {"noWaveform", no_argument, nullptr, 1001},
+    {nullptr, 0, nullptr, 0}
+};
+
 int main(int argc, char *argv[])
 {
     // Initialize ROOT for multi-threading
@@ -161,6 +169,8 @@ int main(int argc, char *argv[])
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
+    bool Ecalib = false;
+    bool noWaveform = false;
     int num_threads = 4;
 
     std::string db_dir = prad2::resolve_data_dir(
@@ -170,7 +180,7 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:f:n:c:d:j:p")) != -1) {
+    while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:p", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f': max_files = std::atoi(optarg); break;
@@ -179,6 +189,9 @@ int main(int argc, char *argv[])
             case 'd': daq_map = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
             case 'p': peaks = true; break;
+            case 1000: Ecalib = true; break;
+            case 1001: noWaveform = true; break;
+            default: break;
         }
     }
 
@@ -191,7 +204,7 @@ int main(int argc, char *argv[])
 
     if (evio_files.empty() || output_dir.empty()) {
         std::cerr << "Usage: replay_rawdata <evio_file_or_dir> [more files/dirs...] -o output_dir\n"
-                  << "       [-f max_files] [-j threads] [-c daq_config.json] [-d hycal_map.json] [-n N] [-p]\n";
+                  << "       [-f max_files] [-j threads] [-c daq_config.json] [-d hycal_map.json] [-n N] [-p] [--Ecalib] [--noWaveform]\n";
         std::cerr << "  -o  output directory (REQUIRED)\n";
         std::cerr << "  -f  max files to process (default: all)\n";
         std::cerr << "  -j  number of threads (default: 4)\n";
@@ -250,7 +263,8 @@ int main(int argc, char *argv[])
             if (idx >= num_files) break;
 
             std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.Process(evio_files[idx], out, gRunConfig, db_dir, max_events, peaks, daq_config);
+            bool ok = replay.Process(evio_files[idx], out, gRunConfig, db_dir, max_events, peaks, daq_config,
+                Ecalib, noWaveform);
 
             std::lock_guard<std::mutex> lk(io_mtx);
             if (ok) {

@@ -133,7 +133,8 @@
         {"from_run": 24436, "pedestal_file": "gem_peds/gem_ped_24436.dat", "common_mode_file": "gem_peds/CommonModeRange_24436.txt"},
         {"from_run": 24495, "pedestal_file": "gem_peds/gem_ped_24495.dat", "common_mode_file": "gem_peds/CommonModeRange_24495.txt"},
         {"from_run": 24535, "pedestal_file": "gem_peds/gem_ped_24535.dat", "common_mode_file": "gem_peds/CommonModeRange_24535.txt"},
-        {"from_run": 25540, "pedestal_file": "gem_peds/gem_ped_25533.dat", "common_mode_file": "gem_peds/CommonModeRange_25533.txt"}
+        {"from_run": 25540, "pedestal_file": "gem_peds/gem_ped_25533.dat", "common_mode_file": "gem_peds/CommonModeRange_25533.txt"},
+        {"from_run": 25912, "pedestal_file": "gem_peds/gem_ped_25912.dat", "common_mode_file": "gem_peds/CommonModeRange_25912.txt"}
     ],
 
     "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;":                                                   "",

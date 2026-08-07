@@ -214,9 +214,9 @@ void Replay::setupLMSBranches(TTree *tree, LMSEventVars &ev)
     prad2::SetLMSWriteBranches(tree, ev);
 }
 
-void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
+void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks, bool Ecalib = false, bool noWaveform = false)
 {
-    prad2::SetRawWriteBranches(tree, ev, write_peaks);
+    prad2::SetRawWriteBranches(tree, ev, write_peaks, Ecalib, noWaveform);
 }
 
 void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode = false)
@@ -226,7 +226,8 @@ void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode 
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                      const std::string &db_dir,
-                     int max_events, bool write_peaks , const std::string &daq_config_file)
+                     int max_events, bool write_peaks , const std::string &daq_config_file,
+                     bool Ecalib, bool noWaveform)
 {
     // build ROC tag → crate index mapping from DAQ config JSON
     std::unordered_map<int, int> roc_to_crate;
@@ -265,7 +266,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     TTree *tree = new TTree("events", "PRad2 replay data");
     //EventVars ev;
     auto ev = std::make_unique<EventVars>();
-    setupBranches(tree, *ev, write_peaks);
+    setupBranches(tree, *ev, write_peaks, Ecalib, noWaveform);
 
     // Side trees — one DSC2 row per SYNC physics event, one EPICS row per
     // 0x001F event.  Both are populated from prad2dec accessors; this loop
@@ -440,6 +441,11 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             ev->tdc_roc_tags = tdc_roc_tags_snapshot;
             ev->tdc_nwords   = tdc_nwords_snapshot;
             ev->tdc_words    = tdc_words_snapshot;
+
+            if (Ecalib) {
+                bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
+                if (!is_sum) continue;
+            }
 
             // Per-event gain correction (time-series lookup by event number).
             const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
