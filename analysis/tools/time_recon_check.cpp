@@ -228,12 +228,40 @@ int main(int argc, char *argv[])
     TH1F *h1_wave_big[100];
     TH1F *h1_wave_veto_big[100], *h1_wave_veto_small[100];
     // Fitting parameters for the waveforms
-    TH1F *h1_mu_crystal = new TH1F("h1_mu_crystal", "Fitted Mu for Crystal;Mu [ADC];Counts", 100, 0, 4);
-    TH1F *h1_sigma_crystal = new TH1F("h1_sigma_crystal", "Fitted Sigma for Crystal;Sigma [ADC];Counts", 100, 0, 4);
-    TH1F *h1_chi2_ndf_crystal = new TH1F("h1_chi2_ndf_crystal", "Fitted Chi2/NDF for Crystal;Chi2/NDF [ADC];Counts", 100, 0, 50);
-    TH1F *h1_mu_veto = new TH1F("h1_mu_veto", "Fitted Mu for Veto;Mu [ADC];Counts", 100, 0, 4);
-    TH1F *h1_sigma_veto = new TH1F("h1_sigma_veto", "Fitted Sigma for Veto;Sigma [ADC];Counts", 100, 0, 4);
-    TH1F *h1_chi2_ndf_veto = new TH1F("h1_chi2_ndf_veto", "Fitted Chi2/NDF for Veto;Chi2/NDF [ADC];Counts", 100, 0, 50);
+    TH1F *h1_mu_crystal = new TH1F("h1_mu_crystal", "Fitted Mu for Crystal;Mu [ADC];Counts", 100, 0, 2);
+    TH1F *h1_sigma_crystal = new TH1F("h1_sigma_crystal", "Fitted Sigma for Crystal;Sigma [ADC];Counts", 100, 0, 1);
+    TH1F *h1_chi2_ndf_crystal = new TH1F("h1_chi2_ndf_crystal", "Fitted Chi2/NDF for Crystal;Chi2/NDF [ADC];Counts", 100, 0, 15);
+    TH2F *h2_mu_vs_sigma_crystal = new TH2F("h2_mu_vs_sigma_crystal", "Mu vs Sigma for Crystal;Mu [ADC];Sigma [ADC]", 100, 0, 2, 100, 0, 1);
+    TH2F *h2_mu_vs_height_crystal = new TH2F("h2_mu_vs_height_crystal", "Mu vs Height for Crystal;Mu [ADC];Height [ADC]", 100, 0, 2, 1000, 0, 3000);
+    TH2F *h2_sigma_vs_height_crystal = new TH2F("h2_sigma_vs_height_crystal", "Sigma vs Height for Crystal;Sigma [ADC];Height [ADC]", 100, 0, 1, 1000, 0, 3000);
+    TH1F *h1_mu_veto = new TH1F("h1_mu_veto", "Fitted Mu for Veto;Mu [ADC];Counts", 100, 0, 2);
+    TH1F *h1_sigma_veto = new TH1F("h1_sigma_veto", "Fitted Sigma for Veto;Sigma [ADC];Counts", 100, 0, 1);
+    TH1F *h1_chi2_ndf_veto = new TH1F("h1_chi2_ndf_veto", "Fitted Chi2/NDF for Veto;Chi2/NDF [ADC];Counts", 100, 0, 15);
+    TH2F *h2_mu_vs_sigma_veto = new TH2F("h2_mu_vs_sigma_veto", "Mu vs Sigma for Veto;Mu [ADC];Sigma [ADC]", 100, 0, 2, 100, 0, 1);
+    TH2F *h2_mu_vs_height_veto = new TH2F("h2_mu_vs_height_veto", "Mu vs Height for Veto;Mu [ADC];Height [ADC]", 100, 0, 2, 1000, 0, 3000);
+    TH2F *h2_sigma_vs_height_veto = new TH2F("h2_sigma_vs_height_veto", "Sigma vs Height for Veto;Sigma [ADC];Height [ADC]", 100, 0, 1, 1000, 0, 3000);
+
+    // TH2Poly map for per-module out-of-time ratio.
+    TH2Poly *h2_ratio_out4ns_per_crystal = new TH2Poly("h2_ratio_out4ns_per_crystal", "Neighbor - Seed Ratio |#Deltat| > 4 ns;X;Y", -350, 350, -350, 350);
+    h2_ratio_out4ns_per_crystal->SetContour(255);
+    h2_ratio_out4ns_per_crystal->SetStats(false);
+    h2_ratio_out4ns_per_crystal->SetMinimum(0);
+    h2_ratio_out4ns_per_crystal->SetMaximum(0.15);
+    h2_ratio_out4ns_per_crystal->SetOption("colz");
+    std::vector<int> module_bin_by_index(hycal.module_count(), -1);
+    std::vector<int> module_total_counts(hycal.module_count(), 0);
+    std::vector<int> module_out4ns_counts(hycal.module_count(), 0);
+    for (int m = 0; m < hycal.module_count(); ++m) {
+        auto &mod = hycal.module(m);
+        if (!mod.is_pwo4()) continue;
+        const double x1 = mod.x - 0.5 * mod.size_x;
+        const double x2 = mod.x + 0.5 * mod.size_x;
+        const double y1 = mod.y - 0.5 * mod.size_y;
+        const double y2 = mod.y + 0.5 * mod.size_y;
+
+        const int bin_id = h2_ratio_out4ns_per_crystal->AddBin(x1, y1, x2, y2);
+        module_bin_by_index[mod.index] = bin_id;
+    }
 
     for (int i = 0; i < 100; ++i) {
         h1_wave_small_inTime[i] = new TH1F(Form("h1_wave_small_inTime%d", i), Form("Small In-Time Waveform%d;Samples;ADC", i), 100, -0.5, 99.5);
@@ -282,11 +310,14 @@ int main(int argc, char *argv[])
         for (int j = 0; j < ev.nch; ++j) {
 
             if (ev.module_id[j] >= 3001 && ev.module_id[j] <= 3004 && ev.npeaks[j] == 1) {
-                if (ev.peak_height[j][0] > 100 && ev.npeaks[j] == 1) {
+                if (ev.peak_height[j][0] > 10 && ev.npeaks[j] == 1) {
                     ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
                     h1_mu_veto->Fill(wres.peaks_fit[0].mu);
                     h1_sigma_veto->Fill(wres.peaks_fit[0].sigma);
                     h1_chi2_ndf_veto->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
+                    h2_mu_vs_sigma_veto->Fill(wres.peaks_fit[0].mu, wres.peaks_fit[0].sigma);
+                    h2_mu_vs_height_veto->Fill(wres.peaks_fit[0].mu, ev.peak_height[j][0]);
+                    h2_sigma_vs_height_veto->Fill(wres.peaks_fit[0].sigma, ev.peak_height[j][0]);
                 }
                 // save the waveforms for veto modules
                 if (wave_count_veto_small < 100 && ev.peak_height[j][0] < 50) {
@@ -393,13 +424,20 @@ int main(int argc, char *argv[])
             // select the 1st layer of neighboring modules
             if (std::abs(mod->x - seed_mod->x) < mod->size_x * 1.5f &&
                 std::abs(mod->y - seed_mod->y) < mod->size_y * 1.5f && mod->id != seed_mod->id
-                && ev.npeaks[j] == 1) 
+                && ev.npeaks[j] == 1 && ev.module_id[j] > 0) 
             {
                 float peak_time = ev.peak_time[j][0] - time_offset;
                 float dt = peak_time - hits[0].time;
+                const int mod_index = mod->index;
+                if (mod_index >= 0 && mod_index < static_cast<int>(module_total_counts.size())) {
+                    module_total_counts[mod_index]++;
+                    if (dt > 4.0f) {
+                        module_out4ns_counts[mod_index]++;
+                    }
+                }
                 h1_time_diff_seed->Fill(dt);
                 h2_height_vs_dtime->Fill(dt, ev.peak_height[j][0]);
-                if (dt > 6.0 && ev.peak_height[j][0] < 30) {
+                if (dt > 4.0 && ev.peak_height[j][0] < 30) {
                     if (wave_count_small_outTime < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_small_outTime[wave_count_small_outTime];
@@ -433,11 +471,14 @@ int main(int argc, char *argv[])
                     }
                     wave_count_small_inTime++;
                 }
-                if (ev.peak_height[j][0] > 100) {
+                if (ev.peak_height[j][0] > 10) {
                     ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
                     h1_mu_crystal->Fill(wres.peaks_fit[0].mu);
                     h1_sigma_crystal->Fill(wres.peaks_fit[0].sigma);
                     h1_chi2_ndf_crystal->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
+                    h2_mu_vs_sigma_crystal->Fill(wres.peaks_fit[0].mu, wres.peaks_fit[0].sigma);
+                    h2_mu_vs_height_crystal->Fill(wres.peaks_fit[0].mu, ev.peak_height[j][0]);
+                    h2_sigma_vs_height_crystal->Fill(wres.peaks_fit[0].sigma, ev.peak_height[j][0]);
                     if (wave_count_big < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_big[wave_count_big];
@@ -460,6 +501,17 @@ int main(int argc, char *argv[])
         if (!seed_not_clean) {
             h1_cluster_energy->Fill(hits[0].energy);
         }
+    }
+
+    for (int m = 0; m < hycal.module_count(); ++m) {
+        const int bin_id = module_bin_by_index[m];
+        if (bin_id < 0) continue;
+
+        const int total_count = module_total_counts[m];
+        if (total_count <= 0) continue;
+
+        h2_ratio_out4ns_per_crystal->SetBinContent(
+            bin_id, static_cast<double>(module_out4ns_counts[m]) / total_count);
     }
 
     // Draw waveform pages to PDFs: one waveform per page with WaveAnalyzer re-fit overlay.
@@ -485,11 +537,13 @@ int main(int argc, char *argv[])
             h->SetStats(0);
             h->SetLineColor(kBlue + 1);
             h->SetLineWidth(1);
+            h->SetLineStyle(2);
             h->SetMarkerStyle(20);
             h->SetMarkerSize(0.6);
             h->SetMarkerColor(kBlue + 1);
             h->GetXaxis()->SetRangeUser(20.0, 70.0);
-            h->Draw("P");
+            h->Draw("hist l");
+            h->Draw("P same");
 
             // stack-allocated scratch buffer for smoothed waveform
             float smoothed[100];
@@ -634,12 +688,19 @@ int main(int argc, char *argv[])
     h1_cluster_energy->Write();
     h1_time_diff_seed->Write();
     h2_height_vs_dtime->Write();
+    h2_ratio_out4ns_per_crystal->Write();
     h1_mu_crystal->Write();
     h1_sigma_crystal->Write();
     h1_chi2_ndf_crystal->Write();
+    h2_mu_vs_sigma_crystal->Write();
+    h2_mu_vs_height_crystal->Write();
+    h2_sigma_vs_height_crystal->Write();
     h1_mu_veto->Write();
     h1_sigma_veto->Write();
     h1_chi2_ndf_veto->Write();
+    h2_mu_vs_sigma_veto->Write();
+    h2_mu_vs_height_veto->Write();
+    h2_sigma_vs_height_veto->Write();
     output_file->cd();
     output_file->mkdir("waveforms_small_inTime");
     for (int i = 0; i < std::min(wave_count_small_inTime, 100); ++i) h1_wave_small_inTime[i]->Write();
