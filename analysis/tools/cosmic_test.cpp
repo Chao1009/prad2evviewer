@@ -51,6 +51,12 @@ int main(int argc, char *argv[])
     }
     if (optind < argc) input = argv[optind];
 
+    if (run_number < 0 || file_number < 0) {
+        std::cerr << "Usage: " << argv[0]
+                  << " -r <run_number> -n <file_count> [-j existing_json]\n";
+        return 1;
+    }
+
     TChain *cosmic_chain = new TChain("events");
     for(int i = 0; i<=file_number-1; i++){
         std::string filename = Form("prad_023%d.000%02d_raw.root", run_number, i);
@@ -62,8 +68,8 @@ int main(int argc, char *argv[])
         std::cerr << "Cannot find TTree 'events' \n";
         return 1;
     }
-    EventVars ev;
-    prad2::SetRawReadBranches(tree, ev);
+    auto ev = std::make_unique<EventVars>();
+    prad2::SetRawReadBranches(tree, *ev);
 
     //setup for reconstruction
     fdec::HyCalSystem hycal;
@@ -113,45 +119,45 @@ int main(int argc, char *argv[])
     int nentries = tree->GetEntries();
     for(int i = 0; i < nentries; i++){
         tree->GetEntry(i);
-        std::cout << "Event " << ev.event_num << ": nch = " << ev.nch << "\r" << std::flush;
-        if (ev.nch > 900) {
-                for (int j = 0; j < ev.nch; j++) {
-                    const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        std::cout << "Event " << ev->event_num << ": nch = " << ev->nch << "\r" << std::flush;
+        if (ev->nch > 900) {
+                for (int j = 0; j < ev->nch; j++) {
+                    const auto *mod = hycal.module_by_id(ev->module_id[j]);
                     if (!mod || !mod->is_hycal()) continue;
-                    if (ev.npeaks[j] <= 0) continue;
+                    if (ev->npeaks[j] <= 0) continue;
                     int module_id = mod->id-1000;
                     if (module_id >= 1 && module_id <= 1156){
-                        if(ev.npeaks[j] != 1) continue;
-                        lms_hist_module[module_id-1]->Fill(ev.peak_integral[j][0]);
-                        lms_height_hist_module[module_id-1]->Fill(ev.peak_height[j][0]);
+                        if(ev->npeaks[j] != 1) continue;
+                        lms_hist_module[module_id-1]->Fill(ev->peak_integral[j][0]);
+                        lms_height_hist_module[module_id-1]->Fill(ev->peak_height[j][0]);
                     }
                     for(int k = 0; k < LG_num; k++){
                         if(mod->id == LG_module_id[k]) {
-                            if(ev.npeaks[j] != 1) continue;
-                            lms_hist_LG_module[k]->Fill(ev.peak_integral[j][0]);
-                            lms_height_hist_LG_module[k]->Fill(ev.peak_height[j][0]);
+                            if(ev->npeaks[j] != 1) continue;
+                            lms_hist_LG_module[k]->Fill(ev->peak_integral[j][0]);
+                            lms_height_hist_LG_module[k]->Fill(ev->peak_height[j][0]);
                         }
                     }
                 }
         }
-        else if (ev.nch > 4 && ev.nch <= 70) {
-            for (int j = 0; j < ev.nch; j++) {
-                const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        else if (ev->nch > 4 && ev->nch <= 70) {
+            for (int j = 0; j < ev->nch; j++) {
+                const auto *mod = hycal.module_by_id(ev->module_id[j]);
                 if (!mod || !mod->is_hycal()) continue;
-                if (ev.npeaks[j] <= 0) continue;
+                if (ev->npeaks[j] <= 0) continue;
                 event_num_module[mod->id]++;
                 int module_id = mod->id-1000;
                 if (module_id >= 1 && module_id <= 1156){
-                    if(ev.npeaks[j] != 1) continue;
-                    peak_hist_module[module_id-1]->Fill(ev.peak_integral[j][0]);
-                    peakHeight_hist_module[module_id-1]->Fill(ev.peak_height[j][0]);
+                    if(ev->npeaks[j] != 1) continue;
+                    peak_hist_module[module_id-1]->Fill(ev->peak_integral[j][0]);
+                    peakHeight_hist_module[module_id-1]->Fill(ev->peak_height[j][0]);
                     cosmic_eventNum->Fill(mod->x, mod->y);
                 }
                 for(int k = 0; k < LG_num; k++){
                     if(mod->id == LG_module_id[k]) {
-                        if(ev.npeaks[j] != 1) continue;
-                        peak_hist_LG_module[k]->Fill(ev.peak_integral[j][0]);
-                        peakHeight_hist_LG_module[k]->Fill(ev.peak_height[j][0]);
+                        if(ev->npeaks[j] != 1) continue;
+                        peak_hist_LG_module[k]->Fill(ev->peak_integral[j][0]);
+                        peakHeight_hist_LG_module[k]->Fill(ev->peak_height[j][0]);
                         cosmic_eventNum_LG->Fill(mod->x, mod->y);
                     }
                 }

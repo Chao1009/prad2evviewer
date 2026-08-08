@@ -99,6 +99,13 @@ int main(int argc, char *argv[])
         }
     }
     if (endFileNum < startFileNum) endFileNum = startFileNum;
+
+    if (run_number.empty()) {
+        std::cerr << "Usage: " << argv[0]
+                  << " -r <run_number> [-s start_file] [-e end_file]"
+                  << " [-o output_dir] [-i evio_dir]\n";
+        return 1;
+    }
     
     TString dbDir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",

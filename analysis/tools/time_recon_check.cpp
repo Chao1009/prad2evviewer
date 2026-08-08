@@ -157,8 +157,8 @@ int main(int argc, char *argv[])
         tree.Add(file.c_str());
     }
 
-    EventVars ev;
-    prad2::SetRawReadBranches(&tree, ev);
+    auto ev = std::make_unique<EventVars>();
+    prad2::SetRawReadBranches(&tree, *ev);
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
@@ -298,59 +298,59 @@ int main(int argc, char *argv[])
         if (i % 10000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
 
         // assume you are selecting Mott-like events with a single cluster in the HyCal
-        if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
-        if (ev.nch > 70) continue; // channel numbers too high, likely not a clean event
+        if ((ev->trigger_bits & prad2::TBIT_sum) == 0) continue;
+        if (ev->nch > 70) continue; // channel numbers too high, likely not a clean event
 
         // Reconstruct clusters for this event.
         clusterer.Clear();
 
         // Per-event gain correction (time-series lookup by event number).
-        const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev.event_num));
+        const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
 
-        for (int j = 0; j < ev.nch; ++j) {
+        for (int j = 0; j < ev->nch; ++j) {
 
-            if (ev.module_id[j] >= 3001 && ev.module_id[j] <= 3004 && ev.npeaks[j] == 1) {
-                if (ev.peak_height[j][0] > 10 && ev.npeaks[j] == 1) {
-                    ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
+            if (ev->module_id[j] >= 3001 && ev->module_id[j] <= 3004 && ev->npeaks[j] == 1) {
+                if (ev->peak_height[j][0] > 10 && ev->npeaks[j] == 1) {
+                    ana.Analyze(ev->samples[j], ev->nsamples[j], wres);
                     h1_mu_veto->Fill(wres.peaks_fit[0].mu);
                     h1_sigma_veto->Fill(wres.peaks_fit[0].sigma);
                     h1_chi2_ndf_veto->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
                     h2_mu_vs_sigma_veto->Fill(wres.peaks_fit[0].mu, wres.peaks_fit[0].sigma);
-                    h2_mu_vs_height_veto->Fill(wres.peaks_fit[0].mu, ev.peak_height[j][0]);
-                    h2_sigma_vs_height_veto->Fill(wres.peaks_fit[0].sigma, ev.peak_height[j][0]);
+                    h2_mu_vs_height_veto->Fill(wres.peaks_fit[0].mu, ev->peak_height[j][0]);
+                    h2_sigma_vs_height_veto->Fill(wres.peaks_fit[0].sigma, ev->peak_height[j][0]);
                 }
                 // save the waveforms for veto modules
-                if (wave_count_veto_small < 100 && ev.peak_height[j][0] < 50) {
+                if (wave_count_veto_small < 100 && ev->peak_height[j][0] < 50) {
                     auto &wf = stored_wave_veto_small[wave_count_veto_small];
-                    const int ns = std::min<int>(static_cast<int>(ev.nsamples[j]), fdec::MAX_SAMPLES);
+                    const int ns = std::min<int>(static_cast<int>(ev->nsamples[j]), fdec::MAX_SAMPLES);
                     wf.nsamples = ns;
                     wf.dt = 0.0f;
-                    wf.peak_height = static_cast<int>(ev.peak_height[j][0]);
+                    wf.peak_height = static_cast<int>(ev->peak_height[j][0]);
                     for (int s = 0; s < ns; ++s) {
-                        wf.samples[s] = ev.samples[j][s];
+                        wf.samples[s] = ev->samples[j][s];
                         if (s < 100) {
-                            h1_wave_veto_small[wave_count_veto_small]->SetBinContent(s + 1, ev.samples[j][s]);
+                            h1_wave_veto_small[wave_count_veto_small]->SetBinContent(s + 1, ev->samples[j][s]);
                         }
                     }
                     wave_count_veto_small++;
                 }
-                if (wave_count_veto_big < 100 && ev.peak_height[j][0] >= 100) {
+                if (wave_count_veto_big < 100 && ev->peak_height[j][0] >= 100) {
                     auto &wf = stored_wave_veto_big[wave_count_veto_big];
-                    const int ns = std::min<int>(static_cast<int>(ev.nsamples[j]), fdec::MAX_SAMPLES);
+                    const int ns = std::min<int>(static_cast<int>(ev->nsamples[j]), fdec::MAX_SAMPLES);
                     wf.nsamples = ns;
                     wf.dt = 0.0f;
-                    wf.peak_height = static_cast<int>(ev.peak_height[j][0]);
+                    wf.peak_height = static_cast<int>(ev->peak_height[j][0]);
                     for (int s = 0; s < ns; ++s) {
-                        wf.samples[s] = ev.samples[j][s];
+                        wf.samples[s] = ev->samples[j][s];
                         if (s < 100) {
-                            h1_wave_veto_big[wave_count_veto_big]->SetBinContent(s + 1, ev.samples[j][s]);
+                            h1_wave_veto_big[wave_count_veto_big]->SetBinContent(s + 1, ev->samples[j][s]);
                         }
                     }
                     wave_count_veto_big++;
                 }
             }
 
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod) continue;
             if (!mod->is_pwo4()) continue;
 
@@ -366,11 +366,11 @@ int main(int argc, char *argv[])
             // window into the clusterer; the seed-anchored timing
             // coincidence cut is applied inside HyCalCluster, 
             // maximum 2 ns difference between pulses in a same cluster.
-            for (int p = 0; p < ev.npeaks[j]; ++p) {
-                float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
+            for (int p = 0; p < ev->npeaks[j]; ++p) {
+                float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
                 if (peak_time <= hc_win.lo) continue;
                 if (peak_time >= hc_win.hi) continue;
-                float adc = ev.peak_integral[j][p] * gain;
+                float adc = ev->peak_integral[j][p] * gain;
                 float energy = static_cast<float>(mod->energize(adc));
                 clusterer.AddHit(mod->index, energy, peak_time);
             }
@@ -402,8 +402,8 @@ int main(int argc, char *argv[])
 
         // loop over the hits in the cluster
         // Here go to the event by event analysis, add more analysis code or selection .etc here
-        for (int j = 0; j < ev.nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        for (int j = 0; j < ev->nch; ++j) {
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
             // Per-ID gain correction: average of three LMS channels.
@@ -415,18 +415,18 @@ int main(int argc, char *argv[])
 
             // select the seed module and its energy (require only one peak in seed module)
             if (mod->id == seed_id) {
-                if (ev.npeaks[j] != 1) {
+                if (ev->npeaks[j] != 1) {
                     seed_not_clean = true;
                     break;
                 }
-                float seed_energy = static_cast<float>(mod->energize(ev.peak_integral[j][0] * gain));
+                float seed_energy = static_cast<float>(mod->energize(ev->peak_integral[j][0] * gain));
             }
             // select the 1st layer of neighboring modules
             if (std::abs(mod->x - seed_mod->x) < mod->size_x * 1.5f &&
                 std::abs(mod->y - seed_mod->y) < mod->size_y * 1.5f && mod->id != seed_mod->id
-                && ev.npeaks[j] == 1 && ev.module_id[j] > 0) 
+                && ev->npeaks[j] == 1 && ev->module_id[j] > 0) 
             {
-                float peak_time = ev.peak_time[j][0] - time_offset;
+                float peak_time = ev->peak_time[j][0] - time_offset;
                 float dt = peak_time - hits[0].time;
                 const int mod_index = mod->index;
                 if (mod_index >= 0 && mod_index < static_cast<int>(module_total_counts.size())) {
@@ -436,60 +436,60 @@ int main(int argc, char *argv[])
                     }
                 }
                 h1_time_diff_seed->Fill(dt);
-                h2_height_vs_dtime->Fill(dt, ev.peak_height[j][0]);
-                if (dt > 4.0 && ev.peak_height[j][0] < 30) {
+                h2_height_vs_dtime->Fill(dt, ev->peak_height[j][0]);
+                if (dt > 4.0 && ev->peak_height[j][0] < 30) {
                     if (wave_count_small_outTime < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_small_outTime[wave_count_small_outTime];
-                        const int ns = std::min<int>(static_cast<int>(ev.nsamples[j]), fdec::MAX_SAMPLES);
+                        const int ns = std::min<int>(static_cast<int>(ev->nsamples[j]), fdec::MAX_SAMPLES);
                         wf.nsamples = ns;
                         wf.dt = dt;
-                        wf.peak_height = ev.peak_height[j][0];
+                        wf.peak_height = ev->peak_height[j][0];
                         for (int s = 0; s < ns; ++s) {
-                            wf.samples[s] = ev.samples[j][s];
+                            wf.samples[s] = ev->samples[j][s];
                             if (s < 100) {
-                                h1_wave_small_outTime[wave_count_small_outTime]->SetBinContent(s + 1, ev.samples[j][s]);
+                                h1_wave_small_outTime[wave_count_small_outTime]->SetBinContent(s + 1, ev->samples[j][s]);
                             }
                         }
                     }
                     wave_count_small_outTime++;
                 }
-                if (std::abs(dt) < dt_max && ev.peak_height[j][0] < 30) {
+                if (std::abs(dt) < dt_max && ev->peak_height[j][0] < 30) {
                     if (wave_count_small_inTime < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_small_inTime[wave_count_small_inTime];
-                        const int ns = std::min<int>(static_cast<int>(ev.nsamples[j]), fdec::MAX_SAMPLES);
+                        const int ns = std::min<int>(static_cast<int>(ev->nsamples[j]), fdec::MAX_SAMPLES);
                         wf.nsamples = ns;
                         wf.dt = dt;
-                        wf.peak_height = ev.peak_height[j][0];
+                        wf.peak_height = ev->peak_height[j][0];
                         for (int s = 0; s < ns; ++s) {
-                            wf.samples[s] = ev.samples[j][s];
+                            wf.samples[s] = ev->samples[j][s];
                             if (s < 100) {
-                                h1_wave_small_inTime[wave_count_small_inTime]->SetBinContent(s + 1, ev.samples[j][s]);
+                                h1_wave_small_inTime[wave_count_small_inTime]->SetBinContent(s + 1, ev->samples[j][s]);
                             }
                         }
                     }
                     wave_count_small_inTime++;
                 }
-                if (ev.peak_height[j][0] > 10) {
-                    ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
+                if (ev->peak_height[j][0] > 10) {
+                    ana.Analyze(ev->samples[j], ev->nsamples[j], wres);
                     h1_mu_crystal->Fill(wres.peaks_fit[0].mu);
                     h1_sigma_crystal->Fill(wres.peaks_fit[0].sigma);
                     h1_chi2_ndf_crystal->Fill(wres.peaks_fit[0].chi2_per_dof/wres.peaks_fit[0].A);
                     h2_mu_vs_sigma_crystal->Fill(wres.peaks_fit[0].mu, wres.peaks_fit[0].sigma);
-                    h2_mu_vs_height_crystal->Fill(wres.peaks_fit[0].mu, ev.peak_height[j][0]);
-                    h2_sigma_vs_height_crystal->Fill(wres.peaks_fit[0].sigma, ev.peak_height[j][0]);
+                    h2_mu_vs_height_crystal->Fill(wres.peaks_fit[0].mu, ev->peak_height[j][0]);
+                    h2_sigma_vs_height_crystal->Fill(wres.peaks_fit[0].sigma, ev->peak_height[j][0]);
                     if (wave_count_big < 100) {
                         // Store the waveforms
                         auto &wf = stored_wave_big[wave_count_big];
-                        const int ns = std::min<int>(static_cast<int>(ev.nsamples[j]), fdec::MAX_SAMPLES);
+                        const int ns = std::min<int>(static_cast<int>(ev->nsamples[j]), fdec::MAX_SAMPLES);
                         wf.nsamples = ns;
                         wf.dt = dt;
-                        wf.peak_height = ev.peak_height[j][0];
+                        wf.peak_height = ev->peak_height[j][0];
                         for (int s = 0; s < ns; ++s) {
-                            wf.samples[s] = ev.samples[j][s];
+                            wf.samples[s] = ev->samples[j][s];
                             if (s < 100) {
-                                h1_wave_big[wave_count_big]->SetBinContent(s + 1, ev.samples[j][s]);
+                                h1_wave_big[wave_count_big]->SetBinContent(s + 1, ev->samples[j][s]);
                             }
                         }
                     }

@@ -143,8 +143,8 @@ int main(int argc, char *argv[])
         tree.Add(file.c_str());
     }
 
-    EventVars ev;
-    prad2::SetRawReadBranches(&tree, ev);
+    auto ev = std::make_unique<EventVars>();
+    prad2::SetRawReadBranches(&tree, *ev);
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
@@ -234,32 +234,32 @@ int main(int argc, char *argv[])
         if (i >= max_events && max_events > 0) break;
         if (i % 10000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
 
-        if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
-        if (ev.nch > 70) continue;
+        if ((ev->trigger_bits & prad2::TBIT_sum) == 0) continue;
+        if (ev->nch > 70) continue;
 
         // Reconstruct clusters for this event.
         clusterer.Clear();
-        for (int j = 0; j < ev.nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        for (int j = 0; j < ev->nch; ++j) {
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
             float adc      = 0.f;
             int bestIdx = -1;
             float bestHeight = -1.f;
-            for(int p = 0; p < ev.npeaks[j]; ++p){
-                if(ev.peak_time[j][p] > gRunConfig.hc_time_win_lo &&
-                    ev.peak_time[j][p] < gRunConfig.hc_time_win_hi) {
-                    if(ev.peak_integral[j][p] > bestHeight) {
-                        bestHeight = ev.peak_integral[j][p];
+            for(int p = 0; p < ev->npeaks[j]; ++p){
+                if(ev->peak_time[j][p] > gRunConfig.hc_time_win_lo &&
+                    ev->peak_time[j][p] < gRunConfig.hc_time_win_hi) {
+                    if(ev->peak_integral[j][p] > bestHeight) {
+                        bestHeight = ev->peak_integral[j][p];
                         bestIdx = p;
                     }
                 }
             }
             if (bestIdx < 0) continue;
-            adc = ev.peak_integral[j][bestIdx] * ev.gain_factor[j]; // apply gain factor
+            adc = ev->peak_integral[j][bestIdx] * ev->gain_factor[j]; // apply gain factor
             float energy = (mod->cal_factor > 0)
                 ? static_cast<float>(mod->energize(adc)) : 0.f;
-            clusterer.AddHit(mod->index, energy, ev.peak_time[j][bestIdx]);
+            clusterer.AddHit(mod->index, energy, ev->peak_time[j][bestIdx]);
         }
         clusterer.FormClusters();
         std::vector<fdec::ClusterHit> hits;
@@ -278,13 +278,13 @@ int main(int argc, char *argv[])
         // For every pair of modules that are both present in the event and are
         // neighbors, compute dt = t_i - t_j and fill the corresponding histogram.
         std::map<int, float> event_times;
-        for (int j = 0; j < ev.nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        for (int j = 0; j < ev->nch; ++j) {
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
-            if (ev.npeaks[j] != 1) continue;
-            if (ev.peak_height[j][0] < 100) continue;
-            if (validation) event_times[mod->index] = ev.peak_time[j][0] - mod->time_offset;
-            else event_times[mod->index] = ev.peak_time[j][0];
+            if (ev->npeaks[j] != 1) continue;
+            if (ev->peak_height[j][0] < 100) continue;
+            if (validation) event_times[mod->index] = ev->peak_time[j][0] - mod->time_offset;
+            else event_times[mod->index] = ev->peak_time[j][0];
             // Fill the seed-module delta-t histogram for checking.
             // The seed module is the one with the highest energy in this event.
             // all the other modules in the 5 by 5 block region are considered to get the delta-t distribution.

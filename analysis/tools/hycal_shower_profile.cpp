@@ -134,8 +134,8 @@ int main(int argc, char *argv[])
         tree.Add(file.c_str());
     }
 
-    EventVars ev;
-    prad2::SetRawReadBranches(&tree, ev);
+    auto ev = std::make_unique<EventVars>();
+    prad2::SetRawReadBranches(&tree, *ev);
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
@@ -213,17 +213,17 @@ int main(int argc, char *argv[])
         if (i % 10000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
 
         // assume you are selecting Mott-like events with a single cluster in the HyCal
-        if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
-        if (ev.nch > 70) continue; // channel numbers too high, likely not a clean event
+        if ((ev->trigger_bits & prad2::TBIT_sum) == 0) continue;
+        if (ev->nch > 70) continue; // channel numbers too high, likely not a clean event
 
         // Reconstruct clusters for this event.
         clusterer.Clear();
 
         // Per-event gain correction (time-series lookup by event number).
-        const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev.event_num));
+        const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
 
-        for (int j = 0; j < ev.nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        for (int j = 0; j < ev->nch; ++j) {
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
             // Per-ID gain correction: average of three LMS channels.
@@ -238,11 +238,11 @@ int main(int argc, char *argv[])
             // window into the clusterer; the seed-anchored timing
             // coincidence cut is applied inside HyCalCluster, 
             // maximum 2 ns difference between pulses in a same cluster.
-            for (int p = 0; p < ev.npeaks[j]; ++p) {
-                float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
+            for (int p = 0; p < ev->npeaks[j]; ++p) {
+                float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
                 if (peak_time <= hc_win.lo) continue;
                 if (peak_time >= hc_win.hi) continue;
-                float adc = ev.peak_integral[j][p] * gain;
+                float adc = ev->peak_integral[j][p] * gain;
                 float energy = static_cast<float>(mod->energize(adc));
                 clusterer.AddHit(mod->index, energy, peak_time);
             }
@@ -276,8 +276,8 @@ int main(int argc, char *argv[])
 
         // loop over the hits in the cluster
         // Here go to the event by event analysis, add more analysis code or selection .etc here
-        for (int j = 0; j < ev.nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        for (int j = 0; j < ev->nch; ++j) {
+            const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
             // Per-ID gain correction: average of three LMS channels.
@@ -289,11 +289,11 @@ int main(int argc, char *argv[])
 
             // select the seed module and its energy (require only one peak in seed module)
             if (mod->id == seed_id) {
-                if (ev.npeaks[j] != 1) {
+                if (ev->npeaks[j] != 1) {
                     seed_not_clean = true;
                     break;
                 }
-                float seed_energy = static_cast<float>(mod->energize(ev.peak_integral[j][0] * gain));
+                float seed_energy = static_cast<float>(mod->energize(ev->peak_integral[j][0] * gain));
                 h1_seed_energy->Fill(seed_energy);
                 h2_cluster_vs_seed_energy->Fill(seed_energy, hits[0].energy);
             }
@@ -302,13 +302,13 @@ int main(int argc, char *argv[])
                 std::abs(mod->y - seed_mod->y) < mod->size_y * 1.5f && mod->id != seed_mod->id) 
             {
                 // check if this module has a peak in seed time window
-                for (int p = 0; p < ev.npeaks[j]; ++p) {
-                    float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
+                for (int p = 0; p < ev->npeaks[j]; ++p) {
+                    float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
                     float dt = peak_time - hits[0].time;
                     h1_time_diff_seed->Fill(dt);
                     if (std::abs(dt) < dt_max) {
                         n1st_layer++;
-                        float energy = static_cast<float>(mod->energize(ev.peak_integral[j][p] * gain));
+                        float energy = static_cast<float>(mod->energize(ev->peak_integral[j][p] * gain));
                         // fill the histogram for shower profile analysis
 
                         break; // only count one peak per module
@@ -322,13 +322,13 @@ int main(int argc, char *argv[])
                 std::abs(mod->y - seed_mod->y) > mod->size_y * 1.5f) && mod->id != seed_mod->id) 
             {
                 // check if this module has a peak in seed time window
-                for (int p = 0; p < ev.npeaks[j]; ++p) {
-                    float peak_time = ev.peak_time[j][p] - time_offset; // apply module time offset
+                for (int p = 0; p < ev->npeaks[j]; ++p) {
+                    float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
                     float dt = peak_time - hits[0].time;
                     h1_time_diff_seed->Fill(dt);
                     if (std::abs(dt) < dt_max) {
                         n2nd_layer++;
-                        float energy = static_cast<float>(mod->energize(ev.peak_integral[j][p] * gain));
+                        float energy = static_cast<float>(mod->energize(ev->peak_integral[j][p] * gain));
                         // fill the histogram for shower profile analysis
 
                         break; // only count one peak per module
