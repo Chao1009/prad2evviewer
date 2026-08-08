@@ -630,6 +630,33 @@ struct ReportPoint {
                                   // phase 5, stays 0 when split is off.
 };
 
+inline void reset_recon_optional(prad2::ReconEventData &ev)
+{
+    // Keep optional blocks safe when an input file omits some branches.
+    ev.matchNum = 0;
+    std::fill(std::begin(ev.matchFlag), std::end(ev.matchFlag), 0);
+    ev.clear_match_lists();
+
+    ev.veto_nch = 0;
+    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
+
+    ev.lms_nch = 0;
+    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
+
+    ev.vtp_cl_n = 0;
+    ev.rf_n_a = 0;
+    ev.rf_n_b = 0;
+
+    ev.ssp_raw.clear();
+    ev.vtp_roc_tags.clear();
+    ev.vtp_nwords.clear();
+    ev.vtp_words.clear();
+
+    std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
+    std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
+              std::numeric_limits<float>::quiet_NaN());
+}
+
 // ── Main pipeline ────────────────────────────────────────────────────────
 
 bool detect_event_tree(const std::string &path, std::string &name)
@@ -1414,6 +1441,8 @@ int run(const std::vector<std::string> &input_files,
                 TTree *t = f ? dynamic_cast<TTree *>(f->Get("recon")) : nullptr;
                 if (t) {
                     prad2::SetReconReadBranches(t, ev);
+                    prad2::ReconMatchVectorBindings match_bind;
+                    prad2::BindReconMatchVectorBranches(t, ev, match_bind);
                     std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
                     if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
                     std::vector<uint32_t> *p_vtp_roc = &ev.vtp_roc_tags, *p_vtp_nw = &ev.vtp_nwords, *p_vtp_w = &ev.vtp_words;
@@ -1423,7 +1452,7 @@ int run(const std::vector<std::string> &input_files,
                     Long64_t n = t->GetEntries();
                     if (!split_active) stats.n_in += n;
                     for (Long64_t i = 0; i < n; ++i) {
-                        ev.ssp_raw.clear(); ev.vtp_roc_tags.clear(); ev.vtp_nwords.clear(); ev.vtp_words.clear();
+                        reset_recon_optional(ev);
                         t->GetEntry(i);
                         if (split_active && in_span(s, ev.event_num)) ++stats.n_in;
                         if (is_kept(s, ev.event_num)) {
@@ -1709,6 +1738,8 @@ int run(const std::vector<std::string> &input_files,
             TTree *t = dynamic_cast<TTree *>(f->Get("recon"));
             if (!t) continue;
             prad2::SetReconReadBranches(t, ev);
+            prad2::ReconMatchVectorBindings match_bind;
+            prad2::BindReconMatchVectorBranches(t, ev, match_bind);
             std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
             if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
             // vtp_* vector branches — same pointer-to-pointer dance as
@@ -1723,10 +1754,7 @@ int run(const std::vector<std::string> &input_files,
             Long64_t n = t->GetEntries();
             if (!split_active) n_in += n;       // split off: every event counts
             for (Long64_t i = 0; i < n; ++i) {
-                ev.ssp_raw.clear();
-                ev.vtp_roc_tags.clear();
-                ev.vtp_nwords.clear();
-                ev.vtp_words.clear();
+                reset_recon_optional(ev);
                 t->GetEntry(i);
                 if (split_active && in_span(s, ev.event_num)) ++n_in;
                 if (is_kept(s, ev.event_num)) {

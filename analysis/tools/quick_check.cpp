@@ -559,8 +559,9 @@ static bool processFile(const std::string &path,
                 }
             }
 
-            //loop over GEM matched hits find e-p events
-            for(int j = 0; j < ev.matchNum; j++) {
+            // loop over GEM matched hits find e-p events
+            const int n_match = std::clamp(ev.matchNum, 0, prad2::kMaxClusters);
+            for (int j = 0; j < n_match; ++j) {
                 float x = ev.mHit_gx[j][1];
                 float y = ev.mHit_gy[j][1];
                 float z = ev.mHit_gz[j][1];
@@ -589,6 +590,10 @@ static bool processFile(const std::string &path,
                 float z[2] = {ev.mHit_gz[0][1], ev.mHit_gz[1][1]};
                 float E[2] = {ev.mHit_E[0], ev.mHit_E[1]};
                 int idx[2] = {ev.mHit_cl_index[0], ev.mHit_cl_index[1]};
+                if (idx[0] < 0 || idx[1] < 0
+                    || idx[0] >= ev.n_clusters || idx[1] >= ev.n_clusters
+                    || idx[0] >= prad2::kMaxClusters || idx[1] >= prad2::kMaxClusters)
+                    continue;
                 float time[2] = {ev.cl_time[idx[0]], ev.cl_time[idx[1]]};
                 int mod_id[2] = {ev.cl_center[idx[0]], ev.cl_center[idx[1]]};
                 float scale[2] = {ev.mHit_z[0] / z[0], ev.mHit_z[1] / z[1]};
@@ -772,8 +777,10 @@ static bool processFile(const std::string &path,
 
             std::vector<Hits> hits_candidate;
             out.h_3cl_cluster_gem_num->Fill(ev.matchNum);
-            for (int j = 0; j < ev.matchNum; j++) {
+            const int n_match_3cl = std::clamp(ev.matchNum, 0, prad2::kMaxClusters);
+            for (int j = 0; j < n_match_3cl; ++j) {
                 int idx = ev.mHit_cl_index[j];
+                if (idx < 0 || idx >= ev.n_clusters || idx >= prad2::kMaxClusters) continue;
                 if(ev.cl_nblocks[idx] <= 2) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kInnerBound)) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kOuterBound)) continue;
@@ -798,6 +805,7 @@ static bool processFile(const std::string &path,
             std::vector<Hits> hits;
             std::sort(hits_candidate.begin(), hits_candidate.end(),
                       [](const Hits &a, const Hits &b) { return a.E > b.E; });
+            if (hits_candidate.empty()) continue;
             hits.push_back(hits_candidate[0]);
             // loop over the candidates to check the timing correlation,
             // should +-2ns around the highest energy matched cluster which is the 1st in the candidates vector
