@@ -11,6 +11,8 @@
 //   -j  number of threads (default: 4)
 //   -c  DAQ configuration file
 //   -d  HyCal map file (default: <db>/hycal_map.json)
+//   -x  run the X17 reconstruction path
+//   -z  override GEM zero-suppression threshold (sigma)
 //   --Ecalib  enable Ecalib mode, throw out extra branches to reduce output size
 //   --noWaveform  disable saving raw waveform samples
 //=============================================================================
@@ -165,13 +167,15 @@ int main(int argc, char *argv[])
     TClass::GetClass("TFile");
     TClass::GetClass("TBranch");
 
-    std::string daq_config, daq_map, output_dir;
+    std::string daq_config, daq_map, output_dir, recon_config;
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
     bool Ecalib = false;
     bool noWaveform = false;
     int num_threads = 4;
+    float zerosup_override = 5.f;
+    bool x17 = false;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -180,7 +184,7 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:p", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:p:x:z:", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f': max_files = std::atoi(optarg); break;
@@ -189,6 +193,8 @@ int main(int argc, char *argv[])
             case 'd': daq_map = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
             case 'p': peaks = true; break;
+            case 'x': x17 = true; break;
+            case 'z': zerosup_override = std::atof(optarg); break;
             case 1000: Ecalib = true; break;
             case 1001: noWaveform = true; break;
             default: break;
@@ -212,6 +218,8 @@ int main(int argc, char *argv[])
         std::cerr << "  -d  HyCal map JSON (default: <db>/hycal_map.json)\n";
         std::cerr << "  -n  max events per file (default: all)\n";
         std::cerr << "  -p  include peak analysis branches (soft + firmware DAQ-mode)\n";
+        std::cerr << "  -x  run the X17 reconstruction path\n";
+        std::cerr << "  -z  override GEM zero-suppression threshold (sigma)\n";
         return 1;
     }
     int num_files = static_cast<int>(evio_files.size());
@@ -242,6 +250,11 @@ int main(int argc, char *argv[])
     int run_num = get_run_int(evio_files[0]);
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
+    if(recon_config.empty()) {
+        if(x17) recon_config = db_dir + "/reconstruction_config_x17.json";
+        else recon_config = db_dir + "/reconstruction_config.json";
+    }
+
     // shared work queue: atomic index into file list
     std::atomic<int> next_file{0};
     std::mutex io_mtx;
@@ -263,8 +276,8 @@ int main(int argc, char *argv[])
             if (idx >= num_files) break;
 
             std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.Process(evio_files[idx], out, gRunConfig, db_dir, max_events, peaks, daq_config,
-                Ecalib, noWaveform);
+            bool ok = replay.Process(evio_files[idx], out, gRunConfig, db_dir, recon_config, max_events, peaks, daq_config,
+                zerosup_override, Ecalib, noWaveform);
 
             std::lock_guard<std::mutex> lk(io_mtx);
             if (ok) {

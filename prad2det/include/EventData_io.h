@@ -154,15 +154,19 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
                      Form("hycal.daq_peak_quality[hycal.nch][%d]/b",  fdec::MAX_PEAKS));
     }
 
-    // GEM strip data.
+    // GEM strip hit data (processed by GemSystem).
     if (!Ecalib){
-        tree->Branch("gem.nch",         &ev.gem_nch,     "gem.nch/I");
-        tree->Branch("gem.mpd_crate",   ev.mpd_crate,    "gem.mpd_crate[gem.nch]/b");
-        tree->Branch("gem.mpd_fiber",   ev.mpd_fiber,    "gem.mpd_fiber[gem.nch]/b");
-        tree->Branch("gem.apv",         ev.apv,          "gem.apv[gem.nch]/b");
-        tree->Branch("gem.strip",       ev.strip,        "gem.strip[gem.nch]/b");
-        tree->Branch("gem.ssp_samples", ev.ssp_samples,
-                    Form("gem.ssp_samples[gem.nch][%d]/S", ssp::SSP_TIME_SAMPLES));
+        tree->Branch("gem.nch",    &ev.gem_nch,    "gem.nch/I");
+        tree->Branch("gem.det",     ev.gem_det,    "gem.det[gem.nch]/b");
+        tree->Branch("gem.plane",   ev.gem_plane,  "gem.plane[gem.nch]/b");
+        tree->Branch("gem.strip",   ev.gem_strip,  "gem.strip[gem.nch]/I");
+        tree->Branch("gem.charge",  ev.gem_charge, "gem.charge[gem.nch]/F");
+        tree->Branch("gem.max_tb",  ev.gem_max_tb, "gem.max_tb[gem.nch]/S");
+        tree->Branch("gem.pos",     ev.gem_pos,    "gem.pos[gem.nch]/F");
+        tree->Branch("gem.xtalk",   ev.gem_xtalk,  "gem.xtalk[gem.nch]/b");
+        if (!noWaveform)
+            tree->Branch("gem.ts_adc", ev.gem_ts_adc,
+                         Form("gem.ts_adc[gem.nch][%d]/F", ssp::SSP_TIME_SAMPLES));
 
         // Raw 0xE10C SSP trigger bank words.
         tree->Branch("ssp_raw", &ev.ssp_raw);
@@ -239,12 +243,15 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 
     s.has_gem = (tree->GetBranch("gem.nch") != nullptr);
     if (s.has_gem) {
-        bind("gem.nch",         &ev.gem_nch);
-        bind("gem.mpd_crate",   ev.mpd_crate);
-        bind("gem.mpd_fiber",   ev.mpd_fiber);
-        bind("gem.apv",         ev.apv);
-        bind("gem.strip",       ev.strip);
-        bind("gem.ssp_samples", ev.ssp_samples);
+        bind("gem.nch",    &ev.gem_nch);
+        bind("gem.det",     ev.gem_det);
+        bind("gem.plane",   ev.gem_plane);
+        bind("gem.strip",   ev.gem_strip);
+        bind("gem.charge",  ev.gem_charge);
+        bind("gem.max_tb",  ev.gem_max_tb);
+        bind("gem.pos",     ev.gem_pos);
+        bind("gem.xtalk",   ev.gem_xtalk);
+        bind("gem.ts_adc",  ev.gem_ts_adc);
     }
 
     // ssp_raw is std::vector<uint32_t>: ROOT needs a stable

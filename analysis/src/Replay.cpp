@@ -225,28 +225,56 @@ void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode 
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
-                     const std::string &db_dir,
+                     const std::string &db_dir, const std::string &recon_config_file,
                      int max_events, bool write_peaks , const std::string &daq_config_file,
-                     bool Ecalib, bool noWaveform)
-{
-    // build ROC tag → crate index mapping from DAQ config JSON
-    std::unordered_map<int, int> roc_to_crate;
-    if (!daq_config_file.empty()) {
-        std::cout << "Loading DAQ config from " << daq_config_file << "\n";
-        std::ifstream dcf(daq_config_file);
-        if (dcf.is_open()) {
-            auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
-            if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
-                for (auto &entry : dcj["roc_tags"]) {
-                    int tag   = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
-                    int crate = entry.at("crate").get<int>();
-                    roc_to_crate[tag] = crate;
-                }
-            }
-        }
+                     const float zerosup_override,bool Ecalib, bool noWaveform)
+{   
+    // Detectors: PRad-II flows through PipelineBuilder so the wiring stays in
+    // one place (see prad2det/include/PipelineBuilder.h).  PRad-1 keeps its
+    // hand-wired path because the builder is PRad-II-shaped (no GEM, different
+    // hycal map, ADC1881M pedestals).
+    fdec::HyCalSystem                 hycal;
+    gem::GemSystem                    gem_sys;
+    fdec::ClusterConfig               cluster_cfg;
+    prad2::HyCalTimeCuts              hc_time_cuts;
+    prad2::HyCalRfOffsets             hc_rf_offsets;
+    std::unordered_map<int, int>      roc_to_crate;
+    
+    // PRad-II: hand off to the canonical PipelineBuilder.  daq_cfg_ moves
+    // through the builder (which then attaches map paths) and comes back
+    // populated with everything the per-event loop needs.
+    std::string hycal_map_override = daq_cfg_.hycal_map_file;
+    std::string gem_map_override   = daq_cfg_.gem_map_file;
+
+    prad2::Pipeline pipeline = prad2::PipelineBuilder()
+        .set_recon_config(recon_config_file)
+        .set_database_dir(db_dir)
+        .set_loaded_daq_config(std::move(daq_cfg_))
+        .set_daq_config(daq_config_file)        // logging only
+        .set_hycal_map(std::move(hycal_map_override))
+        .set_gem_map(std::move(gem_map_override))
+        .set_gem_pedestal("")         // empty falls back to RunConfig default
+        .set_run_number_from_evio(input_evio)
+        .set_log_stream(&std::cerr)
+        .build();
+
+    daq_cfg_         = std::move(pipeline.daq_cfg);
+    hycal            = std::move(pipeline.hycal);
+    gem_sys          = std::move(pipeline.gem);
+    cluster_cfg      = pipeline.hycal_cluster_cfg;
+    hc_time_cuts     = std::move(pipeline.hycal_time_cuts);
+    hc_rf_offsets    = std::move(pipeline.hycal_rf_offsets);
+
+    // ROC→crate map from the same daq_cfg the builder consumed.
+    for (const auto &re : daq_cfg_.roc_tags) {
+        if (re.crate < 0) continue;
+        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
+        roc_to_crate[re.tag] = re.crate;
     }
-    else {
-        std::cerr << "No DAQ config file provided, ROC tag to crate mapping will be unavailable.\n";
+
+    if (zerosup_override >= 0.f) {
+        gem_sys.SetZeroSupThreshold(zerosup_override);
+        std::cerr << "Zero-sup : " << zerosup_override << " sigma (override)\n";
     }
 
     evc::EvChannel ch;
@@ -529,31 +557,28 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             }
             ev->nch = nch;
 
-            // decode GEM SSP data
+            // decode and process GEM SSP data via GemSystem
+            gem_sys.Clear();
+            gem_sys.ProcessEvent(*ssp_evt);
             int gem_ch = 0;
-            for (int m = 0; m < ssp_evt->nmpds; ++m) {
-                auto &mpd = ssp_evt->mpds[m];
-                if (!mpd.present) continue;
-                for (int a = 0; a < ssp::MAX_APVS_PER_MPD; ++a) {
-                    auto &apv = mpd.apvs[a];
-                    if (!apv.present) continue;
-                    int idx = -1; // find APV index in GemSystem if needed
-                    for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s) {
-                        if (!apv.hasStrip(s)) continue;
-                        if (gem_ch >= prad2::kMaxGemStrips) continue;
-                        
-                        ev->mpd_crate[gem_ch] = mpd.crate_id;
-                        ev->mpd_fiber[gem_ch] = mpd.mpd_id;
-                        ev->apv[gem_ch]       = a;
-                        ev->strip[gem_ch]     = s;
-                        for (int t = 0; t < ssp::SSP_TIME_SAMPLES; t++)
-                            ev->ssp_samples[gem_ch][t] = apv.strips[s][t];
-
-                        gem_ch++;
+            for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+                for (int p = 0; p < 2; ++p) {
+                    for (const auto &h : gem_sys.GetPlaneHits(d, p)) {
+                        if (gem_ch >= prad2::kMaxGemStrips) break;
+                        ev->gem_det[gem_ch]   = static_cast<uint8_t>(d);
+                        ev->gem_plane[gem_ch] = static_cast<uint8_t>(p);
+                        ev->gem_strip[gem_ch] = h.strip;
+                        ev->gem_charge[gem_ch] = h.charge;
+                        ev->gem_max_tb[gem_ch] = h.max_timebin;
+                        ev->gem_pos[gem_ch]   = h.position;
+                        ev->gem_xtalk[gem_ch] = h.cross_talk ? 1u : 0u;
+                        for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t)
+                            ev->gem_ts_adc[gem_ch][t] = t < (int)h.ts_adc.size() ? h.ts_adc[t] : 0.f;
+                        ++gem_ch;
                     }
                 }
             }
-            ev->gem_nch = gem_ch; // total channels = HyCal + GEM
+            ev->gem_nch = gem_ch;
             tree->Fill();
             total++;
 

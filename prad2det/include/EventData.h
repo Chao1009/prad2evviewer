@@ -142,13 +142,16 @@ struct RawEventData {
     int     daq_peak_fine[kMaxChannels][fdec::MAX_PEAKS]     = {};
     uint8_t daq_peak_quality[kMaxChannels][fdec::MAX_PEAKS]  = {};
 
-    // GEM per-strip data
-    int        gem_nch = 0;
-    uint8_t mpd_crate[kMaxGemStrips]  = {};
-    uint8_t mpd_fiber[kMaxGemStrips]  = {};
-    uint8_t apv[kMaxGemStrips]        = {};
-    uint8_t strip[kMaxGemStrips]      = {};
-    int16_t ssp_samples[kMaxGemStrips][ssp::SSP_TIME_SAMPLES] = {};
+    // GEM strip hit data (after GemSystem: ZS, pedestal, common-mode subtraction)
+    int     gem_nch                                           = 0;
+    uint8_t gem_det[kMaxGemStrips]                            = {};  // detector ID
+    uint8_t gem_plane[kMaxGemStrips]                          = {};  // 0=X, 1=Y
+    int32_t gem_strip[kMaxGemStrips]                          = {};  // plane-wise strip number
+    float   gem_charge[kMaxGemStrips]                         = {};  // max charge across time bins
+    int16_t gem_max_tb[kMaxGemStrips]                         = {};  // timebin of max charge
+    float   gem_pos[kMaxGemStrips]                            = {};  // physical position (mm)
+    uint8_t gem_xtalk[kMaxGemStrips]                          = {};  // cross-talk flag
+    float   gem_ts_adc[kMaxGemStrips][ssp::SSP_TIME_SAMPLES]  = {};  // per-timebin ADC values
 
     // Raw 0xE10C SSP trigger bank words (one variable-length entry per event)
     std::vector<uint32_t> ssp_raw;

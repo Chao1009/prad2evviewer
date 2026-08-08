@@ -61,9 +61,9 @@ public:
     // Convert an EVIO file to a ROOT file with a TTree.
     // max_events <= 0 means process all. peaks=true adds peak branches.
     bool Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
-                 const std::string &db_dir,
+                 const std::string &db_dir, const std::string &recon_config_file,
                  int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "",
-                 bool Ecalib = false, bool noWaveform = false);
+                 const float zerosup_override = 5.f, bool Ecalib = false, bool noWaveform = false);
 
     bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                             const std::string &db_dir, const std::string &recon_config_file,
