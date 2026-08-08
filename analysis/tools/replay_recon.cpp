@@ -16,6 +16,7 @@
 //   -z  zero-suppression threshold override
 //   -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)
 //   -x17  run the X17 reconstruction path (default without a mode option: PRad2)
+//   -x17_full  run the X17 full reconstruction path
 //=============================================================================
 
 #include "Replay.h"
@@ -188,12 +189,13 @@ int main(int argc, char *argv[])
     TClass::GetClass("TBranch");
 
     std::string recon_config,daq_config, daq_map, gem_ped_file, output_dir;
-    float zerosup_override = 0.f;
+    float zerosup_override = 5.f;
     int max_files = -1;
     int num_threads = 4;
     int merge_batch_size = 62;
     bool prad1 = false;
     bool x17 = false;
+    bool x17_blind = true;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -204,6 +206,7 @@ int main(int argc, char *argv[])
     static const option long_options[] = {
         {"prad1", no_argument, nullptr, 1001},
         {"x17", no_argument, nullptr, 1000},
+        {"x17_full", no_argument, nullptr, 1002},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -222,6 +225,7 @@ int main(int argc, char *argv[])
             case 'm': merge_batch_size = std::atoi(optarg); break;
             case 1000: x17 = true; break;
             case 1001: prad1 = true; break;
+            case 1002: x17_blind = false; break; // -x17_full
         }
     }
 
@@ -248,11 +252,18 @@ int main(int argc, char *argv[])
         std::cerr << "  default  PRad2 mode\n";
         std::cerr << "  -prad1  PRad-1 mode (no GEM)\n";
         std::cerr << "  -x17  run the X17 reconstruction path\n";
+        std::cerr << "  -x17_full  run the X17 full reconstruction path\n";
         return 1;
     }
     if (prad1 && x17) {
         std::cerr << "Options -prad1 and -x17 cannot be used together\n";
         return 1;
+    }
+    if (x17 && !x17_blind) {
+        std::cout << "X17 full reconstruction mode enabled\n";
+    }
+    if (!x17 && x17_blind) {
+        std::cout << "X17 blind mode should be used with the -x17 option\n";
     }
     std::cout << "Replay mode: " << (x17 ? "X17" : prad1 ? "PRad1" : "PRad2") << "\n";
     if(recon_config.empty()) {
@@ -308,11 +319,8 @@ int main(int argc, char *argv[])
             if (idx >= num_files) break;
 
             std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = x17
-                ? replay.ProcessWithReconX17(evio_files[idx], out, gRunConfig, db_dir, recon_config,
-                                             daq_config, gem_ped_file, zerosup_override)
-                : replay.ProcessWithRecon(evio_files[idx], out, gRunConfig, db_dir, recon_config,
-                                          daq_config, gem_ped_file, zerosup_override, prad1);
+            bool ok = replay.ProcessWithRecon(evio_files[idx], out, gRunConfig, db_dir, recon_config,
+                                              daq_config, gem_ped_file, zerosup_override, prad1, x17, x17_blind);
             output_files[idx] = out;
             if (ok)
                 output_ok[idx] = 1;

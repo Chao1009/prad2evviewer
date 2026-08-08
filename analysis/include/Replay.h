@@ -68,13 +68,8 @@ public:
     bool ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                             const std::string &db_dir, const std::string &recon_config_file,
                             const std::string &daq_config_file = "",
-                            const std::string &gem_ped_file = "", float zerosup_override = 0.f,
-                            bool prad1 = false);
-    
-    bool ProcessWithReconX17(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
-                            const std::string &db_dir, const std::string &recon_config_file,
-                            const std::string &daq_config_file = "",
-                            const std::string &gem_ped_file = "", float zerosup_override = 0.f);
+                            const std::string &gem_ped_file = "", float zerosup_override = 5.f,
+                            bool prad1 = false, bool x17 = false, bool x17_blind = false);
     
     bool Process_LMSgainFactor(const std::string &input_evio, const std::string &output_root,
                                 const std::string &db_dir, const std::string &daq_config_file);

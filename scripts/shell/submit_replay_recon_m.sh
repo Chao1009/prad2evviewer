@@ -126,7 +126,7 @@ else
 fi
 
 while true; do
-    read -rp "Enter replay mode (prad2, x17, or prad1) [prad2]: " REPLAY_MODE_INPUT
+    read -rp "Enter replay mode (prad2, x17, x17_full, or prad1) [prad2]: " REPLAY_MODE_INPUT
     REPLAY_MODE_INPUT="${REPLAY_MODE_INPUT,,}"
     case "${REPLAY_MODE_INPUT}" in
         ""|prad2|-prad2)
@@ -139,13 +139,18 @@ while true; do
             REPLAY_MODE_NAME="X17"
             break
             ;;
+        x17_full|-x17_full)
+            REPLAY_MODE_INPUT_FOR_ONE="x17_full"
+            REPLAY_MODE_NAME="X17 Full"
+            break
+            ;;
         prad1|-prad1)
             REPLAY_MODE_INPUT_FOR_ONE="prad1"
             REPLAY_MODE_NAME="PRad1"
             break
             ;;
         *)
-            echo "ERROR: enter prad2, x17, or prad1."
+            echo "ERROR: enter prad2, x17, x17_full, or prad1."
             ;;
     esac
 done
