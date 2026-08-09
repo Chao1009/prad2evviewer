@@ -1432,6 +1432,7 @@ int run(const std::vector<std::string> &input_files,
                 }
                 out->cd();
                 out_ev->Write();
+                out_ev->ResetBranchAddresses();
             } else {
                 prad2::ReconEventData ev;
                 out->cd();
@@ -1464,6 +1465,7 @@ int run(const std::vector<std::string> &input_files,
                 }
                 out->cd();
                 out_ev->Write();
+                out_ev->ResetBranchAddresses();
             }
             std::vector<size_t> one{fi};
             write_slow_trees(*out, one, s, split_active);
@@ -1727,6 +1729,7 @@ int run(const std::vector<std::string> &input_files,
         }
         out->cd();
         out_ev->Write();
+        out_ev->ResetBranchAddresses();
     } else {
         prad2::ReconEventData ev;
         out->cd();
@@ -1766,6 +1769,7 @@ int run(const std::vector<std::string> &input_files,
         }
         out->cd();
         out_ev->Write();
+        out_ev->ResetBranchAddresses();
     }
 
     // Concatenate scalers tree from every input.  Adds a `good` boolean

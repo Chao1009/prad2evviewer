@@ -728,7 +728,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     // create TTree and branches for reconstructed data
     TTree *tree = new TTree("recon", "PRad2 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev);
+    setupReconBranches(tree, *ev, x17);
 
     // Side trees — see Process() above for the design.  The recon path
     // writes the same scalers / epics records so analysis joining keeps
