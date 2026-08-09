@@ -157,6 +157,7 @@ struct QuickResult {
     std::unique_ptr<TH1F> h_gamma_pty;
     std::unique_ptr<TH2F> h2_gamma_Pt;
     std::unique_ptr<TH1F> h_gamma_tDiff;
+    std::unique_ptr<TH1F> h_gamma_dphi;
 
     std::unique_ptr<TH1F> h_gamma_totalE_pass;
     std::unique_ptr<TH2F> h2_gamma_hits_pass;
@@ -173,6 +174,9 @@ struct QuickResult {
     std::unique_ptr<TH2F> h2_gamma_E_gamma_vs_E_electron_pass;
     std::unique_ptr<TH2F> h2_gamma_Etheta_gamma_pass;
     std::unique_ptr<TH2F> h2_gamma_Etheta_electron_pass;
+    std::unique_ptr<TH1F> h_gamma_dphi_pass;
+
+    std::unique_ptr<TH1F> h_gamma_mass_pass_dphi;
 
     std::unique_ptr<TH1F> h_3cl_cluster_gem_num;
     std::unique_ptr<TH1F> h_3cl_totalE_gem;
@@ -198,6 +202,12 @@ struct QuickResult {
     std::unique_ptr<TH2F> h2_3cl_Pt_gem_cut;
     std::unique_ptr<TH1F> h_3cl_tDiff_gem_cut;
     std::unique_ptr<TH1F> h_3cl_dphi_gem_cut;
+
+    std::unique_ptr<TH1F> h_3cl_mass_gem_cut_dphi;
+    std::unique_ptr<TH1F> h_3cl_mass_gem_cut_dphi_moller;
+    std::unique_ptr<TH1F> h_3cl_mass_gem_cut_dphi_moller_1comb;
+    std::unique_ptr<TH2F> h2_3cl_E_angle_gem_cut_dphi_moller;
+    std::unique_ptr<TH2F> h2_3cl_E_angle_gem_cut_dphi_moller_1comb;
 };
 
 static void detach(TH1 *h)
@@ -287,6 +297,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "Gamma Channel Pt hycal;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_gamma_tDiff = std::make_unique<TH1F>("gamma_tDiff",
         "Gamma Channel Time Difference;Time Difference (ns);Counts", 200, 0, 20);
+    r->h_gamma_dphi = std::make_unique<TH1F>("gamma_dphi",
+        "Gamma Channel Delta Phi;Delta Phi (deg);Counts", 360, 0, 360);
 
     r->h2_gamma_hits_pass = std::make_unique<TH2F>("gamma_hits_pass",
         "Gamma Channel Hit positions hycal - Pass;X (mm);Y (mm)", 720, -360, 360, 720, -360, 360);
@@ -306,6 +318,8 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "Gamma Channel Pty - Pass;Pty (MeV);Counts", 200, -50, 50);
     r->h2_gamma_Pt_pass = std::make_unique<TH2F>("gamma_Pt_pass",
         "Gamma Channel Pt hycal - Pass;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
+    r->h_gamma_dphi_pass = std::make_unique<TH1F>("gamma_dphi_pass",
+        "Gamma Channel Delta Phi - Pass;Delta Phi (deg);Counts", 360, 0, 360);
     r->h_gamma_tDiff_pass = std::make_unique<TH1F>("gamma_tDiff_pass",
         "Gamma Channel Time Difference - Pass;Time Difference (ns);Counts", 200, 0, 20);
     r->h_gamma_E_gamma_pass = std::make_unique<TH1F>("gamma_E_gamma_pass",
@@ -318,6 +332,9 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         "Gamma Cluster Energy vs Angle - Pass;Theta (deg);Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
     r->h2_gamma_Etheta_electron_pass = std::make_unique<TH2F>("gamma_Etheta_electron_pass",
         "Electron Cluster Energy vs Angle - Pass;Theta (deg);Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
+
+    r->h_gamma_mass_pass_dphi = std::make_unique<TH1F>("gamma_mass_pass_dphi",
+        "Gamma Channel Mass - Pass & Delta Phi Cut;Mass (MeV);Counts", 1000, 0, 100);
 
     // use gem matching to cut the 3-cluster events
     r->h_3cl_cluster_gem_num = std::make_unique<TH1F>( "3cl_cluster_gem_num",
@@ -339,7 +356,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_3cl_pty_gem = std::make_unique<TH1F>("3cl_pty_gem",
         "3-Cluster Pty with GEM matching;Pty (MeV);Counts", 200, -50, 50);
     r->h_3cl_tDiff_gem = std::make_unique<TH1F>("3cl_tDiff_gem",
-        "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 200, 0, 20);
+        "3-Cluster Time Difference with GEM matching;Time Difference (ns);Counts", 80*2, -4, 4);
     r->h_3cl_dphi_gem = std::make_unique<TH1F>("3cl_dphi_gem",
         "3-Cluster Phi Difference with GEM matching;#Delta#phi (deg);Counts", 360*3, 0, 360);
     r->h2_3cl_Pt_gem = std::make_unique<TH2F>("3cl_Pt_gem",
@@ -364,9 +381,20 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_3cl_Pt_gem_cut = std::make_unique<TH2F>("3cl_Pt_gem_cut",
         "3-Cluster Pt hycal with GEM matching - Cut;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_3cl_tDiff_gem_cut = std::make_unique<TH1F>("3cl_tDiff_gem_cut",
-        "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 200, 0, 20);
+        "3-Cluster Time Difference with GEM matching - Cut;Time Difference (ns);Counts", 80*2, -4, 4);
     r->h_3cl_dphi_gem_cut = std::make_unique<TH1F>("3cl_dphi_gem_cut",
         "3-Cluster Phi Difference with GEM matching - Cut;#Delta#phi (deg);Counts", 360, 0, 360);
+
+    r->h_3cl_mass_gem_cut_dphi = std::make_unique<TH1F>("3cl_mass_gem_cut_dphi",
+        "3-Cluster Inv. Mass with GEM matching - Cut, dphi;Inv. Mass (MeV);Counts", 1000, 0, 100);
+    r->h_3cl_mass_gem_cut_dphi_moller = std::make_unique<TH1F>("3cl_mass_gem_cut_dphi_moller",
+        "3-Cluster Inv. Mass with GEM matching - Cut, dphi, moller;Inv. Mass (MeV);Counts", 1000, 0, 100);
+    r->h_3cl_mass_gem_cut_dphi_moller_1comb = std::make_unique<TH1F>("3cl_mass_gem_cut_dphi_moller_1comb",
+        "3-Cluster Inv. Mass with GEM matching - Cut, dphi, moller, 1comb;Inv. Mass (MeV);Counts", 1000, 0, 100);
+    r->h2_3cl_E_angle_gem_cut_dphi_moller_1comb = std::make_unique<TH2F>("3cl_E_angle_gem_cut_dphi_moller_1comb",
+        "3-Cluster E vs Angle with GEM matching - Cut, dphi, moller, 1comb;Theta (deg); Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
+    r->h2_3cl_E_angle_gem_cut_dphi_moller = std::make_unique<TH2F>("3cl_E_angle_gem_cut_dphi_moller",
+        "3-Cluster E vs Angle with GEM matching - Cut, dphi, moller;Theta (deg); Energy (MeV)", 80, 0, 4, 7500, 0, 5000);
 
     detach(r->hit_pos.get());
     detach(r->h_1cl.get());
@@ -405,6 +433,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h_gamma_pty.get());
     detach(r->h2_gamma_Pt.get());
     detach(r->h_gamma_tDiff.get());
+    detach(r->h_gamma_dphi.get());
 
     detach(r->h2_gamma_hits_pass.get());
     detach(r->h2_gamma_E_angle_pass.get());
@@ -421,6 +450,9 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h2_gamma_E_gamma_vs_E_electron_pass.get());
     detach(r->h2_gamma_Etheta_gamma_pass.get());
     detach(r->h2_gamma_Etheta_electron_pass.get());
+
+    detach(r->h_gamma_dphi_pass.get());
+    detach(r->h_gamma_mass_pass_dphi.get());
     
     detach(r->h_3cl_cluster_gem_num.get());
     detach(r->h2_3cl_hits_gem.get());
@@ -445,6 +477,12 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     detach(r->h2_3cl_Pt_gem_cut.get());
     detach(r->h_3cl_tDiff_gem_cut.get());
     detach(r->h_3cl_dphi_gem_cut.get());
+
+    detach(r->h_3cl_mass_gem_cut_dphi.get());
+    detach(r->h_3cl_mass_gem_cut_dphi_moller.get());
+    detach(r->h_3cl_mass_gem_cut_dphi_moller_1comb.get());
+    detach(r->h2_3cl_E_angle_gem_cut_dphi_moller_1comb.get());
+    detach(r->h2_3cl_E_angle_gem_cut_dphi_moller.get());
     return r;
 }
 
@@ -643,126 +681,136 @@ static bool processFile(const std::string &path,
         if (is_3cluster) {
             //try to find the gamma decay channel,
             //firstly try on the clean events(only 3 clusters on HyCal)
-            if(ev.n_clusters == 3) {
+            if(ev.n_clusters == 3 && ev.matchNum == 1) {
                 // code to analyze 3-cluster events for gamma decay channel goes here
-                float x[3], y[3], z[3], E[3], t[3], theta[3];
-                x[0] = ev.cl_x[0]; y[0] = ev.cl_y[0]; z[0] = ev.cl_z[0];
-                x[1] = ev.cl_x[1]; y[1] = ev.cl_y[1]; z[1] = ev.cl_z[1];
-                x[2] = ev.cl_x[2]; y[2] = ev.cl_y[2]; z[2] = ev.cl_z[2];
-                E[0] = ev.cl_energy[0]; E[1] = ev.cl_energy[1]; E[2] = ev.cl_energy[2];
+                int e_idx = ev.mHit_cl_index[0];
+                float E_e = ev.cl_energy[e_idx];
+                float x_e = ev.mHit_gx[0][1];
+                float y_e = ev.mHit_gy[0][1];
+                float z_e = ev.mHit_gz[0][1];
+                float t_e = ev.cl_time[e_idx];
 
-                t[0] = ev.cl_time[0]; t[1] = ev.cl_time[1]; t[2] = ev.cl_time[2];
-                float tDiff = std::max({std::fabs(t[0] - t[1]), std::fabs(t[0] - t[2]), std::fabs(t[1] - t[2])});
-
-                bool nblocks_ok = true;
-                if(ev.cl_nblocks[0] <= 2 || ev.cl_nblocks[1] <= 2 || ev.cl_nblocks[2] <= 2)
-                    nblocks_ok = false;
-
-                theta[0] = std::atan2(std::sqrt(x[0]*x[0] + y[0]*y[0]), z[0]) * 180.f / M_PI;
-                theta[1] = std::atan2(std::sqrt(x[1]*x[1] + y[1]*y[1]), z[1]) * 180.f / M_PI;
-                theta[2] = std::atan2(std::sqrt(x[2]*x[2] + y[2]*y[2]), z[2]) * 180.f / M_PI;
-
-                // check the GEM matching, the 2 gamma clusters should not have matching on both of 2 layers
-                // the one electron cluster should have matching on both layers
-                bool gem_ok = true;
-                int gamma_count = 0, electron_count = 0;
-                int electron_index = -1, gamma_index1 = -1, gamma_index2 = -1;
-                for (int i = 0; i < 3; i++) {
-                    bool has_downstream = ev.matchFlag[i] & 1u << 0 || ev.matchFlag[i] & 1u << 1;
-                    bool has_upstream = ev.matchFlag[i] & 1u << 2 || ev.matchFlag[i] & 1u << 3;
-                    if (has_downstream && has_upstream) {
-                        electron_index = i;
-                        electron_count++;
-                    } else if (!has_downstream && !has_upstream) {
-                        if (gamma_index1 == -1) gamma_index1 = i;
-                        else gamma_index2 = i;
-                        gamma_count++;
-                    } else {
-                        gem_ok = false;
-                    }
+                float E_g[2], x_g[2], y_g[2], z_g[2], t_g[2];
+                int gamma_idx = 0;
+                for (int j = 0; j < 3; j++) {
+                    if ( j == e_idx) continue;
+                    E_g[gamma_idx] = ev.cl_energy[j];
+                    x_g[gamma_idx] = ev.mHit_gx[j][1];
+                    y_g[gamma_idx] = ev.mHit_gy[j][1];
+                    z_g[gamma_idx] = ev.mHit_gz[j][1];
+                    t_g[gamma_idx] = ev.cl_time[j];
+                    gamma_idx++;
                 }
-                if (gamma_count != 2 || electron_count != 1) gem_ok = false;
 
-                if (gem_ok) {
-                    // Pt x and Pt y calculation
-                    auto get_pt = [](float x, float y, float z, float energy, bool is_gamma) {
-                        float mass = M_ELECTRON;
-                        if (is_gamma) mass = 0.f;
-                        const float norm = std::sqrt(x*x + y*y + z*z);
-                        if (norm <= 0.f || energy < mass)
-                            return std::pair<float, float>{0.f, 0.f};
-                        const float p = std::sqrt(std::max(
-                            0.f, energy*energy - mass*mass));
-                        return std::pair<float, float>{p*x/norm, p*y/norm};
-                    };
-                    const auto [pxe, pye] = get_pt(x[electron_index], y[electron_index], z[electron_index], E[electron_index], false);
-                    const auto [pxgamma1, pygamma1] = get_pt(x[gamma_index1], y[gamma_index1], z[gamma_index1], E[gamma_index1], true);
-                    const auto [pxgamma2, pygamma2] = get_pt(x[gamma_index2], y[gamma_index2], z[gamma_index2], E[gamma_index2], true);
-                    const float ptx = pxe + pxgamma1 + pxgamma2;
-                    const float pty = pye + pygamma1 + pygamma2;
+                float Sigma_e = 0.035*sqrt(E_e *1000.f);
+                float Sigma[2] = {0.035*sqrt(E_g[0] *1000.f), 0.035*sqrt(E_g[1] *1000.f)};
+                float totalSigma = std::sqrt(Sigma_e*Sigma_e + Sigma[0]*Sigma[0] + Sigma[1]*Sigma[1]);
+                float totalE = E_e + E_g[0] + E_g[1];
 
-                    float mass = electronPairInvariantMass(x[gamma_index1], y[gamma_index1], z[gamma_index1], E[gamma_index1],
-                        x[gamma_index2], y[gamma_index2], z[gamma_index2], E[gamma_index2], true);
+                float theta_g[2], theta_e;
+                theta_e = std::atan2(std::sqrt(x_e*x_e + y_e*y_e), z_e) * 180.f / M_PI;
+                theta_g[0] = std::atan2(std::sqrt(x_g[0]*x_g[0] + y_g[0]*y_g[0]), z_g[0]) * 180.f / M_PI;
+                theta_g[1] = std::atan2(std::sqrt(x_g[1]*x_g[1] + y_g[1]*y_g[1]), z_g[1]) * 180.f / M_PI;
 
-                    bool time_cut = false, totalE_cut = false, Pt_cut = false, clusterE_cut = false, inHyCal_cut = false;
+                float tDiff = std::max({std::fabs(t_e - t_g[0]), std::fabs(t_e - t_g[1]), std::fabs(t_g[0] - t_g[1])});
+                float dt[2] = {t_g[0] - t_e, t_g[1] - t_e};
 
-                    if(tDiff < 2.f)
-                        time_cut = true;
-                    if(E[gamma_index1] + E[gamma_index2] + E[electron_index] < Ebeam + 250.f && E[gamma_index1] + E[gamma_index2] + E[electron_index] > 0.8 * Ebeam)
-                        totalE_cut = true;
-                    if(std::sqrt(ptx*ptx + pty*pty) < 5.f)
-                        Pt_cut = true;
-                    if(inHyCal(x[gamma_index1], y[gamma_index1]) && inHyCal(x[gamma_index2], y[gamma_index2]) && inHyCal(x[electron_index], y[electron_index]))
-                        inHyCal_cut = true;
-                    if(E[gamma_index1] > 70.f && E[gamma_index2] > 70.f && E[electron_index] > 70.f && E[gamma_index1] < 0.75 * Ebeam && E[gamma_index2] < 0.75 * Ebeam && E[electron_index] < 0.75 * Ebeam)
-                        clusterE_cut = true;
+                // 4-momentum calculation for each single hit and gamma pair hits
+                TLorentzVector p_e, p_g[2], p_pair;
+                const float norm = std::sqrt(x_e * x_e + y_e * y_e + z_e * z_e);
+                const float p_mag = std::sqrt(E_e * E_e - M_ELECTRON * M_ELECTRON);
+                const float ux = x_e / norm;
+                const float uy = y_e / norm;
+                const float uz = z_e / norm;
+                p_e = TLorentzVector(ux * p_mag, uy * p_mag, uz * p_mag, E_e);
+
+                for (int i = 0; i < 2; ++i) {
+                    const float norm_g = std::sqrt(x_g[i] * x_g[i] + y_g[i] * y_g[i] + z_g[i] * z_g[i]);
+                    const float p_mag_g = E_g[i];
+                    const float ux_g = x_g[i] / norm_g;
+                    const float uy_g = y_g[i] / norm_g;
+                    const float uz_g = z_g[i] / norm_g;
+                    p_g[i] = TLorentzVector(ux_g * p_mag_g, uy_g * p_mag_g, uz_g * p_mag_g, E_g[i]);
+                }
+                p_pair = p_g[0] + p_g[1];
+
+                // Pt x and Pt y calculation using TLorentzVector
+                float ptx = p_e.Px() + p_g[0].Px() + p_g[1].Px();
+                float pty = p_e.Py() + p_g[0].Py() + p_g[1].Py();
+
+                float mass = (p_g[0] + p_g[1]).M();
+
+                // get the azimuthal angles for each single hit and the pair of gamma hits
+                float phi_e = std::atan2(p_e.Py(), p_e.Px()) * 180.f / M_PI;
+                float phi_g[2] = {
+                    std::atan2(p_g[0].Py(), p_g[0].Px()) * 180.f / M_PI,
+                    std::atan2(p_g[1].Py(), p_g[1].Px()) * 180.f / M_PI
+                };
+                float phi_pair = std::atan2(p_pair.Py(), p_pair.Px()) * 180.f / M_PI;
+
+                // Phi difference for the pair of gamma hits and the electron hit
+                float dphi = std::fabs(phi_pair - phi_e);
+
+                bool nblocks_ok = (ev.cl_nblocks[0] > 2 && ev.cl_nblocks[1] > 2 && ev.cl_nblocks[2] > 2);
+                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * totalSigma;
+                bool Pt_pass = std::sqrt(ptx * ptx + pty * pty) < 5.0f;
+                bool pos_pass = inHyCal(x_e, y_e) && inHyCal(x_g[0], y_g[0]) && inHyCal(x_g[1], y_g[1]);
+                bool time_pass = tDiff < 2.f;
+                bool clusterE_pass = E_e > 70.f && E_g[0] > 70.f && E_g[1] > 70.f && E_e < 0.75 * Ebeam && E_g[0] < 0.75 * Ebeam && E_g[1] < 0.75 * Ebeam;
+                bool dphi_pass = std::fabs(dphi - 180.f) < 10.0f;
                         
-                    out.h_gamma_totalE->Fill(E[gamma_index1] + E[gamma_index2] + E[electron_index]);
-                    out.h_gamma_ptx->Fill(ptx);
-                    out.h_gamma_pty->Fill(pty);
-                    out.h2_gamma_Pt->Fill(ptx, pty);
-                    out.h_gamma_tDiff->Fill(tDiff);
-                    out.h_gamma_E->Fill(E[gamma_index1]);
-                    out.h_gamma_E->Fill(E[gamma_index2]);
-                    out.h_gamma_E->Fill(E[electron_index]);
-                    out.h2_gamma_hits->Fill(x[gamma_index1], y[gamma_index1]);
-                    out.h2_gamma_hits->Fill(x[gamma_index2], y[gamma_index2]);
-                    out.h2_gamma_hits->Fill(x[electron_index], y[electron_index]);
-                    out.h2_gamma_E_angle->Fill(theta[gamma_index1], E[gamma_index1]);
-                    out.h2_gamma_E_angle->Fill(theta[gamma_index2], E[gamma_index2]);
-                    out.h2_gamma_E_angle->Fill(theta[electron_index], E[electron_index]);
-                    out.h_gamma_yield->Fill(theta[gamma_index1]);
-                    out.h_gamma_yield->Fill(theta[gamma_index2]);
-                    out.h_gamma_yield->Fill(theta[electron_index]);
-                    if (std::isfinite(mass)) out.h_gamma_mass->Fill(mass);
+                out.h_gamma_totalE->Fill(totalE);
+                out.h_gamma_ptx->Fill(ptx);
+                out.h_gamma_pty->Fill(pty);
+                out.h2_gamma_Pt->Fill(ptx, pty);
+                out.h_gamma_tDiff->Fill(dt[0]);
+                out.h_gamma_tDiff->Fill(dt[1]);
+                out.h_gamma_E->Fill(E_g[0]);
+                out.h_gamma_E->Fill(E_g[1]);
+                out.h_gamma_E->Fill(E_e);
+                out.h2_gamma_hits->Fill(x_g[0], y_g[0]);
+                out.h2_gamma_hits->Fill(x_g[1], y_g[1]);
+                out.h2_gamma_hits->Fill(x_e, y_e);
+                out.h2_gamma_E_angle->Fill(theta_g[0], E_g[0]);
+                out.h2_gamma_E_angle->Fill(theta_g[1], E_g[1]);
+                out.h2_gamma_E_angle->Fill(theta_e, E_e);
+                out.h_gamma_yield->Fill(theta_g[0]);
+                out.h_gamma_yield->Fill(theta_g[1]);
+                out.h_gamma_yield->Fill(theta_e);
+                out.h_gamma_mass->Fill(mass);
+                out.h_gamma_dphi->Fill(dphi);
                     
-                    if(nblocks_ok && totalE_cut && time_cut && Pt_cut && inHyCal_cut && clusterE_cut) {
-                        out.h_gamma_totalE_pass->Fill(E[gamma_index1] + E[gamma_index2] + E[electron_index]);
-                        out.h_gamma_ptx_pass->Fill(ptx);
-                        out.h_gamma_pty_pass->Fill(pty);
-                        out.h2_gamma_Pt_pass->Fill(ptx, pty);
-                        out.h_gamma_tDiff_pass->Fill(tDiff);
-                        out.h_gamma_E_pass->Fill(E[gamma_index1]);
-                        out.h_gamma_E_pass->Fill(E[gamma_index2]);
-                        out.h_gamma_E_pass->Fill(E[electron_index]);
-                        out.h2_gamma_hits_pass->Fill(x[gamma_index1], y[gamma_index1]);
-                        out.h2_gamma_hits_pass->Fill(x[gamma_index2], y[gamma_index2]);
-                        out.h2_gamma_hits_pass->Fill(x[electron_index], y[electron_index]);
-                        out.h2_gamma_E_angle_pass->Fill(theta[gamma_index1], E[gamma_index1]);
-                        out.h2_gamma_E_angle_pass->Fill(theta[gamma_index2], E[gamma_index2]);
-                        out.h2_gamma_E_angle_pass->Fill(theta[electron_index], E[electron_index]);
-                        out.h_gamma_yield_pass->Fill(theta[gamma_index1]);
-                        out.h_gamma_yield_pass->Fill(theta[gamma_index2]);
-                        out.h_gamma_yield_pass->Fill(theta[electron_index]);
-                        out.h_gamma_E_gamma_pass->Fill(E[gamma_index1]);
-                        out.h_gamma_E_gamma_pass->Fill(E[gamma_index2]);
-                        out.h_gamma_E_electron_pass->Fill(E[electron_index]);
-                        out.h2_gamma_E_gamma_vs_E_electron_pass->Fill(E[electron_index], E[gamma_index1]);
-                        out.h2_gamma_E_gamma_vs_E_electron_pass->Fill(E[electron_index], E[gamma_index2]);
-                        out.h2_gamma_Etheta_gamma_pass->Fill(theta[gamma_index1], E[gamma_index1]);
-                        out.h2_gamma_Etheta_gamma_pass->Fill(theta[gamma_index2], E[gamma_index2]);
-                        out.h2_gamma_Etheta_electron_pass->Fill(theta[electron_index], E[electron_index]);
-                        if (std::isfinite(mass)) out.h_gamma_mass_pass->Fill(mass);
+                if(nblocks_ok && totalE_pass && time_pass && Pt_pass && pos_pass && clusterE_pass) {
+                    out.h_gamma_totalE_pass->Fill(totalE);
+                    out.h_gamma_ptx_pass->Fill(ptx);
+                    out.h_gamma_pty_pass->Fill(pty);
+                    out.h2_gamma_Pt_pass->Fill(ptx, pty);
+                    out.h_gamma_tDiff_pass->Fill(dt[0]);
+                    out.h_gamma_tDiff_pass->Fill(dt[1]);
+                    out.h_gamma_E_pass->Fill(E_g[0]);
+                    out.h_gamma_E_pass->Fill(E_g[1]);
+                    out.h_gamma_E_pass->Fill(E_e);
+                    out.h2_gamma_hits_pass->Fill(x_g[0], y_g[0]);
+                    out.h2_gamma_hits_pass->Fill(x_g[1], y_g[1]);
+                    out.h2_gamma_hits_pass->Fill(x_e, y_e);
+                    out.h2_gamma_E_angle_pass->Fill(theta_g[0], E_g[0]);
+                    out.h2_gamma_E_angle_pass->Fill(theta_g[1], E_g[1]);
+                    out.h2_gamma_E_angle_pass->Fill(theta_e, E_e);
+                    out.h_gamma_yield_pass->Fill(theta_g[0]);
+                    out.h_gamma_yield_pass->Fill(theta_g[1]);
+                    out.h_gamma_yield_pass->Fill(theta_e);
+                    out.h_gamma_E_gamma_pass->Fill(E_g[0]);
+                    out.h_gamma_E_gamma_pass->Fill(E_g[1]);
+                    out.h_gamma_E_electron_pass->Fill(E_e);
+                    out.h2_gamma_E_gamma_vs_E_electron_pass->Fill(E_e, E_g[0]);
+                    out.h2_gamma_E_gamma_vs_E_electron_pass->Fill(E_e, E_g[1]);
+                    out.h2_gamma_Etheta_gamma_pass->Fill(theta_g[0], E_g[0]);
+                    out.h2_gamma_Etheta_gamma_pass->Fill(theta_g[1], E_g[1]);
+                    out.h2_gamma_Etheta_electron_pass->Fill(theta_e, E_e);
+                    out.h_gamma_mass_pass->Fill(mass);
+                    out.h_gamma_dphi_pass->Fill(dphi);
+                    if (dphi_pass) {
+                        out.h_gamma_mass_pass_dphi->Fill(mass);
                     }
                 }
             }
@@ -817,6 +865,8 @@ static bool processFile(const std::string &path,
             if(hits.size() == 3){
                 float dt[2] = {hits[1].t - hits[0].t, hits[2].t - hits[0].t};
                 float totalE = hits[0].E + hits[1].E + hits[2].E;
+                float Sigma[3] = {0.035*sqrt(hits[0].E *1000.f), 0.035*sqrt(hits[1].E *1000.f), 0.035*sqrt(hits[2].E *1000.f)};
+                float totalSigma = std::sqrt(Sigma[0]*Sigma[0] + Sigma[1]*Sigma[1] + Sigma[2]*Sigma[2]);
                 float theta[3] = {std::atan2(std::sqrt(hits[0].x * hits[0].x + hits[0].y * hits[0].y), hits[0].z) * 180.f / M_PI,
                                   std::atan2(std::sqrt(hits[1].x * hits[1].x + hits[1].y * hits[1].y), hits[1].z) * 180.f / M_PI,
                                   std::atan2(std::sqrt(hits[2].x * hits[2].x + hits[2].y * hits[2].y), hits[2].z) * 180.f / M_PI};
@@ -866,7 +916,24 @@ static bool processFile(const std::string &path,
                 mass[1] = p02.M();
                 mass[2] = p01.M();
 
-                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * 0.035 * sqrt(Ebeam * 1000.f);
+                // judge if it's Moller event plus an accidental smaller energy cluster
+                // For the 2 combinations of biggest energy hit with the ohter 2 hits,
+                // check (total energy, enrgy angle correlation, coplanarity) to identify Moller events
+                bool Moller_event = false;
+                for (int j = 1; j < 3; ++j) {
+                    if (fabs(hits[0].E + hits[j].E - Ebeam) < 3. * sqrt(Sigma[0]*Sigma[0] + Sigma[j]*Sigma[j])) {
+                        if (fabs(phi[0] - phi[j]) - 180.0 < 10.0) {
+                            float expectE1 = physics.ExpectedEnergy(theta[0], Ebeam, "ee");
+                            float expectE2 = physics.ExpectedEnergy(theta[j], Ebeam, "ee");
+                            if (fabs(hits[0].E - expectE1) < 3. * 0.035 * sqrt(expectE1 * 1000.0) && 
+                                fabs(hits[j].E - expectE2) < 3. * 0.035 * sqrt(expectE2 * 1000.0)) {
+                                Moller_event = true;
+                            }
+                        }
+                    }
+                }
+
+                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * totalSigma;
                 bool Pt_pass = std::sqrt(ptx * ptx + pty * pty) < 5.0f;
                 bool pos_pass = inHyCal(hits[0].x, hits[0].y) && inHyCal(hits[1].x, hits[1].y) && inHyCal(hits[2].x, hits[2].y);
 
@@ -898,7 +965,17 @@ static bool processFile(const std::string &path,
                         out.h2_3cl_E_angle_gem_cut->Fill(theta[j], hits[j].E);
                         out.h_3cl_yield_gem_cut->Fill(theta[j]);
                         out.h_3cl_mass_gem_cut->Fill(mass[j]);
+                        if(fabs(dphi[j] -180.0) < 10.0) out.h_3cl_mass_gem_cut_dphi->Fill(mass[j]);
+                        if(fabs(dphi[j] -180.0) < 10.0 && !Moller_event) {
+                            out.h_3cl_mass_gem_cut_dphi_moller->Fill(mass[j]);
+                            out.h2_3cl_E_angle_gem_cut_dphi_moller->Fill(theta[j], hits[j].E);
+                        }
                         out.h_3cl_dphi_gem_cut->Fill(dphi[j]);
+                    }
+                    if (fabs(dphi[2] - 180.0) < 10.0 && !Moller_event) {
+                        out.h_3cl_mass_gem_cut_dphi_moller_1comb->Fill(mass[2]);
+                        out.h2_3cl_E_angle_gem_cut_dphi_moller_1comb->Fill(theta[0], hits[0].E);
+                        out.h2_3cl_E_angle_gem_cut_dphi_moller_1comb->Fill(theta[1], hits[1].E);
                     }
                 }
             }
@@ -946,6 +1023,7 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h_gamma_pty->Add(src.h_gamma_pty.get());
     dst.h2_gamma_Pt->Add(src.h2_gamma_Pt.get());
     dst.h_gamma_tDiff->Add(src.h_gamma_tDiff.get());
+    dst.h_gamma_dphi->Add(src.h_gamma_dphi.get());
 
     dst.h_gamma_totalE_pass->Add(src.h_gamma_totalE_pass.get());
     dst.h2_gamma_hits_pass->Add(src.h2_gamma_hits_pass.get());
@@ -962,6 +1040,8 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h2_gamma_E_gamma_vs_E_electron_pass->Add(src.h2_gamma_E_gamma_vs_E_electron_pass.get());
     dst.h2_gamma_Etheta_gamma_pass->Add(src.h2_gamma_Etheta_gamma_pass.get());
     dst.h2_gamma_Etheta_electron_pass->Add(src.h2_gamma_Etheta_electron_pass.get());
+    dst.h_gamma_dphi_pass->Add(src.h_gamma_dphi_pass.get());
+    dst.h_gamma_mass_pass_dphi->Add(src.h_gamma_mass_pass_dphi.get());
 
     // X17 three-cluster histograms with GEM matching.
     dst.h_3cl_cluster_gem_num->Add(src.h_3cl_cluster_gem_num.get());
@@ -988,6 +1068,11 @@ static void mergeResult(QuickResult &dst, const QuickResult &src, fdec::HyCalSys
     dst.h2_3cl_Pt_gem_cut->Add(src.h2_3cl_Pt_gem_cut.get());
     dst.h_3cl_tDiff_gem_cut->Add(src.h_3cl_tDiff_gem_cut.get());
     dst.h_3cl_dphi_gem_cut->Add(src.h_3cl_dphi_gem_cut.get());
+    dst.h_3cl_mass_gem_cut_dphi->Add(src.h_3cl_mass_gem_cut_dphi.get());
+    dst.h_3cl_mass_gem_cut_dphi_moller->Add(src.h_3cl_mass_gem_cut_dphi_moller.get());
+    dst.h_3cl_mass_gem_cut_dphi_moller_1comb->Add(src.h_3cl_mass_gem_cut_dphi_moller_1comb.get());
+    dst.h2_3cl_E_angle_gem_cut_dphi_moller->Add(src.h2_3cl_E_angle_gem_cut_dphi_moller.get());
+    dst.h2_3cl_E_angle_gem_cut_dphi_moller_1comb->Add(src.h2_3cl_E_angle_gem_cut_dphi_moller_1comb.get());
     dst.physics->GetEnergyVsModuleHist()->Add(src.physics->GetEnergyVsModuleHist());
     dst.physics->GetEnergyVsThetaHist()->Add(src.physics->GetEnergyVsThetaHist());
     dst.physics->GetMollerPhiDiffHist()->Add(src.physics->GetMollerPhiDiffHist());
@@ -1168,6 +1253,7 @@ int main(int argc, char *argv[])
     merged->h_gamma_pty->Write();
     merged->h2_gamma_Pt->Write();
     merged->h_gamma_tDiff->Write();
+    merged->h_gamma_dphi->Write();
 
     outfile.cd();
     outfile.mkdir("x17_gamma_pass"); outfile.cd("x17_gamma_pass");
@@ -1186,6 +1272,8 @@ int main(int argc, char *argv[])
     merged->h2_gamma_E_gamma_vs_E_electron_pass->Write();
     merged->h2_gamma_Etheta_gamma_pass->Write();
     merged->h2_gamma_Etheta_electron_pass->Write();
+    merged->h_gamma_dphi_pass->Write();
+    merged->h_gamma_mass_pass_dphi->Write();
 
     outfile.cd();
     outfile.mkdir("x17_gem"); outfile.cd("x17_gem");
@@ -1215,6 +1303,11 @@ int main(int argc, char *argv[])
     merged->h2_3cl_Pt_gem_cut->Write();
     merged->h_3cl_tDiff_gem_cut->Write();
     merged->h_3cl_dphi_gem_cut->Write();
+    merged->h_3cl_mass_gem_cut_dphi->Write();
+    merged->h_3cl_mass_gem_cut_dphi_moller->Write();
+    merged->h_3cl_mass_gem_cut_dphi_moller_1comb->Write();
+    merged->h2_3cl_E_angle_gem_cut_dphi_moller->Write();
+    merged->h2_3cl_E_angle_gem_cut_dphi_moller_1comb->Write();
 
     outfile.cd("moller_analysis");
 

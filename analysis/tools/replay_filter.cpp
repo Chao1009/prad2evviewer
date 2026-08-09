@@ -1392,7 +1392,8 @@ int run(const std::vector<std::string> &input_files,
             }
 
             if (!is_recon) {
-                prad2::RawEventData ev;
+                auto ev_ptr = std::make_unique<prad2::RawEventData>();
+                auto &ev = *ev_ptr;
                 prad2::RawReadStatus first_status;
                 {
                     std::unique_ptr<TFile> f0(TFile::Open(file_info[fi].path.c_str(), "READ"));
@@ -1434,7 +1435,8 @@ int run(const std::vector<std::string> &input_files,
                 out_ev->Write();
                 out_ev->ResetBranchAddresses();
             } else {
-                prad2::ReconEventData ev;
+                auto ev_ptr = std::make_unique<prad2::ReconEventData>();
+                auto &ev = *ev_ptr;
                 out->cd();
                 TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
                 prad2::SetReconWriteBranches(out_ev, ev, false); // not x17_mode
@@ -1675,7 +1677,8 @@ int run(const std::vector<std::string> &input_files,
     // Filter the events/recon tree.  We use the existing
     // SetRaw{Read,Write}Branches helpers so the output schema matches.
     if (!is_recon) {
-        prad2::RawEventData    ev;
+        auto ev_ptr = std::make_unique<prad2::RawEventData>();
+        auto &ev = *ev_ptr;
         prad2::RawReadStatus   first_status;
         {
             std::unique_ptr<TFile> f0(TFile::Open(input_files.front().c_str(), "READ"));
@@ -1731,7 +1734,8 @@ int run(const std::vector<std::string> &input_files,
         out_ev->Write();
         out_ev->ResetBranchAddresses();
     } else {
-        prad2::ReconEventData ev;
+        auto ev_ptr = std::make_unique<prad2::ReconEventData>();
+        auto &ev = *ev_ptr;
         out->cd();
         TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
         prad2::SetReconWriteBranches(out_ev, ev, false); // not x17_mode
