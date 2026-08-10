@@ -296,7 +296,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h2_gamma_Pt = std::make_unique<TH2F>("gamma_Pt",
         "Gamma Channel Pt hycal;Ptx (MeV);Pty (MeV)", 400, -50, 50, 400, -50, 50);
     r->h_gamma_tDiff = std::make_unique<TH1F>("gamma_tDiff",
-        "Gamma Channel Time Difference;Time Difference (ns);Counts", 200, 0, 20);
+        "Gamma Channel Time Difference;Time Difference (ns);Counts", 80*2, -4, 4);
     r->h_gamma_dphi = std::make_unique<TH1F>("gamma_dphi",
         "Gamma Channel Delta Phi;Delta Phi (deg);Counts", 360, 0, 360);
 
@@ -321,7 +321,7 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
     r->h_gamma_dphi_pass = std::make_unique<TH1F>("gamma_dphi_pass",
         "Gamma Channel Delta Phi - Pass;Delta Phi (deg);Counts", 360, 0, 360);
     r->h_gamma_tDiff_pass = std::make_unique<TH1F>("gamma_tDiff_pass",
-        "Gamma Channel Time Difference - Pass;Time Difference (ns);Counts", 200, 0, 20);
+        "Gamma Channel Time Difference - Pass;Time Difference (ns);Counts", 80*2, -4, 4);
     r->h_gamma_E_gamma_pass = std::make_unique<TH1F>("gamma_E_gamma_pass",
         "Gamma Cluster Energy - Pass;Energy (MeV);Counts", 3750, 0, 2500);
     r->h_gamma_E_electron_pass = std::make_unique<TH1F>("gamma_E_electron_pass",
@@ -751,8 +751,8 @@ static bool processFile(const std::string &path,
                 // Phi difference for the pair of gamma hits and the electron hit
                 float dphi = std::fabs(phi_pair - phi_e);
 
-                bool nblocks_ok = (ev.cl_nblocks[0] > 2 && ev.cl_nblocks[1] > 2 && ev.cl_nblocks[2] > 2);
-                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * totalSigma;
+                bool nblocks_ok = (ev.cl_nblocks[0] > 1 && ev.cl_nblocks[1] > 1 && ev.cl_nblocks[2] > 1);
+                bool totalE_pass = std::fabs(totalE - Ebeam) < 4. * totalSigma;
                 bool Pt_pass = std::sqrt(ptx * ptx + pty * pty) < 5.0f;
                 bool pos_pass = inHyCal(x_e, y_e) && inHyCal(x_g[0], y_g[0]) && inHyCal(x_g[1], y_g[1]);
                 bool time_pass = tDiff < 2.f;
@@ -780,7 +780,7 @@ static bool processFile(const std::string &path,
                 out.h_gamma_mass->Fill(mass);
                 out.h_gamma_dphi->Fill(dphi);
                     
-                if(nblocks_ok && totalE_pass && time_pass && Pt_pass && pos_pass && clusterE_pass) {
+                if(nblocks_ok && totalE_pass && time_pass && Pt_pass && pos_pass && clusterE_pass && dphi_pass) {
                     out.h_gamma_totalE_pass->Fill(totalE);
                     out.h_gamma_ptx_pass->Fill(ptx);
                     out.h_gamma_pty_pass->Fill(pty);
@@ -809,9 +809,6 @@ static bool processFile(const std::string &path,
                     out.h2_gamma_Etheta_electron_pass->Fill(theta_e, E_e);
                     out.h_gamma_mass_pass->Fill(mass);
                     out.h_gamma_dphi_pass->Fill(dphi);
-                    if (dphi_pass) {
-                        out.h_gamma_mass_pass_dphi->Fill(mass);
-                    }
                 }
             }
 
@@ -829,7 +826,7 @@ static bool processFile(const std::string &path,
             for (int j = 0; j < n_match_3cl; ++j) {
                 int idx = ev.mHit_cl_index[j];
                 if (idx < 0 || idx >= ev.n_clusters || idx >= prad2::kMaxClusters) continue;
-                if(ev.cl_nblocks[idx] <= 2) continue;
+                if(ev.cl_nblocks[idx] < 2) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kInnerBound)) continue;
                 if(fdec::test_bit(ev.cl_flag[idx], fdec::kOuterBound)) continue;
                 if(ev.cl_energy[idx] < 70.f || ev.cl_energy[idx] > 0.75 * Ebeam) continue;
@@ -933,7 +930,7 @@ static bool processFile(const std::string &path,
                     }
                 }
 
-                bool totalE_pass = std::fabs(totalE - Ebeam) < 3. * totalSigma;
+                bool totalE_pass = std::fabs(totalE - Ebeam) < 4. * totalSigma;
                 bool Pt_pass = std::sqrt(ptx * ptx + pty * pty) < 5.0f;
                 bool pos_pass = inHyCal(hits[0].x, hits[0].y) && inHyCal(hits[1].x, hits[1].y) && inHyCal(hits[2].x, hits[2].y);
 
