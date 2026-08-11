@@ -192,22 +192,73 @@ inline bool atCTDistance(std::vector<StripCluster>::iterator it,
 
 } // anonymous namespace
 
+// // Below is the original implementation of setCrossTalk().
+
+// void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
+// {
+//     if (cfg_.charac_dists.empty()) return;
+
+//     // sort by peak charge ascending (check weakest clusters first)
+//     std::sort(clusters.begin(), clusters.end(),
+//               [](const StripCluster &a, const StripCluster &b) {
+//                   return a.peak_charge < b.peak_charge;
+//               });
+
+//     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
+//         if (!isPureCrossTalk(*it)) continue;
+//         it->cross_talk = atCTDistance(it, clusters.end(),
+//                                      cfg_.cross_talk_width, cfg_.charac_dists);
+//     }
+// }
+
+// Below is the modified implementation of setCrossTalk() that looks at the charge ratio between the weak cluster and the strong cluster
+
 void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
 {
     if (cfg_.charac_dists.empty()) return;
 
-    // sort by peak charge ascending (check weakest clusters first)
+    const float kPeakRatioMax = 0.40f;  // charge ratio threshold is currently set to 0.40.
+
+    // Keep the original sorting: weakest to strongest
     std::sort(clusters.begin(), clusters.end(),
               [](const StripCluster &a, const StripCluster &b) {
                   return a.peak_charge < b.peak_charge;
               });
 
     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
+        // Keep the original requirement:
+        // candidate cluster must already be made entirely of cross-talk-like strips
         if (!isPureCrossTalk(*it)) continue;
-        it->cross_talk = atCTDistance(it, clusters.end(),
-                                     cfg_.cross_talk_width, cfg_.charac_dists);
+
+        for (auto itn = it + 1; itn != clusters.end(); ++itn) {
+            const float delta = std::abs(it->position - itn->position);
+
+            bool at_ct_distance = false;
+            for (float dist : cfg_.charac_dists) {
+                if (delta > dist - cfg_.cross_talk_width &&
+                    delta < dist + cfg_.cross_talk_width) {
+                    at_ct_distance = true;
+                    break;
+                }
+            }
+
+            if (!at_ct_distance)
+                continue;
+
+            if (itn->peak_charge <= 0.f)
+                continue;
+
+            const float peak_ratio = it->peak_charge / itn->peak_charge;
+
+            // Original method + one extra charge-ratio condition
+            if (peak_ratio < kPeakRatioMax) {
+                it->cross_talk = true;
+                break;
+            }
+        }
     }
 }
+
 
 //=============================================================================
 // filterClusters — remove bad clusters
