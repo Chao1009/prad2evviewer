@@ -1,13 +1,17 @@
 
 //=============================================================================
-// det_align — detector position calibration via Møller scattering
+// det_align — iterative detector alignment via Møller / Mott scattering
 //
-// Process: Read reconstructed root files, judge if it's 
-// Moller events, analyze and fill histgroams, find out the detector alignment
+// Reads reconstructed ROOT files, selects Møller (2-cluster) and Mott
+// (1-cluster) events, fills alignment histograms, fits peak positions, and
+// updates the run configuration with corrected detector positions.
+// Convergence graphs are built from consecutive run_config_iter{N}.json files.
 //
 // Usage:
 //   det_align <recon_root_file_or_dir> [more files/dirs...]
-//             -o output_dir
+//             -o output_dir [-i iteration] [-j threads]
+//             [-c run_config_in.json] [-r run_config_base_path.json]
+//             [-f max_files] [-n max_events]
 //=============================================================================
 
 #include "Replay.h"
