@@ -175,17 +175,27 @@ inline bool isPureCrossTalk(const StripCluster &cl)
 }
 
 // Check if cluster is at a characteristic CT distance from any later cluster
+// and has a peak charge ratio below the threshold.
 inline bool atCTDistance(std::vector<StripCluster>::iterator it,
                         std::vector<StripCluster>::iterator end,
                         float width,
-                        const std::vector<float> &charac)
+                        const std::vector<float> &charac,
+                        float peak_ratio_max)
 {
     for (auto itn = it + 1; itn != end; ++itn) {
+        bool dist_match = false;
         float delta = std::abs(it->position - itn->position);
         for (float dist : charac) {
-            if (delta > dist - width && delta < dist + width)
-                return true;
+            if (delta > dist - width && delta < dist + width) {
+                dist_match = true;
+                break;
+            }
         }
+        if (!dist_match || itn->peak_charge <= 0.f) continue;
+
+        const float peak_ratio = it->peak_charge / itn->peak_charge;
+        if (peak_ratio < peak_ratio_max)
+            return true;
     }
     return false;
 }
@@ -207,7 +217,8 @@ inline bool atCTDistance(std::vector<StripCluster>::iterator it,
 //     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
 //         if (!isPureCrossTalk(*it)) continue;
 //         it->cross_talk = atCTDistance(it, clusters.end(),
-//                                      cfg_.cross_talk_width, cfg_.charac_dists);
+//                                      cfg_.cross_talk_width, cfg_.charac_dists,
+//                                      cfg_.cross_talk_peak_ratio_max);
 //     }
 // }
 
@@ -217,8 +228,6 @@ void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
 {
     if (cfg_.charac_dists.empty()) return;
 
-    const float kPeakRatioMax = 0.40f;  // charge ratio threshold is currently set to 0.40.
-
     // Keep the original sorting: weakest to strongest
     std::sort(clusters.begin(), clusters.end(),
               [](const StripCluster &a, const StripCluster &b) {
@@ -226,36 +235,12 @@ void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
               });
 
     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
-        // Keep the original requirement:
         // candidate cluster must already be made entirely of cross-talk-like strips
+        // and has a peak charge ratio below the threshold.
         if (!isPureCrossTalk(*it)) continue;
-
-        for (auto itn = it + 1; itn != clusters.end(); ++itn) {
-            const float delta = std::abs(it->position - itn->position);
-
-            bool at_ct_distance = false;
-            for (float dist : cfg_.charac_dists) {
-                if (delta > dist - cfg_.cross_talk_width &&
-                    delta < dist + cfg_.cross_talk_width) {
-                    at_ct_distance = true;
-                    break;
-                }
-            }
-
-            if (!at_ct_distance)
-                continue;
-
-            if (itn->peak_charge <= 0.f)
-                continue;
-
-            const float peak_ratio = it->peak_charge / itn->peak_charge;
-
-            // Original method + one extra charge-ratio condition
-            if (peak_ratio < kPeakRatioMax) {
-                it->cross_talk = true;
-                break;
-            }
-        }
+        it->cross_talk = atCTDistance(it, clusters.end(),
+                                     cfg_.cross_talk_width, cfg_.charac_dists,
+                                     cfg_.cross_talk_peak_ratio_max);
     }
 }
 

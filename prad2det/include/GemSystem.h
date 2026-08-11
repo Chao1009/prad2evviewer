@@ -162,6 +162,7 @@ struct ClusterConfig {
     int   consecutive_thres = 1;    // max gap between consecutive strips
     float split_thres       = 14.f; // charge valley depth for splitting
     float cross_talk_width  = 2.f;  // mm
+    float cross_talk_peak_ratio_max = 0.40f; // weak/strong peak ratio upper bound
     std::vector<float> charac_dists;// cross-talk characteristic distances
 
     // XY matching mode: 0 = ADC-sorted 1:1, 1 = full Cartesian with cuts

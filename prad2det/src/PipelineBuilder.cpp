@@ -80,6 +80,8 @@ void apply_gem_cluster_overrides(const json &j, gem::ClusterConfig &cfg)
     if (j.contains("consecutive_thres"))   cfg.consecutive_thres   = j["consecutive_thres"];
     if (j.contains("split_thres"))         cfg.split_thres         = j["split_thres"];
     if (j.contains("cross_talk_width"))    cfg.cross_talk_width    = j["cross_talk_width"];
+    if (j.contains("cross_talk_peak_ratio_max"))
+        cfg.cross_talk_peak_ratio_max = j["cross_talk_peak_ratio_max"];
     if (j.contains("charac_dists") && j["charac_dists"].is_array()) {
         cfg.charac_dists.clear();
         for (auto &v : j["charac_dists"])
@@ -569,6 +571,7 @@ Pipeline PipelineBuilder::build()
                     << " consec="   << c.consecutive_thres
                     << " split="    << c.split_thres
                     << " xtalk="    << c.cross_talk_width
+                    << " xtalk_peak_ratio_max=" << c.cross_talk_peak_ratio_max
                     << " match_mode=" << c.match_mode
                     << " asym="     << c.match_adc_asymmetry
                     << " tdiff="    << c.match_time_diff

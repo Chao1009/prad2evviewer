@@ -637,12 +637,9 @@ void GemSystem::collectHits(int apv_idx)
         float pos = static_cast<float>(plane_strip) * plane.pitch
                     - plane.size * 0.5f + plane.pitch * 0.5f;
 
-        // // Check cross-talk - original method in Prad2evviewer
-        // bool xtalk = (max_charge < cfg.pedestal[ch].noise * crosstalk_thres_)
-        //              && (max_charge > cfg.pedestal[ch].noise * zerosup_thres_);
-
         // Check cross-talk - without upper threshold
         bool xtalk = (max_charge > cfg.pedestal[ch].noise * zerosup_thres_);
+                        //&& (max_charge < cfg.pedestal[ch].noise * crosstalk_thres_);
 
         StripHit hit;
         hit.strip       = plane_strip;

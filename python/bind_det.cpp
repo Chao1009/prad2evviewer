@@ -212,6 +212,8 @@ static void bind_gem(py::module_ &m)
         .def_readwrite("consecutive_thres",  &gem::ClusterConfig::consecutive_thres)
         .def_readwrite("split_thres",        &gem::ClusterConfig::split_thres)
         .def_readwrite("cross_talk_width",   &gem::ClusterConfig::cross_talk_width)
+        .def_readwrite("cross_talk_peak_ratio_max",
+                   &gem::ClusterConfig::cross_talk_peak_ratio_max)
         .def_readwrite("charac_dists",       &gem::ClusterConfig::charac_dists)
         .def_readwrite("match_mode",         &gem::ClusterConfig::match_mode)
         .def_readwrite("match_adc_asymmetry",&gem::ClusterConfig::match_adc_asymmetry)

@@ -38,6 +38,7 @@
             "consecutive_thres":   1,
             "split_thres":         14.0,
             "cross_talk_width":    2.0,
+            "cross_talk_peak_ratio_max": 0.4,
             "charac_dists":        [],
             "match_mode":          1,
             "match_adc_asymmetry": 0.7,
