@@ -42,10 +42,13 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <regex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -363,7 +366,10 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
     if (!cfg.contains("configurations") || !cfg["configurations"].is_array())
         cfg["configurations"] = nlohmann::json::array();
 
+    // Keep both keys for compatibility: `from_run` is the preferred key,
+    // `run_number` is a legacy alias still accepted by LoadRunConfig.
     nlohmann::json entry;
+    entry["from_run"]                        = run_num;
     entry["run_number"]                      = run_num;
     entry["beam_energy"]                     = geo.Ebeam;
     entry["calibration"]["file"]             = geo.energy_calib_file;
@@ -393,6 +399,8 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
         entry["time_cuts"]["hycal_rf_offsets"] = geo.hycal_rf_offset_file;
     entry["matching"]["radius"]          = geo.matching_radius;
     entry["matching"]["use_square_cut"]  = geo.matching_use_square;
+    entry["matching"]["energy_dependent"] = geo.matching_energy_dependent;
+    entry["matching"]["sigma"]            = geo.matching_sigma;
     if (!geo.gain_data_dir.empty() || geo.gain_ref_run >= 0) {
         if (!geo.gain_data_dir.empty()) entry["gain_factor"]["data_dir"] = geo.gain_data_dir;
         if (geo.gain_ref_run >= 0)      entry["gain_factor"]["ref_run"]  = geo.gain_ref_run;
@@ -400,8 +408,13 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
 
     auto &arr = cfg["configurations"];
     bool replaced = false;
+    auto entry_from_run = [](const nlohmann::json &e) -> int {
+        if (e.contains("from_run"))   return e["from_run"].get<int>();
+        if (e.contains("run_number")) return e["run_number"].get<int>();
+        return -1;
+    };
     for (auto &e : arr) {
-        if (e.contains("run_number") && e["run_number"].get<int>() == run_num) {
+        if (entry_from_run(e) == run_num) {
             // Merge entry into e field-by-field: existing keys are updated
             // in-place (preserving their original position); new keys are
             // appended at the end.
@@ -414,8 +427,10 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
     if (!replaced) arr.push_back(entry);
 
     std::sort(arr.begin(), arr.end(), [](const nlohmann::json &a, const nlohmann::json &b) {
-        int ra = a.contains("run_number") ? a["run_number"].get<int>() : -1;
-        int rb = b.contains("run_number") ? b["run_number"].get<int>() : -1;
+     int ra = a.contains("from_run")   ? a["from_run"].get<int>()
+         : a.contains("run_number") ? a["run_number"].get<int>() : -1;
+     int rb = b.contains("from_run")   ? b["from_run"].get<int>()
+         : b.contains("run_number") ? b["run_number"].get<int>() : -1;
         return ra < rb;
     });
 
@@ -426,7 +441,42 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
             std::cerr << "Error: cannot write " << tmp << "\n";
             return false;
         }
-        out << cfg.dump(4) << "\n";
+        // Custom JSON dump with 3-decimal precision for floats
+        // First, recursively limit float precision
+        std::function<void(nlohmann::json&)> limit_precision = [&](nlohmann::json& j) {
+            if (j.is_object()) {
+                for (auto& [key, val] : j.items()) {
+                    if (val.is_number_float()) {
+                        double d = val.get<double>();
+                        // Round to 3 decimal places
+                        d = std::round(d * 1000.0) / 1000.0;
+                        j[key] = d;
+                    } else if (val.is_array() || val.is_object()) {
+                        limit_precision(val);
+                    }
+                }
+            } else if (j.is_array()) {
+                for (auto& val : j) {
+                    if (val.is_number_float()) {
+                        double d = val.get<double>();
+                        d = std::round(d * 1000.0) / 1000.0;
+                        val = d;
+                    } else if (val.is_array() || val.is_object()) {
+                        limit_precision(val);
+                    }
+                }
+            }
+        };
+        limit_precision(cfg);
+        
+        std::string output = cfg.dump(4);
+        
+        // Compact arrays with 3 numbers on one line: [ num, num, num ]
+        // Pattern: "[\n    number,\n    number,\n    number\n    ]"
+        std::regex array_pattern(R"(\[\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\s*\])");
+        output = std::regex_replace(output, array_pattern, "[$1, $2, $3]");
+        
+        out << output << "\n";
     }
     if (std::rename(tmp.c_str(), path.c_str()) != 0) {
         std::cerr << "Error: failed to rename " << tmp << " -> " << path << "\n";

@@ -62,7 +62,7 @@ add_analysis_tool(cosmic_test tools/cosmic_test.cpp)
 add_analysis_tool(quick_check tools/quick_check.cpp)
 add_analysis_tool(matching tools/matching.cpp)
 add_analysis_tool(GEM_matching tools/GEM_matching.cpp)
-add_analysis_tool(det_calib tools/det_calib.cpp)
+add_analysis_tool(det_align tools/det_align.cpp)
 add_analysis_tool(gain_monitor tools/gain_monitor.cpp)
 add_analysis_tool(gain_fitter tools/gain_fitter.cpp)
 add_analysis_tool(refGain_produce tools/refGain_produce.cpp)
@@ -78,7 +78,7 @@ add_analysis_tool(time_recon_check tools/time_recon_check.cpp)
 
 install(TARGETS replay_rawdata replay_gainCorr online_gain_monitor_base replay_recon replay_filter replay_add_hv
                 live_charge epCalib GEM_matching
-                cosmic_test quick_check matching det_calib cosmic_lg sim2replay sim2replay_hc
+                cosmic_test quick_check matching det_align cosmic_lg sim2replay sim2replay_hc
                 gain_monitor gain_fitter refGain_produce
                 hycal_rf_offset_calib nonlinearity calib_5by5 hycal_module_time_calib hycal_shower_profile
                 time_recon_check

@@ -132,6 +132,13 @@ public:
     //   type:  "ep" or "ee"
     static float ExpectedEnergy(float theta_deg, float Ebeam, const std::string &type);
 
+    // Expected scattering angle (inverse of ExpectedEnergy).
+    //   measured_energy: detected energy in MeV
+    //   Ebeam: beam energy in MeV
+    //   type:  "ep" or "ee"
+    // Returns scattering angle in degrees, or 0 if unphysical.
+    static float ExpectedAngle(float measured_energy, float Ebeam, const std::string &type);
+
     // Energy loss correction for electron passing through target + windows.
     //   theta: scattering angle in degrees
     //   E:     measured energy in MeV
