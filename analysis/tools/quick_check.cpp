@@ -1328,11 +1328,9 @@ int main(int argc, char *argv[])
     merged->h_ee_tDiff->Write();
     merged->h_ee_invariant_mass->Write();
 
-    outfile.cd();
-    outfile.mkdir("x17_gamma"); outfile.cd("x17_gamma");
     for (int i = 0; i < 5; i++){
-        outfile.cd("x17_gamma");
-        outfile.mkdir(Form("cut_steps_%d", i)); outfile.cd(Form("cut_steps_%d", i));
+        outfile.cd();
+        outfile.mkdir(Form("x17_gamma_cut_steps_%d", i)); outfile.cd(Form("x17_gamma_cut_steps_%d", i));
         merged->h_gamma_totalE[i]->Write();
         merged->h2_gamma_hits[i]->Write();
         merged->h_gamma_E[i]->Write();
@@ -1357,8 +1355,8 @@ int main(int argc, char *argv[])
     merged->h_3cl_tDiff_raw->Write();
     merged->h_3cl_cluster_num_cut_cl_t->Write();
     for (int i = 0; i < 6; ++i) {
-        outfile.cd("x17_gem");
-        outfile.mkdir(Form("cut_steps_%d", i)); outfile.cd(Form("cut_steps_%d", i));
+        outfile.cd();
+        outfile.mkdir(Form("x17_gem_cut_steps_%d", i)); outfile.cd(Form("x17_gem_cut_steps_%d", i));
         merged->h_3cl_totalE[i]->Write();
         merged->h2_3cl_hits[i]->Write();
         merged->h2_3cl_E_angle[i]->Write();
