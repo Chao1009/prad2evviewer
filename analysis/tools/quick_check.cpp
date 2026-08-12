@@ -274,11 +274,11 @@ static std::unique_ptr<QuickResult> makeResult(fdec::HyCalSystem &hycal)
         r->h2_gamma_E_angle_electron[i] = std::make_unique<TH2F>(Form("gamma_E_angle_electron_step_%d", i),
             Form("Gamma Channel E_electron vs Angle Electron - Step %d;Theta (deg);E_electron (MeV)", i), 80, 0, 4, 2500, 0, 2500);
         r->h_gamma_ptx[i] = std::make_unique<TH1F>(Form("gamma_ptx_step_%d", i),
-            Form("Gamma Channel Ptx - Step %d;Ptx (MeV/c);Counts", i), 2500, 0, 2500);
+            Form("Gamma Channel Ptx - Step %d;Ptx (MeV/c);Counts", i), 200, -50, 50);
         r->h_gamma_pty[i] = std::make_unique<TH1F>(Form("gamma_pty_step_%d", i),
-            Form("Gamma Channel Pty - Step %d;Pty (MeV/c);Counts", i), 2500, 0, 2500);
+            Form("Gamma Channel Pty - Step %d;Pty (MeV/c);Counts", i), 200, -50, 50);
         r->h2_gamma_Pt[i] = std::make_unique<TH2F>(Form("gamma_Pt_step_%d", i),
-            Form("Gamma Channel Pt - Step %d;Ptx (MeV/c);Pty (MeV/c)", i), 2500, 0, 2500, 2500, 0, 2500);
+            Form("Gamma Channel Pt - Step %d;Ptx (MeV/c);Pty (MeV/c)", i), 400, -50, 50, 400, -50, 50);
         r->h_gamma_tDiff[i] = std::make_unique<TH1F>(Form("gamma_tDiff_step_%d", i),
             Form("Gamma Channel Time Difference - Step %d;#Deltat (ns);Counts", i), 240*2, -12, 12);
         r->h_gamma_dphi[i] = std::make_unique<TH1F>(Form("gamma_dphi_step_%d", i),
@@ -602,14 +602,19 @@ static bool processFile(const std::string &path,
                 float z_e = ev.mHit_gz[0][1];
                 float t_e = ev.cl_time[e_idx];
 
+                float scale = ev.cl_z[e_idx] / z_e;
+                x_e *= scale;
+                y_e *= scale;
+                z_e *= scale;
+
                 float E_g[2], x_g[2], y_g[2], z_g[2], t_g[2];
                 int gamma_idx = 0;
                 for (int j = 0; j < 3; j++) {
                     if ( j == e_idx) continue;
                     E_g[gamma_idx] = ev.cl_energy[j];
-                    x_g[gamma_idx] = ev.mHit_gx[j][1];
-                    y_g[gamma_idx] = ev.mHit_gy[j][1];
-                    z_g[gamma_idx] = ev.mHit_gz[j][1];
+                    x_g[gamma_idx] = ev.cl_x[j];
+                    y_g[gamma_idx] = ev.cl_y[j];
+                    z_g[gamma_idx] = ev.cl_z[j];
                     t_g[gamma_idx] = ev.cl_time[j];
                     gamma_idx++;
                 }
@@ -921,7 +926,7 @@ static bool processFile(const std::string &path,
                 bool Moller_event = false;
                 for (int j = 1; j < 3; ++j) {
                     if (fabs(hits[0].E + hits[j].E - Ebeam) < 3. * sqrt(Sigma[0]*Sigma[0] + Sigma[j]*Sigma[j])) {
-                        if (fabs(phi[0] - phi[j]) - 180.0 < 10.0) {
+                        if (fabs(fabs(phi[0] - phi[j]) - 180.0) < 10.0) {
                             float expectE1 = physics.ExpectedEnergy(theta[0], Ebeam, "ee");
                             float expectE2 = physics.ExpectedEnergy(theta[j], Ebeam, "ee");
                             if (fabs(hits[0].E - expectE1) < 3. * 0.035 * sqrt(expectE1 * 1000.0) && 
@@ -942,8 +947,8 @@ static bool processFile(const std::string &path,
                     float z2 = hits[j].zd;
 
                     // project to r = 0 to estimate vertex Z position
-                    float distance = z1 - r1 * (z2 - z1) / (r2 - r1);
-                    vertexZ[j] = distance;
+                    if (r2 <= r1) vertexZ[j] = -9999.;
+                    else vertexZ[j] = z1 - r1 * (z2 - z1) / (r2 - r1);
                 }
 
                 bool totalE_pass = std::fabs(totalE - Ebeam) < 4. * totalSigma;
