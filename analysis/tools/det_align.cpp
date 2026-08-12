@@ -533,7 +533,8 @@ int main(int argc, char *argv[])
     }
 
     // 2. Extract Detector Z position from HyCal/GEMs Z alignment parameter
-    in_run_config.hycal_z = alignment_params["HC_z"];
+    // Use the extracted Moller vertex-Z peak; "HC_z" was never populated.
+    in_run_config.hycal_z = alignment_params["moller_HC_z"];
     in_run_config.gem_z[0] = alignment_params["moller_GEM0_z"];
     in_run_config.gem_z[1] = alignment_params["moller_GEM1_z"];
     in_run_config.gem_z[2] = alignment_params["moller_GEM2_z"];
@@ -564,7 +565,8 @@ int main(int argc, char *argv[])
     // 4. Extract GEMs phi alignment(roll rotate around Z axis) parameters (alignment to HyCal coordinate system)
     // TODO: don't sure which direction is positive for the phi rotation
     for (int det = 0; det < 4; ++det) {
-        in_run_config.gem_tilt_z[det] -= alignment_params["phi_diff_" + std::to_string(det)];
+        // Keep key names consistent with the fitted histogram outputs.
+        in_run_config.gem_tilt_z[det] -= alignment_params["moller_phi_diff_" + std::to_string(det)];
     }
 
     //5. TODO: Extract GEMs rotation around X/Y axes (tilt) parameters
@@ -650,9 +652,9 @@ int main(int argc, char *argv[])
         };
 
         // HyCal: x and y are direct adjustment values; z is iteration-to-iteration delta
-        g_hc_x = make_graph("HC_x", false);
-        g_hc_y = make_graph("HC_y", false);
-        g_hc_z = make_graph("HC_z", true);
+        g_hc_x = make_graph("moller_HC_x", false);
+        g_hc_y = make_graph("moller_HC_y", false);
+        g_hc_z = make_graph("moller_HC_z", true);
         
         if (g_hc_x) convergence_graphs.push_back(g_hc_x);
         if (g_hc_y) convergence_graphs.push_back(g_hc_y);
@@ -695,11 +697,11 @@ int main(int argc, char *argv[])
 
         // GEM 0-3: x, y from run_config position deltas; z diff; phi direct
         for (int det = 0; det < 4; ++det) {
-            std::string pfx = "GEM" + std::to_string(det);
+            std::string pfx = "moller_GEM" + std::to_string(det);
             g_gem[det][0] = build_gem_pos_graph(det, 0);
             g_gem[det][1] = build_gem_pos_graph(det, 1);
             g_gem[det][2] = make_graph(pfx + "_z", true);
-            g_gem[det][3] = make_graph("phi_diff_" + std::to_string(det), false);
+            g_gem[det][3] = make_graph("moller_phi_diff_" + std::to_string(det), false);
 
             if (g_gem[det][0]) convergence_graphs.push_back(g_gem[det][0]);
             if (g_gem[det][1]) convergence_graphs.push_back(g_gem[det][1]);
