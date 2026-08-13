@@ -126,6 +126,14 @@
                 "data_dir": "",
                 "ref_run":  26094
             }
+        },
+        {
+            "from_run":    26214,
+            "calibration": {"file": "calibration/x17_26214.json"},
+            "gain_factor": {
+                "data_dir": "",
+                "ref_run":  26214
+            }
         }
 
     ],
