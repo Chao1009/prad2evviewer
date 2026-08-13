@@ -157,6 +157,7 @@
     "// if a run has an entry here, it overrides the target_* fields for that run only.":                                                                                   "",
     "beam_target_positions": [
         {"from_run": 24185, "target": [0.0, 0.0, 0.0]},
-        {"from_run": 25655, "target": [-0.108, 1.601, 0.0]}
+        {"from_run": 25655, "target": [-0.108, 1.601, 0.0]},
+        {"from_run": 26000, "target": [0.85, 1.5, 0.0]}
     ]
 }

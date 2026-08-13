@@ -39,7 +39,7 @@
             "split_thres":         14.0,
             "cross_talk_width":    2.0,
             "cross_talk_peak_ratio_max": 0.4,
-            "charac_dists":        [],
+            "charac_dists":        [6.4, 17.6, 23.6, 25.6, 27.6, 33.6, 44.8],
             "match_mode":          1,
             "match_adc_asymmetry": 0.7,
             "match_time_diff":     50.0,
