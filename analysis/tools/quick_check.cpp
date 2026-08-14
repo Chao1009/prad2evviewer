@@ -609,6 +609,7 @@ static bool processFile(const std::string &path,
 
                 float E_g[2], x_g[2], y_g[2], z_g[2], t_g[2];
                 int gamma_idx = 0;
+                bool noMatch[2] = {true, true};
                 for (int j = 0; j < 3; j++) {
                     if ( j == e_idx) continue;
                     E_g[gamma_idx] = ev.cl_energy[j];
@@ -616,8 +617,10 @@ static bool processFile(const std::string &path,
                     y_g[gamma_idx] = ev.cl_y[j];
                     z_g[gamma_idx] = ev.cl_z[j];
                     t_g[gamma_idx] = ev.cl_time[j];
+                    if (ev.matchFlag[j] != 0) noMatch[gamma_idx] = false;
                     gamma_idx++;
                 }
+                bool bothNoMatch = noMatch[0] && noMatch[1];
 
                 float Sigma_e = 0.035*sqrt(E_e *1000.f);
                 float Sigma[2] = {0.035*sqrt(E_g[0] *1000.f), 0.035*sqrt(E_g[1] *1000.f)};
@@ -677,7 +680,7 @@ static bool processFile(const std::string &path,
                 bool dphi_pass = std::fabs(dphi - 180.f) < 10.0f;
 
                 // cut steps 0, nblocks_ok, acceptance position ok, cluster energy ok
-                if(nblocks_ok && pos_pass && clusterE_pass) {
+                if(bothNoMatch && nblocks_ok && pos_pass && clusterE_pass) {
                     out.h_gamma_totalE[0]->Fill(totalE);
                     out.h2_gamma_hits[0]->Fill(x_g[0], y_g[0]);
                     out.h2_gamma_hits[0]->Fill(x_g[1], y_g[1]);
@@ -703,7 +706,7 @@ static bool processFile(const std::string &path,
                     out.h_gamma_mass[0]->Fill(mass);
                 }
                 // cut steps 1, timing
-                if (nblocks_ok && pos_pass && clusterE_pass && time_pass) {
+                if (bothNoMatch && nblocks_ok && pos_pass && clusterE_pass && time_pass) {
                     out.h_gamma_totalE[1]->Fill(totalE);
                     out.h2_gamma_hits[1]->Fill(x_g[0], y_g[0]);
                     out.h2_gamma_hits[1]->Fill(x_g[1], y_g[1]);
@@ -729,7 +732,7 @@ static bool processFile(const std::string &path,
                     out.h_gamma_mass[1]->Fill(mass);
                 }
                 // cut steps 2, total energy
-                if (nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass) {
+                if (bothNoMatch && nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass) {
                     out.h_gamma_totalE[2]->Fill(totalE);
                     out.h2_gamma_hits[2]->Fill(x_g[0], y_g[0]);
                     out.h2_gamma_hits[2]->Fill(x_g[1], y_g[1]);
@@ -755,7 +758,7 @@ static bool processFile(const std::string &path,
                     out.h_gamma_mass[2]->Fill(mass);
                 }
                 // cut steps 3, Pt cut
-                if (nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass && Pt_pass) {
+                if (bothNoMatch && nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass && Pt_pass) {
                     out.h_gamma_totalE[3]->Fill(totalE);
                     out.h2_gamma_hits[3]->Fill(x_g[0], y_g[0]);
                     out.h2_gamma_hits[3]->Fill(x_g[1], y_g[1]);
@@ -781,7 +784,7 @@ static bool processFile(const std::string &path,
                     out.h_gamma_mass[3]->Fill(mass);
                 }
                 // cuts step 4, azimuthal angle cut
-                if (nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass && Pt_pass && dphi_pass) {
+                if (bothNoMatch && nblocks_ok && pos_pass && clusterE_pass && time_pass && totalE_pass && Pt_pass && dphi_pass) {
                     out.h_gamma_totalE[4]->Fill(totalE);
                     out.h2_gamma_hits[4]->Fill(x_g[0], y_g[0]);
                     out.h2_gamma_hits[4]->Fill(x_g[1], y_g[1]);
