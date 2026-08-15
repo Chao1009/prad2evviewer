@@ -150,7 +150,7 @@ struct RawEventData {
     float   gem_charge[kMaxGemStrips]                         = {};  // max charge across time bins
     int16_t gem_max_tb[kMaxGemStrips]                         = {};  // timebin of max charge
     float   gem_pos[kMaxGemStrips]                            = {};  // physical position (mm)
-    uint8_t gem_xtalk[kMaxGemStrips]                          = {};  // cross-talk flag
+    uint8_t gem_xtalk[kMaxGemStrips]                          = {};  // possible cross-talk flag
     float   gem_ts_adc[kMaxGemStrips][ssp::SSP_TIME_SAMPLES]  = {};  // per-timebin ADC values
 
     // Raw 0xE10C SSP trigger bank words (one variable-length entry per event)

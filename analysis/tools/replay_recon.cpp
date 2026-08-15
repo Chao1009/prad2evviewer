@@ -1,7 +1,7 @@
 //=============================================================================
 // replay_recon — convert multiple EVIO files to reconstructed ROOT trees (multi-threaded)
 //
-// Usage: prad2ana_replay_recon <evio_file_or_dir> [more files/dirs...]
+// Usage: prad2ana_replay_recon <evio(or _raw.root)_file_or_dir> [more files/dirs...]
 //                     -o output_dir [-f max_files] [-n max_events] [-prad1] [-j num_threads]
 //                     [-c daq_config.json] [-d daq_map.json]
 //                     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files] [-x17]
@@ -13,7 +13,7 @@
 //   -c  DAQ configuration file
 //   -d  HyCal map file (default: <db>/hycal_map.json)
 //   -g  GEM pedestal file
-//   -z  zero-suppression threshold override
+//   -z  zero-suppression threshold override (not available for reading raw files)
 //   -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)
 //   -x17  run the X17 reconstruction path (default without a mode option: PRad2)
 //   -x17_full  run the X17 full reconstruction path
@@ -127,13 +127,21 @@ static bool ensureGainCorr(int run_num,
     return true;
 }
 
-static std::vector<std::string> collectEvioFiles(const std::string &path)
+static bool isRawReplayFile(const std::string &path)
+{
+    const auto name = std::filesystem::path(path).filename().string();
+    return name.size() >= 9
+           && name.compare(name.size() - 9, 9, "_raw.root") == 0;
+}
+
+static std::vector<std::string> collectInputFiles(const std::string &path)
 {
     std::vector<std::string> files;
     if (std::filesystem::is_directory(path)) {
         for (auto &entry : std::filesystem::directory_iterator(path)) {
-            if (entry.is_regular_file() &&
-                entry.path().filename().string().find(".evio") != std::string::npos)
+            if (entry.is_regular_file()
+                && (entry.path().filename().string().find(".evio") != std::string::npos
+                    || isRawReplayFile(entry.path().string())))
                 files.push_back(entry.path().string());
         }
         std::sort(files.begin(), files.end());
@@ -143,9 +151,13 @@ static std::vector<std::string> collectEvioFiles(const std::string &path)
     return files;
 }
 
-static std::string makeOutputFile(const std::string &evio_path)
+static std::string makeOutputFile(const std::string &input_path)
 {
-    std::string out = std::filesystem::path(evio_path).filename().string();
+    std::string out = std::filesystem::path(input_path).filename().string();
+    if (isRawReplayFile(input_path)) {
+        out.resize(out.size() - 9);
+        return out + "_recon.root";
+    }
     auto pos = out.find(".evio");
     if (pos != std::string::npos)
         out = out.substr(0, pos) + out.substr(pos + 5);
@@ -229,15 +241,15 @@ int main(int argc, char *argv[])
         }
     }
 
-    // collect input files (can be files, directories, or mixed)
-    std::vector<std::string> evio_files;
+    // Collect EVIO and replay_raw ROOT inputs from files, directories, or a mix.
+    std::vector<std::string> input_files;
     for (int i = optind; i < argc; ++i) {
-        auto f = collectEvioFiles(argv[i]);
-        evio_files.insert(evio_files.end(), f.begin(), f.end());
+        auto files = collectInputFiles(argv[i]);
+        input_files.insert(input_files.end(), files.begin(), files.end());
     }
 
-    if (evio_files.empty() || output_dir.empty()) {
-        std::cerr << "Usage: prad2ana_replay_recon <evio_file_or_dir> [more files/dirs...] -o output_dir\n"
+    if (input_files.empty() || output_dir.empty()) {
+        std::cerr << "Usage: prad2ana_replay_recon <evio_or_raw_file_or_dir> [more files/dirs...] -o output_dir\n"
                   << "       [-f max_files] [-j threads] [-c daq_config.json] [-d daq_map.json]\n"
                   << "       [-g gem_ped.json] [-z threshold] [-m merge_files] [-prad1] [-x17]\n";
         std::cerr << "  -o  output directory (REQUIRED)\n";
@@ -247,7 +259,7 @@ int main(int argc, char *argv[])
         std::cerr << "  -c  DAQ config JSON (default: <db>/daq_config.json)\n";
         std::cerr << "  -d  HyCal map JSON (default: <db>/hycal_map.json)\n";
         std::cerr << "  -g  GEM pedestal JSON\n";
-        std::cerr << "  -z  zero-suppression threshold override\n";
+        std::cerr << "  -z  zero-suppression threshold override (not available for reading raw files)\n";
         std::cerr << "  -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)\n";
         std::cerr << "  default  PRad2 mode\n";
         std::cerr << "  -prad1  PRad-1 mode (no GEM)\n";
@@ -257,6 +269,10 @@ int main(int argc, char *argv[])
     }
     if (prad1 && x17) {
         std::cerr << "Options -prad1 and -x17 cannot be used together\n";
+        return 1;
+    }
+    if (prad1 && std::any_of(input_files.begin(), input_files.end(), isRawReplayFile)) {
+        std::cerr << "Raw ROOT reconstruction does not support -prad1\n";
         return 1;
     }
     if (x17 && !x17_blind) {
@@ -272,7 +288,7 @@ int main(int argc, char *argv[])
     }
     if (merge_batch_size < 0)
         merge_batch_size = 0;
-    int num_files = static_cast<int>(evio_files.size());
+    int num_files = static_cast<int>(input_files.size());
     if (max_files > 0) num_files = std::min(num_files, max_files);
     num_threads = std::max(1, std::min(num_threads, num_files));
 
@@ -281,11 +297,13 @@ int main(int argc, char *argv[])
     
     if(daq_map.empty()) daq_map = db_dir + "/hycal_map.json";
 
-    // Group files by run number; ensure gain correction for every distinct run.
+    // Only direct EVIO input can be passed to replay_gainCorr.  replay_raw
+    // input is assumed to have been produced after that step.
     {
         std::map<int, std::vector<std::string>> run_files_map;
         for (int i = 0; i < num_files; ++i)
-            run_files_map[get_run_int(evio_files[i])].push_back(evio_files[i]);
+            if (!isRawReplayFile(input_files[i]))
+                run_files_map[get_run_int(input_files[i])].push_back(input_files[i]);
 
         std::cout << "Detected " << run_files_map.size() << " run(s):";
         for (auto &[rn, rf] : run_files_map)
@@ -297,7 +315,7 @@ int main(int argc, char *argv[])
                            daq_config, daq_map, num_threads);
     }
 
-    int run_num = get_run_int(evio_files[0]);
+    int run_num = get_run_int(input_files[0]);
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
     // shared work queue: atomic index into file list
@@ -318,9 +336,15 @@ int main(int argc, char *argv[])
             int idx = next_file.fetch_add(1);
             if (idx >= num_files) break;
 
-            std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.ProcessWithRecon(evio_files[idx], out, gRunConfig, db_dir, recon_config,
-                                              daq_config, gem_ped_file, zerosup_override, prad1, x17, x17_blind);
+            const auto &input = input_files[idx];
+            std::string out = output_dir + "/" + makeOutputFile(input);
+            const bool is_raw = isRawReplayFile(input);
+            bool ok = is_raw
+                ? replay.ProcessRaw2Recon(input, out, gRunConfig, db_dir, recon_config,
+                                          daq_config, gem_ped_file, x17, x17_blind)
+                : replay.ProcessWithRecon(input, out, gRunConfig, db_dir, recon_config,
+                                          daq_config, gem_ped_file, zerosup_override,
+                                          prad1, x17, x17_blind);
             output_files[idx] = out;
             if (ok)
                 output_ok[idx] = 1;
@@ -328,10 +352,10 @@ int main(int argc, char *argv[])
             std::lock_guard<std::mutex> lk(io_mtx);
             if (ok) {
                 std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                          << evio_files[idx] << " -> " << out << "\n";
+                          << input << " -> " << out << "\n";
             } else {
                 std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
-                          << evio_files[idx] << "\n";
+                          << input << "\n";
                 errors++;
             }
         }
@@ -354,7 +378,7 @@ int main(int argc, char *argv[])
     std::map<int, std::vector<std::string>> outputs_by_run;
     for (int i = 0; i < num_files; ++i)
         if (output_ok[i])
-            outputs_by_run[get_run_int(evio_files[i])].push_back(output_files[i]);
+            outputs_by_run[get_run_int(input_files[i])].push_back(output_files[i]);
 
     struct MergeJob { std::string output; std::vector<std::string> inputs; };
     std::vector<MergeJob> merge_jobs;

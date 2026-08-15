@@ -57,6 +57,8 @@ public:
     //   LMS     : 3100..3103   (LMSPin=3100, LMS1..3=3101..3103)
     // Returns -1 if the module name is unknown.
     int moduleID(int roc, int slot, int ch) const;
+    // Reverse lookup: returns the (crate, slot, ch) tuple for a given module_id, or {-1,-1,-1}.
+    std::tuple<int, int, int> moduleLocation(int module_id) const;
 
     // Convert an EVIO file to a ROOT file with a TTree.
     // max_events <= 0 means process all. peaks=true adds peak branches.
@@ -70,6 +72,12 @@ public:
                             const std::string &daq_config_file = "",
                             const std::string &gem_ped_file = "", float zerosup_override = 5.f,
                             bool prad1 = false, bool x17 = false, bool x17_blind = false);
+    
+    bool ProcessRaw2Recon(const std::string &input_raw, const std::string &output_root, RunConfig &gRunConfig,
+                            const std::string &db_dir, const std::string &recon_config_file,
+                            const std::string &daq_config_file = "",
+                            const std::string &gem_ped_file = "",
+                            bool x17 = false, bool x17_blind = false);
     
     bool Process_LMSgainFactor(const std::string &input_evio, const std::string &output_root,
                                 const std::string &db_dir, const std::string &daq_config_file);
