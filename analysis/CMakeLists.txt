@@ -54,6 +54,7 @@ add_analysis_tool(replay_rawdata tools/replay_rawdata.cpp)
 add_analysis_tool(replay_gainCorr tools/replay_gainCorr.cpp)
 add_analysis_tool(online_gain_monitor_base tools/online_gain_monitor_base.cpp)
 add_analysis_tool(replay_recon tools/replay_recon.cpp)
+add_analysis_tool(recon_compare tools/recon_compare.cpp)
 add_analysis_tool(replay_filter tools/replay_filter.cpp)
 add_analysis_tool(replay_add_hv tools/replay_add_hv.cpp)
 add_analysis_tool(live_charge tools/live_charge.cpp)
@@ -76,7 +77,7 @@ add_analysis_tool(hycal_module_time_calib tools/hycal_module_time_calib.cpp)
 add_analysis_tool(hycal_shower_profile tools/hycal_shower_profile.cpp)
 add_analysis_tool(time_recon_check tools/time_recon_check.cpp)
 
-install(TARGETS replay_rawdata replay_gainCorr online_gain_monitor_base replay_recon replay_filter replay_add_hv
+install(TARGETS replay_rawdata replay_gainCorr online_gain_monitor_base replay_recon recon_compare replay_filter replay_add_hv
                 live_charge epCalib GEM_matching
                 cosmic_test quick_check matching det_align cosmic_lg sim2replay sim2replay_hc
                 gain_monitor gain_fitter refGain_produce

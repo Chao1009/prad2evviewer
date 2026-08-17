@@ -1268,6 +1268,19 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         std::cerr << "Replay: input raw file has no 'events' tree\n";
         return false;
     }
+    if (tree_in->GetBranch("gem.nch") &&
+        (!tree_in->GetBranch("gem.det") ||
+         !tree_in->GetBranch("gem.plane") ||
+         !tree_in->GetBranch("gem.charge") ||
+         !tree_in->GetBranch("gem.max_tb") ||
+         !tree_in->GetBranch("gem.pos") ||
+         !tree_in->GetBranch("gem.xtalk") ||
+         !tree_in->GetBranch("gem.ts_adc"))) {
+        std::cerr << "Replay: input raw file uses the legacy GEM schema; "
+                  << "regenerate it with the current replay_rawdata before "
+                  << "running raw-to-recon\n";
+        return false;
+    }
 
     // A raw replay tree carries waveform-analysis diagnostics that this
     // reconstruction path never consumes.  Disable everything first so
@@ -1498,7 +1511,6 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         int veto_nch = 0;
         int nch = 0;
         if ((is_sum || is_3cluster) && !is_lms) {
-            if (in->nch > 1000) continue; // too many channels, likely a noise event
             for (int j = 0; j < in->nch; ++j) {
                 if (in->module_type[j] == prad2::MOD_VETO) {
                     if(veto_nch >= 4) continue; // guard against overflow
