@@ -98,6 +98,7 @@ private:
     // name → ModuleType, populated by LoadHyCalMap().  Empty if the
     // modules JSON wasn't loaded; moduleType() then returns MOD_UNKNOWN.
     std::unordered_map<std::string, prad2::ModuleType> module_types_;
+    std::unordered_map<int, std::tuple<int, int, int>> module_locations_;
     evc::DaqConfig daq_cfg_;
 };
 

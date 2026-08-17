@@ -55,6 +55,7 @@ void Replay::LoadHyCalMap(const std::string &json_path)
 
     daq_map_.clear();
     module_types_.clear();
+    module_locations_.clear();
     for (auto &entry : j) {
         std::string name = entry.value("n", "");
         if (name.empty()) continue;
@@ -65,9 +66,13 @@ void Replay::LoadHyCalMap(const std::string &json_path)
             int crate   = d.value("crate", -1);
             int slot    = d.value("slot", -1);
             int channel = d.value("channel", -1);
-            if (crate >= 0)
+            if (crate >= 0) {
                 daq_map_[std::to_string(crate) + "_" + std::to_string(slot) +
                          "_" + std::to_string(channel)] = name;
+                const int id = moduleID(crate, slot, channel);
+                if (id >= 0)
+                    module_locations_[id] = {crate, slot, channel};
+            }
         }
     }
     std::cerr << "Replay: loaded " << module_types_.size()
@@ -131,14 +136,9 @@ int Replay::moduleID(int roc, int slot, int ch) const
 
 std::tuple<int, int, int> Replay::moduleLocation(int module_id) const
 {
-    for (const auto &entry : daq_map_) {
-        int roc, slot, ch;
-        sscanf(entry.first.c_str(), "%d_%d_%d", &roc, &slot, &ch);
-        if (moduleID(roc, slot, ch) == module_id) {
-            return {roc, slot, ch};
-        }
-    }
-    return {-1, -1, -1};
+    auto it = module_locations_.find(module_id);
+    return (it != module_locations_.end())
+        ? it->second : std::tuple{-1, -1, -1};
 }
 
 void Replay::clearEvent(EventVars &ev)
