@@ -1264,6 +1264,41 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         return false;
     }
     TTree *tree_in = dynamic_cast<TTree *>(infile->Get("events"));
+    if (!tree_in) {
+        std::cerr << "Replay: input raw file has no 'events' tree\n";
+        return false;
+    }
+
+    // A raw replay tree carries waveform-analysis diagnostics that this
+    // reconstruction path never consumes.  Disable everything first so
+    // GetEntry() only decompresses data used below or copied to recon output.
+    const bool has_waveform = tree_in->GetBranch("hycal.samples") != nullptr;
+    tree_in->SetBranchStatus("*", 0);
+    auto enable_branch = [tree_in](const char *name) {
+        if (tree_in->GetBranch(name)) tree_in->SetBranchStatus(name, 1);
+    };
+    for (const char *name : {
+             "event_num", "trigger_type", "trigger_bits", "timestamp",
+             "hycal.nch", "hycal.module_id", "hycal.module_type",
+             "hycal.gain_factor",
+             "gem.nch", "gem.det", "gem.plane", "gem.strip",
+             "gem.charge", "gem.max_tb", "gem.pos", "gem.xtalk",
+             "gem.ts_adc",
+             "ssp_raw",
+             "vtp_roc_tags", "vtp_nwords", "vtp_words",
+             "tdc_roc_tags", "tdc_nwords", "tdc_words"}) {
+        enable_branch(name);
+    }
+    if (has_waveform) {
+        enable_branch("hycal.nsamples");
+        enable_branch("hycal.samples");
+    } else {
+        enable_branch("hycal.npeaks");
+        enable_branch("hycal.peak_height");
+        enable_branch("hycal.peak_time");
+        enable_branch("hycal.peak_integral");
+    }
+
     auto in = std::make_unique<EventVars>();
     prad2::SetRawReadBranches(tree_in, *in);
     std::vector<uint32_t> *ssp_raw = &in->ssp_raw;
@@ -1325,8 +1360,6 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
-    bool has_waveform = tree_in->GetBranch("hycal.samples") != nullptr;
-
     auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
         gRunConfig.gain_data_dir + "/gain_correction", run_num);
 
@@ -1346,7 +1379,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         in->tdc_nwords.clear();
         in->tdc_words.clear();
         tree_in->GetEntry(i);
-        if (i % 10000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
+        if (i % 1000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
 
         clearReconEvent(*ev);
         ev->event_num    = in->event_num;
@@ -1357,6 +1390,8 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         ev->vtp_roc_tags = in->vtp_roc_tags;
         ev->vtp_nwords   = in->vtp_nwords;
         ev->vtp_words    = in->vtp_words;
+
+        clusterer.Clear();
 
         // Re-decode PRAD_CLUSTER records from the flat VTP bank snapshot.
         // Each bank occupies the next vtp_nwords[i] words in vtp_words.
@@ -1506,7 +1541,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                     float time_offset = mod->time_offset;
 
                     // Per-ID gain correction: average of three LMS channels.
-                    const float gain = (mod->id > 1000)
+                    float gain = (mod->id > 1000)
                         ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
                         : gain_corr.g[mod->id].avg;
                     if (gain <= 0.f || gain == 1.0f) gain = in->gain_factor[j];

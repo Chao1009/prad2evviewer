@@ -164,9 +164,8 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
         tree->Branch("gem.max_tb",  ev.gem_max_tb, "gem.max_tb[gem.nch]/S");
         tree->Branch("gem.pos",     ev.gem_pos,    "gem.pos[gem.nch]/F");
         tree->Branch("gem.xtalk",   ev.gem_xtalk,  "gem.xtalk[gem.nch]/b");
-        if (!noWaveform)
-            tree->Branch("gem.ts_adc", ev.gem_ts_adc,
-                         Form("gem.ts_adc[gem.nch][%d]/F", ssp::SSP_TIME_SAMPLES));
+        tree->Branch("gem.ts_adc", ev.gem_ts_adc,
+                        Form("gem.ts_adc[gem.nch][%d]/F", ssp::SSP_TIME_SAMPLES));
 
         // Raw 0xE10C SSP trigger bank words.
         tree->Branch("ssp_raw", &ev.ssp_raw);
