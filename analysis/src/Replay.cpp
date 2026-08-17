@@ -1509,6 +1509,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                     const float gain = (mod->id > 1000)
                         ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
                         : gain_corr.g[mod->id].avg;
+                    if (gain <= 0.f || gain == 1.0f) gain = in->gain_factor[j];
                     
                     // if has waveform data, reanalyze the waveforms,
                     // or just use the existing peak information.
