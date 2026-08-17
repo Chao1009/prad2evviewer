@@ -184,7 +184,7 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:p:x:z:", long_options, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:p:xz:", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f': max_files = std::atoi(optarg); break;
