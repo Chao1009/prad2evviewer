@@ -5,6 +5,7 @@
 //                     -o output_dir [-f max_files] [-n max_events] [-prad1] [-j num_threads]
 //                     [-c daq_config.json] [-d daq_map.json]
 //                     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files] [-x17]
+//                     [-random]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
@@ -17,6 +18,7 @@
 //   -m  merge this many split ROOT files per hadd output (default: 62; 0 disables)
 //   -x17  run the X17 reconstruction path (default without a mode option: PRad2)
 //   -x17_full  run the X17 full reconstruction path
+//   -random enable reconstruction for random trigger runs
 //=============================================================================
 
 #include "Replay.h"
@@ -208,6 +210,7 @@ int main(int argc, char *argv[])
     bool prad1 = false;
     bool x17 = false;
     bool x17_blind = true;
+    bool random = false;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -219,6 +222,7 @@ int main(int argc, char *argv[])
         {"prad1", no_argument, nullptr, 1001},
         {"x17", no_argument, nullptr, 1000},
         {"x17_full", no_argument, nullptr, 1002},
+        {"random", no_argument, nullptr, 1003},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -237,7 +241,8 @@ int main(int argc, char *argv[])
             case 'm': merge_batch_size = std::atoi(optarg); break;
             case 1000: x17 = true; break;
             case 1001: prad1 = true; break;
-            case 1002: x17_blind = false; break; // -x17_full
+            case 1002: x17_blind = false; x17 = true; break; // -x17_full
+            case 1003: random = true; break; // -random
         }
     }
 
@@ -251,7 +256,7 @@ int main(int argc, char *argv[])
     if (input_files.empty() || output_dir.empty()) {
         std::cerr << "Usage: prad2ana_replay_recon <evio_or_raw_file_or_dir> [more files/dirs...] -o output_dir\n"
                   << "       [-f max_files] [-j threads] [-c daq_config.json] [-d daq_map.json]\n"
-                  << "       [-g gem_ped.json] [-z threshold] [-m merge_files] [-prad1] [-x17]\n";
+                  << "       [-g gem_ped.json] [-z threshold] [-m merge_files] [-prad1] [-x17] [-x17_full] [-random]\n";
         std::cerr << "  -o  output directory (REQUIRED)\n";
         std::cerr << "  -f  max files to process (default: all)\n";
         std::cerr << "  -j  number of threads (default: 4)\n";
@@ -265,6 +270,7 @@ int main(int argc, char *argv[])
         std::cerr << "  -prad1  PRad-1 mode (no GEM)\n";
         std::cerr << "  -x17  run the X17 reconstruction path\n";
         std::cerr << "  -x17_full  run the X17 full reconstruction path\n";
+        std::cerr << "  -random  enable reconstruction for random trigger runs\n";
         return 1;
     }
     if (prad1 && x17) {
@@ -275,11 +281,20 @@ int main(int argc, char *argv[])
         std::cerr << "Raw ROOT reconstruction does not support -prad1\n";
         return 1;
     }
+    if (x17 && x17_blind) {
+        std::cout << "X17 blind reconstruction mode enabled\n";
+    }
     if (x17 && !x17_blind) {
         std::cout << "X17 full reconstruction mode enabled\n";
     }
     if (!x17 && x17_blind) {
         std::cout << "X17 blind mode should be used with the -x17 option\n";
+    }
+    if (random) {
+        std::cout << "Random trigger reconstruction mode enabled\n";
+    }
+    if (random && (prad1 || x17)) {
+        std::cout << "Warning: Random trigger mode flag cannot be used together with other mode flags\n";
     }
     std::cout << "Replay mode: " << (x17 ? "X17" : prad1 ? "PRad1" : "PRad2") << "\n";
     if(recon_config.empty()) {
@@ -341,10 +356,10 @@ int main(int argc, char *argv[])
             const bool is_raw = isRawReplayFile(input);
             bool ok = is_raw
                 ? replay.ProcessRaw2Recon(input, out, gRunConfig, db_dir, recon_config,
-                                          daq_config, gem_ped_file, x17, x17_blind)
+                                          daq_config, gem_ped_file, x17, x17_blind, random)
                 : replay.ProcessWithRecon(input, out, gRunConfig, db_dir, recon_config,
                                           daq_config, gem_ped_file, zerosup_override,
-                                          prad1, x17, x17_blind);
+                                          prad1, x17, x17_blind, random);
             output_files[idx] = out;
             if (ok)
                 output_ok[idx] = 1;

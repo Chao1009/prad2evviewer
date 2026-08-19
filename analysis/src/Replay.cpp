@@ -571,27 +571,29 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             ev->nch = nch;
 
             // decode and process GEM SSP data via GemSystem
-            gem_sys.Clear();
-            gem_sys.ProcessEvent(*ssp_evt);
-            int gem_ch = 0;
-            for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
-                for (int p = 0; p < 2; ++p) {
-                    for (const auto &h : gem_sys.GetPlaneHits(d, p)) {
-                        if (gem_ch >= prad2::kMaxGemStrips) break;
-                        ev->gem_det[gem_ch]   = static_cast<uint8_t>(d);
-                        ev->gem_plane[gem_ch] = static_cast<uint8_t>(p);
-                        ev->gem_strip[gem_ch] = h.strip;
-                        ev->gem_charge[gem_ch] = h.charge;
-                        ev->gem_max_tb[gem_ch] = h.max_timebin;
-                        ev->gem_pos[gem_ch]   = h.position;
-                        ev->gem_xtalk[gem_ch] = h.cross_talk ? 1u : 0u;
-                        for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t)
-                            ev->gem_ts_adc[gem_ch][t] = t < (int)h.ts_adc.size() ? h.ts_adc[t] : 0.f;
-                        ++gem_ch;
+            if (!Ecalib) {
+                gem_sys.Clear();
+                gem_sys.ProcessEvent(*ssp_evt);
+                int gem_ch = 0;
+                for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+                    for (int p = 0; p < 2; ++p) {
+                        for (const auto &h : gem_sys.GetPlaneHits(d, p)) {
+                            if (gem_ch >= prad2::kMaxGemStrips) break;
+                            ev->gem_det[gem_ch]   = static_cast<uint8_t>(d);
+                            ev->gem_plane[gem_ch] = static_cast<uint8_t>(p);
+                            ev->gem_strip[gem_ch] = h.strip;
+                            ev->gem_charge[gem_ch] = h.charge;
+                            ev->gem_max_tb[gem_ch] = h.max_timebin;
+                            ev->gem_pos[gem_ch]   = h.position;
+                            ev->gem_xtalk[gem_ch] = h.cross_talk ? 1u : 0u;
+                            for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t)
+                                ev->gem_ts_adc[gem_ch][t] = t < (int)h.ts_adc.size() ? h.ts_adc[t] : 0.f;
+                            ++gem_ch;
+                        }
                     }
                 }
-            }
-            ev->gem_nch = gem_ch;
+                ev->gem_nch = gem_ch;
+            } // end of if (!Ecalib)
             tree->Fill();
             total++;
 
@@ -614,7 +616,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                const float zerosup_override, bool prad1, bool x17, bool x17_blind)
+                                const float zerosup_override, bool prad1, bool x17, bool x17_blind, bool random)
 {
     // Similar to Process(), but with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree.
@@ -927,6 +929,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
             bool is_lms = (ev->trigger_bits & prad2::TBIT_lms) != 0;
             bool is_alpha = (ev->trigger_bits & prad2::TBIT_alpha) != 0;
+            if (random) is_sum = true;
             if (!is_sum && !is_lms && !is_alpha && !is_3cluster) continue;
 
             // For X17 blind analysis, keep all the raw-sum triggered events for calibration and monotoring,
@@ -1013,7 +1016,8 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                                 ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
                                 if (wres.npeaks <= 0) continue;
 
-                                const auto hc_win = hc_time_cuts.at(mod->index);
+                                auto hc_win = hc_time_cuts.at(mod->index);
+                                if (random) {hc_win.lo = 0; hc_win.hi = 400;}
                                 if (cluster_cfg.seed_time_window > 0.f) {
                                     // Multi-pulse mode: push every peak inside the trigger
                                     // window into the clusterer; the seed-anchored timing
@@ -1185,7 +1189,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                bool x17, bool x17_blind)
+                                bool x17, bool x17_blind, bool random)
 {
     // Similar to ProcessWithRecon(), with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree. But unlike ProcessWithRecon(), it starts from raw root files 
@@ -1463,6 +1467,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
         bool is_lms = (ev->trigger_bits & prad2::TBIT_lms) != 0;
         bool is_alpha = (ev->trigger_bits & prad2::TBIT_alpha) != 0;
+        if (random) is_sum = true;
         if (!is_sum && !is_lms && !is_alpha && !is_3cluster) continue;
 
         // For X17 blind analysis, keep all the raw-sum triggered events for calibration and monotoring,
@@ -1566,7 +1571,8 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                         if (wres.npeaks <= 0) continue;
                     }
 
-                    const auto hc_win = hc_time_cuts.at(mod->index);
+                    auto hc_win = hc_time_cuts.at(mod->index);
+                    if (random) { hc_win.lo = 0; hc_win.hi = 400; }
                     if (cluster_cfg.seed_time_window > 0.f) {
                         // Multi-pulse mode: push every peak inside the trigger
                         // window into the clusterer; the seed-anchored timing
