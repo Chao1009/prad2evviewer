@@ -81,7 +81,7 @@ if [[ -z "${RUN_NUMBER}" ]]; then
 fi
 
 while true; do
-    read -rp "Enter replay mode (prad2, x17, x17_full, or prad1) [prad2]: " REPLAY_MODE_INPUT
+    read -rp "Enter replay mode (prad2, x17, x17_full, prad1, or random) [prad2]: " REPLAY_MODE_INPUT
     REPLAY_MODE_INPUT="${REPLAY_MODE_INPUT,,}"
     case "${REPLAY_MODE_INPUT}" in
         ""|prad2|-prad2)
@@ -104,12 +104,38 @@ while true; do
             REPLAY_MODE_NAME="PRad1"
             break
             ;;
+        random|-random)
+            REPLAY_MODE_FLAG="-random"
+            REPLAY_MODE_NAME="Random"
+            break
+            ;;
         *)
-            echo "ERROR: enter prad2, x17, x17_full, or prad1."
+            echo "ERROR: enter prad2, x17, x17_full, prad1, or random."
             ;;
     esac
 done
 echo "Replay mode: ${REPLAY_MODE_NAME}"
+
+while true; do
+    read -rp "Include GEM hit-level branches in output? [no]: " REPLAY_GEM_HIT_INPUT
+    REPLAY_GEM_HIT_INPUT="${REPLAY_GEM_HIT_INPUT,,}"
+    case "${REPLAY_GEM_HIT_INPUT}" in
+        ""|n|no|false)
+            REPLAY_GEM_HIT_FLAG=""
+            break
+            ;;
+        y|yes|true|gem_hit|-gem_hit)
+            REPLAY_GEM_HIT_FLAG="-gem_hit"
+            break
+            ;;
+        *)
+            echo "ERROR: enter yes/no or gem_hit."
+            ;;
+    esac
+done
+if [[ -n "${REPLAY_GEM_HIT_FLAG}" ]]; then
+    echo "GEM hit-level branches will be included in the output"
+fi
 
 PRAD2_SOFT="$(prompt_default "Enter prad2evviewer directory" "${PRAD2_SOFT}")"
 if [[ "${PRAD2_BIN_WAS_SET}" -eq 0 ]]; then
@@ -215,6 +241,7 @@ REPLAY_ZERO_SUPPRESS=$(shell_quote "${REPLAY_ZERO_SUPPRESS}")
 REPLAY_MAX_FILES=$(shell_quote "${REPLAY_MAX_FILES}")
 REPLAY_MERGE_FILES=$(shell_quote "${REPLAY_MERGE_FILES}")
 REPLAY_MODE_FLAG=$(shell_quote "${REPLAY_MODE_FLAG}")
+REPLAY_GEM_HIT_FLAG=$(shell_quote "${REPLAY_GEM_HIT_FLAG}")
 REPLAY_MODE_NAME=$(shell_quote "${REPLAY_MODE_NAME}")
 REPORT=$(shell_quote "${REPORT}")
 SLOW_ROOT=$(shell_quote "${SLOW_ROOT}")
@@ -269,8 +296,10 @@ echo ""
 echo "Starting replay..."
 REPLAY_MODE_ARGS=()
 [[ -n "\${REPLAY_MODE_FLAG}" ]] && read -ra REPLAY_MODE_ARGS <<< "\${REPLAY_MODE_FLAG}"
-echo "\${REPLAY_CMD} \${RUN_DIR} -o \${OUT_DIR} -j \${REPLAY_CORES} -z \${REPLAY_ZERO_SUPPRESS} -f \${REPLAY_MAX_FILES} -m \${REPLAY_MERGE_FILES} \${REPLAY_MODE_ARGS[*]}"
-"\${REPLAY_CMD}" "\${RUN_DIR}" -o "\${OUT_DIR}" -j "\${REPLAY_CORES}" -z "\${REPLAY_ZERO_SUPPRESS}" -f "\${REPLAY_MAX_FILES}" -m "\${REPLAY_MERGE_FILES}" "\${REPLAY_MODE_ARGS[@]}"
+REPLAY_GEM_HIT_ARGS=()
+[[ -n "\${REPLAY_GEM_HIT_FLAG}" ]] && read -ra REPLAY_GEM_HIT_ARGS <<< "\${REPLAY_GEM_HIT_FLAG}"
+echo "\${REPLAY_CMD} \${RUN_DIR} -o \${OUT_DIR} -j \${REPLAY_CORES} -z \${REPLAY_ZERO_SUPPRESS} -f \${REPLAY_MAX_FILES} -m \${REPLAY_MERGE_FILES} \${REPLAY_MODE_ARGS[*]} \${REPLAY_GEM_HIT_ARGS[*]}"
+"\${REPLAY_CMD}" "\${RUN_DIR}" -o "\${OUT_DIR}" -j "\${REPLAY_CORES}" -z "\${REPLAY_ZERO_SUPPRESS}" -f "\${REPLAY_MAX_FILES}" -m "\${REPLAY_MERGE_FILES}" "\${REPLAY_MODE_ARGS[@]}" "\${REPLAY_GEM_HIT_ARGS[@]}"
 
 mapfile -t RECON_INPUTS < <(find "\${OUT_DIR}" -maxdepth 1 -type f -name "prad_\${RUN_NUMBER}_recon_*.root" | sort)
 if [[ "\${#RECON_INPUTS[@]}" -eq 0 ]]; then

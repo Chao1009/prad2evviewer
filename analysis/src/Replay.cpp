@@ -232,9 +232,9 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks, bool Ec
     prad2::SetRawWriteBranches(tree, ev, write_peaks, Ecalib, noWaveform);
 }
 
-void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode = false)
+void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode, bool gem_hits)
 {
-    prad2::SetReconWriteBranches(tree, ev, x17_mode);
+    prad2::SetReconWriteBranches(tree, ev, x17_mode, gem_hits);
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
@@ -616,7 +616,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                const float zerosup_override, bool prad1, bool x17, bool x17_blind, bool random)
+                                const float zerosup_override, bool prad1, bool x17, bool x17_blind, bool random, bool gem_hit)
 {
     // Similar to Process(), but with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree.
@@ -743,7 +743,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     // create TTree and branches for reconstructed data
     TTree *tree = new TTree("recon", "PRad2 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev, x17);
+    setupReconBranches(tree, *ev, x17, gem_hit);
 
     // Side trees — see Process() above for the design.  The recon path
     // writes the same scalers / epics records so analysis joining keeps
@@ -1189,7 +1189,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                bool x17, bool x17_blind, bool random)
+                                bool x17, bool x17_blind, bool random, bool gem_hit)
 {
     // Similar to ProcessWithRecon(), with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree. But unlike ProcessWithRecon(), it starts from raw root files 
@@ -1347,7 +1347,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
     // Create the reconstructed event tree.
     TTree *tree = new TTree("recon", "PRad2 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev);
+    setupReconBranches(tree, *ev, x17, gem_hit);
 
     // Side trees already exist in replay_raw output.  Copy them verbatim so
     // their event-number join semantics survive raw-to-recon conversion.

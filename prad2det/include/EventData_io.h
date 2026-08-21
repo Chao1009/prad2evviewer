@@ -278,7 +278,7 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 // ─────────────────────────────────────────────────────────────────────────
 // Recon tree — write
 // ─────────────────────────────────────────────────────────────────────────
-inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode)
+inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode, bool with_gem_hits = false)
 {
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
@@ -319,20 +319,21 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("mHit_cl_index", ev.mHit_cl_index, "mHit_cl_index[match_num]/b");
 
     // GEM hits (lab frame, per-detector plane).
-    tree->Branch("n_gem_hits",   &ev.n_gem_hits,   "n_gem_hits/I");
-    tree->Branch("det_id",       ev.det_id,        "det_id[n_gem_hits]/b");
-    tree->Branch("gem_x",        ev.gem_x,         "gem_x[n_gem_hits]/F");
-    tree->Branch("gem_y",        ev.gem_y,         "gem_y[n_gem_hits]/F");
-    tree->Branch("gem_z",        ev.gem_z,         "gem_z[n_gem_hits]/F");
-    tree->Branch("gem_x_charge", ev.gem_x_charge,  "gem_x_charge[n_gem_hits]/F");
-    tree->Branch("gem_y_charge", ev.gem_y_charge,  "gem_y_charge[n_gem_hits]/F");
-    tree->Branch("gem_x_peak",   ev.gem_x_peak,    "gem_x_peak[n_gem_hits]/F");
-    tree->Branch("gem_y_peak",   ev.gem_y_peak,    "gem_y_peak[n_gem_hits]/F");
-    tree->Branch("gem_x_size",   ev.gem_x_size,    "gem_x_size[n_gem_hits]/b");
-    tree->Branch("gem_y_size",   ev.gem_y_size,    "gem_y_size[n_gem_hits]/b");
-    tree->Branch("gem_x_mTbin",  ev.gem_x_mTbin,   "gem_x_mTbin[n_gem_hits]/b");
-    tree->Branch("gem_y_mTbin",  ev.gem_y_mTbin,   "gem_y_mTbin[n_gem_hits]/b");
-
+    if (with_gem_hits) {
+        tree->Branch("n_gem_hits",   &ev.n_gem_hits,   "n_gem_hits/I");
+        tree->Branch("det_id",       ev.det_id,        "det_id[n_gem_hits]/b");
+        tree->Branch("gem_x",        ev.gem_x,         "gem_x[n_gem_hits]/F");
+        tree->Branch("gem_y",        ev.gem_y,         "gem_y[n_gem_hits]/F");
+        tree->Branch("gem_z",        ev.gem_z,         "gem_z[n_gem_hits]/F");
+        tree->Branch("gem_x_charge", ev.gem_x_charge,  "gem_x_charge[n_gem_hits]/F");
+        tree->Branch("gem_y_charge", ev.gem_y_charge,  "gem_y_charge[n_gem_hits]/F");
+        tree->Branch("gem_x_peak",   ev.gem_x_peak,    "gem_x_peak[n_gem_hits]/F");
+        tree->Branch("gem_y_peak",   ev.gem_y_peak,    "gem_y_peak[n_gem_hits]/F");
+        tree->Branch("gem_x_size",   ev.gem_x_size,    "gem_x_size[n_gem_hits]/b");
+        tree->Branch("gem_y_size",   ev.gem_y_size,    "gem_y_size[n_gem_hits]/b");
+        tree->Branch("gem_x_mTbin",  ev.gem_x_mTbin,   "gem_x_mTbin[n_gem_hits]/b");
+        tree->Branch("gem_y_mTbin",  ev.gem_y_mTbin,   "gem_y_mTbin[n_gem_hits]/b");
+    }
     // Veto + LMS soft-peak summaries.
     if(!x17_mode) {
         tree->Branch("veto_nch",         &ev.veto_nch,         "veto_nch/I");

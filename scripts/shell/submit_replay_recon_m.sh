@@ -126,7 +126,7 @@ else
 fi
 
 while true; do
-    read -rp "Enter replay mode (prad2, x17, x17_full, or prad1) [prad2]: " REPLAY_MODE_INPUT
+    read -rp "Enter replay mode (prad2, x17, x17_full, prad1, or random) [prad2]: " REPLAY_MODE_INPUT
     REPLAY_MODE_INPUT="${REPLAY_MODE_INPUT,,}"
     case "${REPLAY_MODE_INPUT}" in
         ""|prad2|-prad2)
@@ -149,12 +149,38 @@ while true; do
             REPLAY_MODE_NAME="PRad1"
             break
             ;;
+        random|-random)
+            REPLAY_MODE_INPUT_FOR_ONE="random"
+            REPLAY_MODE_NAME="Random"
+            break
+            ;;
         *)
-            echo "ERROR: enter prad2, x17, x17_full, or prad1."
+            echo "ERROR: enter prad2, x17, x17_full, prad1, or random."
             ;;
     esac
 done
 echo "Replay mode: ${REPLAY_MODE_NAME}"
+
+while true; do
+    read -rp "Include GEM hit-level branches in output? [no]: " REPLAY_GEM_HIT_INPUT
+    REPLAY_GEM_HIT_INPUT="${REPLAY_GEM_HIT_INPUT,,}"
+    case "${REPLAY_GEM_HIT_INPUT}" in
+        ""|n|no|false)
+            REPLAY_GEM_HIT_INPUT_FOR_ONE=""
+            break
+            ;;
+        y|yes|true|gem_hit|-gem_hit)
+            REPLAY_GEM_HIT_INPUT_FOR_ONE="-gem_hit"
+            break
+            ;;
+        *)
+            echo "ERROR: enter yes/no or gem_hit."
+            ;;
+    esac
+done
+if [[ -n "${REPLAY_GEM_HIT_INPUT_FOR_ONE}" ]]; then
+    echo "GEM hit-level branches will be included in the output"
+fi
 
 PRAD2_SOFT="$(prompt_default "Enter prad2evviewer directory" "${PRAD2_SOFT}")"
 if [[ "${PRAD2_BIN_WAS_SET}" -eq 0 ]]; then
@@ -235,9 +261,10 @@ fi
 echo ""
 for run in "${CACHED_RUNS[@]}"; do
     echo "Submitting replay/recon job for run ${run}..."
-    if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    if ! printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
             "${run}" \
             "${REPLAY_MODE_INPUT_FOR_ONE}" \
+            "${REPLAY_GEM_HIT_INPUT_FOR_ONE}" \
             "${PRAD2_SOFT}" \
             "${PRAD2_BIN}" \
             "${CACHE_BASE}" \

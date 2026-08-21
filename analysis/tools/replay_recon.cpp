@@ -4,8 +4,8 @@
 // Usage: prad2ana_replay_recon <evio(or _raw.root)_file_or_dir> [more files/dirs...]
 //                     -o output_dir [-f max_files] [-n max_events] [-prad1] [-j num_threads]
 //                     [-c daq_config.json] [-d daq_map.json]
-//                     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files] [-x17]
-//                     [-random]
+//                     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files]
+//                     [-x17] [-x17_full] [-random] [-gem_hit]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
@@ -19,6 +19,7 @@
 //   -x17  run the X17 reconstruction path (default without a mode option: PRad2)
 //   -x17_full  run the X17 full reconstruction path
 //   -random enable reconstruction for random trigger runs
+//   -gem_hit  include GEM hit-level branches in the output (default: disabled)
 //=============================================================================
 
 #include "Replay.h"
@@ -211,6 +212,7 @@ int main(int argc, char *argv[])
     bool x17 = false;
     bool x17_blind = true;
     bool random = false;
+    bool gem_hit = false;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -223,6 +225,7 @@ int main(int argc, char *argv[])
         {"x17", no_argument, nullptr, 1000},
         {"x17_full", no_argument, nullptr, 1002},
         {"random", no_argument, nullptr, 1003},
+        {"gem_hit", no_argument, nullptr, 1004},
         {nullptr, 0, nullptr, 0}
     };
 
@@ -243,6 +246,7 @@ int main(int argc, char *argv[])
             case 1001: prad1 = true; break;
             case 1002: x17_blind = false; x17 = true; break; // -x17_full
             case 1003: random = true; break; // -random
+            case 1004: gem_hit = true; break; // -gem_hit
         }
     }
 
@@ -256,7 +260,7 @@ int main(int argc, char *argv[])
     if (input_files.empty() || output_dir.empty()) {
         std::cerr << "Usage: prad2ana_replay_recon <evio_or_raw_file_or_dir> [more files/dirs...] -o output_dir\n"
                   << "       [-f max_files] [-j threads] [-c daq_config.json] [-d daq_map.json]\n"
-                  << "       [-g gem_ped.json] [-z threshold] [-m merge_files] [-prad1] [-x17] [-x17_full] [-random]\n";
+                  << "       [-g gem_ped.json] [-z threshold] [-m merge_files] [-prad1] [-x17] [-x17_full] [-random] [-gem_hit]\n";
         std::cerr << "  -o  output directory (REQUIRED)\n";
         std::cerr << "  -f  max files to process (default: all)\n";
         std::cerr << "  -j  number of threads (default: 4)\n";
@@ -271,6 +275,7 @@ int main(int argc, char *argv[])
         std::cerr << "  -x17  run the X17 reconstruction path\n";
         std::cerr << "  -x17_full  run the X17 full reconstruction path\n";
         std::cerr << "  -random  enable reconstruction for random trigger runs\n";
+        std::cerr << "  -gem_hit  include GEM hit-level branches in the output (default: disabled)\n";
         return 1;
     }
     if (prad1 && x17) {
@@ -297,6 +302,11 @@ int main(int argc, char *argv[])
         std::cout << "Warning: Random trigger mode flag cannot be used together with other mode flags\n";
     }
     std::cout << "Replay mode: " << (x17 ? "X17" : prad1 ? "PRad1" : "PRad2") << "\n";
+    if (gem_hit) {
+        std::cout << "GEM hit-level branches will be included in the output\n";
+    } else {
+        std::cout << "GEM hit-level branches will NOT be included in the output\n";
+    }
     if(recon_config.empty()) {
         if(x17) recon_config = db_dir + "/reconstruction_config_x17.json";
         else recon_config = db_dir + "/reconstruction_config.json";
@@ -356,10 +366,10 @@ int main(int argc, char *argv[])
             const bool is_raw = isRawReplayFile(input);
             bool ok = is_raw
                 ? replay.ProcessRaw2Recon(input, out, gRunConfig, db_dir, recon_config,
-                                          daq_config, gem_ped_file, x17, x17_blind, random)
+                                          daq_config, gem_ped_file, x17, x17_blind, random, gem_hit)
                 : replay.ProcessWithRecon(input, out, gRunConfig, db_dir, recon_config,
                                           daq_config, gem_ped_file, zerosup_override,
-                                          prad1, x17, x17_blind, random);
+                                          prad1, x17, x17_blind, random, gem_hit);
             output_files[idx] = out;
             if (ok)
                 output_ok[idx] = 1;
