@@ -195,8 +195,8 @@ int main(int argc, char *argv[])
             case 'p': peaks = true; break;
             case 'x': x17 = true; break;
             case 'z': zerosup_override = std::atof(optarg); break;
-            case 1000: Ecalib = true; break;
-            case 1001: noWaveform = true; break;
+            case 1000: Ecalib = true; peaks = true; break;
+            case 1001: noWaveform = true; peaks = true; break;
             default: break;
         }
     }
@@ -220,6 +220,8 @@ int main(int argc, char *argv[])
         std::cerr << "  -p  include peak analysis branches (soft + firmware DAQ-mode)\n";
         std::cerr << "  -x  run the X17 reconstruction path\n";
         std::cerr << "  -z  override GEM zero-suppression threshold (sigma)\n";
+        std::cerr << "  --Ecalib  enable Ecalib mode, throw out extra branches to reduce output size (including peak analysis)\n";
+        std::cerr << "  --noWaveform  disable saving raw waveform samples (including peak analysis)\n";
         return 1;
     }
     int num_files = static_cast<int>(evio_files.size());
