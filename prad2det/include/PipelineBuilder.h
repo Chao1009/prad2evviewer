@@ -32,6 +32,7 @@
 #include "GemCluster.h"      // gem::ClusterConfig (per-detector knobs)
 #include "GemSystem.h"
 #include "HyCalCluster.h"    // fdec::ClusterConfig (HyCal clusterer knobs)
+#include "HyCalDeadModules.h" // prad2::ApplyHyCalDeadModules (applies layout flags)
 #include "HyCalSystem.h"
 #include "HyCalTimeCalib.h"  // prad2::LoadHyCalTimeCalib (applies mod.time_offset)
 #include "HyCalTimeCuts.h"   // prad2::HyCalTimeCuts (per-module time window)

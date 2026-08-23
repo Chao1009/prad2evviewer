@@ -101,6 +101,9 @@ struct RunConfig {
     // prad2det/include/HyCalRfOffsets.h and
     // docs/analysis_notes/rf_time_reconstruction_plan.md.
     std::string hycal_rf_offset_file;
+    // Per-run replacement list selected from the independent
+    // `hycal_dead_modules` table in runinfo/general.json.
+    std::vector<std::string> hycal_dead_modules;
 };
 
 // Returns a RunConfig populated by chaining all matching `configurations`
@@ -304,10 +307,27 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
         }
     }
 
+    // 5) HyCal dead modules: independent lookup. Each entry replaces the
+    //    previous list rather than being chained.
+    int best_dead_run = -1;
+    if (cfg.contains("hycal_dead_modules") && cfg["hycal_dead_modules"].is_array()) {
+        auto [dead_entry, dead_run] = pick_best(cfg["hycal_dead_modules"]);
+        if (dead_entry != nullptr && dead_entry->contains("dead_modules") &&
+            (*dead_entry)["dead_modules"].is_array()) {
+            result.hycal_dead_modules.clear();
+            for (const auto &name : (*dead_entry)["dead_modules"]) {
+                if (name.is_string())
+                    result.hycal_dead_modules.push_back(name.get<std::string>());
+            }
+            best_dead_run = dead_run;
+        }
+    }
+
     std::cerr << "RunInfo   : chained " << chain.size()
               << " config(s), last from_run=" << best_run;
     if (best_ped_run >= 0) std::cerr << "  ped_from_run=" << best_ped_run;
     if (best_beam_run >= 0) std::cerr << "  beam_from_run=" << best_beam_run;
+    if (best_dead_run >= 0) std::cerr << "  dead_from_run=" << best_dead_run;
     std::cerr << " from " << path << "\n";
 
     // If gain_data_dir is empty (not set in JSON, or explicitly set to ""),

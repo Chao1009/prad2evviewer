@@ -138,9 +138,9 @@
 
     ],
 
-    "// Per-run GEM pedestals + common-mode range.  Bumping pedestals on a":                                                          "",
-    "// new run only requires appending one row here — no need to touch":                                                             "",
-    "// the configurations array.":                                                                                                   "",
+    "// Per-run GEM pedestals + common-mode range.  Bumping pedestals on a": "",
+    "// new run only requires appending one row here — no need to touch": "",
+    "// the configurations array.": "",
     "gem_pedestals": [
         {"from_run":     0, "pedestal_file": "gem_peds/peds_24177.txt",    "common_mode_file": "gem_peds/cm_24177.txt"},
         {"from_run": 24023, "pedestal_file": "gem_peds/gem_ped_24023.dat", "common_mode_file": "gem_peds/CommonModeRange_24023.txt"},
@@ -153,11 +153,20 @@
         {"from_run": 25912, "pedestal_file": "gem_peds/gem_ped_25912.dat", "common_mode_file": "gem_peds/CommonModeRange_25912.txt"}
     ],
 
-    "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;":                                                   "",
-    "// if a run has an entry here, it overrides the target_* fields for that run only.":                                                                                   "",
+    "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;": "",
+    "// if a run has an entry here, it overrides the target_* fields for the runs >= from_run.": "",
     "beam_target_positions": [
         {"from_run": 24185, "target": [0.0, 0.0, 0.0]},
         {"from_run": 25655, "target": [-0.108, 1.601, 0.0]},
         {"from_run": 26000, "target": [0.85, 1.5, 0.0]}
+    ],
+
+    "// Per-run HyCal dead modules list. Independent lookup, no chaining": "",
+    "// the definate time of W1141 dead is not known, run 24850 is an estimate": "",
+    "hycal_dead_modules": [
+        {"from_run": 0, "dead_modules": ["W1124", "W691"]},
+        {"from_run": 24693, "dead_modules": ["W1124"]},
+        {"from_run": 24850, "dead_modules": ["W1124", "W1141"]},
+        {"from_run": 25540, "dead_modules": ["W1124", "W781"]}
     ]
 }

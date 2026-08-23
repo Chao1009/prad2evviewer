@@ -287,6 +287,18 @@ Pipeline PipelineBuilder::build()
         out.hycal_map_path = hc_map;
     }
 
+    // --- 6b. Per-run HyCal dead modules -----------------------------------
+    {
+        const auto dead = prad2::ApplyHyCalDeadModules(
+            out.run_cfg.hycal_dead_modules, out.hycal);
+        std::ostringstream oss;
+        oss << "[setup] HC dead    : modules=" << dead.n_dead
+            << "  neighbors=" << dead.n_dead_neighbors;
+        if (dead.n_unknown > 0)
+            oss << "  unknown=" << dead.n_unknown;
+        LOG(oss.str());
+    }
+
     // --- 7. HyCal calibration --------------------------------------------
     std::string hc_calib = hycal_calib_path_.empty()
         ? resolve(out.run_cfg.energy_calib_file)
