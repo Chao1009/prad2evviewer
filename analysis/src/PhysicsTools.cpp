@@ -7,6 +7,7 @@
 #include <TF1.h>
 #include <TSpectrum.h>
 #include <TMath.h>
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <fstream>
@@ -462,20 +463,73 @@ float PhysicsTools::GetPhiAngle(float x, float y)
 
 //for gain factor monitoring
 
-// Helper: fit a TH1F with a Gaussian and return {mean, sigma, chi2/ndf}.
-// Returns {0,0,0} if histogram is null or has too few entries.
-static std::array<double, 3> fitGaus(TH1F *h)
+// Fit a peak near expectPeak with a Gaussian and return {mean, sigma, chi2/ndf}.
+// Returns {0,0,0} if the histogram or fit is invalid.
+std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
 {
-    if (!h || h->GetEntries() < 10) return {0., 0., 0.};
-    double peak0 = h->GetBinCenter(h->GetMaximumBin());
-    double rms0  = h->GetRMS();
-    if (rms0 <= 0.) rms0 = peak0 * 0.1;
-    double lo = peak0 - 2. * rms0, hi = peak0 + 2. * rms0;
+    if (!h || h->GetEntries() < 100) return {0., 0., 0.};
+
+    const int nBins = h->GetNbinsX();
+    if (nBins < 4) return {0., 0., 0.};
+
+    int peakBin = -1;
+    double peakHeight = 0.;
+
+    // Prefer the largest local maximum within +/-20% of the expected peak.
+    if (std::isfinite(expectPeak) && expectPeak > 0.) {
+        int firstBin = h->GetXaxis()->FindFixBin(0.8 * expectPeak);
+        int lastBin  = h->GetXaxis()->FindFixBin(1.2 * expectPeak);
+        firstBin = std::max(1, firstBin);
+        lastBin  = std::min(nBins, lastBin);
+
+        for (int bin = firstBin; bin <= lastBin; ++bin) {
+            const double content = h->GetBinContent(bin);
+            const double left = (bin > 1) ? h->GetBinContent(bin - 1) : content;
+            const double right = (bin < nBins) ? h->GetBinContent(bin + 1) : content;
+            if (content > 0. && content >= left && content >= right && content > peakHeight) {
+                peakBin = bin;
+                peakHeight = content;
+            }
+        }
+    }
+
+    // Fall back to the global maximum when no peak is found near expectPeak.
+    if (peakBin < 0) {
+        peakBin = h->GetMaximumBin();
+        peakHeight = h->GetBinContent(peakBin);
+    }
+    if (peakHeight <= 0.) return {0., 0., 0.};
+
+    const double threshold = 0.4 * peakHeight;
+    int leftBin = peakBin;
+    int rightBin = peakBin;
+    while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
+    while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
+    if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
+
+    const double lo = h->GetBinCenter(leftBin);
+    const double hi = h->GetBinCenter(rightBin);
+    const double peak0 = h->GetBinCenter(peakBin);
+    const double sigma0 = (hi - lo) / (2. * std::sqrt(-2. * std::log(0.4)));
+    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
+
+    // ROOT's chi-square fit uses the histogram bin errors. Sumw2 initializes
+    // Poisson statistical errors for an unweighted histogram and preserves them
+    // correctly if the histogram is filled again later.
+    if (h->GetSumw2N() == 0) h->Sumw2();
+
     TF1 gaus("_fg_", "gaus", lo, hi);
-    gaus.SetParameters(h->GetMaximum(), peak0, rms0);
-    h->Fit(&gaus, "RQ0");
+    gaus.SetParameters(peakHeight, peak0, sigma0);
+    const int fitStatus = h->Fit(&gaus, "RQ0N");
+    if (fitStatus != 0) return {0., 0., 0.};
+
+    const double mean = gaus.GetParameter(1);
+    const double sigma = std::abs(gaus.GetParameter(2));
+    if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
+        return {0., 0., 0.};
+
     double chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.;
-    return {gaus.GetParameter(1), std::abs(gaus.GetParameter(2)), chi2};
+    return {mean, sigma, chi2};
 }
 
 void PhysicsTools::ComputeModuleGains()

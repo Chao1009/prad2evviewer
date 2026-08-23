@@ -100,6 +100,7 @@ public:
     // Returns {peak, sigma, chi2} from Gaussian fit.
     std::array<float, 3> FitPeakResolution(int module_id) const;
     void Resolution2Database(int run_id);
+    static std::array<double, 3> fitGaus(TH1F *h, float expectPeak = 0.f);
 
     // --- gain factor analysis ------------------------------------------------
     // One result row per module.
