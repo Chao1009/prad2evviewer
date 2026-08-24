@@ -133,8 +133,8 @@ static bool ensureGainCorr(int run_num,
 static bool isRawReplayFile(const std::string &path)
 {
     const auto name = std::filesystem::path(path).filename().string();
-    return name.size() >= 9
-           && name.compare(name.size() - 9, 9, "_raw.root") == 0;
+    return name.find("_raw") != std::string::npos
+           && name.find(".root") != std::string::npos;
 }
 
 static std::vector<std::string> collectInputFiles(const std::string &path)
@@ -158,7 +158,13 @@ static std::string makeOutputFile(const std::string &input_path)
 {
     std::string out = std::filesystem::path(input_path).filename().string();
     if (isRawReplayFile(input_path)) {
-        out.resize(out.size() - 9);
+        // Preserve foo_raw.root -> foo_recon.root, while also producing a
+        // valid name for variants such as foo_raw_filter.root.
+        const auto root_pos = out.rfind(".root");
+        out.resize(root_pos);
+        if (out.size() >= 4
+            && out.compare(out.size() - 4, 4, "_raw") == 0)
+            out.resize(out.size() - 4);
         return out + "_recon.root";
     }
     auto pos = out.find(".evio");

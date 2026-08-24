@@ -5,13 +5,18 @@
 // merged before the module fits and calibration update are performed.
 //
 // Events are selected from the sum trigger by requiring one reconstructed
-// cluster, at least three blocks, a hit near the center of the seed crystal,
-// and at least 60% of the cluster energy in that crystal. Time-compatible
-// PbWO4 hits in a 5x5 window are summed. For each module, the reconstructed
-// elastic e-p peak is fitted near the expected energy calculated from the run
-// beam energy and detector geometry. The expected/fitted peak ratio is damped
-// to 70% of the full correction, limited to [0.5, 2.0], and applied to the
-// current calibration constant. Later iterations use the preceding result.
+// cluster with at least four blocks, a hit near the center of its seed crystal,
+// and at least 60% of the cluster energy in that crystal. Dead seed modules
+// from the run configuration are rejected. For transition modules, only hits
+// on the inner side of the crystal are retained. Time-compatible PbWO4 hits in
+// a 5x5 window are then summed into the seed module's energy spectrum.
+//
+// For each non-dead module, the reconstructed elastic e-p peak is fitted near
+// the expected energy calculated from the run beam energy and detector
+// geometry. The expected/fitted peak ratio is damped to 70% of the full
+// correction, limited to [0.5, 2.0], and applied to the current calibration
+// constant. Later iterations use the preceding result. Dead modules are not
+// calibrated, and dead/dead-neighbor flags are recorded in the fit-result JSON.
 //=============================================================================
 //
 // Usage: physics_calib <input_raw.root|dir> [more files/dirs...]
@@ -80,6 +85,8 @@ struct HistResult {
     std::unique_ptr<TH1F>                    h_E_1cl;
     std::unique_ptr<TH1F>                    h_center_energy_fraction;
     std::unique_ptr<TH1F>                    h_center_energy;
+    std::unique_ptr<TH1F>                    h_2nd_energy_fraction;
+    std::unique_ptr<TH1F>                    h_3rd_energy_fraction;
     std::unique_ptr<TH1F>                    h_fit_peak_energy;
     std::unique_ptr<TH1F>                    h_fit_peak_ratio;
     std::unique_ptr<TH1F>                    h_fit_peak_chi2ndf;
@@ -251,6 +258,20 @@ int main(int argc, char *argv[])
             energy_bins, energy_min, energy_max);
         res->h_center_energy->SetDirectory(nullptr);
 
+        res->h_2nd_energy_fraction = std::make_unique<TH1F>(
+            Form("h_2nd_energy_fraction_tid%d", tid),
+            "Second 5x5 energy layer fraction;E_{layer 2}/E_{5x5};Counts",
+            center_energy_fraction_bins,
+            center_energy_fraction_min, center_energy_fraction_max);
+        res->h_2nd_energy_fraction->SetDirectory(nullptr);
+
+        res->h_3rd_energy_fraction = std::make_unique<TH1F>(
+            Form("h_3rd_energy_fraction_tid%d", tid),
+            "Third 5x5 energy layer fraction;E_{layer 3}/E_{5x5};Counts",
+            center_energy_fraction_bins,
+            center_energy_fraction_min, center_energy_fraction_max);
+        res->h_3rd_energy_fraction->SetDirectory(nullptr);
+
         res->h_fit_peak_energy = std::make_unique<TH1F>(
             Form("h_fit_peak_energy_tid%d", tid),
             "Fitted peak energy;E_{peak} (MeV);Modules",
@@ -360,6 +381,20 @@ int main(int argc, char *argv[])
         energy_bins, energy_min, energy_max);
     merged_result.h_center_energy->SetDirectory(nullptr);
 
+    merged_result.h_2nd_energy_fraction = std::make_unique<TH1F>(
+        "h_2nd_energy_fraction",
+        "Second 5x5 energy layer fraction;E_{layer 2}/E_{5x5};Counts",
+        center_energy_fraction_bins,
+        center_energy_fraction_min, center_energy_fraction_max);
+    merged_result.h_2nd_energy_fraction->SetDirectory(nullptr);
+
+    merged_result.h_3rd_energy_fraction = std::make_unique<TH1F>(
+        "h_3rd_energy_fraction",
+        "Third 5x5 energy layer fraction;E_{layer 3}/E_{5x5};Counts",
+        center_energy_fraction_bins,
+        center_energy_fraction_min, center_energy_fraction_max);
+    merged_result.h_3rd_energy_fraction->SetDirectory(nullptr);
+
     merged_result.h_fit_peak_energy = std::make_unique<TH1F>(
         "h_fit_peak_energy",
         "Fitted peak energy;E_{peak} (MeV);Modules",
@@ -421,6 +456,14 @@ int main(int argc, char *argv[])
         if (res->h_center_energy) {
             merged_result.h_center_energy->Add(res->h_center_energy.get());
         }
+        if (res->h_2nd_energy_fraction) {
+            merged_result.h_2nd_energy_fraction->Add(
+                res->h_2nd_energy_fraction.get());
+        }
+        if (res->h_3rd_energy_fraction) {
+            merged_result.h_3rd_energy_fraction->Add(
+                res->h_3rd_energy_fraction.get());
+        }
         if (res->h_fit_peak_energy) {
             merged_result.h_fit_peak_energy->Add(res->h_fit_peak_energy.get());
         }
@@ -440,6 +483,7 @@ int main(int argc, char *argv[])
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
     hycal.LoadCalibration(input_calib_file);
+    prad2::ApplyHyCalDeadModules(gRunConfig.hycal_dead_modules, hycal);
     analysis::PhysicsTools physics(hycal);
 
     // save the new calibration results, later we can write them into a JSON file
@@ -454,6 +498,8 @@ int main(int argc, char *argv[])
         float fit_sigma;
         float fit_chi2ndf;
         bool fit_good; // true if the fit is considered good
+        bool is_dead; // true if the module is dead (read from RunConfig)
+        bool is_deadNeighbor; // true if the module is in a 3 by 3 region of dead modules
     };
     std::vector<CalibrationResult> calib_results;
 
@@ -466,6 +512,14 @@ int main(int argc, char *argv[])
         int mod_id = i + 1000 + 1; // module IDs start at 1001(W1)
         auto mod = hycal.module_by_id(mod_id);
         if (!mod) continue;
+
+        bool is_dead = fdec::test_bit(mod->flag, fdec::kDeadModule);
+        bool is_deadNeighbor = fdec::test_bit(mod->flag, fdec::kDeadNeighbor);
+        if (is_dead) {
+            calib_results.push_back({mod_id, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, false, is_dead, is_deadNeighbor});
+            continue; // skip dead modules
+        }
+
         float theta_deg = std::atan(std::sqrt(mod->x * mod->x + mod->y * mod->y)
                                     / gRunConfig.hycal_z) * 180.f / 3.14159265f;
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
@@ -499,8 +553,9 @@ int main(int argc, char *argv[])
         calib_results.push_back({mod_id, 
             static_cast<float>(current_factor), 
             static_cast<float>(new_factor),
-            ratio, peak, expected_peak, 
-            sigma, chi2, fit_good});
+            ratio, static_cast<float>(peak), expected_peak,
+            static_cast<float>(sigma), static_cast<float>(chi2), fit_good,
+            is_dead, is_deadNeighbor});
     }
 
     // Write calibration results to a json file
@@ -519,7 +574,9 @@ int main(int argc, char *argv[])
                      << "\"expected_peak\": " << res.expected_peak << ", "
                      << "\"sigma\": " << res.fit_sigma << ", "
                      << "\"chi2/ndf\": " << res.fit_chi2ndf << ", "
-                     << "\"fit_good\": " << (res.fit_good ? "true" : "false")
+                     << "\"fit_good\": " << (res.fit_good ? "true" : "false") << ", "
+                     << "\"is_dead\": " << (res.is_dead ? "true" : "false") << ", "
+                     << "\"is_deadNeighbor\": " << (res.is_deadNeighbor ? "true" : "false")
                      << "}" << (i + 1 < calib_results.size() ? "," : "") << "\n";
         }
         json_out << "]\n";
@@ -536,6 +593,8 @@ int main(int argc, char *argv[])
     if (merged_result.h_E_1cl) merged_result.h_E_1cl->Write();
     if (merged_result.h_center_energy_fraction) merged_result.h_center_energy_fraction->Write();
     if (merged_result.h_center_energy) merged_result.h_center_energy->Write();
+    if (merged_result.h_2nd_energy_fraction) merged_result.h_2nd_energy_fraction->Write();
+    if (merged_result.h_3rd_energy_fraction) merged_result.h_3rd_energy_fraction->Write();
     if (merged_result.h_fit_peak_energy) merged_result.h_fit_peak_energy->Write();
     if (merged_result.h_fit_peak_ratio) merged_result.h_fit_peak_ratio->Write();
     if (merged_result.h_fit_peak_chi2ndf) merged_result.h_fit_peak_chi2ndf->Write();
@@ -651,7 +710,8 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                     float adc = in->peak_integral[j][p] * gain;
                     float energy = static_cast<float>(mod->energize(adc));
                     clusterer.AddHit(mod->index, energy, peak_time);
-                    valid_peaks.push_back({static_cast<int>(in->module_id[j]), mod->x, mod->y, 
+                    valid_peaks.push_back({static_cast<int>(in->module_id[j]),
+                        static_cast<float>(mod->x), static_cast<float>(mod->y),
                         energy, peak_time, in->npeaks[j]});
                 }
             } else {
@@ -672,7 +732,8 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                 float adc = in->peak_integral[j][bestIdx] * gain;
                 float energy = static_cast<float>(mod->energize(adc));
                 clusterer.AddHit(mod->index, energy, in->peak_time[j][bestIdx] - time_offset);
-                valid_peaks.push_back({static_cast<int>(in->module_id[j]), mod->x, mod->y, 
+                valid_peaks.push_back({static_cast<int>(in->module_id[j]),
+                    static_cast<float>(mod->x), static_cast<float>(mod->y),
                     energy, in->peak_time[j][bestIdx] - time_offset, in->npeaks[j]});
             }
         }
@@ -681,20 +742,30 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         clusterer.ReconstructHits(hits);
 
         if (hits.size() != 1) continue; // only keep single-cluster events
-        if (hits[0].nblocks < 3) continue; // require cluster to be at least 3 blocks (5x5) for this calibration
+        if (hits[0].nblocks <= 3) continue; // require cluster to be at least 4 blocks (5x5) for this calibration
         
         auto *mod = hycal.module_by_id(hits[0].center_id);
         if (!mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
+
+        if (fdec::test_bit(hits[0].flag, fdec::kDeadModule)) continue; // skip clusters with dead modules
 
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         float xd = (hits[0].x - (float)mod->x) / (float)mod->size_x;
         float yd = (hits[0].y - (float)mod->y) / (float)mod->size_y;
         if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
+        if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
+            if (hits[0].x >  300.0 && xd >= 0.0f) continue; // only keep hits on the inner side for transition modules
+            if (hits[0].x < -300.0 && xd <= 0.0f) continue;
+            if (hits[0].y >  300.0 && yd >= 0.0f) continue;
+            if (hits[0].y < -300.0 && yd <= 0.0f) continue;
+        }
 
         // 5×5 energy sum: select modules whose center lies within
         // ±2 crystal pitches (20.75 mm) in both x and y from center
-        constexpr float half_win = 2.5f * 20.75f;
+        constexpr float crystal_pitch = 20.75f;
+        constexpr float half_win = 2.5f * crystal_pitch;
         float E5x5 = 0.f, center_energy = 0.f;
+        float second_layer_energy = 0.f, third_layer_energy = 0.f;
         for (const auto &peak : valid_peaks) {
             float dx = peak.mod_x - mod->x;
             float dy = peak.mod_y - mod->y;
@@ -704,17 +775,25 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                     continue; // skip peaks outside the seed time window
                 }
                 E5x5 += peak.energy;
-                if (peak.module_id == mod->id) center_energy = peak.energy;
+                int x_offset = static_cast<int>(std::lround(dx / crystal_pitch));
+                int y_offset = static_cast<int>(std::lround(dy / crystal_pitch));
+                int layer = std::max(std::abs(x_offset), std::abs(y_offset));
+                if (layer == 0) {
+                    center_energy += peak.energy;
+                } else if (layer == 1) {
+                    second_layer_energy += peak.energy;
+                } else if (layer == 2) {
+                    third_layer_energy += peak.energy;
+                }
             }
         }
         // require center module to have at least 60% of cluster energy
-        if (hits[0].energy <= 0.f) continue;
+        if (hits[0].energy <= 0.f || E5x5 <= 0.f) continue;
         float center_energy_fraction = center_energy / hits[0].energy;
         if (center_energy_fraction < 0.6f) continue;
 
-        // TODO:
-        // here waiting to add the information of center energy fraction fot event selection
-        // and module position flags(edge, dead), different flags different conditions to select the events
+        float second_energy_fraction = second_layer_energy / hits[0].energy;
+        float third_energy_fraction = third_layer_energy / hits[0].energy;
 
         res->h1_E_modules[mod->id-1001]->Fill(E5x5);
         float theta = std::atan2(std::sqrt(hits[0].x*hits[0].x + hits[0].y*hits[0].y), gRunConfig.hycal_z) * 180.0f / M_PI;
@@ -723,8 +802,9 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         res->h_E_1cl->Fill(E5x5);
         res->h_center_energy_fraction->Fill(center_energy_fraction);
         res->h_center_energy->Fill(center_energy);
+        res->h_2nd_energy_fraction->Fill(second_energy_fraction);
+        res->h_3rd_energy_fraction->Fill(third_energy_fraction);
         res->events_processed++;
-
     }
     infile->Close();
     delete infile;
