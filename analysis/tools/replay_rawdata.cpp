@@ -32,6 +32,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <limits>
+#include <cmath>
 
 #include <TFileMerger.h>
 #include <TClass.h>
@@ -156,6 +158,49 @@ static const struct option long_options[] = {
     {nullptr, 0, nullptr, 0}
 };
 
+static bool parseIntOption(const char *text, int &value)
+{
+    if (!text || *text == '\0') return false;
+    char *end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(text, &end, 10);
+    if (errno == ERANGE || *end != '\0'
+            || parsed < std::numeric_limits<int>::min()
+            || parsed > std::numeric_limits<int>::max())
+        return false;
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+static bool parseFloatOption(const char *text, float &value)
+{
+    if (!text || *text == '\0') return false;
+    char *end = nullptr;
+    errno = 0;
+    const float parsed = std::strtof(text, &end);
+    if (errno == ERANGE || *end != '\0' || !std::isfinite(parsed)) return false;
+    value = parsed;
+    return true;
+}
+
+static int invalidOptionValue(const char *flag, const char *value)
+{
+    std::cerr << "Invalid value for " << flag << ": "
+              << (value ? value : "(missing)") << "\n";
+    return 2;
+}
+
+static int invalidOption(char *argv[], int optind, int optopt)
+{
+    if (optopt != 0)
+        std::cerr << "Invalid option or missing argument: -"
+                  << static_cast<char>(optopt) << "\n";
+    else
+        std::cerr << "Invalid option: "
+                  << (optind > 0 ? argv[optind - 1] : "(unknown)") << "\n";
+    return 2;
+}
+
 int main(int argc, char *argv[])
 {
     // Initialize ROOT for multi-threading
@@ -183,21 +228,37 @@ int main(int argc, char *argv[])
         DATABASE_DIR);
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
+    opterr = 0;
     int opt;
     while ((opt = getopt_long(argc, argv, "o:f:n:c:d:j:z:px", long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
-            case 'f': max_files = std::atoi(optarg); break;
-            case 'n': max_events = std::atoi(optarg); break;
+            case 'f':
+                if (!parseIntOption(optarg, max_files))
+                    return invalidOptionValue("-f", optarg);
+                break;
+            case 'n':
+                if (!parseIntOption(optarg, max_events))
+                    return invalidOptionValue("-n", optarg);
+                break;
             case 'c': daq_config = optarg; break;
             case 'd': daq_map = optarg; break;
-            case 'j': num_threads = std::atoi(optarg); break;
+            case 'j':
+                if (!parseIntOption(optarg, num_threads) || num_threads <= 0)
+                    return invalidOptionValue("-j", optarg);
+                break;
             case 'p': peaks = true; break;
             case 'x': x17 = true; break;
-            case 'z': zerosup_override = std::atof(optarg); break;
+            case 'z':
+                if (!parseFloatOption(optarg, zerosup_override)
+                        || zerosup_override < 0.f)
+                    return invalidOptionValue("-z", optarg);
+                break;
             case 1000: Ecalib = true; peaks = true; break;
             case 1001: noWaveform = true; peaks = true; break;
-            default: break;
+            case '?':
+            default:
+                return invalidOption(argv, optind, optopt);
         }
     }
 

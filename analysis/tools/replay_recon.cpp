@@ -38,6 +38,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <limits>
+#include <cmath>
 
 #include <TFileMerger.h>
 #include <TClass.h>
@@ -199,6 +201,49 @@ static int runHadd(const std::string &output, const std::vector<std::string> &in
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
 
+static bool parseIntOption(const char *text, int &value)
+{
+    if (!text || *text == '\0') return false;
+    char *end = nullptr;
+    errno = 0;
+    const long parsed = std::strtol(text, &end, 10);
+    if (errno == ERANGE || *end != '\0'
+            || parsed < std::numeric_limits<int>::min()
+            || parsed > std::numeric_limits<int>::max())
+        return false;
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+static bool parseFloatOption(const char *text, float &value)
+{
+    if (!text || *text == '\0') return false;
+    char *end = nullptr;
+    errno = 0;
+    const float parsed = std::strtof(text, &end);
+    if (errno == ERANGE || *end != '\0' || !std::isfinite(parsed)) return false;
+    value = parsed;
+    return true;
+}
+
+static int invalidOptionValue(const char *flag, const char *value)
+{
+    std::cerr << "Invalid value for " << flag << ": "
+              << (value ? value : "(missing)") << "\n";
+    return 2;
+}
+
+static int invalidOption(char *argv[], int optind, int optopt)
+{
+    if (optopt != 0)
+        std::cerr << "Invalid option or missing argument: -"
+                  << static_cast<char>(optopt) << "\n";
+    else
+        std::cerr << "Invalid option: "
+                  << (optind > 0 ? argv[optind - 1] : "(unknown)") << "\n";
+    return 2;
+}
+
 int main(int argc, char *argv[])
 {
     // Initialize ROOT for multi-threading
@@ -235,25 +280,52 @@ int main(int argc, char *argv[])
         {nullptr, 0, nullptr, 0}
     };
 
+    opterr = 0;
     int opt;
     while ((opt = getopt_long_only(argc, argv, "o:f:r:c:d:j:g:z:m:",
                                    long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_dir = optarg; break;
-            case 'f': max_files = std::atoi(optarg); break;
+            case 'f':
+                if (!parseIntOption(optarg, max_files))
+                    return invalidOptionValue("-f", optarg);
+                break;
             case 'r': recon_config = optarg; break;
             case 'c': daq_config = optarg; break;
             case 'd': daq_map = optarg; break;
-            case 'j': num_threads = std::atoi(optarg); break;
+            case 'j':
+                if (!parseIntOption(optarg, num_threads) || num_threads <= 0)
+                    return invalidOptionValue("-j", optarg);
+                break;
             case 'g': gem_ped_file = optarg; break;
-            case 'z': zerosup_override = std::atof(optarg); break;
-            case 'm': merge_batch_size = std::atoi(optarg); break;
+            case 'z':
+                if (!parseFloatOption(optarg, zerosup_override)
+                        || zerosup_override < 0.f)
+                    return invalidOptionValue("-z", optarg);
+                break;
+            case 'm':
+                if (!parseIntOption(optarg, merge_batch_size)
+                        || merge_batch_size < 0)
+                    return invalidOptionValue("-m", optarg);
+                break;
             case 1000: x17 = true; break;
             case 1001: prad1 = true; break;
             case 1002: x17_blind = false; x17 = true; break; // -x17_full
             case 1003: random = true; break; // -random
             case 1004: gem_hit = true; break; // -gem_hit
+            case '?':
+            default:
+                return invalidOption(argv, optind, optopt);
         }
+    }
+
+    if (prad1 && x17) {
+        std::cerr << "Options -prad1 and -x17 cannot be used together\n";
+        return 2;
+    }
+    if (random && (prad1 || x17)) {
+        std::cerr << "Option -random cannot be used with -prad1 or an X17 mode\n";
+        return 2;
     }
 
     // Collect EVIO and replay_raw ROOT inputs from files, directories, or a mix.
@@ -284,10 +356,6 @@ int main(int argc, char *argv[])
         std::cerr << "  -gem_hit  include GEM hit-level branches in the output (default: disabled)\n";
         return 1;
     }
-    if (prad1 && x17) {
-        std::cerr << "Options -prad1 and -x17 cannot be used together\n";
-        return 1;
-    }
     if (prad1 && std::any_of(input_files.begin(), input_files.end(), isRawReplayFile)) {
         std::cerr << "Raw ROOT reconstruction does not support -prad1\n";
         return 1;
@@ -298,14 +366,8 @@ int main(int argc, char *argv[])
     if (x17 && !x17_blind) {
         std::cout << "X17 full reconstruction mode enabled\n";
     }
-    if (!x17 && x17_blind) {
-        std::cout << "X17 blind mode should be used with the -x17 option\n";
-    }
     if (random) {
         std::cout << "Random trigger reconstruction mode enabled\n";
-    }
-    if (random && (prad1 || x17)) {
-        std::cout << "Warning: Random trigger mode flag cannot be used together with other mode flags\n";
     }
     std::cout << "Replay mode: " << (x17 ? "X17" : prad1 ? "PRad1" : "PRad2") << "\n";
     if (gem_hit) {
@@ -317,8 +379,6 @@ int main(int argc, char *argv[])
         if(x17) recon_config = db_dir + "/reconstruction_config_x17.json";
         else recon_config = db_dir + "/reconstruction_config.json";
     }
-    if (merge_batch_size < 0)
-        merge_batch_size = 0;
     int num_files = static_cast<int>(input_files.size());
     if (max_files > 0) num_files = std::min(num_files, max_files);
     num_threads = std::max(1, std::min(num_threads, num_files));
