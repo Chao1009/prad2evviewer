@@ -80,13 +80,12 @@ using namespace analysis;
 // ── Per-thread accumulated results ──────────────────────────────────────────
 struct HistResult {
     std::vector<std::unique_ptr<TH1F>>       h1_E_modules;   // indexed by module ID (index 0 is module W1)
+    std::vector<std::unique_ptr<TH1F>>       h1_E_modules_island;  // same as h1_E_modules but energy from island clustering
     std::unique_ptr<TH2F>                    h2_energy_theta;
     std::unique_ptr<TH2F>                    hit_pos;
     std::unique_ptr<TH1F>                    h_E_1cl;
     std::unique_ptr<TH1F>                    h_center_energy_fraction;
     std::unique_ptr<TH1F>                    h_center_energy;
-    std::unique_ptr<TH1F>                    h_2nd_energy_fraction;
-    std::unique_ptr<TH1F>                    h_3rd_energy_fraction;
     std::unique_ptr<TH1F>                    h_fit_peak_energy;
     std::unique_ptr<TH1F>                    h_fit_peak_ratio;
     std::unique_ptr<TH1F>                    h_fit_peak_chi2ndf;
@@ -218,6 +217,7 @@ int main(int argc, char *argv[])
         hycal.Init(db_dir + "/hycal_map.json");
 
         res->h1_E_modules.resize(1156);
+        res->h1_E_modules_island.resize(1156);
         for (int i = 0; i < 1156; ++i) {
             const int mod_id = i + 1000 + 1; // module IDs start at 1001(W1)
             res->h1_E_modules[i] = std::make_unique<TH1F>(
@@ -225,6 +225,11 @@ int main(int argc, char *argv[])
                 Form("Module W%d cluster energy;E (MeV);Counts", mod_id-1000),
                 energy_bins, energy_min, energy_max);
             res->h1_E_modules[i]->SetDirectory(nullptr);
+            res->h1_E_modules_island[i] = std::make_unique<TH1F>(
+                Form("h1_E_mod_%d_island_tid%d", mod_id, tid),
+                Form("Module W%d island cluster energy;E (MeV);Counts", mod_id-1000),
+                energy_bins, energy_min, energy_max);
+            res->h1_E_modules_island[i]->SetDirectory(nullptr);
         }
 
         res->h2_energy_theta = std::make_unique<TH2F>(
@@ -257,20 +262,6 @@ int main(int argc, char *argv[])
             "Center module energy;E_{center} (MeV);Counts",
             energy_bins, energy_min, energy_max);
         res->h_center_energy->SetDirectory(nullptr);
-
-        res->h_2nd_energy_fraction = std::make_unique<TH1F>(
-            Form("h_2nd_energy_fraction_tid%d", tid),
-            "Second 5x5 energy layer fraction;E_{layer 2}/E_{5x5};Counts",
-            center_energy_fraction_bins,
-            center_energy_fraction_min, center_energy_fraction_max);
-        res->h_2nd_energy_fraction->SetDirectory(nullptr);
-
-        res->h_3rd_energy_fraction = std::make_unique<TH1F>(
-            Form("h_3rd_energy_fraction_tid%d", tid),
-            "Third 5x5 energy layer fraction;E_{layer 3}/E_{5x5};Counts",
-            center_energy_fraction_bins,
-            center_energy_fraction_min, center_energy_fraction_max);
-        res->h_3rd_energy_fraction->SetDirectory(nullptr);
 
         res->h_fit_peak_energy = std::make_unique<TH1F>(
             Form("h_fit_peak_energy_tid%d", tid),
@@ -340,6 +331,7 @@ int main(int argc, char *argv[])
     HistResult merged_result;
     // Initialize merged histograms
     merged_result.h1_E_modules.resize(1156);
+    merged_result.h1_E_modules_island.resize(1156);
     for (int i = 0; i < 1156; ++i) {
         const int mod_id = i + 1000 + 1; // module IDs start at 1001(W1)
         merged_result.h1_E_modules[i] = std::make_unique<TH1F>(
@@ -347,6 +339,11 @@ int main(int argc, char *argv[])
             Form("Module W%d cluster energy;E (MeV);Counts", mod_id-1000),
             energy_bins, energy_min, energy_max);
         merged_result.h1_E_modules[i]->SetDirectory(nullptr);
+        merged_result.h1_E_modules_island[i] = std::make_unique<TH1F>(
+            Form("h1_E_mod_%d_island_merged", mod_id),
+            Form("Module W%d island cluster energy;E (MeV);Counts", mod_id-1000),
+            energy_bins, energy_min, energy_max);
+        merged_result.h1_E_modules_island[i]->SetDirectory(nullptr);
     }
     merged_result.h2_energy_theta = std::make_unique<TH2F>(
         "h2_energy_theta_merged",
@@ -380,20 +377,6 @@ int main(int argc, char *argv[])
         "Center module energy;E_{center} (MeV);Counts",
         energy_bins, energy_min, energy_max);
     merged_result.h_center_energy->SetDirectory(nullptr);
-
-    merged_result.h_2nd_energy_fraction = std::make_unique<TH1F>(
-        "h_2nd_energy_fraction",
-        "Second 5x5 energy layer fraction;E_{layer 2}/E_{5x5};Counts",
-        center_energy_fraction_bins,
-        center_energy_fraction_min, center_energy_fraction_max);
-    merged_result.h_2nd_energy_fraction->SetDirectory(nullptr);
-
-    merged_result.h_3rd_energy_fraction = std::make_unique<TH1F>(
-        "h_3rd_energy_fraction",
-        "Third 5x5 energy layer fraction;E_{layer 3}/E_{5x5};Counts",
-        center_energy_fraction_bins,
-        center_energy_fraction_min, center_energy_fraction_max);
-    merged_result.h_3rd_energy_fraction->SetDirectory(nullptr);
 
     merged_result.h_fit_peak_energy = std::make_unique<TH1F>(
         "h_fit_peak_energy",
@@ -430,6 +413,10 @@ int main(int argc, char *argv[])
                 TH1F *main_h = merged_result.h1_E_modules[i].get();
                 main_h->Add(res->h1_E_modules[i].get());
             }
+            if (res->h1_E_modules_island[i]) {
+                TH1F *main_h = merged_result.h1_E_modules_island[i].get();
+                main_h->Add(res->h1_E_modules_island[i].get());
+            }
         }
 
         // Merge E-vs-theta 2D histogram
@@ -455,14 +442,6 @@ int main(int argc, char *argv[])
         }
         if (res->h_center_energy) {
             merged_result.h_center_energy->Add(res->h_center_energy.get());
-        }
-        if (res->h_2nd_energy_fraction) {
-            merged_result.h_2nd_energy_fraction->Add(
-                res->h_2nd_energy_fraction.get());
-        }
-        if (res->h_3rd_energy_fraction) {
-            merged_result.h_3rd_energy_fraction->Add(
-                res->h_3rd_energy_fraction.get());
         }
         if (res->h_fit_peak_energy) {
             merged_result.h_fit_peak_energy->Add(res->h_fit_peak_energy.get());
@@ -587,14 +566,13 @@ int main(int argc, char *argv[])
     TFile *outfile = TFile::Open(output_root_file.c_str(), "RECREATE");
     for (int i = 0; i < 1156; ++i) {
         if (merged_result.h1_E_modules[i]) merged_result.h1_E_modules[i]->Write();
+        if (merged_result.h1_E_modules_island[i]) merged_result.h1_E_modules_island[i]->Write();
     }
     if (merged_result.h2_energy_theta) merged_result.h2_energy_theta->Write();
     if (merged_result.hit_pos) merged_result.hit_pos->Write();
     if (merged_result.h_E_1cl) merged_result.h_E_1cl->Write();
     if (merged_result.h_center_energy_fraction) merged_result.h_center_energy_fraction->Write();
     if (merged_result.h_center_energy) merged_result.h_center_energy->Write();
-    if (merged_result.h_2nd_energy_fraction) merged_result.h_2nd_energy_fraction->Write();
-    if (merged_result.h_3rd_energy_fraction) merged_result.h_3rd_energy_fraction->Write();
     if (merged_result.h_fit_peak_energy) merged_result.h_fit_peak_energy->Write();
     if (merged_result.h_fit_peak_ratio) merged_result.h_fit_peak_ratio->Write();
     if (merged_result.h_fit_peak_chi2ndf) merged_result.h_fit_peak_chi2ndf->Write();
@@ -677,16 +655,6 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
 
         clusterer.Clear();
 
-        struct PeakInfo {
-            int module_id;
-            float mod_x;
-            float mod_y;
-            float energy;
-            float time;
-            int peak_n;
-        };
-        std::vector<PeakInfo> valid_peaks;
-
         for (int j = 0; j < in->nch; ++j) {
             const auto *mod = hycal.module_by_id(in->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
@@ -710,9 +678,6 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                     float adc = in->peak_integral[j][p] * gain;
                     float energy = static_cast<float>(mod->energize(adc));
                     clusterer.AddHit(mod->index, energy, peak_time);
-                    valid_peaks.push_back({static_cast<int>(in->module_id[j]),
-                        static_cast<float>(mod->x), static_cast<float>(mod->y),
-                        energy, peak_time, in->npeaks[j]});
                 }
             } else {
                 // Legacy: pick the largest in-window peak as the single
@@ -732,9 +697,6 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                 float adc = in->peak_integral[j][bestIdx] * gain;
                 float energy = static_cast<float>(mod->energize(adc));
                 clusterer.AddHit(mod->index, energy, in->peak_time[j][bestIdx] - time_offset);
-                valid_peaks.push_back({static_cast<int>(in->module_id[j]),
-                    static_cast<float>(mod->x), static_cast<float>(mod->y),
-                    energy, in->peak_time[j][bestIdx] - time_offset, in->npeaks[j]});
             }
         }
         clusterer.FormClusters();
@@ -760,50 +722,26 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
             if (hits[0].y < -300.0 && yd <= 0.0f) continue;
         }
 
-        // 5×5 energy sum: select modules whose center lies within
-        // ±2 crystal pitches (20.75 mm) in both x and y from center
-        constexpr float crystal_pitch = 20.75f;
-        constexpr float half_win = 2.5f * crystal_pitch;
-        float E5x5 = 0.f, center_energy = 0.f;
-        float second_layer_energy = 0.f, third_layer_energy = 0.f;
-        for (const auto &peak : valid_peaks) {
-            float dx = peak.mod_x - mod->x;
-            float dy = peak.mod_y - mod->y;
-            if (std::abs(dx) <= half_win && std::abs(dy) <= half_win) {
-                if (cluster_cfg.seed_time_window > 0.f &&
-                    std::abs(peak.time - hits[0].time) > cluster_cfg.seed_time_window) {
-                    continue; // skip peaks outside the seed time window
-                }
-                E5x5 += peak.energy;
-                int x_offset = static_cast<int>(std::lround(dx / crystal_pitch));
-                int y_offset = static_cast<int>(std::lround(dy / crystal_pitch));
-                int layer = std::max(std::abs(x_offset), std::abs(y_offset));
-                if (layer == 0) {
-                    center_energy += peak.energy;
-                } else if (layer == 1) {
-                    second_layer_energy += peak.energy;
-                } else if (layer == 2) {
-                    third_layer_energy += peak.energy;
-                }
+        float center_energy = 0.f;
+        for (const auto &cluster : clusterer.GetClusters()) {
+            if (cluster.center.index == mod->index) {
+                center_energy = cluster.center.energy;
+                break;
             }
         }
         // require center module to have at least 60% of cluster energy
-        if (hits[0].energy <= 0.f || E5x5 <= 0.f) continue;
+        if (hits[0].energy <= 0.f || hits[0].energy_square <= 0.f) continue;
         float center_energy_fraction = center_energy / hits[0].energy;
         if (center_energy_fraction < 0.6f) continue;
 
-        float second_energy_fraction = second_layer_energy / hits[0].energy;
-        float third_energy_fraction = third_layer_energy / hits[0].energy;
-
-        res->h1_E_modules[mod->id-1001]->Fill(E5x5);
+        res->h1_E_modules[mod->id-1001]->Fill(hits[0].energy_square);
+        res->h1_E_modules_island[mod->id-1001]->Fill(hits[0].energy);
         float theta = std::atan2(std::sqrt(hits[0].x*hits[0].x + hits[0].y*hits[0].y), gRunConfig.hycal_z) * 180.0f / M_PI;
-        res->h2_energy_theta->Fill(theta, E5x5);
+        res->h2_energy_theta->Fill(theta, hits[0].energy_square);
         res->hit_pos->Fill(hits[0].x, hits[0].y);
-        res->h_E_1cl->Fill(E5x5);
+        res->h_E_1cl->Fill(hits[0].energy_square);
         res->h_center_energy_fraction->Fill(center_energy_fraction);
         res->h_center_energy->Fill(center_energy);
-        res->h_2nd_energy_fraction->Fill(second_energy_fraction);
-        res->h_3rd_energy_fraction->Fill(third_energy_fraction);
         res->events_processed++;
     }
     infile->Close();

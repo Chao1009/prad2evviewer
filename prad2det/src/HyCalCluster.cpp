@@ -439,6 +439,20 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.flag      = cl.flag;
     result.linear_corr = 1.f;
 
+    // Sum original module energies in the 5x5 area so split fractions cannot
+    // affect this value.
+    result.energy_square = 0.f;
+    for (const auto &hit : hits_) {
+        if (config_.seed_time_window > 0.f &&
+            std::fabs(hit.time - cl.center.time) > config_.seed_time_window)
+            continue;
+
+        double dx, dy;
+        sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
+        if (std::fabs(dx) < 2.51 && std::fabs(dy) < 2.51)
+            result.energy_square += hit.energy;
+    }
+
     if (config_.non_linear_corr) {
         // 1/linear_corr = E_rec/E_exp
         // = 1 + nl1*(E_rec-E_base)/1000 + nl2*((E_rec-E_base)/1000)^2
