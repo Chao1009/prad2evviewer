@@ -38,10 +38,10 @@ enum LayoutFlag : uint32_t {
     kOuterBound  = 4,   // outer boundary of HyCal
     kDeadModule  = 5,
     kDeadNeighbor = 6,
-    kLeakage     = 7,   // module that has leakage (consider 5 by 5 neighborhood)
+    kLeakage     = 9,   // module that has leakage (consider 5 by 5 neighborhood)
     // cluster flags (used on ModuleCluster::flag, not module layout)
-    kSplit       = 8,   // cluster was split from a multi-maximum group
-    kLeakCorr    = 9,   // leakage correction applied
+    kSplit       = 7,   // cluster was split from a multi-maximum group
+    kLeakCorr    = 8,   // leakage correction applied
 };
 
 inline void     set_bit(uint32_t &f, uint32_t b) { f |= (1u << b); }
@@ -296,6 +296,28 @@ public:
         return std::sqrt(a * a + b * b + pos_res_C_ * pos_res_C_);
     }
 
+    // --- energy resolution --------------------------------------------------
+    // sigma(E) = E * sqrt( A^2/E_GeV + C^2 + B^2/E_GeV^2 ) / 100   [MeV]
+    // Loaded from reconstruction_config.json:hycal:energy_resolution = [A, B, C].
+    void  SetEnergyResolutionParams(float A, float B, float C)
+    {
+        ene_res_A_ = A;
+        ene_res_B_ = B;
+        ene_res_C_ = C;
+    }
+    float GetEnergyResolutionA() const { return ene_res_A_; }
+    float GetEnergyResolutionB() const { return ene_res_B_; }
+    float GetEnergyResolutionC() const { return ene_res_C_; }
+    float EnergyResolution(float energy_mev) const
+    {
+        if (energy_mev <= 0.f) return 0.f;
+        const float E_GeV = energy_mev / 1000.f;
+        const float sigma_percent = std::sqrt(ene_res_A_ * ene_res_A_ / E_GeV +
+                                              ene_res_C_ * ene_res_C_ +
+                                              ene_res_B_ * ene_res_B_ / (E_GeV * E_GeV));
+        return energy_mev * sigma_percent / 100.f;
+    }
+
     // --- static helpers -----------------------------------------------------
     static int          name_to_id(const std::string &name);
     int                 id_to_index(int id) const;
@@ -320,6 +342,11 @@ private:
     float                pos_res_A_ = 0.f;   // mm·sqrt(GeV)
     float                pos_res_B_ = 0.f;   // mm·GeV
     float                pos_res_C_ = 5.f;   // mm
+
+    // energy resolution coefficients (see EnergyResolution above)
+    float                ene_res_A_ = 3.3f;
+    float                ene_res_B_ = 0.f;
+    float                ene_res_C_ = 0.f;
 
     // lookup maps
     std::unordered_map<std::string, int> name_map_;     // name → index

@@ -260,17 +260,14 @@ void HyCalSystem::assign_layout(Module &m) const
         m.row    = pid / 34;
         m.column = pid % 34;
 
-        // inner boundary (beam hole): rows/cols 15-18 (0-based)
+        // The missing 2x2 beam-hole cells are rows/columns 16-17 (0-based).
+        // Existing modules in the surrounding 4x4 ring (15-18) are marked as
+        // the inner boundary.
         if (m.row >= 15 && m.row <= 18 && m.column >= 15 && m.column <= 18)
             set_bit(m.flag, kInnerBound);
         // transition: outer ring of crystal array
         if (m.row == 0 || m.row == 33 || m.column == 0 || m.column == 33)
             set_bit(m.flag, kTransition);
-        // modules that have leakage close to the edges of the crystal array (5 by 5 region)
-        if (m.row >= 14 && m.row <= 19 && m.column >= 14 && m.column <= 19)
-            set_bit(m.flag, kLeakage);
-        if (m.row <= 1 || m.row >= 32 || m.column <= 1 || m.column >= 32)
-            set_bit(m.flag, kLeakage);
 
     } else {
         set_bit(m.flag, kPbGlass);

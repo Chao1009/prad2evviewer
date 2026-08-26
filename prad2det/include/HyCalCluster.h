@@ -49,6 +49,11 @@ struct ClusterConfig {
     // energy correction
     bool  non_linear_corr    = true;      // apply per-module energy non-linearity correction
     std::shared_ptr<const IClusterProfile> profile;
+    bool  leakage_correction = false;
+    int   leakage_iterations = 6;
+    float least_leakage_fraction = 0.01f;
+    float max_leakage_fraction = 0.30f;
+    float leakage_convergence_rel = 0.001f;
 
     // --- multi-pulse / timing coincidence ------------------------------------
     // Waveform data can produce more than one pulse per module per event.
@@ -83,7 +88,13 @@ struct ModuleCluster {
     ModuleHit              center;     // seed module (highest energy local max)
     std::vector<ModuleHit> hits;       // all hits (energy may be split)
     float                  energy = 0.f;
+    float                  energy_square = 0.f;
+    float                  leakage = 0.f;
     uint32_t               flag   = 0;
+    bool                   has_leakage_position = false;
+    float                  leakage_x = 0.f;
+    float                  leakage_y = 0.f;
+    int                    leakage_npos = 0;
 
     void add_hit(const ModuleHit &h)
     {
@@ -394,9 +405,34 @@ private:
     std::vector<int> find_maxima(const std::vector<int> &group) const;
     void split_hits(const std::vector<int> &maxima,
                     const std::vector<int> &group);
+    float calculate_energy_square(const ModuleHit &center) const;
     void eval_fraction(const std::vector<int> &maxima,
                        const std::vector<int> &group,
                        SplitContainer &split) const;
+
+    struct LeakagePoint {
+        float x = 0.f;
+        float y = 0.f;
+        float energy = 0.f;
+        int   npos = 0;
+    };
+
+    struct LeakageHit {
+        double x = 0.;
+        double y = 0.;
+        double dx = 0.;
+        double dy = 0.;
+        int sector = -1;
+        ModuleType type = ModuleType::PbWO4;
+        float energy = 0.f;
+    };
+
+    void apply_leakage_correction(ModuleCluster &cl) const;
+    LeakagePoint reconstruct_leakage_position(const ModuleCluster &cl,
+                                              const std::vector<LeakageHit> &leaks,
+                                              float total_energy) const;
+    double eval_cluster_profile(const LeakagePoint &pos,
+                                const ModuleCluster &cl) const;
 
     // position reconstruction
     ClusterHit reconstruct_pos(const ModuleCluster &cl) const;
@@ -404,6 +440,11 @@ private:
 
     // profile helper
     float get_profile_frac(const ModuleHit &center, const ModuleHit &hit) const;
+    ProfileValue get_profile_value_at(float cx, float cy, float cE,
+                                      double mx, double my, int msector,
+                                      ModuleType type) const;
+    ProfileValue get_pwo_profile_value_at(float cx, float cy, float cE,
+                                          double mx, double my) const;
     float get_profile_frac_at(float cx, float cy, float cE,
                               const ModuleHit &hit) const;
 
