@@ -33,6 +33,8 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
         auto &mod = hycal.module(i);
         fdec::clear_bit(mod.flag, fdec::kDeadModule);
         fdec::clear_bit(mod.flag, fdec::kDeadNeighbor);
+
+        mod.ClearVirtNeighbors();
     }
 
     std::vector<int> dead_indices;
@@ -77,14 +79,53 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
         });
 
         const auto &dead_module = hycal.module(dead_index);
+        if (!dead_module.is_pwo4()) continue;
         for (int i = 0; i < n_modules; ++i) {
             const auto &module = hycal.module(i);
-            if (!module.is_hycal()) continue;
+            if (!module.is_pwo4()) continue;
 
             double dx, dy;
             hycal.qdist(dead_module, module, dx, dy);
             if (std::abs(dx) < 2.51 && std::abs(dy) < 2.51)
                 fdec::set_bit(hycal.module(i).flag, fdec::kLeakage);
+        }
+    }
+
+    for (int owner_index = 0; owner_index < n_modules; ++owner_index) {
+        auto &owner = hycal.module(owner_index);
+        if (!owner.is_pwo4() ||
+            !fdec::test_bit(owner.flag, fdec::kLeakage))
+            continue;
+
+        for (int dead_index : dead_indices) {
+            const auto &dead = hycal.module(dead_index);
+            if (!dead.is_pwo4() || dead_index == owner_index) continue;
+
+            double dx, dy;
+            hycal.qdist(owner, dead, dx, dy);
+            if (std::abs(dx) < 2.51 && std::abs(dy) < 2.51) {
+                owner.AddVirtNeighbor({dead.row, dead.column, dead.index,
+                                       dead.x, dead.y, dx, dy,
+                                       fdec::ModuleType::PbWO4});
+            }
+        }
+
+        for (int row = owner.row - 2; row <= owner.row + 2; ++row) {
+            for (int column = owner.column - 2;
+                 column <= owner.column + 2; ++column) {
+                const bool outside = row < 0 || row > 33 ||
+                                     column < 0 || column > 33;
+                const bool within_two_layers = row >= -2 && row <= 35 &&
+                                               column >= -2 && column <= 35;
+                if (!outside || !within_two_layers) continue;
+
+                owner.AddVirtNeighbor({row, column, -1,
+                                       owner.x + (column - owner.column) * owner.size_x,
+                                       owner.y + (row - owner.row) * owner.size_y,
+                                       static_cast<double>(column - owner.column),
+                                       static_cast<double>(row - owner.row),
+                                       fdec::ModuleType::PbWO4});
+            }
         }
     }
 

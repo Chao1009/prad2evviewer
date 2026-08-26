@@ -85,6 +85,17 @@ struct NeighborInfo {
     float dist;         // sqrt(dx*dx + dy*dy)
 };
 
+struct VirtualNeighbor {
+    int    row = -1;
+    int    column = -1;
+    int    backing_module = -1;
+    double x = 0.;
+    double y = 0.;
+    double dx = 0.;
+    double dy = 0.;
+    ModuleType type = ModuleType::PbWO4;
+};
+
 // --- sector grid for O(1) neighbor lookup -----------------------------------
 static constexpr int SECTOR_GRID_MAX_CELLS = 34 * 34;  // Center is largest
 
@@ -149,6 +160,13 @@ struct Module {
     // pre-computed cross-sector neighbors (same-sector uses grid lookup)
     int          neighbor_count = 0;
     NeighborInfo neighbors[MAX_NEIGHBORS];
+    std::vector<VirtualNeighbor> virtual_neighbors;
+
+    void ClearVirtNeighbors() { virtual_neighbors.clear(); }
+    void AddVirtNeighbor(const VirtualNeighbor &neighbor)
+    {
+        virtual_neighbors.push_back(neighbor);
+    }
 
     // helpers
     bool is_pwo4()   const { return type == ModuleType::PbWO4; }
