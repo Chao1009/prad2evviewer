@@ -18,11 +18,17 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
+#include <array>
+#include <fstream>
+#include <memory>
+#include <sstream>
 #include <vector>
 #include <cmath>
 
 namespace fdec
 {
+
+struct IClusterProfile;
 
 // --- configuration ----------------------------------------------------------
 struct ClusterConfig {
@@ -42,6 +48,7 @@ struct ClusterConfig {
 
     // energy correction
     bool  non_linear_corr    = true;      // apply per-module energy non-linearity correction
+    std::shared_ptr<const IClusterProfile> profile;
 
     // --- multi-pulse / timing coincidence ------------------------------------
     // Waveform data can produce more than one pulse per module per event.
@@ -112,27 +119,181 @@ struct ClusterHit {
 float shower_depth(int center_id, float energy_mev);
 
 // --- cluster profile (energy sharing lookup) --------------------------------
+struct ProfileValue {
+    float frac = 0.f;
+    float err  = 0.f;
+};
+
 // Abstract interface — users can plug in their own profile data.
 // Default implementation uses a simple analytical approximation.
 struct IClusterProfile {
     virtual ~IClusterProfile() = default;
+    virtual ProfileValue GetFractionValue(ModuleType type, float dist,
+                                  float energy) const = 0;
+
     // Returns the fraction of energy at quantized distance `dist` for a cluster
     // of total energy `energy` (MeV) on a module of given type.
-    virtual float GetFraction(ModuleType type, float dist, float energy) const = 0;
+    float GetFraction(ModuleType type, float dist, float energy) const
+    {
+        return GetFractionValue(type, dist, energy).frac;
+    }
 };
 
 // Simple analytical profile (exponential falloff in Moliere radius units)
 struct SimpleProfile : public IClusterProfile {
-    float GetFraction(ModuleType type, float dist, float /*energy*/) const override
+    ProfileValue GetFractionValue(ModuleType type, float dist,
+                          float /*energy*/) const override
     {
         // approximate transverse shower profile in quantized distance units
         // PbWO4 Moliere radius ~20mm ≈ module size, PbGlass ~38mm ≈ module size
         // so quantized distance ~1 corresponds to ~1 Moliere radius
-        if (dist < 0.01f) return 0.78f;    // center module: ~78% of energy
+        if (dist < 0.01f) return {0.78f, 0.f}; // center module: ~78% of energy
         float sigma = (type == ModuleType::PbWO4) ? 0.36f : 0.40f;
-        return 0.78f * std::exp(-dist * dist / (2.f * sigma * sigma));
+        return {0.78f * std::exp(-dist * dist / (2.f * sigma * sigma)), 0.f};
     }
 };
+
+// read Geant4 simulated shower profile from database
+// get the fraction of energy at a given module corresponding to 
+// the quantized distance "dist" from cluster center to the module center.
+struct Geant4Profile : public IClusterProfile {
+    Geant4Profile() = default;
+
+    explicit Geant4Profile(const std::string &path)
+    {
+        Load(ModuleType::PbWO4, path);
+    }
+
+    Geant4Profile(const std::string &pwo_path, const std::string &glass_path)
+    {
+        Load(ModuleType::PbWO4, pwo_path);
+        Load(ModuleType::PbGlass, glass_path);
+    }
+
+    bool Load(const std::string &path)
+    {
+        return Load(ModuleType::PbWO4, path);
+    }
+
+    bool Load(ModuleType type, const std::string &path)
+    {
+        const auto type_index = static_cast<int>(type);
+        if (type_index < 0 || type_index >= static_cast<int>(profiles_.size()))
+            return false;
+
+        std::ifstream input(path);
+        if (!input) return false;
+
+        auto &profile = profiles_[static_cast<size_t>(type_index)];
+        std::string line;
+        float min_energy, max_energy, energy_step;
+        float max_distance, distance_step;
+        bool header_found = false;
+        while (std::getline(input, line)) {
+            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos ||
+                line[line.find_first_not_of(" \t")] == '#')
+                continue;
+            for (char &character : line)
+                if (character == ',') character = ' ';
+            std::istringstream header(line);
+            if (!(header >> min_energy >> max_energy >> energy_step
+                        >> max_distance >> distance_step))
+                return false;
+            header_found = true;
+            break;
+        }
+
+        if (!header_found || energy_step <= 0.f || distance_step <= 0.f ||
+            max_energy < min_energy || max_distance < 0.f)
+            return false;
+
+        const int energy_count = static_cast<int>((max_energy - min_energy) /
+                                                   energy_step) + 1;
+        const int distance_count = static_cast<int>(max_distance /
+                                                     distance_step) + 1;
+        if (energy_count <= 0 || distance_count <= 0) return false;
+
+        profile.values.assign(static_cast<size_t>(energy_count * distance_count), {});
+        profile.min_energy = min_energy;
+        profile.max_energy = max_energy;
+        profile.energy_step = energy_step;
+        profile.max_distance = max_distance;
+        profile.distance_step = distance_step;
+        profile.energy_count = energy_count;
+        profile.distance_count = distance_count;
+
+        int energy_index, distance_index;
+        float fraction, error;
+        while (std::getline(input, line)) {
+            if (line.empty() || line.find_first_not_of(" \t") == std::string::npos ||
+                line[line.find_first_not_of(" \t")] == '#')
+                continue;
+            std::istringstream row(line);
+            if (!(row >> energy_index >> distance_index >> fraction >> error))
+                continue;
+            if (energy_index < 0 || energy_index >= energy_count ||
+                distance_index < 0 || distance_index >= distance_count)
+                continue;
+            profile.values[static_cast<size_t>(energy_index * distance_count +
+                                               distance_index)] = {fraction, error};
+        }
+
+        profile.loaded = true;
+        return true;
+    }
+
+    ProfileValue GetFractionValue(ModuleType type, float dist, float energy) const override
+    {
+        const auto type_index = static_cast<int>(type);
+        if (type_index < 0 || type_index >= static_cast<int>(profiles_.size()))
+            return SimpleProfile{}.GetFractionValue(type, dist, energy);
+        const auto &profile = profiles_[static_cast<size_t>(type_index)];
+        if (!profile.loaded)
+            return SimpleProfile{}.GetFractionValue(type, dist, energy);
+        if (dist < 0.f || dist >= profile.max_distance)
+            return {};
+
+        const int distance_index = static_cast<int>(dist /
+                                                    profile.distance_step + 0.5f);
+        const float normalized_energy = (energy - profile.min_energy) /
+                                        profile.energy_step;
+        int energy_index = static_cast<int>(normalized_energy);
+        if (energy_index < 0) energy_index = 0;
+        if (energy_index + 1 >= profile.energy_count)
+            energy_index = profile.energy_count - 1;
+
+        const auto value = [&profile, distance_index](int index) {
+            return profile.values[static_cast<size_t>(index * profile.distance_count +
+                                                      distance_index)];
+        };
+        if (energy_index == profile.energy_count - 1)
+            return value(energy_index);
+        const float remainder = normalized_energy -
+                                static_cast<float>(energy_index);
+        if (remainder < 0.05f) return value(energy_index);
+        if (remainder > 0.95f) return value(energy_index + 1);
+        const auto lower = value(energy_index);
+        const auto upper = value(energy_index + 1);
+        return {lower.frac * (1.f - remainder) + upper.frac * remainder,
+            lower.err * (1.f - remainder) + upper.err * remainder};
+    }
+
+private:
+    struct Profile {
+        std::vector<ProfileValue> values;
+        float min_energy = 0.f;
+        float max_energy = 0.f;
+        float energy_step = 0.f;
+        float max_distance = 0.f;
+        float distance_step = 0.f;
+        int energy_count = 0;
+        int distance_count = 0;
+        bool loaded = false;
+    };
+
+    std::array<Profile, 4> profiles_;
+};
+
 
 // --- split container (static, reused across calls) --------------------------
 static constexpr int SPLIT_MAX_HITS   = 100;
@@ -164,15 +325,22 @@ public:
     explicit HyCalCluster(const HyCalSystem &sys);
     ~HyCalCluster();
 
-    // non-copyable (owns profile pointer)
+    // non-copyable
     HyCalCluster(const HyCalCluster &) = delete;
     HyCalCluster &operator=(const HyCalCluster &) = delete;
 
     // set configuration
-    void SetConfig(const ClusterConfig &cfg) { config_ = cfg; }
+    void SetConfig(const ClusterConfig &cfg)
+    {
+        config_ = cfg;
+        if (config_.profile)
+            profile_ = config_.profile;
+    }
     const ClusterConfig &GetConfig() const   { return config_; }
 
-    // set cluster profile (takes ownership)
+    // set cluster profile; the shared profile remains valid for all clusterers
+    void SetProfile(std::shared_ptr<const IClusterProfile> prof);
+    // compatibility overload; transfers ownership of the raw pointer
     void SetProfile(IClusterProfile *prof);
 
     // --- per-event interface ------------------------------------------------
@@ -241,8 +409,7 @@ private:
 
     const HyCalSystem     &sys_;
     ClusterConfig          config_;
-    IClusterProfile       *profile_;
-    bool                   owns_profile_;
+    std::shared_ptr<const IClusterProfile> profile_;
 
     // per-event data
     std::vector<ModuleHit>              hits_;

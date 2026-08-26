@@ -13,10 +13,12 @@
 #include "DaqConfig.h"
 #include "ConfigSetup.h"
 #include "load_daq_config.h"
+#include "HyCalCluster.h"
 
 #include <TFile.h>
 #include <TTree.h>
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 

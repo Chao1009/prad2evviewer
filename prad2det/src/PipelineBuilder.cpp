@@ -287,6 +287,19 @@ Pipeline PipelineBuilder::build()
         out.hycal_map_path = hc_map;
     }
 
+    // --- 6a. Shared cluster profile --------------------------------------
+    const std::string pwo_profile = resolve("cluster_profiles/prof_pwo.dat");
+    const std::string glass_profile = resolve("cluster_profiles/prof_lg.dat");
+    auto table_profile = std::make_shared<fdec::Geant4Profile>();
+    if (table_profile->Load(fdec::ModuleType::PbWO4, pwo_profile) &&
+        table_profile->Load(fdec::ModuleType::PbGlass, glass_profile)) {
+        out.hycal_profile = std::move(table_profile);
+        LOG("[setup] HC profile : loaded PWO and PbGlass tables");
+    } else {
+        out.hycal_profile = std::make_shared<fdec::SimpleProfile>();
+        LOG("[WARN] HC profile : failed to load PWO/LG tables; using SimpleProfile");
+    }
+
     // --- 6b. Per-run HyCal dead modules -----------------------------------
     {
         const auto dead = prad2::ApplyHyCalDeadModules(
@@ -444,6 +457,7 @@ Pipeline PipelineBuilder::build()
     // --- 9. HyCal cluster config -----------------------------------------
     if (recon.contains("hycal") && recon["hycal"].is_object())
         apply_hycal_cluster_overrides(recon["hycal"], out.hycal_cluster_cfg);
+    out.hycal_cluster_cfg.profile = out.hycal_profile;
     {
         std::ostringstream oss;
         oss << "[setup] HC cluster : min_mod_E=" << out.hycal_cluster_cfg.min_module_energy

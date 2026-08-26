@@ -266,6 +266,11 @@ void HyCalSystem::assign_layout(Module &m) const
         // transition: outer ring of crystal array
         if (m.row == 0 || m.row == 33 || m.column == 0 || m.column == 33)
             set_bit(m.flag, kTransition);
+        // modules that have leakage close to the edges of the crystal array (5 by 5 region)
+        if (m.row >= 14 && m.row <= 19 && m.column >= 14 && m.column <= 19)
+            set_bit(m.flag, kLeakage);
+        if (m.row <= 1 || m.row >= 32 || m.column <= 1 || m.column >= 32)
+            set_bit(m.flag, kLeakage);
 
     } else {
         set_bit(m.flag, kPbGlass);

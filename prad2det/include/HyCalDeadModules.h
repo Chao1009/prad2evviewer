@@ -37,6 +37,17 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
 
     std::vector<int> dead_indices;
     dead_indices.reserve(dead_module_names.size());
+    // Set all the LG modules as dead initially since we do not expect them to be active
+    for (int i = 0; i < n_modules; ++i) {
+        const auto &mod = hycal.module(i);
+        if (!mod.is_glass()) continue;
+
+        is_dead[i] = true;
+        dead_indices.push_back(i);
+        fdec::set_bit(hycal.module(i).flag, fdec::kDeadModule);
+        ++summary.n_dead;
+    }
+
     for (const auto &name : dead_module_names) {
         const auto *mod = hycal.module_by_name(name);
         if (!mod || !mod->is_hycal()) {
@@ -64,6 +75,17 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
                 ++summary.n_dead_neighbors;
             }
         });
+
+        const auto &dead_module = hycal.module(dead_index);
+        for (int i = 0; i < n_modules; ++i) {
+            const auto &module = hycal.module(i);
+            if (!module.is_hycal()) continue;
+
+            double dx, dy;
+            hycal.qdist(dead_module, module, dx, dy);
+            if (std::abs(dx) < 2.51 && std::abs(dy) < 2.51)
+                fdec::set_bit(hycal.module(i).flag, fdec::kLeakage);
+        }
     }
 
     return summary;

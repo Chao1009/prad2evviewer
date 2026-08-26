@@ -42,21 +42,20 @@ float shower_depth(int center_id, float energy_mev)
 
 HyCalCluster::HyCalCluster(const HyCalSystem &sys)
     : sys_(sys)
-    , profile_(new SimpleProfile())
-    , owns_profile_(true)
+    , profile_(std::make_shared<SimpleProfile>())
 {
 }
 
-HyCalCluster::~HyCalCluster()
+HyCalCluster::~HyCalCluster() = default;
+
+void HyCalCluster::SetProfile(std::shared_ptr<const IClusterProfile> prof)
 {
-    if (owns_profile_) delete profile_;
+    profile_ = prof ? std::move(prof) : std::make_shared<SimpleProfile>();
 }
 
 void HyCalCluster::SetProfile(IClusterProfile *prof)
 {
-    if (owns_profile_) delete profile_;
-    profile_ = prof;
-    owns_profile_ = false;
+    SetProfile(std::shared_ptr<const IClusterProfile>(prof));
 }
 
 //=============================================================================
@@ -73,6 +72,7 @@ void HyCalCluster::Clear()
 void HyCalCluster::AddHit(int module_index, float energy, float time)
 {
     if (module_index < 0 || module_index >= sys_.module_count()) return;
+    if (test_bit(sys_.module(module_index).flag, kDeadModule)) return;
     if (energy > config_.min_module_energy)
         hits_.push_back({module_index, energy, time});
 }

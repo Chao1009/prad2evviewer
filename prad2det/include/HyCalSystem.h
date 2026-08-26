@@ -38,9 +38,10 @@ enum LayoutFlag : uint32_t {
     kOuterBound  = 4,   // outer boundary of HyCal
     kDeadModule  = 5,
     kDeadNeighbor = 6,
+    kLeakage     = 7,   // module that has leakage (consider 5 by 5 neighborhood)
     // cluster flags (used on ModuleCluster::flag, not module layout)
-    kSplit       = 7,   // cluster was split from a multi-maximum group
-    kLeakCorr    = 8,   // leakage correction applied
+    kSplit       = 8,   // cluster was split from a multi-maximum group
+    kLeakCorr    = 9,   // leakage correction applied
 };
 
 inline void     set_bit(uint32_t &f, uint32_t b) { f |= (1u << b); }
