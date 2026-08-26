@@ -105,6 +105,14 @@ void apply_hycal_cluster_overrides(const json &j, fdec::ClusterConfig &cfg)
     if (j.contains("log_weight_thres"))   cfg.log_weight_thres   = j["log_weight_thres"];
     if (j.contains("seed_time_window"))   cfg.seed_time_window   = j["seed_time_window"];
     if (j.contains("non_linear_corr"))    cfg.non_linear_corr    = j["non_linear_corr"];
+    if (j.contains("leakage_correction")) cfg.leakage_correction = j["leakage_correction"];
+    if (j.contains("leakage_iterations")) cfg.leakage_iterations = j["leakage_iterations"];
+    if (j.contains("least_leakage_fraction"))
+        cfg.least_leakage_fraction = j["least_leakage_fraction"];
+    if (j.contains("max_leakage_fraction"))
+        cfg.max_leakage_fraction = j["max_leakage_fraction"];
+    if (j.contains("leakage_convergence_rel"))
+        cfg.leakage_convergence_rel = j["leakage_convergence_rel"];
 }
 
 } // namespace
@@ -287,6 +295,39 @@ Pipeline PipelineBuilder::build()
         out.hycal_map_path = hc_map;
     }
 
+    if (recon.contains("hycal") && recon["hycal"].is_object()) {
+        const auto &h = recon["hycal"];
+        if (h.contains("energy_resolution") && h["energy_resolution"].is_array() &&
+                h["energy_resolution"].size() >= 3) {
+            out.hycal_energy_res[0] = h["energy_resolution"][0].get<float>();
+            out.hycal_energy_res[1] = h["energy_resolution"][1].get<float>();
+            out.hycal_energy_res[2] = h["energy_resolution"][2].get<float>();
+        }
+    }
+    out.hycal.SetEnergyResolutionParams(
+        out.hycal_energy_res[0], out.hycal_energy_res[1], out.hycal_energy_res[2]);
+    {
+        std::ostringstream oss;
+        oss << "[setup] HC sigma_E : E*sqrt("
+            << std::fixed << std::setprecision(3) << out.hycal_energy_res[0]
+            << "^2/E_GeV+" << out.hycal_energy_res[2]
+            << "^2+" << out.hycal_energy_res[1] << "^2/E_GeV^2)/100";
+        LOG(oss.str());
+    }
+
+    // --- 6a. Shared cluster profile --------------------------------------
+    const std::string pwo_profile = resolve("cluster_profiles/prof_pwo.dat");
+    const std::string glass_profile = resolve("cluster_profiles/prof_lg.dat");
+    auto table_profile = std::make_shared<fdec::Geant4Profile>();
+    if (table_profile->Load(fdec::ModuleType::PbWO4, pwo_profile) &&
+        table_profile->Load(fdec::ModuleType::PbGlass, glass_profile)) {
+        out.hycal_profile = std::move(table_profile);
+        LOG("[setup] HC profile : loaded PWO and PbGlass tables");
+    } else {
+        out.hycal_profile = std::make_shared<fdec::SimpleProfile>();
+        LOG("[WARN] HC profile : failed to load PWO/LG tables; using SimpleProfile");
+    }
+
     // --- 6b. Per-run HyCal dead modules -----------------------------------
     {
         const auto dead = prad2::ApplyHyCalDeadModules(
@@ -444,6 +485,7 @@ Pipeline PipelineBuilder::build()
     // --- 9. HyCal cluster config -----------------------------------------
     if (recon.contains("hycal") && recon["hycal"].is_object())
         apply_hycal_cluster_overrides(recon["hycal"], out.hycal_cluster_cfg);
+    out.hycal_cluster_cfg.profile = out.hycal_profile;
     {
         std::ostringstream oss;
         oss << "[setup] HC cluster : min_mod_E=" << out.hycal_cluster_cfg.min_module_energy

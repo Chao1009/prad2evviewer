@@ -260,7 +260,9 @@ void HyCalSystem::assign_layout(Module &m) const
         m.row    = pid / 34;
         m.column = pid % 34;
 
-        // inner boundary (beam hole): rows/cols 15-18 (0-based)
+        // The missing 2x2 beam-hole cells are rows/columns 16-17 (0-based).
+        // Existing modules in the surrounding 4x4 ring (15-18) are marked as
+        // the inner boundary.
         if (m.row >= 15 && m.row <= 18 && m.column >= 15 && m.column <= 18)
             set_bit(m.flag, kInnerBound);
         // transition: outer ring of crystal array

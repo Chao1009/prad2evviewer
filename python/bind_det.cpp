@@ -642,6 +642,16 @@ static void bind_hycal(py::module_ &m)
              "sigma(E) at HyCal face (mm): "
              "sqrt((A/sqrt(E_GeV))^2 + (B/E_GeV)^2 + C^2).")
 
+           .def("set_energy_resolution_params",
+               &fdec::HyCalSystem::SetEnergyResolutionParams,
+               py::arg("A"), py::arg("B"), py::arg("C"),
+               "Set the [A, B, C] coefficients of the HyCal energy "
+               "resolution formula. See EnergyResolution(E).")
+           .def("energy_resolution",
+               &fdec::HyCalSystem::EnergyResolution,
+               py::arg("energy_mev"),
+               "sigma(E) in MeV: E*sqrt(A^2/E_GeV + C^2 + B^2/E_GeV^2)/100.")
+
         .def("sector_info",
             &fdec::HyCalSystem::sector_info, py::arg("sector"),
             py::return_value_policy::reference_internal)
@@ -702,6 +712,14 @@ static void bind_hycal(py::module_ &m)
         .def_readwrite("min_cluster_size",   &fdec::ClusterConfig::min_cluster_size)
         .def_readwrite("corner_conn",        &fdec::ClusterConfig::corner_conn)
         .def_readwrite("non_linear_corr",    &fdec::ClusterConfig::non_linear_corr)
+        .def_readwrite("leakage_correction", &fdec::ClusterConfig::leakage_correction)
+        .def_readwrite("leakage_iterations", &fdec::ClusterConfig::leakage_iterations)
+        .def_readwrite("least_leakage_fraction",
+                   &fdec::ClusterConfig::least_leakage_fraction)
+        .def_readwrite("max_leakage_fraction",
+                   &fdec::ClusterConfig::max_leakage_fraction)
+        .def_readwrite("leakage_convergence_rel",
+                   &fdec::ClusterConfig::leakage_convergence_rel)
         .def_readwrite("split_iter",         &fdec::ClusterConfig::split_iter)
         .def_readwrite("least_split",        &fdec::ClusterConfig::least_split)
         .def_readwrite("log_weight_thres",   &fdec::ClusterConfig::log_weight_thres)
@@ -1067,6 +1085,12 @@ static void bind_pipeline(py::module_ &m)
                                           p.hycal_pos_res.end());
             },
             "[A, B, C] coefficients of HyCal-face position resolution.")
+        .def_property_readonly("hycal_energy_res",
+            [](const prad2::Pipeline &p) {
+                return std::vector<float>(p.hycal_energy_res.begin(),
+                                          p.hycal_energy_res.end());
+            },
+            "[A, B, C] coefficients of HyCal energy resolution.")
         .def_readonly("gem_pos_res",        &prad2::Pipeline::gem_pos_res)
         .def_property_readonly("target_pos_res",
             [](const prad2::Pipeline &p) {

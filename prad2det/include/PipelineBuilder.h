@@ -71,6 +71,8 @@ struct Pipeline {
     // calls SetConfig(p.hycal_cluster_cfg).  GEM per-detector configs are
     // already installed inside `gem` via SetReconConfigs.
     fdec::ClusterConfig                hycal_cluster_cfg;
+    std::shared_ptr<const fdec::IClusterProfile> hycal_profile;
+    std::array<float, 3>               hycal_energy_res = {3.3f, 0.f, 0.f};
 
     // Per-module HyCal peak-time windows.  Always sized to hycal.module_count()
     // when build() succeeds (uniform default when no per-module file).  Use

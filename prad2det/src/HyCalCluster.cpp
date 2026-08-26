@@ -42,21 +42,20 @@ float shower_depth(int center_id, float energy_mev)
 
 HyCalCluster::HyCalCluster(const HyCalSystem &sys)
     : sys_(sys)
-    , profile_(new SimpleProfile())
-    , owns_profile_(true)
+    , profile_(std::make_shared<SimpleProfile>())
 {
 }
 
-HyCalCluster::~HyCalCluster()
+HyCalCluster::~HyCalCluster() = default;
+
+void HyCalCluster::SetProfile(std::shared_ptr<const IClusterProfile> prof)
 {
-    if (owns_profile_) delete profile_;
+    profile_ = prof ? std::move(prof) : std::make_shared<SimpleProfile>();
 }
 
 void HyCalCluster::SetProfile(IClusterProfile *prof)
 {
-    if (owns_profile_) delete profile_;
-    profile_ = prof;
-    owns_profile_ = false;
+    SetProfile(std::shared_ptr<const IClusterProfile>(prof));
 }
 
 //=============================================================================
@@ -73,6 +72,7 @@ void HyCalCluster::Clear()
 void HyCalCluster::AddHit(int module_index, float energy, float time)
 {
     if (module_index < 0 || module_index >= sys_.module_count()) return;
+    if (test_bit(sys_.module(module_index).flag, kDeadModule)) return;
     if (energy > config_.min_module_energy)
         hits_.push_back({module_index, energy, time});
 }
@@ -88,6 +88,11 @@ void HyCalCluster::FormClusters()
     // step 2: find maxima and split each group
     for (auto &group : groups_)
         split_cluster(group);
+
+    if (config_.leakage_correction) {
+        for (auto &cl : clusters_)
+            apply_leakage_correction(cl);
+    }
 }
 
 void HyCalCluster::ReconstructHits(std::vector<ClusterHit> &out) const
@@ -225,6 +230,7 @@ void HyCalCluster::split_cluster(const std::vector<int> &group)
         auto &cl = clusters_.back();
         cl.center = seed;
         cl.flag   = sys_.module(seed.index).flag;
+        cl.energy_square = calculate_energy_square(cl.center);
 
         for (int hi : group)
             cl.add_hit(hits_[hi]);
@@ -298,6 +304,7 @@ void HyCalCluster::split_hits(const std::vector<int> &maxima,
         auto &cl = clusters_.back();
         cl.center = hits_[maxima[i]];
         cl.flag   = sys_.module(cl.center.index).flag;
+        cl.energy_square = calculate_energy_square(cl.center);
 
         for (int j = 0; j < nhits; ++j) {
             if (split.frac[j][i] == 0.f) continue;
@@ -318,6 +325,24 @@ void HyCalCluster::split_hits(const std::vector<int> &maxima,
             set_bit(cl.flag, kSplit);
         }
     }
+}
+
+float HyCalCluster::calculate_energy_square(const ModuleHit &center) const
+{
+    const auto &center_mod = sys_.module(center.index);
+    float energy_square = 0.f;
+
+    for (const auto &hit : hits_) {
+        if (config_.seed_time_window > 0.f &&
+            std::fabs(hit.time - center.time) > config_.seed_time_window)
+            continue;
+
+        double dx, dy;
+        sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
+        if (std::fabs(dx) < 2.51 && std::fabs(dy) < 2.51)
+            energy_square += hit.energy;
+    }
+    return energy_square;
 }
 
 void HyCalCluster::eval_fraction(const std::vector<int> &maxima,
@@ -439,19 +464,9 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.flag      = cl.flag;
     result.linear_corr = 1.f;
 
-    // Sum original module energies in the 5x5 area so split fractions cannot
-    // affect this value.
-    result.energy_square = 0.f;
-    for (const auto &hit : hits_) {
-        if (config_.seed_time_window > 0.f &&
-            std::fabs(hit.time - cl.center.time) > config_.seed_time_window)
-            continue;
-
-        double dx, dy;
-        sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
-        if (std::fabs(dx) < 2.51 && std::fabs(dy) < 2.51)
-            result.energy_square += hit.energy;
-    }
+    // Keep the raw 5x5 sum independent of split fractions. Leakage is added
+    // separately by the correction stage when it is accepted.
+    result.energy_square = cl.energy_square + cl.leakage;
 
     if (config_.non_linear_corr) {
         // 1/linear_corr = E_rec/E_exp
@@ -477,6 +492,12 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     }
     result.npos = npos;
 
+    if (cl.has_leakage_position) {
+        result.x = cl.leakage_x;
+        result.y = cl.leakage_y;
+        result.npos = cl.leakage_npos;
+    }
+
     return result;
 }
 
@@ -485,6 +506,170 @@ float HyCalCluster::get_weight(float E, float E_total) const
     if (E_total <= 0.f) return 0.f;
     float w = config_.log_weight_thres + std::log(E / E_total);
     return (w > 0.f) ? w : 0.f;
+}
+
+void HyCalCluster::apply_leakage_correction(ModuleCluster &cl) const
+{
+    if (!config_.leakage_correction || test_bit(cl.flag, kLeakCorr)) return;
+    if (cl.energy < config_.min_cluster_energy) return;
+    if (static_cast<int>(cl.hits.size()) < config_.min_cluster_size) return;
+    if (cl.hits.size() < 4) return;
+
+    const auto &center_mod = sys_.module(cl.center.index);
+    if (!test_bit(center_mod.flag, kLeakage) || center_mod.virtual_neighbors.empty())
+        return;
+
+    std::vector<LeakageHit> leaks;
+    leaks.reserve(center_mod.virtual_neighbors.size());
+    for (const auto &vn : center_mod.virtual_neighbors) {
+        LeakageHit hit;
+        hit.x = vn.x;
+        hit.y = vn.y;
+        hit.dx = vn.dx;
+        hit.dy = vn.dy;
+        hit.sector = center_mod.sector;
+        hit.type = vn.type;
+        if (vn.backing_module >= 0 && vn.backing_module < sys_.module_count())
+            hit.sector = sys_.module(vn.backing_module).sector;
+        leaks.push_back(hit);
+    }
+    if (leaks.empty()) return;
+
+    LeakagePoint pos = reconstruct_leakage_position(cl, leaks, cl.energy);
+    double est = eval_cluster_profile(pos, cl);
+    if (!std::isfinite(est)) return;
+
+    std::vector<float> previous(leaks.size(), 0.f);
+    for (int iter = 0; iter < config_.leakage_iterations; ++iter) {
+        for (size_t i = 0; i < leaks.size(); ++i)
+            previous[i] = leaks[i].energy;
+
+        float leakage = 0.f;
+        for (auto &leak : leaks) {
+            auto prof = get_pwo_profile_value_at(pos.x, pos.y, pos.energy,
+                                                 leak.x, leak.y);
+            leak.energy = 0.f;
+            if (prof.frac > config_.least_leakage_fraction && prof.frac < 1.f)
+                leak.energy = pos.energy * prof.frac;
+            leakage += leak.energy;
+        }
+
+        if (!std::isfinite(leakage) || leakage <= 0.f) break;
+        if (config_.max_leakage_fraction > 0.f &&
+            leakage / cl.energy > config_.max_leakage_fraction) {
+            // Reject the complete correction, including any earlier accepted
+            // iteration, rather than leaving a partially divergent result.
+            return;
+        }
+
+        LeakagePoint new_pos = reconstruct_leakage_position(cl, leaks,
+                                                            cl.energy + leakage);
+        double new_est = eval_cluster_profile(new_pos, cl);
+        if (!std::isfinite(new_est) || new_est >= est) {
+            for (size_t i = 0; i < leaks.size(); ++i)
+                leaks[i].energy = previous[i];
+            break;
+        }
+
+        const float relative_change = std::fabs(new_pos.energy - pos.energy) /
+                                      std::max(pos.energy, 1.f);
+        pos = new_pos;
+        est = new_est;
+        if (config_.leakage_convergence_rel > 0.f &&
+            relative_change < config_.leakage_convergence_rel)
+            break;
+    }
+
+    float leakage = 0.f;
+    for (const auto &leak : leaks)
+        leakage += leak.energy;
+    if (leakage <= 0.f) return;
+
+    cl.leakage = leakage;
+    cl.energy += leakage;
+    cl.has_leakage_position = true;
+    cl.leakage_x = pos.x;
+    cl.leakage_y = pos.y;
+    cl.leakage_npos = pos.npos;
+    set_bit(cl.flag, kLeakCorr);
+}
+
+HyCalCluster::LeakagePoint HyCalCluster::reconstruct_leakage_position(
+    const ModuleCluster &cl,
+    const std::vector<LeakageHit> &leaks,
+    float total_energy) const
+{
+    const auto &center_mod = sys_.module(cl.center.index);
+    LeakagePoint pos;
+    pos.x = center_mod.x;
+    pos.y = center_mod.y;
+    pos.energy = total_energy;
+
+    float wx = 0.f, wy = 0.f;
+    float wtot = get_weight(cl.center.energy, total_energy);
+    pos.npos = (wtot > 0.f) ? 1 : 0;
+
+    for (const auto &hit : cl.hits) {
+        if (hit.index == cl.center.index) continue;
+
+        double dx, dy;
+        sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
+        if (std::abs(dx) >= 1.01 || std::abs(dy) >= 1.01) continue;
+
+        float w = get_weight(hit.energy, total_energy);
+        if (w > 0.f) {
+            wx += static_cast<float>(dx) * w;
+            wy += static_cast<float>(dy) * w;
+            wtot += w;
+            pos.npos++;
+        }
+    }
+
+    for (const auto &leak : leaks) {
+        if (leak.energy <= 0.f) continue;
+        if (std::abs(leak.dx) >= 1.01 || std::abs(leak.dy) >= 1.01) continue;
+
+        float w = get_weight(leak.energy, total_energy);
+        if (w > 0.f) {
+            wx += static_cast<float>(leak.dx) * w;
+            wy += static_cast<float>(leak.dy) * w;
+            wtot += w;
+            pos.npos++;
+        }
+    }
+
+    if (wtot > 0.f) {
+        pos.x = center_mod.x + (wx / wtot) * center_mod.size_x;
+        pos.y = center_mod.y + (wy / wtot) * center_mod.size_y;
+    }
+    return pos;
+}
+
+double HyCalCluster::eval_cluster_profile(const LeakagePoint &pos,
+                                           const ModuleCluster &cl) const
+{
+    if (pos.energy <= 0.f) return std::numeric_limits<double>::infinity();
+
+    const double sigma_E = sys_.EnergyResolution(pos.energy);
+    double est = 0.;
+    int count = 0;
+
+    for (const auto &hit : cl.hits) {
+        const auto &mod = sys_.module(hit.index);
+        auto prof = get_pwo_profile_value_at(pos.x, pos.y, pos.energy,
+                                             mod.x, mod.y);
+        if (prof.frac < 0.01f) continue;
+
+        const double diff = hit.energy - pos.energy * prof.frac;
+        const double sigma2 = pos.energy * pos.energy * prof.err * prof.err +
+                              sigma_E * sigma_E * prof.frac * prof.frac;
+        if (sigma2 <= 0.) continue;
+
+        est += std::abs(diff) / std::sqrt(sigma2);
+        ++count;
+    }
+
+    return (count > 0) ? est / count : std::numeric_limits<double>::infinity();
 }
 
 //=============================================================================
@@ -502,16 +687,40 @@ float HyCalCluster::get_profile_frac(const ModuleHit &center, const ModuleHit &h
     return profile_->GetFraction(m1.type, dist, center.energy / 0.78f);
 }
 
+ProfileValue HyCalCluster::get_profile_value_at(float cx, float cy, float cE,
+                                                 double mx, double my,
+                                                 int msector,
+                                                 ModuleType type) const
+{
+    int sid = sys_.get_sector_id(cx, cy);
+    if (sid < 0 || sid >= static_cast<int>(Sector::Max))
+        sid = msector;
+    double dx, dy;
+    sys_.qdist(cx, cy, sid, mx, my, msector, dx, dy);
+    float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+    return profile_->GetFractionValue(type, dist, cE);
+}
+
+ProfileValue HyCalCluster::get_pwo_profile_value_at(float cx, float cy, float cE,
+                                                     double mx, double my) const
+{
+    // Leakage candidates are virtual continuations of the PbWO4 grid.  Use
+    // the W cell pitch directly even when the reconstructed point moves past
+    // the physical W boundary; sector-based qdist would otherwise introduce
+    // PbGlass dimensions at the outer edge.
+    const auto &w = sys_.sector_info(static_cast<int>(Sector::Center));
+    if (w.msize_x <= 0. || w.msize_y <= 0.) return {};
+    const double dx = (mx - cx) / w.msize_x;
+    const double dy = (my - cy) / w.msize_y;
+    const float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+    return profile_->GetFractionValue(ModuleType::PbWO4, dist, cE);
+}
+
 float HyCalCluster::get_profile_frac_at(float cx, float cy, float cE,
                                           const ModuleHit &hit) const
 {
     const auto &m = sys_.module(hit.index);
-    int sid = sys_.get_sector_id(cx, cy);
-    double dx, dy;
-    sys_.qdist(cx, cy, sid, m.x, m.y, m.sector, dx, dy);
-    float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
-    ModuleType type = sys_.sector_info(sid).mtype;
-    return profile_->GetFraction(type, dist, cE);
+    return get_profile_value_at(cx, cy, cE, m.x, m.y, m.sector, m.type).frac;
 }
 
 //=============================================================================
