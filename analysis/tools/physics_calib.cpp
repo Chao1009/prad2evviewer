@@ -47,6 +47,7 @@
 #include "RunInfoConfig.h"
 #include "gain_factor.h"
 #include "PipelineBuilder.h"
+#include "PulseTemplateStore.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -354,7 +355,7 @@ int main(int argc, char *argv[])
 
     merged_result.hit_pos = std::make_unique<TH2F>(
         "hit_pos_merged",
-        "Hit position;X (cm);Y (cm)",
+        "Hit position;X (mm);Y (mm)",
         pos_bins, pos_min, pos_max,
         pos_bins, pos_min, pos_max);
     merged_result.hit_pos->SetDirectory(nullptr);
@@ -483,6 +484,7 @@ int main(int argc, char *argv[])
     std::vector<CalibrationResult> calib_results;
 
     int n_calibrated = 0;
+    int n_good_fit = 0;
     for (int i = 0; i < 1156; ++i) {
         if (!merged_result.h1_E_modules[i]) continue;
         TH1F *h = merged_result.h1_E_modules[i].get();
@@ -504,12 +506,14 @@ int main(int argc, char *argv[])
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
 
         auto [peak, sigma, chi2] = physics.fitGaus(h, expected_peak);
-        bool fit_good = (peak > 0 && sigma > 0 && sigma < 2. * 0.03*peak/std::sqrt(peak/1000.f) && chi2 < 10.f);
+        bool fit_good = (peak > 0 && sigma > 0 && sigma < 1.5 * 0.03*peak/std::sqrt(peak/1000.f) && chi2 < 1.8f);
         if (!fit_good) {
             std::cout << "Check!!! Module W" << (mod_id - 1000)
                  << ": fit failed (peak=" << peak
                  << ", sigma=" << sigma
                  << ", chi2/ndf=" << chi2 << ")\n";
+        } else {
+            n_good_fit++;
         }
         if (peak <= 0) peak = expected_peak; // fallback to expected if fit failed
         float ratio         = expected_peak / peak; 
@@ -536,6 +540,9 @@ int main(int argc, char *argv[])
             static_cast<float>(sigma), static_cast<float>(chi2), fit_good,
             is_dead, is_deadNeighbor});
     }
+
+    std::cout << "Calibration iteration " << iteration << " completed. "
+              << n_calibrated << " modules calibrated. " << n_good_fit << " fits were good.\n";
 
     // Write calibration results to a json file
     hycal.PrintCalibConstants(output_calib_file);
@@ -564,10 +571,19 @@ int main(int argc, char *argv[])
 
     // ── Save merged histograms to output ROOT file ───────────────────────────
     TFile *outfile = TFile::Open(output_root_file.c_str(), "RECREATE");
+    outfile->cd();
+    outfile->mkdir("modules_island");
+    outfile->cd("modules_island");
     for (int i = 0; i < 1156; ++i) {
-        if (merged_result.h1_E_modules[i]) merged_result.h1_E_modules[i]->Write();
         if (merged_result.h1_E_modules_island[i]) merged_result.h1_E_modules_island[i]->Write();
     }
+    outfile->cd();
+    outfile->mkdir("modules_5by5");
+    outfile->cd("modules_5by5");
+    for (int i = 0; i < 1156; ++i) {
+        if (merged_result.h1_E_modules[i]) merged_result.h1_E_modules[i]->Write();
+    }
+    outfile->cd();
     if (merged_result.h2_energy_theta) merged_result.h2_energy_theta->Write();
     if (merged_result.hit_pos) merged_result.hit_pos->Write();
     if (merged_result.h_E_1cl) merged_result.h_E_1cl->Write();
@@ -586,7 +602,9 @@ int main(int argc, char *argv[])
 bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig, 
                       const std::string &db_dir, const std::string &recon_config_file,
                       const std::string &calib_file, HistResult *res)
-{
+{   
+    evc::DaqConfig daq_cfg;
+
     // Detectors: PRad-II flows through PipelineBuilder so the wiring stays in
     // one place (see prad2det/include/PipelineBuilder.h).
     fdec::HyCalSystem                 hycal;
@@ -607,6 +625,7 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         .set_log_stream(&std::cerr)
         .build();
 
+    daq_cfg          = std::move(pipeline.daq_cfg);
     hycal            = std::move(pipeline.hycal);
     cluster_cfg      = pipeline.hycal_cluster_cfg;
     hc_time_cuts     = std::move(pipeline.hycal_time_cuts);
@@ -614,6 +633,18 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+
+    //initialize tools for cluster reconstruction
+    fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
+    fdec::PulseTemplateStore template_store;
+    if (daq_cfg.wave_cfg.nnls_deconv.enabled
+        && !daq_cfg.wave_cfg.nnls_deconv.template_file.empty()) {
+        template_store.LoadFromFile(
+            db_dir + "/" + daq_cfg.wave_cfg.nnls_deconv.template_file,
+            daq_cfg.wave_cfg);
+    }
+    ana.SetTemplateStore(&template_store);
+    fdec::WaveResult wres;
 
     // set up raw read branches for the input tree
     TFile *infile = TFile::Open(input_raw.c_str(), "READ");
@@ -626,6 +657,11 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         std::cerr << "Replay: input raw file has no 'events' tree\n";
         return false;
     }
+    const bool has_waveform = tree_in->GetBranch("hycal.samples") != nullptr;
+    const bool has_peaks    = tree_in->GetBranch("hycal.npeaks") != nullptr;
+    std::cout << "Input file: " << input_raw
+              << " (waveform branches: " << (has_waveform ? "yes" : "no")
+              << ", peak branches: " << (has_peaks ? "yes" : "no") << ")\n";
     tree_in->SetBranchStatus("*", 0);
     auto enable_branch = [tree_in](const char *name) {
         if (tree_in->GetBranch(name)) tree_in->SetBranchStatus(name, 1);
@@ -635,6 +671,7 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
              "event_num", "trigger_type", "trigger_bits",
              "hycal.nch", "hycal.module_id", "hycal.module_type",
              "hycal.gain_factor",
+             "hycal.nsamples", "hycal.samples",
              "hycal.npeaks",
              "hycal.peak_height",
              "hycal.peak_time",
@@ -654,6 +691,24 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         if (in->nch > 100) continue; // too many hits, likely not a clean event
 
         clusterer.Clear();
+
+        // in case the peaks branches are missing
+        // waveform analyzer to fill the peak branches
+        if (has_waveform && !has_peaks) {
+            for (int j = 0; j < in->nch; ++j) {
+                const auto *mod = hycal.module_by_id(in->module_id[j]);
+                if (!mod || !mod->is_pwo4()) continue;
+
+                ana.Analyze(in->samples[j], in->nsamples[j], wres);
+                in->npeaks[j] = std::min(wres.npeaks, fdec::MAX_PEAKS);
+                for (int p = 0; p < in->npeaks[j]; ++p) {
+                    const auto &pk = wres.peaks[p];
+                    in->peak_height[j][p]   = pk.height;
+                    in->peak_time[j][p]     = pk.time;
+                    in->peak_integral[j][p] = pk.integral;
+                }
+            }
+        }
 
         for (int j = 0; j < in->nch; ++j) {
             const auto *mod = hycal.module_by_id(in->module_id[j]);
