@@ -463,6 +463,7 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.nblocks   = static_cast<int>(cl.hits.size());
     result.flag      = cl.flag;
     result.linear_corr = 1.f;
+    result.leakage = cl.leakage;
 
     // Keep the raw 5x5 sum independent of split fractions. Leakage is added
     // separately by the correction stage when it is accepted.

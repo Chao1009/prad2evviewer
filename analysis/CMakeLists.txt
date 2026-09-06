@@ -75,13 +75,14 @@ add_analysis_tool(hycal_module_time_calib tools/hycal_module_time_calib.cpp)
 add_analysis_tool(hycal_shower_profile tools/hycal_shower_profile.cpp)
 add_analysis_tool(time_recon_check tools/time_recon_check.cpp)
 add_analysis_tool(physics_calib tools/physics_calib.cpp)
+add_analysis_tool(leakage_correction_check tools/leakage_correction_check.cpp)
 
 install(TARGETS replay_rawdata replay_gainCorr online_gain_monitor_base replay_recon replay_filter replay_add_hv
                 live_charge GEM_matching
                 cosmic_test quick_check matching det_align cosmic_lg sim2replay sim2replay_hc
                 gain_monitor gain_fitter refGain_produce
                 hycal_rf_offset_calib nonlinearity calib_5by5 hycal_module_time_calib hycal_shower_profile
-                time_recon_check physics_calib
+                time_recon_check physics_calib leakage_correction_check
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------

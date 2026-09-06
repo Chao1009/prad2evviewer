@@ -114,6 +114,7 @@ struct ClusterHit {
     uint32_t flag;      // cluster flags
     float linear_corr;    // linearity correction factor (E_corr / E_meas)
     float energy_square;  // raw module-energy sum in the 5x5 area around center
+    float leakage;         // energy leakage correction (MeV)
 };
 
 // Shower-max depth into the calorimeter face for an EM shower of energy `E`
