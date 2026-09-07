@@ -223,6 +223,38 @@ python scripts/ep_calib_viewer.py [Physics_calib_dir]
 python scripts/ep_calib_viewer.py build/Physics_calib
 ```
 
+### physics_calib_viewer.py
+
+Visualises the output of `analysis/tools/physics_calib.cpp`.  The viewer reads
+`calib_result_iterN.json`, `calib_factor_iterN.json`, and
+`calib_result_iterN.root` from each `Physics_calib/runN/` directory.  The map
+provides `Has data`, `fit_good`, `chi2/ndf`, `sigma`, `delta E`,
+`|delta E/expected|`, and `ratio`
+views.  Click a module to inspect its energy histogram; drag across the plot
+to choose a Gaussian fit range.
+
+Dragging a range starts the fit immediately.  `Apply fit + save` keeps the
+manual Gaussian overlay visible, writes the new fit fields directly to
+`calib_result_iterN.json`, and writes the new factor to
+`calib_factor_iterN.json`.  Multi-select operations mark the changed modules
+with circles and leave multi-select mode after a successful apply or restore.
+The outer-layer controls support square row/column rings and circular radial
+rings.  `Rebin N` followed by `Rebin outer` combines adjacent energy bins for
+the selected outer layers without changing the original ROOT file.
+
+Choose the module histogram source with `--hist-mode`:
+
+```bash
+python scripts/physics_calib_viewer.py build/Physics_calib --hist-mode 5by5
+python scripts/physics_calib_viewer.py build/Physics_calib --hist-mode island
+```
+
+After a manual fit is applied, its `peak`, `sigma`, `chi2/ndf`, `ratio`,
+`new_factor`, and `fit_good` fields are updated directly in
+`calib_result_iterN.json`; `old_factor` remains unchanged.  The calculated
+factor is written back to `calib_factor_iterN.json`.  The factor uses the producer rule
+`old_factor * clamp(1 + 0.7 * (expected_peak / peak - 1), 0.5, 2.0)`.
+
 ### json_flattener.py
 
 Generic helper that flattens an arbitrary JSON document into a flat

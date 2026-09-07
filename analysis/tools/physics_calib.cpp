@@ -488,7 +488,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 1156; ++i) {
         if (!merged_result.h1_E_modules[i]) continue;
         TH1F *h = merged_result.h1_E_modules[i].get();
-        if (h->GetEntries() < 100) continue; // skip modules with too few entries
+        if (h->GetEntries() < 70) continue; // skip modules with too few entries
 
         int mod_id = i + 1000 + 1; // module IDs start at 1001(W1)
         auto mod = hycal.module_by_id(mod_id);

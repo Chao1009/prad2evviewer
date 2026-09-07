@@ -805,3 +805,318 @@ the kinematic expectation, and iteratively updates the module factor with a
 damped multiplicative correction. A usable final calibration requires checking
 peak shape, fit quality, dead and edge regions, statistical coverage, and
 convergence across iterations.
+
+---
+
+## 11. Physics Calibration Viewer User Guide
+
+`physics_calib_viewer.py` is a desktop viewer for inspecting the per-module
+spectra and fit results produced by `physics_calib.cpp`. It is intended for
+diagnosis and controlled manual refitting after an automated calibration pass.
+The viewer can update the result and factor JSON files, so make a backup before
+editing production calibration output.
+
+### 11.1 Starting the viewer
+
+From the source checkout, run the viewer with the `Physics_calib` directory as
+the optional positional argument:
+
+```bash
+python3 scripts/physics_calib_viewer.py build/Physics_calib
+```
+
+The histogram source can be selected at startup or from the top toolbar:
+
+```bash
+python3 scripts/physics_calib_viewer.py build/Physics_calib --hist-mode 5by5
+python3 scripts/physics_calib_viewer.py build/Physics_calib --hist-mode island
+```
+
+`5by5` reads the module spectra from the `modules_5by5` ROOT directory;
+`island` reads them from `modules_island`. The run and iteration selectors are
+populated from directories containing `calib_result_iterN.json`. The selected
+iteration also loads its matching `calib_factor_iterN.json` and
+`calib_result_iterN.root`.
+
+The ROOT file is loaded in a background worker. While it is loading, the map
+and JSON result information may already be visible, but a module histogram or
+global ROOT plot may remain empty until loading finishes.
+
+### 11.2 Main window layout
+
+The window has four functional regions:
+
+1. **Top toolbar**: open a `Physics_calib` directory, select a run and
+   iteration, and choose the `5by5` or `island` histogram source.
+2. **Map mode row and range control**: select the quantity painted on the
+   HyCal map and adjust its color range, palette, or log mapping.
+3. **HyCal map**: inspect spatial patterns, select modules, preview outer
+   layers, and perform batch factor operations.
+4. **Module detail and global diagnostics**: inspect one module's energy
+   spectrum, refit it, and view run-wide ROOT diagnostic histograms.
+
+The top controls are used as follows:
+
+- **Open Physics_calib**: open a directory chooser and load another
+  `Physics_calib` output directory. The directory must contain run subdirectories
+  such as `run25320`.
+- **Run**: choose which run directory to inspect. Changing it repopulates the
+  iteration selector.
+- **Iteration**: choose the matching `calib_result_iterN.json`, factor JSON, and
+  ROOT file. Changing it clears temporary map selections and histogram display
+  state, then starts a new ROOT load.
+- **Histogram**: choose `5by5` or `island`. Changing it reloads the module
+  spectra from the corresponding ROOT directory and resets the current module's
+  temporary rebin state.
+- **Map mode buttons**: select the quantity painted on the left map. Switching
+  to `Has data` or `fit_good` fixes the range to `[0, 1]`; the other map modes
+  recompute an automatic continuous range.
+- **Map range controls**: use the minimum/maximum edits to set a manual range,
+  `Auto` to recompute it, and `Log` to toggle logarithmic color mapping. These
+  controls affect the map display only and do not alter calibration files.
+
+### 11.3 Map modes and what to check
+
+The map buttons show one value per module when that value exists in the result
+JSON. Modules absent from the result JSON are displayed as no data. This is
+important because the factor JSON contains a complete calibration table, while
+the result JSON only contains modules with enough processed statistics.
+
+#### `Has data`
+
+This is a binary map: `1` means the module has an entry in
+`calib_result_iterN.json`, and `0` means it does not. The map range is fixed to
+`[0, 1]`.
+
+Use it to check coverage. A missing module normally means that its spectrum did
+not reach the producer's minimum statistics threshold. It does not necessarily
+mean that the module is dead or absent from the detector. Click a no-data
+module to confirm that no result entry exists, then inspect its ROOT spectrum
+if available.
+
+#### `fit_good`
+
+This is also a binary map with a fixed range of `[0, 1]`. A value of `1` means
+the result passed the producer/viewer fit-quality flag; `0` means it did not.
+
+Look for clusters of bad fits near detector edges, transition regions, or
+dead-neighbor regions. A bad fit is a review signal, not proof that the factor
+must be restored. Inspect the module histogram, fitted width, chi-square, and
+peak location before changing it.
+
+#### `chi2/ndf`
+
+This map displays the Gaussian fit chi-square per degree of freedom. Its range
+is automatically fitted to the values currently present.
+
+Large isolated values usually indicate background, a second peak, a poor fit
+window, or a module with an unusual shower shape. A broad spatial region of
+large values can indicate a selection or calibration problem rather than one
+bad channel.
+
+#### `sigma`
+
+This map displays the fitted Gaussian width in MeV. Use it to find unusually
+wide peaks, which can indicate background, leakage, double peaks, or an
+incorrect peak selection. Very small widths should also be checked because
+they can result from too few useful bins or an overly narrow fit window.
+
+#### `delta E`
+
+This map displays the signed peak displacement:
+
+$$
+\Delta E = peak - expected\_peak.
+$$
+
+Positive values mean the fitted energy is above the kinematic expectation;
+negative values mean it is below. Spatially coherent positive or negative
+regions are useful for spotting geometry or calibration trends. This map uses
+an automatic continuous range, so zero is not necessarily at the center of the
+color palette.
+
+#### `|delta E/expected|`
+
+This map displays the absolute relative peak error:
+
+$$
+\left|\frac{\Delta E}{expected\_peak}\right|
+= \frac{|peak - expected\_peak|}{expected\_peak}.
+$$
+
+It is useful for ranking modules by deviation without regard to the direction
+of the error. Low values indicate alignment with the expected peak; high values
+should be checked against `fit_good`, `sigma`, and the module spectrum.
+
+#### `ratio`
+
+This map displays the damped correction ratio stored in the result JSON. Values
+near `1` indicate little correction. Values above `1` increase the factor;
+values below `1` decrease it. Values at `0.5` or `2.0` indicate that the
+producer clamp was reached and deserve direct inspection.
+
+### 11.4 Map controls and markers
+
+The range control below the map modes provides the following interactions:
+
+- **Minimum and maximum range fields**: manually set the color scale bounds.
+- **Auto**: fit the scale to the current map values. The viewer also applies
+  automatic ranges when switching continuous map modes.
+- **Log**: use logarithmic color mapping when the selected quantity is strictly
+  positive. Do not use it to interpret signed `delta E` values.
+- **Palette/color bar**: use the shared map palette controls to change the
+  visual contrast.
+- **Map zoom/pan**: use the map's existing zoom/pan interaction to inspect a
+  detector region.
+
+The map uses three independent marker styles:
+
+- **Red circle**: a module whose factor or manual fit has been applied during
+  the current viewer session.
+- **Blue circle**: a module currently selected in multi-select mode.
+- **Yellow dashed circle**: a temporary outer-layer preview.
+
+Markers are visual state only; the yellow preview does not modify any JSON
+file. Click `Preview outer` a second time to clear only the yellow preview.
+Red and blue markers remain unchanged.
+
+### 11.5 Factor and outer-layer buttons
+
+The controls below the map perform the following operations:
+
+- **Multi-select**: enable or disable module toggling by map clicks. Selected
+  modules are shown with blue circles.
+- **Factor**: enter a positive factor for the selected modules.
+- **Apply selected**: write that factor to all selected module entries in
+  `calib_factor_iterN.json`. After a successful write, the selected modules are
+  marked red and multi-select mode exits.
+- **Restore selected old_factor**: restore the producer `old_factor` from the
+  result JSON for every selected module. It updates the factor JSON only, then
+  marks the modules red and exits multi-select mode.
+- **Outer layers**: choose how many outer layers to include. The spinbox has
+  visible up/down buttons and changes by one layer per step.
+- **Square / Circle**: choose the definition of an outer layer.
+  `Square` uses the row/column distance from the PbWO4 array boundary;
+  `Circle` uses radial distance from the geometric center of the PbWO4 array.
+- **Restore outer W**: write the selected outer W modules' producer
+  `old_factor` values to `calib_factor_iterN.json`.
+- **Rebin N** next to the outer controls: choose the number of adjacent bins
+  to combine when applying outer-layer rebinning.
+- **Preview outer**: show the currently selected outer modules with yellow
+  dashed circles. Press it again to clear only that preview.
+- **Rebin outer**: apply the outer rebin setting to the selected outer module
+  histograms for display. It does not modify the ROOT file.
+
+The outer-layer selection is recalculated from the current shape and layer
+count when `Preview outer`, `Restore outer W`, or `Rebin outer` is pressed.
+
+### 11.6 Global diagnostics buttons
+
+The `Global diagnostics` panel contains a row of buttons. Each button selects
+one ROOT histogram loaded from `calib_result_iterN.root`:
+
+- **Energy vs theta**: two-dimensional selected cluster energy versus angle.
+  Look for the expected kinematic band and discontinuities.
+- **Hit position**: two-dimensional reconstructed hit-position coverage.
+  Look for holes, edge effects, and dead-region patterns.
+- **One cluster energy**: inclusive selected single-cluster energy spectrum.
+  Use it as a run-level overview, not as a replacement for module spectra.
+- **Peak ratio**: distribution of module correction ratios. A wide distribution
+  or pileup at the clamp limits suggests unstable fits or broad calibration
+  variation.
+- **Fit chi2/ndf**: distribution of fit quality values. A long high-value tail
+  indicates spectra that require review.
+- **Fit sigma**: distribution of fitted widths. Outliers should be compared
+  with their individual module spectra.
+
+The one-dimensional plots automatically adjust their x-axis to the non-zero
+data range. The two-dimensional plots use a white background and logarithmic
+z scaling so sparse and dense regions can be seen together.
+
+For all global plots, drag a rectangle with the **left mouse button** to zoom
+into that region. Drag with the **right mouse button** to zoom out around the
+selected region. Scrolling is not required. Click **Reset zoom** to restore the
+automatic limits for the current diagnostic plot.
+
+### 11.7 Module histogram controls
+
+Click a module on the map to populate the module detail panel. The information
+block shows the module ID, producer peak, expected peak, sigma, chi-square,
+ratio, old factor, new factor, and current factor.
+
+Below the histogram:
+
+- **Histogram rebin**: combine adjacent energy bins for the current module.
+  The setting is stored separately for each module during the session.
+  Rebinning affects display and refitting; it does not rewrite the ROOT file.
+- **Restore old factor**: write only the current module's producer
+  `old_factor` to `calib_factor_iterN.json`.
+- **Range xmin/xmax**: optionally enter explicit fit boundaries in MeV.
+- **Run fit**: fit the current histogram using the selected range, or use the
+  automatic peak-window logic when no range is entered.
+- **Apply fit + save**: write the accepted fit to both JSON outputs and keep
+  the manual fit line visible on the plot.
+
+### 11.8 Manual refit procedure
+
+Use the following procedure for a module that needs review:
+
+1. Select the correct run and iteration at the top of the window.
+2. Choose `5by5` or `island`, depending on which spectrum should be reviewed.
+3. Select a map mode such as `fit_good`, `chi2/ndf`, `delta E`, or
+   `|delta E/expected|` to locate suspicious modules.
+4. Click the module. Confirm the module information and wait for its histogram
+   to load.
+5. Set `Histogram rebin` if the spectrum needs a coarser binning. The fit uses
+   the rebinned spectrum.
+6. Drag across the desired peak region on the histogram. The viewer immediately
+   runs a fit using that range. Alternatively, enter `xmin` and `xmax` and
+   press `Run fit`.
+7. Inspect the manual fit line and the displayed peak, sigma, chi-square,
+   damped ratio, and new factor. Compare the manual result with the producer
+   fit line and the expected peak.
+8. Press `Apply fit + save` only after the fit window and peak are credible.
+9. Confirm that the map updates immediately. In particular, `ratio`, `delta E`,
+   `|delta E/expected|`, `sigma`, and `fit_good` should reflect the new result.
+
+The ratio and factor use the same update rule as the producer:
+
+$$
+ratio = \operatorname{clamp}\left(
+1+0.7\left(\frac{expected\_peak}{peak}-1\right), 0.5, 2.0\right),
+$$
+
+$$
+new\_factor = old\_factor \times ratio.
+$$
+
+The `old_factor` used here is taken from the result row and is deliberately
+not replaced by the current factor. The current fit updates these fields in
+the original `calib_result_iterN.json`:
+
+```text
+peak, sigma, chi2/ndf, ratio, new_factor, fit_good
+```
+
+The original `old_factor` remains unchanged. The calculated factor is written
+to the matching module in `calib_factor_iterN.json`. No
+`calib_result_iterN.manual.json` sidecar is created.
+
+If writing either JSON file fails, the viewer reports the failure and does not
+claim that the fit was saved. Keep the original files backed up when doing
+manual calibration work.
+
+### 11.9 Recommended viewer review order
+
+For a new iteration, a practical review sequence is:
+
+1. Check `Has data` for coverage.
+2. Check `fit_good` for broad regions of failed fits.
+3. Check `ratio` and `|delta E/expected|` for modules requiring correction.
+4. Check `chi2/ndf` and `sigma` for shape or fit-quality problems.
+5. Use the global `Energy vs theta` and `Hit position` plots for run-wide
+   selection or geometry problems.
+6. Inspect suspicious modules individually and refit only when the histogram
+   supports a different peak or fit window.
+7. Save the manual change, verify the map refresh, and record which modules
+   were changed before proceeding to the next iteration.
