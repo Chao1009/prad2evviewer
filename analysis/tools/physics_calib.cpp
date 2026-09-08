@@ -92,6 +92,11 @@ struct HistResult {
     std::unique_ptr<TH1F>                    h_fit_peak_chi2ndf;
     std::unique_ptr<TH1F>                    h_fit_peak_sigma;
     long long                                events_processed = 0;
+    // more histograms here but do not go to the physics_calib_viewer
+    std::unique_ptr<TH1F>                    h1_E_1cl_island;
+    std::unique_ptr<TH1F>                    h1_E_1cl_square;
+    std::unique_ptr<TH1F>                    h1_dE_1cl; // E_island - E_square
+    std::unique_ptr<TH2F>                    h2_cl_module_occupancy; // the occupancy of neighboring modules in one cluster
 };
 
 const int angle_bins = 50; const double angle_min = 0., angle_max = 5.;
@@ -101,6 +106,9 @@ const int center_energy_fraction_bins = 100; const double center_energy_fraction
 const int fit_ratio_bins = 200; const double fit_ratio_min = 0., fit_ratio_max = 2.;
 const int fit_chi2ndf_bins = 200; const double fit_chi2ndf_min = 0., fit_chi2ndf_max = 50.;
 const int fit_sigma_bins = 200; const double fit_sigma_min = 0., fit_sigma_max = 200.;
+const int extra_energy_bins = 500; const double extra_energy_min = 0., extra_energy_max = 5000.;
+const int extra_denergy_bins = 1000; const double extra_denergy_min = -100., extra_denergy_max = 100.;
+const int cl_module_occupancy_bins = 9; const double cl_module_occupancy_min = -4.5, cl_module_occupancy_max = 4.5;
 
 bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig, 
                       const std::string &db_dir, const std::string &recon_config_file,
@@ -288,6 +296,31 @@ int main(int argc, char *argv[])
             fit_sigma_bins, fit_sigma_min, fit_sigma_max);
         res->h_fit_peak_sigma->SetDirectory(nullptr);
 
+        res->h1_E_1cl_island = std::make_unique<TH1F>(
+            Form("h1_E_1cl_island_tid%d", tid),
+            "Single-cluster island energy;E_{island} (MeV);Counts",
+            extra_energy_bins, extra_energy_min, extra_energy_max);
+        res->h1_E_1cl_island->SetDirectory(nullptr);
+
+        res->h1_E_1cl_square = std::make_unique<TH1F>(
+            Form("h1_E_1cl_square_tid%d", tid),
+            "Single-cluster square energy;E_{square} (MeV);Counts",
+            extra_energy_bins, extra_energy_min, extra_energy_max);
+        res->h1_E_1cl_square->SetDirectory(nullptr);
+
+        res->h1_dE_1cl = std::make_unique<TH1F>(
+            Form("h1_dE_1cl_tid%d", tid),
+            "Island minus square energy;E_{island}-E_{square} (MeV);Counts",
+            extra_denergy_bins, extra_denergy_min, extra_denergy_max);
+        res->h1_dE_1cl->SetDirectory(nullptr);
+
+        res->h2_cl_module_occupancy = std::make_unique<TH2F>(
+            Form("h2_cl_module_occupancy_tid%d", tid),
+            "Modules in selected cluster;#Delta x (module);#Delta y (module)",
+            cl_module_occupancy_bins, cl_module_occupancy_min, cl_module_occupancy_max,
+            cl_module_occupancy_bins, cl_module_occupancy_min, cl_module_occupancy_max);
+        res->h2_cl_module_occupancy->SetDirectory(nullptr);
+
         results[tid] = std::move(res);
     }
 
@@ -365,6 +398,12 @@ int main(int argc, char *argv[])
         "Single-cluster energy;E (MeV);Counts",
         energy_bins, energy_min, energy_max);
     merged_result.h_E_1cl->SetDirectory(nullptr);
+    merged_result.h2_cl_module_occupancy = std::make_unique<TH2F>(
+        "h2_cl_module_occupancy",
+        "Modules in selected cluster;#Delta x (module);#Delta y (module)",
+        cl_module_occupancy_bins, cl_module_occupancy_min, cl_module_occupancy_max,
+        cl_module_occupancy_bins, cl_module_occupancy_min, cl_module_occupancy_max);
+    merged_result.h2_cl_module_occupancy->SetDirectory(nullptr);
 
     merged_result.h_center_energy_fraction = std::make_unique<TH1F>(
         "h_center_energy_fraction",
@@ -402,6 +441,21 @@ int main(int argc, char *argv[])
         "Fitted peak sigma;#sigma (MeV);Modules",
         fit_sigma_bins, fit_sigma_min, fit_sigma_max);
     merged_result.h_fit_peak_sigma->SetDirectory(nullptr);
+    merged_result.h1_E_1cl_island = std::make_unique<TH1F>(
+        "h1_E_1cl_island",
+        "Single-cluster island energy;E_{island} (MeV);Counts",
+        extra_energy_bins, extra_energy_min, extra_energy_max);
+    merged_result.h1_E_1cl_island->SetDirectory(nullptr);
+    merged_result.h1_E_1cl_square = std::make_unique<TH1F>(
+        "h1_E_1cl_square",
+        "Single-cluster square energy;E_{square} (MeV);Counts",
+        extra_energy_bins, extra_energy_min, extra_energy_max);
+    merged_result.h1_E_1cl_square->SetDirectory(nullptr);
+    merged_result.h1_dE_1cl = std::make_unique<TH1F>(
+        "h1_dE_1cl",
+        "Island minus square energy;E_{island}-E_{square} (MeV);Counts",
+        extra_denergy_bins, extra_denergy_min, extra_denergy_max);
+    merged_result.h1_dE_1cl->SetDirectory(nullptr);
     merged_result.events_processed = 0;
 
     for (int tid = 0; tid < num_threads; ++tid) {
@@ -455,6 +509,19 @@ int main(int argc, char *argv[])
         }
         if (res->h_fit_peak_sigma) {
             merged_result.h_fit_peak_sigma->Add(res->h_fit_peak_sigma.get());
+        }
+        if (res->h1_E_1cl_island) {
+            merged_result.h1_E_1cl_island->Add(res->h1_E_1cl_island.get());
+        }
+        if (res->h1_E_1cl_square) {
+            merged_result.h1_E_1cl_square->Add(res->h1_E_1cl_square.get());
+        }
+        if (res->h1_dE_1cl) {
+            merged_result.h1_dE_1cl->Add(res->h1_dE_1cl.get());
+        }
+        if (res->h2_cl_module_occupancy) {
+            merged_result.h2_cl_module_occupancy->Add(
+                res->h2_cl_module_occupancy.get());
         }
         merged_result.events_processed += res->events_processed;
     }
@@ -593,6 +660,14 @@ int main(int argc, char *argv[])
     if (merged_result.h_fit_peak_ratio) merged_result.h_fit_peak_ratio->Write();
     if (merged_result.h_fit_peak_chi2ndf) merged_result.h_fit_peak_chi2ndf->Write();
     if (merged_result.h_fit_peak_sigma) merged_result.h_fit_peak_sigma->Write();
+    if (merged_result.h1_E_1cl_island) merged_result.h1_E_1cl_island->Write();
+    if (merged_result.h1_E_1cl_square) merged_result.h1_E_1cl_square->Write();
+    if (merged_result.h1_dE_1cl) merged_result.h1_dE_1cl->Write();
+    if (merged_result.h2_cl_module_occupancy) {
+        int entries = merged_result.h2_cl_module_occupancy->GetBinContent(cl_module_occupancy_bins/2+1, cl_module_occupancy_bins/2+1);
+        merged_result.h2_cl_module_occupancy->Scale(100.0 / entries);
+        merged_result.h2_cl_module_occupancy->Write();
+    }
 
     outfile->Close();
     delete outfile;
@@ -759,17 +834,18 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         clusterer.ReconstructHits(hits);
 
         if (hits.size() != 1) continue; // only keep single-cluster events
-        if (hits[0].nblocks <= 3) continue; // require cluster to be at least 4 blocks (5x5) for this calibration
+        if (hits[0].nblocks < 3) continue; // require cluster to be at least 4 blocks (5x5) for this calibration
         
         auto *mod = hycal.module_by_id(hits[0].center_id);
         if (!mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
 
         if (fdec::test_bit(hits[0].flag, fdec::kDeadModule)) continue; // skip clusters with dead modules
+        if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue; // skip clusters with split hits
 
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         float xd = (hits[0].x - (float)mod->x) / (float)mod->size_x;
         float yd = (hits[0].y - (float)mod->y) / (float)mod->size_y;
-        if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
+        if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && (fabs(hits[0].x) > 20.75 * 2.0 || fabs(hits[0].y) > 20.75 * 2.0) ) continue;
         if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
             if (hits[0].x >  300.0 && xd >= 0.0f) continue; // only keep hits on the inner side for transition modules
             if (hits[0].x < -300.0 && xd <= 0.0f) continue;
@@ -778,9 +854,11 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         }
 
         float center_energy = 0.f;
+        const fdec::ModuleCluster *selected_cluster = nullptr;
         for (const auto &cluster : clusterer.GetClusters()) {
             if (cluster.center.index == mod->index) {
                 center_energy = cluster.center.energy;
+                selected_cluster = &cluster;
                 break;
             }
         }
@@ -798,6 +876,23 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         res->h_center_energy_fraction->Fill(center_energy_fraction);
         res->h_center_energy->Fill(center_energy);
         res->events_processed++;
+
+        // add more histograms for the new analysis
+        if ( (fabs(mod->x) > 20.75 * 4.0 || fabs(mod->y) > 20.75 * 4.0) &&
+             (fabs(mod->x) < 20.75 * 14.0 && fabs(mod->y) < 20.75 * 14.0) ) {
+            res->h1_E_1cl_island->Fill(hits[0].energy);
+            res->h1_E_1cl_square->Fill(hits[0].energy_square);
+            res->h1_dE_1cl->Fill(hits[0].energy - hits[0].energy_square);
+            if (selected_cluster) {
+                const auto &center_mod = hycal.module(selected_cluster->center.index);
+                for (const auto &cluster_hit : selected_cluster->hits) {
+                    const auto &hit_mod = hycal.module(cluster_hit.index);
+                    double dx = 0., dy = 0.;
+                    hycal.qdist(center_mod, hit_mod, dx, dy);
+                    res->h2_cl_module_occupancy->Fill(dx, dy);
+                }
+            }
+        }
     }
     infile->Close();
     delete infile;

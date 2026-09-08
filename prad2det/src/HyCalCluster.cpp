@@ -230,10 +230,10 @@ void HyCalCluster::split_cluster(const std::vector<int> &group)
         auto &cl = clusters_.back();
         cl.center = seed;
         cl.flag   = sys_.module(seed.index).flag;
-        cl.energy_square = calculate_energy_square(cl.center);
 
         for (int hi : group)
             cl.add_hit(hits_[hi]);
+        cl.energy_square = calculate_energy_square(cl);
     }
     else {
         split_hits(maxima, group);
@@ -304,7 +304,6 @@ void HyCalCluster::split_hits(const std::vector<int> &maxima,
         auto &cl = clusters_.back();
         cl.center = hits_[maxima[i]];
         cl.flag   = sys_.module(cl.center.index).flag;
-        cl.energy_square = calculate_energy_square(cl.center);
 
         for (int j = 0; j < nhits; ++j) {
             if (split.frac[j][i] == 0.f) continue;
@@ -324,17 +323,18 @@ void HyCalCluster::split_hits(const std::vector<int> &maxima,
 
             set_bit(cl.flag, kSplit);
         }
+        cl.energy_square = calculate_energy_square(cl);
     }
 }
 
-float HyCalCluster::calculate_energy_square(const ModuleHit &center) const
+float HyCalCluster::calculate_energy_square(const ModuleCluster &cluster) const
 {
-    const auto &center_mod = sys_.module(center.index);
+    const auto &center_mod = sys_.module(cluster.center.index);
     float energy_square = 0.f;
 
-    for (const auto &hit : hits_) {
+    for (const auto &hit : cluster.hits) {
         if (config_.seed_time_window > 0.f &&
-            std::fabs(hit.time - center.time) > config_.seed_time_window)
+            std::fabs(hit.time - cluster.center.time) > config_.seed_time_window)
             continue;
 
         double dx, dy;
@@ -464,10 +464,7 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.flag      = cl.flag;
     result.linear_corr = 1.f;
     result.leakage = cl.leakage;
-
-    // Keep the raw 5x5 sum independent of split fractions. Leakage is added
-    // separately by the correction stage when it is accepted.
-    result.energy_square = cl.energy_square + cl.leakage;
+    result.energy_square = cl.energy_square;
 
     if (config_.non_linear_corr) {
         // 1/linear_corr = E_rec/E_exp
@@ -588,6 +585,7 @@ void HyCalCluster::apply_leakage_correction(ModuleCluster &cl) const
 
     cl.leakage = leakage;
     cl.energy += leakage;
+    cl.energy_square += leakage;
     cl.has_leakage_position = true;
     cl.leakage_x = pos.x;
     cl.leakage_y = pos.y;

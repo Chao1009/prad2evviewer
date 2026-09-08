@@ -406,7 +406,7 @@ private:
     std::vector<int> find_maxima(const std::vector<int> &group) const;
     void split_hits(const std::vector<int> &maxima,
                     const std::vector<int> &group);
-    float calculate_energy_square(const ModuleHit &center) const;
+    float calculate_energy_square(const ModuleCluster &cluster) const;
     void eval_fraction(const std::vector<int> &maxima,
                        const std::vector<int> &group,
                        SplitContainer &split) const;

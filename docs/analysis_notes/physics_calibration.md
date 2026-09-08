@@ -882,6 +882,22 @@ JSON. Modules absent from the result JSON are displayed as no data. This is
 important because the factor JSON contains a complete calibration table, while
 the result JSON only contains modules with enough processed statistics.
 
+#### `module flag`
+
+This discrete map encodes the module status from the result JSON with a fixed
+range of `[0, 2]`:
+
+| Value | Status |
+|---:|---|
+| `0` | Normal module |
+| `1` | Dead-neighbor module |
+| `2` | Dead module |
+
+Dead has priority over dead-neighbor if both flags are present. Use this map
+to locate geometric regions affected by dead hardware and to compare them with
+large sigma, poor chi-square, or large relative peak error. The flag is a
+diagnostic classification; it does not by itself change the factor.
+
 #### `Has data`
 
 This is a binary map: `1` means the module has an entry in

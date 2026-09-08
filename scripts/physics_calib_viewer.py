@@ -440,7 +440,7 @@ class RootWorker(QThread):
 
 
 class Viewer(QMainWindow):
-	MODES = ("Has data", "fit_good", "chi2/ndf", "sigma", "delta E", "|delta E/expected|", "ratio")
+	MODES = ("Has data", "fit_good", "module flag", "chi2/ndf", "sigma", "delta E", "|delta E/expected|", "ratio")
 
 	def __init__(self, initial_dir=None, hist_mode="5by5"):
 		super().__init__()
@@ -543,7 +543,7 @@ class Viewer(QMainWindow):
 		self.map.moduleClicked.connect(self._module_clicked)
 		self.map.moduleHovered.connect(self._module_hovered)
 		self.map.selectionChanged.connect(self._selection_changed)
-		self.range_control = ColorRangeControl(self.map, auto_fit="minmax_nonzero", include_log=True)
+		self.range_control = ColorRangeControl(self.map, auto_fit="minmax", include_log=True)
 		outer.addWidget(self.range_control)
 
 		splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -713,7 +713,7 @@ class Viewer(QMainWindow):
 		self.map.clear_selection()
 		self.map.set_preview_modules(set())
 		self.map.marked = set()
-		self._refresh_map()
+		self._refresh_map(auto_range=True)
 		self._draw_global()
 		self._start_root_load()
 
@@ -745,9 +745,9 @@ class Viewer(QMainWindow):
 
 	def _set_mode(self, mode):
 		self._map_mode = mode
-		self._refresh_map()
+		self._refresh_map(auto_range=True)
 
-	def _refresh_map(self):
+	def _refresh_map(self, auto_range=False):
 		if self.current is None:
 			return
 		values = {}
@@ -758,6 +758,8 @@ class Viewer(QMainWindow):
 				values[name] = 1.0
 			elif mode == "fit_good":
 				values[name] = 1.0 if result.fit_good else 0.0
+			elif mode == "module flag":
+				values[name] = 2.0 if result.is_dead else (1.0 if result.is_dead_neighbor else 0.0)
 			elif mode == "chi2/ndf":
 				values[name] = result.chi2
 			elif mode == "sigma":
@@ -773,11 +775,14 @@ class Viewer(QMainWindow):
 				values[name] = result.ratio
 		self.map.set_values(values)
 		self.map.set_map_label(mode) if hasattr(self.map, "set_map_label") else None
-		self.range_control.notify_values_changed(values)
-		if mode in ("Has data", "fit_good"):
-			self.range_control.set_range(0.0, 1.0)
-		else:
-			self.range_control.controller.auto_fit(values)
+		if auto_range:
+			self.range_control.notify_values_changed(values)
+			if mode in ("Has data", "fit_good"):
+				self.range_control.set_range(0.0, 1.0)
+			elif mode == "module flag":
+				self.range_control.set_range(0.0, 2.0)
+			else:
+				self.range_control.controller.auto_fit(values)
 
 	def _hist_rebin_changed(self, factor):
 		self._rebin = max(1, int(factor))
@@ -832,6 +837,11 @@ class Viewer(QMainWindow):
 		result = self.current.results.get(module_id_from_name(name))
 		if overlay is None:
 			overlay = self._manual_overlays.get(name)
+		fit_peak = overlay[0] if overlay else (result.peak if result else None)
+		if result and result.expected_peak > 0:
+			self.canvas.ax.axvline(
+				result.expected_peak, color=THEME.SUCCESS, linewidth=2.0,
+				linestyle=":", label=f"Expected peak = {result.expected_peak:.2f}")
 		if result and result.peak > 0 and result.sigma > 0:
 			x = np.linspace(result.peak - 4 * result.sigma,
 							result.peak + 4 * result.sigma, 500)
@@ -843,7 +853,14 @@ class Viewer(QMainWindow):
 			x = np.linspace(peak - 4 * sigma, peak + 4 * sigma, 500)
 			self.canvas.ax.plot(x, amp * np.exp(-0.5 * ((x - peak) / sigma) ** 2),
 								color=THEME.WARN, linewidth=2, label="manual fit")
-			self.canvas.ax.legend(facecolor=THEME.PANEL, labelcolor=THEME.TEXT)
+		if fit_peak is not None and fit_peak > 0:
+			self.canvas.ax.axvline(
+				fit_peak, color=THEME.WARN, linewidth=1.8,
+				linestyle="--", label=f"Fit peak = {fit_peak:.2f}")
+		if result or overlay:
+			self.canvas.ax.legend(
+				loc="upper left", facecolor=THEME.PANEL,
+				labelcolor=THEME.TEXT, framealpha=0.9)
 		x_candidates = []
 		nonzero = np.flatnonzero(counts > 0)
 		if nonzero.size:
