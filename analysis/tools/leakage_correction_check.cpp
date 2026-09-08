@@ -4,8 +4,8 @@
 // then check the energy beafore and after the dead module, and check the leakage correction effect
 
 const int seed_id = 1565;
-const int dead_id = 1566;
-float seed_energy, dead_energy;
+const int neighbor_id = 1566;
+float seed_energy, neighbor_energy;
 
 #include "Replay.h"
 #include "PhysicsTools.h"
@@ -178,6 +178,7 @@ int main(int argc, char *argv[])
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);
 
@@ -195,11 +196,14 @@ int main(int argc, char *argv[])
 
     auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
         gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto shower_profile = pipeline.hycal_profile;
 
     // create histograms you want to fill for shower profile analysis
     TH1F *h1_cluster_energy = new TH1F("h1_cluster_energy", "Cluster Energy;Energy [MeV];Counts", 4000, 0, 4000);
-    TH1F *h1_seed_fraction = new TH1F("h1_seed_fraction", "Seed Module Fraction;Fraction;Counts", 100, 0, 1);
-    TH1F *h1_neighbor_fraction = new TH1F("h1_neighbor_fraction", "Fraction of Energy in Neighbor Module;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_seed_energy = new TH1F("h1_seed_energy", "Seed Module Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_neighbor_energy = new TH1F("h1_neighbor_energy", "Neighbor Module Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_seed_project = new TH1F("h1_seed_project", "Seed Module Projected Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_neighbor_project = new TH1F("h1_neighbor_project", "Neighbor Module Projected Energy;Energy [MeV];Counts", 4000, 0, 4000);
     TH2F *h2_pos = new TH2F("h2_pos_live", "Hit Position;X_d[20.75mm];Y_d[20.77mm]", 40, -1, 1, 40, -1, 1);
 
     // Here loop over the events in the TChain, read channels data, reconstruct clusters, and fill the histograms
@@ -216,8 +220,8 @@ int main(int argc, char *argv[])
         // Reconstruct clusters for this event.
         clusterer.Clear();
 
-        dead_energy = 0.f;
         seed_energy = 0.f;
+        neighbor_energy = 0.f;
 
         // Per-event gain correction (time-series lookup by event number).
         const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
@@ -248,8 +252,8 @@ int main(int argc, char *argv[])
                     float adc = pk.integral * gain;
                     float energy = static_cast<float>(mod->energize(adc));
                     clusterer.AddHit(mod->index, energy, pk.time);
-                    if (mod->id == dead_id) {
-                        dead_energy = energy; // store the energy of the dead module for later analysis
+                    if (mod->id == neighbor_id) {
+                        neighbor_energy = energy; // store the energy of the neighbor module for later analysis
                     }
                     if (mod->id == seed_id) {
                         seed_energy = energy; // store the energy of the seed module for later analysis
@@ -265,6 +269,12 @@ int main(int argc, char *argv[])
                     float adc = ev->peak_integral[j][p] * gain;
                     float energy = static_cast<float>(mod->energize(adc));
                     clusterer.AddHit(mod->index, energy, peak_time);
+                    if (mod->id == neighbor_id) {
+                        neighbor_energy = energy; // store the energy of the neighbor module for later analysis
+                    }
+                    if (mod->id == seed_id) {
+                        seed_energy = energy; // store the energy of the seed module for later analysis
+                    }
                 }
             }
         }
@@ -287,34 +297,48 @@ int main(int argc, char *argv[])
         
 
         const auto *seed_mod = hycal.module_by_id(seed_id);
-        if (!seed_mod || !seed_mod->is_pwo4()) continue;
+        const auto *neighbor_mod = hycal.module_by_id(neighbor_id);
+        if (!seed_mod || !neighbor_mod) continue;
 
         if (hits[1].center_id == seed_id) {
             std::swap(hits[0], hits[1]);
         }
+        if (hits[0].energy < 1600. || hits[0].energy > 1850.) continue;
+
+        if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue; // skip clusters with split hits
 
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         float xd = (hits[0].x - (float)seed_mod->x) / (float)seed_mod->size_x;
         float yd = (hits[0].y - (float)seed_mod->y) / (float)seed_mod->size_y;
         h2_pos->Fill(xd, yd);
-        if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
+        if (std::abs(xd) >= 0.2f || std::abs(yd) >= 0.2f) continue;
 
-        float dead_fraction = dead_energy / hits[0].energy;
-        if (cluster_cfg.leakage_correction) {
-            dead_fraction = hits[0].leakage / hits[0].energy; // use leakage energy if correction is applied
-        }
-        float seed_fraction = seed_energy / hits[0].energy;
+        // projected energy for seed and neighbor modules using PRad1 shower profile
+        const int shower_sector = hycal.get_sector_id(hits[0].x, hits[0].y);
+        const int profile_sector = (shower_sector >= 0) ? shower_sector : seed_mod->sector;
+        const auto projected_energy = [&](const fdec::Module *mod) {
+            double dx = 0.;
+            double dy = 0.;
+            hycal.qdist(hits[0].x, hits[0].y, profile_sector,
+                        mod->x, mod->y, mod->sector, dx, dy);
+            const float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+            return hits[0].energy * shower_profile->GetFraction(mod->type, dist, hits[0].energy);
+        };
+        h1_seed_project->Fill(projected_energy(seed_mod));
+        h1_neighbor_project->Fill(projected_energy(neighbor_mod));
 
         h1_cluster_energy->Fill(hits[0].energy);
-        h1_seed_fraction->Fill(seed_fraction);
-        h1_neighbor_fraction->Fill(dead_fraction);
+        h1_seed_energy->Fill(seed_energy);
+        h1_neighbor_energy->Fill(neighbor_energy);
     }
 
     // Save the histograms to a root file
     TFile *output_file = new TFile((output_path_name + ".root").c_str(), "RECREATE");
     h1_cluster_energy->Write();
-    h1_seed_fraction->Write();
-    h1_neighbor_fraction->Write();
+    h1_seed_energy->Write();
+    h1_neighbor_energy->Write();
+    h1_seed_project->Write();
+    h1_neighbor_project->Write();
     h2_pos->Write();
     output_file->Close();
 
