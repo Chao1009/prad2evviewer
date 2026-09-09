@@ -1,5 +1,6 @@
 #include "PipelineBuilder.h"
 
+#include "HyCalClusterDensity.h"
 #include "load_daq_config.h"
 
 #include <nlohmann/json.hpp>
@@ -106,6 +107,9 @@ void apply_hycal_cluster_overrides(const json &j, fdec::ClusterConfig &cfg)
     if (j.contains("seed_time_window"))   cfg.seed_time_window   = j["seed_time_window"];
     if (j.contains("non_linear_corr"))    cfg.non_linear_corr    = j["non_linear_corr"];
     if (j.contains("leakage_correction")) cfg.leakage_correction = j["leakage_correction"];
+    cfg.density_correction = read_json_bool(j, "density_correction", cfg.density_correction);
+    cfg.s_shape_energy_correction = read_json_bool(j, "s_shape_energy_correction",
+                                                   cfg.s_shape_energy_correction);
     if (j.contains("leakage_iterations")) cfg.leakage_iterations = j["leakage_iterations"];
     if (j.contains("least_leakage_fraction"))
         cfg.least_leakage_fraction = j["least_leakage_fraction"];
@@ -486,6 +490,85 @@ Pipeline PipelineBuilder::build()
     if (recon.contains("hycal") && recon["hycal"].is_object())
         apply_hycal_cluster_overrides(recon["hycal"], out.hycal_cluster_cfg);
     out.hycal_cluster_cfg.profile = out.hycal_profile;
+    out.hycal_cluster_cfg.hycal_z = out.run_cfg.hycal_z;
+
+    if (out.hycal_cluster_cfg.density_correction ||
+        out.hycal_cluster_cfg.s_shape_energy_correction) {
+        fdec::DensitySet density_set;
+        if (fdec::HyCalClusterDensity::SelectSetForBeamEnergy(out.run_cfg.Ebeam,
+                                                              density_set)) {
+            auto correction_file = [&](const char *set_key,
+                                       const char *field,
+                                       const char *fallback) {
+                if (recon.contains("hycal") && recon["hycal"].is_object()) {
+                    const auto &h = recon["hycal"];
+                    if (h.contains("density_correction_sets") &&
+                        h["density_correction_sets"].is_object()) {
+                        const auto &sets = h["density_correction_sets"];
+                        if (sets.contains(set_key) && sets[set_key].is_object() &&
+                            sets[set_key].contains(field) && sets[set_key][field].is_string())
+                            return resolve(sets[set_key][field].get<std::string>());
+                    }
+                }
+                return resolve(fallback);
+            };
+
+            const char *set_key = "";
+            const char *position_fallback = "";
+            const char *energy_fallback = "";
+            switch (density_set) {
+                case fdec::DensitySet::Set_1GeV:
+                    set_key = "1.0";
+                    position_fallback = "density_params/set_1GeV.dat";
+                    energy_fallback = "s_energy_params/ecorrect_1GeV.dat";
+                    break;
+                case fdec::DensitySet::Set_2GeV:
+                    set_key = "2.0";
+                    position_fallback = "density_params/set_2GeV.dat";
+                    energy_fallback = "s_energy_params/ecorrect_2GeV.dat";
+                    break;
+                case fdec::DensitySet::Set_Above3GeV:
+                    set_key = "above_3.0";
+                    break;
+                case fdec::DensitySet::MaxSets:
+                    break;
+            }
+
+            const std::string position_path = correction_file(set_key, "position_file",
+                                                              position_fallback);
+            const std::string energy_path = correction_file(set_key, "energy_file",
+                                                            energy_fallback);
+            auto density_profile = std::make_shared<fdec::HyCalClusterDensity>();
+            if (density_profile->Load(density_set, position_path, energy_path) &&
+                density_profile->ChooseSet(density_set)) {
+                out.hycal_cluster_cfg.density_profile = density_profile;
+                std::ostringstream oss;
+                oss << "[setup] HC density: beam=" << std::fixed << std::setprecision(1)
+                    << out.run_cfg.Ebeam << " MeV  set="
+                    << fdec::HyCalClusterDensity::SetName(density_set)
+                    << "  position=" << (out.hycal_cluster_cfg.density_correction ? "on" : "off")
+                    << "  s_energy=" << (out.hycal_cluster_cfg.s_shape_energy_correction ? "on" : "off");
+                LOG(oss.str());
+            } else {
+                out.hycal_cluster_cfg.density_correction = false;
+                out.hycal_cluster_cfg.s_shape_energy_correction = false;
+                std::ostringstream oss;
+                oss << "[WARN] HC density: no usable correction files for beam="
+                    << std::fixed << std::setprecision(1) << out.run_cfg.Ebeam
+                    << " MeV set=" << fdec::HyCalClusterDensity::SetName(density_set)
+                    << "; corrections disabled.";
+                LOG(oss.str());
+            }
+        } else {
+            out.hycal_cluster_cfg.density_correction = false;
+            out.hycal_cluster_cfg.s_shape_energy_correction = false;
+            std::ostringstream oss;
+            oss << "[WARN] HC density: no correction set mapped for beam="
+                << std::fixed << std::setprecision(1) << out.run_cfg.Ebeam
+                << " MeV; corrections disabled.";
+            LOG(oss.str());
+        }
+    }
     {
         std::ostringstream oss;
         oss << "[setup] HC cluster : min_mod_E=" << out.hycal_cluster_cfg.min_module_energy
@@ -493,6 +576,8 @@ Pipeline PipelineBuilder::build()
             << "  min_cl_E=" << out.hycal_cluster_cfg.min_cluster_energy
             << "  split_iter=" << out.hycal_cluster_cfg.split_iter
             << "  nonlin=" << (out.hycal_cluster_cfg.non_linear_corr ? "on" : "off")
+            << "  density=" << (out.hycal_cluster_cfg.density_correction ? "on" : "off")
+            << "  s_energy=" << (out.hycal_cluster_cfg.s_shape_energy_correction ? "on" : "off")
             << "  seed_t_win=" << out.hycal_cluster_cfg.seed_time_window << "ns"
             << (out.hycal_cluster_cfg.seed_time_window > 0.f ? " (gated)" : " (off)");
         LOG(oss.str());

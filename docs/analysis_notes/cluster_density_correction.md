@@ -329,3 +329,28 @@ The two flags are independent. Position and energy correction can therefore be e
 9. Use the corrected x/y position to calculate and add the energy correction.
 10. Set flags to prevent repeated correction.
 ```
+
+## PRad2 Integration Notes
+
+The PRad2 implementation uses the same PRad1 formulas and parameter files, but
+the active correction set is selected from the beam energy resolved by
+`LoadRunConfig()` from `database/runinfo/general.json`. The selection does not
+use run number directly.
+
+The switches live under `hycal` in `database/reconstruction_config.json`:
+
+```json
+"density_correction": false,
+"s_shape_energy_correction": false
+```
+
+The available file mapping is also configured there. Current behavior is:
+
+```text
+beam energy < 1.0 GeV -> density_params/set_1GeV.dat + s_energy_params/ecorrect_1GeV.dat
+2.0 GeV < beam energy < 3.0 GeV -> density_params/set_2GeV.dat + s_energy_params/ecorrect_2GeV.dat
+beam energy > 3.0 GeV -> interface reserved; skip correction until files are provided
+```
+
+Missing files are non-fatal. The pipeline logs a warning and disables these two
+corrections for that run.

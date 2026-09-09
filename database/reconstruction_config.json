@@ -23,6 +23,23 @@
         "least_leakage_fraction": 0.01,
         "max_leakage_fraction": 0.30,
         "leakage_convergence_rel": 0.001,
+        "// PRad1 density/S-shape corrections. The active set is selected from runinfo/general.json beam_energy.": "",
+        "density_correction": true,
+        "s_shape_energy_correction": true,
+        "density_correction_sets": {
+            "1.0": {
+                "position_file": "density_params/set_1GeV.dat",
+                "energy_file": "s_energy_params/ecorrect_1GeV.dat"
+            },
+            "2.0": {
+                "position_file": "density_params/set_2GeV.dat",
+                "energy_file": "s_energy_params/ecorrect_2GeV.dat"
+            },
+            "above_3.0": {
+                "position_file": "",
+                "energy_file": ""
+            }
+        },
         "energy_resolution": [3.3, 0.0, 0.0],
         "split_iter":         6,
         "least_split":        0.01,

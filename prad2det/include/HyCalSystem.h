@@ -42,6 +42,8 @@ enum LayoutFlag : uint32_t {
     // cluster flags (used on ModuleCluster::flag, not module layout)
     kSplit       = 7,   // cluster was split from a multi-maximum group
     kLeakCorr    = 8,   // leakage correction applied
+    kDenCorr     = 10,  // cluster density position correction applied
+    kSEneCorr    = 11,  // S-shape energy correction applied
 };
 
 inline void     set_bit(uint32_t &f, uint32_t b) { f |= (1u << b); }

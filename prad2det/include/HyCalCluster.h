@@ -29,6 +29,7 @@ namespace fdec
 {
 
 struct IClusterProfile;
+class HyCalClusterDensity;
 
 // --- configuration ----------------------------------------------------------
 struct ClusterConfig {
@@ -54,6 +55,10 @@ struct ClusterConfig {
     float least_leakage_fraction = 0.01f;
     float max_leakage_fraction = 0.30f;
     float leakage_convergence_rel = 0.001f;
+    bool  density_correction = false;
+    bool  s_shape_energy_correction = false;
+    float hycal_z = 6225.f;
+    std::shared_ptr<const HyCalClusterDensity> density_profile;
 
     // --- multi-pulse / timing coincidence ------------------------------------
     // Waveform data can produce more than one pulse per module per event.
@@ -115,6 +120,7 @@ struct ClusterHit {
     float linear_corr;    // linearity correction factor (E_corr / E_meas)
     float energy_square;  // raw module-energy sum in the 5x5 area around center
     float leakage;         // energy leakage correction (MeV)
+    float energy_s_shape_corr = 0.f; // additive S-shape energy correction (MeV)
 };
 
 // Shower-max depth into the calorimeter face for an EM shower of energy `E`

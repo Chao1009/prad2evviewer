@@ -8,6 +8,7 @@
 //=============================================================================
 
 #include "HyCalCluster.h"
+#include "HyCalClusterDensity.h"
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -494,6 +495,17 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
         result.x = cl.leakage_x;
         result.y = cl.leakage_y;
         result.npos = cl.leakage_npos;
+    }
+
+    if (config_.density_profile &&
+        (config_.density_correction || config_.s_shape_energy_correction)) {
+        const float relative_energy_window = (result.energy > 0.f)
+            ? 6.f * sys_.EnergyResolution(result.energy) / result.energy
+            : 0.f;
+        config_.density_profile->CorrectBias(center_mod, result, config_.hycal_z,
+                                             relative_energy_window,
+                                             config_.density_correction,
+                                             config_.s_shape_energy_correction);
     }
 
     return result;
