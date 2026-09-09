@@ -78,6 +78,15 @@ inline void ApplyToLocal(const DetectorTransform &xform, Hit &h)
     xform.labToLocal(h.x, h.y, h.z, dx, dy, dz);
     h.x = dx; h.y = dy; h.z = dz;
 }
+// Transform a hit position to the HyCal coordinate system (translation only).
+// need to be projected to HyCal surface before calling this.
+template <typename Hit>
+inline void ApplyToHyCal(Hit &h, const RunConfig &geo = gRunConfig)
+{
+    float dx = geo.target_x, dy = geo.target_y;
+    h.x += dx;
+    h.y += dy;
+}
 
 
 // MollerData is a translation-only calibration shift — used by det_calib to

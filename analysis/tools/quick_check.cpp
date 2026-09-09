@@ -622,15 +622,16 @@ static bool processFile(const std::string &path,
                 }
                 bool bothNoMatch = noMatch[0] && noMatch[1];
 
-                float Sigma_e = 0.035*sqrt(E_e *1000.f);
-                float Sigma[2] = {0.035*sqrt(E_g[0] *1000.f), 0.035*sqrt(E_g[1] *1000.f)};
+                float Sigma_e = 0.035f * std::sqrt(E_e * 1000.f);
+                float Sigma[2] = {0.035f * std::sqrt(E_g[0] * 1000.f),
+                                  0.035f * std::sqrt(E_g[1] * 1000.f)};
                 float totalSigma = std::sqrt(Sigma_e*Sigma_e + Sigma[0]*Sigma[0] + Sigma[1]*Sigma[1]);
                 float totalE = E_e + E_g[0] + E_g[1];
 
                 float theta_g[2], theta_e;
-                theta_e = std::atan2(std::sqrt(x_e*x_e + y_e*y_e), z_e) * 180.f / M_PI;
-                theta_g[0] = std::atan2(std::sqrt(x_g[0]*x_g[0] + y_g[0]*y_g[0]), z_g[0]) * 180.f / M_PI;
-                theta_g[1] = std::atan2(std::sqrt(x_g[1]*x_g[1] + y_g[1]*y_g[1]), z_g[1]) * 180.f / M_PI;
+                theta_e = std::atan2(std::sqrt(x_e*x_e + y_e*y_e), z_e) * 180.f / static_cast<float>(M_PI);
+                theta_g[0] = std::atan2(std::sqrt(x_g[0]*x_g[0] + y_g[0]*y_g[0]), z_g[0]) * 180.f / static_cast<float>(M_PI);
+                theta_g[1] = std::atan2(std::sqrt(x_g[1]*x_g[1] + y_g[1]*y_g[1]), z_g[1]) * 180.f / static_cast<float>(M_PI);
 
                 float tDiff = std::max({std::fabs(t_e - t_g[0]), std::fabs(t_e - t_g[1]), std::fabs(t_g[0] - t_g[1])});
                 float dt[2] = {t_g[0] - t_e, t_g[1] - t_e};
@@ -661,12 +662,12 @@ static bool processFile(const std::string &path,
                 float mass = (p_g[0] + p_g[1]).M();
 
                 // get the azimuthal angles for each single hit and the pair of gamma hits
-                float phi_e = std::atan2(p_e.Py(), p_e.Px()) * 180.f / M_PI;
+                float phi_e = std::atan2(p_e.Py(), p_e.Px()) * 180.f / static_cast<float>(M_PI);
                 float phi_g[2] = {
-                    std::atan2(p_g[0].Py(), p_g[0].Px()) * 180.f / M_PI,
-                    std::atan2(p_g[1].Py(), p_g[1].Px()) * 180.f / M_PI
+                    static_cast<float>(std::atan2(p_g[0].Py(), p_g[0].Px()) * 180.f / M_PI),
+                    static_cast<float>(std::atan2(p_g[1].Py(), p_g[1].Px()) * 180.f / M_PI)
                 };
-                float phi_pair = std::atan2(p_pair.Py(), p_pair.Px()) * 180.f / M_PI;
+                float phi_pair = std::atan2(p_pair.Py(), p_pair.Px()) * 180.f / static_cast<float>(M_PI);
 
                 // Phi difference for the pair of gamma hits and the electron hit
                 float dphi = std::fabs(phi_pair - phi_e);
@@ -867,11 +868,13 @@ static bool processFile(const std::string &path,
             if(hits.size() == 3){
                 float dt[2] = {hits[1].t - hits[0].t, hits[2].t - hits[0].t};
                 float totalE = hits[0].E + hits[1].E + hits[2].E;
-                float Sigma[3] = {0.035*sqrt(hits[0].E *1000.f), 0.035*sqrt(hits[1].E *1000.f), 0.035*sqrt(hits[2].E *1000.f)};
+                float Sigma[3] = {0.035f * std::sqrt(hits[0].E * 1000.f),
+                                  0.035f * std::sqrt(hits[1].E * 1000.f),
+                                  0.035f * std::sqrt(hits[2].E * 1000.f)};
                 float totalSigma = std::sqrt(Sigma[0]*Sigma[0] + Sigma[1]*Sigma[1] + Sigma[2]*Sigma[2]);
-                float theta[3] = {std::atan2(std::sqrt(hits[0].x * hits[0].x + hits[0].y * hits[0].y), hits[0].z) * 180.f / M_PI,
-                                  std::atan2(std::sqrt(hits[1].x * hits[1].x + hits[1].y * hits[1].y), hits[1].z) * 180.f / M_PI,
-                                  std::atan2(std::sqrt(hits[2].x * hits[2].x + hits[2].y * hits[2].y), hits[2].z) * 180.f / M_PI};
+                float theta[3] = {std::atan2(std::sqrt(hits[0].x * hits[0].x + hits[0].y * hits[0].y), hits[0].z) * 180.f / static_cast<float>(M_PI),
+                                  std::atan2(std::sqrt(hits[1].x * hits[1].x + hits[1].y * hits[1].y), hits[1].z) * 180.f / static_cast<float>(M_PI),
+                                  std::atan2(std::sqrt(hits[2].x * hits[2].x + hits[2].y * hits[2].y), hits[2].z) * 180.f / static_cast<float>(M_PI)};
 
                 // 4-momentum calculation for each single hit and each pair of hits
                 TLorentzVector p[3], p12, p02, p01;
@@ -891,14 +894,14 @@ static bool processFile(const std::string &path,
 
                 // get the azimuthal angles for each single hit and each pair of hits
                 float phi[3] = {
-                    std::atan2(hits[0].y, hits[0].x) * 180.f / M_PI,
-                    std::atan2(hits[1].y, hits[1].x) * 180.f / M_PI,
-                    std::atan2(hits[2].y, hits[2].x) * 180.f / M_PI
+                    std::atan2(hits[0].y, hits[0].x) * 180.f / static_cast<float>(M_PI),
+                    std::atan2(hits[1].y, hits[1].x) * 180.f / static_cast<float>(M_PI),
+                    std::atan2(hits[2].y, hits[2].x) * 180.f / static_cast<float>(M_PI)
                 };
                 float phi_pair[3] = {
-                    std::atan2(p12.Y(), p12.X()) * 180.f / M_PI,
-                    std::atan2(p02.Y(), p02.X()) * 180.f / M_PI,
-                    std::atan2(p01.Y(), p01.X()) * 180.f / M_PI
+                    static_cast<float>(std::atan2(p12.Y(), p12.X()) * 180.f / M_PI),
+                    static_cast<float>(std::atan2(p02.Y(), p02.X()) * 180.f / M_PI),
+                    static_cast<float>(std::atan2(p01.Y(), p01.X()) * 180.f / M_PI)
                 };
 
                 // Phi difference for each combination (the pair of hits and the remaining single hit)
