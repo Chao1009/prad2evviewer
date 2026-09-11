@@ -24,6 +24,7 @@
 #include "PipelineBuilder.h"
 
 #include <TFile.h>
+#include <TKey.h>
 #include <TH1F.h>
 #include <TH2Poly.h>
 #include <TChain.h>
@@ -41,7 +42,11 @@
 #include <vector>
 #include <memory>
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
+#include <future>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <utility>
@@ -60,6 +65,16 @@ namespace fs = std::filesystem;
 
 using EventVars = prad2::RawEventData;
 using namespace analysis;
+
+static std::string shell_quote(const std::string &value)
+{
+    std::string quoted = "'";
+    for (char ch : value) {
+        if (ch == '\'') quoted += "'\\''";
+        else quoted += ch;
+    }
+    return quoted + "'";
+}
 
 // ── File collection helper ───────────────────────────────────────────────────
 static std::vector<std::string> collectRootFiles(const std::string &path)
@@ -92,14 +107,16 @@ int main(int argc, char *argv[])
     int  max_events  = -1;
     int  num_threads = 4;
     int  num_files   = -1;
+    bool worker_mode = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "o:n:f:j:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:n:f:j:w")) != -1) {
         switch (opt) {
             case 'o': output_path_name = optarg; break;
             case 'n': max_events       = std::atoi(optarg); break;
             case 'f': num_files        = std::atoi(optarg); break;
             case 'j': num_threads     = std::atoi(optarg); break;
+            case 'w': worker_mode      = true; break;
         }
     }
 
@@ -129,6 +146,103 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // ROOT owns substantial global state, and TChain/TTree branch addresses are
+    // not safe to share between worker threads.  Run one isolated worker
+    // process per input file, then merge the worker histograms in this process.
+    // This preserves the existing event loop while making -j useful for large
+    // input sets without sharing detector or ROOT scratch state.
+    if (!worker_mode && root_files.size() > 1) {
+        num_threads = std::max(1, std::min(num_threads,
+                                           static_cast<int>(root_files.size())));
+        const std::string executable = shell_quote(argv[0]);
+        std::vector<std::string> worker_outputs(root_files.size());
+        std::atomic<size_t> next_file{0};
+        std::mutex worker_mutex;
+        std::vector<std::future<void>> workers;
+
+        auto run_worker = [&]() {
+            while (true) {
+                const size_t file_index = next_file.fetch_add(1);
+                if (file_index >= root_files.size()) return;
+
+                const std::string worker_prefix =
+                    output_path_name + ".worker_" + std::to_string(file_index);
+                worker_outputs[file_index] = worker_prefix + ".root";
+                std::string command = executable + " -w -o "
+                    + shell_quote(worker_prefix);
+                if (max_events > 0)
+                    command += " -n " + std::to_string(max_events);
+                command += " -j 1 " + shell_quote(root_files[file_index]);
+
+                const int status = std::system(command.c_str());
+                std::lock_guard<std::mutex> lock(worker_mutex);
+                if (status != 0)
+                    std::cerr << "Worker failed for " << root_files[file_index]
+                              << " (status " << status << ")\n";
+            }
+        };
+        for (int i = 0; i < num_threads; ++i)
+            workers.push_back(std::async(std::launch::async, run_worker));
+        for (auto &worker : workers) worker.get();
+
+        TFile *merged = TFile::Open((output_path_name + ".root").c_str(), "RECREATE");
+        if (!merged || merged->IsZombie()) {
+            std::cerr << "Cannot create merged output " << output_path_name << ".root\n";
+            return 1;
+        }
+        // Discover top-level histograms from the worker files instead of
+        // maintaining a second hard-coded list whenever a new histogram is
+        // added to the event loop.
+        std::map<std::string, std::unique_ptr<TH1>> merged_histograms;
+        for (const auto &worker_output : worker_outputs) {
+            TFile *input = TFile::Open(worker_output.c_str(), "READ");
+            if (!input || input->IsZombie()) {
+                if (input) delete input;
+                continue;
+            }
+            TIter keys(input->GetListOfKeys());
+            while (auto *key = dynamic_cast<TKey *>(keys())) {
+                TObject *object = key->ReadObj();
+                auto *hist = dynamic_cast<TH1 *>(object);
+                if (!hist) {
+                    delete object;
+                    continue;
+                }
+
+                const std::string name = hist->GetName();
+                auto it = merged_histograms.find(name);
+                if (it == merged_histograms.end()) {
+                    std::unique_ptr<TH1> copy(
+                        dynamic_cast<TH1 *>(hist->Clone(name.c_str())));
+                    if (copy) {
+                        copy->SetDirectory(nullptr);
+                        merged_histograms.emplace(name, std::move(copy));
+                    }
+                } else {
+                    it->second->Add(hist);
+                }
+                delete object;
+            }
+            input->Close();
+            delete input;
+        }
+
+        merged->cd();
+        for (auto &[name, hist] : merged_histograms) {
+            hist->SetDirectory(merged);
+            hist->Write(name.c_str(), TObject::kOverwrite);
+            // Detach before closing/destroying the file.  Otherwise the
+            // histogram destructor later tries to remove itself from a dead
+            // TDirectory during merged_histograms destruction.
+            hist->SetDirectory(nullptr);
+        }
+        merged->Close();
+        delete merged;
+        for (const auto &worker_output : worker_outputs)
+            std::remove(worker_output.c_str());
+        return 0;
+    }
+
     TChain tree("events");
     for (const auto &file : root_files) {
         tree.Add(file.c_str());
@@ -136,6 +250,8 @@ int main(int argc, char *argv[])
 
     auto ev = std::make_unique<EventVars>();
     prad2::SetRawReadBranches(&tree, *ev);
+    const bool has_waveform = tree.GetBranch("hycal.samples") != nullptr;
+    const bool has_peaks    = tree.GetBranch("hycal.npeaks") != nullptr;
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
@@ -177,6 +293,7 @@ int main(int argc, char *argv[])
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);
 
@@ -194,16 +311,28 @@ int main(int argc, char *argv[])
 
     auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
         gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto shower_profile = pipeline.hycal_profile;
+
+    // Per-detector lab transforms — set up by either branch of the detector
+    // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).
+    const auto &hc_xform = hycal_transform;
+    const auto &g_xform  = gem_transforms;
 
     // create histograms you want to fill for shower profile analysis
     TH1F *h1_cluster_energy = new TH1F("h1_cluster_energy", "Cluster Energy;Energy [MeV];Counts", 4000, 0, 4000);
     TH1F *h1_seed_energy = new TH1F("h1_seed_energy", "Seed Module Energy;Energy [MeV];Counts", 4000, 0, 4000);
-    TH2F *h2_cluster_vs_seed_energy = new TH2F("h2_cluster_vs_seed_energy", 
-        "Cluster Energy vs Seed Module Energy;Seed Energy [MeV];Cluster Energy [MeV]", 
-        4000, 0, 4000, 4000, 0, 4000);
-    TH1F *h1_blocks_1st_layer = new TH1F("h1_blocks_1st_layer", "Number of Fired Modules in 1st Layer;Count;Events", 20, 0, 20);
-    TH1F *h1_blocks_2nd_layer = new TH1F("h1_blocks_2nd_layer", "Number of Fired Modules in 2nd Layer;Count;Events", 20, 0, 20);
-    TH1F *h1_time_diff_seed = new TH1F("h1_time_diff_seed", "Time Difference with Seed Module;#Delta t [ns];Events", 200, -10, 10);
+    TH1F *h1_neighbor_energy = new TH1F("h1_neighbor_energy", "Neighbor Module Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_seed_project = new TH1F("h1_seed_project", "Seed Module Projected Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_neighbor_project = new TH1F("h1_neighbor_project", "Neighbor Module Projected Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH2F *h2_pos = new TH2F("h2_pos_live", "Hit Position;X_d[20.75mm];Y_d[20.77mm]", 40, -1, 1, 40, -1, 1);
+    TH1F *h1_seed_fraction = new TH1F("h1_seed_fraction", "Seed Module Energy Fraction;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_seed_fraction_proj = new TH1F("h1_seed_fraction_proj", "Seed Module Energy Fraction Projected;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_neighbor_fraction = new TH1F("h1_neighbor_fraction", "Neighbor Module Energy Fraction;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_neighbor_fraction_proj = new TH1F("h1_neighbor_fraction_proj", "Neighbor Module Energy Fraction Projected;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_neighbor_energy2 = new TH1F("h1_neighbor_energy2", "Neighbor Module 2 Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_neighbor_project2 = new TH1F("h1_neighbor_project2", "Neighbor Module 2 Projected Energy;Energy [MeV];Counts", 4000, 0, 4000);
+    TH1F *h1_neighbor_fraction2 = new TH1F("h1_neighbor_fraction2", "Neighbor Module 2 Energy Fraction;Fraction;Counts", 100, 0, 1);
+    TH1F *h1_neighbor_fraction_proj2 = new TH1F("h1_neighbor_fraction_proj2", "Neighbor Module 2 Energy Fraction Projected;Fraction;Counts", 100, 0, 1);
 
     // Here loop over the events in the TChain, read channels data, reconstruct clusters, and fill the histograms
     long long nentries = tree.GetEntries();
@@ -221,6 +350,24 @@ int main(int argc, char *argv[])
 
         // Per-event gain correction (time-series lookup by event number).
         const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
+
+        // in case the peaks branches are missing
+        // waveform analyzer to fill the peak branches
+        if (has_waveform && !has_peaks) {
+            for (int j = 0; j < ev->nch; ++j) {
+                const auto *mod = hycal.module_by_id(ev->module_id[j]);
+                if (!mod || !mod->is_pwo4()) continue;
+
+                ana.Analyze(ev->samples[j], ev->nsamples[j], wres);
+                ev->npeaks[j] = std::min(wres.npeaks, fdec::MAX_PEAKS);
+                for (int p = 0; p < ev->npeaks[j]; ++p) {
+                    const auto &pk = wres.peaks[p];
+                    ev->peak_height[j][p]   = pk.height;
+                    ev->peak_time[j][p]     = pk.time;
+                    ev->peak_integral[j][p] = pk.integral;
+                }
+            }
+        }
 
         for (int j = 0; j < ev->nch; ++j) {
             const auto *mod = hycal.module_by_id(ev->module_id[j]);
@@ -251,107 +398,185 @@ int main(int argc, char *argv[])
         std::vector<fdec::ClusterHit> hits;
         clusterer.ReconstructHits(hits);
 
-        // Here could also reconstruct the GEM parts do matching with HyCal clusters if needed
-        // TODO: Add GEM cluster reconstruction and matching if needed
+        // No reconstructed cluster means there is no HyCal position to use
+        // for the event selection below.
+        if (hits.empty()) continue;
 
+        HCHit hc_hit;
+        GEMHit g_hit;
+        hc_hit.x = hits[0].x;
+        hc_hit.y = hits[0].y;
+        hc_hit.z = gRunConfig.hycal_z;
+
+        // Event Selection only use HyCal
         // select single cluster Mott events
         if (hits.size() != 1 || hits[0].nblocks < 3) continue;
-        float hc_x = hits[0].x, hc_y = hits[0].y, hc_z = gRunConfig.hycal_z;
-        float theta = std::atan2(std::sqrt(hc_x * hc_x + hc_y * hc_y), hc_z) * 180.0 / M_PI;
+        float theta = std::atan2(std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z) * 180.0 / M_PI;
         if (std::abs(hits[0].energy - gRunConfig.Ebeam) > 3. * 0.033 * std::sqrt(gRunConfig.Ebeam * 1000.)) continue;
-        if (theta < 0.7 ) continue; 
+        if (theta < 0.7 ) continue;
+        if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue; // skip clusters with split hits
 
         int seed_id = hits[0].center_id;
         const auto *seed_mod = hycal.module_by_id(seed_id);
         if (!seed_mod || !seed_mod->is_pwo4()) continue;
+        const auto *neighbor_mod = hycal.module_by_id(seed_mod->id + 1);
+        if (!neighbor_mod) continue;
+        const auto *neighbor_mod2 = hycal.module_by_id(seed_mod->id + 2);
+        if (!neighbor_mod2) continue;
 
-        //the time window cut is already applied in the clusterer
-        float dt_max = cluster_cfg.seed_time_window;
+        if ( !( (fabs(seed_mod->x) > 20.75 * 4.0 || fabs(seed_mod->y) > 20.75 * 4.0) &&
+             (fabs(seed_mod->x) < 20.75 * 14.0 && fabs(seed_mod->y) < 20.75 * 14.0) ) ) continue;
 
-        // counts for fired modules in the 1st and 2nd layer of neighbors
-        int n1st_layer = 0;
-        int n2nd_layer = 0;
+        // Here reconstruct the GEM parts do matching with HyCal clusters
+        if (gem_sys.GetNDetectors() > 0) {
+            std::vector<std::array<std::vector<gem::StripHit>, 2>> plane_hits(
+                gem_sys.GetNDetectors());
+            const int n_strips = std::min(ev->gem_nch, prad2::kMaxGemStrips);
+            for (int strip_idx = 0; strip_idx < n_strips; ++strip_idx) {
+                const int det_id = ev->gem_det[strip_idx];
+                const int plane = ev->gem_plane[strip_idx];
+                if (det_id < 0 || det_id >= gem_sys.GetNDetectors()
+                    || plane < 0 || plane > 1)
+                    continue;
 
-        bool seed_not_clean = false;
-
-        // loop over the hits in the cluster
-        // Here go to the event by event analysis, add more analysis code or selection .etc here
-        for (int j = 0; j < ev->nch; ++j) {
-            const auto *mod = hycal.module_by_id(ev->module_id[j]);
-            if (!mod || !mod->is_pwo4()) continue;
-
-            // Per-ID gain correction: average of three LMS channels.
-            const float gain = (mod->id > 1000)
-                ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
-                : 1.0f; // default gain factor
-            // timing offset for this module
-            float time_offset = mod->time_offset;
-
-            // select the seed module and its energy (require only one peak in seed module)
-            if (mod->id == seed_id) {
-                if (ev->npeaks[j] != 1) {
-                    seed_not_clean = true;
-                    break;
-                }
-                float seed_energy = static_cast<float>(mod->energize(ev->peak_integral[j][0] * gain));
-                h1_seed_energy->Fill(seed_energy);
-                h2_cluster_vs_seed_energy->Fill(seed_energy, hits[0].energy);
+                gem::StripHit hit;
+                hit.strip = ev->gem_strip[strip_idx];
+                hit.charge = ev->gem_charge[strip_idx];
+                hit.max_timebin = ev->gem_max_tb[strip_idx];
+                hit.position = ev->gem_pos[strip_idx];
+                hit.cross_talk = ev->gem_xtalk[strip_idx] != 0;
+                hit.ts_adc.assign(ev->gem_ts_adc[strip_idx],
+                                  ev->gem_ts_adc[strip_idx] + ssp::SSP_TIME_SAMPLES);
+                plane_hits[det_id][plane].push_back(std::move(hit));
             }
-            // select the 1st layer of neighboring modules
-            if (std::abs(mod->x - seed_mod->x) < mod->size_x * 1.5f &&
-                std::abs(mod->y - seed_mod->y) < mod->size_y * 1.5f && mod->id != seed_mod->id) 
-            {
-                // check if this module has a peak in seed time window
-                for (int p = 0; p < ev->npeaks[j]; ++p) {
-                    float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
-                    float dt = peak_time - hits[0].time;
-                    h1_time_diff_seed->Fill(dt);
-                    if (std::abs(dt) < dt_max) {
-                        n1st_layer++;
-                        float energy = static_cast<float>(mod->energize(ev->peak_integral[j][p] * gain));
-                        // fill the histogram for shower profile analysis
 
-                        break; // only count one peak per module
-                    }
+            std::vector<gem::GEMHit> all_gem_hits;
+            const auto &gem_cfgs = gem_sys.GetReconConfigs();
+            for (int det_id = 0; det_id < gem_sys.GetNDetectors(); ++det_id) {
+                gem_clusterer.SetConfig(gem_cfgs[det_id]);
+                std::vector<gem::StripCluster> x_clusters;
+                std::vector<gem::StripCluster> y_clusters;
+                gem_clusterer.FormClusters(plane_hits[det_id][0], x_clusters);
+                gem_clusterer.FormClusters(plane_hits[det_id][1], y_clusters);
+
+                std::vector<gem::GEMHit> det_hits;
+                gem_clusterer.CartesianReconstruct(
+                    x_clusters, y_clusters, det_hits, det_id);
+                all_gem_hits.insert(all_gem_hits.end(), det_hits.begin(), det_hits.end());
+            }
+
+            std::vector<HCHit> hc_hits;
+            std::vector<GEMHit> gem_hits[4];
+            for (const auto &hit : hits) {
+                HCHit local_hit = {hit.x, hit.y, fdec::shower_depth(hit.center_id, hit.energy),
+                    hit.energy, static_cast<uint16_t>(hit.center_id), hit.flag};
+                analysis::ApplyToLab(hc_xform, local_hit);
+                GetProjection(local_hit, gRunConfig.hycal_z);
+                hc_hits.push_back(local_hit);
+            }
+            for (const auto &hit : all_gem_hits) {
+                if (hit.det_id >= 0 && hit.det_id < 4) {
+                    GEMHit local_hit = {
+                        hit.x, hit.y, 0.f, static_cast<uint8_t>(hit.det_id)};
+                    if (local_hit.det_id >= 0 && local_hit.det_id < 4)
+                        analysis::ApplyToLab(g_xform[local_hit.det_id], local_hit);
+                    gem_hits[hit.det_id].push_back(local_hit);
                 }
             }
-            // select the 2nd layer of neighboring modules
-            if (std::abs(mod->x - seed_mod->x) < mod->size_x * 2.5f &&
-                std::abs(mod->y - seed_mod->y) < mod->size_y * 2.5f && 
-                (std::abs(mod->x - seed_mod->x) > mod->size_x * 1.5f ||
-                std::abs(mod->y - seed_mod->y) > mod->size_y * 1.5f) && mod->id != seed_mod->id) 
-            {
-                // check if this module has a peak in seed time window
-                for (int p = 0; p < ev->npeaks[j]; ++p) {
-                    float peak_time = ev->peak_time[j][p] - time_offset; // apply module time offset
-                    float dt = peak_time - hits[0].time;
-                    h1_time_diff_seed->Fill(dt);
-                    if (std::abs(dt) < dt_max) {
-                        n2nd_layer++;
-                        float energy = static_cast<float>(mod->energize(ev->peak_integral[j][p] * gain));
-                        // fill the histogram for shower profile analysis
+            matching.SetMatchRange(gRunConfig.matching_radius);
+            matching.SetSquareSelection(gRunConfig.matching_use_square);
+            matching.SetEnergyDependent(gRunConfig.matching_energy_dependent);
+            matching.SetMatchSigma(gRunConfig.matching_sigma);
+            const auto matched_hits = matching.Match(
+                hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
+            if (matched_hits.empty()) continue;
+            // MatchHit::gem ordering: 
+            // (GEM1/GEM2, det_id 0/1) index 0 is the downstream GEM pair
+            // (GEM3/GEM4, det_id 2/3) index 1 is the upstream GEM pair
+            if (matched_hits[0].gem[1].det_id < 2
+                || matched_hits[0].gem[1].det_id > 3)
+                continue;
+            g_hit.x = matched_hits[0].gem[1].x;
+            g_hit.y = matched_hits[0].gem[1].y;
+            g_hit.z = matched_hits[0].gem[1].z;
+        }
 
-                        break; // only count one peak per module
-                    }
+        // projection of the GEM hit onto the HyCal plane
+        if (g_hit.z == 0.f) continue;
+        float scale = gRunConfig.hycal_z / g_hit.z;
+        g_hit.x *= scale;
+        g_hit.y *= scale;
+        g_hit.z *= scale;
+
+        //move back to HyCal coordinate system
+        ApplyToHyCal(hc_hit, gRunConfig);
+        ApplyToHyCal(g_hit, gRunConfig);
+
+        // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
+        float xd = (g_hit.x - (float)seed_mod->x) / (float)seed_mod->size_x;
+        float yd = (g_hit.y - (float)seed_mod->y) / (float)seed_mod->size_y;
+        h2_pos->Fill(xd, yd);
+        if (std::abs(xd) >= 0.2f || std::abs(yd) >= 0.2f) continue;
+
+        float seed_energy = 0.f;
+        float neighbor_energy = 0.f;
+        float neighbor_energy2 = 0.f;
+
+        for (const auto &cluster : clusterer.GetClusters()) {
+            if (cluster.center.index == seed_mod->index) {
+                seed_energy = cluster.center.energy;
+                for (const auto &hit : cluster.hits){
+                    if (hit.index == neighbor_mod->index)
+                        neighbor_energy = hit.energy;
+                    if (hit.index == neighbor_mod2->index)
+                        neighbor_energy2 = hit.energy;
                 }
             }
         }
-        // fill the histograms for the number of fired modules in the 1st and 2nd layers
-        if (!seed_not_clean) {
-            h1_blocks_1st_layer->Fill(n1st_layer);
-            h1_blocks_2nd_layer->Fill(n2nd_layer);
-            h1_cluster_energy->Fill(hits[0].energy);
-        }
+
+        // projected energy for seed and neighbor modules using PRad1 shower profile
+        const int shower_sector = hycal.get_sector_id(g_hit.x, g_hit.y);
+        const int profile_sector = (shower_sector >= 0) ? shower_sector : seed_mod->sector;
+        const auto projected_energy = [&](const fdec::Module *mod) {
+            double dx = 0.;
+            double dy = 0.;
+            hycal.qdist(g_hit.x, g_hit.y, profile_sector,
+                        mod->x, mod->y, mod->sector, dx, dy);
+            const float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
+            return hits[0].energy * shower_profile->GetFraction(mod->type, dist, hits[0].energy);
+        };
+        h1_seed_project->Fill(projected_energy(seed_mod));
+        h1_neighbor_project->Fill(projected_energy(neighbor_mod));
+        h1_neighbor_project2->Fill(projected_energy(neighbor_mod2));
+
+        h1_cluster_energy->Fill(hits[0].energy);
+        h1_seed_energy->Fill(seed_energy);
+        h1_neighbor_energy->Fill(neighbor_energy);
+        h1_neighbor_energy2->Fill(neighbor_energy2);
+        h1_seed_fraction->Fill(seed_energy / hits[0].energy);
+        h1_seed_fraction_proj->Fill(projected_energy(seed_mod) / hits[0].energy);
+        h1_neighbor_fraction->Fill(neighbor_energy / hits[0].energy);
+        h1_neighbor_fraction_proj->Fill(projected_energy(neighbor_mod) / hits[0].energy);
+        h1_neighbor_fraction2->Fill(neighbor_energy2 / hits[0].energy);
+        h1_neighbor_fraction_proj2->Fill(projected_energy(neighbor_mod2) / hits[0].energy);
     }
 
     // Save the histograms to a root file
     TFile *output_file = new TFile((output_path_name + ".root").c_str(), "RECREATE");
     h1_cluster_energy->Write();
     h1_seed_energy->Write();
-    h2_cluster_vs_seed_energy->Write();
-    h1_blocks_1st_layer->Write();
-    h1_blocks_2nd_layer->Write();
-    h1_time_diff_seed->Write();
+    h1_neighbor_energy->Write();
+    h1_seed_project->Write();
+    h1_neighbor_project->Write();
+    h1_seed_fraction->Write();
+    h1_seed_fraction_proj->Write();
+    h1_neighbor_fraction->Write();
+    h1_neighbor_fraction_proj->Write();
+    h1_neighbor_energy2->Write();
+    h1_neighbor_project2->Write();
+    h1_neighbor_fraction2->Write();
+    h1_neighbor_fraction_proj2->Write();
+    h2_pos->Write();
     output_file->Close();
 
 }

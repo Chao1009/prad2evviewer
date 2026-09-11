@@ -200,6 +200,7 @@ int main(int argc, char *argv[])
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
     cluster_cfg.seed_time_window = 0;
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);

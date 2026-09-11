@@ -615,6 +615,7 @@ int main(int argc, char *argv[])
 
     fdec::HyCalCluster clusterer(pipeline.hycal);
     clusterer.SetConfig(pipeline.hycal_cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
     analysis::MatchingTools matching(pipeline.match_method);
     matching.SetMatchRange(pipeline.run_cfg.matching_radius);
     matching.SetSquareSelection(pipeline.run_cfg.matching_use_square);

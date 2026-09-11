@@ -708,6 +708,7 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
 
     //initialize tools for cluster reconstruction
     fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
