@@ -1070,6 +1070,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
             for (int i = 0; i < ev->n_clusters; ++i) {
                 ev->cl_nblocks[i] = hits[i].nblocks;
+                ev->cl_npos[i]    = hits[i].npos;
                 ev->cl_time[i]    = hits[i].time;
                 //transform the cluster positions to the lab coordinate
                 HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
@@ -1658,6 +1659,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
         for (int i = 0; i < ev->n_clusters; ++i) {
             ev->cl_nblocks[i] = hits[i].nblocks;
+            ev->cl_npos[i]    = hits[i].npos;
             ev->cl_time[i]    = hits[i].time;
             //transform the cluster positions to the lab coordinate
             HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),

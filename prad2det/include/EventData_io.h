@@ -294,6 +294,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("cl_energy",  ev.cl_energy,   "cl_energy[n_clusters]/F");
     tree->Branch("cl_linear_corr", ev.cl_linear_corr, "cl_linear_corr[n_clusters]/F");
     tree->Branch("cl_nblocks", ev.cl_nblocks,  "cl_nblocks[n_clusters]/b");
+    tree->Branch("cl_npos",    ev.cl_npos,     "cl_npos[n_clusters]/b");
     tree->Branch("cl_center",  ev.cl_center,   "cl_center[n_clusters]/s");
     tree->Branch("cl_time",    ev.cl_time,     "cl_time[n_clusters]/F");
     tree->Branch("cl_flag",    ev.cl_flag,     "cl_flag[n_clusters]/i");
@@ -409,6 +410,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
     bind("cl_linear_corr", ev.cl_linear_corr);
     bind("cl_nblocks", ev.cl_nblocks);
+    bind("cl_npos",    ev.cl_npos);
     bind("cl_center",  ev.cl_center);
     bind("cl_time",    ev.cl_time);
     bind("cl_flag",    ev.cl_flag);

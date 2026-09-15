@@ -535,12 +535,12 @@ int main(int argc, char *argv[])
         }
 
         // projected energy for seed and neighbor modules using PRad1 shower profile
-        const int shower_sector = hycal.get_sector_id(g_hit.x, g_hit.y);
+        const int shower_sector = hycal.get_sector_id(hc_hit.x, hc_hit.y);
         const int profile_sector = (shower_sector >= 0) ? shower_sector : seed_mod->sector;
         const auto projected_energy = [&](const fdec::Module *mod) {
             double dx = 0.;
             double dy = 0.;
-            hycal.qdist(g_hit.x, g_hit.y, profile_sector,
+            hycal.qdist(hc_hit.x, hc_hit.y, profile_sector,
                         mod->x, mod->y, mod->sector, dx, dy);
             const float dist = std::sqrt(static_cast<float>(dx * dx + dy * dy));
             return hits[0].energy * shower_profile->GetFraction(mod->type, dist, hits[0].energy);
