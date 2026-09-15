@@ -351,8 +351,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     int total = 0;
 
     int run_num = get_run_int(input_evio);
-    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
-        gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
@@ -774,8 +773,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     fdec::WaveResult wres;
 
     int run_num = get_run_int(input_evio);
-    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
-        gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 
     // Per-detector lab transforms — set up by either branch of the detector
     // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).
@@ -1383,8 +1381,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
-    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
-        gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 
     // Per-detector lab transforms — set up by either branch of the detector
     // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).

@@ -217,8 +217,7 @@ int main(int argc, char *argv[])
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
-    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
-        gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 
     // create histograms you want to fill for shower profile analysis
     TH1F *h1_cluster_energy = new TH1F("h1_cluster_energy", "Cluster Energy;Energy [MeV];Counts", 4000, 0, 4000);

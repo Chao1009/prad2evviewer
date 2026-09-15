@@ -72,9 +72,14 @@
                 "ref_run":  24827
             }
         },
-		{
+		{   
+            "// a calibration test with run 25319-25326, LMS reference run is 25320": "",
 			"from_run":    25200,
-			"beam_energy": 2239.51
+			"beam_energy": 2239.51,
+            "gain_factor": {
+                "data_dir": "",
+                "ref_run":  25320
+            }
 		},
         {
             "// from here, start the X17 experimental runs": "",

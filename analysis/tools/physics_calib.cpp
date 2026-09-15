@@ -722,6 +722,8 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
+
     // set up raw read branches for the input tree
     TFile *infile = TFile::Open(input_raw.c_str(), "READ");
     if (!infile || !infile->IsOpen()) {
@@ -786,12 +788,18 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
             }
         }
 
+        // Per-event gain correction (time-series lookup by event number).
+        const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(in->event_num));
+
         for (int j = 0; j < in->nch; ++j) {
             const auto *mod = hycal.module_by_id(in->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
             // Per-ID gain correction: average of 2 LMS channels(LMS 2 and 3, 1 is not used).
-            float gain = in->gain_factor[j];
+            float gain = (mod->id > 1000)
+                    ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
+                    : gain_corr.g[mod->id].avg;
+            if (gain <= 0.f || gain == 1.f) gain = in->gain_factor[j];
 
             // timing offset for this module
             float time_offset = mod->time_offset;

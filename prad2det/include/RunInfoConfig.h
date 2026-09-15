@@ -335,7 +335,7 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
     if (result.gain_data_dir.empty()) {
         result.gain_data_dir =
             std::filesystem::path(path).parent_path().parent_path().string()
-            + "/gain_factor";
+            + "/gain_factor/gain_correction";
     }
 
     // Apply the beam and target offset to the detector positions so that the caller gets

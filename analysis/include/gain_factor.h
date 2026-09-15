@@ -16,9 +16,19 @@
 //   File:      prad_XXXXXX_gain_corr.root  (TTree "gain_corr", one entry/batch)
 //   Only W (PbWO4) modules; G (PbGlass) corrections not stored in these files.
 //
+//   Default method (use_precomputed = false): the correction is computed at
+//   load time as ref_run.gain_W / cur_run.gain_W, where ref_run comes from
+//   RunConfig::gain_ref_run (not read from the current run's file — that
+//   field is unreliable) and ref_run.gain_W is the average of that value
+//   over *all* batches in the reference run's own gain_corr.root (one
+//   average per module/LMS channel).  This ignores the gain_corr_W branch.
+//
+//   Legacy method (use_precomputed = true): read the pre-computed
+//   gain_corr_W branch directly (ref_tbl.g from the .dat file / cur_run's
+//   gain_W, computed once by replay_gainCorr).
+//
 //   // One-time setup (single-threaded):
-//   auto ts = prad2::LoadGainCorrTimeSeries(
-//                 db + "/gain_factor/gain_correction", run_num);
+//   auto ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 //   // Per-event lookup (read-only → safe from multiple threads after init):
 //   const auto& corr = ts.GetCorr(event_num);
 //   new_adc2mev = old_adc2mev * corr.w[module_id].avg;
@@ -40,6 +50,8 @@
 #include <TROOT.h>
 #include <TFile.h>
 #include <TTree.h>
+
+#include "RunInfoConfig.h"
 
 namespace prad2 {
 
@@ -230,18 +242,28 @@ struct GainCorrTimeSeries {
 
 // Load the gain correction time series from the replay_gainCorr ROOT output.
 //
-// corr_dir : directory containing prad_XXXXXX_gain_corr.root files
-//            (typically <db>/gain_factor/gain_correction)
-// run_num  : select file by run number (see selection rule in header)
+// run_cfg         : RunConfig for this run — supplies gain_data_dir (base
+//                    directory; "/gain_correction" is appended) and
+//                    gain_ref_run (the reference run number to divide into).
+// run_num         : select file by run number (see selection rule in header)
+// use_precomputed : false (default) — compute the correction at load time as
+//                    ref_run.gain_W / cur_run.gain_W, where ref_run.gain_W is
+//                    averaged over every batch in the reference run's own
+//                    gain_corr.root.  true — use the pre-computed
+//                    gain_corr_W branch instead (legacy behaviour).
 //
 // Thread safety
 //   Call once from a single thread during setup.
 //   The returned GainCorrTimeSeries may then be shared across threads for
 //   read-only access via GetCorr().  Requires ROOT::EnableThreadSafety() to
 //   have been called before spawning worker threads.
-inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
-                                                  int               run_num)
+inline GainCorrTimeSeries LoadGainCorrTimeSeries(const RunConfig &run_cfg,
+                                                  int              run_num,
+                                                  bool             use_precomputed = false)
 {
+    const std::string corr_dir = run_cfg.gain_data_dir;
+    const int         ref_run  = run_cfg.gain_ref_run;
+
     GainCorrTimeSeries ts;
     ts.run_num = run_num;
 
@@ -268,20 +290,75 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
         return ts;
     }
 
-    // Written with gain_corr_W[N_W][N_LMS], N_W = 1156, N_LMS = 3.
+    // Written with gain_corr_W[N_W][N_LMS] or gain_W[N_W][N_LMS], N_W = 1156, N_LMS = 3.
     static constexpr int kNW   = GainCorrTable::MAX_W - 1;  // 1156
     static constexpr int kNLMS = 3;
 
-    int   ev_start = 0, ev_end = 0;
+    int      ev_start = 0, ev_end = 0;
     uint32_t unix_time = 0;
     float corr_W[kNW][kNLMS];
+    float gain_W[kNW][kNLMS];
 
     tree->SetBranchAddress("event_num_start", &ev_start);
     tree->SetBranchAddress("event_num_end",   &ev_end);
-    tree->SetBranchAddress("gain_corr_W",      corr_W);
+    if (use_precomputed)
+        tree->SetBranchAddress("gain_corr_W", corr_W);
+    else
+        tree->SetBranchAddress("gain_W",      gain_W);
     const bool has_unix_time = tree->GetBranch("unix_time") != nullptr;
     if (has_unix_time)
         tree->SetBranchAddress("unix_time", &unix_time);
+
+    // New (default) method: average the reference run's own gain_W over all
+    // of its batches, then divide it into every current-run batch below.
+    float ref_gain_W[kNW][kNLMS];
+    bool  have_ref_gain = false;
+    if (!use_precomputed) {
+        if (ref_run < 0) {
+            std::cerr << "Warning: RunConfig has no valid gain_ref_run\n";
+        } else {
+            std::string ref_path = FindGainCorrRootFile(corr_dir, ref_run);
+            if (ref_path.empty()) {
+                std::cerr << "Warning: no gain_corr root file in " << corr_dir
+                          << " for ref run " << ref_run << "\n";
+            } else {
+                TFile *ref_f = TFile::Open(ref_path.c_str(), "READ");
+                if (!ref_f || ref_f->IsZombie()) {
+                    std::cerr << "Warning: cannot open ref-run gain_corr file "
+                              << ref_path << "\n";
+                } else {
+                    TTree *ref_tree = nullptr;
+                    ref_f->GetObject("gain_corr", ref_tree);
+                    const Long64_t n_ref_entries = ref_tree ? ref_tree->GetEntries() : 0;
+                    if (n_ref_entries == 0) {
+                        std::cerr << "Warning: no 'gain_corr' entries in "
+                                  << ref_path << "\n";
+                    } else {
+                        float ref_batch_W[kNW][kNLMS];
+                        float ref_sum[kNW][kNLMS] = {};
+                        int   ref_cnt[kNW][kNLMS] = {};
+                        ref_tree->SetBranchAddress("gain_W", ref_batch_W);
+                        for (Long64_t rk = 0; rk < n_ref_entries; ++rk) {
+                            ref_tree->GetEntry(rk);
+                            for (int wi = 0; wi < kNW; ++wi) {
+                                for (int j = 0; j < kNLMS; ++j) {
+                                    if (ref_batch_W[wi][j] <= 0.f) continue;
+                                    ref_sum[wi][j] += ref_batch_W[wi][j];
+                                    ++ref_cnt[wi][j];
+                                }
+                            }
+                        }
+                        for (int wi = 0; wi < kNW; ++wi)
+                            for (int j = 0; j < kNLMS; ++j)
+                                ref_gain_W[wi][j] = (ref_cnt[wi][j] > 0)
+                                    ? ref_sum[wi][j] / ref_cnt[wi][j] : 0.f;
+                        have_ref_gain = true;
+                    }
+                }
+                delete ref_f;
+            }
+        }
+    }
 
     const Long64_t nentries = tree->GetEntries();
     ts.batches.reserve(static_cast<size_t>(nentries));
@@ -294,12 +371,19 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
         b.event_num_end   = ev_end;
         b.unix_time       = has_unix_time ? unix_time : 0;
         b.corr.cur_run    = run_num;
+        b.corr.ref_run    = ref_run;
 
         for (int wi = 0; wi < kNW; ++wi) {
             float sum = 0.f;
             for (int j = 0; j < kNLMS; ++j) {
-                // 0 in the ROOT file signals a failed fit — treat as identity.
-                float v = (corr_W[wi][j] > 0.f) ? corr_W[wi][j] : 1.f;
+                float v;
+                if (use_precomputed) {
+                    // 0 in the ROOT file signals a failed fit — treat as identity.
+                    v = (corr_W[wi][j] > 0.f) ? corr_W[wi][j] : 1.f;
+                } else {
+                    v = (have_ref_gain && ref_gain_W[wi][j] > 0.f && gain_W[wi][j] > 0.f)
+                        ? ref_gain_W[wi][j] / gain_W[wi][j] : 1.f;
+                }
                 b.corr.w[wi + 1].corr[j] = v;
                 sum += v;
             }
@@ -319,7 +403,9 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
 
     ts.loaded = true;
     std::cerr << "GainCorrTS: run " << run_num << ": "
-              << ts.batches.size() << " batches from " << path << "\n";
+              << ts.batches.size() << " batches from " << path
+              << (use_precomputed ? " (precomputed gain_corr_W)"
+                                  : " (ref-run gain_W ratio)") << "\n";
     return ts;
 }
 

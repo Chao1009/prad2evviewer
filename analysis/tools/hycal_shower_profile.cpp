@@ -309,8 +309,7 @@ int main(int argc, char *argv[])
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
-    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(
-        gRunConfig.gain_data_dir + "/gain_correction", run_num);
+    auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
     auto shower_profile = pipeline.hycal_profile;
 
     // Per-detector lab transforms — set up by either branch of the detector
