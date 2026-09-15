@@ -466,6 +466,7 @@ int gem_hycal_matching(const char *evio_path,
     // run).  HyCalCluster needs the wired-up HyCalSystem reference.
     fdec::HyCalCluster hc_clusterer(hycal);
     hc_clusterer.SetConfig(pipeline.hycal_cluster_cfg);
+    hc_clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster gem_clusterer;
 
     //---- EVIO discovery -----------------------------------------------------

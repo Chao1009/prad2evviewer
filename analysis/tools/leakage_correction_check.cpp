@@ -137,6 +137,7 @@ int main(int argc, char *argv[])
     auto ev = std::make_unique<EventVars>();
     prad2::SetRawReadBranches(&tree, *ev);
     const bool has_waveform = tree.GetBranch("hycal.samples") != nullptr;
+    const bool has_peaks    = tree.GetBranch("hycal.npeaks") != nullptr;
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
@@ -225,6 +226,24 @@ int main(int argc, char *argv[])
 
         // Per-event gain correction (time-series lookup by event number).
         const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
+
+        // in case the peaks branches are missing
+        // waveform analyzer to fill the peak branches
+        if (has_waveform && !has_peaks) {
+            for (int j = 0; j < ev->nch; ++j) {
+                const auto *mod = hycal.module_by_id(ev->module_id[j]);
+                if (!mod || !mod->is_pwo4()) continue;
+
+                ana.Analyze(ev->samples[j], ev->nsamples[j], wres);
+                ev->npeaks[j] = std::min(wres.npeaks, fdec::MAX_PEAKS);
+                for (int p = 0; p < ev->npeaks[j]; ++p) {
+                    const auto &pk = wres.peaks[p];
+                    ev->peak_height[j][p]   = pk.height;
+                    ev->peak_time[j][p]     = pk.time;
+                    ev->peak_integral[j][p] = pk.integral;
+                }
+            }
+        }
 
         for (int j = 0; j < ev->nch; ++j) {
             const auto *mod = hycal.module_by_id(ev->module_id[j]);

@@ -207,6 +207,7 @@ struct ReconEventData {
     float cl_linear_corr[kMaxClusters] = {};
     float cl_time[kMaxClusters]    = {};
     uint8_t cl_nblocks[kMaxClusters] = {};
+    uint8_t cl_npos[kMaxClusters] = {};
     uint16_t cl_center[kMaxClusters]  = {};
     uint32_t cl_flag[kMaxClusters]    = {};
     // Matching results

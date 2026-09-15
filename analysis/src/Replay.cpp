@@ -723,6 +723,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(cluster_cfg.profile);
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);
     //open EVIO file and output ROOT file
@@ -1069,6 +1070,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
             for (int i = 0; i < ev->n_clusters; ++i) {
                 ev->cl_nblocks[i] = hits[i].nblocks;
+                ev->cl_npos[i]    = hits[i].npos;
                 ev->cl_time[i]    = hits[i].time;
                 //transform the cluster positions to the lab coordinate
                 HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
@@ -1159,6 +1161,9 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                 ev->mHit_x[i] = matched_hits[i].hycal_hit.x;
                 ev->mHit_y[i] = matched_hits[i].hycal_hit.y;
                 ev->mHit_z[i] = matched_hits[i].hycal_hit.z;
+                // MatchHit::gem ordering: 
+                // (GEM1/GEM2, det_id 0/1) index 0 is the downstream GEM pair
+                // (GEM3/GEM4, det_id 2/3) index 1 is the upstream GEM pair
                 for(int j = 0; j < 2; j++) {
                     ev->mHit_gx[i][j] =  matched_hits[i].gem[j].x;
                     ev->mHit_gy[i][j] =  matched_hits[i].gem[j].y;
@@ -1252,6 +1257,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
+    clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);
 
@@ -1653,6 +1659,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
         for (int i = 0; i < ev->n_clusters; ++i) {
             ev->cl_nblocks[i] = hits[i].nblocks;
+            ev->cl_npos[i]    = hits[i].npos;
             ev->cl_time[i]    = hits[i].time;
             //transform the cluster positions to the lab coordinate
             HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
@@ -1782,6 +1789,9 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                 ev->mHit_x[match_idx] = match.hycal_hit.x;
                 ev->mHit_y[match_idx] = match.hycal_hit.y;
                 ev->mHit_z[match_idx] = match.hycal_hit.z;
+                // MatchHit::gem ordering: 
+                // (GEM1/GEM2, det_id 0/1) index 0 is the downstream GEM pair
+                // (GEM3/GEM4, det_id 2/3) index 1 is the upstream GEM pair
                 for (int gem_idx = 0; gem_idx < 2; ++gem_idx) {
                     ev->mHit_gx[match_idx][gem_idx] = match.gem[gem_idx].x;
                     ev->mHit_gy[match_idx][gem_idx] = match.gem[gem_idx].y;
