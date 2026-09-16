@@ -18,8 +18,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QPen
+from PyQt6.QtCore import Qt, QPointF, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPen, QPolygonF
 from PyQt6.QtWidgets import (
 	QApplication, QButtonGroup, QComboBox, QFileDialog, QGroupBox,
 	QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
@@ -245,7 +245,14 @@ def fit_histogram(counts, edges, xmin=None, xmax=None, expected=0.0):
 def damped_ratio(expected: float, peak: float) -> float:
 	if expected <= 0 or peak <= 0:
 		raise ValueError("expected peak and fitted peak must be positive")
-	return min(2.0, max(0.5, 1.0 + 0.7 * (expected / peak - 1.0)))
+	return min(2.0, max(0.5, 1.0 + 0.85 * (expected / peak - 1.0)))
+
+
+def is_fit_good(peak: float, sigma: float, chi2: float) -> bool:
+	if peak <= 0 or sigma <= 0:
+		return False
+	expected_sigma = 0.03 * peak / math.sqrt(peak / 1000.0)
+	return 0.5 * expected_sigma < sigma < 1.5 * expected_sigma and chi2 < 2.5
 
 
 def atomic_json_write(path: Path, value) -> None:
@@ -295,6 +302,7 @@ class PhysicsMap(HyCalMapWidget):
 		self.multi_select = False
 		self.marked = set()
 		self.preview = set()
+		self.refit = set()
 
 	def set_multi_select(self, enabled):
 		self.multi_select = bool(enabled)
@@ -310,6 +318,10 @@ class PhysicsMap(HyCalMapWidget):
 
 	def set_preview_modules(self, names):
 		self.preview = set(names)
+		self.update()
+
+	def set_refit_modules(self, names):
+		self.refit = set(names)
 		self.update()
 
 	def _handle_click(self, pos):
@@ -345,6 +357,24 @@ class PhysicsMap(HyCalMapWidget):
 			if rect is not None:
 				painter.drawEllipse(rect.center(), min(rect.width(), rect.height()) * 0.42,
 									min(rect.width(), rect.height()) * 0.42)
+		# Unified "Refit outer" marker: a small filled triangle at the
+		# module's top-right corner, distinct from the circle markers above.
+		painter.setPen(QPen(QColor(THEME.ACCENT_STRONG), 1.0))
+		painter.setBrush(QColor(THEME.ACCENT_STRONG))
+		for module_name in self.refit:
+			rect = self._rects.get(module_name)
+			if rect is None:
+				continue
+			size = min(rect.width(), rect.height()) * 0.32
+			cx = rect.right() - size * 0.6
+			cy = rect.top() + size * 0.6
+			triangle = QPolygonF([
+				QPointF(cx, cy - size),
+				QPointF(cx - size, cy + size),
+				QPointF(cx + size, cy + size),
+			])
+			painter.drawPolygon(triangle)
+		painter.setBrush(Qt.BrushStyle.NoBrush)
 
 	def _tooltip_text(self, name):
 		value = self._values.get(name)
@@ -593,6 +623,10 @@ class Viewer(QMainWindow):
 		rebin_outer = QPushButton("Rebin outer")
 		rebin_outer.clicked.connect(self._rebin_outer)
 		batch.addWidget(rebin_outer)
+		refit_outer = QPushButton("Refit outer")
+		refit_outer.clicked.connect(self._refit_outer)
+		refit_outer.setToolTip("Fit every selected outer module and save its result + factor")
+		batch.addWidget(refit_outer)
 		left_layout.addLayout(batch)
 		splitter.addWidget(left)
 
@@ -690,6 +724,8 @@ class Viewer(QMainWindow):
 		self.run_box.addItems(sorted(self.scan))
 		self.run_box.blockSignals(False)
 		if self.run_box.count():
+			# Default to the highest run number.
+			self.run_box.setCurrentIndex(self.run_box.count() - 1)
 			self._run_changed(self.run_box.currentText())
 
 	def _run_changed(self, run):
@@ -699,6 +735,8 @@ class Viewer(QMainWindow):
 			self.iter_box.addItems(str(number) for number in sorted(self.scan[run]))
 		self.iter_box.blockSignals(False)
 		if self.iter_box.count():
+			# Default to the highest iteration number.
+			self.iter_box.setCurrentIndex(self.iter_box.count() - 1)
 			self._iter_changed(self.iter_box.currentText())
 
 	def _iter_changed(self, text):
@@ -712,6 +750,7 @@ class Viewer(QMainWindow):
 		self.rebin_spin.setValue(1)
 		self.map.clear_selection()
 		self.map.set_preview_modules(set())
+		self.map.set_refit_modules(set())
 		self.map.marked = set()
 		self._refresh_map(auto_range=True)
 		self._draw_global()
@@ -725,6 +764,7 @@ class Viewer(QMainWindow):
 			self._rebinned_modules = set()
 			self._module_rebin = {}
 			self.rebin_spin.setValue(1)
+			self.map.set_refit_modules(set())
 			self.current.histograms.clear()
 			self._start_root_load()
 
@@ -937,7 +977,7 @@ class Viewer(QMainWindow):
 			"chi2/ndf": chi2,
 			"ratio": ratio,
 			"new_factor": new_factor,
-			"fit_good": bool(peak > 0 and sigma > 0 and chi2 < 1.8),
+			"fit_good": is_fit_good(peak, sigma, chi2),
 		})
 		factors = [dict(entry) for entry in self.current.factors]
 		updated = False
@@ -964,7 +1004,7 @@ class Viewer(QMainWindow):
 		self.current.results[module_id] = Result(
 			module_id, peak, result.expected_peak, sigma, chi2, ratio,
 			result.old_factor, new_factor,
-			bool(peak > 0 and sigma > 0 and chi2 < 1.8),
+			is_fit_good(peak, sigma, chi2),
 			result.is_dead, result.is_dead_neighbor)
 		self.map.marked.add(self.current_module)
 		self._refresh_map()
@@ -1121,6 +1161,83 @@ class Viewer(QMainWindow):
 			self._draw_module(self.current_module)
 		self.statusBar().showMessage(
 			f"Rebinned {len(outer_names)} outer module histogram(s) by {self._rebin}", 4000)
+
+	def _refit_outer(self):
+		if not self.current:
+			return
+		outer_names = self._outer_module_names()
+		result_rows = [dict(row) for row in self.current.result_rows]
+		result_row_by_id = {int(row.get("module_id", -1)): row for row in result_rows}
+		factors = [dict(entry) for entry in self.current.factors]
+		factor_by_name = {entry.get("name"): entry for entry in factors}
+
+		fitted = {}
+		skipped = 0
+		for name in outer_names:
+			module_id = module_id_from_name(name)
+			result = self.current.results.get(module_id)
+			data = self._display_histogram(name)
+			if result is None or data is None:
+				skipped += 1
+				continue
+			try:
+				peak, sigma, chi2, _amplitude = fit_histogram(
+					data[0], data[1], None, None, result.expected_peak)
+				ratio = damped_ratio(result.expected_peak, peak)
+			except (ValueError, RuntimeError):
+				skipped += 1
+				continue
+			new_factor = result.old_factor * ratio
+			fitted[module_id] = (peak, sigma, chi2, ratio, new_factor)
+
+		if not fitted:
+			self.statusBar().showMessage("No outer module could be refit", 4000)
+			return
+
+		for module_id, (peak, sigma, chi2, ratio, new_factor) in fitted.items():
+			row = result_row_by_id.get(module_id)
+			if row is None:
+				continue
+			row.update({
+				"peak": peak,
+				"sigma": sigma,
+				"chi2/ndf": chi2,
+				"ratio": ratio,
+				"new_factor": new_factor,
+				"fit_good": is_fit_good(peak, sigma, chi2),
+			})
+			entry = factor_by_name.get(module_name(module_id))
+			if entry is not None:
+				entry["factor"] = new_factor
+
+		try:
+			atomic_json_write_many([
+				(self.current.factor_path, factors),
+				(self.current.result_path, result_rows),
+			])
+		except OSError as exc:
+			self.statusBar().showMessage(f"Save failed; memory unchanged: {exc}", 6000)
+			return
+
+		self.current.factors = factors
+		self.current.factor_by_id = {module_id_from_name(e.get("name", "")): e
+									 for e in factors if module_id_from_name(e.get("name", ""))}
+		self.current.result_rows = result_rows
+		for module_id, (peak, sigma, chi2, ratio, new_factor) in fitted.items():
+			result = self.current.results.get(module_id)
+			if result is None:
+				continue
+			self.current.results[module_id] = Result(
+				module_id, peak, result.expected_peak, sigma, chi2, ratio,
+				result.old_factor, new_factor,
+				is_fit_good(peak, sigma, chi2),
+				result.is_dead, result.is_dead_neighbor)
+		self.map.set_refit_modules(module_name(mid) for mid in fitted)
+		self._refresh_map()
+		if self.current_module and module_id_from_name(self.current_module) in fitted:
+			self._show_module(self.current_module)
+		self.statusBar().showMessage(
+			f"Refit {len(fitted)} outer module(s); {skipped} skipped", 5000)
 
 	def _draw_global(self):
 		if not self.current:

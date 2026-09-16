@@ -505,6 +505,13 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
     int rightBin = peakBin;
     while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
     while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
+    // Widen a too-narrow threshold-crossing range to a minimum 50 MeV span
+    // so low-statistics spectra still get a usable fit window.
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 50.
+           && (leftBin > 1 || rightBin < nBins)) {
+        if (leftBin > 1) --leftBin;
+        if (rightBin < nBins) ++rightBin;
+    }
     if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
 
     const double lo = h->GetBinCenter(leftBin);

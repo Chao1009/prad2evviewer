@@ -43,18 +43,14 @@
             "beam_energy": 2108.8,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [60.0, 400.0]},
-            "gain_factor": {"data_dir": "", 
-            "ref_run": 24827}
+            "gain_factor": {"data_dir": "", "ref_run": 24827}
         },
         {
             "from_run":    24185,
             "beam_energy": 3488.43,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  24827
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
         {
             "// Reuses the 24185 calibration, time cuts, and gain reference":  "",
@@ -67,20 +63,16 @@
             "beam_energy": 3485.41,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  24827
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
 		{   
-            "// a calibration test with run 25319-25326, LMS reference run is 25320": "",
+            "// a calibration test with run 25319-25326, LMS reference run is 25320, PRad2_2p2_round0_1.json": "",
 			"from_run":    25200,
 			"beam_energy": 2239.51,
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25320
-            }
+            "calibration": {"file": "calibration/PRad2_2p2_round0_1.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25320}
 		},
+
         {
             "// from here, start the X17 experimental runs": "",
 
@@ -100,10 +92,7 @@
 			"beam_energy": 2239.51,
             "calibration": {"file": "calibration/x17_25560.json"},
             "time_cuts":   {"hc_time_window": [130, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25560
-            },
+            "gain_factor": {"data_dir": "", "ref_run":  25560},
             "// 25560 is the reference run for the 1st X17 calibration": "",
             "// reuse PRad2 calibration, the ref_gain run is 24827": "",
             "matching":    {"radius": 15.0, "use_square_cut": false, "energy_dependent": true, "sigma": 3.0}
@@ -111,34 +100,22 @@
         {
             "from_run":    25655,
             "calibration": {"file": "calibration/x17_25655.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25655
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  25655}
         },
         {
             "from_run":    25785,
             "calibration": {"file": "calibration/x17_25825.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25825
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  25825}
         },
         {
             "from_run":    26030,
             "calibration": {"file": "calibration/x17_26094.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  26094
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  26094}
         },
         {
             "from_run":    26214,
             "calibration": {"file": "calibration/x17_26214.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  26214
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  26214}
         }
 
     ],
@@ -170,9 +147,9 @@
     "// Per-run HyCal dead modules list. Independent lookup, no chaining": "",
     "// the definate time of W1141 dead is not known, run 24850 is an estimate": "",
     "hycal_dead_modules": [
-        {"from_run": 0, "dead_modules": ["W1124", "W691"]},
-        {"from_run": 24693, "dead_modules": ["W1124"]},
-        {"from_run": 24850, "dead_modules": ["W1124", "W1141"]},
-        {"from_run": 25540, "dead_modules": ["W1124", "W781"]}
+        {"from_run": 0, "dead_modules": ["W1019", "W1020", "W1124", "W691"]},
+        {"from_run": 24693, "dead_modules": ["W1019", "W1020", "W1124"]},
+        {"from_run": 24850, "dead_modules": ["W1019", "W1020", "W1124", "W1141"]},
+        {"from_run": 25540, "dead_modules": ["W1019", "W1020", "W1124", "W781"]}
     ]
 }

@@ -386,17 +386,19 @@ therefore all propagate into the final calibration.
 The program defines `fit_good` as
 
 $$
-E_\mathrm{fit}>0,\qquad \sigma>0,
+E_\mathrm{fit}>0,
 $$
 
 $$
-\sigma<2\times0.03E_\mathrm{fit}
-\sqrt{\frac{1000}{E_\mathrm{fit}}},
-\qquad \chi^2/\mathrm{NDF}<10.
+0.5\times0.03E_\mathrm{fit}\sqrt{\frac{1000}{E_\mathrm{fit}}}
+<\sigma<
+1.5\times0.03E_\mathrm{fit}\sqrt{\frac{1000}{E_\mathrm{fit}}},
+\qquad \chi^2/\mathrm{NDF}<2.5.
 $$
 
 The $0.03/\sqrt{E/1000}$ term is the approximate relative-resolution scale
-used by the code; the fit cut permits twice that width.
+used by the code; the fit cut requires the fitted width to fall within
+0.5–1.5 times that scale.
 
 ### 5.4 Update rule
 
@@ -404,7 +406,7 @@ For a positive fitted peak:
 
 ```text
 raw_ratio  = expected_peak / peak
-ratio      = 1 + 0.7 * (raw_ratio - 1)
+ratio      = 1 + 0.85 * (raw_ratio - 1)
 ratio      = clamp(ratio, 0.5, 2.0)
 new_factor = old_factor * ratio
 ```

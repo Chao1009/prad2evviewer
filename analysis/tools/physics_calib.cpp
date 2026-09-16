@@ -187,12 +187,15 @@ int main(int argc, char *argv[])
     if (output_path.empty()) output_path = ".";
     std::string run_out_dir = output_path + "/Physics_calib/" + run_str;
     fs::create_directories(run_out_dir);
+    // Make absolute: PipelineBuilder treats a relative calib path as
+    // relative to db_dir, which would misresolve calib_factor_iterN.json.
+    run_out_dir = fs::absolute(run_out_dir).lexically_normal().string();
     std::cerr << "Output directory: " << run_out_dir << "\n";
 
     std::string input_calib_file, output_calib_file, output_root_file, output_json_file;
     if (iteration == 1)
         input_calib_file = !seed_calib_file.empty()
-            ? seed_calib_file
+            ? fs::absolute(seed_calib_file).lexically_normal().string()
             : db_dir + "/calibration/calibration_factor_3p5_June7.json";
     else if (iteration > 1)
         input_calib_file = run_out_dir + Form("/calib_factor_iter%d.json", iteration - 1);
@@ -555,7 +558,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < 1156; ++i) {
         if (!merged_result.h1_E_modules[i]) continue;
         TH1F *h = merged_result.h1_E_modules[i].get();
-        if (h->GetEntries() < 70) continue; // skip modules with too few entries
+        if (h->GetEntries() < 40) continue; // skip modules with too few entries
 
         int mod_id = i + 1000 + 1; // module IDs start at 1001(W1)
         auto mod = hycal.module_by_id(mod_id);
@@ -573,7 +576,8 @@ int main(int argc, char *argv[])
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
 
         auto [peak, sigma, chi2] = physics.fitGaus(h, expected_peak);
-        bool fit_good = (peak > 0 && sigma > 0 && sigma < 1.5 * 0.03*peak/std::sqrt(peak/1000.f) && chi2 < 1.8f);
+        float expected_sigma = 0.03f*peak/std::sqrt(peak/1000.f);
+        bool fit_good = (peak > 0 && sigma > 0.5f * expected_sigma && sigma < 1.5f * expected_sigma && chi2 < 2.5f);
         if (!fit_good) {
             std::cout << "Check!!! Module W" << (mod_id - 1000)
                  << ": fit failed (peak=" << peak
@@ -585,7 +589,7 @@ int main(int argc, char *argv[])
         if (peak <= 0) peak = expected_peak; // fallback to expected if fit failed
         float ratio         = expected_peak / peak; 
         // apply a conservative factor to avoid over-correction
-        ratio = (ratio - 1.f) * 0.7f + 1.f; // apply a conservative factor to avoid over-correction
+        ratio = (ratio - 1.f) * 0.85f + 1.f; // apply a conservative factor to avoid over-correction
         if(ratio < 0.5) ratio = 0.5;
         if(ratio > 2.0) ratio = 2.0;
 
@@ -855,12 +859,12 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         float xd = (hits[0].x - (float)mod->x) / (float)mod->size_x;
         float yd = (hits[0].y - (float)mod->y) / (float)mod->size_y;
         if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && (fabs(hits[0].x) > 20.75 * 2.0 || fabs(hits[0].y) > 20.75 * 2.0) ) continue;
-        if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
+        /*if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
             if (hits[0].x >  300.0 && xd >= 0.0f) continue; // only keep hits on the inner side for transition modules
             if (hits[0].x < -300.0 && xd <= 0.0f) continue;
             if (hits[0].y >  300.0 && yd >= 0.0f) continue;
             if (hits[0].y < -300.0 && yd <= 0.0f) continue;
-        }
+        }*/
 
         float center_energy = 0.f;
         const fdec::ModuleCluster *selected_cluster = nullptr;
