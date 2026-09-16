@@ -32,3 +32,6 @@ __pycache__/
 *.swo
 *~
 .DS_Store
+
+# Per-user template extraction plots (derived — regenerate from JSONs)
+analysis/pyscripts/output/template_plots_*/
