@@ -148,6 +148,7 @@ int main(int argc, char *argv[])
     int  iteration   = 1;
     int  max_events  = -1;
     int  num_threads = 4;
+    bool use_crystal_ball = false;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -158,12 +159,28 @@ int main(int argc, char *argv[])
     std::string recon_config_file = db_dir + "/reconstruction_config.json";
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:j:c:")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:j:c:f:")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_path = optarg; break;
             case 'c': seed_calib_file  = optarg; break;
             case 'j': num_threads      = std::atoi(optarg); break;
+            case 'f': {
+                std::string mode = optarg;
+                std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
+                    return std::tolower(ch);
+                });
+                if (mode == "gaus" || mode == "g") {
+                    use_crystal_ball = false;
+                } else if (mode == "crystalball" || mode == "crystal_ball" || mode == "cb" || mode == "c") {
+                    use_crystal_ball = true;
+                } else {
+                    std::cerr << "Unknown fit mode: '" << optarg
+                              << "'. Use 'gaus' or 'crystalball'.\n";
+                    return 1;
+                }
+                break;
+            }
         }
     }
 
@@ -176,7 +193,8 @@ int main(int argc, char *argv[])
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: calib_5by5 <input_raw.root|dir> [more...] "
-                     "[-i iter] [-o output_dir] [-c seed_calib.json] [-j threads]\n";
+                     "[-i iter] [-o output_dir] [-c seed_calib.json] [-j threads] "
+                     "[-f gaus|crystalball]\n";
         return 1;
     }
 
@@ -575,7 +593,7 @@ int main(int argc, char *argv[])
                                     / gRunConfig.hycal_z) * 180.f / 3.14159265f;
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
 
-        auto [peak, sigma, chi2] = physics.fitGaus(h, expected_peak);
+        auto [peak, sigma, chi2] = physics.fitPeak(h, expected_peak, use_crystal_ball);
         float expected_sigma = 0.03f*peak/std::sqrt(peak/1000.f);
         bool fit_good = (peak > 0 && sigma > 0.5f * expected_sigma && sigma < 1.5f * expected_sigma && chi2 < 2.5f);
         if (!fit_good) {

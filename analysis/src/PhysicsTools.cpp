@@ -463,6 +463,16 @@ float PhysicsTools::GetPhiAngle(float x, float y)
 
 //for gain factor monitoring
 
+std::array<double, 3> PhysicsTools::fitPeak(TH1F *h, float expectPeak,
+                                            bool useCrystalBall,
+                                            float alpha, float n)
+{
+    if (useCrystalBall) {
+        return fitCrystalBall(h, expectPeak, alpha, n);
+    }
+    return fitGaus(h, expectPeak);
+}
+
 // Fit a peak near expectPeak with a Gaussian and return {mean, sigma, chi2/ndf}.
 // Returns {0,0,0} if the histogram or fit is invalid.
 std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
@@ -527,7 +537,7 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
 
     TF1 gaus("_fg_", "gaus", lo, hi);
     gaus.SetParameters(peakHeight, peak0, sigma0);
-    const int fitStatus = h->Fit(&gaus, "RQ0N");
+    const int fitStatus = h->Fit(&gaus, "RQN");
     if (fitStatus != 0) return {0., 0., 0.};
 
     const double mean = gaus.GetParameter(1);
@@ -536,6 +546,87 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
         return {0., 0., 0.};
 
     double chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.;
+    return {mean, sigma, chi2};
+}
+
+// Fit a peak near expectPeak with a Crystal Ball and return {mean, sigma, chi2/ndf}.
+// Returns {0,0,0} if the histogram or fit is invalid.
+std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
+                                                  float alpha, float n)
+{
+    if (!h || h->GetEntries() < 100) return {0., 0., 0.};
+
+    const int nBins = h->GetNbinsX();
+    if (nBins < 4) return {0., 0., 0.};
+
+    int peakBin = -1;
+    double peakHeight = 0.;
+
+    if (std::isfinite(expectPeak) && expectPeak > 0.) {
+        int firstBin = h->GetXaxis()->FindFixBin(0.7 * expectPeak);
+        int lastBin  = h->GetXaxis()->FindFixBin(1.3 * expectPeak);
+        firstBin = std::max(1, firstBin);
+        lastBin  = std::min(nBins, lastBin);
+
+        for (int bin = firstBin; bin <= lastBin; ++bin) {
+            const double content = h->GetBinContent(bin);
+            const double left = (bin > 1) ? h->GetBinContent(bin - 1) : content;
+            const double right = (bin < nBins) ? h->GetBinContent(bin + 1) : content;
+            if (content > 0. && content >= left && content >= right && content > peakHeight) {
+                peakBin = bin;
+                peakHeight = content;
+            }
+        }
+    }
+
+    if (peakBin < 0) {
+        peakBin = h->GetMaximumBin();
+        peakHeight = h->GetBinContent(peakBin);
+    }
+    if (peakHeight <= 0.) return {0., 0., 0.};
+
+    const double threshold = 0.1 * peakHeight;
+    int leftBin = peakBin;
+    int rightBin = peakBin;
+    while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
+    while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 100.
+           && (leftBin > 1 || rightBin < nBins)) {
+        if (leftBin > 1) --leftBin;
+        if (rightBin < nBins) ++rightBin;
+    }
+    if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
+
+    const double lo = h->GetBinCenter(leftBin);
+    const double hi = h->GetBinCenter(rightBin);
+    const double peak0 = h->GetBinCenter(peakBin);
+    const double sigma0 = (hi - lo) / (2. * std::sqrt(-2. * std::log(0.4)));
+    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
+
+    if (h->GetSumw2N() == 0) h->Sumw2();
+
+    TF1 cb("_fcb_", crystalBallFunc, lo, hi, 5);
+    cb.SetParName(0, "amp");
+    cb.SetParName(1, "mean");
+    cb.SetParName(2, "sigma");
+    cb.SetParName(3, "alpha");
+    cb.SetParName(4, "n");
+    cb.SetParameters(peakHeight, peak0, sigma0, alpha, n);
+    cb.SetParLimits(0, 0.0, std::numeric_limits<double>::max());
+    cb.SetParLimits(1, lo, hi);
+    cb.SetParLimits(2, 1e-6, std::max(hi - lo, 1e-3));
+    cb.SetParLimits(3, 0.5, 30.0);
+    cb.SetParLimits(4, 1.1, 100.0);
+
+    const int fitStatus = h->Fit(&cb, "RQN");
+    if (fitStatus != 0) return {0., 0., 0.};
+
+    const double mean = cb.GetParameter(1);
+    const double sigma = std::abs(cb.GetParameter(2));
+    if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
+        return {0., 0., 0.};
+
+    const double chi2 = (cb.GetNDF() > 0) ? cb.GetChisquare() / cb.GetNDF() : 0.;
     return {mean, sigma, chi2};
 }
 

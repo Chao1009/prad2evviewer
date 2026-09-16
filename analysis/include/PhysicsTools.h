@@ -101,6 +101,11 @@ public:
     std::array<float, 3> FitPeakResolution(int module_id) const;
     void Resolution2Database(int run_id);
     static std::array<double, 3> fitGaus(TH1F *h, float expectPeak = 0.f);
+    static std::array<double, 3> fitCrystalBall(TH1F *h, float expectPeak = 0.f,
+                                               float alpha = 10.0f, float n = 3.f);
+    static std::array<double, 3> fitPeak(TH1F *h, float expectPeak = 0.f,
+                                        bool useCrystalBall = false,
+                                        float alpha = 10.0f, float n = 3.f);
 
     // --- gain factor analysis ------------------------------------------------
     // One result row per module.
