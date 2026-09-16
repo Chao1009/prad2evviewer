@@ -873,6 +873,35 @@ def main() -> None:
         json.dump(out, f, indent=2, sort_keys=False)
     print(f"[write] {out_path}", flush=True)
 
+    # Per-pulse (peak_amp, chi2, module_type) dump for the χ²-vs-amplitude
+    # diagnostic — verify whether the good_fit gate is amplitude-biased.
+    # (sigma_per_sample = ped_rms / peak_amp, so low-amplitude pulses carry
+    # a larger relative noise weighting; this dump lets plot_chi2_vs_amp.py
+    # test whether the chi2/dof threshold preferentially rejects them.)
+    if plotting:
+        all_amps  = []
+        all_chi2  = []
+        all_types = []
+        for st in stats.values():
+            # st.peak_amp and st.chi2 are always the same length (both
+            # appended together only on fit convergence).
+            n = len(st.peak_amp)
+            if n == 0:
+                continue
+            all_amps.extend(st.peak_amp)
+            all_chi2.extend(st.chi2)
+            all_types.extend([st.module_type] * n)
+        if all_amps:
+            npz_path = plot_dir / "per_pulse_amp_chi2.npz"
+            npz_path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                npz_path,
+                amp=np.asarray(all_amps,  dtype=np.float32),
+                chi2=np.asarray(all_chi2, dtype=np.float32),
+                mtype=np.asarray(all_types),   # numpy will pick a string dtype
+            )
+            print(f"[write] {npz_path}  ({len(all_amps)} pulses)", flush=True)
+
     # ---- plotting ----------------------------------------------------------
     if not plotting:
         return
