@@ -487,6 +487,7 @@ static void bind_hycal(py::module_ &m)
         .value("PbGlass", fdec::ModuleType::PbGlass)
         .value("PbWO4",   fdec::ModuleType::PbWO4)
         .value("LMS",     fdec::ModuleType::LMS)
+        .value("Veto",    fdec::ModuleType::Veto)
         .value("Unknown", fdec::ModuleType::Unknown);
 
     py::enum_<fdec::Sector>(m, "Sector")
