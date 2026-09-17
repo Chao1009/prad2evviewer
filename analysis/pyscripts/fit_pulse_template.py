@@ -580,6 +580,14 @@ def main() -> None:
                     help="Minimum peak height (ADC, pedsub) for fitting.")
     ap.add_argument("--height-rms-mult", type=float, default=10.0,
                     help="Also require peak height >= this × ped.rms.")
+    ap.add_argument("--t0-min", type=float, default=float("-inf"),
+                    help="Post-fit filter: reject pulses with fit t0_ns < this "
+                         "value (ns).  Default -inf (no lower cut).  Useful for "
+                         "excluding early-arriving background pulses that fit "
+                         "with atypically small t0.")
+    ap.add_argument("--t0-max", type=float, default=float("inf"),
+                    help="Post-fit filter: reject pulses with fit t0_ns > this "
+                         "value (ns).  Default +inf (no upper cut).")
     ap.add_argument("--model", choices=["two_tau", "two_tau_p"],
                     default="two_tau",
                     help="Pulse-shape model.  'two_tau': "
@@ -784,6 +792,8 @@ def main() -> None:
                                         args.model_err_floor)
                                     if not fit.ok:
                                         continue
+                                    if fit.t0_ns < args.t0_min or fit.t0_ns > args.t0_max:
+                                        continue
                                     st.tau_r.append(fit.tau_r_ns)
                                     st.tau_f.append(fit.tau_f_ns)
                                     st.t0.append(fit.t0_ns)
@@ -796,6 +806,8 @@ def main() -> None:
                                         float(ped), float(rms), clk_ns,
                                         args.model_err_floor)
                                     if not fit.ok:
+                                        continue
+                                    if fit.t0_ns < args.t0_min or fit.t0_ns > args.t0_max:
                                         continue
                                     st.tau_r.append(fit.tau_r_ns)
                                     st.tau_f.append(fit.tau_f_ns)
@@ -881,6 +893,8 @@ def main() -> None:
             "chi2_max": args.chi2_max,
             "height_min": args.height_min,
             "height_rms_mult": args.height_rms_mult,
+            "t0_min": None if args.t0_min == float("-inf") else args.t0_min,
+            "t0_max": None if args.t0_max == float("inf") else args.t0_max,
             "model_err_floor": args.model_err_floor,
         }
     }
