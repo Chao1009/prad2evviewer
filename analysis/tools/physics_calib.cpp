@@ -896,7 +896,6 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         // require center module to have at least 60% of cluster energy
         if (hits[0].energy <= 0.f || hits[0].energy_square <= 0.f) continue;
         float center_energy_fraction = center_energy / hits[0].energy;
-        if (center_energy_fraction < 0.6f) continue;
 
         res->h1_E_modules[mod->id-1001]->Fill(hits[0].energy_square);
         res->h1_E_modules_island[mod->id-1001]->Fill(hits[0].energy);
