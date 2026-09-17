@@ -35,37 +35,6 @@
     "t0_max": null,
     "model_err_floor": 0.03
   },
-  "LMS2": {
-    "channel_id": "134_13_11",
-    "module_type": "LMS",
-    "n_pulses_attempted": 723,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 161.48552502306336,
-      "rms": 0.46466589497497635
-    },
-    "good_fit": false
-  },
   "V1": {
     "channel_id": "134_3_0",
     "module_type": "Veto",
@@ -903,37 +872,6 @@
     },
     "good_fit": false
   },
-  "W1019": {
-    "channel_id": "140_6_10",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 723,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 156.94951573710884,
-      "rms": 0.4631604711379583
-    },
-    "good_fit": false
-  },
   "W102": {
     "channel_id": "140_3_5",
     "module_type": "PbWO4",
@@ -962,37 +900,6 @@
     "ped": {
       "mean": 147.34976196289062,
       "rms": 0.27739205956459045
-    },
-    "good_fit": false
-  },
-  "W1020": {
-    "channel_id": "140_6_11",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 723,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 145.06587763742786,
-      "rms": 0.46277810944396264
     },
     "good_fit": false
   },
@@ -2143,37 +2050,6 @@
     },
     "good_fit": false
   },
-  "W1055": {
-    "channel_id": "128_3_5",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 3,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 169.01097106933594,
-      "rms": 0.40282731254895526
-    },
-    "good_fit": false
-  },
   "W1056": {
     "channel_id": "128_3_4",
     "module_type": "PbWO4",
@@ -3256,37 +3132,6 @@
     "ped": {
       "mean": 159.85880993390532,
       "rms": 0.3886634738611472
-    },
-    "good_fit": false
-  },
-  "W1088": {
-    "channel_id": "140_6_15",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 723,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 155.96802017401856,
-      "rms": 0.3793029594409021
     },
     "good_fit": false
   },
@@ -6356,37 +6201,6 @@
     "ped": {
       "mean": 94.0984693373697,
       "rms": 0.4070191637677678
-    },
-    "good_fit": false
-  },
-  "W139": {
-    "channel_id": "130_14_12",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 2,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 197.3616180419922,
-      "rms": 0.44710348546504974
     },
     "good_fit": false
   },
@@ -12246,37 +12060,6 @@
     "ped": {
       "mean": 154.13511810302734,
       "rms": 0.4269325762987137
-    },
-    "good_fit": false
-  },
-  "W31": {
-    "channel_id": "138_17_11",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 1,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 144.3743896484375,
-      "rms": 0.3756093680858612
     },
     "good_fit": false
   },
@@ -22075,37 +21858,6 @@
       "rms": 0.3938159276828444
     },
     "good_fit": true
-  },
-  "W6": {
-    "channel_id": "130_4_14",
-    "module_type": "PbWO4",
-    "n_pulses_attempted": 3,
-    "n_pulses_used": 0,
-    "tau_r_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "tau_f_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "t0_ns": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "peak_amp_adc": {
-      "median": NaN,
-      "mad": NaN
-    },
-    "chi2_per_dof": {
-      "median": NaN,
-      "mean": NaN
-    },
-    "ped": {
-      "mean": 163.62332661946616,
-      "rms": 0.3879813849925995
-    },
-    "good_fit": false
   },
   "W60": {
     "channel_id": "136_19_3",

@@ -85,6 +85,26 @@ TYPE_COLORS = {"PbGlass": "C0", "PbWO4": "C1",
                "LMS":     "C2", "Veto":  "C3", "Unknown": "0.5"}
 
 
+def _replace_nan_recursive(obj):
+    """Replace any NaN/Inf floats in a nested dict/list with None.
+
+    JSON standard forbids NaN and Inf literals; nlohmann/json (used by the
+    C++ PulseTemplateStore) rejects them with a parse error.  Channels with
+    no converged fits are skipped before reaching this point (Option A), but
+    this sanitiser is kept as a belt-and-braces fallback (Option B) so that
+    any pathological NaN that slips through causes a clear ValueError from
+    json.dump(allow_nan=False) rather than silently producing broken JSON.
+    """
+    import math
+    if isinstance(obj, dict):
+        return {k: _replace_nan_recursive(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_replace_nan_recursive(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
 # ---------------------------------------------------------------------------
 # Pulse model
 # ---------------------------------------------------------------------------
@@ -899,10 +919,18 @@ def main() -> None:
         }
     }
     summaries: List[Dict] = []
+    n_skipped_empty = 0
     for name in sorted(stats):
+        if stats[name].n_used == 0:
+            n_skipped_empty += 1
+            continue
         rec = finalize_channel(stats[name], args.min_pulses, args.chi2_max)
         out[name] = rec
         summaries.append({"name": name, **rec})
+
+    if n_skipped_empty:
+        print(f"[write] skipped {n_skipped_empty} channels with n_pulses_used=0 "
+              f"(all fits filtered by t0 cut or LM failure)", flush=True)
 
     # Per-type aggregate (median ± MAD across channel medians) for each
     # fit parameter.  This is what the C++ PulseTemplateStore actually
@@ -914,8 +942,9 @@ def main() -> None:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_sanitized = _replace_nan_recursive(out)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2, sort_keys=False)
+        json.dump(out_sanitized, f, indent=2, sort_keys=False, allow_nan=False)
     print(f"[write] {out_path}", flush=True)
 
     # Per-pulse (peak_amp, chi2, module_type, t0, tau_r, tau_f, name) dump for

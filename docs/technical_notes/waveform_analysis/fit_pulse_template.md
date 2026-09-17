@@ -64,7 +64,92 @@ used the same `--height-min 500 --model-err-floor 0.03 --t0-min 25.0` cuts.
 
 ![Template extraction summary for run 026138](plots/template_summary_026138.png)
 
-### 2c. JSON Ready for Deconvolution
+### 2c. Sensitivity to Selection Cuts
+
+The h500+t0cut selection deliberately isolates the physics population. To characterize how much the
+fit result depends on that selection, we compare the three-run extraction with and without the cuts.
+Both extractions use `--model-err-floor 0.03`; the difference is the `--height-min 500` amplitude
+cut and the `--t0-min 25.0` timing cut in the h500+t0cut run, versus the script defaults (no
+amplitude cut, no t0 cut) in the default-cut run.
+
+**h500+t0cut (physics only).** See the table in Section 2b for the h500+t0cut numbers.
+
+**Default cut (mixed population).**
+
+| Metric              | Run 025308   | Run 025320   | Run 026138   |
+|---------------------|--------------|--------------|--------------|
+| τ_r (ns)            | 1.89 ± 0.18  | 1.93 ± 0.17  | 1.64 ± 0.17  |
+| τ_f (ns)            | 24.08 ± 1.18 | 24.20 ± 1.19 | 23.81 ± 1.14 |
+| χ²/dof (median)     | 1.69         | 1.68         | 1.80         |
+| Good channels       | 1129/1136    | 1149/1151    | 1087/1097    |
+| n_pulses used       | 450,923      | 537,562      | 343,429      |
+
+Selection efficiency is not shown in this table because it is not currently computed for the no-cut
+extraction — to obtain it, query `n_pulses_attempted` from each JSON's per-channel entries and take
+the aggregate ratio. As a rough guide, `n_pulses_used` in the no-cut extraction is approximately
+3-4× the value in the h500+t0cut extraction, consistent with the wider selection admitting a large
+low-amplitude population.
+
+τ_f is stable across both selection methods on all three runs. The three no-cut runs agree on τ_f to
+within 2% (24.08, 24.20, 23.81 ns), essentially the same as the h500+t0cut values (24.01, 23.95,
+23.26 ns). This is direct evidence that τ_f is population-robust — the two-τ model recovers a
+consistent fall-time regardless of the amplitude regime. τ_r is not stable: without the cuts, the
+aggregate τ_r drops by roughly 15–30% relative to the h500+t0cut values (from 2.24/2.22/2.36 ns
+to 1.89/1.93/1.64 ns) and the run-to-run spread widens (~5% with cuts, ~15% without). The χ²/dof
+median roughly doubles from ~0.85 to ~1.70 in the no-cut extraction, consistent with fitting a
+heterogeneous mixture — spanning both Population A and Population B (§4b) — with a single-template
+model. The `n_channels_good` count (~99% of contributing channels in both extractions) does not
+distinguish the two cases, because the `good_fit` threshold (χ²/dof < 3.0) is satisfied even by
+the mixed-population median; this is a known limitation of the current per-channel quality metric.
+For the deconvolver, τ_r sensitivity to selection means the physics-only extraction (h500+t0cut) is
+the correct choice — the template should describe the shape the deconvolver most needs to recover
+accurately (the high-amplitude pulses that dominate physics events), not an average over amplitudes.
+
+### 2d. Background Population Template Stability
+
+Inverting the t0 cut with `--t0-max 22.0` and keeping the other cuts (`--height-min 500
+--model-err-floor 0.03`) selects Population B, the beam-related background identified in Section
+4b. Extracting a template for this population characterizes its shape and tests whether the
+background is stable across runs. Both are directly relevant to a potential dual-template
+deconvolver design.
+
+**Table: PbWO4 background-population template across runs.**
+
+| Metric               | Run 025308   | Run 025320   | Run 026138   |
+|----------------------|--------------|--------------|--------------|
+| τ_r (ns)             | 9.12 ± 0.88  | 9.11 ± 0.91  | 9.27 ± 0.93  |
+| τ_f (ns)             | 38.62 ± 0.46 | 38.60 ± 0.44 | 38.54 ± 0.42 |
+| χ²/dof (median)      | 2.44         | 2.47         | 2.44         |
+| Good channels        | 192/220      | 191/222      | 245/264      |
+| n_pulses used        | 93,272       | 96,712       | 55,904       |
+
+**Comparison to the physics population (reference run 025308).**
+
+| Parameter   | Physics (t0 > 25) | Background (t0 < 22) | Separation           |
+|-------------|-------------------|----------------------|----------------------|
+| τ_r (ns)    | 2.24 ± 0.21       | 9.12 ± 0.88          | ~4× larger, ~8 MAD   |
+| τ_f (ns)    | 24.01 ± 1.00      | 38.62 ± 0.46         | ~1.6× larger, ~15 MAD|
+| χ²/dof      | 0.86              | 2.44                 | 3× worse fit         |
+
+The background template is strikingly stable across all three runs: τ_r agrees to within 2% (9.12,
+9.11, 9.27 ns), and τ_f agrees to within 0.2% (38.62, 38.60, 38.54 ns). This is more stable than
+the physics-population τ_r, which drifted ~5% between run 026138 and the earlier runs. The
+background χ²/dof (~2.44) is consistently 3× worse than the physics fit (~0.86); this is expected
+because Population B is a mixture of physical origins — soft photons, beam halo, activation, and
+secondary radiation — each with slightly different shapes, and a single two-τ template averages
+over them. The number of channels contributing to the background aggregate (192–245) is far smaller
+than the physics aggregate (~1150 channels), reflecting that fewer modules accumulate enough
+background pulses above the 500 ADC amplitude threshold to satisfy the `min_pulses = 50` floor;
+backgrounds concentrate at lower amplitudes overall. Despite the mediocre single-template fit
+quality, the background population's (τ_r, τ_f) is cleanly separated from the physics population
+in shape-parameter space — roughly 8 MAD on τ_r and 15 MAD on τ_f — which is directly useful for
+any downstream shape-based background rejection. For the paper, this stability suggests the
+background shape is a persistent detector property rather than a per-run fluctuation; it may enable
+a background template shipped alongside the physics template for dual-template deconvolution, but
+the mixed-population nature of Population B (indicated by χ²/dof > 2) means the single template is
+an average, not an accurate model of any single background subpopulation.
+
+### 2e. JSON Ready for Deconvolution
 
 `output/pulse_templates_025308_h500_t0cut.json` (or the equivalent per-run file) is the template
 ready for use by the C++ pile-up deconvolver. To enable it in production, set
@@ -225,7 +310,7 @@ All under `analysis/pyscripts/`. See individual `--help` output for usage.
 **Pile-up deconvolution.** Feed the clean per-material template into the existing C++
 `WaveAnalyzer::Deconvolve`. The `output/pulse_templates_<RUN>_h500_t0cut.json` files are ready;
 the only step required is pointing `daq_config.json` at the deployed template and enabling the
-deconvolver (see §2c).
+deconvolver (see §2e).
 
 **Synthetic pile-up generation and ROC characterization.** New scripts are needed to inject
 synthetic pile-up at known separations, run the deconvolver, and measure detection efficiency vs.

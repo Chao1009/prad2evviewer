@@ -41,6 +41,10 @@ If only per-PMT/electronics variation drives the bi-modality, the colour
 pattern will look random or crate-striped (the latter being the signature
 tested by ``plot_template_by_crate.py``).
 
+A fourth map shows ``n_pulses_used`` per channel on a log colour scale,
+making it easy to see where the high-statistics physics signal lives (central
+modules) versus where peripheral or background-dominated channels sit.
+
 Usage
 -----
     python plot_template_2d_map.py pulse_templates_<run>.json \\
@@ -48,13 +52,15 @@ Usage
         [--out-dir plots/] \\
         [--min-pulses 50] \\
         [--materials PbWO4,PbGlass] \\
-        [--vmin 2.0] [--vmax 8.0]
+        [--vmin 2.0] [--vmax 8.0] \\
+        [--n-vmin 10] [--n-vmax 5000]
 
 Outputs (per material, per parameter, in --out-dir)
 ----------------------------------------------------
     template_2d_<material>_tau_r.png
     template_2d_<material>_tau_f.png
     template_2d_<material>_t0.png
+    template_2d_<material>_n_pulses.png
 
 No dependencies beyond numpy, matplotlib, argparse, json, pathlib, and os.
 """
@@ -71,6 +77,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.collections import PatchCollection
+from matplotlib.colors import LogNorm
 from matplotlib.patches import Rectangle
 import numpy as np
 
@@ -331,6 +338,142 @@ def make_2d_map(
 
 
 # ---------------------------------------------------------------------------
+# n_pulses 2D map (log colour scale)
+# ---------------------------------------------------------------------------
+
+def make_2d_map_n_pulses(
+    material: str,
+    channels: list[dict],
+    geo_map: dict[str, tuple[float, float, float, float]],
+    out_path: Path,
+    vmin_override: float | None,
+    vmax_override: float | None,
+) -> None:
+    """Render a 2D spatial map colour-coded by n_pulses_used and save to *out_path*.
+
+    The colour scale is logarithmic (``LogNorm``) because pulse counts span
+    orders of magnitude across the detector face (thousands near the beam axis,
+    hundreds or fewer at the periphery).  The lower bound is clamped to at
+    least 1 so that LogNorm never receives a non-positive value.
+
+    Parameters
+    ----------
+    material : str
+        Module material label (e.g. 'PbWO4').
+    channels : list of dict
+        Channel records for *material* (already filtered for min_pulses).
+        Each record must contain the key 'n_pulses_used'.
+    geo_map : dict
+        name → (x, y, sx, sy) from load_hycal_map().
+    out_path : Path
+        Destination PNG path.
+    vmin_override, vmax_override : float or None
+        CLI overrides for the colour-scale bounds (--n-vmin / --n-vmax).
+        When None the 2nd and 98th percentiles of the plotted counts are used,
+        with vmin clamped to ≥ 1.
+    """
+    cmap = "viridis"
+    cbar_label = "n_pulses_used per channel"
+
+    # --- Match channels to geometry ----------------------------------------
+    xs:   list[float] = []
+    ys:   list[float] = []
+    sxs:  list[float] = []
+    sys_: list[float] = []
+    vals: list[float] = []
+    missing = 0
+
+    for ch in channels:
+        name = ch["name"]
+        geo = geo_map.get(name)
+        if geo is None:
+            print(f"  [WARN] {name}: not found in HyCal map — skipping",
+                  file=sys.stderr)
+            missing += 1
+            continue
+        x, y, sx, sy = geo
+        xs.append(x)
+        ys.append(y)
+        sxs.append(sx)
+        sys_.append(sy)
+        vals.append(float(ch["n_pulses_used"]))
+
+    n_plotted = len(vals)
+    if n_plotted == 0:
+        print(f"  [WARN] {material}/n_pulses: no modules to plot after "
+              f"geometry matching — skipping figure.", file=sys.stderr)
+        return
+
+    xs_arr   = np.asarray(xs,   dtype=np.float64)
+    ys_arr   = np.asarray(ys,   dtype=np.float64)
+    sxs_arr  = np.asarray(sxs,  dtype=np.float64)
+    sys_arr  = np.asarray(sys_, dtype=np.float64)
+    vals_arr = np.asarray(vals, dtype=np.float64)
+
+    # Colour-scale bounds — default to 2nd/98th percentile, but clamp vmin ≥ 1
+    if vmin_override is None:
+        vmin = max(1.0, float(np.percentile(vals_arr, 2)))
+    else:
+        vmin = max(1.0, float(vmin_override))
+
+    if vmax_override is None:
+        vmax = float(np.percentile(vals_arr, 98))
+    else:
+        vmax = float(vmax_override)
+
+    if vmin >= vmax:
+        # Degenerate range — fall back to full range (still clamped ≥ 1)
+        vmin = max(1.0, float(vals_arr.min()))
+        vmax = float(vals_arr.max())
+
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+
+    # --- Build rectangle patches -------------------------------------------
+    patches = [
+        Rectangle((x - sx / 2.0, y - sy / 2.0), sx, sy)
+        for x, y, sx, sy in zip(xs_arr, ys_arr, sxs_arr, sys_arr)
+    ]
+    pc = PatchCollection(patches, cmap=cmap, norm=norm, linewidths=0)
+    pc.set_array(vals_arr)
+
+    # --- Figure layout -------------------------------------------------------
+    x_lo = float((xs_arr - sxs_arr / 2.0).min())
+    x_hi = float((xs_arr + sxs_arr / 2.0).max())
+    y_lo = float((ys_arr - sys_arr / 2.0).min())
+    y_hi = float((ys_arr + sys_arr / 2.0).max())
+    pad_x = 0.07 * (x_hi - x_lo)
+    pad_y = 0.07 * (y_hi - y_lo)
+
+    fig, ax = plt.subplots(figsize=(9, 9))
+    ax.add_collection(pc)
+
+    cbar = fig.colorbar(pc, ax=ax, fraction=0.035, pad=0.02)
+    cbar.set_label(cbar_label, fontsize=11)
+
+    ax.set_xlim(x_lo - pad_x, x_hi + pad_x)
+    ax.set_ylim(y_lo - pad_y, y_hi + pad_y)
+    ax.set_aspect("equal")
+    ax.set_xlabel("x (mm)", fontsize=11)
+    ax.set_ylabel("y (mm)", fontsize=11)
+
+    med_val = float(np.median(vals_arr))
+    title = (
+        f"{material}  —  n_pulses_used 2D spatial map\n"
+        f"{n_plotted} modules plotted"
+        + (f"  ({missing} missing from map)" if missing else "")
+        + f"   colour range [{vmin:.0f}, {vmax:.0f}] (log scale)"
+        + f"   median = {med_val:.0f}"
+    )
+    ax.set_title(title, fontsize=10)
+
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Wrote {out_path}")
+
+
+# ---------------------------------------------------------------------------
 # Per-material summary
 # ---------------------------------------------------------------------------
 
@@ -344,6 +487,7 @@ def print_material_summary(
     tau_r_arr = np.array([c["tau_r"] for c in channels])
     tau_f_arr = np.array([c["tau_f"] for c in channels])
     t0_arr    = np.array([c["t0"]    for c in channels])
+    n_pulses_arr = np.array([c["n_pulses_used"] for c in channels], dtype=np.int64)
     n = len(channels)
     print(
         f"\n=== {material}: {n}/{n_map_modules} map modules had templates"
@@ -355,6 +499,8 @@ def print_material_summary(
           f" (median {np.median(tau_f_arr):.1f} ns)")
     print(f"    t₀ range: {t0_arr.min():.1f} ns to {t0_arr.max():.1f} ns"
           f" (median {np.median(t0_arr):.1f} ns)")
+    print(f"    n_pulses: min = {n_pulses_arr.min()}, max = {n_pulses_arr.max()},"
+          f" median {int(np.median(n_pulses_arr))}, total {n_pulses_arr.sum()}")
 
 
 # ---------------------------------------------------------------------------
@@ -426,7 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="VAL",
-        help="Override colour-scale minimum (ns). "
+        help="Override colour-scale minimum (ns) for the τ_r/τ_f/t₀ maps. "
              "Default: 2nd percentile of the plotted values.",
     )
     p.add_argument(
@@ -434,8 +580,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="VAL",
-        help="Override colour-scale maximum (ns). "
+        help="Override colour-scale maximum (ns) for the τ_r/τ_f/t₀ maps. "
              "Default: 98th percentile of the plotted values.",
+    )
+    p.add_argument(
+        "--n-vmin",
+        type=float,
+        default=None,
+        metavar="VAL",
+        help="Override colour-scale minimum for the n_pulses_used map "
+             "(log scale; clamped to ≥ 1). "
+             "Default: 2nd percentile of the plotted counts (clamped to ≥ 1).",
+    )
+    p.add_argument(
+        "--n-vmax",
+        type=float,
+        default=None,
+        metavar="VAL",
+        help="Override colour-scale maximum for the n_pulses_used map (log scale). "
+             "Default: 98th percentile of the plotted counts.",
     )
     return p
 
@@ -524,6 +687,16 @@ def main(argv: list[str] | None = None) -> int:
                 vmin_override=args.vmin,
                 vmax_override=args.vmax,
             )
+
+        out_png_n = out_dir / f"template_2d_{material}_n_pulses.png"
+        make_2d_map_n_pulses(
+            material=material,
+            channels=channels,
+            geo_map=geo_map,
+            out_path=out_png_n,
+            vmin_override=args.n_vmin,
+            vmax_override=args.n_vmax,
+        )
 
         # Summary
         n_map_total = n_map_by_type.get(material, len(channels))
