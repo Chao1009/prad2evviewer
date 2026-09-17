@@ -27,7 +27,7 @@ static double gaussianFunc(double *x, double *p)
 
 // Fit a peak near expectPeak with a Gaussian and return {mean, sigma, chi2/ndf}.
 // Returns {0,0,0} if the histogram or fit is invalid.
-std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
+std::array<double, 3> fitGaus(TH1F *h, float expectPeak, TF1 **fitResult = nullptr)
 {
     if (!h || h->GetEntries() < 100) return {0., 0., 0.};
 
@@ -98,13 +98,15 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
         return {0., 0., 0.};
 
     double chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.;
+    if (fitResult) *fitResult = new TF1(gaus);
     return {mean, sigma, chi2};
 }
 
 // Fit a peak near expectPeak with a Crystal Ball and return {mean, sigma, chi2/ndf}.
 // Returns {0,0,0} if the histogram or fit is invalid.
-std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
-                                                  float alpha, float n)
+std::array<double, 3> fitCrystalBall(TH1F *h, float expectPeak,
+                                                  float alpha, float n,
+                                                  TF1 **fitResult = nullptr)
 {
     if (!h || h->GetEntries() < 100) return {0., 0., 0.};
 
@@ -137,7 +139,7 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     }
     if (peakHeight <= 0.) return {0., 0., 0.};
 
-    const double threshold = 0.1 * peakHeight;
+    const double threshold = 0.05 * peakHeight;
     int leftBin = peakBin;
     int rightBin = peakBin;
     while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
@@ -149,7 +151,7 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     }
     if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
 
-    const double lo = h->GetBinCenter(leftBin);
+    const double lo = h->GetBinCenter(std::max(1, leftBin));
     const double hi = h->GetBinCenter(rightBin);
     const double peak0 = h->GetBinCenter(peakBin);
     const double sigma0 = (hi - lo) / (2. * std::sqrt(-2. * std::log(0.4)));
@@ -164,13 +166,19 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     cb.SetParName(3, "alpha");
     cb.SetParName(4, "n");
     cb.SetParameters(peakHeight, peak0, sigma0, alpha, n);
-    cb.SetParLimits(0, 0.0, std::numeric_limits<double>::max());
+    cb.SetParLimits(0, 0.0, 5. * peakHeight);
     cb.SetParLimits(1, lo, hi);
     cb.SetParLimits(2, 1e-6, std::max(hi - lo, 1e-3));
-    cb.SetParLimits(3, 0.5, 30.0);
-    cb.SetParLimits(4, 1.1, 100.0);
+    cb.SetParLimits(3, 1.0, 5.0);
+    cb.SetParLimits(4, 1.0, 20.0);
 
-    const int fitStatus = h->Fit(&cb, "RQN");
+    int fitStatus = h->Fit(&cb, "RN");
+    if (fitStatus != 0) {
+        cb.SetParameters(peakHeight, peak0, sigma0, alpha, n);
+        cb.FixParameter(3, alpha);
+        cb.FixParameter(4, n);
+        fitStatus = h->Fit(&cb, "RQN");
+    }
     if (fitStatus != 0) return {0., 0., 0.};
 
     const double mean = cb.GetParameter(1);
@@ -179,6 +187,7 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
         return {0., 0., 0.};
 
     const double chi2 = (cb.GetNDF() > 0) ? cb.GetChisquare() / cb.GetNDF() : 0.;
+    if (fitResult) *fitResult = new TF1(cb);
     return {mean, sigma, chi2};
 }
 
@@ -197,7 +206,7 @@ void peak_fitting_compare() {
     TF1 *gaus = new TF1("gaus_curve", gaussianFunc, mu - 6 * sigma, mu + 6 * sigma, 3);
     gaus->SetParameters(amp, mu, sigma);
     gaus->SetLineColor(kBlack);
-    gaus->SetLineWidth(2);
+    gaus->SetLineWidth(4);
     gaus->SetTitle("Gaussian vs Crystal Ball");
     gaus->GetXaxis()->SetTitle("Energy");
     gaus->GetYaxis()->SetTitle("Yield");
@@ -216,7 +225,7 @@ void peak_fitting_compare() {
         auto *cb = new TF1(Form("cb_%zu", i), crystalBallFunc, mu - 6 * sigma, mu + 6 * sigma, 5);
         cb->SetParameters(amp, mu, sigma, alpha, n);
         cb->SetLineColor(i+1);
-        cb->SetLineWidth(2);
+        cb->SetLineWidth(4);
         cb->SetLineStyle(2);
         cbs.push_back(cb);
     }
@@ -244,10 +253,10 @@ void peak_fitting_compare() {
     TCanvas *fit_compare = new TCanvas("fit_compare", "Gaussian vs Crystal Ball Fit", 900, 600);
     fit_compare->cd();
 
-    TFile *file = TFile::Open("energy_spectra.root");
+    TFile *file = TFile::Open("prad_025319_quick_check.root");
     TH1F *h1_Espec = nullptr;
     if (file && !file->IsZombie()) {
-        h1_Espec = dynamic_cast<TH1F*>(file->Get("h1_Espec"));
+        h1_Espec = dynamic_cast<TH1F*>(file->Get("module_energy/h_W565"));
     }
     if (!h1_Espec) {
         h1_Espec = new TH1F("h1_Espec_demo", "Demo energy spectrum;Energy;Counts",
@@ -258,58 +267,51 @@ void peak_fitting_compare() {
         }
     }
 
-    h1_Espec->SetLineColor(kGray + 2);
+    h1_Espec->SetLineColor(kBlack);
+    h1_Espec->SetLineWidth(4);
     h1_Espec->Draw("hist");
 
-    double fit_min = h1_Espec->GetXaxis()->GetXmin();
-    double fit_max = h1_Espec->GetXaxis()->GetXmax();
+    const float expectedPeak = static_cast<float>(mu);
+    const float cbAlpha = 1.5f;
+    const float cbN = 5.0f;
+    TF1 *gausFit = nullptr;
+    TF1 *cbFit = nullptr;
+    const auto gausResult = fitGaus(h1_Espec, expectedPeak, &gausFit);
+    const auto cbResult = fitCrystalBall(h1_Espec, expectedPeak, cbAlpha, cbN, &cbFit);
 
-    TF1 *gaus_fit = new TF1("gaus_fit", "gaus", fit_min, fit_max);
-    gaus_fit->SetLineColor(kBlue);
-    gaus_fit->SetLineWidth(2);
-    h1_Espec->Fit(gaus_fit, "RQN");
+    auto addFitLegendEntry = [](TLegend *legend, TF1 *fit, const char *label) {
+        if (fit) legend->AddEntry(fit, label, "l");
+    };
 
-    TF1 *cb_fit = new TF1("cb_fit", crystalBallFunc, fit_min, fit_max, 5);
-    cb_fit->SetParameters(gaus_fit->GetParameter(0),
-                          gaus_fit->GetParameter(1),
-                          gaus_fit->GetParameter(2),
-                          1.5, 3.0);
-    cb_fit->SetParLimits(0, 0.0, 1.0e30);
-    cb_fit->SetParLimits(1, h1_Espec->GetMean() - 3.0 * h1_Espec->GetRMS(),
-                         h1_Espec->GetMean() + 3.0 * h1_Espec->GetRMS());
-    cb_fit->SetParLimits(2, 1.0e-6, 1.0e4);
-    cb_fit->SetParLimits(3, 0.5, 30.0);
-    cb_fit->SetParLimits(4, 1.1, 100.0);
-    cb_fit->SetLineColor(kRed);
-    cb_fit->SetLineWidth(2);
-    cb_fit->SetLineStyle(2);
-    h1_Espec->Fit(cb_fit, "RQN");
+    if (gausFit) {
+        gausFit->SetLineColor(kBlue + 1);
+        gausFit->SetLineWidth(4);
+        gausFit->Draw("same");
+    }
+    if (cbFit) {
+        cbFit->SetLineColor(kRed + 1);
+        cbFit->SetLineWidth(4);
+        cbFit->SetLineStyle(2);
+        cbFit->Draw("same");
+    }
 
-    gaus_fit->Draw("same");
-    cb_fit->Draw("same");
-
-    auto *fit_leg = new TLegend(0.55, 0.55, 0.92, 0.9);
-    fit_leg->SetFillStyle(0);
-    fit_leg->SetBorderSize(0);
-    fit_leg->AddEntry(h1_Espec, "Histogram", "l");
-
-    TString gaus_label = Form("gaus: A=%.3f, #mu=%.3f, #sigma=%.3f",
-                              gaus_fit->GetParameter(0),
-                              gaus_fit->GetParameter(1),
-                              gaus_fit->GetParameter(2));
-    fit_leg->AddEntry(gaus_fit, gaus_label.Data(), "l");
-
-    TString cb_label = Form("crystal ball: A=%.3f, #mu=%.3f, #sigma=%.3f, #alpha=%.3f, n=%.3f",
-                            cb_fit->GetParameter(0),
-                            cb_fit->GetParameter(1),
-                            cb_fit->GetParameter(2),
-                            cb_fit->GetParameter(3),
-                            cb_fit->GetParameter(4));
-    fit_leg->AddEntry(cb_fit, cb_label.Data(), "l");
-    fit_leg->Draw();
-
+    auto *fitLegend = new TLegend(0.52, 0.62, 0.96, 0.92);
+    fitLegend->SetFillStyle(0);
+    fitLegend->SetBorderSize(0);
+    fitLegend->AddEntry(h1_Espec, "Data", "l");
+    if (gausFit) {
+        const char *label = Form("Gaussian: A=%.3g, #mu=%.3f, #sigma=%.3f; #chi^{2}/ndf=%.3f",
+                                 gausFit->GetParameter(0), gausFit->GetParameter(1),
+                                 gausFit->GetParameter(2), gausResult[2]);
+        addFitLegendEntry(fitLegend, gausFit, label);
+    }
+    if (cbFit) {
+        const char *label = Form("Crystal Ball: A=%.3g, #mu=%.3f, #sigma=%.3f; #alpha=%.3f, n=%.3f; #chi^{2}/ndf=%.3f",
+                                 cbFit->GetParameter(0), cbFit->GetParameter(1),
+                                 cbFit->GetParameter(2), cbFit->GetParameter(3),
+                                 cbFit->GetParameter(4), cbResult[2]);
+        addFitLegendEntry(fitLegend, cbFit, label);
+    }
+    fitLegend->Draw();
     fit_compare->Update();
-
-    if (file) file->Close();
-    delete file;
 }
