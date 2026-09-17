@@ -69,6 +69,15 @@ from _common import dec  # prad2py.dec re-export
 # Number of raw pulses we keep per channel for the diagnostic plots.
 # 20 × 50 samples × 8 bytes × ~2000 channels ≈ 16 MB — negligible.
 PULSE_CACHE = 20
+PULSE_CACHE_PER_BIN = 30  # per-amplitude-bin waveform cache (Test A diagnostic)
+
+# Amplitude bins for Test A: (label, lo, hi).  Bins are inclusive on lo,
+# exclusive on hi, using -inf / +inf for open ends.
+AMP_BINS = [
+    ("lt_300",     float("-inf"), 300.0),
+    ("300_to_500", 300.0,         500.0),
+    ("gt_500",     500.0,         float("inf")),
+]
 
 # Stable colour assignments for the per-type summary panels.  Types that
 # don't appear in this map fall through to matplotlib's default cycle.
@@ -150,6 +159,12 @@ class ChannelStats:
     # the fly so users see the raw shapes alongside the normalised stack.
     sample_pulses: List[np.ndarray] = field(default_factory=list)
     sample_peak_amps: List[float]   = field(default_factory=list)
+    # Per-amplitude-bin caches for Test A (background-vs-signal shape check).
+    # Keys are amp-bin labels ("lt_300", "300_to_500", "gt_500"); values are
+    # lists of pedsub pulse arrays up to PULSE_CACHE_PER_BIN per bin.
+    # Populated only when plotting is enabled AND the amplitude bin isn't full.
+    sample_pulses_by_amp: Dict[str, List[np.ndarray]] = field(default_factory=dict)
+    sample_peak_amps_by_amp: Dict[str, List[float]]   = field(default_factory=dict)
 
 
 def _median_mad(values: List[float]) -> Tuple[float, float]:
@@ -800,6 +815,22 @@ def main() -> None:
                                         slice_u16.astype(np.float64) - ped)
                                     st.sample_peak_amps.append(fit.peak_amp)
 
+                                # Test A caching: also stratify a copy of this
+                                # pulse into an amplitude bin so per-channel
+                                # plots can show separate low/mid/high-amp
+                                # stacks.
+                                if plotting:
+                                    ph = float(pk.height)
+                                    for label, lo, hi in AMP_BINS:
+                                        if lo <= ph < hi:
+                                            bin_pulses = st.sample_pulses_by_amp.setdefault(label, [])
+                                            bin_amps   = st.sample_peak_amps_by_amp.setdefault(label, [])
+                                            if len(bin_pulses) < PULSE_CACHE_PER_BIN:
+                                                bin_pulses.append(
+                                                    slice_u16.astype(np.float64) - ped)
+                                                bin_amps.append(fit.peak_amp)
+                                            break
+
                 if n_phys >= next_progress:
                     _emit_progress(n_files_open, len(p.evio_files), fpath)
                     # Bump past every threshold this CODA read crossed, so
@@ -873,15 +904,23 @@ def main() -> None:
         json.dump(out, f, indent=2, sort_keys=False)
     print(f"[write] {out_path}", flush=True)
 
-    # Per-pulse (peak_amp, chi2, module_type) dump for the χ²-vs-amplitude
-    # diagnostic — verify whether the good_fit gate is amplitude-biased.
+    # Per-pulse (peak_amp, chi2, module_type, t0, tau_r, tau_f, name) dump for
+    # χ²-vs-amplitude and τ-vs-amplitude diagnostics.
     # (sigma_per_sample = ped_rms / peak_amp, so low-amplitude pulses carry
     # a larger relative noise weighting; this dump lets plot_chi2_vs_amp.py
-    # test whether the chi2/dof threshold preferentially rejects them.)
+    # test whether the chi2/dof threshold preferentially rejects them, and
+    # plot_tau_vs_amp.py test whether pulse shape parameters are amplitude-
+    # dependent — a signature of PMT saturation.)
     if plotting:
         all_amps  = []
         all_chi2  = []
         all_types = []
+        all_t0    = []
+        all_tau_r = []
+        all_tau_f = []
+        all_p     = []
+        all_names = []
+        has_p     = False
         for st in stats.values():
             # st.peak_amp and st.chi2 are always the same length (both
             # appended together only on fit convergence).
@@ -891,16 +930,62 @@ def main() -> None:
             all_amps.extend(st.peak_amp)
             all_chi2.extend(st.chi2)
             all_types.extend([st.module_type] * n)
+            all_t0.extend(st.t0)
+            all_tau_r.extend(st.tau_r)
+            all_tau_f.extend(st.tau_f)
+            all_names.extend([st.name] * n)
+            # p_list is only populated for --model two_tau_p, else empty
+            if st.p_list:
+                has_p = True
+                all_p.extend(st.p_list)
         if all_amps:
             npz_path = plot_dir / "per_pulse_amp_chi2.npz"
             npz_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
-                npz_path,
+            save_kwargs = dict(
                 amp=np.asarray(all_amps,  dtype=np.float32),
                 chi2=np.asarray(all_chi2, dtype=np.float32),
                 mtype=np.asarray(all_types),   # numpy will pick a string dtype
+                t0=np.asarray(all_t0,     dtype=np.float32),
+                tau_r=np.asarray(all_tau_r, dtype=np.float32),
+                tau_f=np.asarray(all_tau_f, dtype=np.float32),
+                name=np.asarray(all_names),
             )
+            if has_p:
+                save_kwargs["p"] = np.asarray(all_p, dtype=np.float32)
+            np.savez_compressed(npz_path, **save_kwargs)
             print(f"[write] {npz_path}  ({len(all_amps)} pulses)", flush=True)
+
+    # Test A dump: per-channel raw waveforms stratified by amplitude bin.
+    # One .npz per channel that has at least one bin populated; downstream
+    # plot_raw_pulses_by_amp.py consumes these.
+    if plotting:
+        wf_dir = plot_dir / "waveforms_by_amp"
+        n_written = 0
+        for name, st in stats.items():
+            if not st.sample_pulses_by_amp:
+                continue
+            # Only write channels with at least 5 pulses in at least two bins,
+            # otherwise the overlay comparison is uninformative.
+            populated = [lbl for lbl, pulses in st.sample_pulses_by_amp.items()
+                         if len(pulses) >= 5]
+            if len(populated) < 2:
+                continue
+            wf_dir.mkdir(parents=True, exist_ok=True)
+            # One npz per channel; keys are the bin labels; each stores a
+            # 2D array of shape (n_pulses, n_samples) plus an "amps" 1D array.
+            save_kwargs = {"module_type": np.asarray(st.module_type)}
+            for lbl in populated:
+                pulses = st.sample_pulses_by_amp[lbl]
+                amps   = st.sample_peak_amps_by_amp[lbl]
+                # Pulses on this channel all have the same slice length by
+                # construction (pre+post samples, checked in the event loop),
+                # so stacking is safe.
+                save_kwargs[f"pulses_{lbl}"] = np.stack(pulses).astype(np.float32)
+                save_kwargs[f"amps_{lbl}"]   = np.asarray(amps, dtype=np.float32)
+            np.savez_compressed(wf_dir / f"{name}.npz", **save_kwargs)
+            n_written += 1
+        if n_written:
+            print(f"[write] {wf_dir}/  ({n_written} channels)", flush=True)
 
     # ---- plotting ----------------------------------------------------------
     if not plotting:
