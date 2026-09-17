@@ -511,23 +511,25 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
     if (peakHeight <= 0.) return {0., 0., 0.};
 
     const double threshold = 0.4 * peakHeight;
+    const double peak0 = h->GetBinCenter(peakBin);
+    const double sigma0 = 0.03 * sqrt(peak0 * 1000.);
     int leftBin = peakBin;
     int rightBin = peakBin;
     while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
     while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
-    // Widen a too-narrow threshold-crossing range to a minimum 50 MeV span
-    // so low-statistics spectra still get a usable fit window.
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 50.
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 2.5 * sigma0
            && (leftBin > 1 || rightBin < nBins)) {
         if (leftBin > 1) --leftBin;
         if (rightBin < nBins) ++rightBin;
     }
-    if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) > 4.5 * sigma0
+           && (leftBin > 1 || rightBin < nBins)) {
+        ++leftBin;
+        --rightBin;
+    }
 
     const double lo = h->GetBinCenter(leftBin);
     const double hi = h->GetBinCenter(rightBin);
-    const double peak0 = h->GetBinCenter(peakBin);
-    const double sigma0 = (hi - lo) / (2. * std::sqrt(-2. * std::log(0.4)));
     if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
 
     // ROOT's chi-square fit uses the histogram bin errors. Sumw2 initializes
@@ -585,22 +587,26 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     }
     if (peakHeight <= 0.) return {0., 0., 0.};
 
-    const double threshold = 0.1 * peakHeight;
+    const double threshold = 0.05 * peakHeight;
+    const double peak0 = h->GetBinCenter(peakBin);
+    const double sigma0 = 0.03 * sqrt(peak0 * 1000.);
     int leftBin = peakBin;
     int rightBin = peakBin;
     while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
     while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 100.
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 2.5 * sigma0
            && (leftBin > 1 || rightBin < nBins)) {
         if (leftBin > 1) --leftBin;
         if (rightBin < nBins) ++rightBin;
     }
-    if (rightBin - leftBin + 1 < 4) return {0., 0., 0.};
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) > 6.0 * sigma0
+           && (leftBin > 1 || rightBin < nBins)) {
+        ++leftBin;
+        --rightBin;
+    }
 
     const double lo = h->GetBinCenter(leftBin);
     const double hi = h->GetBinCenter(rightBin);
-    const double peak0 = h->GetBinCenter(peakBin);
-    const double sigma0 = (hi - lo) / (2. * std::sqrt(-2. * std::log(0.4)));
     if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
 
     if (h->GetSumw2N() == 0) h->Sumw2();
@@ -612,11 +618,11 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     cb.SetParName(3, "alpha");
     cb.SetParName(4, "n");
     cb.SetParameters(peakHeight, peak0, sigma0, alpha, n);
-    cb.SetParLimits(0, 0.0, std::numeric_limits<double>::max());
+    cb.SetParLimits(0, 0.0, 5.0 * peakHeight);
     cb.SetParLimits(1, lo, hi);
     cb.SetParLimits(2, 1e-6, std::max(hi - lo, 1e-3));
-    cb.SetParLimits(3, 0.5, 30.0);
-    cb.SetParLimits(4, 1.1, 100.0);
+    cb.SetParLimits(3, 1.0, 5.0);
+    cb.SetParLimits(4, 1.01, 20.0);
 
     const int fitStatus = h->Fit(&cb, "RQN");
     if (fitStatus != 0) return {0., 0., 0.};
