@@ -29,7 +29,8 @@ All three runs share the same beam energy of 2239.51 MeV.
 | χ²/dof (median)      | 0.86       | 0.85       | 0.81       |
 | Good channels        | 424/425    | 458/461    | 238/238    |
 | n_pulses used        | 133,715    | 169,041    | 57,136     |
-| Selection efficiency | ~99.8%     | ~99.3%     | 100%       |
+| n_pulses attempted   | 327,406    | 401,565    | 147,960    |
+| Selection efficiency | 45.0%      | 45.8%      | 43.4%      |
 
 Selection efficiency is `n_pulses_used / n_pulses_attempted` — the fraction of pulses passing the
 clean-pulse gate (single peak, no pile-up flag, above `--height-min`, in-window, not overflowed)
@@ -45,6 +46,22 @@ fluctuation. τ_f is stable to within ~3% across all three runs (24.01, 23.95, 2
 stays in the 0.81–0.86 range on all runs — all fits describe the data to sub-noise-floor precision.
 The good-channel fraction is essentially 100% on every run. Run 026138 contributes ~40% of the
 pulse statistics of the other runs but still yields a well-defined per-material aggregate.
+
+**Caveat on selection efficiency.** The `n_pulses_used / n_pulses_attempted` ratio reported in the
+table is affected by the `--max-pulses-per-channel 500` cap in `fit_pulse_template.py`. This cap
+short-circuits pulse attempts once a channel has accumulated 500 accepted fits — `n_attempted` is
+not incremented for skipped pulses. Because most physics-run pulses pass the `--t0-min` cut,
+channels quickly fill this cap; the reported `n_attempted` is therefore smaller than the true count
+of clean-gated pulses. The ~45% efficiency measured here reflects a mix of the true
+fit-convergence-plus-t₀-selection rate and the artificial cap. For a genuine measurement of the
+fraction of clean-gated pulses that are Population A physics, run with `--max-pulses-per-channel`
+set effectively-infinite (e.g. 100000). The background extraction in section 2d is not affected in
+the same way, because only ~5-20% of pulses are backgrounds and channels rarely fill the cap; those
+efficiency numbers ARE meaningful signal-to-background estimates.
+
+The `Good channels` row is a channel-level metric (fraction of channels where the median χ²/dof <
+3.0 and the channel has ≥ 50 accepted pulses), not a pulse-level efficiency. Do not conflate the
+two.
 
 **Per-run summary plots.**
 
@@ -82,13 +99,14 @@ amplitude cut, no t0 cut) in the default-cut run.
 | τ_f (ns)            | 24.08 ± 1.18 | 24.20 ± 1.19 | 23.81 ± 1.14 |
 | χ²/dof (median)     | 1.69         | 1.68         | 1.80         |
 | Good channels       | 1129/1136    | 1149/1151    | 1087/1097    |
-| n_pulses used       | 450,923      | 537,562      | 343,429      |
+| n_pulses attempted  | 1,518,930    | 1,532,900    | 785,909      |
+| n_pulses used       | 459,031      | 557,735      | 345,848      |
+| Selection efficiency | 30.2%       | 36.4%        | 44.0%        |
 
-Selection efficiency is not shown in this table because it is not currently computed for the no-cut
-extraction — to obtain it, query `n_pulses_attempted` from each JSON's per-channel entries and take
-the aggregate ratio. As a rough guide, `n_pulses_used` in the no-cut extraction is approximately
-3-4× the value in the h500+t0cut extraction, consistent with the wider selection admitting a large
-low-amplitude population.
+Default-cut selection efficiency (30–44%) is somewhat lower than the h500+t0cut efficiency
+(43–46%), consistent with more pulses failing convergence when low-amplitude noise is included in
+the fit population. `n_pulses_used` in the no-cut extraction is approximately 3-4× the value in the
+h500+t0cut extraction, reflecting the wider selection admitting a large low-amplitude population.
 
 τ_f is stable across both selection methods on all three runs. The three no-cut runs agree on τ_f to
 within 2% (24.08, 24.20, 23.81 ns), essentially the same as the h500+t0cut values (24.01, 23.95,
@@ -104,6 +122,9 @@ the mixed-population median; this is a known limitation of the current per-chann
 For the deconvolver, τ_r sensitivity to selection means the physics-only extraction (h500+t0cut) is
 the correct choice — the template should describe the shape the deconvolver most needs to recover
 accurately (the high-amplitude pulses that dominate physics events), not an average over amplitudes.
+
+See Section 5 — Counter definitions in `fit_pulse_template.py` for the precise definitions of
+`n_pulses_attempted` and `n_pulses_used`.
 
 ### 2d. Background Population Template Stability
 
@@ -122,6 +143,23 @@ deconvolver design.
 | χ²/dof (median)      | 2.44         | 2.47         | 2.44         |
 | Good channels        | 192/220      | 191/222      | 245/264      |
 | n_pulses used        | 93,272       | 96,712       | 55,904       |
+| **n_pulses attempted** | 1,545,259  | 2,186,913    | 275,485      |
+| **Selection efficiency** | 6.2%     | 4.5%         | 20.7%        |
+
+Selection efficiency here is `n_pulses_used / n_pulses_attempted` — the fraction of pulses passing
+the clean-pulse gate whose LM fit also converged AND whose `fit.t0_ns` landed within the
+`--t0-max 22.0` window selecting Population B. `n_pulses_attempted` counts pulses passing the
+clean-pulse gate only (single peak, `Q_PEAK_GOOD`, above `--height-min`, in-window, not overflowed)
+— it does NOT include the fit or t₀ cut. The low efficiency (~5-20%) reflects the intrinsic
+signal-to-background ratio at the clean-gate level: roughly 5-20% of clean-gated pulses have
+`fit.t0_ns ≤ 22 ns` and are therefore in the background population, while the remaining ~80-95%
+are Population A physics pulses (t₀ ~ 26 ns) rejected by the `--t0-max` cut. The higher efficiency
+for run 026138 (20.7% vs. ~5% for the other two runs) reflects a genuinely larger fractional
+background contribution in that run — possibly from different beam or trigger conditions. (Contrast
+with the physics extraction in section 2b, where the `--max-pulses-per-channel` cap distorts the
+efficiency — see caveat there. Background extraction is not affected because channels rarely fill.)
+See Section 5 — Counter definitions in `fit_pulse_template.py` for the precise definitions of
+`n_pulses_attempted` and `n_pulses_used`.
 
 **Comparison to the physics population (reference run 025308).**
 
@@ -304,6 +342,57 @@ All under `analysis/pyscripts/`. See individual `--help` output for usage.
 | `plot_template_2d_map.py` | 2D spatial maps of τ_r, τ_f, t₀ on HyCal face. Diagnostic for finding §4b |
 | `plot_tau_vs_amp.py` | Per-pulse τ_r and τ_f vs. peak amplitude, per-material and per-channel |
 | `plot_raw_pulses_by_amp.py` | Per-channel raw waveform overlays split by amplitude bin |
+
+### Counter definitions in `fit_pulse_template.py`
+
+Two per-channel pulse counters appear throughout the JSON output and in the tables in Sections 2b,
+2c, and 2d. Their definitions are precise but easy to conflate, so recording them explicitly:
+
+**`n_pulses_attempted`.** For a given channel, this counts channel-events (i.e. one FADC channel ×
+one physics event) that pass ALL of the following, in order:
+
+1. The channel had non-zero waveform samples for this event.
+2. `WaveAnalyzer.analyze(samples)` returned **exactly one** peak (`len(peaks) == 1`).
+3. `pk.quality == 0` — no `Q_PEAK_PILED`, `Q_PEAK_DECONVOLVED`, or other quality flag set.
+4. `pk.height >= --height-min` (absolute amplitude threshold).
+5. `pk.height >= --height-rms-mult × ped_rms` (SNR threshold).
+6. `not pk.overflow`.
+7. Fit window `[pk.pos - pre_samples, pk.pos + post_samples + 1]` fits inside the sample buffer.
+8. The channel had accumulated fewer than `--max-pulses-per-channel` accepted fits at the time of
+   this attempt.
+
+Item 8 is the **per-channel cap short-circuit**. Once a channel accumulates the cap's worth of
+accepted fits (default 500), subsequent attempts on that channel are silently skipped BEFORE
+`n_pulses_attempted` is incremented. This matters for the "selection efficiency" numbers below.
+
+**`n_pulses_used`.** Subset of `n_pulses_attempted` that also passes:
+
+9. The LM fit did not return NaN/Inf parameters (`fit.ok == True`).
+10. The fitted onset `fit.t0_ns` is inside `[--t0-min, --t0-max]`.
+
+Item 9 is a lenient claim — it only requires the best parameters seen during LM iterations to be
+finite. It does NOT require the χ² to be reasonable. Pulses can produce large χ² and still be
+counted in `n_pulses_used` as long as the fit didn't NaN out. The `good_fit` per-channel flag
+applies a separate χ² threshold (`chi2_max`, default 3.0) but the pulse-level counter does not.
+
+**Selection efficiency = `n_pulses_used / n_pulses_attempted`.** By construction, this is the
+fraction of clean-gated, non-capped attempts that survive LM convergence AND the `t0_ns` window.
+It decomposes into:
+
+- LM convergence rate (typically >99% on clean pulses; failures come from pathological baselines or
+  ADC saturation not caught upstream).
+- Fraction of pulses whose fitted `t0_ns` lands inside the configured `[t0_min, t0_max]` window.
+
+The per-channel cap in item 8 distorts this ratio: when most pulses pass (as in the
+physics-population extraction with `--t0-min 25.0`), channels fill their quota rapidly and later
+attempts are dropped without incrementing `n_pulses_attempted`. The efficiency ratio reported in
+that regime is not the true fraction of clean-gated pulses — it's a mixture of the fit + t₀
+survival rate and the cap's short-circuiting effect. See caveats in Sections 2b and 2d.
+
+**For sibling scripts.** `pileup_generator.py` uses the same clean-pulse gate plus an additional
+fit-quality gate (χ²/dof threshold) and a residual hidden-pileup veto. Its accepted base events
+are therefore a stricter subset than `fit_pulse_template.py`'s `n_pulses_used`. This is intentional
+— the pile-up generator needs high-confidence single-pulse bases, not just clean-gated ones.
 
 ## 6. What Is Next
 

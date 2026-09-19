@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -83,6 +84,37 @@ AMP_BINS = [
 # don't appear in this map fall through to matplotlib's default cycle.
 TYPE_COLORS = {"PbGlass": "C0", "PbWO4": "C1",
                "LMS":     "C2", "Veto":  "C3", "Unknown": "0.5"}
+
+
+def _resolve_trigger_bits(spec: str, bits_file: Path) -> int:
+    """Resolve a comma-separated trigger spec ('SSP0,LMS' or '8,24') to a
+    bitmask (int). Empty spec returns 0. Names are looked up in
+    trigger_bits.json's 'trigger_bits' list."""
+    if not spec.strip():
+        return 0
+    # Build name -> bit lookup
+    with open(bits_file, "r", encoding="utf-8") as f:
+        bits_json = json.load(f)
+    name_to_bit = {}
+    for entry in bits_json.get("trigger_bits", []):
+        name_to_bit[entry["name"]] = entry["bit"]
+    mask = 0
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token in name_to_bit:
+            mask |= (1 << name_to_bit[token])
+        else:
+            try:
+                bit_num = int(token, 0)  # supports "8", "0x8", etc.
+                mask |= (1 << bit_num)
+            except ValueError:
+                raise SystemExit(
+                    f"[ERROR] unknown trigger name or bit: '{token}'\n"
+                    f"        valid names: {sorted(name_to_bit.keys())}\n"
+                    f"        or use bit numbers (e.g., '8', '0x10')")
+    return mask
 
 
 def _replace_nan_recursive(obj):
@@ -163,6 +195,12 @@ class ChannelStats:
     channel_id: str            # roc_<tag>_<slot>_<channel>
     module_type: str = "Unknown"   # mod.type.name from HyCalSystem; "Unknown"
                                    # for non-HyCal channels (tagger TDC, etc).
+    n_total: int = 0 # total in the evio pool
+    n_trigger: int = 0 # triggered by total sum or LMS
+    n_good: int = 0 # good pulse
+    n_after_cut: int = 0 # after pulse height
+    n_good_fit: int = 0 #good fits 
+    n_good_fit_time_cut: int = 0 #good fits after time cut
     n_attempted: int = 0
     n_used: int = 0
     tau_r:    List[float] = field(default_factory=list)
@@ -252,6 +290,10 @@ def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float
         "module_type": s.module_type,
         "n_pulses_attempted": s.n_attempted,
         "n_pulses_used":      s.n_used,
+        "n_good":             s.n_good,
+        "n_after_cut":        s.n_after_cut,
+        "n_good_fit":           s.n_good_fit,
+        "n_good_fit_time_cut":  s.n_good_fit_time_cut,
         "tau_r_ns": {"median": tr_med, "mad": tr_mad},
         "tau_f_ns": {"median": tf_med, "mad": tf_mad},
         "t0_ns":    {"median": t0_med, "mad": t0_mad},
@@ -573,7 +615,28 @@ def select_plot_targets(stats: Dict[str, ChannelStats], min_pulses: int,
 # Main
 # ---------------------------------------------------------------------------
 
-def main() -> None:
+def main() -> int:
+    # Resolve trigger bits file for help-text listing.  Same resolution order
+    # as the runtime code below.
+    _default_bits_file = None
+    if os.environ.get("PRAD2_DATABASE_DIR"):
+        _cand = Path(os.environ["PRAD2_DATABASE_DIR"]) / "trigger_bits.json"
+        if _cand.is_file():
+            _default_bits_file = _cand
+    if _default_bits_file is None:
+        _cand = Path(__file__).resolve().parents[2] / "database" / "trigger_bits.json"
+        if _cand.is_file():
+            _default_bits_file = _cand
+
+    _known_trigger_names = "(unavailable — trigger_bits.json not found)"
+    if _default_bits_file is not None:
+        try:
+            with open(_default_bits_file, "r", encoding="utf-8") as f:
+                _known_trigger_names = ", ".join(
+                    e["name"] for e in json.load(f).get("trigger_bits", []))
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser(
         description="Per-channel pulse-shape fit on FADC250 waveforms.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -651,7 +714,68 @@ def main() -> None:
                     help="DAQ config (default: installed default).")
     ap.add_argument("--hc-map-file", default="",
                     help="HyCal modules map (default: database lookup).")
+    ap.add_argument("--trigger-accept", default="",
+                    help="Comma-separated trigger names/bits to accept. "
+                         f"Known names: {_known_trigger_names}. "
+                         "Numeric bits (decimal or 0x) also accepted. "
+                         "Empty (default) = accept all events. "
+                         "See --list-triggers for full details.")
+    ap.add_argument("--trigger-reject", default="",
+                    help="Comma-separated trigger names/bits to reject "
+                         "(applied after --trigger-accept). "
+                         f"Known names: {_known_trigger_names}. "
+                         "See --list-triggers for full details.")
+    ap.add_argument("--trigger-bits-file", default="",
+                    help="Path to trigger_bits.json (default: try "
+                         "$PRAD2_DATABASE_DIR/trigger_bits.json, then "
+                         "<repo>/database/trigger_bits.json).")
+    ap.add_argument("--list-triggers", action="store_true",
+                    help="Print all known trigger names and bits from "
+                         "trigger_bits.json, then exit.")
     args = ap.parse_args()
+
+    if args.list_triggers:
+        # Resolve trigger bits file the same way we do for --trigger-accept
+        if args.trigger_bits_file:
+            bits_file = Path(args.trigger_bits_file)
+        elif os.environ.get("PRAD2_DATABASE_DIR"):
+            bits_file = Path(os.environ["PRAD2_DATABASE_DIR"]) / "trigger_bits.json"
+        else:
+            bits_file = Path(__file__).resolve().parents[2] / "database" / "trigger_bits.json"
+
+        with open(bits_file, "r", encoding="utf-8") as f:
+            bits_json = json.load(f)
+
+        print(f"Trigger bits (from {bits_file}):")
+        print(f"  {'name':10s}  {'bit':>4s}  label")
+        print(f"  {'-'*10}  {'-'*4}  {'-'*30}")
+        for entry in bits_json.get("trigger_bits", []):
+            print(f"  {entry['name']:10s}  {entry['bit']:>4d}  {entry.get('label','')}")
+
+        trigger_types = bits_json.get("trigger_type", [])
+        if trigger_types:
+            print()
+            print("Trigger event types:")
+            print(f"  {'name':16s}  {'type':>6s}  primary_bit  label")
+            print(f"  {'-'*16}  {'-'*6}  {'-'*11}  {'-'*30}")
+            for entry in trigger_types:
+                print(f"  {entry['name']:16s}  {entry['type']:>6s}  {entry.get('primary_bit',''):>11}  {entry.get('label','')}")
+        return 0
+
+    if args.trigger_bits_file:
+        bits_file = Path(args.trigger_bits_file)
+    elif os.environ.get("PRAD2_DATABASE_DIR"):
+        bits_file = Path(os.environ["PRAD2_DATABASE_DIR"]) / "trigger_bits.json"
+    else:
+        # Fall back to repo location relative to this script
+        bits_file = Path(__file__).resolve().parents[2] / "database" / "trigger_bits.json"
+
+    accept_mask = _resolve_trigger_bits(args.trigger_accept, bits_file)
+    reject_mask = _resolve_trigger_bits(args.trigger_reject, bits_file)
+
+    if accept_mask or reject_mask:
+        print(f"[setup] trigger accept mask = 0x{accept_mask:x}", flush=True)
+        print(f"[setup] trigger reject mask = 0x{reject_mask:x}", flush=True)
 
     chan_filter   = {s.strip() for s in args.channels.split(",") if s.strip()}
     extra_plot    = {s.strip() for s in args.plot_channels.split(",") if s.strip()}
@@ -713,6 +837,8 @@ def main() -> None:
     ch.set_config(p.cfg)
 
     n_phys = n_pulses_attempted = n_pulses_used = 0
+    n_events_trigger_filtered = 0
+    n_total = n_trigger = n_good = n_after_cut = n_good_fit = n_good_fit_time_cut = 0
     n_files_open = 0
     t0_wall = time.monotonic()
     progress_every = max(1, int(args.progress_every))
@@ -747,10 +873,23 @@ def main() -> None:
                     if not decoded["ok"]:
                         continue
                     n_phys += 1
+                    n_total += 1
                     if args.max_events and n_phys >= args.max_events:
                         done = True
 
                     fadc_evt = decoded["event"]
+
+                    # Trigger filter (optional; default no-op)
+                    if accept_mask or reject_mask:
+                        trigger_bits = int(fadc_evt.info.trigger_bits)
+                        if accept_mask and not (trigger_bits & accept_mask):
+                            n_events_trigger_filtered += 1
+                            continue
+                        if reject_mask and (trigger_bits & reject_mask):
+                            n_events_trigger_filtered += 1
+                            continue
+                    n_trigger += 1
+
                     for ri in range(fadc_evt.nrocs):
                         roc = fadc_evt.roc(ri)
                         if not roc.present:
@@ -768,22 +907,24 @@ def main() -> None:
 
                                 samples = np.asarray(cd.samples, dtype=np.uint16)
                                 ped, rms, peaks = p.wave_ana.analyze(samples)
-
+                                #Good pulse selection
                                 if len(peaks) != 1:
                                     continue
                                 pk = peaks[0]
                                 if pk.quality != 0:
                                     continue
+                                if pk.overflow:
+                                    continue
+                                lo, hi = pk.pos - pre, pk.pos + post + 1
+                                if lo < 0 or hi > samples.shape[0]:
+                                    continue
+                                n_good += 1
+                                #Additional cuts
                                 if pk.height < args.height_min:
                                     continue
                                 if pk.height < args.height_rms_mult * rms:
                                     continue
-                                if pk.overflow:
-                                    continue
-
-                                lo, hi = pk.pos - pre, pk.pos + post + 1
-                                if lo < 0 or hi > samples.shape[0]:
-                                    continue
+                                n_after_cut += 1   # after height
 
                                 # Hand the raw uint16 slice straight to the
                                 # C++ fitter — no float64 conversion, no
@@ -798,6 +939,8 @@ def main() -> None:
                                     stats[name] = st
                                 if st.n_used >= args.max_pulses_per_channel:
                                     continue
+                                st.n_good += 1  # per-channel clean-pulse count
+                                st.n_after_cut += 1  # per-channel: after height cuts (moved from post-fit)
 
                                 st.n_attempted += 1
                                 n_pulses_attempted += 1
@@ -812,8 +955,12 @@ def main() -> None:
                                         args.model_err_floor)
                                     if not fit.ok:
                                         continue
+                                    n_good_fit += 1
+                                    st.n_good_fit += 1
                                     if fit.t0_ns < args.t0_min or fit.t0_ns > args.t0_max:
                                         continue
+                                    n_good_fit_time_cut += 1
+                                    st.n_good_fit_time_cut += 1
                                     st.tau_r.append(fit.tau_r_ns)
                                     st.tau_f.append(fit.tau_f_ns)
                                     st.t0.append(fit.t0_ns)
@@ -827,8 +974,12 @@ def main() -> None:
                                         args.model_err_floor)
                                     if not fit.ok:
                                         continue
+                                    n_good_fit += 1
+                                    st.n_good_fit += 1
                                     if fit.t0_ns < args.t0_min or fit.t0_ns > args.t0_max:
                                         continue
+                                    n_good_fit_time_cut += 1
+                                    st.n_good_fit_time_cut += 1
                                     st.tau_r.append(fit.tau_r_ns)
                                     st.tau_f.append(fit.tau_f_ns)
                                     st.t0.append(fit.t0_ns)
@@ -836,7 +987,6 @@ def main() -> None:
                                     st.chi2.append(fit.chi2_per_dof)
                                 st.n_used += 1
                                 n_pulses_used += 1
-
                                 # Cache raw pulses + their peak amps for the
                                 # diagnostic plots (normalised stack vs
                                 # median fit).  Pedsub on the fly here so
@@ -883,6 +1033,7 @@ def main() -> None:
     elapsed = time.monotonic() - t0_wall
     print(f"[done] {n_phys} phys events  /  {n_pulses_attempted} fits attempted"
           f"  /  {n_pulses_used} converged  /  {len(stats)} channels"
+          f"  /  trigger_filtered={n_events_trigger_filtered}"
           f"  /  {elapsed:.1f}s", flush=True)
 
     # Aggregate + write JSON.
@@ -891,8 +1042,14 @@ def main() -> None:
             "inputs": list(args.evio_paths),
             "n_evio_splits": len(p.evio_files),
             "n_phys_events": n_phys,
+            "n_total_events": n_total,
+            "n_events_after_trigger": n_trigger,
             "n_pulses_attempted": n_pulses_attempted,
             "n_pulses_used": n_pulses_used,
+            "n_pulses_good": n_good,
+            "n_pulses_after_cut": n_after_cut,
+            "n_pulses_good_fit":          n_good_fit,
+            "n_pulses_good_fit_time_cut": n_good_fit_time_cut,
             "n_channels": len(stats),
             "model": args.model,
             "model_formula": (
@@ -916,6 +1073,11 @@ def main() -> None:
             "t0_min": None if args.t0_min == float("-inf") else args.t0_min,
             "t0_max": None if args.t0_max == float("inf") else args.t0_max,
             "model_err_floor": args.model_err_floor,
+            "trigger_accept_spec": args.trigger_accept or None,
+            "trigger_reject_spec": args.trigger_reject or None,
+            "trigger_accept_mask": accept_mask or None,
+            "trigger_reject_mask": reject_mask or None,
+            "n_events_trigger_filtered": n_events_trigger_filtered,
         }
     }
     summaries: List[Dict] = []
@@ -1075,6 +1237,8 @@ def main() -> None:
                                plot_dir / "summary_per_pulse.png")
         print(f"[plot] wrote {plot_dir / 'summary_per_pulse.png'}", flush=True)
 
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
