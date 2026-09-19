@@ -463,24 +463,25 @@ float PhysicsTools::GetPhiAngle(float x, float y)
 
 //for gain factor monitoring
 
-std::array<double, 3> PhysicsTools::fitPeak(TH1F *h, float expectPeak,
+std::array<double, 5> PhysicsTools::fitPeak(TH1F *h, float expectPeak, bool withError,
                                             bool useCrystalBall,
                                             float alpha, float n)
 {
     if (useCrystalBall) {
-        return fitCrystalBall(h, expectPeak, alpha, n);
+        return fitCrystalBall(h, expectPeak, alpha, n, withError);
     }
-    return fitGaus(h, expectPeak);
+    return fitGaus(h, expectPeak, withError);
 }
 
-// Fit a peak near expectPeak with a Gaussian and return {mean, sigma, chi2/ndf}.
-// Returns {0,0,0} if the histogram or fit is invalid.
-std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
+// Fit a peak near expectPeak with a Gaussian and return
+// {mean, sigma, chi2/ndf, mean_error, sigma_error}.
+// Returns all zeroes if the histogram or fit is invalid.
+std::array<double, 5> PhysicsTools::fitGaus(TH1F *h, float expectPeak, bool withError)
 {
-    if (!h || h->GetEntries() < 100) return {0., 0., 0.};
+    if (!h || h->GetEntries() < 100) return {0., 0., 0., 0., 0.};
 
     const int nBins = h->GetNbinsX();
-    if (nBins < 4) return {0., 0., 0.};
+    if (nBins < 4) return {0., 0., 0., 0., 0.};
 
     int peakBin = -1;
     double peakHeight = 0.;
@@ -508,7 +509,7 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
         peakBin = h->GetMaximumBin();
         peakHeight = h->GetBinContent(peakBin);
     }
-    if (peakHeight <= 0.) return {0., 0., 0.};
+    if (peakHeight <= 0.) return {0., 0., 0., 0., 0.};
 
     const double threshold = 0.4 * peakHeight;
     const double peak0 = h->GetBinCenter(peakBin);
@@ -530,7 +531,7 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
 
     const double lo = h->GetBinCenter(leftBin);
     const double hi = h->GetBinCenter(rightBin);
-    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
+    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0., 0., 0.};
 
     // ROOT's chi-square fit uses the histogram bin errors. Sumw2 initializes
     // Poisson statistical errors for an unweighted histogram and preserves them
@@ -539,27 +540,32 @@ std::array<double, 3> PhysicsTools::fitGaus(TH1F *h, float expectPeak)
 
     TF1 gaus("_fg_", "gaus", lo, hi);
     gaus.SetParameters(peakHeight, peak0, sigma0);
-    const int fitStatus = h->Fit(&gaus, "RQN");
-    if (fitStatus != 0) return {0., 0., 0.};
+    // Keep the fitted TF1 attached to the histogram so it is drawn with the
+    // histogram and persisted when the histogram is written to a ROOT file.
+    const int fitStatus = h->Fit(&gaus, "RQ");
+    if (fitStatus != 0) return {0., 0., 0., 0., 0.};
 
     const double mean = gaus.GetParameter(1);
     const double sigma = std::abs(gaus.GetParameter(2));
     if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
-        return {0., 0., 0.};
+        return {0., 0., 0., 0., 0.};
 
     double chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.;
-    return {mean, sigma, chi2};
+    return {mean, sigma, chi2,
+            withError ? gaus.GetParError(1) : 0.,
+            withError ? gaus.GetParError(2) : 0.};
 }
 
-// Fit a peak near expectPeak with a Crystal Ball and return {mean, sigma, chi2/ndf}.
-// Returns {0,0,0} if the histogram or fit is invalid.
-std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
-                                                  float alpha, float n)
+// Fit a peak near expectPeak with a Crystal Ball and return
+// {mean, sigma, chi2/ndf, mean_error, sigma_error}.
+// Returns all zeroes if the histogram or fit is invalid.
+std::array<double, 5> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
+                                                  float alpha, float n, bool withError)
 {
-    if (!h || h->GetEntries() < 100) return {0., 0., 0.};
+    if (!h || h->GetEntries() < 100) return {0., 0., 0., 0., 0.};
 
     const int nBins = h->GetNbinsX();
-    if (nBins < 4) return {0., 0., 0.};
+    if (nBins < 4) return {0., 0., 0., 0., 0.};
 
     int peakBin = -1;
     double peakHeight = 0.;
@@ -585,7 +591,7 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
         peakBin = h->GetMaximumBin();
         peakHeight = h->GetBinContent(peakBin);
     }
-    if (peakHeight <= 0.) return {0., 0., 0.};
+    if (peakHeight <= 0.) return {0., 0., 0., 0., 0.};
 
     const double threshold = 0.05 * peakHeight;
     const double peak0 = h->GetBinCenter(peakBin);
@@ -607,7 +613,7 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
 
     const double lo = h->GetBinCenter(leftBin);
     const double hi = h->GetBinCenter(rightBin);
-    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0.};
+    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0., 0., 0.};
 
     if (h->GetSumw2N() == 0) h->Sumw2();
 
@@ -624,16 +630,19 @@ std::array<double, 3> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     cb.SetParLimits(3, 1.0, 5.0);
     cb.SetParLimits(4, 1.01, 20.0);
 
-    const int fitStatus = h->Fit(&cb, "RQN");
-    if (fitStatus != 0) return {0., 0., 0.};
+    // Keep the fitted TF1 attached to the histogram for ROOT output and redraw.
+    const int fitStatus = h->Fit(&cb, "RQ");
+    if (fitStatus != 0) return {0., 0., 0., 0., 0.};
 
     const double mean = cb.GetParameter(1);
     const double sigma = std::abs(cb.GetParameter(2));
     if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
-        return {0., 0., 0.};
+        return {0., 0., 0., 0., 0.};
 
     const double chi2 = (cb.GetNDF() > 0) ? cb.GetChisquare() / cb.GetNDF() : 0.;
-    return {mean, sigma, chi2};
+    return {mean, sigma, chi2,
+            withError ? cb.GetParError(1) : 0.,
+            withError ? cb.GetParError(2) : 0.};
 }
 
 void PhysicsTools::ComputeModuleGains()

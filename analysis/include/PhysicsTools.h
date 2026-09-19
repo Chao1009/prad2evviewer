@@ -100,10 +100,14 @@ public:
     // Returns {peak, sigma, chi2} from Gaussian fit.
     std::array<float, 3> FitPeakResolution(int module_id) const;
     void Resolution2Database(int run_id);
-    static std::array<double, 3> fitGaus(TH1F *h, float expectPeak = 0.f);
-    static std::array<double, 3> fitCrystalBall(TH1F *h, float expectPeak = 0.f,
-                                               float alpha = 1.5f, float n = 5.0f);
-    static std::array<double, 3> fitPeak(TH1F *h, float expectPeak = 0.f,
+    static std::array<double, 5> fitGaus(TH1F *h, float expectPeak = 0.f,
+                                        bool withError = false);
+    static std::array<double, 5> fitCrystalBall(TH1F *h, float expectPeak = 0.f,
+                                               float alpha = 1.5f, float n = 5.0f,
+                                               bool withError = false);
+    // Returns {mean, sigma, chi2/ndf, mean_error, sigma_error}.
+    // The last two values are zero unless withError is true.
+    static std::array<double, 5> fitPeak(TH1F *h, float expectPeak = 0.f, bool withError = false,
                                         bool useCrystalBall = false,
                                         float alpha = 1.5f, float n = 5.0f);
 

@@ -593,7 +593,10 @@ int main(int argc, char *argv[])
                                     / gRunConfig.hycal_z) * 180.f / 3.14159265f;
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
 
-        auto [peak, sigma, chi2] = physics.fitPeak(h, expected_peak, use_crystal_ball);
+        auto fit_result = physics.fitPeak(h, expected_peak, false, use_crystal_ball);
+        float peak = static_cast<float>(fit_result[0]);
+        float sigma = static_cast<float>(fit_result[1]);
+        float chi2 = static_cast<float>(fit_result[2]);
         float expected_sigma = 0.03f*peak/std::sqrt(peak/1000.f);
         bool fit_good = (peak > 0 && sigma > 0.5f * expected_sigma && sigma < 1.5f * expected_sigma && chi2 < 2.5f);
         if (!fit_good) {
