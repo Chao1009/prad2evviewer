@@ -35,3 +35,4 @@ __pycache__/
 
 # Per-user template extraction plots (derived — regenerate from JSONs)
 analysis/pyscripts/output/template_plots_*/
+analysis/pyscripts/output/

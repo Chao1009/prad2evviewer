@@ -117,6 +117,35 @@ def _resolve_trigger_bits(spec: str, bits_file: Path) -> int:
     return mask
 
 
+def _resolve_trigger_event_types(spec: str, bits_file: Path) -> set:
+    """Resolve a comma-separated trigger event-type spec ('SSP_RawSum,LMS')
+    to a set of integer type codes. Empty spec returns empty set (= no filter).
+    Names are looked up in trigger_bits.json's 'trigger_type' list."""
+    if not spec.strip():
+        return set()
+    with open(bits_file, "r", encoding="utf-8") as f:
+        bits_json = json.load(f)
+    name_to_type = {}
+    for entry in bits_json.get("trigger_type", []):
+        name_to_type[entry["name"]] = int(entry["type"], 0)
+    result = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if token in name_to_type:
+            result.add(name_to_type[token])
+        else:
+            try:
+                result.add(int(token, 0))
+            except ValueError:
+                raise SystemExit(
+                    f"[ERROR] unknown trigger event-type name: '{token}'\n"
+                    f"        valid names: {sorted(name_to_type.keys())}\n"
+                    f"        or use hex/int codes (e.g., '0x29', '41')")
+    return result
+
+
 def _replace_nan_recursive(obj):
     """Replace any NaN/Inf floats in a nested dict/list with None.
 
@@ -616,6 +645,45 @@ def select_plot_targets(stats: Dict[str, ChannelStats], min_pulses: int,
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    # Handle --list-triggers early, before argparse validates required args.
+    if "--list-triggers" in sys.argv:
+        # Resolve trigger_bits.json path
+        bits_file_arg = None
+        for i, arg in enumerate(sys.argv):
+            if arg == "--trigger-bits-file" and i + 1 < len(sys.argv):
+                bits_file_arg = sys.argv[i + 1]
+                break
+        if bits_file_arg:
+            bits_file = Path(bits_file_arg)
+        elif os.environ.get("PRAD2_DATABASE_DIR"):
+            bits_file = Path(os.environ["PRAD2_DATABASE_DIR"]) / "trigger_bits.json"
+        else:
+            bits_file = Path(__file__).resolve().parents[2] / "database" / "trigger_bits.json"
+
+        if not bits_file.is_file():
+            print(f"[ERROR] trigger_bits.json not found at {bits_file}", file=sys.stderr)
+            return 1
+
+        with open(bits_file, "r", encoding="utf-8") as f:
+            bits_json = json.load(f)
+
+        print(f"Trigger bits (from {bits_file}):")
+        print(f"  {'name':10s}  {'bit':>4s}  label")
+        print(f"  {'-'*10}  {'-'*4}  {'-'*30}")
+        for entry in bits_json.get("trigger_bits", []):
+            print(f"  {entry['name']:10s}  {entry['bit']:>4d}  {entry.get('label', '')}")
+
+        trigger_types = bits_json.get("trigger_type", [])
+        if trigger_types:
+            print()
+            print("Trigger event types:")
+            print(f"  {'name':16s}  {'type':>6s}  primary_bit  label")
+            print(f"  {'-'*16}  {'-'*6}  {'-'*11}  {'-'*30}")
+            for entry in trigger_types:
+                print(f"  {entry['name']:16s}  {entry['type']:>6s}  "
+                      f"{entry.get('primary_bit', ''):>11}  {entry.get('label', '')}")
+        return 0
+
     # Resolve trigger bits file for help-text listing.  Same resolution order
     # as the runtime code below.
     _default_bits_file = None
@@ -637,6 +705,15 @@ def main() -> int:
         except Exception:
             pass
 
+    _known_event_type_names = "(unavailable)"
+    if _default_bits_file is not None:
+        try:
+            with open(_default_bits_file, "r", encoding="utf-8") as f:
+                _known_event_type_names = ", ".join(
+                    e["name"] for e in json.load(f).get("trigger_type", []))
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser(
         description="Per-channel pulse-shape fit on FADC250 waveforms.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -652,7 +729,7 @@ def main() -> int:
                          "files (0 = process everything).")
     ap.add_argument("--max-pulses-per-channel", type=int, default=500,
                     help="Stop fitting a channel once it has this many "
-                         "accepted pulses.")
+                         "accepted pulses (0 = unlimited, no cap).")
     ap.add_argument("--min-pulses", type=int, default=50,
                     help="Channel needs at least this many converged fits "
                          "to be marked good_fit=true (also gates summary "
@@ -732,35 +809,16 @@ def main() -> int:
     ap.add_argument("--list-triggers", action="store_true",
                     help="Print all known trigger names and bits from "
                          "trigger_bits.json, then exit.")
+    ap.add_argument("--trigger-event-type", default="",
+                    help="Comma-separated trigger event-type names to accept "
+                         "(e.g. 'SSP_RawSum,LMS'). Names are resolved from "
+                         "trigger_bits.json's trigger_type list. "
+                         f"Known names: {_known_event_type_names}. "
+                         "Filters on fadc_evt.info.trigger_type (a single "
+                         "per-event value), NOT on the trigger bitmask. "
+                         "Empty (default) = accept all event types. "
+                         "See --list-triggers for full details.")
     args = ap.parse_args()
-
-    if args.list_triggers:
-        # Resolve trigger bits file the same way we do for --trigger-accept
-        if args.trigger_bits_file:
-            bits_file = Path(args.trigger_bits_file)
-        elif os.environ.get("PRAD2_DATABASE_DIR"):
-            bits_file = Path(os.environ["PRAD2_DATABASE_DIR"]) / "trigger_bits.json"
-        else:
-            bits_file = Path(__file__).resolve().parents[2] / "database" / "trigger_bits.json"
-
-        with open(bits_file, "r", encoding="utf-8") as f:
-            bits_json = json.load(f)
-
-        print(f"Trigger bits (from {bits_file}):")
-        print(f"  {'name':10s}  {'bit':>4s}  label")
-        print(f"  {'-'*10}  {'-'*4}  {'-'*30}")
-        for entry in bits_json.get("trigger_bits", []):
-            print(f"  {entry['name']:10s}  {entry['bit']:>4d}  {entry.get('label','')}")
-
-        trigger_types = bits_json.get("trigger_type", [])
-        if trigger_types:
-            print()
-            print("Trigger event types:")
-            print(f"  {'name':16s}  {'type':>6s}  primary_bit  label")
-            print(f"  {'-'*16}  {'-'*6}  {'-'*11}  {'-'*30}")
-            for entry in trigger_types:
-                print(f"  {entry['name']:16s}  {entry['type']:>6s}  {entry.get('primary_bit',''):>11}  {entry.get('label','')}")
-        return 0
 
     if args.trigger_bits_file:
         bits_file = Path(args.trigger_bits_file)
@@ -776,6 +834,12 @@ def main() -> int:
     if accept_mask or reject_mask:
         print(f"[setup] trigger accept mask = 0x{accept_mask:x}", flush=True)
         print(f"[setup] trigger reject mask = 0x{reject_mask:x}", flush=True)
+
+    event_type_accept = _resolve_trigger_event_types(args.trigger_event_type, bits_file)
+    if event_type_accept:
+        print(f"[setup] trigger event-type accept = "
+              f"{{{', '.join(f'0x{t:02x}' for t in sorted(event_type_accept))}}} "
+              f"({args.trigger_event_type})", flush=True)
 
     chan_filter   = {s.strip() for s in args.channels.split(",") if s.strip()}
     extra_plot    = {s.strip() for s in args.plot_channels.split(",") if s.strip()}
@@ -888,6 +952,14 @@ def main() -> int:
                         if reject_mask and (trigger_bits & reject_mask):
                             n_events_trigger_filtered += 1
                             continue
+
+                    # Trigger event-type filter (optional; default no-op)
+                    if event_type_accept:
+                        evt_type = int(fadc_evt.info.trigger_type)
+                        if evt_type not in event_type_accept:
+                            n_events_trigger_filtered += 1
+                            continue
+
                     n_trigger += 1
 
                     for ri in range(fadc_evt.nrocs):
@@ -937,7 +1009,7 @@ def main() -> int:
                                     st = ChannelStats(name=name, channel_id=chan_id,
                                                       module_type=mtype)
                                     stats[name] = st
-                                if st.n_used >= args.max_pulses_per_channel:
+                                if args.max_pulses_per_channel and st.n_used >= args.max_pulses_per_channel:
                                     continue
                                 st.n_good += 1  # per-channel clean-pulse count
                                 st.n_after_cut += 1  # per-channel: after height cuts (moved from post-fit)
@@ -1077,6 +1149,8 @@ def main() -> int:
             "trigger_reject_spec": args.trigger_reject or None,
             "trigger_accept_mask": accept_mask or None,
             "trigger_reject_mask": reject_mask or None,
+            "trigger_event_type_spec": args.trigger_event_type or None,
+            "trigger_event_type_accept": sorted(event_type_accept) if event_type_accept else None,
             "n_events_trigger_filtered": n_events_trigger_filtered,
         }
     }

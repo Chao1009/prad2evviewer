@@ -20,54 +20,89 @@ two-tau template model, see [`wave_analysis.md`](wave_analysis.md).
 
 All three runs share the same beam energy of 2239.51 MeV.
 
-### 2b. PbWO4 Template Stability Across Runs
+### 2b. Trigger-Type Scan and PbWO4 Template Results
 
-| Metric               | Run 025308 | Run 025320 | Run 026138 |
-|----------------------|------------|------------|------------|
-| τ_r (ns)             | 2.24 ± 0.21 | 2.22 ± 0.20 | 2.36 ± 0.21 |
-| τ_f (ns)             | 24.01 ± 1.00 | 23.95 ± 1.02 | 23.26 ± 1.02 |
-| χ²/dof (median)      | 0.86       | 0.85       | 0.81       |
-| Good channels        | 424/425    | 458/461    | 238/238    |
-| n_pulses used        | 133,715    | 169,041    | 57,136     |
-| n_pulses attempted   | 327,406    | 401,565    | 147,960    |
-| Selection efficiency | 45.0%      | 45.8%      | 43.4%      |
+A systematic scan was performed across 3 runs × 4 trigger event types (SSP_RawSum, SSP_Cluster,
+Pulser, LMS) using `--trigger-event-type`, with cuts `--height-min 500 --model-err-floor 0.03
+--t0-min 22.0 --max-pulses-per-channel 0`. Only SSP_RawSum produces sufficient PbWO4 statistics
+for template extraction; the other trigger types yield too few PbWO4 pulses (≤ 91 events) to form
+a meaningful per-material aggregate. The full batch was run with `run_trigger_scan.sh`.
 
-Selection efficiency is `n_pulses_used / n_pulses_attempted` — the fraction of pulses passing the
-clean-pulse gate (single peak, no pile-up flag, above `--height-min`, in-window, not overflowed)
-whose LM fit also converged and landed inside the `--t0-min` window. Actual per-channel values may
-be lower for individual channels — this is the aggregate. Efficiency of the pre-fit clean-pulse gate
-itself relative to all `WaveAnalyzer`-found peaks is not computed in the current pipeline.
+**Table 1: Trigger-type overview — all 12 run × trigger combinations.**
 
-τ_r between runs 025308 and 025320 agrees to below 1% (2.24 vs. 2.22 ns), but rises to 2.36 ns on
-run 026138 — a ~5% shift. This drift is smaller than the per-pulse MAD (~0.21 ns, ~9% of the
-median), so it is not statistically significant per-pulse, but the shift is coherent across all 238
-contributing modules, pointing to a genuine detector-state change rather than statistical
-fluctuation. τ_f is stable to within ~3% across all three runs (24.01, 23.95, 23.26 ns). χ²/dof
-stays in the 0.81–0.86 range on all runs — all fits describe the data to sub-noise-floor precision.
-The good-channel fraction is essentially 100% on every run. Run 026138 contributes ~40% of the
-pulse statistics of the other runs but still yields a well-defined per-material aggregate.
+| Run    | Trigger     | n_after_cut | n_gf_time_cut | Signal rate | Notes                  |
+|--------|-------------|-------------|---------------|-------------|------------------------|
+| 025308 | SSP_RawSum  | 1,477,462   | 1,475,651     | 99.9%       | Primary physics        |
+| 025308 | SSP_Cluster | 124,846     | 3             | 0.0%        | No PbWO4 aggregate     |
+| 025308 | Pulser      | 44          | 44            | 100.0%      | No PbWO4 aggregate     |
+| 025308 | LMS         | —           | —             | —           | EMPTY (no events)      |
+| 025320 | SSP_RawSum  | 2,149,121   | 2,147,117     | 99.9%       | Primary physics        |
+| 025320 | SSP_Cluster | 156,499     | 14            | 0.0%        | No PbWO4 aggregate     |
+| 025320 | Pulser      | 84          | 84            | 100.0%      | No PbWO4 aggregate     |
+| 025320 | LMS         | —           | —             | —           | EMPTY (no events)      |
+| 026138 | SSP_RawSum  | 23,688      | 23,674        | 99.9%       | Primary physics        |
+| 026138 | SSP_Cluster | 4,509       | 91            | 2.0%        | No PbWO4 aggregate     |
+| 026138 | Pulser      | 476         | 476           | 100.0%      | No PbWO4 aggregate     |
+| 026138 | LMS         | 49,246      | 28            | 0.1%        | No PbWO4 aggregate     |
 
-**Caveat on selection efficiency.** The `n_pulses_used / n_pulses_attempted` ratio reported in the
-table is affected by the `--max-pulses-per-channel 500` cap in `fit_pulse_template.py`. This cap
-short-circuits pulse attempts once a channel has accumulated 500 accepted fits — `n_attempted` is
-not incremented for skipped pulses. Because most physics-run pulses pass the `--t0-min` cut,
-channels quickly fill this cap; the reported `n_attempted` is therefore smaller than the true count
-of clean-gated pulses. The ~45% efficiency measured here reflects a mix of the true
-fit-convergence-plus-t₀-selection rate and the artificial cap. For a genuine measurement of the
-fraction of clean-gated pulses that are Population A physics, run with `--max-pulses-per-channel`
-set effectively-infinite (e.g. 100000). The background extraction in section 2d is not affected in
-the same way, because only ~5-20% of pulses are backgrounds and channels rarely fill the cap; those
-efficiency numbers ARE meaningful signal-to-background estimates.
+Signal rate = `n_pulses_good_fit_time_cut / n_pulses_after_cut` (fraction of clean-gated,
+amplitude-cut pulses that also had a converged LM fit and `t0_ns ≥ 22 ns`). Background rate
+= `1 − signal rate`.
 
-The `Good channels` row is a channel-level metric (fraction of channels where the median χ²/dof <
-3.0 and the channel has ≥ 50 accepted pulses), not a pulse-level efficiency. Do not conflate the
-two.
+**Table 2: SSP_RawSum PbWO4 template results across all three runs.**
 
-**Per-run summary plots.**
+| Metric                        | Run 025308  | Run 025320  | Run 026138 |
+|-------------------------------|-------------|-------------|------------|
+| n_total_events                | 1,313,747   | 1,932,685   | 415,288    |
+| n_events_after_trigger        | 1,309,752   | 1,924,824   | 21,243     |
+| n_pulses_after_cut            | 1,477,462   | 2,149,121   | 23,688     |
+| n_pulses_good_fit             | 1,477,462   | 2,149,121   | 23,688     |
+| n_pulses_used (= n_gf_t0cut)  | 1,475,651   | 2,147,117   | 23,674     |
+| Fit efficiency                | 100.0%      | 100.0%      | 100.0%     |
+| Signal rate (t₀ ≥ 22 ns)      | 99.9%       | 99.9%       | 99.9%      |
+| Background rate (t₀ < 22 ns)  | 0.1%        | 0.1%        | 0.1%       |
+| τ_r (ns)                      | 2.46 ± 0.25 | 2.45 ± 0.25 | 2.81 ± 0.24 |
+| τ_f (ns)                      | 23.97 ± 1.01 | 23.87 ± 1.02 | 22.49 ± 0.76|
+| χ²/dof (median)               | 0.80        | 0.81        | 0.75       |
 
-Each per-run summary combines the per-channel-median distributions of the fit parameters (τ_r, τ_f,
-t₀, peak amplitude, χ²/dof) split by module type, along with a τ_r-vs-τ_f scatter. All three runs
-used the same `--height-min 500 --model-err-floor 0.03 --t0-min 25.0` cuts.
+Fit efficiency = `n_pulses_good_fit / n_pulses_after_cut`.
+
+**Interpretation.** SSP_RawSum dominates all three runs, accounting for >99% of triggered physics
+events in runs 025308 and 025320. Run 026138 is an X17 run where most events fire SSP_Cluster
+instead — SSP_RawSum sees only 21,243 out of 415,288 total events — yet that still produces a
+clean PbWO4 aggregate (23,688 amplitude-cut pulses). Fit efficiency is 100% across all three runs:
+the LM fitter never fails on clean, high-amplitude PbWO4 pulses with `--model-err-floor 0.03`.
+Signal rate (t₀ ≥ 22 ns) is 99.9% on every run, indicating that Population B contamination above
+the 500 ADC height cut is negligible (~0.1%). τ_r and τ_f are stable between runs 025308 and
+025320 (τ_r: 2.46 vs. 2.45 ns; τ_f: 23.97 vs. 23.87 ns) but shift on run 026138 (τ_r: 2.81 ns,
+τ_f: 22.49 ns), indicating a genuine detector-state change rather than a statistical fluctuation —
+the shift is coherent across all channels contributing to the aggregate. χ²/dof is consistently
+below 1 (0.75–0.81) on all runs, confirming that `--model-err-floor 0.03` adequately accounts for
+the parametric model's systematic residual. The `--t0-min 22.0` cut (versus the earlier
+`--t0-min 25.0` used for the summary plots below) admits slightly more events while background
+contamination remains negligible; the wider window is preferable for maximizing statistics.
+
+**SSP_Cluster.** For runs 025308 and 025320 (Carbon and ep elastic), SSP_Cluster has a near-zero
+signal rate (0.0%): almost all SSP_Cluster-triggered pulses that pass the amplitude cut have
+t₀ < 22 ns. These are accidental backgrounds, not physics — consistent with SSP_Cluster being a
+minority trigger in non-X17 runs where the few events it fires on are dominated by accidentals.
+For run 026138 (X17), SSP_Cluster contributes more events but only 2.0% pass the t₀ cut, and
+the resulting 91 pulses are too few for a per-type aggregate.
+
+**Pulser.** Pulser-triggered events have 100% signal rate (all 44–476 pulses have t₀ ≥ 22 ns).
+These are accidental physics pulses that happened to be in the readout window when the 100 Hz
+pulser fired. Their timing is indistinguishable from physics, but their count is far too small for
+template extraction.
+
+**LMS.** LMS fires no events in runs 025308 and 025320 — the laser is not used in Carbon/ep elastic
+configurations. On run 026138, LMS fires ~49K pulses above the height cut, but only 28 pass
+t₀ ≥ 22 ns. LMS-triggered readouts predominantly capture background-timed pulses on PbWO4 channels
+rather than physics-coincident ones, as expected for a laser fired asynchronously to beam events.
+
+**Per-run summary plots.** Each plot shows the per-channel-median distributions of τ_r, τ_f, t₀,
+peak amplitude, and χ²/dof split by module type, along with a τ_r-vs-τ_f scatter. These plots
+were generated with `--height-min 500 --model-err-floor 0.03 --t0-min 25.0` (the earlier timing
+cut); the trigger-scan results in Tables 1 and 2 use `--t0-min 22.0`.
 
 **Run 025308 (Carbon target).**
 
@@ -81,118 +116,47 @@ used the same `--height-min 500 --model-err-floor 0.03 --t0-min 25.0` cuts.
 
 ![Template extraction summary for run 026138](plots/template_summary_026138.png)
 
-### 2c. Sensitivity to Selection Cuts
+### 2c. Background Population Characteristics
 
-The h500+t0cut selection deliberately isolates the physics population. To characterize how much the
-fit result depends on that selection, we compare the three-run extraction with and without the cuts.
-Both extractions use `--model-err-floor 0.03`; the difference is the `--height-min 500` amplitude
-cut and the `--t0-min 25.0` timing cut in the h500+t0cut run, versus the script defaults (no
-amplitude cut, no t0 cut) in the default-cut run.
-
-**h500+t0cut (physics only).** See the table in Section 2b for the h500+t0cut numbers.
-
-**Default cut (mixed population).**
-
-| Metric              | Run 025308   | Run 025320   | Run 026138   |
-|---------------------|--------------|--------------|--------------|
-| τ_r (ns)            | 1.89 ± 0.18  | 1.93 ± 0.17  | 1.64 ± 0.17  |
-| τ_f (ns)            | 24.08 ± 1.18 | 24.20 ± 1.19 | 23.81 ± 1.14 |
-| χ²/dof (median)     | 1.69         | 1.68         | 1.80         |
-| Good channels       | 1129/1136    | 1149/1151    | 1087/1097    |
-| n_pulses attempted  | 1,518,930    | 1,532,900    | 785,909      |
-| n_pulses used       | 459,031      | 557,735      | 345,848      |
-| Selection efficiency | 30.2%       | 36.4%        | 44.0%        |
-
-Default-cut selection efficiency (30–44%) is somewhat lower than the h500+t0cut efficiency
-(43–46%), consistent with more pulses failing convergence when low-amplitude noise is included in
-the fit population. `n_pulses_used` in the no-cut extraction is approximately 3-4× the value in the
-h500+t0cut extraction, reflecting the wider selection admitting a large low-amplitude population.
-
-τ_f is stable across both selection methods on all three runs. The three no-cut runs agree on τ_f to
-within 2% (24.08, 24.20, 23.81 ns), essentially the same as the h500+t0cut values (24.01, 23.95,
-23.26 ns). This is direct evidence that τ_f is population-robust — the two-τ model recovers a
-consistent fall-time regardless of the amplitude regime. τ_r is not stable: without the cuts, the
-aggregate τ_r drops by roughly 15–30% relative to the h500+t0cut values (from 2.24/2.22/2.36 ns
-to 1.89/1.93/1.64 ns) and the run-to-run spread widens (~5% with cuts, ~15% without). The χ²/dof
-median roughly doubles from ~0.85 to ~1.70 in the no-cut extraction, consistent with fitting a
-heterogeneous mixture — spanning both Population A and Population B (§4b) — with a single-template
-model. The `n_channels_good` count (~99% of contributing channels in both extractions) does not
-distinguish the two cases, because the `good_fit` threshold (χ²/dof < 3.0) is satisfied even by
-the mixed-population median; this is a known limitation of the current per-channel quality metric.
-For the deconvolver, τ_r sensitivity to selection means the physics-only extraction (h500+t0cut) is
-the correct choice — the template should describe the shape the deconvolver most needs to recover
-accurately (the high-amplitude pulses that dominate physics events), not an average over amplitudes.
-
-See Section 5 — Counter definitions in `fit_pulse_template.py` for the precise definitions of
-`n_pulses_attempted` and `n_pulses_used`.
-
-### 2d. Background Population Template Stability
-
-Inverting the t0 cut with `--t0-max 22.0` and keeping the other cuts (`--height-min 500
---model-err-floor 0.03`) selects Population B, the beam-related background identified in Section
-4b. Extracting a template for this population characterizes its shape and tests whether the
-background is stable across runs. Both are directly relevant to a potential dual-template
+Inverting the t₀ cut with `--t0-max 22.0` and keeping `--height-min 500 --model-err-floor 0.03`
+selects Population B, the beam-related background identified in Section 4b. The background
+template is useful for characterizing Population B shape and for potential dual-template
 deconvolver design.
 
 **Table: PbWO4 background-population template across runs.**
 
-| Metric               | Run 025308   | Run 025320   | Run 026138   |
-|----------------------|--------------|--------------|--------------|
-| τ_r (ns)             | 9.12 ± 0.88  | 9.11 ± 0.91  | 9.27 ± 0.93  |
-| τ_f (ns)             | 38.62 ± 0.46 | 38.60 ± 0.44 | 38.54 ± 0.42 |
-| χ²/dof (median)      | 2.44         | 2.47         | 2.44         |
-| Good channels        | 192/220      | 191/222      | 245/264      |
-| n_pulses used        | 93,272       | 96,712       | 55,904       |
-| **n_pulses attempted** | 1,545,259  | 2,186,913    | 275,485      |
-| **Selection efficiency** | 6.2%     | 4.5%         | 20.7%        |
+| Metric              | Run 025308   | Run 025320   | Run 026138   |
+|---------------------|--------------|--------------|--------------|
+| τ_r (ns)            | 9.12 ± 0.88  | 9.11 ± 0.91  | 9.27 ± 0.93  |
+| τ_f (ns)            | 38.62 ± 0.46 | 38.60 ± 0.44 | 38.54 ± 0.42 |
+| χ²/dof (median)     | 2.44         | 2.47         | 2.44         |
 
-Selection efficiency here is `n_pulses_used / n_pulses_attempted` — the fraction of pulses passing
-the clean-pulse gate whose LM fit also converged AND whose `fit.t0_ns` landed within the
-`--t0-max 22.0` window selecting Population B. `n_pulses_attempted` counts pulses passing the
-clean-pulse gate only (single peak, `Q_PEAK_GOOD`, above `--height-min`, in-window, not overflowed)
-— it does NOT include the fit or t₀ cut. The low efficiency (~5-20%) reflects the intrinsic
-signal-to-background ratio at the clean-gate level: roughly 5-20% of clean-gated pulses have
-`fit.t0_ns ≤ 22 ns` and are therefore in the background population, while the remaining ~80-95%
-are Population A physics pulses (t₀ ~ 26 ns) rejected by the `--t0-max` cut. The higher efficiency
-for run 026138 (20.7% vs. ~5% for the other two runs) reflects a genuinely larger fractional
-background contribution in that run — possibly from different beam or trigger conditions. (Contrast
-with the physics extraction in section 2b, where the `--max-pulses-per-channel` cap distorts the
-efficiency — see caveat there. Background extraction is not affected because channels rarely fill.)
-See Section 5 — Counter definitions in `fit_pulse_template.py` for the precise definitions of
-`n_pulses_attempted` and `n_pulses_used`.
+**Comparison to physics population (reference run 025308).**
 
-**Comparison to the physics population (reference run 025308).**
+| Parameter | Physics (t₀ ≥ 22 ns) | Background (t₀ < 22 ns) | Separation            |
+|-----------|----------------------|-------------------------|-----------------------|
+| τ_r (ns)  | 2.46 ± 0.25          | 9.12 ± 0.88             | ~4× larger, ~8 MAD    |
+| τ_f (ns)  | 23.97 ± 1.01         | 38.62 ± 0.46            | ~1.6× larger, ~15 MAD |
+| χ²/dof    | 0.80                 | 2.44                    | 3× worse fit          |
 
-| Parameter   | Physics (t0 > 25) | Background (t0 < 22) | Separation           |
-|-------------|-------------------|----------------------|----------------------|
-| τ_r (ns)    | 2.24 ± 0.21       | 9.12 ± 0.88          | ~4× larger, ~8 MAD   |
-| τ_f (ns)    | 24.01 ± 1.00      | 38.62 ± 0.46         | ~1.6× larger, ~15 MAD|
-| χ²/dof      | 0.86              | 2.44                 | 3× worse fit         |
+The background template is strikingly stable across all three runs: τ_r agrees to within 2%
+(9.12, 9.11, 9.27 ns) and τ_f agrees to within 0.2% (38.62, 38.60, 38.54 ns). The background
+χ²/dof (~2.44) is consistently 3× worse than the physics fit (~0.80), expected because Population
+B is a mixture of physical origins — soft photons, beam halo, activation, secondary radiation —
+each with slightly different shapes. Despite the mediocre single-template fit quality, the
+background (τ_r, τ_f) is cleanly separated from the physics population in shape-parameter space
+(~8 MAD on τ_r, ~15 MAD on τ_f), which is directly useful for downstream shape-based background
+rejection. The stability of the background shape across runs suggests it is a persistent detector
+property rather than a per-run fluctuation. Note that τ_f is population-robust — the two-τ model
+recovers a consistent fall-time regardless of the amplitude or timing population — while τ_r is
+sensitive to population selection.
 
-The background template is strikingly stable across all three runs: τ_r agrees to within 2% (9.12,
-9.11, 9.27 ns), and τ_f agrees to within 0.2% (38.62, 38.60, 38.54 ns). This is more stable than
-the physics-population τ_r, which drifted ~5% between run 026138 and the earlier runs. The
-background χ²/dof (~2.44) is consistently 3× worse than the physics fit (~0.86); this is expected
-because Population B is a mixture of physical origins — soft photons, beam halo, activation, and
-secondary radiation — each with slightly different shapes, and a single two-τ template averages
-over them. The number of channels contributing to the background aggregate (192–245) is far smaller
-than the physics aggregate (~1150 channels), reflecting that fewer modules accumulate enough
-background pulses above the 500 ADC amplitude threshold to satisfy the `min_pulses = 50` floor;
-backgrounds concentrate at lower amplitudes overall. Despite the mediocre single-template fit
-quality, the background population's (τ_r, τ_f) is cleanly separated from the physics population
-in shape-parameter space — roughly 8 MAD on τ_r and 15 MAD on τ_f — which is directly useful for
-any downstream shape-based background rejection. For the paper, this stability suggests the
-background shape is a persistent detector property rather than a per-run fluctuation; it may enable
-a background template shipped alongside the physics template for dual-template deconvolution, but
-the mixed-population nature of Population B (indicated by χ²/dof > 2) means the single template is
-an average, not an accurate model of any single background subpopulation.
+### 2d. JSON Ready for Deconvolution
 
-### 2e. JSON Ready for Deconvolution
-
-`output/pulse_templates_025308_h500_t0cut.json` (or the equivalent per-run file) is the template
-ready for use by the C++ pile-up deconvolver. To enable it in production, set
-`database/daq_config.json`'s `fadc250_waveform.analyzer.nnls_deconv.template_file` to the deployed
-template path and set `enabled` to `true`.
+`output/trigger_scan/pulse_templates_<RUN>_SSP_RawSum_h500_t0min22.0.json` is the template ready
+for use by the C++ pile-up deconvolver. To enable it in production, set
+`database/daq_config.json`'s `fadc250_waveform.analyzer.nnls_deconv.template_file` to the
+deployed template path and set `enabled` to `true`.
 
 ## 3. Reproducing the Extraction
 
@@ -209,39 +173,52 @@ export DAQ_CONFIG=$HOME/work/PRad/prad2evviewer/database/daq_config.json
 export HC_MAP=$HOME/work/PRad/prad2evviewer/database/hycal_map.json
 ```
 
-### Extracting a Template for One Run
+### Canonical Invocation (Physics Extraction)
 
-Replace `<RUN>` with the run number (e.g. `025308`):
+Replace `<RUN>` with the run number (e.g. `025308`). This is the SSP_RawSum physics extraction
+used for all template results in Section 2b.
 
 ```bash
 python3 fit_pulse_template.py \
     ~/work/PRad/data/evio/prad_<RUN>.evio.* \
-    -o output/pulse_templates_<RUN>_h500_t0cut.json \
+    -o output/trigger_scan/pulse_templates_<RUN>_SSP_RawSum_h500_t0min22.0.json \
     --max-events 0 \
+    --max-pulses-per-channel 0 \
     --height-min 500 \
     --model-err-floor 0.03 \
-    --t0-min 25.0 \
-    --plot-dir output/template_plots_<RUN>_h500_t0cut \
-    --daq-config $DAQ_CONFIG \
-    --hc-map-file $HC_MAP
+    --t0-min 22.0 \
+    --trigger-event-type SSP_RawSum \
+    --daq-config $HOME/work/PRad/prad2evviewer/database/daq_config.json \
+    --hc-map-file $HOME/work/PRad/prad2evviewer/database/hycal_map.json
 ```
 
 | Flag | Value | Purpose |
 |---|---|---|
 | `--max-events 0` | all events | Full run statistics |
+| `--max-pulses-per-channel 0` | unlimited | No per-channel cap; all accepted fits are counted |
 | `--height-min 500` | 500 ADC | Reject low-amplitude background pulses (§4b) |
 | `--model-err-floor 0.03` | 3% | Correct χ² amplitude bias (§4a) |
-| `--t0-min 25.0` | 25 ns | Select Population A physics pulses by arrival time (§4b) |
-| `--plot-dir ...` | per-run | Enables the per-pulse `.npz` dump and diagnostic PNGs |
+| `--t0-min 22.0` | 22 ns | Select Population A physics pulses by arrival time (§4b) |
+| `--trigger-event-type SSP_RawSum` | SSP_RawSum | Restrict to SSP_RawSum-triggered events |
 | `--daq-config ...` | absolute path | DAQ channel map and analyzer config |
 | `--hc-map-file ...` | absolute path | HyCal module geometry for downstream 2D maps |
+
+### Full Trigger-Type Scan
+
+The full 3-run × 4-trigger grid is run with:
+
+```bash
+bash run_trigger_scan.sh
+```
+
+This generates one JSON per run × trigger combination under `output/trigger_scan/`.
 
 ### Generating the 2D HyCal Map
 
 ```bash
 python3 plot_template_2d_map.py \
-    output/pulse_templates_<RUN>_h500_t0cut.json \
-    --out-dir output/template_plots_<RUN>_h500_t0cut
+    output/trigger_scan/pulse_templates_<RUN>_SSP_RawSum_h500_t0min22.0.json \
+    --out-dir output/template_plots_<RUN>_SSP_RawSum_h500_t0min22.0
 ```
 
 Produces six PNG files (τ_r, τ_f, t₀ per material) showing the spatial distribution of template
@@ -254,9 +231,9 @@ python3 -c "
 import json
 
 runs = {
-    '025308': 'output/pulse_templates_025308_h500_t0cut.json',
-    '025320': 'output/pulse_templates_025320_h500_t0cut.json',
-    '026138': 'output/pulse_templates_026138_h500_t0cut.json',
+    '025308': 'output/trigger_scan/pulse_templates_025308_SSP_RawSum_h500_t0min22.0.json',
+    '025320': 'output/trigger_scan/pulse_templates_025320_SSP_RawSum_h500_t0min22.0.json',
+    '026138': 'output/trigger_scan/pulse_templates_026138_SSP_RawSum_h500_t0min22.0.json',
 }
 data = {r: json.load(open(p))['_by_type']['PbWO4'] for r, p in runs.items()}
 
@@ -316,7 +293,7 @@ not randomly scattered.
   Large τ_r, large τ_f, small t₀ — earlier arrival time, distinct pulse shape.
 
 Because Population B reaches physics-scale amplitudes, amplitude cuts alone cannot remove it. The
-distinct t₀ distribution is the discriminating observable. A per-pulse `--t0-min 25` cut cleanly
+distinct t₀ distribution is the discriminating observable. A per-pulse `--t0-min 22.0` cut cleanly
 selects Population A. The different t₀ between populations also directly motivates the
 cluster-level timing gate: Population B's systematically earlier arrival is exactly what a ΔT cut
 between cluster and seed time exploits.
@@ -337,6 +314,7 @@ All under `analysis/pyscripts/`. See individual `--help` output for usage.
 | Script | Purpose |
 |---|---|
 | `fit_pulse_template.py` | Template extraction with per-pulse `.npz` and waveform-by-amp-bin dumps |
+| `run_trigger_scan.sh` | Batch runner for the full 3-run × 4-trigger scan grid |
 | `plot_chi2_vs_amp.py` | χ²/dof vs. peak amplitude, per-material scatter + running median. Diagnostic for finding §4a (committed with `bbdc8b1`) |
 | `plot_template_by_crate.py` | Per-material params grouped by FADC crate. Diagnostic for testing electronics origin |
 | `plot_template_2d_map.py` | 2D spatial maps of τ_r, τ_f, t₀ on HyCal face. Diagnostic for finding §4b |
@@ -345,49 +323,80 @@ All under `analysis/pyscripts/`. See individual `--help` output for usage.
 
 ### Counter definitions in `fit_pulse_template.py`
 
-Two per-channel pulse counters appear throughout the JSON output and in the tables in Sections 2b,
-2c, and 2d. Their definitions are precise but easy to conflate, so recording them explicitly:
+The per-run JSON `_meta` block and per-channel records expose a chain of pulse counters in cut
+order. Their definitions are precise but easy to conflate; they are recorded explicitly below.
 
-**`n_pulses_attempted`.** For a given channel, this counts channel-events (i.e. one FADC channel ×
-one physics event) that pass ALL of the following, in order:
+#### Event-level counters
+
+**`n_total_events`.** All decoded physics events seen by the script before any filtering.
+
+**`n_events_after_trigger`.** Events that passed the trigger filter (if `--trigger-event-type` is
+set).
+
+**`n_events_trigger_filtered`.** Events rejected by the trigger filter
+(`n_total_events - n_events_after_trigger`).
+
+#### Pulse-level counters (in cut-chain order)
+
+**`n_pulses_good`** (also `n_good` in per-channel records). For a given channel, this counts
+channel-events that pass the **clean-pulse gate**, ALL of the following:
 
 1. The channel had non-zero waveform samples for this event.
 2. `WaveAnalyzer.analyze(samples)` returned **exactly one** peak (`len(peaks) == 1`).
 3. `pk.quality == 0` — no `Q_PEAK_PILED`, `Q_PEAK_DECONVOLVED`, or other quality flag set.
-4. `pk.height >= --height-min` (absolute amplitude threshold).
-5. `pk.height >= --height-rms-mult × ped_rms` (SNR threshold).
-6. `not pk.overflow`.
-7. Fit window `[pk.pos - pre_samples, pk.pos + post_samples + 1]` fits inside the sample buffer.
-8. The channel had accumulated fewer than `--max-pulses-per-channel` accepted fits at the time of
-   this attempt.
+4. `not pk.overflow`.
+5. Fit window `[pk.pos - pre_samples, pk.pos + post_samples + 1]` fits inside the sample buffer.
 
-Item 8 is the **per-channel cap short-circuit**. Once a channel accumulates the cap's worth of
-accepted fits (default 500), subsequent attempts on that channel are silently skipped BEFORE
-`n_pulses_attempted` is incremented. This matters for the "selection efficiency" numbers below.
+Note: `n_pulses_good` is NOT gated by height cuts.
 
-**`n_pulses_used`.** Subset of `n_pulses_attempted` that also passes:
+**`n_pulses_after_cut`** (also `n_after_cut` in per-channel records). Subset of `n_pulses_good`
+that also passes the **amplitude cuts**:
 
-9. The LM fit did not return NaN/Inf parameters (`fit.ok == True`).
-10. The fitted onset `fit.t0_ns` is inside `[--t0-min, --t0-max]`.
+6. `pk.height >= --height-min` (absolute amplitude threshold).
+7. `pk.height >= --height-rms-mult × ped_rms` (SNR threshold).
 
-Item 9 is a lenient claim — it only requires the best parameters seen during LM iterations to be
-finite. It does NOT require the χ² to be reasonable. Pulses can produce large χ² and still be
-counted in `n_pulses_used` as long as the fit didn't NaN out. The `good_fit` per-channel flag
+**`n_pulses_attempted`** — redundant alias for `n_pulses_after_cut`. Both are exposed in the JSON
+for backward compatibility; they are identical in value.
+
+**`n_pulses_good_fit`** (also `n_good_fit` in per-channel records). Subset of `n_pulses_after_cut`
+where the LM fit also converged:
+
+8. The LM fit did not return NaN/Inf parameters (`fit.ok == True`).
+
+Item 8 is a lenient convergence check — it only requires the best parameters seen during LM
+iterations to be finite. It does NOT require χ² to be reasonable. The `good_fit` per-channel flag
 applies a separate χ² threshold (`chi2_max`, default 3.0) but the pulse-level counter does not.
 
-**Selection efficiency = `n_pulses_used / n_pulses_attempted`.** By construction, this is the
-fraction of clean-gated, non-capped attempts that survive LM convergence AND the `t0_ns` window.
-It decomposes into:
+**`n_pulses_good_fit_time_cut`** (also `n_good_fit_time_cut` in per-channel records). Subset of
+`n_pulses_good_fit` where the fitted onset is inside the configured t₀ window:
 
-- LM convergence rate (typically >99% on clean pulses; failures come from pathological baselines or
-  ADC saturation not caught upstream).
-- Fraction of pulses whose fitted `t0_ns` lands inside the configured `[t0_min, t0_max]` window.
+9. `fit.t0_ns` is inside `[--t0-min, --t0-max]`.
 
-The per-channel cap in item 8 distorts this ratio: when most pulses pass (as in the
-physics-population extraction with `--t0-min 25.0`), channels fill their quota rapidly and later
-attempts are dropped without incrementing `n_pulses_attempted`. The efficiency ratio reported in
-that regime is not the true fraction of clean-gated pulses — it's a mixture of the fit + t₀
-survival rate and the cap's short-circuiting effect. See caveats in Sections 2b and 2d.
+**`n_pulses_used`** — redundant alias for `n_pulses_good_fit_time_cut`. Both are exposed in the
+JSON for backward compatibility; they are identical in value.
+
+#### Redundancy pairs
+
+| JSON name | Identical to |
+|---|---|
+| `n_pulses_attempted` | `n_pulses_after_cut` |
+| `n_pulses_used` | `n_pulses_good_fit_time_cut` |
+
+Both aliases are preserved in the output for backward compatibility with downstream scripts that
+reference the older names.
+
+#### Efficiency and rate definitions
+
+**Fit efficiency** = `n_pulses_good_fit / n_pulses_after_cut` — the fraction of pulses that passed
+the clean-pulse gate AND amplitude cuts AND had a converged LM fit. This is a pure LM convergence
+rate, independent of the t₀ window.
+
+**Signal rate** = `n_pulses_good_fit_time_cut / n_pulses_after_cut` — the fraction of clean-gated,
+amplitude-cut pulses that had a converged LM fit AND `t0_ns` inside the physics window
+(Population A). This combines fit convergence with population selection.
+
+**Background rate** = `1 − signal rate` — the fraction of clean-gated, amplitude-cut pulses that
+either failed the LM fit or had `t0_ns` outside the physics window (Population B + fit failures).
 
 **For sibling scripts.** `pileup_generator.py` uses the same clean-pulse gate plus an additional
 fit-quality gate (χ²/dof threshold) and a residual hidden-pileup veto. Its accepted base events
@@ -397,9 +406,10 @@ are therefore a stricter subset than `fit_pulse_template.py`'s `n_pulses_used`. 
 ## 6. What Is Next
 
 **Pile-up deconvolution.** Feed the clean per-material template into the existing C++
-`WaveAnalyzer::Deconvolve`. The `output/pulse_templates_<RUN>_h500_t0cut.json` files are ready;
-the only step required is pointing `daq_config.json` at the deployed template and enabling the
-deconvolver (see §2e).
+`WaveAnalyzer::Deconvolve`. The
+`output/trigger_scan/pulse_templates_<RUN>_SSP_RawSum_h500_t0min22.0.json` files are ready; the
+only step required is pointing `daq_config.json` at the deployed template and enabling the
+deconvolver (see §2d).
 
 **Synthetic pile-up generation and ROC characterization.** New scripts are needed to inject
 synthetic pile-up at known separations, run the deconvolver, and measure detection efficiency vs.
@@ -421,6 +431,8 @@ stability systematic.
   model used by `FitPulseShape`.
 - [`analysis/pyscripts/fit_pulse_template.py`](../../../analysis/pyscripts/fit_pulse_template.py)
   — the template extraction script.
+- [`analysis/pyscripts/run_trigger_scan.sh`](../../../analysis/pyscripts/run_trigger_scan.sh)
+  — batch runner for the trigger-type scan grid.
 - [`python/bind_det.cpp`](../../../python/bind_det.cpp) — pybind11 bindings for detector types;
   Veto fix landed in commit `e0ec70d`.
 - [`prad2dec/src/WaveAnalyzer.cpp:1241`](../../../prad2dec/src/WaveAnalyzer.cpp) — C++
