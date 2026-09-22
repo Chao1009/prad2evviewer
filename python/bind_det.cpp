@@ -712,6 +712,8 @@ static void bind_hycal(py::module_ &m)
         .def_readwrite("min_cluster_size",   &fdec::ClusterConfig::min_cluster_size)
         .def_readwrite("corner_conn",        &fdec::ClusterConfig::corner_conn)
         .def_readwrite("non_linear_corr",    &fdec::ClusterConfig::non_linear_corr)
+        .def_readwrite("energy_bias_correction",
+               &fdec::ClusterConfig::energy_bias_correction)
         .def_readwrite("leakage_correction", &fdec::ClusterConfig::leakage_correction)
         .def_readwrite("leakage_iterations", &fdec::ClusterConfig::leakage_iterations)
         .def_readwrite("least_leakage_fraction",
@@ -750,6 +752,8 @@ static void bind_hycal(py::module_ &m)
         .def_readonly("nblocks",   &fdec::ClusterHit::nblocks)
         .def_readonly("npos",      &fdec::ClusterHit::npos)
         .def_readonly("flag",      &fdec::ClusterHit::flag)
+        .def_readonly("linear_corr", &fdec::ClusterHit::linear_corr)
+        .def_readonly("bias_corr", &fdec::ClusterHit::bias_corr)
         .def("__repr__", [](const fdec::ClusterHit &c) {
             char buf[160];
             std::snprintf(buf, sizeof(buf),
@@ -1091,6 +1095,8 @@ static void bind_pipeline(py::module_ &m)
                                           p.hycal_energy_res.end());
             },
             "[A, B, C] coefficients of HyCal energy resolution.")
+            .def_readonly("hycal_energy_bias_nominal",
+                      &prad2::Pipeline::hycal_energy_bias_nominal)
         .def_readonly("gem_pos_res",        &prad2::Pipeline::gem_pos_res)
         .def_property_readonly("target_pos_res",
             [](const prad2::Pipeline &p) {
@@ -1107,6 +1113,10 @@ static void bind_pipeline(py::module_ &m)
         .def_readonly("hycal_map_path",     &prad2::Pipeline::hycal_map_path)
         .def_readonly("gem_map_path",       &prad2::Pipeline::gem_map_path)
         .def_readonly("hycal_calib_path",     &prad2::Pipeline::hycal_calib_path)
+        .def_readonly("hycal_energy_bias_ee_path",
+                  &prad2::Pipeline::hycal_energy_bias_ee_path)
+        .def_readonly("hycal_energy_bias_ep_path",
+                  &prad2::Pipeline::hycal_energy_bias_ep_path)
         .def_readonly("hycal_time_cut_path",  &prad2::Pipeline::hycal_time_cut_path)
         .def_readonly("gem_pedestal_path",    &prad2::Pipeline::gem_pedestal_path)
         .def_readonly("gem_common_mode_path", &prad2::Pipeline::gem_common_mode_path);

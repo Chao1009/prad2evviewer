@@ -653,6 +653,7 @@ inline void reset_recon_optional(prad2::ReconEventData &ev)
     ev.vtp_words.clear();
 
     std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
+    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
     std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
               std::numeric_limits<float>::quiet_NaN());
 }

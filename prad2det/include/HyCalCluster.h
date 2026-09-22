@@ -18,6 +18,7 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
+#include "HyCalEnergyBias.h"
 #include <array>
 #include <fstream>
 #include <memory>
@@ -48,6 +49,8 @@ struct ClusterConfig {
 
     // energy correction
     bool  non_linear_corr    = true;      // apply per-module energy non-linearity correction
+    bool  energy_bias_correction = false; // apply position-dependent 5x5 energy bias
+    std::shared_ptr<const HyCalEnergyBias> energy_bias;
     std::shared_ptr<const IClusterProfile> profile;
     bool  leakage_correction = false;
     int   leakage_iterations = 6;
@@ -113,6 +116,7 @@ struct ClusterHit {
     int   npos;         // number of modules used in position reconstruction
     uint32_t flag;      // cluster flags
     float linear_corr;    // linearity correction factor (E_corr / E_meas)
+    float bias_corr;      // position-dependent energy-bias correction factor
     float energy_square;  // raw module-energy sum in the 5x5 area around center
     float leakage;         // energy leakage correction (MeV)
 };

@@ -463,6 +463,7 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.nblocks   = static_cast<int>(cl.hits.size());
     result.flag      = cl.flag;
     result.linear_corr = 1.f;
+    result.bias_corr = 1.f;
     result.leakage = cl.leakage;
     result.energy_square = cl.energy_square;
 
@@ -483,7 +484,10 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
         result.npos = cl.leakage_npos;
     }
 
-    // TODO: Here goes the energy bias correction
+    if (config_.energy_bias_correction && config_.energy_bias) {
+        result.bias_corr = config_.energy_bias->correction_factor(
+            center_mod, result.x, result.y, cl.energy);
+    }
 
     // non-linear correction as the last step
     if (config_.non_linear_corr) {
@@ -493,13 +497,14 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
         const float nl2 = sys_.GetCalibNonLinearity2(center_mod.id);
         const float base_energy = sys_.GetCalibBaseEnergy(center_mod.id);
         const float delta_gev = (cl.energy - base_energy) / 1000.f;
-        result.linear_corr = 1.f / (1.f + nl1 * delta_gev
-                                          + nl2 * delta_gev * delta_gev);
-        if (cl.energy > 3800.f || result.linear_corr < 0.7f || result.linear_corr > 1.3f)
-            result.linear_corr = 1.f;
+        float non_linear_factor = 1.f / (1.f + nl1 * delta_gev
+                                               + nl2 * delta_gev * delta_gev);
+        if (cl.energy > 3800.f || non_linear_factor < 0.7f || non_linear_factor > 1.3f)
+            non_linear_factor = 1.f;
+        result.linear_corr *= non_linear_factor;
     }
 
-    result.energy = cl.energy * result.linear_corr;
+    result.energy = cl.energy * result.bias_corr * result.linear_corr;
 
     return result;
 }

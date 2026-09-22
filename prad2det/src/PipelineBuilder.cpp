@@ -105,6 +105,9 @@ void apply_hycal_cluster_overrides(const json &j, fdec::ClusterConfig &cfg)
     if (j.contains("log_weight_thres"))   cfg.log_weight_thres   = j["log_weight_thres"];
     if (j.contains("seed_time_window"))   cfg.seed_time_window   = j["seed_time_window"];
     if (j.contains("non_linear_corr"))    cfg.non_linear_corr    = j["non_linear_corr"];
+    if (j.contains("energy_bias_correction"))
+        cfg.energy_bias_correction = read_json_bool(
+            j, "energy_bias_correction", cfg.energy_bias_correction);
     if (j.contains("leakage_correction")) cfg.leakage_correction = j["leakage_correction"];
     if (j.contains("leakage_iterations")) cfg.leakage_iterations = j["leakage_iterations"];
     if (j.contains("least_leakage_fraction"))
@@ -486,6 +489,36 @@ Pipeline PipelineBuilder::build()
     if (recon.contains("hycal") && recon["hycal"].is_object())
         apply_hycal_cluster_overrides(recon["hycal"], out.hycal_cluster_cfg);
     out.hycal_cluster_cfg.profile = out.hycal_profile;
+
+    if (out.hycal_cluster_cfg.energy_bias_correction) {
+        if (out.run_cfg.Ebeam > 0.f) {
+            const auto set = fdec::SelectHyCalEnergyBiasSet(out.run_cfg.Ebeam);
+            const std::string base = std::string("energy_bias/") + set.file_prefix;
+            out.hycal_energy_bias_nominal = set.nominal_mev;
+            out.hycal_energy_bias_ee_path = resolve(base + "_ee.json");
+            out.hycal_energy_bias_ep_path = resolve(base + "_ep.json");
+            out.hycal_energy_bias = fdec::LoadHyCalEnergyBias(
+                out.hycal_energy_bias_ee_path,
+                out.hycal_energy_bias_ep_path,
+                out.hycal, out.run_cfg.Ebeam);
+            out.hycal_cluster_cfg.energy_bias = out.hycal_energy_bias;
+
+            std::ostringstream oss;
+            oss << "[setup] HC E bias : beam=" << out.run_cfg.Ebeam
+                << " MeV  set=" << set.nominal_mev
+                << " MeV  ee_cells=" << out.hycal_energy_bias->ee_cells_loaded
+                << "  ep_cells=" << out.hycal_energy_bias->ep_cells_loaded;
+            LOG(oss.str());
+            if (out.hycal_energy_bias->ee_cells_loaded == 0 ||
+                out.hycal_energy_bias->ep_cells_loaded == 0) {
+                LOG("[WARN] HC E bias : one or both parameter files loaded no cells; zero-bias fallback is active.");
+            }
+        } else {
+            LOG("[WARN] HC E bias : enabled but beam energy is invalid; correction is inactive.");
+        }
+    } else {
+        LOG("[setup] HC E bias : disabled");
+    }
     {
         std::ostringstream oss;
         oss << "[setup] HC cluster : min_mod_E=" << out.hycal_cluster_cfg.min_module_energy
@@ -493,6 +526,7 @@ Pipeline PipelineBuilder::build()
             << "  min_cl_E=" << out.hycal_cluster_cfg.min_cluster_energy
             << "  split_iter=" << out.hycal_cluster_cfg.split_iter
             << "  nonlin=" << (out.hycal_cluster_cfg.non_linear_corr ? "on" : "off")
+            << "  E_bias=" << (out.hycal_cluster_cfg.energy_bias_correction ? "on" : "off")
             << "  seed_t_win=" << out.hycal_cluster_cfg.seed_time_window << "ns"
             << (out.hycal_cluster_cfg.seed_time_window > 0.f ? " (gated)" : " (off)");
         LOG(oss.str());

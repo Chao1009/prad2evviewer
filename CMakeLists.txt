@@ -21,6 +21,7 @@ include(PradHelpers)        # prad_option, prad_optional_probe, add_prad_tool
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+enable_testing()
 
 # -fPIC for all static libs so they can be pulled into shared objects
 # (ACLiC-compiled ROOT macros and the pybind11 module).

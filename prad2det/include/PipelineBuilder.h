@@ -33,6 +33,7 @@
 #include "GemSystem.h"
 #include "HyCalCluster.h"    // fdec::ClusterConfig (HyCal clusterer knobs)
 #include "HyCalDeadModules.h" // prad2::ApplyHyCalDeadModules (applies layout flags)
+#include "HyCalEnergyBias.h" // fdec::HyCalEnergyBias (position-dependent energy correction)
 #include "HyCalSystem.h"
 #include "HyCalTimeCalib.h"  // prad2::LoadHyCalTimeCalib (applies mod.time_offset)
 #include "HyCalTimeCuts.h"   // prad2::HyCalTimeCuts (per-module time window)
@@ -72,7 +73,9 @@ struct Pipeline {
     // already installed inside `gem` via SetReconConfigs.
     fdec::ClusterConfig                hycal_cluster_cfg;
     std::shared_ptr<const fdec::IClusterProfile> hycal_profile;
+    std::shared_ptr<const fdec::HyCalEnergyBias> hycal_energy_bias;
     std::array<float, 3>               hycal_energy_res = {3.3f, 0.f, 0.f};
+    float                              hycal_energy_bias_nominal = 0.f;
 
     // Per-module HyCal peak-time windows.  Always sized to hycal.module_count()
     // when build() succeeds (uniform default when no per-module file).  Use
@@ -108,6 +111,8 @@ struct Pipeline {
     std::string                        hycal_map_path;
     std::string                        gem_map_path;
     std::string                        hycal_calib_path;
+    std::string                        hycal_energy_bias_ee_path;
+    std::string                        hycal_energy_bias_ep_path;
     std::string                        hycal_time_calib_path;   // optional per-module raw-time offset file
     std::string                        hycal_time_cut_path;     // optional per-module window file
     std::string                        hycal_rf_offset_path;    // optional per-module RF offset file

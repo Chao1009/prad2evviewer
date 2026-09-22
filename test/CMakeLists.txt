@@ -25,6 +25,9 @@ endforeach()
 add_prad_tool(ts_dump   SRC dev/ts_dump.cpp   LINKS nlohmann_json::nlohmann_json)
 add_prad_tool(livetime  SRC dev/livetime.cpp  LINKS nlohmann_json::nlohmann_json)
 add_prad_tool(dsc_scan  SRC dev/dsc_scan.cpp  LINKS nlohmann_json::nlohmann_json)
+add_prad_tool(hycal_energy_bias_test SRC dev/hycal_energy_bias_test.cpp
+    LINKS prad2det nlohmann_json::nlohmann_json)
+add_test(NAME prad2det.hycal_energy_bias COMMAND hycal_energy_bias_test)
 
 # ET-only dev tools (compiled only when WITH_ET is on in prad2dec).
 #   evc_scan  — smoketest reader (evio file or ET ring).
