@@ -527,12 +527,35 @@ All knobs live in `fdec::ClusterConfig`. Defaults match
 | `log_weight_thres` | 3.6 | — | $T$ in $w = \max(0,\; T + \ln(E_h / E_{\mathrm{tot}}))$. |
 | `seed_time_window` | $-1$ | ns | $W$ for the multi-pulse coincidence gate; $\le 0$ disables. |
 | `non_linear_corr`   | true | — | Apply per-module energy non-linearity correction. |
+| `energy_bias_correction` | false | — | Apply the position-dependent 5x5 PbWO4 energy-bias correction. |
 
 `PipelineBuilder` reads the JSON `recon.hycal` block and applies
 overrides for any of the above. To enable the timing-coincidence
 extension on a per-run basis, set
 `recon.hycal.seed_time_window` to a positive value chosen from the
 study tool output.
+
+When `energy_bias_correction` is enabled, `PipelineBuilder` selects the
+nearest 0.7, 2.2, or 3.5 GeV parameter set from `database/energy_bias/`
+and loads both its `_ee.json` and `_ep.json` files. A cluster is classified
+as ep only when
+
+$$
+E_{\mathrm{cluster}} > E_{\mathrm{beam}} -
+4(0.03)\frac{E_{\mathrm{beam}}}{\sqrt{E_{\mathrm{beam}}[\mathrm{GeV}]}}.
+$$
+
+The selected JSON stores
+$b = E_{\mathrm{rec}}/E_{\mathrm{expected}} - 1$ for each `Wn/y#/x#`
+cell, so the applied factor is $1/(1+b)$. Columns increase with local
+$x$, rows increase with local $y$, and coordinates outside the seed module
+are clamped to the nearest edge cell. PbGlass modules and missing or invalid
+entries use zero bias. The lookup uses the final reconstructed position after
+optional leakage-position correction, then the result is composed with the
+existing non-linearity correction. `ClusterHit::bias_corr` contains only the
+position-dependent factor, while `ClusterHit::linear_corr` contains only the
+non-linearity factor. The final energy is
+$E = E_{\mathrm{cluster}} C_{\mathrm{bias}} C_{\mathrm{linear}}$.
 
 ## Output — `ClusterHit`
 
@@ -547,7 +570,8 @@ study tool output.
 | `nblocks` | `int` | Modules contributing to this cluster (post-split) |
 | `npos` | `int` | Modules used in the log-weighted position ($\le 9$) |
 | `flag` | `uint32_t` | Bitmask of layout + algorithm flags |
-| `linear_corr` | `float` | Linear energy correction applied to the cluster energy. |
+| `linear_corr` | `float` | Per-module non-linearity correction factor. |
+| `bias_corr` | `float` | Position-dependent 5x5 energy-bias correction factor. |
 
 Useful flag bits (defined in `HyCalSystem.h`):
 

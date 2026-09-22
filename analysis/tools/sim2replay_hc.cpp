@@ -324,6 +324,7 @@ void clearReconEvent(prad2::ReconEventData &ev)
 {
     ev = prad2::ReconEventData{};
     std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
+    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
     std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
               std::numeric_limits<float>::quiet_NaN());
 }
@@ -681,6 +682,7 @@ int main(int argc, char *argv[])
             ev->cl_energy[i] = smearHyCalClusterEnergy(hit.energy,
                                                        smear_rng);
             ev->cl_linear_corr[i] = hit.linear_corr;
+            ev->cl_bias_corr[i] = hit.bias_corr;
             ev->cl_time[i] = hit.time;
             ev->cl_nblocks[i] = static_cast<uint8_t>(
                 std::min(hit.nblocks, 255));

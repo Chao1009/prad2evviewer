@@ -18,6 +18,8 @@
         "min_cluster_size":   1,
         "corner_conn":        false,
         "non_linear_corr":    true,
+        "// Position-dependent 5x5 energy-bias correction. PipelineBuilder selects the nearest 0.7/2.2/3.5 GeV ee+ep tables.": "",
+        "energy_bias_correction": false,
         "leakage_correction": false,
         "leakage_iterations": 6,
         "least_leakage_fraction": 0.01,

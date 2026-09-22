@@ -120,6 +120,7 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 | `least_split`       | 0.01 | minimum split fraction |
 | `log_weight_thres`  | 3.6 | W = max(0, thres + ln(E_i / E_tot)) |
 | `non_linear_corr`   | true | apply per-module energy non-linearity correction |
+| `energy_bias_correction` | false | apply the beam- and position-dependent PbWO4 5x5 correction |
 
 ### Per-event types
 
@@ -127,8 +128,10 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 
 `ModuleCluster { center, hits, energy, flag }` with `add_hit(h)`.
 
-`ClusterHit { center_id, x, y, energy, time, nblocks, npos, flag }` —
-reconstructed cluster output.
+`ClusterHit { center_id, x, y, energy, time, nblocks, npos, flag,
+linear_corr, bias_corr }` — reconstructed cluster output. `linear_corr`
+contains only the non-linearity factor and `bias_corr` contains only the
+position-dependent energy-bias factor.
 
 `shower_depth(int center_id, float energy_mev)` — shower-max depth (mm)
 discriminating PWO4 vs PbGlass via `PWO_ID0`.
@@ -360,13 +363,15 @@ server, Python bindings) share the same wiring.
 | `hycal` | initialized + calibrated `fdec::HyCalSystem` |
 | `gem`   | initialized GEM with pedestals / CM / per-detector configs installed |
 | `hycal_cluster_cfg` | `fdec::ClusterConfig` (caller wires into `HyCalCluster::SetConfig`) |
+| `hycal_energy_bias` | shared ee/ep 5x5 bias tables loaded when the correction is enabled |
+| `hycal_energy_bias_nominal` | selected nominal parameter energy in MeV (700, 2200, or 3500) |
 | `hycal_transform`, `gem_transforms[4]` | poses already `set()`, matrices cached |
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |
 | `gem_pos_res` | per-detector σ (mm) |
 | `target_pos_res[3]` | (σx, σy, σz) at target |
 | `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (`1` = legacy `PostMatch` (closest to hycal cluster), other = `PostMatch_upgrade` (optimized matching algorithm, minimizes deltaR between 2 GEM hits)) |
 | `gem_crate_remap` | derived from `daq_cfg.roc_tags[type=="gem"]` |
-| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
+| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `hycal_energy_bias_ee_path`, `hycal_energy_bias_ep_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
 
 Move-only — `HyCalSystem` and `GemSystem` hold large internal buffers.
 
