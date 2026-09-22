@@ -466,6 +466,26 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.leakage = cl.leakage;
     result.energy_square = cl.energy_square;
 
+    // get weighted position
+    if (wtot > 0.f) {
+        result.x = center_mod.x + (wx / wtot) * center_mod.size_x;
+        result.y = center_mod.y + (wy / wtot) * center_mod.size_y;
+    } else {
+        result.x = center_mod.x;
+        result.y = center_mod.y;
+    }
+    result.npos = npos;
+
+    // if available, update the weighted position with leakage correction
+    if (cl.has_leakage_position) {
+        result.x = cl.leakage_x;
+        result.y = cl.leakage_y;
+        result.npos = cl.leakage_npos;
+    }
+
+    // TODO: Here goes the energy bias correction
+
+    // non-linear correction as the last step
     if (config_.non_linear_corr) {
         // 1/linear_corr = E_rec/E_exp
         // = 1 + nl1*(E_rec-E_base)/1000 + nl2*((E_rec-E_base)/1000)^2
@@ -480,21 +500,6 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     }
 
     result.energy = cl.energy * result.linear_corr;
-
-    if (wtot > 0.f) {
-        result.x = center_mod.x + (wx / wtot) * center_mod.size_x;
-        result.y = center_mod.y + (wy / wtot) * center_mod.size_y;
-    } else {
-        result.x = center_mod.x;
-        result.y = center_mod.y;
-    }
-    result.npos = npos;
-
-    if (cl.has_leakage_position) {
-        result.x = cl.leakage_x;
-        result.y = cl.leakage_y;
-        result.npos = cl.leakage_npos;
-    }
 
     return result;
 }
