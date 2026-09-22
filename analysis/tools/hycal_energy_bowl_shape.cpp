@@ -5,15 +5,15 @@
 // module and compare its fitted peak with the expected energy. Each module is divided into a grid,
 // First try to a grid of 5 by 5, the map is below, could be saved into a 2D array of 1D hist
 // with one reconstructed-energy histogram for each cell in the 5x5 grid.
-// The hists would be created for each cell in the 5x5 grid
-// for example hist[5][5], the first index is the row and the second index is the column.
+// The histograms use h1_energy_grid[module][column][row]. Columns increase
+// with the local HyCal X coordinate, and rows increase with local HyCal Y.
 // column   0   1   2   3   4
-// row     +---+---+---+---+---+     beam top  ^
-//  0      |   |   |   |   |   |               |
-//  1      |   |   |   |   |   |
-//  2      |   |   |   |   |   |     beam right ->
+// row     +---+---+---+---+---+     beam top (+Y) ^
+//  4      |   |   |   |   |   |                   |
 //  3      |   |   |   |   |   |
-//  4      |   |   |   |   |   |
+//  2      |   |   |   |   |   |     beam right (+X) ->
+//  1      |   |   |   |   |   |
+//  0      |   |   |   |   |   |
 //         +---+---+---+---+---+
 
 #include "PhysicsTools.h"
@@ -44,8 +44,12 @@
 #include <TClass.h>
 #include <TLorentzVector.h>
 
+#include <nlohmann/json.hpp>
+
 #include <iostream>
 #include <array>
+#include <fstream>
+#include <iomanip>
 #include <string>
 #include <vector>
 #include <cmath>
@@ -81,50 +85,58 @@ const Double_t binEdge[Nbins+1] = {
     1.338, 1.417, 1.514, 1.634, 1.787, 2.000, 2.213, 2.492, 2.792, 3.092,
     3.392, 3.692, 3.992, 4.292
 };
-const int energy_bins = 500; const double energy_min = 0., energy_max = 5000.;
+const int energy_bins = 350; const double energy_min = 500., energy_max = 4000.;
 const int grids = 5;
+
+// Modules map that want to draw
+// W456 W457 W458 W459 W460 W461 W462 W463
+// W490 W491 W492 W493 W494 W495 W496 W497
+// W524 W525                     W530 W531
+// W558 W559                     W564 W565
+// W592 W593                     W598 W599
+// W626 W627                     W632 W633
+// W660 W661 W662 W663 W664 W665 W666 W667
+// W694 W695 W696 W697 W698 W699 W700 W701
+const std::array<int, 48> module_numbers = {
+    456, 457, 458, 459, 460, 461, 462, 463,
+    490, 491, 492, 493, 494, 495, 496, 497,
+    524, 525, 530, 531,
+    558, 559, 564, 565,
+    592, 593, 598, 599,
+    626, 627, 632, 633,
+    660, 661, 662, 663, 664, 665, 666, 667,
+    694, 695, 696, 697, 698, 699, 700, 701
+};
+const std::array<int, 48> module_canvas_pads = {
+     1,  2,  3,  4,  5,  6,  7,  8,
+     9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 23, 24,
+    25, 26, 31, 32,
+    33, 34, 39, 40,
+    41, 42, 47, 48,
+    49, 50, 51, 52, 53, 54, 55, 56,
+    57, 58, 59, 60, 61, 62, 63, 64
+};
+const int module_count = module_numbers.size();
 
 struct HistResult {
     std::unique_ptr<TH2F> h2_hit_module_hycal;
     std::unique_ptr<TH2F> h2_hit_module_gem;
-    std::unique_ptr<TH1F> h1_energy_grid_W521[grids][grids];
-    std::unique_ptr<TH1F> h1_energy_grid_W522[grids][grids];
-    std::unique_ptr<TH1F> h1_energy_grid_W523[grids][grids];
-    std::unique_ptr<TH1F> h1_energy_grid_W633[grids][grids];
-    std::unique_ptr<TH1F> h1_energy_grid_W634[grids][grids];
-    std::unique_ptr<TH1F> h1_energy_grid_W635[grids][grids];
-    std::vector<std::unique_ptr<TH1F>> h1_energy_grid[grids][grids];
+    std::unique_ptr<TH1F> h1_energy_grid[module_count][grids][grids];
+    std::unique_ptr<TH1F> h1_energy_grid_allModule[1156][grids][grids];
     long long events_processed = 0;
+};
+
+struct SharedFillLocks {
+    std::array<std::mutex, 1156> module;
+    std::mutex hit_maps;
+    std::atomic<long long> events_processed{0};
 };
 
 static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix);
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
                             const std::string &db_dir, long long max_events,
-                            HistResult *result);
-
-static void mergeHistResult(HistResult &destination, const HistResult &source)
-{
-    destination.h2_hit_module_hycal->Add(source.h2_hit_module_hycal.get());
-    destination.h2_hit_module_gem->Add(source.h2_hit_module_gem.get());
-    for (int i = 0; i < grids; ++i) {
-        for (int j = 0; j < grids; ++j) {
-            destination.h1_energy_grid_W521[i][j]->Add(source.h1_energy_grid_W521[i][j].get());
-            destination.h1_energy_grid_W522[i][j]->Add(source.h1_energy_grid_W522[i][j].get());
-            destination.h1_energy_grid_W523[i][j]->Add(source.h1_energy_grid_W523[i][j].get());
-            destination.h1_energy_grid_W633[i][j]->Add(source.h1_energy_grid_W633[i][j].get());
-            destination.h1_energy_grid_W634[i][j]->Add(source.h1_energy_grid_W634[i][j].get());
-            destination.h1_energy_grid_W635[i][j]->Add(source.h1_energy_grid_W635[i][j].get());
-        }
-    }
-    for (int m = 0; m < 1156; ++m) {
-        for (int i = 0; i < grids; ++i) {
-            for (int j = 0; j < grids; ++j) {
-                destination.h1_energy_grid[m][i][j]->Add(source.h1_energy_grid[m][i][j].get());
-            }
-        }   
-    }
-    destination.events_processed += source.events_processed;
-}
+                            HistResult *result, SharedFillLocks *fill_locks);
 
 static std::vector<std::string> collectRootFiles(const std::string &path);
 
@@ -143,6 +155,14 @@ static std::string outputFileName(const std::string &output_name, bool corr = fa
     const fs::path output_path(output_name);
     const std::string file_name = output_path.filename().string()
         + (corr ? ".corr" : "") + ".root";
+    return (output_path.parent_path() / file_name).string();
+}
+
+static std::string outputJsonFileName(const std::string &output_name, bool corr = false)
+{
+    const fs::path output_path(output_name);
+    const std::string file_name = output_path.filename().string()
+        + (corr ? ".corr" : "") + ".json";
     return (output_path.parent_path() / file_name).string();
 }
 
@@ -169,7 +189,7 @@ static std::vector<std::string> collectRootFiles(const std::string &path)
 bool inHyCal(float xmm, float ymm) {
     const float module = 20.75; // mm
     return (fabs(xmm) > module * 2.0 || fabs(ymm) > module * 2.0)
-        && (fabs(xmm) < module * 15. && fabs(ymm) < module * 15.);
+        && (fabs(xmm) < module * 16. && fabs(ymm) < module * 16.);
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -252,6 +272,7 @@ int main(int argc, char *argv[])
     }
 
     auto merged = makeHistResult("");
+    SharedFillLocks fill_locks;
     const int threads_count = std::max(1, std::min(num_threads,
         static_cast<int>(root_files.size())));
     const int rounds = (static_cast<int>(root_files.size()) + threads_count - 1)
@@ -264,17 +285,14 @@ int main(int argc, char *argv[])
         const int first = round * threads_count;
         const int last = std::min(first + threads_count,
                                   static_cast<int>(root_files.size()));
-        std::vector<std::unique_ptr<HistResult>> results(last - first);
         std::vector<std::thread> workers;
         workers.reserve(last - first);
 
         for (int file_index = first; file_index < last; ++file_index) {
             workers.emplace_back([&, file_index, first]() {
-                auto result = makeHistResult(Form("worker%d", file_index - first));
                 const long long limit = max_events >= 0 ? file_limits[file_index] : -1;
                 const bool ok = processRootFile(root_files[file_index], gRunConfig,
-                                                db_dir, limit, result.get());
-                results[file_index - first] = std::move(result);
+                                                db_dir, limit, merged.get(), &fill_locks);
                 std::lock_guard<std::mutex> lock(io_mutex);
                 std::cout << "[worker " << (file_index - first) << "] file "
                           << file_index << " / " << (root_files.size() - 1)
@@ -283,213 +301,140 @@ int main(int argc, char *argv[])
             });
         }
         for (auto &worker : workers) worker.join();
-        for (const auto &result : results) {
-            if (result) mergeHistResult(*merged, *result);
-        }
     }
+    merged->events_processed = fill_locks.events_processed.load();
 
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
     analysis::PhysicsTools physics(hycal);
 
-    // Fit or get the mean energy for each grid cell, fill the bowl shape histograms
-    TH2F *h2_bowl_shape_W521 = new TH2F("h2_bowl_shape_W521", "Bowl Shape W521;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
-    TH2F *h2_bowl_shape_W522 = new TH2F("h2_bowl_shape_W522", "Bowl Shape W522;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
-    TH2F *h2_bowl_shape_W523 = new TH2F("h2_bowl_shape_W523", "Bowl Shape W523;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
-    TH2F *h2_bowl_shape_W633 = new TH2F("h2_bowl_shape_W633", "Bowl Shape W633;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
-    TH2F *h2_bowl_shape_W634 = new TH2F("h2_bowl_shape_W634", "Bowl Shape W634;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
-    TH2F *h2_bowl_shape_W635 = new TH2F("h2_bowl_shape_W635", "Bowl Shape W635;X;Y;E_{recon}/E_{expect}", grids, 0, grids, grids, 0, grids);
+    std::array<std::unique_ptr<TH2F>, module_count> bowl_shapes;
+    std::array<double, module_count> expected_energies{};
+    for (int m = 0; m < module_count; ++m) {
+        const int module_number = module_numbers[m];
+        bowl_shapes[m] = std::make_unique<TH2F>(
+            Form("h2_bowl_shape_W%d", module_number),
+            Form("Bowl Shape W%d;X;Y;E_{recon}/E_{expect}", module_number),
+            grids, 0, grids, grids, 0, grids);
+        const auto *module = hycal.module_by_id(1000 + module_number);
+        if (!module) {
+            std::cerr << "Cannot find HyCal module W" << module_number << "\n";
+            return 1;
+        }
+        const double angle = std::atan2(
+            std::sqrt(module->x * module->x + module->y * module->y),
+            gRunConfig.hycal_z);
+        expected_energies[m] = analysis::PhysicsTools::ExpectedEnergy(
+            angle, gRunConfig.Ebeam, "ep");
 
-    double E_mean_W521[grids][grids], E_mean_W522[grids][grids], E_mean_W523[grids][grids];
-    double E_mean_W633[grids][grids], E_mean_W634[grids][grids], E_mean_W635[grids][grids];
-    memset(E_mean_W521, 0, sizeof(E_mean_W521));
-    memset(E_mean_W522, 0, sizeof(E_mean_W522));
-    memset(E_mean_W523, 0, sizeof(E_mean_W523));
-    memset(E_mean_W633, 0, sizeof(E_mean_W633));
-    memset(E_mean_W634, 0, sizeof(E_mean_W634));
-    memset(E_mean_W635, 0, sizeof(E_mean_W635));
-    const auto &mod_W521 = hycal.module_by_id(1521);
-    double angle_W521 = std::atan2(std::sqrt(mod_W521->x * mod_W521->x + mod_W521->y * mod_W521->y), gRunConfig.hycal_z);
-    double expected_energy_W521 = analysis::PhysicsTools::ExpectedEnergy(angle_W521, gRunConfig.Ebeam, "ep");
-    const auto &mod_W522 = hycal.module_by_id(1522);
-    double angle_W522 = std::atan2(std::sqrt(mod_W522->x * mod_W522->x + mod_W522->y * mod_W522->y), gRunConfig.hycal_z);
-    double expected_energy_W522 = analysis::PhysicsTools::ExpectedEnergy(angle_W522, gRunConfig.Ebeam, "ep");
-    const auto &mod_W523 = hycal.module_by_id(1523);
-    double angle_W523 = std::atan2(std::sqrt(mod_W523->x * mod_W523->x + mod_W523->y * mod_W523->y), gRunConfig.hycal_z);
-    double expected_energy_W523 = analysis::PhysicsTools::ExpectedEnergy(angle_W523, gRunConfig.Ebeam, "ep");
-    const auto &mod_W633 = hycal.module_by_id(1633);
-    double angle_W633 = std::atan2(std::sqrt(mod_W633->x * mod_W633->x + mod_W633->y * mod_W633->y), gRunConfig.hycal_z);
-    double expected_energy_W633 = analysis::PhysicsTools::ExpectedEnergy(angle_W633, gRunConfig.Ebeam, "ep");
-    const auto &mod_W634 = hycal.module_by_id(1634);
-    double angle_W634 = std::atan2(std::sqrt(mod_W634->x * mod_W634->x + mod_W634->y * mod_W634->y), gRunConfig.hycal_z);
-    double expected_energy_W634 = analysis::PhysicsTools::ExpectedEnergy(angle_W634, gRunConfig.Ebeam, "ep");
-    const auto &mod_W635 = hycal.module_by_id(1635);
-    double angle_W635 = std::atan2(std::sqrt(mod_W635->x * mod_W635->x + mod_W635->y * mod_W635->y), gRunConfig.hycal_z);
-    double expected_energy_W635 = analysis::PhysicsTools::ExpectedEnergy(angle_W635, gRunConfig.Ebeam, "ep");
-    for (int i = 0; i < grids; ++i) {
-        for (int j = 0; j < grids; ++j) {
-            const auto fit_W521 = physics.fitPeak(merged->h1_energy_grid_W521[i][j].get(), static_cast<float>(expected_energy_W521), true);
-            if (fit_W521[0] != 0) E_mean_W521[i][j] = fit_W521[0]/expected_energy_W521;
-            else E_mean_W521[i][j] = merged->h1_energy_grid_W521[i][j]->GetMean()/expected_energy_W521;
-            const auto fit_W522 = physics.fitPeak(merged->h1_energy_grid_W522[i][j].get(), static_cast<float>(expected_energy_W522), true);
-            if (fit_W522[0] != 0) E_mean_W522[i][j] = fit_W522[0]/expected_energy_W522;
-            else E_mean_W522[i][j] = merged->h1_energy_grid_W522[i][j]->GetMean()/expected_energy_W522;
-            const auto fit_W523 = physics.fitPeak(merged->h1_energy_grid_W523[i][j].get(), static_cast<float>(expected_energy_W523), true);
-            if (fit_W523[0] != 0) E_mean_W523[i][j] = fit_W523[0]/expected_energy_W523;
-            else E_mean_W523[i][j] = merged->h1_energy_grid_W523[i][j]->GetMean()/expected_energy_W523;
-            const auto fit_W633 = physics.fitPeak(merged->h1_energy_grid_W633[i][j].get(), static_cast<float>(expected_energy_W633), true);
-            if (fit_W633[0] != 0) E_mean_W633[i][j] = fit_W633[0]/expected_energy_W633;
-            else E_mean_W633[i][j] = merged->h1_energy_grid_W633[i][j]->GetMean()/expected_energy_W633;
-            const auto fit_W634 = physics.fitPeak(merged->h1_energy_grid_W634[i][j].get(), static_cast<float>(expected_energy_W634), true);
-            if (fit_W634[0] != 0) E_mean_W634[i][j] = fit_W634[0]/expected_energy_W634;
-            else E_mean_W634[i][j] = merged->h1_energy_grid_W634[i][j]->GetMean()/expected_energy_W634;
-            const auto fit_W635 = physics.fitPeak(merged->h1_energy_grid_W635[i][j].get(), static_cast<float>(expected_energy_W635), true);
-            if (fit_W635[0] != 0) E_mean_W635[i][j] = fit_W635[0]/expected_energy_W635;
-            else E_mean_W635[i][j] = merged->h1_energy_grid_W635[i][j]->GetMean()/expected_energy_W635;
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                auto fit = physics.fitPeak(
+                    merged->h1_energy_grid[m][i][j].get(),
+                    static_cast<float>(expected_energies[m]), true);
+                // If the fit failed, use the mean of the histogram as the energy.
+                // or the entries are too few to perform a reliable fit.
+                if (merged->h1_energy_grid[m][i][j]->GetEntries() < 200) fit[0] = 0;
+                const double energy = fit[0] != 0
+                    ? fit[0] : merged->h1_energy_grid[m][i][j]->GetMean();
+                bowl_shapes[m]->SetBinContent(
+                    i + 1, j + 1, energy / expected_energies[m]);
+            }
         }
     }
 
-    for (int i = 0; i < grids; ++i) {
-        for (int j = 0; j < grids; ++j) {
-            h2_bowl_shape_W521->SetBinContent(i+1, j+1, E_mean_W521[i][j]);
-            h2_bowl_shape_W522->SetBinContent(i+1, j+1, E_mean_W522[i][j]);
-            h2_bowl_shape_W523->SetBinContent(i+1, j+1, E_mean_W523[i][j]);
-            h2_bowl_shape_W633->SetBinContent(i+1, j+1, E_mean_W633[i][j]);
-            h2_bowl_shape_W634->SetBinContent(i+1, j+1, E_mean_W634[i][j]);
-            h2_bowl_shape_W635->SetBinContent(i+1, j+1, E_mean_W635[i][j]);
+    TCanvas bowl_modules("bowl_modules", "HyCal Module Bowl Shapes", 3200, 3200);
+    bowl_modules.Divide(8, 8, 0.002, 0.002);
+    for (int m = 0; m < module_count; ++m) {
+        bowl_modules.cd(module_canvas_pads[m]);
+        gPad->SetLeftMargin(0.12);
+        gPad->SetRightMargin(0.14);
+        gPad->SetBottomMargin(0.12);
+        bowl_shapes[m]->SetStats(0);
+        bowl_shapes[m]->SetMinimum(0.98);
+        bowl_shapes[m]->SetMaximum(1.02);
+        bowl_shapes[m]->GetXaxis()->SetTitleSize(0.06);
+        bowl_shapes[m]->GetYaxis()->SetTitleSize(0.06);
+        bowl_shapes[m]->GetZaxis()->SetTitleSize(0.05);
+        bowl_shapes[m]->GetXaxis()->SetLabelSize(0.05);
+        bowl_shapes[m]->GetYaxis()->SetLabelSize(0.05);
+        bowl_shapes[m]->GetZaxis()->SetLabelSize(0.045);
+        bowl_shapes[m]->Draw("COLZ");
+    }
+    bowl_modules.Update();
+
+    // fit the grids histograms for each module
+    float energy_bias[1156][grids][grids] = {{{0}}};
+    int fit_count = 0, mean_count = 0, analyzed_module_count = 0;
+    for (int m = 0; m < 1156; ++m) {
+        const auto *module = hycal.module_by_id(1001 + m);
+        if (!module) continue;
+        if (std::fabs(module->x) < 20.75 * 2.0 && std::fabs(module->y) < 20.75 * 2.0) continue;
+        if (std::fabs(module->x) > 20.75 * 16.0 || std::fabs(module->y) > 20.75 * 16.0) continue;
+        ++analyzed_module_count;
+        const double angle = std::atan2(std::sqrt(module->x * module->x + module->y * module->y), gRunConfig.hycal_z);
+        const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(angle, gRunConfig.Ebeam, "ep");
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 50) continue;
+                auto fit = physics.fitPeak(
+                    merged->h1_energy_grid_allModule[m][i][j].get(),
+                    static_cast<float>(expected_energy), true);
+                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 100) fit[0] = 0;
+                const double energy = fit[0] != 0
+                    ? (fit_count++, fit[0]) : (mean_count++, merged->h1_energy_grid_allModule[m][i][j]->GetMean());
+                energy_bias[m][i][j] = std::clamp(energy / expected_energy - 1.0, -0.03, 0.03);
+            }
         }
     }
-    TCanvas bowl_W521("bowl_W521", "Bowl Shape of W521", 800, 600);
-    bowl_W521.SetLeftMargin(0.10);
-    bowl_W521.SetBottomMargin(0.10);
-    bowl_W521.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W521->SetStats(0);
-    h2_bowl_shape_W521->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W521->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W521->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W521->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W521->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W521->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W521->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W521->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W521->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W521->SetMinimum(0.99);
-    h2_bowl_shape_W521->SetMaximum(1.02);
-    h2_bowl_shape_W521->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
+    std::cout << "Fit count: " << fit_count << ", Mean count: " << mean_count << ", Module count: " << analyzed_module_count << ", Grids: " << analyzed_module_count * grids * grids << "\n";
 
-    TCanvas bowl_W522("bowl_W522", "Bowl Shape of W522", 800, 600);
-    bowl_W522.SetLeftMargin(0.10);
-    bowl_W522.SetBottomMargin(0.10);
-    bowl_W522.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W522->SetStats(0);
-    h2_bowl_shape_W522->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W522->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W522->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W522->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W522->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W522->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W522->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W522->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W522->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W522->SetMinimum(0.99);
-    h2_bowl_shape_W522->SetMaximum(1.02);
-    h2_bowl_shape_W522->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
+    // output energy bias for each module and grid to a json file to put in database
+    // structure of the JSON file:
+    // {
+    //     "W555": {
+    //         "y4": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
+    //         "y3": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
+    //         "y2": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
+    //         "y1": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
+    //         "y0": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
+    //     }
+    // }
+    const std::string output_json_name = outputJsonFileName(output_name, corr);
+    std::ofstream json_output(output_json_name);
+    if (!json_output) {
+        std::cerr << "Cannot create output file " << output_json_name << "\n";
+        return 1;
+    }
+    json_output << std::fixed << std::setprecision(6) << "{\n";
+    bool first_module = true;
+    for (int m = 0; m < 1156; ++m) {
+        if (!hycal.module_by_id(1001 + m)) continue;
+        if (!first_module) json_output << ",\n";
+        first_module = false;
+        json_output << "  \"W" << m + 1 << "\": {\n";
+        for (int row = grids - 1; row >= 0; --row) {
+            json_output << "    \"y" << row << "\": {";
+            for (int col = 0; col < grids; ++col) {
+                if (col > 0) json_output << ",";
+                json_output << " \"x" << col << "\": "
+                            << energy_bias[m][col][row];
+            }
+            json_output << " }" << (row > 0 ? "," : "") << "\n";
+        }
+        json_output << "  }";
+    }
+    json_output << "\n}\n";
+    json_output.close();
+    std::cout << "Wrote energy-bias JSON to " << output_json_name << "\n";
 
-    TCanvas bowl_W523("bowl_W523", "Bowl Shape of W523", 800, 600);
-    bowl_W523.SetLeftMargin(0.10);
-    bowl_W523.SetBottomMargin(0.10);
-    bowl_W523.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W523->SetStats(0);
-    h2_bowl_shape_W523->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W523->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W523->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W523->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W523->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W523->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W523->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W523->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W523->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W523->SetMinimum(0.99);
-    h2_bowl_shape_W523->SetMaximum(1.02);
-    h2_bowl_shape_W523->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
-
-    TCanvas bowl_W633("bowl_W633", "Bowl Shape of W633", 800, 600);
-    bowl_W633.SetLeftMargin(0.10);
-    bowl_W633.SetBottomMargin(0.10);
-    bowl_W633.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W633->SetStats(0);
-    h2_bowl_shape_W633->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W633->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W633->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W633->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W633->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W633->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W633->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W633->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W633->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W633->SetMinimum(0.99);
-    h2_bowl_shape_W633->SetMaximum(1.02);
-    h2_bowl_shape_W633->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
-
-    TCanvas bowl_W634("bowl_W634", "Bowl Shape of W634", 800, 600);
-    bowl_W634.SetLeftMargin(0.10);
-    bowl_W634.SetBottomMargin(0.10);
-    bowl_W634.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W634->SetStats(0);
-    h2_bowl_shape_W634->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W634->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W634->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W634->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W634->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W634->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W634->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W634->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W634->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W634->SetMinimum(0.99);
-    h2_bowl_shape_W634->SetMaximum(1.02);
-    h2_bowl_shape_W634->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
-
-    TCanvas bowl_W635("bowl_W635", "Bowl Shape of W635", 800, 600);
-    bowl_W635.SetLeftMargin(0.10);
-    bowl_W635.SetBottomMargin(0.10);
-    bowl_W635.SetRightMargin(0.05);
-    gStyle->SetPalette(kRainBow);
-    h2_bowl_shape_W635->SetStats(0);
-    h2_bowl_shape_W635->GetXaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W635->GetYaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W635->GetZaxis()->SetTitleSize(0.04);
-    h2_bowl_shape_W635->GetXaxis()->SetTitleOffset(1.8);
-    h2_bowl_shape_W635->GetYaxis()->SetTitleOffset(2.0);
-    h2_bowl_shape_W635->GetZaxis()->SetTitleOffset(1.3);
-    h2_bowl_shape_W635->GetXaxis()->CenterTitle();
-    h2_bowl_shape_W635->GetYaxis()->CenterTitle();
-    h2_bowl_shape_W635->GetZaxis()->CenterTitle();
-    h2_bowl_shape_W635->SetMinimum(0.99);
-    h2_bowl_shape_W635->SetMaximum(1.02);
-    h2_bowl_shape_W635->Draw("LEGO2Z");  // 3D colored blocks with Z-palette
-    gPad->SetTheta(30.);
-    gPad->SetPhi(40.);
-    gPad->Update();
+    // TH1::Fit draws into the active pad, which is pad 64 after the loop above.
+    // Restore W701 after all fits before persisting the combined canvas.
+    bowl_modules.cd(module_canvas_pads.back());
+    gPad->Clear();
+    bowl_shapes.back()->Draw("COLZ");
+    bowl_modules.Modified();
+    bowl_modules.Update();
 
     const std::string output_file_name = outputFileName(output_name, corr);
     TFile output_file(output_file_name.c_str(), "RECREATE");
@@ -499,43 +444,29 @@ int main(int argc, char *argv[])
     }
     merged->h2_hit_module_hycal->Write();
     merged->h2_hit_module_gem->Write();
-    output_file.cd();
-    output_file.mkdir("energy_grids_W521");
-    output_file.mkdir("energy_grids_W522");
-    output_file.mkdir("energy_grids_W523");
-    output_file.mkdir("energy_grids_W633");
-    output_file.mkdir("energy_grids_W634");
-    output_file.mkdir("energy_grids_W635");
-    for (int i = 0; i < grids; ++i) {
-        for (int j = 0; j < grids; ++j) {
-            output_file.cd("energy_grids_W521");
-            merged->h1_energy_grid_W521[i][j]->Write();
-            output_file.cd("energy_grids_W522");
-            merged->h1_energy_grid_W522[i][j]->Write();
-            output_file.cd("energy_grids_W523");
-            merged->h1_energy_grid_W523[i][j]->Write();
-            output_file.cd("energy_grids_W633");
-            merged->h1_energy_grid_W633[i][j]->Write();
-            output_file.cd("energy_grids_W634");
-            merged->h1_energy_grid_W634[i][j]->Write();
-            output_file.cd("energy_grids_W635");
-            merged->h1_energy_grid_W635[i][j]->Write();
+
+    for (int m = 0; m < module_count; ++m) {
+        const std::string directory = Form("energy_grids_W%d", module_numbers[m]);
+        output_file.mkdir(directory.c_str());
+        output_file.cd(directory.c_str());
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                merged->h1_energy_grid[m][i][j]->Write();
+            }
         }
     }
     output_file.cd();
-    h2_bowl_shape_W521->Write("h2_bowl_shape_W521");
-    h2_bowl_shape_W522->Write("h2_bowl_shape_W522");
-    h2_bowl_shape_W523->Write("h2_bowl_shape_W523");
-    h2_bowl_shape_W633->Write("h2_bowl_shape_W633");
-    h2_bowl_shape_W634->Write("h2_bowl_shape_W634");
-    h2_bowl_shape_W635->Write("h2_bowl_shape_W635");
-    bowl_W521.Write("bowl_shape_W521");
-    bowl_W522.Write("bowl_shape_W522");
-    bowl_W523.Write("bowl_shape_W523");
-    bowl_W633.Write("bowl_shape_W633");
-    bowl_W634.Write("bowl_shape_W634");
-    bowl_W635.Write("bowl_shape_W635");
-    output_file.cd();
+    for (const auto &bowl_shape : bowl_shapes) bowl_shape->Write();
+    bowl_modules.Write("bowl_shapes_8x8");
+    output_file.mkdir("energy_grids_allModule");
+    output_file.cd("energy_grids_allModule");
+    for (int m = 0; m < 1156; ++m) {
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                merged->h1_energy_grid_allModule[m][i][j]->Write();
+            }
+        }
+    }
     output_file.Close();
 
 }
@@ -552,32 +483,28 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
         Form("h2_hit_module_gem%s", name_suffix.c_str()),
         "GEM Hit Distribution (Module);(X_{gem}-X_{cell center})/d_{cell size};(Y_{gem}-Y_{cell center})/d_{cell size}",
         100, -0.5, 0.5, 100, -0.5, 0.5);
-    for (int i = 0; i < grids; ++i) {
-        for (int j = 0; j < grids; ++j) {
-                    result->h1_energy_grid_W521[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W521_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W521;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
-            result->h1_energy_grid_W522[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W522_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W522;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
-            result->h1_energy_grid_W523[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W523_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W523;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
-            result->h1_energy_grid_W633[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W633_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W633;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
-            result->h1_energy_grid_W634[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W634_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W634;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
-            result->h1_energy_grid_W635[i][j] = std::make_unique<TH1F>(
-                Form("h1_energy_grid_W635_%d_%d%s", i, j, name_suffix.c_str()),
-                "Energy Grid W635;E_{recon} [MeV];Counts",
-                energy_bins, energy_min, energy_max);
+    for (int m = 0; m < module_count; ++m) {
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                result->h1_energy_grid[m][i][j] = std::make_unique<TH1F>(
+                    Form("h1_energy_grid_W%d_%d_%d%s",
+                         module_numbers[m], i, j, name_suffix.c_str()),
+                    Form("Energy Grid W%d;E_{recon} [MeV];Counts",
+                         module_numbers[m]),
+                    energy_bins, energy_min, energy_max);
+            }
+        }
+    }
+    for (int m = 0; m < 1156; ++m) {
+        for (int i = 0; i < grids; ++i) {
+            for (int j = 0; j < grids; ++j) {
+                result->h1_energy_grid_allModule[m][i][j] = std::make_unique<TH1F>(
+                    Form("h1_energy_grid_allModule_W%d_%d_%d%s",
+                        m + 1, i, j, name_suffix.c_str()),
+                    Form("Energy Grid All Module W%d;E_{recon} [MeV];Counts",
+                        m + 1),
+                    energy_bins, energy_min, energy_max);
+            }
         }
     }
     return result;
@@ -585,7 +512,7 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
 
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
                             const std::string &db_dir, long long max_events,
-                            HistResult *result)
+                            HistResult *result, SharedFillLocks *fill_locks)
 {
     TFile input(input_file.c_str(), "READ");
     if (input.IsZombie() || !input.IsOpen()) {
@@ -605,11 +532,12 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
     Long64_t entries = tree->GetEntries();
     if (max_events >= 0) entries = std::min(entries, max_events);
+    long long events_processed = 0;
     for (Long64_t entry = 0; entry < entries; ++entry) {
         tree->GetEntry(entry);
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
         if (event.n_clusters != 1) continue;
-        if (event.matchNum != 1) continue;
+        //if (event.matchNum != 1) continue;
         if (event.cl_nblocks[0] < 3) continue;
         if (fabs(event.cl_energy[0] - run_config.Ebeam) > 3.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.)) continue;
 
@@ -623,11 +551,12 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         gem_hit.y = event.mHit_gy[0][0];
         gem_hit.z = event.mHit_gz[0][0];
 
-        if (gem_hit.z == 0.f) continue;
-        const float scale = hc_hit.z / gem_hit.z;
-        gem_hit.x *= scale;
-        gem_hit.y *= scale;
-        gem_hit.z *= scale;
+        if (gem_hit.z != 0.f) {
+            const float scale = hc_hit.z / gem_hit.z;
+            gem_hit.x *= scale;
+            gem_hit.y *= scale;
+            gem_hit.z *= scale;
+        }
         ApplyToHyCal(gem_hit, run_config);
         ApplyToHyCal(hc_hit, run_config);
         if (!inHyCal(hc_hit.x, hc_hit.y)) continue;
@@ -638,34 +567,36 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         const float dy = hc_hit.y - gem_hit.y;
         float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
         float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
-        //if (xd_hycal < -0.5f) xd_hycal += 1.0f;
-        //if (xd_hycal >  0.5f) xd_hycal -= 1.0f;
-        //if (yd_hycal < -0.5f) yd_hycal += 1.0f;
-        //if (yd_hycal >  0.5f) yd_hycal -= 1.0f;
+
         float xd_gem = (gem_hit.x - mod->x) / mod->size_x;
         float yd_gem = (gem_hit.y - mod->y) / mod->size_y;
-        //if (xd_gem < -0.5f) xd_gem += 1.0f;
-        //if (xd_gem >  0.5f) xd_gem -= 1.0f;
-        //if (yd_gem < -0.5f) yd_gem += 1.0f;
-        //if (yd_gem >  0.5f) yd_gem -= 1.0f;
 
-        // Fill the energy grid histograms for the W521-W526 modules
+        // Fill the selected module's energy-grid histogram.
         int col = static_cast<int>((xd_hycal + 0.5f) * grids);
         int row = static_cast<int>((yd_hycal + 0.5f) * grids);
         if (col < 0) col = 0;
         if (col >= grids) col = grids - 1;
         if (row < 0) row = 0;
         if (row >= grids) row = grids - 1;
-        if (mod->id == 1521) result->h1_energy_grid_W521[col][row]->Fill(hc_hit.energy);
-        if (mod->id == 1522) result->h1_energy_grid_W522[col][row]->Fill(hc_hit.energy);
-        if (mod->id == 1523) result->h1_energy_grid_W523[col][row]->Fill(hc_hit.energy);
-        if (mod->id == 1633) result->h1_energy_grid_W633[col][row]->Fill(hc_hit.energy);
-        if (mod->id == 1634) result->h1_energy_grid_W634[col][row]->Fill(hc_hit.energy);
-        if (mod->id == 1635) result->h1_energy_grid_W635[col][row]->Fill(hc_hit.energy);
+        const int all_module_index = mod->id - 1001;
+        {
+            std::lock_guard<std::mutex> lock(fill_locks->module[all_module_index]);
+            const auto module_it = std::find(
+                module_numbers.begin(), module_numbers.end(), mod->id - 1000);
+            if (module_it != module_numbers.end()) {
+                const int module_index = std::distance(module_numbers.begin(), module_it);
+                result->h1_energy_grid[module_index][col][row]->Fill(hc_hit.energy);
+            }
+            result->h1_energy_grid_allModule[all_module_index][col][row]->Fill(hc_hit.energy);
+        }
 
-        result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
-        result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
-        ++result->events_processed;
+        {
+            std::lock_guard<std::mutex> lock(fill_locks->hit_maps);
+            result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+            result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
+        }
+        ++events_processed;
     }
+    fill_locks->events_processed.fetch_add(events_processed, std::memory_order_relaxed);
     return true;
 }

@@ -24,6 +24,7 @@
 #include <TLegend.h>
 #include <TPad.h>
 #include <TROOT.h>
+#include <TStyle.h>
 #include <TClass.h>
 #include <TLorentzVector.h>
 
@@ -72,6 +73,9 @@ struct HistResult {
     std::unique_ptr<TH2F> h2_hit_hycal;
     std::unique_ptr<TH2F> h2_hit_gem;
     std::unique_ptr<TH1F> h1_yield_theta;
+    std::unique_ptr<TH2F> h2_Erecon_theta;
+    std::unique_ptr<TH2F> h2_Erecon_theta_center;
+    std::unique_ptr<TH2F> h2_Erecon_theta_edge;
     std::vector<std::unique_ptr<TH1F>> h1_Erecon_theta;
     std::vector<std::unique_ptr<TH1F>> h1_Erecon_theta_center;
     std::vector<std::unique_ptr<TH1F>> h1_Erecon_theta_edge;
@@ -96,6 +100,9 @@ static void mergeHistResult(HistResult &destination, const HistResult &source)
         destination.h1_Erecon_theta_center[i]->Add(source.h1_Erecon_theta_center[i].get());
         destination.h1_Erecon_theta_edge[i]->Add(source.h1_Erecon_theta_edge[i].get());
     }
+    destination.h2_Erecon_theta->Add(source.h2_Erecon_theta.get());
+    destination.h2_Erecon_theta_center->Add(source.h2_Erecon_theta_center.get());
+    destination.h2_Erecon_theta_edge->Add(source.h2_Erecon_theta_edge.get());
     for (int i = 0; i < 1156; ++i) {
         destination.h1_E_modules[i]->Add(source.h1_E_modules[i].get());
     }
@@ -270,16 +277,25 @@ int main(int argc, char *argv[])
     auto h2_deltaE_module_map = std::make_unique<TH2Poly>(
         "h2_deltaE_module_map", "Delta E (Module) Map;X [mm];Y [mm];#Delta E [MeV]",
         -360., 360., -360., 360.);
+    auto h1_resolution_module = std::make_unique<TH1F>("h1_resolution_module", "Resolution (Module);#sigma_{E}/E*#sqrt{E} [%];Modules",
+        50, 2.5, 3.5);
+    auto h2_resolution_module_map = std::make_unique<TH2Poly>(
+        "h2_resolution_module_map", "Resolution (Module) Map;X [mm];Y [mm];#sigma_{E}/E*#sqrt{E} [%]",
+        -360., 360., -360., 360.);
 
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
     analysis::PhysicsTools physics(hycal);
 
     std::vector<int> deltaE_polygon_bins(1156, -1);
+    std::vector<int> resolution_polygon_bins(1156, -1);
     for (int i = 0; i < 1156; ++i) {
         const auto *mod = hycal.module_by_id(i + 1001);
         if (!mod || mod->size_x <= 0. || mod->size_y <= 0.) continue;
         deltaE_polygon_bins[i] = h2_deltaE_module_map->AddBin(
+            mod->x - 0.5 * mod->size_x, mod->y - 0.5 * mod->size_y,
+            mod->x + 0.5 * mod->size_x, mod->y + 0.5 * mod->size_y);
+        resolution_polygon_bins[i] = h2_resolution_module_map->AddBin(
             mod->x - 0.5 * mod->size_x, mod->y - 0.5 * mod->size_y,
             mod->x + 0.5 * mod->size_x, mod->y + 0.5 * mod->size_y);
     }
@@ -287,6 +303,10 @@ int main(int argc, char *argv[])
     h2_deltaE_module_map->SetMinimum(-10.);
     h2_deltaE_module_map->SetMaximum(10.);
     h2_deltaE_module_map->SetOption("colz");
+    h2_resolution_module_map->GetZaxis()->SetTitle("#sigma_{E}/E*#sqrt{E} [%]");
+    h2_resolution_module_map->SetMinimum(2.5);
+    h2_resolution_module_map->SetMaximum(3.5);
+    h2_resolution_module_map->SetOption("colz text");
 
     for (int i = 0; i < 1156; i++) {
         const auto *mod = hycal.module_by_id(i + 1001);
@@ -310,16 +330,21 @@ int main(int argc, char *argv[])
             ? 0.03f * peak / std::sqrt(peak / 1000.f) : 0.f;
         const bool fit_good = peak > 0.f && expected_sigma > 0.f
             && sigma > 0.5f * expected_sigma
-            && sigma < 1.5f * expected_sigma
-            && chi2 < 2.5f;
+            && sigma < 1.5f * expected_sigma;
         if (fit_good) {
             const float delta_energy = peak - expected_energy;
+            float resolution = sigma / peak * std::sqrt(peak / 1000.f) * 100.f;
             h1_deltaE_module->Fill(delta_energy);
+            h1_resolution_module->Fill(resolution);
+            resolution = std::round(resolution * 100.f) / 100.f;
 
             // Each module has its own polygon bin; assign rather than accumulate.
             const int polygon_bin = deltaE_polygon_bins[i];
             if (polygon_bin > 0)
                 h2_deltaE_module_map->SetBinContent(polygon_bin, delta_energy);
+            const int resolution_polygon_bin = resolution_polygon_bins[i];
+            if (resolution_polygon_bin > 0)
+                h2_resolution_module_map->SetBinContent(resolution_polygon_bin, resolution);
         }
     }
     std::vector<double> angle_points;
@@ -554,6 +579,8 @@ int main(int argc, char *argv[])
     merged->h1_yield_theta->Write();
     h1_deltaE_module->Write();
     h2_deltaE_module_map->Write();
+    h1_resolution_module->Write();
+    h2_resolution_module_map->Write();
     c_reconE.Write("recon_energy_resolution_vs_angle");
     output_file.cd();
     output_file.mkdir("Erecon_theta");
@@ -564,6 +591,9 @@ int main(int argc, char *argv[])
         merged->h1_Erecon_theta_edge[i]->Write();
     }
     output_file.cd();
+    merged->h2_Erecon_theta->Write();
+    merged->h2_Erecon_theta_center->Write();
+    merged->h2_Erecon_theta_edge->Write();
     output_file.mkdir("E_modules");
     output_file.cd("E_modules");
     for (int i = 0; i < 1156; ++i) {
@@ -595,6 +625,16 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
     result->h1_yield_theta = std::make_unique<TH1F>(
         Form("h1_yield_theta%s", name_suffix.c_str()),
         "Yield vs Theta;#theta [deg];Yield/binWidth", Nbins, binEdge);
+
+    result->h2_Erecon_theta = std::make_unique<TH2F>(
+        Form("h2_Erecon_theta%s", name_suffix.c_str()),
+        "Reconstructed Energy vs Scattering Angles;#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
+    result->h2_Erecon_theta_center = std::make_unique<TH2F>(
+        Form("h2_Erecon_theta_center%s", name_suffix.c_str()),
+        "Reconstructed Energy vs Scattering Angles (Center);#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
+    result->h2_Erecon_theta_edge = std::make_unique<TH2F>(
+        Form("h2_Erecon_theta_edge%s", name_suffix.c_str()),
+        "Reconstructed Energy vs Scattering Angles (Edge);#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
 
     result->h1_Erecon_theta.reserve(Nbins);
     result->h1_Erecon_theta_center.reserve(Nbins);
@@ -707,6 +747,13 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             } else {
                 result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[0]);
             }
+        }
+
+        result->h2_Erecon_theta->Fill(theta, event.cl_energy[0]);
+        if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+            result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[0]);
+        } else {
+            result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[0]);
         }
 
         const int module_index = mod->id - 1001;
