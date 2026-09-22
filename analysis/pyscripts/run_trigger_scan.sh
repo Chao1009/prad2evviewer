@@ -62,8 +62,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_OUT_DIR="$HOME/work/PRad/prad2evviewer/analysis/pyscripts/output/trigger_scan"
 DEFAULT_EVIO_DIR="$HOME/work/PRad/data/evio"
-DEFAULT_RUNS="025308,025320,026138"
-DEFAULT_TRIGGERS="SSP_RawSum,Pulser,LMS,SSP_Cluster"
+#DEFAULT_RUNS="025308,025320,026138"
+#DEFAULT_TRIGGERS="SSP_RawSum,Pulser,LMS,SSP_Cluster"
+DEFAULT_RUNS="024503"
+DEFAULT_TRIGGERS="SSP_RawSum"
 
 PY_SCRIPT="$HOME/work/PRad/prad2evviewer/analysis/pyscripts/fit_pulse_template.py"
 DAQ_CONFIG="$HOME/work/PRad/prad2evviewer/database/daq_config.json"

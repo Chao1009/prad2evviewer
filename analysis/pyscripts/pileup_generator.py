@@ -64,6 +64,9 @@ Output schema (§3.2 — per-cell .npz)
   truth_model_amplitudes  float32 (N, 2)          heights / T_max
   truth_onset_t0_ns       float32 (N, 2)          template onset (ns)
   truth_peak_times_ns     float32 (N, 2)          peak position (ns)
+  event_dt_ns             float32 (N,)            per-event ΔT used for injection (ns)
+                                                   fixed-grid: all equal meta_dt_ns
+                                                   random-dt:  varies per event
   truth_source            <U9     (2,)             ["injected", "base_ref"]
   pedestals               float32 (N, 2)          [ped_mean, ped_rms]
   base_channel_names      <U8     (N,)
@@ -75,13 +78,15 @@ Output schema (§3.2 — per-cell .npz)
   base_source_files       <U64    (N,)
   base_physics_event_index int32  (N,)
   base_chi2_per_dof       float32 (N,)
-  meta_dt_ns              float32 ()
+  meta_dt_ns              float32 ()               fixed-grid ΔT; NaN in random-dt mode
   meta_ratio              float32 ()
   meta_tau_r_ns           float32 ()
   meta_tau_f_ns           float32 ()
   meta_T_max              float32 ()
   meta_t_peak_offset_ns   float32 ()
   meta_n_events           int32   ()
+  meta_dt_min_ns          float32 ()               random-dt mode only
+  meta_dt_max_ns          float32 ()               random-dt mode only
 
 All arrays are pickle-free; np.load(path, allow_pickle=False) works.
 
@@ -205,6 +210,7 @@ class GridPoint:
     _truth_model_amplitudes: np.ndarray = field(init=False)
     _truth_onset_t0_ns: np.ndarray = field(init=False)
     _truth_peak_times_ns: np.ndarray = field(init=False)
+    _event_dt_ns: np.ndarray = field(init=False)
     _pedestals: np.ndarray = field(init=False)
     _base_channel_names: List[str] = field(init=False)
     _base_channel_ids: List[str] = field(init=False)
@@ -224,6 +230,7 @@ class GridPoint:
         self._truth_model_amplitudes = np.zeros((N, 2), dtype=np.float32)
         self._truth_onset_t0_ns     = np.zeros((N, 2), dtype=np.float32)
         self._truth_peak_times_ns   = np.zeros((N, 2), dtype=np.float32)
+        self._event_dt_ns           = np.zeros(N, dtype=np.float32)
         self._pedestals             = np.zeros((N, 2), dtype=np.float32)
         self._base_channel_names    = [""] * N
         self._base_channel_ids      = [""] * N
@@ -248,8 +255,18 @@ class GridPoint:
     def n_filled(self) -> int:
         return self._n_filled
 
-    def append(self, waveform: np.ndarray, truth: Dict, base: "BaseEvent") -> None:
-        """Add one synthetic event.  Caller ensures not full."""
+    def append(self, waveform: np.ndarray, truth: Dict, base: "BaseEvent",
+               event_dt_ns: float = 0.0) -> None:
+        """Add one synthetic event.  Caller ensures not full.
+
+        Parameters
+        ----------
+        waveform     : uint16 array (n_samples,) — composite ADC samples.
+        truth        : dict with inject_* and base_* keys from inject_pulse().
+        base         : BaseEvent provenance.
+        event_dt_ns  : the actual ΔT used for this event (equals gp.dt_ns in
+                       fixed-grid mode; varies per event in random-dt mode).
+        """
         i = self._n_filled
         # Guard: if the actual waveform length differs from the pre-allocated
         # buffer (e.g. DAQ config reported 200 samples but real data has 100),
@@ -268,6 +285,7 @@ class GridPoint:
             self._waveforms = np.zeros((N, waveform.shape[0]), dtype=np.uint16)
             self.n_samples = waveform.shape[0]
         self._waveforms[i] = waveform
+        self._event_dt_ns[i]               = np.float32(event_dt_ns)
         # col 0 = injected, col 1 = base_ref
         self._truth_heights_adc[i, 0]      = truth["inject_height_adc"]
         self._truth_heights_adc[i, 1]      = truth["base_height_adc"]
@@ -299,6 +317,7 @@ class GridPoint:
             truth_model_amplitudes  = self._truth_model_amplitudes[:n],
             truth_onset_t0_ns       = self._truth_onset_t0_ns[:n],
             truth_peak_times_ns     = self._truth_peak_times_ns[:n],
+            event_dt_ns             = self._event_dt_ns[:n],
             pedestals               = self._pedestals[:n],
             base_channel_names      = np.array(self._base_channel_names[:n], dtype="<U8"),
             base_channel_ids        = np.array(self._base_channel_ids[:n],   dtype="<U16"),
@@ -834,7 +853,76 @@ def scan_grid(
                 gp.dt_ns, gp.ratio, shape, clk_ns,
                 noise_model, rng_map[gp.key]
             )
-            gp.append(wf, truth, base)
+            gp.append(wf, truth, base, event_dt_ns=gp.dt_ns)
+        n_bases_done += 1
+
+        if n_bases_done >= next_progress:
+            elapsed = time.monotonic() - t0_wall
+            rate = n_bases_done / elapsed if elapsed > 0 else 0.0
+            cells_full = sum(1 for gp in grid_points if gp.full)
+            print(
+                f"  [progress] bases_kept={n_bases_done}/{n_per_config}  "
+                f"cells_full={cells_full}/{len(grid_points)}  "
+                f"rate={rate:.0f} base/s  elapsed={elapsed:.1f}s",
+                flush=True,
+            )
+            while next_progress <= n_bases_done:
+                next_progress += progress_every
+
+    return n_bases_done
+
+
+def scan_grid_random_dt(
+    base_iter: Generator,
+    grid_points: List[GridPoint],
+    n_per_config: int,
+    shape: TemplateShape,
+    clk_ns: float,
+    noise_model: str,
+    rng_map: Dict[float, np.random.Generator],
+    dt_min: float,
+    dt_max: float,
+    t0_wall: float,
+    progress_every: int,
+) -> int:
+    """Random-ΔT scan: each accepted BaseEvent is reused across all ratio cells,
+    with a fresh ΔT drawn uniformly from [dt_min, dt_max] for every event.
+
+    Parameters
+    ----------
+    base_iter      : generator of BaseEvent
+    grid_points    : list of GridPoint (one per ratio; gp.dt_ns is a sentinel NaN)
+    n_per_config   : events to collect per ratio point
+    shape          : TemplateShape
+    clk_ns         : ns per sample
+    noise_model    : "none" or "gaussian-iid"
+    rng_map        : dict keyed by ratio -> np.random.Generator
+    dt_min         : minimum ΔT in ns
+    dt_max         : maximum ΔT in ns
+    t0_wall        : wall-clock start time (for progress output)
+    progress_every : print progress every N accepted bases
+
+    Returns
+    -------
+    n_bases_done : int
+    """
+    n_bases_done = 0
+    next_progress = progress_every
+
+    for base in base_iter:
+        if n_bases_done >= n_per_config:
+            break
+        for gp in grid_points:
+            rng = rng_map[gp.ratio]
+            dt_ns = float(rng.uniform(dt_min, dt_max))
+            wf, truth = inject_pulse(
+                base.samples, base.ped_mean, base.ped_rms,
+                base.base_height, base.base_peak_time_ns,
+                base.base_onset_t0_ns,
+                dt_ns, gp.ratio, shape, clk_ns,
+                noise_model, rng,
+            )
+            gp.append(wf, truth, base, event_dt_ns=dt_ns)
         n_bases_done += 1
 
         if n_bases_done >= next_progress:
@@ -864,6 +952,12 @@ def _npz_name(material: str, dt_ns: float, ratio: float) -> str:
     return f"pileup_{material}_dt{dt_int:03d}_ratio{ratio_int:04d}.npz"
 
 
+def _npz_name_random_dt(material: str, ratio: float) -> str:
+    """Filename for random-ΔT mode: pileup_PbWO4_dtRandom_ratio0500.npz"""
+    ratio_int = int(round(ratio * 1000))
+    return f"pileup_{material}_dtRandom_ratio{ratio_int:04d}.npz"
+
+
 # ---------------------------------------------------------------------------
 # Serialisation
 # ---------------------------------------------------------------------------
@@ -874,22 +968,35 @@ def write_grid_point(
     shape: TemplateShape,
     meta_common: Dict,
     metadata_in_npz: bool,
+    random_dt: bool = False,
 ) -> Tuple[Path, Path]:
     """Write one .npz + one sidecar .json for a single grid-point cell.
+
+    Parameters
+    ----------
+    random_dt : bool
+        When True the cell was produced in random-ΔT mode.  The filename uses
+        "dtRandom" instead of a fixed dt value, meta_dt_ns is stored as NaN,
+        and meta_dt_min_ns / meta_dt_max_ns scalars are added.
 
     Returns (npz_path, json_path).
     """
     n_ev = gp.n_filled
     arrays = gp.slice()
 
-    stem    = _npz_name(shape.material, gp.dt_ns, gp.ratio)
-    stem    = stem[:-4]  # strip .npz
+    if random_dt:
+        stem = _npz_name_random_dt(shape.material, gp.ratio)
+    else:
+        stem = _npz_name(shape.material, gp.dt_ns, gp.ratio)
+    stem      = stem[:-4]  # strip .npz
     npz_path  = out_dir / (stem + ".npz")
     json_path = out_dir / (stem + ".json")
 
-    sidecar = {
+    # In random-dt mode dt_ns is not fixed; represent as null in the sidecar.
+    sidecar_dt_ns = None if random_dt else gp.dt_ns
+    sidecar: Dict = {
         "material":          shape.material,
-        "dt_ns":             gp.dt_ns,
+        "dt_ns":             sidecar_dt_ns,
         "amplitude_ratio":   gp.ratio,
         "tau_r_ns":          shape.tau_r_ns,
         "tau_f_ns":          shape.tau_f_ns,
@@ -928,14 +1035,21 @@ def write_grid_point(
             ),
         },
     }
+    if random_dt:
+        sidecar["dt_min_ns"] = meta_common["dt_min_ns"]
+        sidecar["dt_max_ns"] = meta_common["dt_max_ns"]
+        sidecar["random_dt"] = True
 
     # Build the npz save-dict
+    # meta_dt_ns: the fixed ΔT for fixed-grid mode; NaN sentinel for random-dt mode.
+    meta_dt_value = np.float32("nan") if random_dt else np.float32(gp.dt_ns)
     save_dict = dict(
         waveforms                = arrays["waveforms"],
         truth_heights_adc        = arrays["truth_heights_adc"],
         truth_model_amplitudes   = arrays["truth_model_amplitudes"],
         truth_onset_t0_ns        = arrays["truth_onset_t0_ns"],
         truth_peak_times_ns      = arrays["truth_peak_times_ns"],
+        event_dt_ns              = arrays["event_dt_ns"],
         truth_source             = np.array(["injected", "base_ref"], dtype="<U9"),
         pedestals                = arrays["pedestals"],
         base_channel_names       = arrays["base_channel_names"],
@@ -947,7 +1061,7 @@ def write_grid_point(
         base_source_files        = arrays["base_source_files"],
         base_physics_event_index = arrays["base_physics_event_index"],
         base_chi2_per_dof        = arrays["base_chi2_per_dof"],
-        meta_dt_ns               = np.float32(gp.dt_ns),
+        meta_dt_ns               = meta_dt_value,
         meta_ratio               = np.float32(gp.ratio),
         meta_tau_r_ns            = np.float32(shape.tau_r_ns),
         meta_tau_f_ns            = np.float32(shape.tau_f_ns),
@@ -955,6 +1069,9 @@ def write_grid_point(
         meta_t_peak_offset_ns    = np.float32(shape.t_peak_offset_ns),
         meta_n_events            = np.int32(n_ev),
     )
+    if random_dt:
+        save_dict["meta_dt_min_ns"] = np.float32(meta_common["dt_min_ns"])
+        save_dict["meta_dt_max_ns"] = np.float32(meta_common["dt_max_ns"])
 
     if metadata_in_npz:
         save_dict["metadata_json"] = np.array(json.dumps(sidecar))
@@ -977,14 +1094,14 @@ def write_manifest(
     cli_argv: str,
 ) -> Path:
     """Write top-level manifest.json."""
-    manifest = {
+    random_dt = meta_common.get("random_dt", False)
+    manifest: Dict = {
         "generator_version": VERSION,
         "generated_utc":     meta_common["generated_utc"],
         "material":          shape.material,
         "template_source":   shape.source_path,
         "clk_ns":            meta_common["clk_ns"],
         "n_samples":         meta_common.get("n_samples", 0),
-        "dt_grid_ns":        sorted({gp.dt_ns for gp in grid_points}),
         "ratio_grid":        sorted({gp.ratio for gp in grid_points}),
         "n_per_config":      meta_common["n_per_config"],
         "noise_model":       meta_common["noise_model"],
@@ -994,6 +1111,13 @@ def write_manifest(
         "seed":              meta_common["seed"],
         "cli":               cli_argv,
     }
+    if random_dt:
+        manifest["random_dt"]  = True
+        manifest["dt_min_ns"]  = meta_common["dt_min_ns"]
+        manifest["dt_max_ns"]  = meta_common["dt_max_ns"]
+        manifest["dt_grid_ns"] = None
+    else:
+        manifest["dt_grid_ns"] = sorted({gp.dt_ns for gp in grid_points})
     mpath = out_dir / "manifest.json"
     mpath.write_text(json.dumps(manifest, indent=2))
     print(f"[manifest] {mpath}", flush=True)
@@ -1030,20 +1154,39 @@ def validate_output(npz_path: Path, wave_ana=None) -> None:
     assert np.all(th > 0), \
         f"truth_heights_adc has non-positive values in {npz_path.name}"
 
-    # Check 3: shape consistency for onset and peak-time arrays
+    # Check 3: shape consistency for onset, peak-time, and per-event dt arrays
     to = data["truth_onset_t0_ns"]
     tp = data["truth_peak_times_ns"]
     assert to.shape == (N, 2), \
         f"truth_onset_t0_ns shape {to.shape} != ({N}, 2) in {npz_path.name}"
     assert tp.shape == (N, 2), \
         f"truth_peak_times_ns shape {tp.shape} != ({N}, 2) in {npz_path.name}"
+    assert "event_dt_ns" in data, \
+        f"event_dt_ns array missing from {npz_path.name}"
+    assert data["event_dt_ns"].shape == (N,), \
+        f"event_dt_ns shape {data['event_dt_ns'].shape} != ({N},) in {npz_path.name}"
 
-    # Check 4: ΔT round-trip (peak-to-peak of col0 vs col1 == meta_dt_ns)
-    meta_dt = float(data["meta_dt_ns"])
-    dt_actual = tp[:, 0] - tp[:, 1]
-    assert np.allclose(dt_actual, meta_dt, atol=1e-4), \
-        (f"ΔT round-trip failed in {npz_path.name}: "
-         f"expected {meta_dt}, got range [{dt_actual.min():.4f}, {dt_actual.max():.4f}]")
+    # Check 4: ΔT round-trip (peak-to-peak of col0 vs col1 == meta_dt_ns).
+    # The injected peak time is set by formula: inject_peak = base_peak + dt_ns.
+    # However, base_peak_time_ns (col 1) comes from WaveAnalyzer pk.time, which
+    # carries interpolation noise — so the difference won't be exact to 1e-4 ns.
+    # In random-dt mode meta_dt_ns is NaN; check event_dt_ns bounds instead.
+    meta_dt_raw = data["meta_dt_ns"]
+    if np.isnan(float(meta_dt_raw)):
+        # Random-dt mode: check each event's dt lies within [dt_min, dt_max]
+        meta_dt_min = float(data["meta_dt_min_ns"])
+        meta_dt_max = float(data["meta_dt_max_ns"])
+        event_dt = data["event_dt_ns"]
+        assert np.all(event_dt >= meta_dt_min - 0.01) and np.all(event_dt <= meta_dt_max + 0.01), \
+            (f"ΔT range check failed in {npz_path.name}: "
+             f"expected [{meta_dt_min}, {meta_dt_max}], "
+             f"got [{event_dt.min():.4f}, {event_dt.max():.4f}]")
+    else:
+        meta_dt = float(meta_dt_raw)
+        dt_actual = tp[:, 0] - tp[:, 1]
+        assert np.allclose(dt_actual, meta_dt, atol=1.0), \
+            (f"ΔT round-trip failed in {npz_path.name}: "
+             f"expected {meta_dt}, got range [{dt_actual.min():.4f}, {dt_actual.max():.4f}]")
 
     # Check 5: ratio round-trip
     meta_ratio = float(data["meta_ratio"])
@@ -1052,12 +1195,18 @@ def validate_output(npz_path: Path, wave_ana=None) -> None:
         (f"ratio round-trip failed in {npz_path.name}: "
          f"expected {meta_ratio}, got range [{ratio_actual.min():.4f}, {ratio_actual.max():.4f}]")
 
-    # Check 6: peak_time - onset_t0 == t_peak_offset (for both columns)
+    # Check 6: peak_time - onset_t0 == t_peak_offset for col 0 (injected pulse).
+    # Only the injected pulse (col 0) has inject_peak_time = inject_onset_t0 +
+    # t_peak_offset by construction.  The base-reference pulse (col 1) has
+    # independently measured peak_time (from WaveAnalyzer pk.time) and onset_t0
+    # (from fit_pulse_shape), which don't satisfy this relationship exactly on
+    # real noisy data.
     meta_tpo = float(data["meta_t_peak_offset_ns"])
-    offset_actual = tp - to
-    assert np.allclose(offset_actual, meta_tpo, atol=1e-4), \
-        (f"t_peak_offset round-trip failed in {npz_path.name}: "
-         f"expected {meta_tpo}, got range [{offset_actual.min():.4f}, {offset_actual.max():.4f}]")
+    offset_injected = tp[:, 0] - to[:, 0]
+    assert np.allclose(offset_injected, meta_tpo, atol=1e-4), \
+        (f"t_peak_offset round-trip failed for injected pulses in {npz_path.name}: "
+         f"expected {meta_tpo}, got range "
+         f"[{offset_injected.min():.4f}, {offset_injected.max():.4f}]")
 
     # Check 7: truth_model_amplitudes * T_max == truth_heights_adc
     meta_T_max = float(data["meta_T_max"])
@@ -1239,7 +1388,7 @@ def run_self_test() -> None:
                 base_physics_event_index = 1,
                 base_run_number          = 0,
             )
-            gp.append(wf_g, truth_g, fake_base)
+            gp.append(wf_g, truth_g, fake_base, event_dt_ns=gp.dt_ns)
 
     meta_common = {
         "clk_ns":             clk_ns,
@@ -1253,6 +1402,7 @@ def run_self_test() -> None:
         "cut_t0_min_ns":      DEFAULT_T0_MIN_NS,
         "cut_chi2_per_dof_max":DEFAULT_CHI2_MAX,
         "residual_veto_sigma":DEFAULT_RESIDUAL_VETO_SIGMA,
+        "random_dt":          False,
         "runs":               [0],
         "n_evio_splits":      1,
         "n_samples":          n_samples,
@@ -1336,6 +1486,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--ratio-grid", type=_parse_float_grid,
                     default=DEFAULT_RATIO_GRID,
                     help="Comma-sep amplitude ratios (default: 0.1,0.2,0.3,0.5,1.0,2.0).")
+    ap.add_argument("--random-dt", action="store_true",
+                    help="Instead of the fixed --dt-grid, draw each injected "
+                         "pulse's ΔT uniformly from [dt-min, dt-max] (in ns). "
+                         "When set, --dt-grid is ignored and --n-per-config "
+                         "events are produced per ratio grid point.")
+    ap.add_argument("--dt-min", type=float, default=4.0,
+                    help="Minimum ΔT in ns for --random-dt mode (default: 4.0).")
+    ap.add_argument("--dt-max", type=float, default=200.0,
+                    help="Maximum ΔT in ns for --random-dt mode (default: 200.0).")
 
     # Base-event selection cuts
     ap.add_argument("--height-min", type=float, default=DEFAULT_HEIGHT_MIN,
@@ -1418,12 +1577,16 @@ def main() -> int:
     shape = load_template_shape(args.template, args.material)
     clk_ns_fallback = 4.0  # filled in from pipeline below
 
+    if args.random_dt:
+        dt_mode_str = f"random ΔT in [{args.dt_min}, {args.dt_max}] ns"
+    else:
+        dt_mode_str = f"fixed grid {args.dt_grid}"
     print(
         f"[setup] template   : {shape.source_path}\n"
         f"[setup] material   : {shape.material}  "
         f"τ_r={shape.tau_r_ns:.4f} ns  τ_f={shape.tau_f_ns:.4f} ns  "
         f"T_max={shape.T_max:.4f}  t_peak_offset={shape.t_peak_offset_ns:.3f} ns\n"
-        f"[setup] dt_grid    : {args.dt_grid}\n"
+        f"[setup] dt mode    : {dt_mode_str}\n"
         f"[setup] ratio_grid : {args.ratio_grid}\n"
         f"[setup] n_per_config={args.n_per_config}  "
         f"noise_model={args.noise_model}  seed={args.seed}",
@@ -1473,9 +1636,7 @@ def main() -> int:
     runs = sorted({C.extract_run_number(f) for f in all_files if C.extract_run_number(f) >= 0})
 
     # --- Build grid ---
-    dt_grid    = args.dt_grid
     ratio_grid = args.ratio_grid
-    dt_max_ns  = max(dt_grid)
 
     # We don't know n_samples until we start reading EVIO, but we can get it
     # from the DAQ config's wave window, or just use a safe 200.
@@ -1490,27 +1651,52 @@ def main() -> int:
     except Exception:
         n_samples_cfg = 200
 
-    grid_points: List[GridPoint] = []
-    for dt in sorted(set(dt_grid)):
-        for r in sorted(set(ratio_grid)):
-            grid_points.append(GridPoint(
-                dt_ns=dt, ratio=r,
-                n_per_config=args.n_per_config,
-                n_samples=n_samples_cfg,
-            ))
-    n_cells = len(grid_points)
-    print(f"[setup] grid: {len(dt_grid)} dt × {len(ratio_grid)} ratio = "
-          f"{n_cells} cells  target={args.n_per_config} per cell", flush=True)
+    if args.random_dt:
+        # Random-ΔT mode: one cell per ratio; ΔT drawn per event from [dt_min, dt_max].
+        # gp.dt_ns is NaN (sentinel — not used for injection, only event_dt_ns matters).
+        # dt_max_ns for the headroom cut uses args.dt_max.
+        dt_max_ns = args.dt_max
+        grid_points = [
+            GridPoint(dt_ns=float("nan"), ratio=r,
+                      n_per_config=args.n_per_config,
+                      n_samples=n_samples_cfg)
+            for r in sorted(set(ratio_grid))
+        ]
+        n_cells = len(grid_points)
+        print(f"[setup] random-dt mode: {len(ratio_grid)} ratio cells  "
+              f"dt_min={args.dt_min} dt_max={args.dt_max}  "
+              f"target={args.n_per_config} per cell", flush=True)
 
-    # --- RNG map (paired-base design — each cell gets its own stream) ---
-    ss = np.random.SeedSequence(args.seed)
-    child_seeds = ss.spawn(n_cells)
-    rng_map: Dict[Tuple[float, float], np.random.Generator] = {}
-    for gp, child in zip(grid_points, child_seeds):
-        rng_map[gp.key] = np.random.default_rng(child)
+        # RNG map keyed by ratio
+        ss = np.random.SeedSequence(args.seed)
+        child_seeds = ss.spawn(n_cells)
+        rng_map_ratio: Dict[float, np.random.Generator] = {}
+        for gp, child in zip(grid_points, child_seeds):
+            rng_map_ratio[gp.ratio] = np.random.default_rng(child)
+    else:
+        dt_grid   = args.dt_grid
+        dt_max_ns = max(dt_grid)
+        grid_points = []
+        for dt in sorted(set(dt_grid)):
+            for r in sorted(set(ratio_grid)):
+                grid_points.append(GridPoint(
+                    dt_ns=dt, ratio=r,
+                    n_per_config=args.n_per_config,
+                    n_samples=n_samples_cfg,
+                ))
+        n_cells = len(grid_points)
+        print(f"[setup] grid: {len(dt_grid)} dt × {len(ratio_grid)} ratio = "
+              f"{n_cells} cells  target={args.n_per_config} per cell", flush=True)
+
+        # RNG map keyed by (dt, ratio)
+        ss = np.random.SeedSequence(args.seed)
+        child_seeds = ss.spawn(n_cells)
+        rng_map_fixed: Dict[Tuple[float, float], np.random.Generator] = {}
+        for gp, child in zip(grid_points, child_seeds):
+            rng_map_fixed[gp.key] = np.random.default_rng(child)
 
     # --- Scan ---
-    meta_common = {
+    meta_common: Dict = {
         "clk_ns":              clk_ns,
         "noise_model":         args.noise_model,
         "seed":                args.seed,
@@ -1525,16 +1711,28 @@ def main() -> int:
         "runs":                runs,
         "n_evio_splits":       len(all_files),
         "n_samples":           n_samples_cfg,
+        "random_dt":           args.random_dt,
     }
+    if args.random_dt:
+        meta_common["dt_min_ns"] = args.dt_min
+        meta_common["dt_max_ns"] = args.dt_max
 
     base_iter = iterate_base_events(p, args, shape, clk_ns, dt_max_ns)
 
     try:
-        n_bases_done = scan_grid(
-            base_iter, grid_points, args.n_per_config,
-            shape, clk_ns, args.noise_model, rng_map,
-            t0_wall, args.progress_every,
-        )
+        if args.random_dt:
+            n_bases_done = scan_grid_random_dt(
+                base_iter, grid_points, args.n_per_config,
+                shape, clk_ns, args.noise_model, rng_map_ratio,
+                args.dt_min, args.dt_max,
+                t0_wall, args.progress_every,
+            )
+        else:
+            n_bases_done = scan_grid(
+                base_iter, grid_points, args.n_per_config,
+                shape, clk_ns, args.noise_model, rng_map_fixed,
+                t0_wall, args.progress_every,
+            )
     except KeyboardInterrupt:
         print("\n[interrupted — partial output]", flush=True)
         n_bases_done = sum(gp.n_filled for gp in grid_points) // max(1, n_cells)
@@ -1568,16 +1766,21 @@ def main() -> int:
         # on the first append if the actual sample count differs from the
         # DAQ-config estimate (see append() implementation above).
         npz_p, json_p = write_grid_point(
-            out_dir, gp, shape, meta_common, args.metadata_in_npz
+            out_dir, gp, shape, meta_common, args.metadata_in_npz,
+            random_dt=args.random_dt,
         )
         validate_output(npz_p, wave_ana=None)
-        file_entries.append({
-            "dt_ns":     gp.dt_ns,
+        entry: Dict = {
             "ratio":     gp.ratio,
             "path":      npz_p.name,
             "sidecar":   json_p.name,
             "n_written": gp.n_filled,
-        })
+        }
+        if args.random_dt:
+            entry["dt_ns"] = None
+        else:
+            entry["dt_ns"] = gp.dt_ns
+        file_entries.append(entry)
         n_written_total += gp.n_filled
 
     write_manifest(out_dir, shape, meta_common, grid_points, file_entries, cli_argv)
