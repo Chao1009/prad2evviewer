@@ -376,11 +376,11 @@ int main(int argc, char *argv[])
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(angle, gRunConfig.Ebeam, "ep");
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
-                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 50) continue;
+                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 200) continue;
                 auto fit = physics.fitPeak(
                     merged->h1_energy_grid_allModule[m][i][j].get(),
                     static_cast<float>(expected_energy), true);
-                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 100) fit[0] = 0;
+                if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 400) fit[0] = 0;
                 const double energy = fit[0] != 0
                     ? (fit_count++, fit[0]) : (mean_count++, merged->h1_energy_grid_allModule[m][i][j]->GetMean());
                 energy_bias[m][i][j] = std::clamp(energy / expected_energy - 1.0, -0.03, 0.03);
@@ -547,9 +547,11 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         hc_hit.y = event.cl_y[0];
         hc_hit.z = event.cl_z[0];
         hc_hit.energy = event.cl_energy[0];
-        gem_hit.x = event.mHit_gx[0][0];
-        gem_hit.y = event.mHit_gy[0][0];
-        gem_hit.z = event.mHit_gz[0][0];
+        if (event.matchNum == 1){
+            gem_hit.x = event.mHit_gx[0][0];
+            gem_hit.y = event.mHit_gy[0][0];
+            gem_hit.z = event.mHit_gz[0][0];
+        }
 
         if (gem_hit.z != 0.f) {
             const float scale = hc_hit.z / gem_hit.z;
@@ -563,8 +565,6 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
-        const float dx = hc_hit.x - gem_hit.x;
-        const float dy = hc_hit.y - gem_hit.y;
         float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
         float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
 
@@ -593,7 +593,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         {
             std::lock_guard<std::mutex> lock(fill_locks->hit_maps);
             result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
-            result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
+            if (event.matchNum == 1) result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
         }
         ++events_processed;
     }
