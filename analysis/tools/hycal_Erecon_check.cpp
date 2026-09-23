@@ -704,12 +704,16 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         gem_hit.y = event.mHit_gy[0][0];
         gem_hit.z = event.mHit_gz[0][0];
 
-        if (gem_hit.z == 0.f) continue;
-        const float scale = hc_hit.z / gem_hit.z;
-        gem_hit.x *= scale;
-        gem_hit.y *= scale;
-        gem_hit.z *= scale;
-        ApplyToHyCal(gem_hit, run_config);
+        gem_hit.z = 0.f;
+        event.matchNum = 0;
+
+        if (gem_hit.z != 0.f) {
+            const float scale = hc_hit.z / gem_hit.z;
+            gem_hit.x *= scale;
+            gem_hit.y *= scale;
+            gem_hit.z *= scale;
+            ApplyToHyCal(gem_hit, run_config);
+        }
         ApplyToHyCal(hc_hit, run_config);
         if (!inHyCal(hc_hit.x, hc_hit.y)) continue;
 
@@ -758,7 +762,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
         const int module_index = mod->id - 1001;
         if (module_index < 0 || module_index >= 1156) continue;
-        if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f)
+        //if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f)
             result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
         result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
         result->h2_hit_gem->Fill(gem_hit.x, gem_hit.y);

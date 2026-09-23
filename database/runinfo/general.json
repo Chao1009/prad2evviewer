@@ -69,7 +69,7 @@
             "// a calibration test with run 25319-25326, LMS reference run is 25320, PRad2_2p2_round0_1.json": "",
 			"from_run":    25200,
 			"beam_energy": 2239.51,
-            "calibration": {"file": "calibration/PRad2_2p2_round0_1.json"},
+            "calibration": {"file": "calibration/PRad2_2p2_round1_1.json"},
             "gain_factor": {"data_dir": "", "ref_run":  25320}
 		},
 

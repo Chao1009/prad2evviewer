@@ -112,7 +112,7 @@ const int cl_module_occupancy_bins = 9; const double cl_module_occupancy_min = -
 
 bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig, 
                       const std::string &db_dir, const std::string &recon_config_file,
-                      const std::string &calib_file, HistResult *res);
+                      const std::string &calib_file, HistResult *res, bool central_region);
 
 // ── File collection helper ───────────────────────────────────────────────────
 static std::vector<std::string> collectRootFiles(const std::string &path)
@@ -149,6 +149,7 @@ int main(int argc, char *argv[])
     int  max_events  = -1;
     int  num_threads = 4;
     bool use_crystal_ball = false;
+    bool central_region = true;
 
     std::string db_dir = prad2::resolve_data_dir(
         "PRAD2_DATABASE_DIR",
@@ -159,12 +160,13 @@ int main(int argc, char *argv[])
     std::string recon_config_file = db_dir + "/reconstruction_config.json";
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:j:c:f:")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:j:c:f:a")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_path = optarg; break;
             case 'c': seed_calib_file  = optarg; break;
             case 'j': num_threads      = std::atoi(optarg); break;
+            case 'a': central_region = false; break;
             case 'f': {
                 std::string mode = optarg;
                 std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
@@ -194,7 +196,7 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: calib_5by5 <input_raw.root|dir> [more...] "
                      "[-i iter] [-o output_dir] [-c seed_calib.json] [-j threads] "
-                     "[-f gaus|crystalball]\n";
+                     "[-f gaus|crystalball] [-a(central_region = false)]\n";
         return 1;
     }
 
@@ -365,7 +367,7 @@ int main(int argc, char *argv[])
                 (void)res;
 
                 bool ok = ProcessRawFiles(root_files[fi], gRunConfig,
-                    db_dir, recon_config_file, input_calib_file, res);
+                    db_dir, recon_config_file, input_calib_file, res, central_region);
                 {
                     std::lock_guard<std::mutex> lk(io_mtx);
                     std::cout << "[thread " << t << "] file " << fi
@@ -701,7 +703,7 @@ int main(int argc, char *argv[])
 
 bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig, 
                       const std::string &db_dir, const std::string &recon_config_file,
-                      const std::string &calib_file, HistResult *res)
+                      const std::string &calib_file, HistResult *res, bool central_region)
 {   
     evc::DaqConfig daq_cfg;
 
@@ -879,13 +881,15 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         float xd = (hits[0].x - (float)mod->x) / (float)mod->size_x;
         float yd = (hits[0].y - (float)mod->y) / (float)mod->size_y;
-        if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && (fabs(hits[0].x) > 20.75 * 2.0 || fabs(hits[0].y) > 20.75 * 2.0) ) continue;
-        /*if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
+        if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && central_region
+            && (fabs(hits[0].x) > 20.75 * 2.0 || fabs(hits[0].y) > 20.75 * 2.0)
+            && (fabs(hits[0].x) < 20.75 * 16.0 && fabs(hits[0].y) < 20.75 * 16.0) ) continue;
+        if (fdec::test_bit(hits[0].flag, fdec::kTransition)) {
             if (hits[0].x >  300.0 && xd >= 0.0f) continue; // only keep hits on the inner side for transition modules
             if (hits[0].x < -300.0 && xd <= 0.0f) continue;
             if (hits[0].y >  300.0 && yd >= 0.0f) continue;
             if (hits[0].y < -300.0 && yd <= 0.0f) continue;
-        }*/
+        }
 
         float center_energy = 0.f;
         const fdec::ModuleCluster *selected_cluster = nullptr;
@@ -896,7 +900,7 @@ bool ProcessRawFiles (const std::string &input_raw, RunConfig &gRunConfig,
                 break;
             }
         }
-        // require center module to have at least 60% of cluster energy
+
         if (hits[0].energy <= 0.f || hits[0].energy_square <= 0.f) continue;
         float center_energy_fraction = center_energy / hits[0].energy;
 

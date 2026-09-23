@@ -505,6 +505,7 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     }
 
     result.energy = cl.energy * result.bias_corr * result.linear_corr;
+    result.energy_square *= result.bias_corr * result.linear_corr;
 
     return result;
 }

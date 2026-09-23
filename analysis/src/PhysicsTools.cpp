@@ -627,7 +627,7 @@ std::array<double, 5> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
     cb.SetParLimits(0, 0.0, 5.0 * peakHeight);
     cb.SetParLimits(1, lo, hi);
     cb.SetParLimits(2, 1e-6, std::max(hi - lo, 1e-3));
-    cb.SetParLimits(3, 1.0, 5.0);
+    cb.SetParLimits(3, 0.5, 4.0);
     cb.SetParLimits(4, 1.01, 20.0);
 
     // Keep the fitted TF1 attached to the histogram for ROOT output and redraw.

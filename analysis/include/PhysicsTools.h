@@ -109,7 +109,7 @@ public:
     // The last two values are zero unless withError is true.
     static std::array<double, 5> fitPeak(TH1F *h, float expectPeak = 0.f, bool withError = false,
                                         bool useCrystalBall = false,
-                                        float alpha = 1.5f, float n = 5.0f);
+                                        float alpha = 0.5f, float n = 5.0f);
 
     // --- gain factor analysis ------------------------------------------------
     // One result row per module.
