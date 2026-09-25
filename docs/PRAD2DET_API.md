@@ -175,10 +175,28 @@ full-readout vs online-ZS data per APV.
 `StripHit { strip, charge, max_timebin, position, cross_talk, ts_adc }`.
 
 `StripCluster { position, peak_charge, total_charge, max_timebin,
-cross_talk, hits }` — see comment in header about value-init importance.
+cross_talk, hits, seed_time, seed_peak_adc, seed_sum_adc, max_strip_dt,
+min_ts_corr }` — see comment in header about value-init importance.
+The last five are SBS-style quality variables filled by
+`GemCluster::FormClusters` for every cluster (seed = first strip with the
+max `charge`; `NaN` = undefined):
+
+| Field | |
+|---|---|
+| `seed_time` | `StripMeanTime` of the seed strip (ns) |
+| `seed_peak_adc` | max `ts_adc` of the seed strip (equals `peak_charge` when strip `charge` = max sample, as on every PRad path; SBS naming) |
+| `seed_sum_adc` | sum of the seed's `ts_adc`, all samples |
+| `max_strip_dt` | max over non-seed strips of \|t_i − seed_time\| (ns); `NaN` for 1-strip clusters |
+| `min_ts_corr` | min over non-seed strips of `TimeSampleCorrelation(seed, i)`; `NaN` for 1-strip clusters |
 
 `GEMHit { x, y, z, det_id, x_charge, y_charge, x_peak, y_peak,
-x_max_timebin, y_max_timebin, x_size, y_size }`.
+x_max_timebin, y_max_timebin, x_size, y_size, x_time, y_time, time_diff,
+adc_asym, x_max_strip_dt, y_max_strip_dt, x_min_ts_corr, y_min_ts_corr }`.
+The quality fields are filled in both match modes: `x_time`/`y_time` =
+cluster `seed_time`, `time_diff = x_time − y_time` (signed ns),
+`adc_asym = (x_peak − y_peak)/(x_peak + y_peak)` (signed, `NaN` if the sum
+≤ 0; its magnitude is what `match_adc_asymmetry` cuts), the rest copied
+from the X / Y cluster.
 
 ### Configuration types
 
@@ -206,7 +224,21 @@ pedestal table, and per-APV CM range.
 | `match_mode`        | 1 | 0 = ADC-sorted 1:1, 1 = Cartesian-with-cuts |
 | `match_adc_asymmetry` | 0.8 | max \|Qx-Qy\|/(Qx+Qy); <0 disables |
 | `match_time_diff`     | 50 ns | <0 disables |
-| `ts_period`           | 25 ns | |
+| `ts_period`           | 25 ns | also the period for strip mean times; JSON `match_ts_period` |
+| `strip_time_min`, `strip_time_max` | −∞, +∞ | strip mean-time window (inclusive), active if either is finite; JSON `strip_mean_time_range: [lo, hi]` (`[]`/`null` = off) |
+| `strip_unimodal`      | false | strip must pass `IsUnimodalPulse`; JSON `strip_unimodal_shape` |
+| `seed_min_peak_adc`   | 0 | reject cluster if `seed_peak_adc` < value; ≤0 disables |
+| `seed_min_sum_adc`    | 0 | reject cluster if `seed_sum_adc` < value; ≤0 disables |
+| `strip_time_agreement` | −1 ns | reject cluster if `max_strip_dt` > value; <0 disables |
+| `strip_ts_corr_min`   | −1 | reject cluster if `min_ts_corr` < value; ≤−1 disables (SBS never applies its 0.7; not recommended as a cluster cut, see gem_clustering.md) |
+
+The last six are SBS-style (`mpd_gem_view_ssp` Cuts) quality cuts, all
+off by default and in the shipped database configs. Strip-level cuts drop
+the failing strip and end the current run of consecutive strips (the plane
+hits keep it); cluster-level cuts run in the filter step, and `NaN`
+quality values pass. JSON keys other than those noted equal the field
+names (`reconstruction_config.json:gem.default` / per-detector
+`"0".."3"`). Details: `docs/technical_notes/gem_clustering/`.
 
 ### Strip-mapping helpers (pure)
 
@@ -268,6 +300,14 @@ Algorithm details: `docs/technical_notes/gem_clustering/`.
 | `void CartesianReconstruct(const std::vector<StripCluster>& xc, const std::vector<StripCluster>& yc, std::vector<GEMHit>& hits, int det_id) const` | match X/Y to 2-D hits |
 
 `ClusterConfig` is shared with `GemSystem.h`.
+
+Free helpers (namespace `gem`), reusable on any `ts_adc` vector:
+
+| Function | Description |
+|---|---|
+| `float StripMeanTime(const std::vector<float>& ts_adc, float ts_period = 25.f)` | ADC-weighted mean time (ns) over positive samples only, sample `i` at `(i+1)·ts_period`; `NaN` if no positive sample. The seed mean time used by the X/Y time cut. |
+| `float TimeSampleCorrelation(const std::vector<float>& a, const std::vector<float>& b)` | Pearson r of two sample vectors; `NaN` if sizes differ, size < 2, or either is flat. |
+| `bool IsUnimodalPulse(const std::vector<float>& ts_adc)` | SBS "concave shape": strictly rising to the first maximum, strictly falling after; peaks in the first/last sample pass; empty → false. |
 
 ---
 

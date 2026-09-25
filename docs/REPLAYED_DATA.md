@@ -393,6 +393,79 @@ per upstream/downstream pair), while other values use `PostMatch_upgrade`
 | `gem_y_size`   | `uint8[n_gem_hits]`    | Strips in Y cluster |
 | `gem_x_mTbin`  | `uint8[n_gem_hits]`    | Time-sample bin of max-ADC strip, X |
 | `gem_y_mTbin`  | `uint8[n_gem_hits]`    | Time-sample bin of max-ADC strip, Y |
+| `gem_x_time`     | `float[n_gem_hits]`  | Seed-strip mean time of the X cluster (ns), = `gem_cl_time` of that cluster |
+| `gem_y_time`     | `float[n_gem_hits]`  | Seed-strip mean time of the Y cluster (ns) |
+| `gem_xy_dt`      | `float[n_gem_hits]`  | `gem_x_time − gem_y_time` (signed, ns); `\|gem_xy_dt\|` is the quantity cut by `match_time_diff` |
+| `gem_xy_asym`    | `float[n_gem_hits]`  | `(gem_x_peak − gem_y_peak) / (gem_x_peak + gem_y_peak)` (signed); NaN if the sum ≤ 0. `\|gem_xy_asym\|` is the quantity cut by `match_adc_asymmetry` |
+| `gem_x_max_sdt`  | `float[n_gem_hits]`  | `gem_cl_max_sdt` of the X cluster (ns) |
+| `gem_y_max_sdt`  | `float[n_gem_hits]`  | `gem_cl_max_sdt` of the Y cluster (ns) |
+| `gem_x_min_corr` | `float[n_gem_hits]`  | `gem_cl_min_corr` of the X cluster |
+| `gem_y_min_corr` | `float[n_gem_hits]`  | `gem_cl_min_corr` of the Y cluster |
+
+All GEM hit and cluster branches (this table and the next) are written only
+by `replay_recon -gem_hit`, in both the EVIO and the `_raw.root` input
+paths.  With a `_raw.root` input, the strip-level `GemSystem` cuts
+(`reject_*_timebin`, `min_peak_adc`, `min_sum_adc`) are the ones in force
+when `replay_rawdata` wrote the file, not the ones in `replay_recon -r`;
+only the `ClusterConfig` keys (`seed_min_*`, `strip_*`, `match_*`, …) can be
+changed at that stage.  The last eight branches above, and the per-cluster block below, are
+the SBS-style (mpd_gem_view_ssp) quality variables computed by
+`gem::GemCluster` (`StripCluster` / `GEMHit` fields; definitions, config keys
+and the SBS mapping in
+[`technical_notes/gem_clustering/gem_clustering.md`](technical_notes/gem_clustering/gem_clustering.md)).
+They are stored for every hit/cluster whether or not the matching SBS-style
+cuts are enabled.  **NaN means "undefined"**, never 0: a seed strip with no
+positive time sample has no mean time, a single-strip cluster has no
+non-seed strip to compare, and a flat waveform has no correlation.
+
+**Caveat — `match_mode` 1 (the default).**  A 2D hit exists only for an X/Y
+pair that PASSED the matching cuts, so per-hit `gem_xy_asym` / `gem_xy_dt`
+are truncated at `match_adc_asymmetry` / `match_time_diff` (0.7 / 50 ns in
+`reconstruction_config.json`) and cannot show how those cuts perform.  For
+the full distributions either use the per-cluster block below (e.g. pair
+the X and Y clusters of one detector by descending `gem_cl_peak` rank, as
+SBS does in its `match_mode` 0), or replay with a QA configuration that sets
+`match_adc_asymmetry < 0` and `match_time_diff < 0` (both cuts disabled).
+
+### GEM 1D clusters (per plane)
+
+`n_gem_cl` ≤ 400.  Every 1D cluster that survived cluster filtering (size,
+cross-talk and any enabled SBS-style quality cut) — i.e. exactly the X/Y
+matching inputs, including clusters that ended up in no 2D hit.  Order:
+detector 0 X, detector 0 Y, detector 1 X, …; within a plane the order is the
+clusterer's (ascending peak charge when cross-talk rejection is configured,
+otherwise strip order) — don't rely on it.  Clusters beyond 400 are
+silently dropped (later detectors first, and the highest-peak clusters of the
+plane where the cut falls), like the hits.  These are noise-burst events
+(≈ 2 % of events in run 24246); skip events with `n_gem_cl == 400` before
+rank-pairing X/Y clusters.
+
+Mean time of one strip, `t = Σ a_i·(i+1)·T / Σ a_i` over the samples with
+`a_i > 0` (`i` = 0..5, `T` = `match_ts_period`, 25 ns); NaN if no sample is
+positive.  (SBS also sums negative samples.)  The **seed** is the first
+strip with the largest `charge` (the max-over-samples ADC) in the cluster.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `n_gem_cl`         | `int`             | Number of stored 1D clusters (all detectors, both planes) |
+| `gem_cl_det`       | `uint8[n_gem_cl]` | GEM detector ID (0..3) |
+| `gem_cl_plane`     | `uint8[n_gem_cl]` | 0 = X, 1 = Y |
+| `gem_cl_size`      | `uint8[n_gem_cl]` | Strips in the cluster (same as `gem_x/y_size` for a hit) |
+| `gem_cl_mTbin`     | `uint8[n_gem_cl]` | Time-sample bin of the max-ADC strip (same as `gem_x/y_mTbin`) |
+| `gem_cl_pos`       | `float[n_gem_cl]` | Charge-weighted position, **detector-local** mm along the plane (NOT lab frame; no geometry transform applied) |
+| `gem_cl_peak`      | `float[n_gem_cl]` | Highest strip charge (same as `gem_x/y_peak`) |
+| `gem_cl_charge`    | `float[n_gem_cl]` | Σ strip charges (same as `gem_x/y_charge`) |
+| `gem_cl_time`      | `float[n_gem_cl]` | Seed-strip mean time (ns); NaN if the seed has no positive sample |
+| `gem_cl_seed_peak` | `float[n_gem_cl]` | Max time-sample ADC of the seed strip (SBS "seed strip peak ADC"; equals `gem_cl_peak` except for a halved valley strip) |
+| `gem_cl_seed_sum`  | `float[n_gem_cl]` | Σ of all time-sample ADCs of the seed strip (SBS "seed strip sum ADC") |
+| `gem_cl_max_sdt`   | `float[n_gem_cl]` | max over non-seed strips of \|t(strip) − t(seed)\| (ns); NaN for a single-strip cluster (SBS "strip time agreement") |
+| `gem_cl_min_corr`  | `float[n_gem_cl]` | min over non-seed strips of the Pearson correlation between the seed and strip time-sample vectors; NaN for a single-strip cluster (SBS "time sample correlation") |
+
+Recon files replayed before 2026-09 don't have these branches.
+`prad2::SetReconReadBranches` then reports `has_gem_qa` / `has_gem_cl =
+false` and leaves the arrays NaN and `n_gem_cl = 0`; uproot scripts must
+check for the branch names themselves.  Don't mix old and new files in one
+`hadd` or `TChain`: their branch lists differ.
 
 ### Veto + LMS (peak summaries)
 

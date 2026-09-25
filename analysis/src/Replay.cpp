@@ -32,6 +32,51 @@ using json = nlohmann::json;
 
 namespace analysis {
 
+namespace {
+
+// GEM quality (SBS-style) recon-tree fillers.  Shared by ProcessWithRecon
+// (EVIO) and ProcessRaw2Recon (raw ROOT) so both paths write identical
+// values; the branches themselves are only booked with -gem_hit.
+
+// Copy the per-hit quality fields of `h` into recon-tree slot `i`.
+void fillGemHitQA(EventVars_Recon &ev, int i, const gem::GEMHit &h)
+{
+    ev.gem_x_time[i]     = h.x_time;
+    ev.gem_y_time[i]     = h.y_time;
+    ev.gem_xy_dt[i]      = h.time_diff;
+    ev.gem_xy_asym[i]    = h.adc_asym;
+    ev.gem_x_max_sdt[i]  = h.x_max_strip_dt;
+    ev.gem_y_max_sdt[i]  = h.y_max_strip_dt;
+    ev.gem_x_min_corr[i] = h.x_min_ts_corr;
+    ev.gem_y_min_corr[i] = h.y_min_ts_corr;
+}
+
+// Append the (already filtered) 1D clusters of one detector plane to the
+// per-cluster block.  Stops silently at kMaxGemClusters, like the hits.
+// size / mTbin use the same narrowing as gem_x_size / gem_x_mTbin.
+void appendGemClusters(EventVars_Recon &ev, int det, int plane,
+                       const std::vector<gem::StripCluster> &cls)
+{
+    for (const auto &c : cls) {
+        if (ev.n_gem_cl >= prad2::kMaxGemClusters) return;
+        const int k = ev.n_gem_cl++;
+        ev.gem_cl_det[k]       = static_cast<uint8_t>(det);
+        ev.gem_cl_plane[k]     = static_cast<uint8_t>(plane);
+        ev.gem_cl_size[k]      = static_cast<uint8_t>(c.hits.size());
+        ev.gem_cl_mTbin[k]     = static_cast<uint8_t>(c.max_timebin);
+        ev.gem_cl_pos[k]       = c.position;
+        ev.gem_cl_peak[k]      = c.peak_charge;
+        ev.gem_cl_charge[k]    = c.total_charge;
+        ev.gem_cl_time[k]      = c.seed_time;
+        ev.gem_cl_seed_peak[k] = c.seed_peak_adc;
+        ev.gem_cl_seed_sum[k]  = c.seed_sum_adc;
+        ev.gem_cl_max_sdt[k]   = c.max_strip_dt;
+        ev.gem_cl_min_corr[k]  = c.min_ts_corr;
+    }
+}
+
+} // anonymous namespace
+
 void Replay::LoadHyCalMap(const std::string &json_path)
 {
     std::ifstream f(json_path);
@@ -171,6 +216,7 @@ void Replay::clearReconEvent(EventVars_Recon &ev)
     ev.total_energy = 0.f;
     ev.n_clusters = 0;
     ev.n_gem_hits = 0;
+    ev.n_gem_cl = 0;
     ev.matchNum = 0;
     std::fill(std::begin(ev.matchFlag), std::end(ev.matchFlag), 0);
     ev.clear_match_lists();
@@ -1113,6 +1159,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                 ev->gem_y_size[i] = h.y_size;
                 ev->gem_x_mTbin[i] = h.x_max_timebin;
                 ev->gem_y_mTbin[i] = h.y_max_timebin;
+                fillGemHitQA(*ev, i, h);
                 //transform the GEM hit positions to the lab coordinate
                 GEMHit local_hit = {h.x, h.y, 0.f, static_cast<uint8_t>(h.det_id)};
                 int d = local_hit.det_id;
@@ -1123,6 +1170,10 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                 ev->gem_y[i] = local_hit.y;
                 ev->gem_z[i] = local_hit.z;
             }
+            // per-cluster QA block: det 0 X, det 0 Y, det 1 X, ...
+            for (int d = 0; d < gem_sys.GetNDetectors(); ++d)
+                for (int p = 0; p < 2; ++p)
+                    appendGemClusters(*ev, d, p, gem_sys.GetPlaneClusters(d, p));
 
             // Perform matching between HyCal clusters and GEM hits
             //store all the hits on HyCal and GEMs in this event
@@ -1710,6 +1761,8 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
             }
 
             std::vector<gem::GEMHit> all_gem_hits;
+            std::vector<std::array<std::vector<gem::StripCluster>, 2>> plane_clusters(
+                gem_sys.GetNDetectors());
             const auto &gem_cfgs = gem_sys.GetReconConfigs();
             for (int det_id = 0; det_id < gem_sys.GetNDetectors(); ++det_id) {
                 gem_clusterer.SetConfig(gem_cfgs[det_id]);
@@ -1722,6 +1775,10 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                 gem_clusterer.CartesianReconstruct(
                     x_clusters, y_clusters, det_hits, det_id);
                 all_gem_hits.insert(all_gem_hits.end(), det_hits.begin(), det_hits.end());
+
+                // keep the filtered clusters for the per-cluster QA block
+                plane_clusters[det_id][0] = std::move(x_clusters);
+                plane_clusters[det_id][1] = std::move(y_clusters);
             }
 
             ev->n_gem_hits = std::min(
@@ -1737,6 +1794,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                 ev->gem_y_size[hit_idx] = hit.y_size;
                 ev->gem_x_mTbin[hit_idx] = hit.x_max_timebin;
                 ev->gem_y_mTbin[hit_idx] = hit.y_max_timebin;
+                fillGemHitQA(*ev, hit_idx, hit);
 
                 GEMHit local_hit = {
                     hit.x, hit.y, 0.f, static_cast<uint8_t>(hit.det_id)};
@@ -1746,6 +1804,11 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                 ev->gem_y[hit_idx] = local_hit.y;
                 ev->gem_z[hit_idx] = local_hit.z;
             }
+            // per-cluster QA block: det 0 X, det 0 Y, det 1 X, ... (same
+            // order as ProcessWithRecon)
+            for (int det_id = 0; det_id < gem_sys.GetNDetectors(); ++det_id)
+                for (int plane = 0; plane < 2; ++plane)
+                    appendGemClusters(*ev, det_id, plane, plane_clusters[det_id][plane]);
 
             std::vector<HCHit> hc_hits;
             std::vector<GEMHit> gem_hits[4];

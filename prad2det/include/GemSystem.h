@@ -19,6 +19,7 @@
 //=============================================================================
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -54,6 +55,25 @@ struct StripCluster {
     // interleaved with reconstruct_gem.
     bool    cross_talk   = false;
     std::vector<StripHit> hits;
+
+    // --- SBS-style (mpd_gem_view_ssp Cuts) quality variables ----------------
+    // Filled for every cluster by GemCluster::reconstructCluster.  Seed =
+    // first strip with the maximum `charge` (strict >).  NaN = undefined;
+    // keep the default initializers (see cross_talk above).
+    //   seed_time      StripMeanTime of the seed strip (ns)
+    //   seed_peak_adc  max ts_adc of the seed strip (SBS "seed strip peak ADC";
+    //                  equals peak_charge whenever charge = max sample, as on
+    //                  every PRad path — a halved valley strip is never the seed)
+    //   seed_sum_adc   sum of ts_adc of the seed strip, all samples
+    //   max_strip_dt   max over non-seed strips of |StripMeanTime(i) - seed_time|
+    //                  (ns); NaN for single-strip clusters
+    //   min_ts_corr    min over non-seed strips of TimeSampleCorrelation(seed, i);
+    //                  NaN for single-strip clusters
+    float   seed_time     = std::numeric_limits<float>::quiet_NaN();
+    float   seed_peak_adc = std::numeric_limits<float>::quiet_NaN();
+    float   seed_sum_adc  = std::numeric_limits<float>::quiet_NaN();
+    float   max_strip_dt  = std::numeric_limits<float>::quiet_NaN();
+    float   min_ts_corr   = std::numeric_limits<float>::quiet_NaN();
 };
 
 struct GEMHit {
@@ -63,6 +83,23 @@ struct GEMHit {
     float x_peak   = 0.f, y_peak   = 0.f;
     short x_max_timebin = 0, y_max_timebin = 0;
     int   x_size = 0, y_size = 0;
+
+    // --- SBS-style quality of the X/Y cluster pair ---------------------------
+    // Filled by GemCluster in both match modes, independent of whether any
+    // cut is enabled.  NaN = undefined.
+    //   x_time, y_time   seed mean times of the X / Y cluster (ns)
+    //   time_diff        x_time - y_time (signed, ns)
+    //   adc_asym         (x_peak - y_peak) / (x_peak + y_peak), signed; NaN if
+    //                    the sum <= 0.  |adc_asym| is what match_adc_asymmetry cuts
+    //   x/y_max_strip_dt, x/y_min_ts_corr   copied from the X / Y StripCluster
+    float x_time    = std::numeric_limits<float>::quiet_NaN();
+    float y_time    = std::numeric_limits<float>::quiet_NaN();
+    float time_diff = std::numeric_limits<float>::quiet_NaN();
+    float adc_asym  = std::numeric_limits<float>::quiet_NaN();
+    float x_max_strip_dt = std::numeric_limits<float>::quiet_NaN();
+    float y_max_strip_dt = std::numeric_limits<float>::quiet_NaN();
+    float x_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
+    float y_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
 };
 
 // --- APV pedestal -----------------------------------------------------------
@@ -170,7 +207,22 @@ struct ClusterConfig {
     // XY matching cuts (mode 1 only)
     float match_adc_asymmetry = 0.8f;  // max |Qx-Qy|/(Qx+Qy), <0 to disable
     float match_time_diff     = 50.f;  // max |mean_t_x - mean_t_y| in ns, <0 to disable
-    float ts_period           = 25.f;  // ns per time sample
+    float ts_period           = 25.f;  // ns per time sample (also used for strip mean times)
+
+    // --- SBS-style (mpd_gem_view_ssp Cuts) quality cuts; all off by default ---
+    // strip level: applied while grouping strips into clusters.  A failing strip
+    // is dropped and terminates the current run of consecutive strips (SBS
+    // IsGoodStrip semantics).  Strips without a positive sample fail an active
+    // time window; empty ts_adc fails an active unimodal cut.
+    float strip_time_min = -std::numeric_limits<float>::infinity();  // ns, inclusive strip mean-time window
+    float strip_time_max =  std::numeric_limits<float>::infinity();  // (active if either finite)
+    bool  strip_unimodal = false;   // SBS "use concave shape cut for strip"
+    // cluster level: applied in filterClusters (after cross-talk flagging).
+    // NaN quality values (e.g. single-strip cluster) pass.
+    float seed_min_peak_adc    = 0.f;   // <= 0 disables (SBS: 30)
+    float seed_min_sum_adc     = 0.f;   // <= 0 disables (SBS: 60)
+    float strip_time_agreement = -1.f;  // ns; reject if max_strip_dt > value; < 0 disables (SBS: 50)
+    float strip_ts_corr_min    = -1.f;  // reject if min_ts_corr < value; <= -1 disables (SBS: 0.7, never applied there)
 };
 
 // --- GemSystem class --------------------------------------------------------

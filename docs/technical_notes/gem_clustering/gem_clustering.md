@@ -46,6 +46,9 @@ the sorted list and starts a new group whenever the gap to the next
 strip exceeds `consecutive_thres` (default 1, i.e. only strictly
 adjacent strips group). Each group is a candidate 1-D cluster but may
 still need to be split if multiple showers share neighbouring strips.
+Optional SBS-style strip cuts (off by default) can end a group at a
+failing strip — see
+[SBS-style quality variables and cuts](#sbs-style-quality-variables-and-cuts).
 
 ### Step 2 — Recursive valley split
 
@@ -108,7 +111,10 @@ charac_dists = { 6.4, 17.6, 24.4, 24.8, 25.2, 25.6,
 - clusters with fewer than `min_cluster_hits` (default 1) strips,
 - clusters with more than `max_cluster_hits` (default 20) strips
   (these are typically noise bursts, not real showers),
-- clusters flagged as cross-talk.
+- clusters flagged as cross-talk,
+- clusters failing one of the optional SBS-style quality cuts (all off
+  by default, see
+  [below](#sbs-style-quality-variables-and-cuts)).
 
 ### Step 6 — Cartesian X/Y matching
 
@@ -126,7 +132,7 @@ genuinely matches the brightest Y.
 then drop any pair that fails either of:
 
 - **ADC asymmetry** — `|Q_X_peak − Q_Y_peak| / (Q_X_peak + Q_Y_peak) ≤ match_adc_asymmetry` (default 0.8). Real GEM hits deposit similar charge on both planes; large asymmetries flag ghosts from accidental coincidence.
-- **Time difference** — the seed-strip ADC-weighted mean times must satisfy `|⟨t⟩_X − ⟨t⟩_Y| ≤ match_time_diff` (default 50 ns). The seed mean time is `Σ(adc_i · t_i) / Σ adc_i` over the time samples, where `t_i = (i + 1) · ts_period` ns.
+- **Time difference** — the seed-strip ADC-weighted mean times must satisfy `|⟨t⟩_X − ⟨t⟩_Y| ≤ match_time_diff` (default 50 ns). The seed mean time is `Σ(adc_i · t_i) / Σ adc_i` over the time samples with `adc_i > 0`, where `t_i = (i + 1) · ts_period` ns (`StripMeanTime`, see [SBS-style quality variables](#sbs-style-quality-variables-and-cuts)). A pair is not rejected by this cut when either seed has no positive sample (undefined time).
 
 Any pair passing both cuts becomes a `GEMHit` with `det_id` and
 per-plane charge / size / max-timebin recorded for downstream use.
@@ -150,7 +156,8 @@ useful when the four GEMs have different APV gains or noise levels.
 | `match_mode` | 1 | — | `0` = ADC-sorted 1:1 matching, `1` = Cartesian product with cuts. |
 | `match_adc_asymmetry` | 0.8 | fraction | Cap on `|Q_X − Q_Y|/(Q_X + Q_Y)` (mode 1). Set negative to disable. |
 | `match_time_diff` | 50 | ns | Cap on `|⟨t⟩_X − ⟨t⟩_Y|` (mode 1). Set negative to disable. |
-| `ts_period` | 25 | ns | Time-sample period (default = 1 / 40 MHz APV clock). |
+| `ts_period` | 25 | ns | Time-sample period (default = 1 / 40 MHz APV clock). Also used for the strip mean times of the quality variables. |
+| `strip_time_min/max`, `strip_unimodal`, `seed_min_peak_adc`, `seed_min_sum_adc`, `strip_time_agreement`, `strip_ts_corr_min` | off | | SBS-style quality cuts, see [below](#sbs-style-quality-variables-and-cuts). |
 
 ## Worked example — strip clustering
 
@@ -243,9 +250,231 @@ Each X/Y match produces one `GEMHit`:
 | `x_peak`, `y_peak` | `float` | Max-strip ADC of the X / Y cluster. |
 | `x_max_timebin`, `y_max_timebin` | `short` | Time-sample bin of the max-ADC strip on each plane. |
 | `x_size`, `y_size` | `int` | Number of strips in the X / Y cluster. |
+| `x_time`, `y_time`, `time_diff`, `adc_asym`, `x/y_max_strip_dt`, `x/y_min_ts_corr` | `float` | SBS-style X/Y quality, see [below](#sbs-style-quality-variables-and-cuts). NaN = undefined. |
 
 These map directly onto the `gem_*` branches of the recon tree (see
 [`docs/REPLAYED_DATA.md`](../../REPLAYED_DATA.md)).
+
+## SBS-style quality variables and cuts
+
+The SBS GEM code (`mpd_gem_view_ssp`, `gem/src/Cuts.cpp` +
+`GEMCluster.cpp`) judges strips, clusters and X/Y pairs with a set of
+time-sample quality variables. `GemCluster` computes the same
+variables for **every** cluster and 2-D hit, and offers the matching
+cuts as `ClusterConfig` knobs. **All of these cuts are off by
+default**, both in the library and in the shipped
+`reconstruction_config.json` / `reconstruction_config_x17.json`, so
+existing reconstruction output is unchanged (bit-for-bit) until a cut
+is switched on. The variables are filled whether or not a cut is
+enabled; `NaN` always means "undefined".
+
+### Definitions
+
+The three helpers are free functions in `GemCluster.h` (namespace
+`gem`), so offline code can reuse them on raw `ts_adc` vectors:
+
+- **Strip mean time** `StripMeanTime(ts_adc, ts_period = 25)` [ns]:
+
+  ```
+  t = Σ_{i: a_i > 0} a_i · (i + 1) · ts_period  /  Σ_{i: a_i > 0} a_i
+  ```
+
+  Only positive samples contribute. Sample 0 maps to `1 · ts_period`
+  (SBS convention), so a 6-sample strip lies in [25, 150] ns. `NaN`
+  if no sample is positive. This is exactly the seed mean time the
+  existing X/Y time cut (`match_time_diff`) has always used.
+- **Time-sample correlation** `TimeSampleCorrelation(a, b)`: Pearson
+  `r = Σ(a−ā)(b−b̄) / sqrt(Σ(a−ā)² · Σ(b−b̄)²)`, accumulated in double.
+  `NaN` if the sizes differ, size < 2, or either vector is flat.
+- **Unimodal pulse** `IsUnimodalPulse(ts_adc)` (SBS
+  `Cuts::is_concave_shape`): samples strictly rise up to the first
+  maximum and strictly fall after it. Any flat pair or tail bump
+  fails; a peak in the first or last sample passes (SBS behaviour
+  since `cdb0e93`; edge peaks are the job of `reject_first/last_timebin`).
+  Empty `ts_adc` fails.
+
+**Seed** = the first strip with the maximum `charge` (strict `>`,
+from the lowest strip up), as in SBS `__get_seed_strip_index` and the
+X/Y time cut. Per cluster (`StripCluster`, filled in
+`reconstructCluster()`):
+
+| field | definition |
+|---|---|
+| `seed_time` | `StripMeanTime` of the seed strip (ns) |
+| `seed_peak_adc` | max of the seed's `ts_adc` (SBS "seed strip peak ADC"). Equals `peak_charge` whenever strip `charge` = max sample, i.e. on every PRad path (a halved valley strip can never be the seed); kept for the SBS naming |
+| `seed_sum_adc` | sum of all the seed's `ts_adc` samples, negatives included (SBS "seed strip sum ADC") |
+| `max_strip_dt` | max over **all** non-seed strips of `\|t_i − seed_time\|` (ns) |
+| `min_ts_corr` | min over all non-seed strips of `TimeSampleCorrelation(seed, strip_i)` |
+
+Non-finite per-strip values are skipped when forming the max / min;
+`max_strip_dt` and `min_ts_corr` are `NaN` for single-strip clusters.
+Per 2-D hit (`GEMHit`, both match modes):
+
+| field | definition |
+|---|---|
+| `x_time`, `y_time` | `seed_time` of the X / Y cluster (ns) |
+| `time_diff` | `x_time − y_time` (signed, ns) |
+| `adc_asym` | `(x_peak − y_peak) / (x_peak + y_peak)`, signed; `NaN` if the sum ≤ 0. `\|adc_asym\|` is exactly what `match_adc_asymmetry` cuts |
+| `x/y_max_strip_dt`, `x/y_min_ts_corr` | copied from the X / Y cluster |
+
+In match mode 1, `GEMHit`s exist only for pairs that **passed** the
+X/Y cuts, so per-hit `adc_asym` / `time_diff` distributions are
+post-cut. For the full distributions, pair X/Y clusters by peak rank
+from the per-cluster values (as SBS does), or use a QA config with
+`match_adc_asymmetry < 0` and `match_time_diff < 0`. With
+`replay_recon -gem_hit` the per-hit values and a per-cluster block are
+written to the recon tree (see
+[`docs/REPLAYED_DATA.md`](../../REPLAYED_DATA.md)).
+
+### Cuts and config keys
+
+All keys live in `reconstruction_config.json` under `gem.default`
+(and can be overridden per detector in `gem."0".."3"`, like every
+other `ClusterConfig` knob):
+
+| JSON key | `ClusterConfig` field | default (off) | SBS value | stage | rejects when |
+|---|---|---|---|---|---|
+| `strip_mean_time_range` | `strip_time_min`, `strip_time_max` | `[]` (±∞) | `[-99999, 99999]` (open); `[25, 150]` historically | strip | `t` outside `[min, max]` (inclusive), or `t` = `NaN`. With positive samples only, a 6-sample `t` always lies in [25, 150] ns, so a useful window must be narrower |
+| `strip_unimodal_shape` | `strip_unimodal` | `false` | `true`, but compiled out | strip | `!IsUnimodalPulse(ts_adc)` |
+| `seed_min_peak_adc` | same | `0` (≤ 0 = off) | 30 | cluster | `seed_peak_adc < value` |
+| `seed_min_sum_adc` | same | `0` (≤ 0 = off) | 60 | cluster | `seed_sum_adc < value` |
+| `strip_time_agreement` | same | `-1` (< 0 = off) | 50 ns | cluster | `max_strip_dt > value` |
+| `strip_ts_corr_min` | same | `-1` (≤ −1 = off) | 0.7, but never called | cluster | `min_ts_corr < value` |
+
+- **Strip-level** cuts run while grouping (`groupHits()`), with SBS
+  `IsGoodStrip` semantics: a failing strip is left out and **ends the
+  current run** of consecutive strips; the next run starts after it.
+  The strip is not erased from the plane hits, so `GetPlaneHits()`
+  and the raw tree still show it. A `[]` or `null`
+  `strip_mean_time_range` disables the window (useful in a
+  per-detector override); any other malformed value is ignored. The
+  four scalar keys must be numbers, like every other numeric
+  `ClusterConfig` key (a `null` or string aborts the config load); use
+  the off values from the table to disable them.
+- **Cluster-level** cuts run in `filterClusters()` after the size and
+  cross-talk checks. Cross-talk flagging runs first, so a strong
+  cluster that later fails a quality cut can still flag its
+  cross-talk partners. `NaN` quality values (single-strip cluster,
+  empty `ts_adc`) **pass** the cluster-level cuts.
+- Because these `ClusterConfig` cuts live in `GemCluster`, they apply
+  on every path that clusters (unlike the `GemSystem` strip keys, see
+  *Raw → recon replay* below): `GemSystem::Reconstruct()` (server, replay from EVIO,
+  Python), the replay raw → recon path and
+  `hycal_shower_profile`.
+- `PipelineBuilder` prints the values on the `[GEMCFG]` line
+  (`strip_t=[min,max] unimodal= seed_peak= seed_sum= strip_dt= ts_corr=`).
+
+### Mapping to SBS
+
+| SBS cut (`gem_tracking*.conf`; `gem.conf` currently loads `gem_tracking_moller.conf`, same cut values) | active in SBS? | PRad-II equivalent |
+|---|---|---|
+| `max time bin = 1, 2, 3, 4` (strip) | **yes** | `reject_first_timebin` + `reject_last_timebin` (`GemSystem` strip cuts; production false/false, X17 true/false) |
+| `strip mean time range` (strip) | wired, but the range is open | `strip_mean_time_range` |
+| `use concave shape cut for strip` | **no** (`USE_STRIP_SHAPE_CUT` commented out) | `strip_unimodal_shape` |
+| `seed strip min peak ADC` | **yes** (30) | `seed_min_peak_adc` |
+| `seed strip min sum ADC` | **yes** (60) | `seed_min_sum_adc` |
+| `strip mean time agreement` (seed vs strips) | **yes** (50 ns), buggy — see below | `strip_time_agreement` |
+| `time sample correlation coefficient` | **no** (never called) | `strip_ts_corr_min` |
+| `min/max cluster size` | yes (1 / 20) | `min_cluster_hits` / `max_cluster_hits` |
+| cross-talk cluster removal | **no** (`setCrossTalk` commented out) | `charac_dists` etc. (on in PRad production) |
+| `xy cluster matching mode` | mode 0 (rank pairing, no cuts) | `match_mode` (PRad production: 1) |
+| `2d cluster adc assymetry` (0.8) | **no** (mode 1 only, and a no-op there) | `match_adc_asymmetry`, value on `GEMHit::adc_asym` |
+| X/Y seed time agreement (50 ns) | **no** (mode 1 only) | `match_time_diff`, value on `GEMHit::time_diff` |
+
+**SBS bugs deliberately not ported:**
+
+- `Cuts::cluster_strip_time_agreement` loops
+  `for (i = 0; i < size && i != seed; i++)`, which stops at the seed:
+  only strips *before* the seed are checked (none if the seed is the
+  first strip). PRad checks every `i ≠ seed`, so it is stricter for
+  clusters with a late strip after the seed.
+- Unqualified `abs(float)` in `Cuts.cpp` resolves to `int abs(int)`:
+  the time difference is truncated (effective cut `|Δt| < 51` ns) and
+  the X/Y ADC asymmetry becomes an integer division that is 0 for any
+  two positive peaks. PRad uses float throughout.
+- `Cuts::__get_sum_adc` accumulates into an `int` (the running sum is
+  truncated after each sample). PRad sums in float.
+- The SBS correlation returns 0 (with a warning on stdout) for
+  mismatched lengths; PRad returns `NaN`.
+
+**Mean-time definition.** SBS `Cuts::__get_mean_time` uses *all*
+samples, negatives included, divides by the int-truncated sum and
+returns 0 when that sum is 0; the SBS replay histogram helper
+(`generate_gem_histos.h`) uses a float sum and returns 0 when it is
+≤ 0. PRad keeps the positive-samples-only definition (it is the one
+the existing X/Y time cut has always used) and returns `NaN` instead
+of 0. For a clean pulse without negative samples the definitions
+agree up to the SBS int truncation; baseline undershoot pulls the SBS
+value down.
+
+**Strip-level vs seed-level minimum ADC.** PRad's `min_peak_adc` /
+`min_sum_adc` (production 30 / 60) are `GemSystem` strip cuts applied
+to **every** strip in `GemSystem::collectHits()`, before clustering:
+a weak strip is dropped entirely, which trims cluster edges and, with
+`consecutive_thres = 1`, splits clusters. SBS applies the same numbers
+to the **seed strip only**. To emulate SBS, set `min_peak_adc` and
+`min_sum_adc` to 0 and use `seed_min_peak_adc = 30`,
+`seed_min_sum_adc = 60`. (The `GemSystem` strip cuts, like
+`reject_*_timebin`, are read only from `gem.default`; the new keys
+are per-detector `ClusterConfig` knobs.) An SBS-like QA configuration
+in `gem.default` is therefore:
+
+```json
+"reject_first_timebin": true,  "reject_last_timebin": true,
+"min_peak_adc": 0.0,           "min_sum_adc": 0.0,
+"seed_min_peak_adc": 30.0,     "seed_min_sum_adc": 60.0,
+"strip_time_agreement": 50.0,
+"charac_dists": [],            "match_mode": 0
+```
+
+It reproduces the SBS cut *logic*, not SBS numbers exactly: the mean
+time, the full seed-vs-strip loop and the float arithmetic differ as
+described above.
+
+**Raw → recon replay.** The `GemSystem` strip keys in this block
+(`reject_*_timebin`, `min_peak_adc`, `min_sum_adc`, like the
+zero-suppression threshold) act only where strips are built from
+EVIO, in `GemSystem::collectHits()`: the server, Python,
+`replay_rawdata`, and `replay_recon` on EVIO input. `replay_recon` on a
+`_raw.root` file (and `hycal_shower_profile`) rebuilds the strips from
+the raw-tree `gem.*` arrays, which already carry the strip cuts of the
+config `replay_rawdata` ran with (production: 30 / 60, no time-bin
+rejection). On that path only the `ClusterConfig` keys (`seed_min_*`,
+`strip_*`, `match_*`, `charac_dists`, …) take effect, even though the
+`[GEMSYS]` line still prints the `-r` config's strip keys. Run the full
+recipe on EVIO input (`replay_recon -r <qa_config>.json <evio>`);
+`replay_rawdata` has no `-r` option and reads
+`reconstruction_config.json` from the database directory.
+
+### What the cuts do on real data
+
+Measured on run 24246 (split 0, first 20k events, September 2026;
+noise-burst events with ≥ 400 clusters excluded from the
+distributions; efficiencies from `gem_eff_audit.py`, leave-one-out):
+
+- **Negligible or no effect at the SBS values:** `strip_time_agreement = 50` (the
+  seed-vs-strip spread ends at ≈ 52 ns; 13 of 80k multi-strip clusters
+  exceed 50), `seed_min_peak_adc = 30` / `seed_min_sum_adc = 60` (the
+  5σ zero suppression already guarantees them, even with
+  `min_peak_adc = min_sum_adc = 0`) and `strip_mean_time_range =
+  [25, 150]` (always satisfied, see the table). Seed times sit at
+  ≈ 66–115 ns (p5–p95).
+- **Edge time bins** (`reject_first/last_timebin`, SBS "max time bin
+  = 1..4"): removes 4–18 % of clusters, including an out-of-time
+  population (peak in the last sample, seed time > 120 ns, coincident
+  in X and Y). It moves the efficiency by at most ≈ 3 points.
+- **`strip_unimodal_shape`**: costs 3–8 efficiency points (GEM0 worst).
+  SBS switched this cut off in May 2026.
+- **`strip_ts_corr_min = 0.7`: do not use it as a cluster cut.** Weak
+  edge strips are noisy, so `min_ts_corr` falls with cluster size and
+  peak (≥ 79 % of 5+ strip clusters fail). The cut removes ≈ 40 % of
+  hits, keeps single-strip noise clusters, and drops the efficiency
+  from 62–87 % to 12–15 %. SBS never calls this cut.
+- X/Y agreement is good on every detector: rank-paired peak
+  correlation r ≈ 0.92, leading-pair `tx − ty` median within ±1.2 ns
+  (p16–p84 half-width 2.5–5 ns), Y peaks ≈ 10–25 % larger than X
+  (median asymmetry −0.05 to −0.11). The production `match_time_diff = 50` and
+  `match_adc_asymmetry = 0.7` remove ≤ 0.1 % and ≤ 0.8 % of rank pairs.
 
 ## Reproducing the plots
 

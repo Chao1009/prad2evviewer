@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <regex>
 #include <sstream>
 #include <stdexcept>
@@ -91,6 +92,27 @@ void apply_gem_cluster_overrides(const json &j, gem::ClusterConfig &cfg)
     if (j.contains("match_adc_asymmetry")) cfg.match_adc_asymmetry = j["match_adc_asymmetry"];
     if (j.contains("match_time_diff"))     cfg.match_time_diff     = j["match_time_diff"];
     if (j.contains("match_ts_period"))     cfg.ts_period           = j["match_ts_period"];
+
+    // SBS-style (mpd_gem_view_ssp Cuts) quality cuts — all off by default.
+    // "strip_mean_time_range": [lo, hi] ns; [] or null disables (±inf).
+    // Any other shape is ignored (keeps the current value, no throw).
+    if (j.contains("strip_mean_time_range")) {
+        const auto &r = j["strip_mean_time_range"];
+        if (r.is_null() || (r.is_array() && r.empty())) {
+            cfg.strip_time_min = -std::numeric_limits<float>::infinity();
+            cfg.strip_time_max =  std::numeric_limits<float>::infinity();
+        } else if (r.is_array() && r.size() == 2 &&
+                   r[0].is_number() && r[1].is_number()) {
+            cfg.strip_time_min = r[0].get<float>();
+            cfg.strip_time_max = r[1].get<float>();
+        }
+    }
+    if (j.contains("strip_unimodal_shape"))
+        cfg.strip_unimodal = read_json_bool(j, "strip_unimodal_shape", cfg.strip_unimodal);
+    if (j.contains("seed_min_peak_adc"))    cfg.seed_min_peak_adc    = j["seed_min_peak_adc"];
+    if (j.contains("seed_min_sum_adc"))     cfg.seed_min_sum_adc     = j["seed_min_sum_adc"];
+    if (j.contains("strip_time_agreement")) cfg.strip_time_agreement = j["strip_time_agreement"];
+    if (j.contains("strip_ts_corr_min"))    cfg.strip_ts_corr_min    = j["strip_ts_corr_min"];
 }
 
 void apply_hycal_cluster_overrides(const json &j, fdec::ClusterConfig &cfg)
@@ -663,7 +685,13 @@ Pipeline PipelineBuilder::build()
                     << " match_mode=" << c.match_mode
                     << " asym="     << c.match_adc_asymmetry
                     << " tdiff="    << c.match_time_diff
-                    << " tperiod="  << c.ts_period;
+                    << " tperiod="  << c.ts_period
+                    << " strip_t=[" << c.strip_time_min << "," << c.strip_time_max << "]"
+                    << " unimodal=" << (int)c.strip_unimodal
+                    << " seed_peak=" << c.seed_min_peak_adc
+                    << " seed_sum=" << c.seed_min_sum_adc
+                    << " strip_dt=" << c.strip_time_agreement
+                    << " ts_corr="  << c.strip_ts_corr_min;
                 LOG(oss.str());
             }
             out.gem.SetReconConfigs(std::move(per));

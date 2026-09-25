@@ -20,7 +20,9 @@
 #include "TdcData.h"       // RfTimeData::MAX_HITS_PER_CH
 #include "VtpData.h"       // vtp::MAX_PRAD_CLUSTERS
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -39,6 +41,7 @@ static constexpr int kMaxChannels  = fdec::MAX_ROCS * fdec::MAX_SLOTS * 16;
 static constexpr int kMaxGemStrips = ssp::MAX_MPDS * ssp::MAX_APVS_PER_MPD * ssp::APV_STRIP_SIZE;
 static constexpr int kMaxClusters  = 100;
 static constexpr int kMaxGemHits   = 400;
+static constexpr int kMaxGemClusters = 400;   // 1D GEM clusters, all detectors + planes
 
 // ── Front-panel trigger bits ───────────────────────────────────────────────
 //
@@ -249,6 +252,38 @@ struct ReconEventData {
     uint8_t gem_x_mTbin[kMaxGemHits]   = {};
     uint8_t gem_y_mTbin[kMaxGemHits]   = {};
 
+    // Per-hit SBS-style (mpd_gem_view_ssp) quality variables, copied from
+    // gem::GEMHit (see GemSystem.h).  Times in ns; NaN = undefined (seed
+    // strip without a positive sample, single-strip cluster, ...).  In
+    // match_mode 1 hits exist only for X/Y pairs that PASSED the matching
+    // cuts, so gem_xy_dt / gem_xy_asym are truncated at the thresholds —
+    // use the per-cluster block below for the full distributions.
+    float   gem_x_time[kMaxGemHits]     = {};  // X seed-strip mean time
+    float   gem_y_time[kMaxGemHits]     = {};  // Y seed-strip mean time
+    float   gem_xy_dt[kMaxGemHits]      = {};  // gem_x_time - gem_y_time (signed)
+    float   gem_xy_asym[kMaxGemHits]    = {};  // (x_peak - y_peak)/(x_peak + y_peak) (signed)
+    float   gem_x_max_sdt[kMaxGemHits]  = {};  // X: max |t(strip) - t(seed)| over non-seed strips
+    float   gem_y_max_sdt[kMaxGemHits]  = {};  // Y: same
+    float   gem_x_min_corr[kMaxGemHits] = {};  // X: min seed-vs-strip time-sample correlation
+    float   gem_y_min_corr[kMaxGemHits] = {};  // Y: same
+
+    // GEM 1D clusters after cluster filtering, both planes of every
+    // detector, ordered det 0 X, det 0 Y, det 1 X, ...; silently truncated
+    // at kMaxGemClusters.  Quality fields as in gem::StripCluster.
+    int     n_gem_cl = 0;
+    uint8_t gem_cl_det[kMaxGemClusters]       = {};  // detector ID
+    uint8_t gem_cl_plane[kMaxGemClusters]     = {};  // 0=X, 1=Y
+    uint8_t gem_cl_size[kMaxGemClusters]      = {};  // strips in cluster
+    uint8_t gem_cl_mTbin[kMaxGemClusters]     = {};  // time-sample bin of max-ADC strip
+    float   gem_cl_pos[kMaxGemClusters]       = {};  // charge-weighted position (detector-local mm, NOT lab)
+    float   gem_cl_peak[kMaxGemClusters]      = {};  // highest strip charge
+    float   gem_cl_charge[kMaxGemClusters]    = {};  // sum of strip charges
+    float   gem_cl_time[kMaxGemClusters]      = {};  // seed-strip mean time (ns)
+    float   gem_cl_seed_peak[kMaxGemClusters] = {};  // max ts_adc of the seed strip
+    float   gem_cl_seed_sum[kMaxGemClusters]  = {};  // sum of ts_adc of the seed strip
+    float   gem_cl_max_sdt[kMaxGemClusters]   = {};  // max |t(strip) - t(seed)| over non-seed strips (ns)
+    float   gem_cl_min_corr[kMaxGemClusters]  = {};  // min seed-vs-strip time-sample correlation
+
     //veto information
     int      veto_nch = 0;
     uint8_t veto_id[4]   = {}; // 1,2,3,4 for veto1-4
@@ -304,6 +339,20 @@ struct ReconEventData {
     // database/hycal_rf_offsets/*.json have already been applied and the
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
+
+    // NaN-fill every GEM quality float array (per-hit QA + per-cluster
+    // block).  Readers call it before binding so files that predate these
+    // branches read NaN instead of 0 (a legal value for dt / asymmetry).
+    void fill_gem_qa_nan()
+    {
+        constexpr float nan = std::numeric_limits<float>::quiet_NaN();
+        for (float *a : {gem_x_time, gem_y_time, gem_xy_dt, gem_xy_asym,
+                         gem_x_max_sdt, gem_y_max_sdt, gem_x_min_corr, gem_y_min_corr})
+            std::fill(a, a + kMaxGemHits, nan);
+        for (float *a : {gem_cl_pos, gem_cl_peak, gem_cl_charge, gem_cl_time,
+                         gem_cl_seed_peak, gem_cl_seed_sum, gem_cl_max_sdt, gem_cl_min_corr})
+            std::fill(a, a + kMaxGemClusters, nan);
+    }
 
     void clear_match_lists()
     {

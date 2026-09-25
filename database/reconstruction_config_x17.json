@@ -56,7 +56,18 @@
             "reject_first_timebin": true,
             "reject_last_timebin":  false,
             "min_peak_adc":         30.0,
-            "min_sum_adc":          60.0
+            "min_sum_adc":          60.0,
+            "// SBS-style (mpd_gem_view_ssp) quality cuts, all disabled here.  SBS values:": "",
+            "//   strip_mean_time_range [25,150] ns (SBS keeps it open), strip_unimodal_shape true": "",
+            "//   (compiled out in SBS), seed_min_peak_adc 30, seed_min_sum_adc 60,": "",
+            "//   strip_time_agreement 50 ns, strip_ts_corr_min 0.7 (never applied in SBS).  SBS 'max time bin = 1,2,3,4'": "",
+            "//   == reject_first_timebin + reject_last_timebin above.": "",
+            "strip_mean_time_range": [],
+            "strip_unimodal_shape":  false,
+            "seed_min_peak_adc":     0.0,
+            "seed_min_sum_adc":      0.0,
+            "strip_time_agreement":  -1.0,
+            "strip_ts_corr_min":     -1.0
         }
     },
 

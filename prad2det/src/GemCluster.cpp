@@ -3,13 +3,91 @@
 //                                                                            //
 // Ported from mpd_gem_view_ssp GEMCluster                                    //
 // Original authors: Xinzhan Bai, Kondo Gnanvo, Chao Peng                     //
+//                                                                            //
+// Also computes the SBS-style (mpd_gem_view_ssp Cuts) quality variables —    //
+// seed mean time / peak / sum, seed-vs-strip time spread and time-sample     //
+// correlation, X/Y time difference and ADC asymmetry — and applies the       //
+// matching optional cuts (all off by default).  SBS bugs deliberately not    //
+// ported: int-truncated sums / abs(), and the seed-vs-strip loop that stops  //
+// at the seed index.                                                         //
 //============================================================================//
 
 #include "GemCluster.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 using namespace gem;
+
+//=============================================================================
+// Strip time-sample helpers (public, see GemCluster.h)
+//=============================================================================
+
+float gem::StripMeanTime(const std::vector<float> &ts_adc, float ts_period)
+{
+    // positive samples only; float accumulators — must stay bit-identical to
+    // the historical seed mean time used by the X/Y time cut
+    float sum_wt = 0.f, sum_w = 0.f;
+    for (size_t i = 0; i < ts_adc.size(); ++i) {
+        float w = ts_adc[i];
+        if (w > 0.f) {
+            sum_wt += w * static_cast<float>(i + 1) * ts_period;
+            sum_w  += w;
+        }
+    }
+    return (sum_w > 0.f) ? sum_wt / sum_w
+                         : std::numeric_limits<float>::quiet_NaN();
+}
+
+float gem::TimeSampleCorrelation(const std::vector<float> &a,
+                                 const std::vector<float> &b)
+{
+    const size_t n = a.size();
+    if (n < 2 || b.size() != n)
+        return std::numeric_limits<float>::quiet_NaN();
+
+    double mean_a = 0., mean_b = 0.;
+    for (size_t i = 0; i < n; ++i) {
+        mean_a += a[i];
+        mean_b += b[i];
+    }
+    mean_a /= static_cast<double>(n);
+    mean_b /= static_cast<double>(n);
+
+    double s_ab = 0., s_aa = 0., s_bb = 0.;
+    for (size_t i = 0; i < n; ++i) {
+        const double da = a[i] - mean_a, db = b[i] - mean_b;
+        s_ab += da * db;
+        s_aa += da * da;
+        s_bb += db * db;
+    }
+    // zero variance (flat samples) or NaN input → undefined
+    if (!(s_aa > 0.) || !(s_bb > 0.))
+        return std::numeric_limits<float>::quiet_NaN();
+
+    // clamp rounding excursions just outside [-1, 1]
+    const double r = s_ab / std::sqrt(s_aa * s_bb);
+    return static_cast<float>(std::max(-1., std::min(1., r)));
+}
+
+bool gem::IsUnimodalPulse(const std::vector<float> &ts_adc)
+{
+    if (ts_adc.empty()) return false;
+
+    // first maximum (strict >), as SBS Cuts::__get_max_timebin
+    size_t max_bin = 0;
+    for (size_t i = 1; i < ts_adc.size(); ++i)
+        if (ts_adc[i] > ts_adc[max_bin]) max_bin = i;
+
+    // strictly rising up to the maximum ...
+    for (size_t i = 0; i < max_bin; ++i)
+        if (!(ts_adc[i] < ts_adc[i + 1])) return false;
+    // ... and strictly falling after it (SBS's extra f'' < 0 check at the
+    // peak is implied by the two strict comparisons)
+    for (size_t i = max_bin; i + 1 < ts_adc.size(); ++i)
+        if (!(ts_adc[i] > ts_adc[i + 1])) return false;
+    return true;
+}
 
 //=============================================================================
 // Construction / destruction
@@ -37,7 +115,7 @@ void GemCluster::FormClusters(std::vector<StripHit> &hits,
     // group consecutive hits → preliminary clusters (with splitting)
     groupHits(hits, clusters);
 
-    // reconstruct cluster position
+    // reconstruct cluster position (+ SBS-style quality variables)
     for (auto &cluster : clusters)
         reconstructCluster(cluster);
 
@@ -61,9 +139,21 @@ void GemCluster::groupHits(std::vector<StripHit> &hits,
                   return a.strip < b.strip;
               });
 
+    // SBS-style strip cuts (IsGoodStrip).  A failing strip closes the open
+    // run and is left out of every cluster; it is not erased from `hits`.
+    // With no strip cut active the loop is the plain consecutive grouping.
+    const bool strip_cuts = cfg_.strip_unimodal ||
+                            std::isfinite(cfg_.strip_time_min) ||
+                            std::isfinite(cfg_.strip_time_max);
+
     // cluster consecutive hits
     auto cbeg = hits.begin();
     for (auto it = hits.begin(); it != hits.end(); ++it) {
+        if (strip_cuts && !isGoodStrip(*it)) {
+            if (cbeg != it) splitCluster(cbeg, it, cfg_.split_thres, clusters);
+            cbeg = it + 1;
+            continue;
+        }
         auto it_n = it + 1;
         if (it_n == hits.end() ||
             it_n->strip - it->strip > cfg_.consecutive_thres)
@@ -72,6 +162,25 @@ void GemCluster::groupHits(std::vector<StripHit> &hits,
             cbeg = it_n;
         }
     }
+}
+
+//=============================================================================
+// isGoodStrip — SBS-style strip-level cuts (only called when one is active)
+//=============================================================================
+
+bool GemCluster::isGoodStrip(const StripHit &hit) const
+{
+    // pulse shape: strictly rising then strictly falling (empty fails)
+    if (cfg_.strip_unimodal && !IsUnimodalPulse(hit.ts_adc))
+        return false;
+
+    // mean-time window, inclusive; NaN (no positive sample) fails
+    if (std::isfinite(cfg_.strip_time_min) || std::isfinite(cfg_.strip_time_max)) {
+        float t = StripMeanTime(hit.ts_adc, cfg_.ts_period);
+        if (!(t >= cfg_.strip_time_min && t <= cfg_.strip_time_max))
+            return false;
+    }
+    return true;
 }
 
 //=============================================================================
@@ -135,7 +244,7 @@ void GemCluster::splitCluster(std::vector<StripHit>::iterator beg,
 }
 
 //=============================================================================
-// reconstructCluster — charge-weighted position
+// reconstructCluster — charge-weighted position + SBS-style quality variables
 //=============================================================================
 
 void GemCluster::reconstructCluster(StripCluster &cluster) const
@@ -158,6 +267,44 @@ void GemCluster::reconstructCluster(StripCluster &cluster) const
 
     if (cluster.total_charge > 0.f)
         cluster.position = weight_pos / cluster.total_charge;
+
+    // --- SBS-style quality variables -------------------------------------
+    // seed = first strip with the maximum charge (strict >), the rule the
+    // X/Y time cut has always used
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const StripHit *seed = &cluster.hits.front();
+    for (auto &hit : cluster.hits)
+        if (hit.charge > seed->charge) seed = &hit;
+
+    cluster.seed_time     = StripMeanTime(seed->ts_adc, cfg_.ts_period);
+    cluster.seed_peak_adc = nan;
+    cluster.seed_sum_adc  = nan;
+    if (!seed->ts_adc.empty()) {
+        float peak = seed->ts_adc.front(), sum = 0.f;
+        for (float v : seed->ts_adc) {
+            if (v > peak) peak = v;
+            sum += v;
+        }
+        cluster.seed_peak_adc = peak;
+        cluster.seed_sum_adc  = sum;
+    }
+
+    // seed vs every other strip (all i != seed, unlike SBS which stops at
+    // the seed index); non-finite per-strip values are skipped
+    cluster.max_strip_dt = nan;
+    cluster.min_ts_corr  = nan;
+    for (auto &hit : cluster.hits) {
+        if (&hit == seed) continue;
+        float dt = std::abs(StripMeanTime(hit.ts_adc, cfg_.ts_period) -
+                            cluster.seed_time);
+        if (std::isfinite(dt) &&
+            (std::isnan(cluster.max_strip_dt) || dt > cluster.max_strip_dt))
+            cluster.max_strip_dt = dt;
+        float r = TimeSampleCorrelation(seed->ts_adc, hit.ts_adc);
+        if (std::isfinite(r) &&
+            (std::isnan(cluster.min_ts_corr) || r < cluster.min_ts_corr))
+            cluster.min_ts_corr = r;
+    }
 }
 
 //=============================================================================
@@ -261,32 +408,23 @@ void GemCluster::filterClusters(std::vector<StripCluster> &clusters) const
                 // cross-talk
                 if (cl.cross_talk)
                     return true;
+                // SBS-style quality cuts, each only when enabled; NaN
+                // (undefined, e.g. single-strip cluster) passes
+                if (cfg_.seed_min_peak_adc > 0.f &&
+                    cl.seed_peak_adc < cfg_.seed_min_peak_adc)
+                    return true;
+                if (cfg_.seed_min_sum_adc > 0.f &&
+                    cl.seed_sum_adc < cfg_.seed_min_sum_adc)
+                    return true;
+                if (cfg_.strip_time_agreement >= 0.f &&
+                    cl.max_strip_dt > cfg_.strip_time_agreement)
+                    return true;
+                if (cfg_.strip_ts_corr_min > -1.f &&
+                    cl.min_ts_corr < cfg_.strip_ts_corr_min)
+                    return true;
                 return false;
             }),
         clusters.end());
-}
-
-//=============================================================================
-// seedMeanTime — ADC-weighted mean time of the seed (max-charge) strip
-//=============================================================================
-
-static float seedMeanTime(const StripCluster &cl, float ts_period)
-{
-    // find seed strip (highest charge)
-    const StripHit *seed = nullptr;
-    for (auto &h : cl.hits)
-        if (!seed || h.charge > seed->charge) seed = &h;
-    if (!seed || seed->ts_adc.empty()) return -1.f;
-
-    float sum_wt = 0.f, sum_w = 0.f;
-    for (size_t i = 0; i < seed->ts_adc.size(); ++i) {
-        float w = seed->ts_adc[i];
-        if (w > 0.f) {
-            sum_wt += w * static_cast<float>(i + 1) * ts_period;
-            sum_w  += w;
-        }
-    }
-    return (sum_w > 0.f) ? sum_wt / sum_w : -1.f;
 }
 
 //=============================================================================
@@ -296,6 +434,9 @@ static float seedMeanTime(const StripCluster &cl, float ts_period)
 // Mode 1 (Cartesian):  all X×Y combinations with optional cuts:
 //   - ADC asymmetry: |Qx_peak - Qy_peak| / (Qx_peak + Qy_peak) <= threshold
 //   - Timing:        |mean_time_x_seed - mean_time_y_seed| <= threshold
+//                    (StripCluster::seed_time, filled by reconstructCluster)
+// Both modes record the X/Y seed times, time difference, signed ADC
+// asymmetry and the cluster quality variables on every GEMHit.
 //=============================================================================
 
 static GEMHit makeHit(const StripCluster &xc, const StripCluster &yc,
@@ -314,6 +455,18 @@ static GEMHit makeHit(const StripCluster &xc, const StripCluster &yc,
     hit.y_max_timebin = yc.max_timebin;
     hit.x_size = static_cast<int>(xc.hits.size());
     hit.y_size = static_cast<int>(yc.hits.size());
+
+    // SBS-style X/Y quality (NaN = undefined)
+    hit.x_time    = xc.seed_time;
+    hit.y_time    = yc.seed_time;
+    hit.time_diff = xc.seed_time - yc.seed_time;
+    float sum = xc.peak_charge + yc.peak_charge;
+    hit.adc_asym  = (sum > 0.f) ? (xc.peak_charge - yc.peak_charge) / sum
+                                : std::numeric_limits<float>::quiet_NaN();
+    hit.x_max_strip_dt = xc.max_strip_dt;
+    hit.y_max_strip_dt = yc.max_strip_dt;
+    hit.x_min_ts_corr  = xc.min_ts_corr;
+    hit.y_min_ts_corr  = yc.min_ts_corr;
     return hit;
 }
 
@@ -346,11 +499,8 @@ void GemCluster::CartesianReconstruct(
     // Mode 1: full Cartesian product with cuts
     const float adc_asym_cut = cfg_.match_adc_asymmetry;
     const float time_cut     = cfg_.match_time_diff;
-    const float ts_ns        = cfg_.ts_period;
 
     for (auto &xc : x_clusters) {
-        float x_mean_t = (time_cut >= 0.f) ? seedMeanTime(xc, ts_ns) : 0.f;
-
         for (auto &yc : y_clusters) {
             // ADC asymmetry cut
             if (adc_asym_cut >= 0.f) {
@@ -361,12 +511,12 @@ void GemCluster::CartesianReconstruct(
                 }
             }
 
-            // timing asymmetry cut
-            if (time_cut >= 0.f && x_mean_t >= 0.f) {
-                float y_mean_t = seedMeanTime(yc, ts_ns);
-                if (y_mean_t >= 0.f && std::abs(x_mean_t - y_mean_t) > time_cut)
-                    continue;
-            }
+            // timing asymmetry cut (seed mean times; skipped when either
+            // is undefined, i.e. the seed has no positive sample)
+            if (time_cut >= 0.f &&
+                std::isfinite(xc.seed_time) && std::isfinite(yc.seed_time) &&
+                std::abs(xc.seed_time - yc.seed_time) > time_cut)
+                continue;
 
             container.push_back(makeHit(xc, yc, det_id));
         }
