@@ -60,7 +60,6 @@ static int scanFile(const std::string &path, int start_ev, int num_ev)
 
             bool dup = (printed > 0 && hash == prev_hash);
 
-            // decode this sub-event
             int nrocs = 0, nchannels = 0;
             if (ch.DecodeEvent(i, event)) {
                 for (int r = 0; r < event.nrocs; ++r) {
@@ -155,7 +154,6 @@ static int testET(const std::string &ip, int port,
     return 0;
 }
 
-// --------------------------------------------------------------------------
 int main(int argc, char *argv[])
 {
     std::string mode;

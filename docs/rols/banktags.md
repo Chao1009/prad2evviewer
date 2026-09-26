@@ -392,18 +392,20 @@ Per channel (repeated N times):
 
 ### FADC250 Raw Hardware Format (0xE109)
 
-Self-describing 32-bit words with type code in bits[31:27]:
+Self-describing 32-bit words.  Defining words have bit 31 = 1 and the type in
+bits[30:27], so bits[31:27] read 0x10 + type (as rol2.c tests them);
+continuation words have bit 31 = 0:
 
-| Type (bits 31:27) | Name             | Key fields                            |
-|-------------------|------------------|---------------------------------------|
-| 0x00              | Block Header     | slot(5), module_id(4), block#(10), nevents(8) |
-| 0x01              | Block Trailer    | slot(5), nwords(22)                   |
-| 0x02              | Event Header     | slot(5), trigger#(22)                 |
-| 0x03              | Trigger Time     | time(24), continuation: time_high(24) |
-| 0x04              | Window Raw Data  | channel(4), width(12), then 2 ADC samples/word |
-| 0x1F              | Filler           | skip                                  |
+| Bits 31:27 | Name             | Key fields                            |
+|------------|------------------|---------------------------------------|
+| 0x10       | Block Header     | slot(5), module_id(4), block#(10), nevents(8) |
+| 0x11       | Block Trailer    | slot(5), nwords(22)                   |
+| 0x12       | Event Header     | slot(5), trigger#(22)                 |
+| 0x13       | Trigger Time     | time(24), continuation: time_high(24) |
+| 0x14       | Window Raw Data  | channel(4), width(12), then 2 ADC samples/word |
+| 0x1E, 0x1F | Data Not Valid, Filler | skip                            |
 
-Sample data words (continuation after type 0x04 header):
+Sample data words (continuation after a 0x14 header):
 - Bits 28:16 = ADC sample i (13 bits)
 - Bits 12:0 = ADC sample i+1 (13 bits)
 

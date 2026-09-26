@@ -20,8 +20,8 @@ Two event-selection modes are provided:
 A channel "fired" when it has at least one FADC peak whose height (above
 pedestal) exceeds the user-specified threshold.
 
-The bottom half of the window shows individual waveforms: the currently
-selected scintillator (V1–V4) and the HyCal module last clicked on the map,
+The bottom half of the window shows individual waveforms: all four
+scintillators (V1–V4) overlaid and the HyCal module last clicked on the map,
 both fetched from the server for the event number entered in the Event Browser.
 
 Usage
@@ -39,7 +39,8 @@ import threading
 import time
 import multiprocessing
 import os
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -61,44 +62,35 @@ from PyQt6.QtGui import (
 )
 
 from hycal_geoview import (
-    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
-    cmap_qcolor,
+    load_modules, load_daq_map, load_roc_tag_map, hole_ring,
+    HyCalMapWidget, cmap_qcolor, series_qcolor, draw_wave_axes,
     apply_theme_palette, set_theme, available_themes, THEME, themed,
 )
+from prad2_env import import_prad2py
 
-try:
-    import prad2py as _prad2py          # type: ignore
-    _HAVE_PRAD2PY = True
-except ImportError:
-    _prad2py = None                     # type: ignore
-    _HAVE_PRAD2PY = False
+_prad2py, _ = import_prad2py(build_first=False)
+_HAVE_PRAD2PY = _prad2py is not None
 
 
-# ===========================================================================
-#  Paths & constants
-# ===========================================================================
+# Paths & constants
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON  = DB_DIR / "hycal_map.json"
-DAQ_MAP_JSON  = DB_DIR / "hycal_map.json"
 DAQ_CFG_JSON  = DB_DIR / "daq_config.json"
 
 DEFAULT_URL = "http://localhost:5051"
 
-# Scintillator names (keys resolved at runtime from daq_map + daq_config)
-SCINTILLATORS: Dict[str, str] = {
-    "V1": "V1",
-    "V2": "V2",
-    "V3": "V3",
-    "V4": "V4",
-}
+# Scintillator names (channel keys resolved at runtime from daq_map + daq_config)
+SCINTILLATORS = ("V1", "V2", "V3", "V4")
 
 # Default thresholds (FADC peak height above pedestal, ADC counts)
 DEFAULT_SCINT_THR = 500.0
 DEFAULT_HYCAL_THR = 500.0
 
-# Default HyCal signal time window (ns) — same FADC window as scintillators
+# Default signal time windows (ns); scintillators and HyCal share the FADC window
+DEFAULT_SCINT_TMIN = 160.0
+DEFAULT_SCINT_TMAX = 200.0
 DEFAULT_HYCAL_TMIN = 160.0
 DEFAULT_HYCAL_TMAX = 200.0
 
@@ -128,7 +120,7 @@ VIEW_COINC   = "coincidence"  # colour = coincidence rate with selected scintill
 VIEW_OCC     = "occupancy"    # colour = number of events module fired above threshold
 VIEW_INSTANT = "instant"      # colour = per-module ADC signal for current event
 
-# Veto scintillator motor PVs  (prad:vetoN.VAL = setpoint, .RBV = read-back)
+# Veto scintillator motor PV prefixes (suffixes: see VetoMotorController)
 VETO_PV_BASES: Dict[str, str] = {
     "V1": "prad:veto1",
     "V2": "prad:veto2",
@@ -143,9 +135,7 @@ BATCH_SIZE = 64    # events per processing batch (small keeps in-flight JSON bou
 CLK_MHZ = 250.0    # FADC clock (for x-axis in ns)
 
 
-# ===========================================================================
-#  Veto motor position reader
-# ===========================================================================
+# Veto motor position reader
 
 class VetoMotorController:
     """Reads and writes position PVs for the four veto scintillator motors.
@@ -191,77 +181,7 @@ class VetoMotorController:
         return self._epics_ok
 
 
-# ===========================================================================
-#  HTTP helpers
-# ===========================================================================
-
-def _load_crate_to_roc(path: Path) -> Dict[int, int]:
-    """Return {crate_index: roc_tag} from daq_config.json roc_tags list.
-    Only 'roc' type entries are included (not ti_slave, tdc, gem, etc.).
-    """
-    mapping: Dict[int, int] = {}
-    try:
-        with open(path) as f:
-            cfg = json_mod.load(f)
-        for entry in cfg.get("roc_tags", []):
-            if entry.get("type") != "roc":
-                continue
-            crate = entry.get("crate")
-            tag_raw = entry.get("tag", "")
-            try:
-                tag = int(tag_raw, 16) if isinstance(tag_raw, str) else int(tag_raw)
-                mapping[int(crate)] = tag
-            except (ValueError, TypeError):
-                pass
-    except Exception:
-        pass
-    return mapping
-
-
-def _load_daq_map(path: Path,
-                  crate_to_roc: Optional[Dict[int, int]] = None) -> Dict[str, str]:
-    """Return {module_name: "roc_tag_slot_channel"} from hycal_map.json.
-
-    The event JSON produced by the C++ server uses the actual ROC tag (not the
-    sequential crate index) as the first component of the channel key.  Pass
-    crate_to_roc so the keys produced here match what the server emits.
-    Records without a "daq" block are skipped.
-    """
-    with open(path) as f:
-        entries = json_mod.load(f)
-    result: Dict[str, str] = {}
-    for e in entries:
-        d = e.get("daq")
-        if not d:
-            continue
-        crate = d["crate"]
-        roc = crate_to_roc.get(crate, crate) if crate_to_roc else crate
-        result[e["n"]] = f"{roc}_{d['slot']}_{d['channel']}"
-    return result
-
-
-def _build_w_module_layers(modules_path: Path) -> Dict[str, int]:
-    """Return {W_module_name: layer} where layer 1 is immediately around the beam hole.
-
-    The central hole occupies rows 17-18, cols 17-18.  A module's layer is its
-    Chebyshev distance to the nearest hole cell:
-        layer = max(max(0, 17-row, row-18), max(0, 17-col, col-18))
-    """
-    with open(modules_path) as f:
-        mods = json_mod.load(f)
-    result: Dict[str, int] = {}
-    for m in mods:
-        name = m['n']
-        if not name.startswith('W'):
-            continue
-        g = m.get('geo')
-        if not g or 'row' not in g or 'col' not in g:
-            continue
-        dr = max(0, 17 - g['row'], g['row'] - 18)
-        dc = max(0, 17 - g['col'], g['col'] - 18)
-        result[name] = max(dr, dc)
-    return result
-
+# HTTP helpers
 
 def _http_get(url: str, timeout: float = 5.0) -> Optional[dict]:
     try:
@@ -326,6 +246,138 @@ def _build_tuple_role_map(scint_keys: Dict[str, str],
     return role
 
 
+# Event selection & counting
+
+@dataclass(frozen=True)
+class CoincCuts:
+    """Event-selection cuts of a coincidence run (picklable, so the parallel
+    file workers get it as is)."""
+    scint_thr: float
+    hycal_thr: float
+    mode: str = MODE_AND
+    min_mods: int = DEFAULT_MIN_CLUSTER_MODS
+    scint_t_min: float = -math.inf
+    scint_t_max: float = math.inf
+    hycal_t_min: float = -math.inf
+    hycal_t_max: float = math.inf
+    neighbor_map: Dict[str, frozenset] = field(default_factory=dict)
+    max_lm: int = 0   # max HyCal local maxima; 0 = no cut
+
+    @property
+    def require_scint(self) -> bool:
+        """Events without a fired scintillator are dropped in AND mode, and
+        in either mode while the scint time cut is active."""
+        return self.mode == MODE_AND or self.scint_t_min > -math.inf
+
+
+def _select_best(ma: Dict[str, float], cuts: CoincCuts) -> Optional[str]:
+    """The highest-ADC module of an event with module ADCs ``ma`` (modules
+    above threshold), or None when the event fails the LMS-occupancy,
+    cluster-size or local-maxima cut."""
+    n_ma = len(ma)
+    if n_ma > LMS_MAX_MODULES or n_ma < cuts.min_mods:
+        return None
+    # Single-module clusters are trivially 1 local max — skip the scan.
+    if (cuts.max_lm > 0 and n_ma > 1
+            and _count_local_maxima(ma, cuts.neighbor_map) > cuts.max_lm):
+        return None
+    return max(ma, key=ma.__getitem__)
+
+
+class Counters:
+    """Coincidence counts of one worker.  Callers count every event in
+    ``processed`` themselves; add() counts the events that passed the cuts.
+    """
+
+    def __init__(self, module_names) -> None:
+        self._mod_names = list(module_names)
+        self._reset()
+
+    def _reset(self) -> None:
+        mods = self._mod_names
+        self.module_hits:    Dict[str, int] = {m: 0 for m in mods}
+        self.scint_hits:     Dict[str, int] = {s: 0 for s in SCINTILLATORS}
+        self.scint_hits_any: Dict[str, int] = {s: 0 for s in SCINTILLATORS}
+        self.coincidences: Dict[str, Dict[str, int]] = {
+            s: {m: 0 for m in mods} for s in SCINTILLATORS
+        }
+        self.processed = 0
+
+    def add(self, sf: Dict[str, bool], best: str, require_scint: bool) -> bool:
+        """Count an event whose best module is ``best``; ``sf`` maps
+        scintillator → fired.
+
+        Individual scintillator fires are counted first, so the stats panel
+        always shows per-scintillator rates.  The event itself is dropped
+        (returns False) when ``require_scint`` and no scintillator fired.
+        Otherwise module_hits[best] += 1 and, for each fired Vi,
+        scint_hits[Vi] and coincidences[Vi][best] += 1.
+        """
+        for sname, fired in sf.items():
+            if fired:
+                self.scint_hits_any[sname] += 1
+        if require_scint and not any(sf.values()):
+            return False
+        self.module_hits[best] += 1
+        for sname, fired in sf.items():
+            if fired:
+                self.scint_hits[sname] += 1
+                self.coincidences[sname][best] += 1
+        return True
+
+    def snapshot(self, mode: str) -> dict:
+        rates: Dict[str, Dict[str, float]] = {}
+        for sname in SCINTILLATORS:
+            rates[sname] = {}
+            s_denom = self.scint_hits[sname]   # N(V_i fired AND HyCal cluster)
+            for mname, m_denom in self.module_hits.items():
+                ncoinc = self.coincidences[sname][mname]
+                if mode == MODE_AND:
+                    rates[sname][mname] = (ncoinc / m_denom
+                                           if m_denom > 0 else math.nan)
+                else:
+                    rates[sname][mname] = (ncoinc / s_denom
+                                           if s_denom > 0 else math.nan)
+        return {
+            "rates": rates,
+            "mode": mode,
+            "module_hits": dict(self.module_hits),
+            "scint_hits": dict(self.scint_hits),
+            "scint_hits_any": dict(self.scint_hits_any),
+            "processed": self.processed,
+        }
+
+    def take_delta(self) -> dict:
+        """The counts as plain dicts (for another process); counting
+        restarts from zero in new dicts, so the returned ones stay as they
+        are while a Queue feeder thread pickles them."""
+        delta = {
+            "module_hits":    self.module_hits,
+            "scint_hits":     self.scint_hits,
+            "scint_hits_any": self.scint_hits_any,
+            "coincidences":   self.coincidences,
+            "processed":      self.processed,
+        }
+        self._reset()
+        return delta
+
+    def merge(self, delta: dict) -> None:
+        """Add a take_delta() result."""
+        for m, v in delta["module_hits"].items():
+            if v: self.module_hits[m] += v
+        for s, v in delta["scint_hits"].items():
+            if v: self.scint_hits[s] += v
+        for s, v in delta["scint_hits_any"].items():
+            if v: self.scint_hits_any[s] += v
+        for s, ccol in delta["coincidences"].items():
+            row = self.coincidences[s]
+            for m, v in ccol.items():
+                if v: row[m] += v
+        self.processed += delta["processed"]
+
+
+# Parallel local-EVIO worker (subprocess)
+
 # Worker-process global for the update queue.  ``forkserver``/``spawn``
 # refuse to pickle a Queue in apply_async args ("Queue objects should
 # only be shared between processes through inheritance"), so we install
@@ -341,37 +393,23 @@ def _init_worker(q):
 def _process_files(args: dict) -> None:
     """Process a list of EVIO files in a subprocess.
 
-    Periodically pushes incremental count deltas to ``args["update_queue"]``
-    so the parent QThread can update the UI while subprocesses are still
-    running.  Returns None — all results flow through the queue.
+    Periodically pushes incremental count deltas to the worker's update
+    queue (see _init_worker) so the parent QThread can update the UI while
+    subprocesses are still running.  Returns None — all results flow
+    through the queue.
     """
     paths           = args["paths"]
     tuple_to_role   = args["tuple_to_role"]
-    scint_thr       = args["scint_thr"]
-    hycal_thr       = args["hycal_thr"]
-    scint_t_min     = args["scint_t_min"]
-    scint_t_max     = args["scint_t_max"]
-    hycal_t_min     = args["hycal_t_min"]
-    hycal_t_max     = args["hycal_t_max"]
-    neighbor_map    = args["neighbor_map"]
-    max_lm          = args["max_lm"]
-    mode            = args["mode"]
-    min_mods        = args["min_mods"]
-    scint_names     = args["scint_names"]
-    mod_names       = args["mod_names"]
-    skip_mask       = args["skip_mask"]
-    lms_max         = args["lms_max"]
+    cuts: CoincCuts = args["cuts"]
     worker_id       = args["worker_id"]
     n_files_in_chunk = len(paths)
     update_q        = _WORKER_UPDATE_Q
     push_interval   = args.get("push_interval", 0.5)
+    scint_thr       = cuts.scint_thr
+    hycal_thr       = cuts.hycal_thr
 
-    # Delta accumulators — reset to zero after each push to the parent.
-    d_module_hits    = {m: 0 for m in mod_names}
-    d_scint_hits     = {s: 0 for s in scint_names}
-    d_scint_hits_any = {s: 0 for s in scint_names}
-    d_coincidences   = {s: {m: 0 for m in mod_names} for s in scint_names}
-    d_processed      = 0
+    # Counts since the last push to the parent.
+    delta = Counters(args["mod_names"])
 
     # Per-file progress state — included in every push so the parent UI can
     # render one progress bar per worker.
@@ -396,48 +434,16 @@ def _process_files(args: dict) -> None:
     for _lst in hycal_locs_by_roc.values():
         _lst.sort()
 
-    # In AND mode, or when the scint time cut is active, we never count an
-    # event whose scintillators don't fire — so skipping HyCal in that case
-    # is safe and saves all per-channel work for those events.
-    require_scint = (mode == MODE_AND or scint_t_min > -math.inf)
-
-    # Pre-compute sample-index bounds for the time-window peak search.
-    # FADC250 ticks at 250 MHz → 4 ns per sample.  N_PED is the number of
-    # leading samples used to estimate pedestal — chosen large enough to be
-    # statistically stable but small enough never to overlap a physics
-    # signal (those arrive after ~100 ns at the earliest).
-    N_PED = 30
-    _ns_per_sample = 4.0
-    _NO_UPPER = 1 << 30
-
-    if scint_t_min > -math.inf:
-        s_lo = max(N_PED, int(scint_t_min / _ns_per_sample))
-    else:
-        s_lo = N_PED
-    if scint_t_max < math.inf:
-        s_hi = int(scint_t_max / _ns_per_sample) + 1
-    else:
-        s_hi = _NO_UPPER
-
-    if hycal_t_min > -math.inf:
-        h_lo = max(N_PED, int(hycal_t_min / _ns_per_sample))
-    else:
-        h_lo = N_PED
-    if hycal_t_max < math.inf:
-        h_hi = int(hycal_t_max / _ns_per_sample) + 1
-    else:
-        h_hi = _NO_UPPER
+    # With require_scint an event whose scintillators don't fire is never
+    # counted, so skipping HyCal in that case is safe and saves all
+    # per-channel work for those events.
+    require_scint = cuts.require_scint
 
     def _flush():
-        nonlocal d_processed
         if update_q is None:
             return
         update_q.put({
-            "module_hits":     dict(d_module_hits),
-            "scint_hits":      dict(d_scint_hits),
-            "scint_hits_any":  dict(d_scint_hits_any),
-            "coincidences":    {s: dict(c) for s, c in d_coincidences.items()},
-            "processed":       d_processed,
+            **delta.take_delta(),
             "worker_id":       worker_id,
             "n_files":         n_files_in_chunk,
             "file_idx":        cur_file_idx,
@@ -446,14 +452,6 @@ def _process_files(args: dict) -> None:
             "records_total":   cur_records_tot,
             "finished":        finished_chunk,
         })
-        for m in mod_names:
-            d_module_hits[m] = 0
-        for s in scint_names:
-            d_scint_hits[s] = 0
-            d_scint_hits_any[s] = 0
-            for m in mod_names:
-                d_coincidences[s][m] = 0
-        d_processed = 0
 
     try:
         import prad2py as _p2       # type: ignore
@@ -472,11 +470,23 @@ def _process_files(args: dict) -> None:
     # WaveAnalyzer not needed in the parallel worker — the per-event hot
     # loop uses a numpy-only peak-in-window heuristic instead.
 
-    # If prad2py was built with the slot-batched fast path, use it.  The
-    # method returns a single float32 array per slot (one C call instead
-    # of 16 separate `.samples` numpy allocations), which is the only
-    # remaining ~10× speedup at this layer.
-    has_batch = hasattr(dec.SlotData, "peak_in_window")
+    # Sample-index bounds for the time-window peak search, on the
+    # WaveAnalyzer clock.  N_PED is the number of leading samples used to
+    # estimate pedestal — chosen large enough to be statistically stable but
+    # small enough never to overlap a physics signal (those arrive after
+    # ~100 ns at the earliest).
+    N_PED = 30
+    clk_mhz = cfg.wave_cfg.clk_mhz
+    ns_per_sample = 1e3 / (clk_mhz if clk_mhz > 0 else CLK_MHZ)
+
+    def _sample_window(t_min: float, t_max: float) -> tuple:
+        lo = (max(N_PED, int(t_min / ns_per_sample))
+              if t_min > -math.inf else N_PED)
+        hi = int(t_max / ns_per_sample) + 1 if t_max < math.inf else 1 << 30
+        return lo, hi
+
+    s_lo, s_hi = _sample_window(cuts.scint_t_min, cuts.scint_t_max)
+    h_lo, h_hi = _sample_window(cuts.hycal_t_min, cuts.hycal_t_max)
 
     last_push = time.monotonic()
 
@@ -514,13 +524,13 @@ def _process_files(args: dict) -> None:
             for si in range(ch.get_n_events()):
                 ch.select_event(si)
                 info = ch.info()
-                d_processed += 1
+                delta.processed += 1
 
-                if int(info.trigger_bits) & skip_mask:
+                if int(info.trigger_bits) & SKIP_TRIGGER_MASK:
                     continue
 
                 fadc_evt = ch.fadc()
-                sf: Dict[str, bool]  = {s: False for s in scint_names}
+                sf: Dict[str, bool]  = {s: False for s in SCINTILLATORS}
                 ma: Dict[str, float] = {}
 
                 # Build a roc_tag -> roc-object map once per event so the
@@ -531,112 +541,55 @@ def _process_files(args: dict) -> None:
                     rr = fadc_evt.roc(r)
                     roc_by_tag[int(rr.tag)] = rr
 
-                if has_batch:
-                    # ---------- Fast C++ batched path ----------
-                    # One C call per slot returns a (MAX_CHANNELS,) float32
-                    # array of (max-in-window − pedestal) values.  Python
-                    # only does dict lookups; no per-channel numpy alloc.
-                    scint_any = False
-                    for rt, sn, cn, name in scint_locs:
-                        rr = roc_by_tag.get(rt)
-                        if rr is None:
-                            continue
-                        heights = rr.slot(sn).peak_in_window(s_lo, s_hi, N_PED)
-                        if heights[cn] > scint_thr:
-                            sf[name]  = True
-                            scint_any = True
-
-                    if require_scint and not scint_any:
+                scint_any = False
+                for rt, sn, cn, name in scint_locs:
+                    rr = roc_by_tag.get(rt)
+                    if rr is None:
                         continue
+                    chan = rr.slot(sn).channel(cn)
+                    if chan.nsamples < N_PED + 1:
+                        continue
+                    samples = chan.samples
+                    if samples.max() - samples.min() < scint_thr:
+                        continue
+                    ped    = samples[:N_PED].mean()
+                    window = samples[s_lo:s_hi]
+                    if window.size == 0:
+                        continue
+                    if window.max() - ped > scint_thr:
+                        sf[name]  = True
+                        scint_any = True
 
-                    for rt, hy_locs in hycal_locs_by_roc.items():
-                        rr = roc_by_tag.get(rt)
-                        if rr is None:
-                            continue
-                        last_slot_num = -1
-                        heights = None
-                        for sn, cn, name in hy_locs:
-                            if sn != last_slot_num:
-                                heights = rr.slot(sn).peak_in_window(
-                                    h_lo, h_hi, N_PED)
-                                last_slot_num = sn
-                            h = heights[cn]
-                            if h > hycal_thr:
-                                ma[name] = float(h)
-                else:
-                    # ---------- Pure-Python fallback path ------
-                    # Used when prad2py hasn't been rebuilt with
-                    # SlotData.peak_in_window.  ~10× slower per event,
-                    # but functionally equivalent.
-                    scint_any = False
-                    for rt, sn, cn, name in scint_locs:
-                        rr = roc_by_tag.get(rt)
-                        if rr is None:
-                            continue
-                        chan = rr.slot(sn).channel(cn)
+                if require_scint and not scint_any:
+                    continue
+
+                for rt, hy_locs in hycal_locs_by_roc.items():
+                    rr = roc_by_tag.get(rt)
+                    if rr is None:
+                        continue
+                    last_slot_num = -1
+                    slot = None
+                    for sn, cn, name in hy_locs:
+                        if sn != last_slot_num:
+                            slot = rr.slot(sn)
+                            last_slot_num = sn
+                        chan = slot.channel(cn)
                         if chan.nsamples < N_PED + 1:
                             continue
                         samples = chan.samples
-                        if samples.max() - samples.min() < scint_thr:
+                        if samples.max() - samples.min() < hycal_thr:
                             continue
                         ped    = samples[:N_PED].mean()
-                        window = samples[s_lo:s_hi]
+                        window = samples[h_lo:h_hi]
                         if window.size == 0:
                             continue
-                        if window.max() - ped > scint_thr:
-                            sf[name]  = True
-                            scint_any = True
+                        height = float(window.max() - ped)
+                        if height > hycal_thr:
+                            ma[name] = height
 
-                    if require_scint and not scint_any:
-                        continue
-
-                    for rt, hy_locs in hycal_locs_by_roc.items():
-                        rr = roc_by_tag.get(rt)
-                        if rr is None:
-                            continue
-                        last_slot_num = -1
-                        slot = None
-                        for sn, cn, name in hy_locs:
-                            if sn != last_slot_num:
-                                slot = rr.slot(sn)
-                                last_slot_num = sn
-                            chan = slot.channel(cn)
-                            if chan.nsamples < N_PED + 1:
-                                continue
-                            samples = chan.samples
-                            if samples.max() - samples.min() < hycal_thr:
-                                continue
-                            ped    = samples[:N_PED].mean()
-                            window = samples[h_lo:h_hi]
-                            if window.size == 0:
-                                continue
-                            height = float(window.max() - ped)
-                            if height > hycal_thr:
-                                ma[name] = height
-
-                n_ma = len(ma)
-                if n_ma > lms_max or n_ma < min_mods:
-                    continue
-
-                if (max_lm > 0 and n_ma > 1
-                        and _count_local_maxima(ma, neighbor_map) > max_lm):
-                    continue
-
-                best = max(ma, key=ma.__getitem__)
-
-                for sname, fired in sf.items():
-                    if fired:
-                        d_scint_hits_any[sname] += 1
-
-                any_scint = sf.get("V1") or sf.get("V2") or sf.get("V3") or sf.get("V4")
-                if not any_scint and (mode == MODE_AND or scint_t_min > -math.inf):
-                    continue
-
-                d_module_hits[best] += 1
-                for sname, fired in sf.items():
-                    if fired:
-                        d_scint_hits[sname] += 1
-                        d_coincidences[sname][best] += 1
+                best = _select_best(ma, cuts)
+                if best is not None:
+                    delta.add(sf, best, require_scint)
 
             # Time-based partial push (between records, not per event,
             # to keep time.monotonic() out of the hottest inner loop).
@@ -654,92 +607,7 @@ def _process_files(args: dict) -> None:
     return None
 
 
-def _channel_fired(ch_data: dict, threshold: float,
-                   t_min: float = -math.inf, t_max: float = math.inf) -> bool:
-    """True if any peak has height > threshold and time within [t_min, t_max] ns."""
-    for pk in ch_data.get("pk", []):
-        if pk.get("h", 0.0) > threshold and t_min <= pk.get("t", 0.0) <= t_max:
-            return True
-    return False
-
-
-# ===========================================================================
-#  Statistics container
-# ===========================================================================
-
-class Stats:
-    """Thread-safe coincidence accumulator."""
-
-    def __init__(self, module_names):
-        self._lock = threading.Lock()
-        self.module_hits:    Dict[str, int] = {m: 0 for m in module_names}
-        self.scint_hits:     Dict[str, int] = {s: 0 for s in SCINTILLATORS}
-        self.scint_hits_any: Dict[str, int] = {s: 0 for s in SCINTILLATORS}
-        self.coincidences: Dict[str, Dict[str, int]] = {
-            s: {m: 0 for m in module_names} for s in SCINTILLATORS
-        }
-        self.processed = 0
-
-    def update(self, scint_fired: Dict[str, bool],
-               module_fired: Dict[str, bool]) -> None:
-        """Accumulate one event.
-
-        For every module Mj that fired:
-            module_hits[Mj]          += 1
-            coincidences[Vi][Mj]     += 1  for each Vi that also fired
-
-        This gives  rate(Vi, Mj) = coincidences[Vi][Mj] / module_hits[Mj]
-                                 = N(Vi fired AND Mj fired) / N(Mj fired)
-        """
-        with self._lock:
-            for sname, sf in scint_fired.items():
-                if sf:
-                    self.scint_hits[sname] += 1
-            for mname, mf in module_fired.items():
-                if mf:
-                    self.module_hits[mname] += 1
-                    for sname, sf in scint_fired.items():
-                        if sf:
-                            self.coincidences[sname][mname] += 1
-            self.processed += 1
-
-    def update_scint_any(self, scint_fired: Dict[str, bool]) -> None:
-        """Count per-scintillator fires for events that passed the cluster cut,
-        regardless of AND/OR mode.  Call this before the AND filter."""
-        with self._lock:
-            for sname, sf in scint_fired.items():
-                if sf:
-                    self.scint_hits_any[sname] += 1
-
-    def snapshot(self, mode: str = MODE_AND) -> dict:
-        with self._lock:
-            rates = {}
-            for sname in SCINTILLATORS:
-                rates[sname] = {}
-                s_denom = self.scint_hits[sname]   # N(V_i fired AND HyCal cluster)
-                for mname, m_denom in self.module_hits.items():
-                    ncoinc = self.coincidences[sname][mname]
-                    if mode == MODE_AND:
-                        # P(V_i fired | M is best): how often V_i coincides with M
-                        rates[sname][mname] = (ncoinc / m_denom
-                                               if m_denom > 0 else math.nan)
-                    else:
-                        # P(M is best | V_i fired): spatial dist. of HyCal given V_i
-                        rates[sname][mname] = (ncoinc / s_denom
-                                               if s_denom > 0 else math.nan)
-            return {
-                "rates": rates,
-                "mode": mode,
-                "module_hits": dict(self.module_hits),
-                "scint_hits": dict(self.scint_hits),
-                "scint_hits_any": dict(self.scint_hits_any),
-                "processed": self.processed,
-            }
-
-
-# ===========================================================================
-#  Waveform collector
-# ===========================================================================
+# Waveform collector
 
 class WaveformCollector:
     """Thread-safe accumulator of per-event waveform records for coincidences.
@@ -845,12 +713,19 @@ class WaveformCollector:
         return n
 
 
-# ===========================================================================
-#  Coincidence scan worker
-# ===========================================================================
+# Coincidence scan worker
 
 def _fetch_event(server_url: str, ev: int) -> Optional[dict]:
     return _http_get(f"{server_url}/api/event/{ev}")
+
+
+def _channel_fired(ch_data: dict, threshold: float,
+                   t_min: float = -math.inf, t_max: float = math.inf) -> bool:
+    """True if any peak has height > threshold and time within [t_min, t_max] ns."""
+    for pk in ch_data.get("pk", []):
+        if pk.get("h", 0.0) > threshold and t_min <= pk.get("t", 0.0) <= t_max:
+            return True
+    return False
 
 
 def _collect_wfm(collector: "WaveformCollector", data: dict,
@@ -876,42 +751,24 @@ def _collect_wfm(collector: "WaveformCollector", data: dict,
                       hycal_name=hycal_name, hycal_key=hycal_key)
 
 
-class ProcessWorker(QThread):
-    progress         = pyqtSignal(int, int)
+class _CoincWorker(QThread):
+    """Common part of the coincidence workers: channel keys, cuts, optional
+    waveform collection and the progress / stats / finished reporting."""
+    progress         = pyqtSignal(int, int)   # (done, total); total -1 = ET, 0 = unknown
     stats_update     = pyqtSignal(dict)
     finished         = pyqtSignal(str)
     waveforms_saved  = pyqtSignal(int, str)   # (count, file_path)
 
-    def __init__(self, server_url: str, n_events: int,
-                 module_keys: Dict[str, str],
+    def __init__(self, module_keys: Dict[str, str],
                  scint_keys: Dict[str, str],
-                 scint_thr: float, hycal_thr: float,
-                 mode: str = MODE_AND,
-                 min_mods: int = DEFAULT_MIN_CLUSTER_MODS,
-                 scint_t_min: float = -math.inf,
-                 scint_t_max: float = math.inf,
-                 hycal_t_min: float = -math.inf,
-                 hycal_t_max: float = math.inf,
-                 neighbor_map: Optional[Dict[str, frozenset]] = None,
-                 max_local_maxima: int = 0,
+                 cuts: CoincCuts,
                  wfm_collector: Optional["WaveformCollector"] = None,
                  wfm_save_path: Optional[Path] = None,
                  parent=None):
         super().__init__(parent)
-        self._url        = server_url
-        self._n          = n_events
         self._mod_keys   = module_keys
         self._scint_keys = scint_keys
-        self._scint_thr  = scint_thr
-        self._hycal_thr  = hycal_thr
-        self._mode       = mode
-        self._min_mods   = min_mods
-        self._scint_t_min  = scint_t_min
-        self._scint_t_max  = scint_t_max
-        self._hycal_t_min  = hycal_t_min
-        self._hycal_t_max  = hycal_t_max
-        self._neighbor_map = neighbor_map or {}
-        self._max_lm       = max_local_maxima
+        self._cuts       = cuts
         self._wfm_coll   = wfm_collector
         self._wfm_path   = wfm_save_path
         self._stop_evt   = threading.Event()
@@ -919,8 +776,72 @@ class ProcessWorker(QThread):
     def stop(self):
         self._stop_evt.set()
 
+    def _emit(self, counters: Counters, done: int, total: int) -> None:
+        self.progress.emit(done, total)
+        self.stats_update.emit(counters.snapshot(self._cuts.mode))
+
+    def _finish(self, counters: Counters, done: int, total: int,
+                err: str = "") -> None:
+        """Last progress/stats update, the waveform file, then finished()
+        with ``err``, or 'stopped' / ''."""
+        self._emit(counters, done, total)
+        if self._wfm_coll and self._wfm_path and self._wfm_coll.count > 0:
+            n = self._wfm_coll.save(self._wfm_path)
+            self.waveforms_saved.emit(n, str(self._wfm_path))
+        self.finished.emit(err or ("stopped" if self._stop_evt.is_set() else ""))
+
+    def _count_server_event(self, data: dict, counters: Counters) -> None:
+        """Select and count one /api/event JSON (server WaveAnalyzer peaks)."""
+        # Reject LMS / alpha events by trigger bit (fast path)
+        if data.get("trigger_bits", 0) & SKIP_TRIGGER_MASK:
+            return
+        cuts = self._cuts
+        channels = data.get("channels", {})
+        scint_fired = {
+            sname: (skey in channels
+                    and _channel_fired(channels[skey], cuts.scint_thr,
+                                       cuts.scint_t_min, cuts.scint_t_max))
+            for sname, skey in self._scint_keys.items()
+        }
+
+        # Per-module ADC: max peak height within the time cut.
+        module_adc: Dict[str, float] = {}
+        for mname, mkey in self._mod_keys.items():
+            if mkey in channels:
+                peaks = channels[mkey].get("pk", [])
+                adc = max(
+                    (float(pk.get("h", 0.0)) for pk in peaks
+                     if cuts.hycal_t_min <= pk.get("t", 0.0) <= cuts.hycal_t_max),
+                    default=0.0)
+                if adc > cuts.hycal_thr:
+                    module_adc[mname] = adc
+
+        best = _select_best(module_adc, cuts)
+        if best is None or not counters.add(scint_fired, best,
+                                            cuts.require_scint):
+            return
+        if self._wfm_coll and not self._wfm_coll.full:
+            _collect_wfm(self._wfm_coll, data, scint_fired,
+                         self._scint_keys, best, self._mod_keys[best])
+
+
+class ProcessWorker(_CoincWorker):
+    """Scans events 1..n_events of the file loaded in the server."""
+
+    def __init__(self, server_url: str, n_events: int,
+                 module_keys: Dict[str, str],
+                 scint_keys: Dict[str, str],
+                 cuts: CoincCuts,
+                 wfm_collector: Optional["WaveformCollector"] = None,
+                 wfm_save_path: Optional[Path] = None,
+                 parent=None):
+        super().__init__(module_keys, scint_keys, cuts,
+                         wfm_collector, wfm_save_path, parent)
+        self._url = server_url
+        self._n   = n_events
+
     def run(self):
-        stats     = Stats(list(self._mod_keys.keys()))
+        counters  = Counters(self._mod_keys)
         last_emit = time.monotonic()
 
         with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
@@ -936,214 +857,44 @@ class ProcessWorker(QThread):
                     if self._stop_evt.is_set():
                         break
                     data = fut.result()
-                    if not data or "error" in data:
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    # Reject LMS / alpha events by trigger bit (fast path)
-                    if data.get("trigger_bits", 0) & SKIP_TRIGGER_MASK:
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    channels = data.get("channels", {})
-                    scint_fired = {
-                        sname: (skey in channels
-                                and _channel_fired(channels[skey], self._scint_thr,
-                                               self._scint_t_min, self._scint_t_max))
-                        for sname, skey in self._scint_keys.items()
-                    }
-
-                    # Compute per-module ADC (max peak height within time cut).
-                    module_adc: Dict[str, float] = {}
-                    for mname, mkey in self._mod_keys.items():
-                        if mkey in channels:
-                            peaks = channels[mkey].get("pk", [])
-                            adc = max(
-                                (float(pk.get("h", 0.0)) for pk in peaks
-                                 if self._hycal_t_min <= pk.get("t", 0.0)
-                                                      <= self._hycal_t_max),
-                                default=0.0)
-                            if adc > self._hycal_thr:
-                                module_adc[mname] = adc
-
-                    # Reject LMS events by module occupancy (>1000 modules fired)
-                    if len(module_adc) > LMS_MAX_MODULES:
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    # Reject isolated single-module noise: require a cluster.
-                    if len(module_adc) < self._min_mods:
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    # Reject multi-cluster events (>1 local ADC maximum).
-                    if (self._max_lm > 0
-                            and _count_local_maxima(module_adc, self._neighbor_map)
-                            > self._max_lm):
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    # Only the module with the highest ADC gets event credit.
-                    # The cluster cut above ensures it is a genuine cluster, not
-                    # an isolated discharge.
-                    best = max(module_adc, key=module_adc.get)
-                    module_fired = {best: True}
-
-                    # Track individual scintillator fires before the AND filter so
-                    # the stats panel always shows per-scintillator rates.
-                    stats.update_scint_any(scint_fired)
-
-                    # Skip if no scint fired in-window (AND mode always; any
-                    # mode when a time cut is active).
-                    if not any(scint_fired.values()) and (
-                            self._mode == MODE_AND
-                            or self._scint_t_min > -math.inf):
-                        with stats._lock:
-                            stats.processed += 1
-                        continue
-
-                    stats.update(scint_fired, module_fired)
-
-                    if self._wfm_coll and not self._wfm_coll.full:
-                        _collect_wfm(self._wfm_coll, data, scint_fired,
-                                     self._scint_keys, best, self._mod_keys[best])
+                    counters.processed += 1
+                    if data and "error" not in data:
+                        self._count_server_event(data, counters)
 
                 batch_start = batch_end + 1
                 now = time.monotonic()
                 if now - last_emit > 0.5:
-                    snap = stats.snapshot(self._mode)
-                    self.progress.emit(snap["processed"], self._n)
-                    self.stats_update.emit(snap)
+                    self._emit(counters, counters.processed, self._n)
                     last_emit = now
 
-        snap = stats.snapshot(self._mode)
-        self.progress.emit(snap["processed"], self._n)
-        self.stats_update.emit(snap)
-        if self._wfm_coll and self._wfm_path and self._wfm_coll.count > 0:
-            n = self._wfm_coll.save(self._wfm_path)
-            self.waveforms_saved.emit(n, str(self._wfm_path))
-        self.finished.emit("" if not self._stop_evt.is_set() else "stopped")
+        self._finish(counters, counters.processed, self._n)
 
 
-class ProcessWorkerET(QThread):
+class ProcessWorkerET(_CoincWorker):
     """Accumulates coincidence statistics from live ET events.
 
-    Polls /api/ring at ~5 Hz, fetches each new sequence number from the
-    ring buffer, and processes it exactly once.  Runs until stopped.
+    Polls /api/ring every POLL_INTERVAL, fetches each new sequence number
+    from the ring buffer, and processes it exactly once.  Runs until stopped.
     """
-    progress         = pyqtSignal(int, int)   # (processed, -1)  — -1 signals ET mode
-    stats_update     = pyqtSignal(dict)
-    finished         = pyqtSignal(str)
-    waveforms_saved  = pyqtSignal(int, str)   # (count, file_path)
 
     POLL_INTERVAL = 0.05  # seconds between /api/ring polls (20 Hz)
 
     def __init__(self, server_url: str,
                  module_keys: Dict[str, str],
                  scint_keys: Dict[str, str],
-                 scint_thr: float, hycal_thr: float,
-                 mode: str = MODE_AND,
-                 min_mods: int = DEFAULT_MIN_CLUSTER_MODS,
+                 cuts: CoincCuts,
                  max_rate_hz: float = 0.0,
-                 scint_t_min: float = -math.inf,
-                 scint_t_max: float = math.inf,
-                 hycal_t_min: float = -math.inf,
-                 hycal_t_max: float = math.inf,
-                 neighbor_map: Optional[Dict[str, frozenset]] = None,
-                 max_local_maxima: int = 0,
                  wfm_collector: Optional["WaveformCollector"] = None,
                  wfm_save_path: Optional[Path] = None,
                  parent=None):
-        super().__init__(parent)
-        self._url          = server_url
-        self._mod_keys     = module_keys
-        self._scint_keys   = scint_keys
-        self._scint_thr    = scint_thr
-        self._hycal_thr    = hycal_thr
-        self._mode         = mode
-        self._min_mods     = min_mods
-        self._max_rate     = max_rate_hz
-        self._scint_t_min  = scint_t_min
-        self._scint_t_max  = scint_t_max
-        self._hycal_t_min  = hycal_t_min
-        self._hycal_t_max  = hycal_t_max
-        self._neighbor_map = neighbor_map or {}
-        self._max_lm       = max_local_maxima
-        self._wfm_coll    = wfm_collector
-        self._wfm_path    = wfm_save_path
-        self._stop_evt    = threading.Event()
-
-    def stop(self):
-        self._stop_evt.set()
-
-    def _process_event(self, data: dict, stats: "Stats") -> None:
-        """Process one decoded event dict and accumulate into stats."""
-        if data.get("trigger_bits", 0) & SKIP_TRIGGER_MASK:
-            with stats._lock:
-                stats.processed += 1
-            return
-
-        channels = data.get("channels", {})
-        scint_fired = {
-            sname: (skey in channels
-                    and _channel_fired(channels[skey], self._scint_thr,
-                                               self._scint_t_min, self._scint_t_max))
-            for sname, skey in self._scint_keys.items()
-        }
-
-        module_adc: Dict[str, float] = {}
-        for mname, mkey in self._mod_keys.items():
-            if mkey in channels:
-                peaks = channels[mkey].get("pk", [])
-                adc = max(
-                    (float(pk.get("h", 0.0)) for pk in peaks
-                     if self._hycal_t_min <= pk.get("t", 0.0) <= self._hycal_t_max),
-                    default=0.0)
-                if adc > self._hycal_thr:
-                    module_adc[mname] = adc
-
-        if len(module_adc) > LMS_MAX_MODULES:
-            with stats._lock:
-                stats.processed += 1
-            return
-
-        if len(module_adc) < self._min_mods:
-            with stats._lock:
-                stats.processed += 1
-            return
-
-        if (self._max_lm > 0
-                and _count_local_maxima(module_adc, self._neighbor_map)
-                > self._max_lm):
-            with stats._lock:
-                stats.processed += 1
-            return
-
-        best = max(module_adc, key=module_adc.get)
-        module_fired = {best: True}
-
-        stats.update_scint_any(scint_fired)
-
-        if not any(scint_fired.values()) and (
-                self._mode == MODE_AND or self._scint_t_min > -math.inf):
-            with stats._lock:
-                stats.processed += 1
-            return
-
-        stats.update(scint_fired, module_fired)
-
-        if self._wfm_coll and not self._wfm_coll.full:
-            _collect_wfm(self._wfm_coll, data, scint_fired,
-                         self._scint_keys, best, self._mod_keys[best])
+        super().__init__(module_keys, scint_keys, cuts,
+                         wfm_collector, wfm_save_path, parent)
+        self._url      = server_url
+        self._max_rate = max_rate_hz
 
     def run(self):
-        stats     = Stats(list(self._mod_keys.keys()))
-        last_seq  = 0    # max sequence number seen; avoids unbounded seen_seqs set
+        counters  = Counters(self._mod_keys)
+        last_seq  = 0    # max sequence number seen
         last_emit = time.monotonic()
 
         with ThreadPoolExecutor(max_workers=N_WORKERS) as pool:
@@ -1154,9 +905,8 @@ class ProcessWorkerET(QThread):
                     time.sleep(self.POLL_INTERVAL)
                     continue
 
-                # Only process sequence numbers we haven't seen yet.
-                # Sequences are monotonically increasing so a single integer
-                # suffices (no need for a growing seen_seqs set).
+                # Sequence numbers increase monotonically, so anything above
+                # last_seq has not been processed yet.
                 new_seqs = sorted(
                     s for s in ring_data.get("ring", []) if s > last_seq)
 
@@ -1170,19 +920,15 @@ class ProcessWorkerET(QThread):
                         if self._stop_evt.is_set():
                             break
                         data = fut.result()
-                        if not data or "error" in data:
-                            with stats._lock:
-                                stats.processed += 1
-                        else:
-                            self._process_event(data, stats)
+                        counters.processed += 1
+                        if data and "error" not in data:
+                            self._count_server_event(data, counters)
 
                     last_seq = max(new_seqs)
 
                 now = time.monotonic()
                 if now - last_emit > 0.5:
-                    snap = stats.snapshot(self._mode)
-                    self.progress.emit(snap["processed"], -1)
-                    self.stats_update.emit(snap)
+                    self._emit(counters, counters.processed, -1)
                     last_emit = now
 
                 # Rate limiting: sleep at least POLL_INTERVAL; sleep longer
@@ -1195,33 +941,20 @@ class ProcessWorkerET(QThread):
                     sleep_t = self.POLL_INTERVAL
                 time.sleep(sleep_t)
 
-        snap = stats.snapshot(self._mode)
-        self.progress.emit(snap["processed"], -1)
-        self.stats_update.emit(snap)
-        if self._wfm_coll and self._wfm_path and self._wfm_coll.count > 0:
-            n = self._wfm_coll.save(self._wfm_path)
-            self.waveforms_saved.emit(n, str(self._wfm_path))
-        self.finished.emit("" if not self._stop_evt.is_set() else "stopped")
+        self._finish(counters, counters.processed, -1)
 
 
-# ===========================================================================
-#  Local EVIO worker  (no server — uses prad2py directly)
-# ===========================================================================
+# Local EVIO worker  (no server — uses prad2py directly)
 
-class ProcessWorkerLocal(QThread):
+class ProcessWorkerLocal(_CoincWorker):
     """Reads an EVIO file directly via prad2py and accumulates coincidence
     statistics.  Requires prad2py to be installed (_HAVE_PRAD2PY == True).
 
-    Optimised for throughput: uses reverse key-lookup dicts so only channels
-    that belong to a known scintillator or HyCal module are analysed; raw
-    waveform samples are never copied to Python lists in the stats path.
-    Local plain-Python counters replace the lock-based Stats object in the
-    hot loop; a snapshot dict is built on demand for periodic UI updates.
+    Optimised for throughput: a (roc_tag, slot, chan) lookup means only
+    channels that belong to a known scintillator or HyCal module are
+    analysed; raw waveform samples are never copied to Python lists in the
+    stats path.
     """
-    progress          = pyqtSignal(int, int)   # (processed, total); total=0 → unknown
-    stats_update      = pyqtSignal(dict)
-    finished          = pyqtSignal(str)
-    waveforms_saved   = pyqtSignal(int, str)
     coincidence_event = pyqtSignal(dict)       # step-through: per-event waveform data
     worker_progress   = pyqtSignal(dict)       # parallel mode: per-worker file progress
     workers_setup     = pyqtSignal(int)        # parallel mode: number of workers about to run
@@ -1229,48 +962,18 @@ class ProcessWorkerLocal(QThread):
     def __init__(self, evio_paths: List[str],
                  module_keys: Dict[str, str],
                  scint_keys: Dict[str, str],
-                 scint_thr: float, hycal_thr: float,
-                 mode: str = MODE_AND,
-                 min_mods: int = DEFAULT_MIN_CLUSTER_MODS,
-                 scint_t_min: float = -math.inf,
-                 scint_t_max: float = math.inf,
-                 hycal_t_min: float = -math.inf,
-                 hycal_t_max: float = math.inf,
-                 neighbor_map: Optional[Dict[str, frozenset]] = None,
-                 max_local_maxima: int = 0,
+                 cuts: CoincCuts,
                  wfm_collector: Optional[WaveformCollector] = None,
                  wfm_save_path: Optional[Path] = None,
                  step_through: bool = False,
                  n_workers: int = 1,
                  parent=None):
-        super().__init__(parent)
+        super().__init__(module_keys, scint_keys, cuts,
+                         wfm_collector, wfm_save_path, parent)
         self._paths        = list(evio_paths)
-        self._mod_keys     = module_keys
-        self._scint_keys   = scint_keys
-        self._scint_thr    = scint_thr
-        self._hycal_thr    = hycal_thr
-        self._mode         = mode
-        self._min_mods     = min_mods
-        self._scint_t_min  = scint_t_min
-        self._scint_t_max  = scint_t_max
-        self._hycal_t_min  = hycal_t_min
-        self._hycal_t_max  = hycal_t_max
-        self._neighbor_map = neighbor_map or {}
-        self._max_lm       = max_local_maxima
-        self._wfm_coll     = wfm_collector
-        self._wfm_path     = wfm_save_path
         self._step_through = step_through
         self._n_workers    = max(1, int(n_workers))
-        self._stop_evt     = threading.Event()
         self._continue_evt = threading.Event()
-
-        # Reverse lookups: channel-key → name, built once so the inner loop
-        # does O(1) dict lookups instead of iterating over all module keys.
-        self._scint_key_to_name: Dict[str, str] = {v: k for k, v in scint_keys.items()}
-        self._mod_key_to_name:   Dict[str, str] = {v: k for k, v in module_keys.items()}
-        self._all_keys = frozenset(scint_keys.values()) | frozenset(module_keys.values())
-        # Tuple-key lookup: (roc_tag, slot, chan) → (kind, name)
-        # Avoids f-string allocation per channel in the hot loop.
         self._tuple_to_role = _build_tuple_role_map(scint_keys, module_keys)
 
     def stop(self):
@@ -1283,7 +986,8 @@ class ProcessWorkerLocal(QThread):
     @staticmethod
     def _fetch_wfm_channels(fadc_evt, analyzer, needed_keys: frozenset) -> Dict[str, dict]:
         """Build a minimal channel dict (with raw samples) for a small set of keys.
-        Called only for coincidence events when waveform saving is enabled."""
+        Called only for coincidence events when waveform saving or
+        step-through is enabled."""
         channels: Dict[str, dict] = {}
         for r in range(fadc_evt.nrocs):
             roc     = fadc_evt.roc(r)
@@ -1315,53 +1019,12 @@ class ProcessWorkerLocal(QThread):
             self.finished.emit("error: prad2py not available")
             return
 
-        mod_names      = list(self._mod_keys.keys())
-        processed      = 0
-        scint_hits     = {s: 0 for s in SCINTILLATORS}
-        scint_hits_any = {s: 0 for s in SCINTILLATORS}
-        module_hits    = {m: 0 for m in mod_names}
-        coincidences   = {s: {m: 0 for m in mod_names} for s in SCINTILLATORS}
+        cuts     = self._cuts
+        counters = Counters(self._mod_keys)
 
-        scint_thr     = self._scint_thr
-        hycal_thr     = self._hycal_thr
-        scint_t_min   = self._scint_t_min
-        scint_t_max   = self._scint_t_max
-        hycal_t_min   = self._hycal_t_min
-        hycal_t_max   = self._hycal_t_max
-        neighbor_map  = self._neighbor_map
-        max_lm        = self._max_lm
-        mode          = self._mode
-        min_mods      = self._min_mods
-        wfm_coll      = self._wfm_coll
-        skip_mask     = SKIP_TRIGGER_MASK
-        scint_names   = list(SCINTILLATORS)
-        tuple_to_role = self._tuple_to_role
-
-        def _make_snap() -> dict:
-            rates: Dict[str, Dict[str, float]] = {}
-            for sname in scint_names:
-                rates[sname] = {}
-                s_denom = scint_hits[sname]
-                for mname in mod_names:
-                    m_denom = module_hits[mname]
-                    ncoinc  = coincidences[sname][mname]
-                    if mode == MODE_AND:
-                        rates[sname][mname] = ncoinc / m_denom if m_denom > 0 else math.nan
-                    else:
-                        rates[sname][mname] = ncoinc / s_denom if s_denom > 0 else math.nan
-            return {
-                "rates":          rates,
-                "mode":           mode,
-                "module_hits":    dict(module_hits),
-                "scint_hits":     dict(scint_hits),
-                "scint_hits_any": dict(scint_hits_any),
-                "processed":      processed,
-            }
-
-        # ------------------------------------------------------------------
-        # Parallel path: one subprocess per file.  Skips when waveform
-        # collection or step-through is enabled (those need per-event UI).
-        # ------------------------------------------------------------------
+        # Parallel path: the files are split across worker subprocesses.
+        # Skipped when waveform collection or step-through is enabled
+        # (those need per-event UI).
         if (len(self._paths) > 1
                 and not self._wfm_coll
                 and not self._step_through):
@@ -1405,46 +1068,19 @@ class ProcessWorkerLocal(QThread):
             file_args = [
                 {
                     "paths":         chunk,
-                    "tuple_to_role": tuple_to_role,
-                    "scint_thr":     scint_thr,
-                    "hycal_thr":     hycal_thr,
-                    "scint_t_min":   scint_t_min,
-                    "scint_t_max":   scint_t_max,
-                    "hycal_t_min":   hycal_t_min,
-                    "hycal_t_max":   hycal_t_max,
-                    "neighbor_map":  neighbor_map,
-                    "max_lm":        max_lm,
-                    "mode":          mode,
-                    "min_mods":      min_mods,
-                    "scint_names":   scint_names,
-                    "mod_names":     mod_names,
-                    "skip_mask":     skip_mask,
-                    "lms_max":       LMS_MAX_MODULES,
+                    "tuple_to_role": self._tuple_to_role,
+                    "cuts":          cuts,
+                    "mod_names":     list(self._mod_keys),
                     "push_interval": 0.5,
                     "worker_id":     i,
                 }
                 for i, chunk in enumerate(chunks)
             ]
-            # Tell the UI how many workers to draw progress rows for.
             self.workers_setup.emit(len(chunks))
             async_results = [pool.apply_async(_process_files, (a,),
                                               error_callback=_on_err)
                              for a in file_args]
             pool.close()
-
-            def _merge(msg):
-                nonlocal processed
-                for m, v in msg["module_hits"].items():
-                    if v: module_hits[m] += v
-                for s, v in msg["scint_hits"].items():
-                    if v: scint_hits[s] += v
-                for s, v in msg["scint_hits_any"].items():
-                    if v: scint_hits_any[s] += v
-                for s, ccol in msg["coincidences"].items():
-                    row = coincidences[s]
-                    for m, v in ccol.items():
-                        if v: row[m] += v
-                processed += msg["processed"]
 
             # Coalesce per-worker progress so we emit at most one signal per
             # worker per UI cycle even when the worker pushes more often.
@@ -1459,7 +1095,7 @@ class ProcessWorkerLocal(QThread):
                             msg = update_q.get(timeout=0.1)
                         except Exception:
                             break
-                        _merge(msg)
+                        counters.merge(msg)
                         if "worker_id" in msg:
                             latest_progress[msg["worker_id"]] = msg
                         drained = True
@@ -1469,8 +1105,7 @@ class ProcessWorkerLocal(QThread):
 
                     now = time.monotonic()
                     if drained and now - last_emit > 0.5:
-                        self.progress.emit(n_done, n_chunks_total)
-                        self.stats_update.emit(_make_snap())
+                        self._emit(counters, n_done, n_chunks_total)
                         for prog in latest_progress.values():
                             self.worker_progress.emit(prog)
                         latest_progress.clear()
@@ -1497,7 +1132,7 @@ class ProcessWorkerLocal(QThread):
                         msg = update_q.get_nowait()
                     except Exception:
                         break
-                    _merge(msg)
+                    counters.merge(msg)
                     if "worker_id" in msg:
                         latest_progress[msg["worker_id"]] = msg
                 for prog in latest_progress.values():
@@ -1513,19 +1148,14 @@ class ProcessWorkerLocal(QThread):
                             if not worker_errors:
                                 _on_err(e)
 
-            snap = _make_snap()
             n_chunks_total = len(async_results)
-            self.progress.emit(n_chunks_total, n_chunks_total)
-            self.stats_update.emit(snap)
+            err = ""
             if worker_errors and not self._stop_evt.is_set():
-                self.finished.emit(f"error: worker failed — {worker_errors[0]}")
-            else:
-                self.finished.emit("" if not self._stop_evt.is_set() else "stopped")
+                err = f"error: worker failed — {worker_errors[0]}"
+            self._finish(counters, n_chunks_total, n_chunks_total, err)
             return
 
-        # ------------------------------------------------------------------
         # Sequential path: single file, or wfm/step-through requested.
-        # ------------------------------------------------------------------
         dec      = _prad2py.dec
         cfg      = dec.load_daq_config()
         ch       = dec.EvChannel()
@@ -1545,6 +1175,17 @@ class ProcessWorkerLocal(QThread):
                 ch.close()
             else:
                 ch.close()
+
+        scint_thr     = cuts.scint_thr
+        hycal_thr     = cuts.hycal_thr
+        scint_t_min   = cuts.scint_t_min
+        scint_t_max   = cuts.scint_t_max
+        hycal_t_min   = cuts.hycal_t_min
+        hycal_t_max   = cuts.hycal_t_max
+        require_scint = cuts.require_scint
+        wfm_coll      = self._wfm_coll
+        tuple_to_role = self._tuple_to_role
+        scint_key_set = frozenset(self._scint_keys.values())
 
         last_emit = time.monotonic()
         n_records = 0
@@ -1568,9 +1209,9 @@ class ProcessWorkerLocal(QThread):
                 for si in range(ch.get_n_events()):
                     ch.select_event(si)
                     info = ch.info()
-                    processed += 1
+                    counters.processed += 1
 
-                    if int(info.trigger_bits) & skip_mask:
+                    if int(info.trigger_bits) & SKIP_TRIGGER_MASK:
                         continue
 
                     fadc_evt = ch.fadc()
@@ -1612,41 +1253,23 @@ class ProcessWorkerLocal(QThread):
                                     if height > hycal_thr:
                                         ma[name] = height
 
-                    for sname in scint_names:
-                        if sname not in sf:
-                            sf[sname] = False
-
-                    n_ma = len(ma)
-                    if n_ma > LMS_MAX_MODULES or n_ma < min_mods:
+                    best = _select_best(ma, cuts)
+                    if best is None:
                         continue
+                    counters.add(sf, best, require_scint)
 
-                    # Single-module clusters are trivially 1 local max — skip the scan.
-                    if (max_lm > 0 and n_ma > 1
-                            and _count_local_maxima(ma, neighbor_map) > max_lm):
+                    # Waveforms are only shown / saved for events in which a
+                    # scintillator fired.
+                    want_wfm = wfm_coll is not None and not wfm_coll.full
+                    if not (any(sf.values())
+                            and (want_wfm or self._step_through)):
                         continue
+                    best_key = self._mod_keys[best]
+                    wfm_ch   = self._fetch_wfm_channels(
+                        fadc_evt, analyzer, scint_key_set | {best_key})
 
-                    best = max(ma, key=ma.__getitem__)
-
-                    for sname, fired in sf.items():
-                        if fired:
-                            scint_hits_any[sname] += 1
-
-                    any_scint = sf["V1"] or sf["V2"] or sf["V3"] or sf["V4"]
-                    if not any_scint and (mode == MODE_AND
-                                          or scint_t_min > -math.inf):
-                        continue
-
-                    module_hits[best] += 1
-                    for sname, fired in sf.items():
-                        if fired:
-                            scint_hits[sname] += 1
-                            coincidences[sname][best] += 1
-
-                    if wfm_coll and not wfm_coll.full and any_scint:
-                        best_key   = self._mod_keys[best]
-                        wfm_needed = frozenset(self._scint_keys.values()) | {best_key}
-                        wfm_ch     = self._fetch_wfm_channels(fadc_evt, analyzer, wfm_needed)
-                        data_stub  = {
+                    if want_wfm:
+                        data_stub = {
                             "trigger_bits": int(info.trigger_bits),
                             "event_number": int(info.event_number),
                             "event":        int(info.event_number),
@@ -1655,13 +1278,8 @@ class ProcessWorkerLocal(QThread):
                         _collect_wfm(wfm_coll, data_stub, sf,
                                      self._scint_keys, best, best_key)
 
-                    if self._step_through and any_scint:
-                        best_key   = self._mod_keys[best]
-                        wfm_needed = frozenset(self._scint_keys.values()) | {best_key}
-                        wfm_ch     = self._fetch_wfm_channels(fadc_evt, analyzer, wfm_needed)
-                        snap = _make_snap()
-                        self.stats_update.emit(snap)
-                        self.progress.emit(n_records, total_records)
+                    if self._step_through:
+                        self._emit(counters, n_records, total_records)
                         self._continue_evt.clear()
                         self.coincidence_event.emit({
                             "event_number": int(info.event_number),
@@ -1678,28 +1296,19 @@ class ProcessWorkerLocal(QThread):
 
                 now = time.monotonic()
                 if now - last_emit > 0.5:
-                    snap = _make_snap()
-                    self.progress.emit(n_records, total_records)
-                    self.stats_update.emit(snap)
+                    self._emit(counters, n_records, total_records)
                     last_emit = now
 
             ch.close()
 
-        snap = _make_snap()
-        self.progress.emit(total_records if total_records else n_records,
-                           total_records)
-        self.stats_update.emit(snap)
-        if self._wfm_coll and self._wfm_path and self._wfm_coll.count > 0:
-            n = self._wfm_coll.save(self._wfm_path)
-            self.waveforms_saved.emit(n, str(self._wfm_path))
-        self.finished.emit("" if not self._stop_evt.is_set() else "stopped")
+        self._finish(counters, total_records or n_records, total_records)
 
 
 class InstantDisplayWorker(QThread):
     """Live event-by-event display from the ET ring buffer.
 
     Polls /api/ring at ~10 Hz, fetches each new latest event, computes
-    per-module ADC values (max peak integral above pedestal), and emits
+    per-module ADC values (max peak height above pedestal), and emits
     event_ready with the raw channels dict so the main thread can render
     both the map and the waveform panels.
     """
@@ -1750,7 +1359,6 @@ class InstantDisplayWorker(QThread):
 
             channels = data.get("channels", {})
 
-            # Per-module ADC = max peak height above pedestal, zeroed if below threshold.
             adc_vals: Dict[str, float] = {}
             for mname, mkey in self._mod_keys.items():
                 ch = channels.get(mkey, {})
@@ -1778,9 +1386,7 @@ class InstantDisplayWorker(QThread):
         self.finished.emit("" if not self._stop_evt.is_set() else "stopped")
 
 
-# ===========================================================================
-#  Waveform fetcher
-# ===========================================================================
+# Waveform fetcher
 
 class WaveformFetcher(QThread):
     """Fetches scintillator and HyCal module waveforms for one event.
@@ -1842,249 +1448,7 @@ class WaveformFetcher(QThread):
                 self.waveform_ready.emit("module", data or {"error": "no response"})
 
 
-# ===========================================================================
-#  Waveform plot widget
-# ===========================================================================
-
-class WavePanel(QWidget):
-    """Simple FADC waveform display driven by the server's waveform JSON.
-
-    Expected input (from /api/waveform/<n>/<key>):
-        {"s": [int, ...], "pm": float, "pr": float,
-         "pk": [{"p": int, "h": float, "i": float,
-                 "l": int, "r": int, "t": float, "o": int}, ...]}
-    """
-
-    PAD_L, PAD_R, PAD_T, PAD_B = 52, 14, 28, 32
-
-    _PEAK_COLORS = (
-        "#00b4d8", "#ff6b6b", "#51cf66", "#ffd43b",
-        "#cc5de8", "#ff922b", "#20c997", "#f06595",
-    )
-
-    def __init__(self, label: str = "", parent=None):
-        super().__init__(parent)
-        self._label       = label
-        self._title       = label
-        self._samples: List[int] = []
-        self._peaks:   List[dict] = []
-        self._ped_mean    = 0.0
-        self._ped_rms     = 0.0
-        self._threshold   = 0.0
-        self._t_min       = -math.inf
-        self._t_max       = math.inf
-        self._fired       = False
-        self._placeholder = "No data — select an event and click Fetch"
-
-        self.setMinimumHeight(120)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-
-    # ------------------------------------------------------------------
-    #  Public API
-    # ------------------------------------------------------------------
-
-    def set_data(self, wave_json: dict, threshold: float,
-                 title: Optional[str] = None,
-                 t_min: float = -math.inf,
-                 t_max: float = math.inf) -> None:
-        """Load waveform from the server JSON response."""
-        if "error" in wave_json:
-            self.clear(title or self._label,
-                       wave_json.get("error", "channel not found"))
-            return
-
-        self._title     = title or self._label
-        self._samples   = list(wave_json.get("s", []))
-        self._peaks     = list(wave_json.get("pk", []))
-        self._ped_mean  = float(wave_json.get("pm", 0))
-        self._ped_rms   = float(wave_json.get("pr", 0))
-        self._threshold = threshold
-        self._t_min     = t_min
-        self._t_max     = t_max
-        self._fired     = any(
-            pk.get("h", 0) > threshold
-            and t_min <= pk.get("t", 0.0) <= t_max
-            for pk in self._peaks
-        )
-        self.update()
-
-    def clear(self, title: Optional[str] = None,
-              placeholder: Optional[str] = None) -> None:
-        self._title     = title or self._label
-        self._samples   = []
-        self._peaks     = []
-        self._fired     = False
-        self._t_min     = -math.inf
-        self._t_max     = math.inf
-        if placeholder is not None:
-            self._placeholder = placeholder
-        self.update()
-
-    # ------------------------------------------------------------------
-    #  Painting
-    # ------------------------------------------------------------------
-
-    def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.fillRect(self.rect(), QColor(THEME.BG))
-
-        r = QRectF(self.PAD_L, self.PAD_T,
-                   max(1.0, self.width() - self.PAD_L - self.PAD_R),
-                   max(1.0, self.height() - self.PAD_T - self.PAD_B))
-        p.setPen(QColor(THEME.BORDER))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(r)
-
-        self._draw_title(p, r)
-
-        n = len(self._samples)
-        if n < 2:
-            p.setPen(QColor(THEME.TEXT_DIM))
-            p.setFont(QFont("Monospace", 10))
-            p.drawText(r, Qt.AlignmentFlag.AlignCenter, self._placeholder)
-            return
-
-        ymin, ymax = self._y_range()
-
-        def sx(i: float) -> float:
-            return r.left() + i / (n - 1) * r.width()
-
-        def sy(v: float) -> float:
-            return r.bottom() - (v - ymin) / (ymax - ymin) * r.height()
-
-        y_ped = sy(self._ped_mean) if self._ped_mean != 0 else None
-        self._draw_pedestal(p, r, y_ped)
-        self._draw_peak_fills(p, sx, sy, y_ped, n)
-        self._draw_waveform(p, sx, sy, n)
-        self._draw_peak_markers(p, sx, sy, n)
-        self._draw_axes(p, r, ymin, ymax, n, sx)
-        self._draw_info(p, r)
-
-    def _y_range(self):
-        s = self._samples
-        ymin, ymax = float(min(s)), float(max(s))
-        if ymax - ymin < 5.0:
-            ymax = ymin + 5.0
-        pad = (ymax - ymin) * 0.06
-        return ymin - pad, ymax + pad
-
-    def _draw_title(self, p: QPainter, r: QRectF):
-        f = QFont("Monospace", 10)
-        f.setBold(True)
-        p.setFont(f)
-        p.setPen(QColor(THEME.TEXT))
-        p.drawText(int(r.left()), int(r.top() - 8), self._title)
-        if self._samples:
-            fm = p.fontMetrics()
-            tw = fm.horizontalAdvance(self._title)
-            fired_txt = "  [FIRED]" if self._fired else "  [—]"
-            p.setPen(QColor(THEME.SUCCESS) if self._fired else QColor(THEME.TEXT_DIM))
-            p.drawText(int(r.left() + tw), int(r.top() - 8), fired_txt)
-
-    def _draw_pedestal(self, p: QPainter, r: QRectF, y_ped: Optional[float]):
-        if y_ped is None:
-            return
-        p.setPen(QPen(QColor(THEME.TEXT_DIM), 1, Qt.PenStyle.DashLine))
-        p.drawLine(int(r.left()), int(y_ped), int(r.right()), int(y_ped))
-
-    def _draw_peak_fills(self, p, sx, sy, y_ped, n):
-        if y_ped is None:
-            return
-        for i, pk in enumerate(self._peaks):
-            base  = QColor(self._PEAK_COLORS[i % len(self._PEAK_COLORS)])
-            # dim peaks that fail height threshold or fall outside the time window
-            if (pk.get("h", 0) <= self._threshold
-                    or not (self._t_min <= pk.get("t", 0.0) <= self._t_max)):
-                base.setAlphaF(0.4)
-            fill = QColor(base)
-            fill.setAlphaF(fill.alphaF() * 0.25)
-            lft = max(0, int(pk.get("l", pk["p"])))
-            rgt = min(n - 1, int(pk.get("r", pk["p"])))
-            poly = QPolygonF()
-            for k in range(lft, rgt + 1):
-                poly.append(QPointF(sx(k), sy(self._samples[k])))
-            poly.append(QPointF(sx(rgt), y_ped))
-            poly.append(QPointF(sx(lft), y_ped))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(fill)
-            p.drawPolygon(poly)
-
-    def _draw_waveform(self, p, sx, sy, n):
-        p.setPen(QPen(QColor(THEME.ACCENT), 1.4))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        s = self._samples
-        for i in range(n - 1):
-            p.drawLine(int(sx(i)),     int(sy(s[i])),
-                       int(sx(i + 1)), int(sy(s[i + 1])))
-
-    def _draw_peak_markers(self, p, sx, sy, n):
-        s = self._samples
-        for i, pk in enumerate(self._peaks):
-            pos = int(pk.get("p", 0))
-            if pos < 0 or pos >= n:
-                continue
-            col = QColor(self._PEAK_COLORS[i % len(self._PEAK_COLORS)])
-            if (pk.get("h", 0) <= self._threshold
-                    or not (self._t_min <= pk.get("t", 0.0) <= self._t_max)):
-                col.setAlphaF(0.4)
-            p.setPen(QPen(col, 1.2))
-            p.setBrush(col)
-            cx, cy = sx(pos), sy(float(s[pos]))
-            diamond = QPolygonF([
-                QPointF(cx,     cy - 4),
-                QPointF(cx + 4, cy),
-                QPointF(cx,     cy + 4),
-                QPointF(cx - 4, cy),
-            ])
-            p.drawPolygon(diamond)
-
-            # height label above the diamond
-            ht = pk.get("h", 0)
-            p.setFont(QFont("Monospace", 8))
-            p.setPen(col)
-            p.drawText(int(cx - 16), int(cy - 7), f"{ht:.0f}")
-
-    def _draw_axes(self, p, r, ymin, ymax, n, sx):
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.setFont(QFont("Monospace", 8))
-        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-            y = r.bottom() - frac * r.height()
-            p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
-            val = ymin + frac * (ymax - ymin)
-            p.drawText(int(r.left() - self.PAD_L + 2), int(y + 4), f"{val:.0f}")
-        tick_every = max(1, n // 8)
-        for i in range(0, n, tick_every):
-            x = r.left() + i / max(1, n - 1) * r.width()
-            p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
-            ns_val = i * 1e3 / CLK_MHZ
-            p.drawText(int(x - 18), int(r.bottom() + 14), f"{ns_val:g}")
-        p.setFont(QFont("Monospace", 9))
-        p.drawText(int(r.left() + r.width() / 2 - 10),
-                   int(r.bottom() + 26), "ns")
-
-    def _draw_info(self, p, r):
-        above = sum(1 for pk in self._peaks
-                    if pk.get("h", 0) > self._threshold
-                    and self._t_min <= pk.get("t", 0.0) <= self._t_max)
-        info = (f"ped={self._ped_mean:.1f}  rms={self._ped_rms:.2f}"
-                f"  peaks={len(self._peaks)} ({above} above thr)")
-        p.setFont(QFont("Monospace", 9))
-        fm = p.fontMetrics()
-        tw = fm.horizontalAdvance(info)
-        th = fm.height()
-        box = QRectF(r.right() - tw - 8, r.top() + 4, tw + 6, th + 2)
-        bg = QColor(THEME.BG)
-        bg.setAlphaF(0.75)
-        p.fillRect(box, bg)
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.drawText(box, Qt.AlignmentFlag.AlignCenter, info)
-
-
-# ===========================================================================
-#  Multi-channel waveform panel (all scintillators overlaid)
-# ===========================================================================
+# Waveform plot widgets
 
 class MultiWavePanel(QWidget):
     """FADC waveform display: multiple channels overlaid with a colour legend.
@@ -2092,16 +1456,24 @@ class MultiWavePanel(QWidget):
     Primary use: show all scintillators (V1-V4) on one shared axis so the
     operator can compare timing and amplitude across all channels at once.
 
-    API mirrors WavePanel for backward compat:
-      set_multi_data(channels, threshold, scint_order, title, t_min, t_max)
-      set_data(wave_json, threshold, title, t_min, t_max)   # single-channel compat
-      clear(title, placeholder)
+    Each channel is the server's waveform JSON (/api/waveform/<n>/<key>):
+        {"s": [int, ...], "pm": float, "pr": float,
+         "pk": [{"p": int, "h": float, "i": float,
+                 "l": int, "r": int, "t": float, "o": int}, ...]}
     """
 
     PAD_L, PAD_R, PAD_T, PAD_B = 52, 14, 28, 32
 
     _CHAN_COLORS = ["#4a9eff", "#ff6b6b", "#51cf66", "#ffd43b",
                     "#cc5de8", "#ff922b", "#20c997", "#f06595"]
+
+    # Presentation switches (WavePanel sets the single-channel look).
+    PER_PEAK_COLORS   = False   # colour peaks by index instead of by channel
+    SHOW_PEDESTAL     = False   # dashed line at channel 0's pedestal
+    SHOW_INFO         = False   # ped / rms / peak-count box for channel 0
+    SHOW_LEGEND       = True
+    TITLE_FIRED       = False   # [FIRED] tag of channel 0 after the title
+    REJECT_FILL_ALPHA = 0.3     # fill alpha of peaks failing the cuts
 
     def __init__(self, label: str = "", parent=None):
         super().__init__(parent)
@@ -2116,9 +1488,7 @@ class MultiWavePanel(QWidget):
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Expanding)
 
-    # ------------------------------------------------------------------
-    #  Public API
-    # ------------------------------------------------------------------
+    # Public API
 
     def set_multi_data(self, channels: dict, threshold: float,
                        scint_order: list,
@@ -2132,38 +1502,18 @@ class MultiWavePanel(QWidget):
         self._t_max     = t_max
         self._channels  = []
         for i, name in enumerate(scint_order):
-            wj    = channels.get(name, {})
-            color = self._CHAN_COLORS[i % len(self._CHAN_COLORS)]
+            wj = channels.get(name, {})
             if "error" in wj or "s" not in wj:
-                self._channels.append({
-                    "name": name, "color": color,
-                    "samples": [], "peaks": [],
-                    "ped_mean": 0.0, "ped_rms": 0.0, "fired": False,
-                })
-            else:
-                samples = list(wj.get("s", []))
-                peaks   = list(wj.get("pk", []))
-                fired   = any(
-                    pk.get("h", 0) > threshold
-                    and t_min <= pk.get("t", 0.0) <= t_max
-                    for pk in peaks
-                )
-                self._channels.append({
-                    "name": name, "color": color,
-                    "samples": samples, "peaks": peaks,
-                    "ped_mean": float(wj.get("pm", 0)),
-                    "ped_rms":  float(wj.get("pr", 0)),
-                    "fired":    fired,
-                })
+                wj = {}
+            peaks = list(wj.get("pk", []))
+            self._channels.append({
+                "name": name, "color": self._chan_color(i),
+                "samples":  list(wj.get("s", [])), "peaks": peaks,
+                "ped_mean": float(wj.get("pm", 0)),
+                "ped_rms":  float(wj.get("pr", 0)),
+                "fired":    any(self._passes(pk) for pk in peaks),
+            })
         self.update()
-
-    def set_data(self, wave_json: dict, threshold: float,
-                 title: Optional[str] = None,
-                 t_min: float = -math.inf,
-                 t_max: float = math.inf) -> None:
-        """Backward-compat: display a single channel (no multi-overlay)."""
-        self.set_multi_data({self._label: wave_json}, threshold,
-                            [self._label], title, t_min, t_max)
 
     def clear(self, title: Optional[str] = None,
               placeholder: Optional[str] = None) -> None:
@@ -2173,9 +1523,18 @@ class MultiWavePanel(QWidget):
             self._placeholder = placeholder
         self.update()
 
-    # ------------------------------------------------------------------
-    #  Painting
-    # ------------------------------------------------------------------
+    def _chan_color(self, i: int) -> str:
+        return self._CHAN_COLORS[i % len(self._CHAN_COLORS)]
+
+    def _peak_color(self, ch: dict, i: int) -> QColor:
+        return series_qcolor(i) if self.PER_PEAK_COLORS else QColor(ch["color"])
+
+    def _passes(self, pk: dict) -> bool:
+        """Peak above threshold and inside the time window."""
+        return (pk.get("h", 0) > self._threshold
+                and self._t_min <= pk.get("t", 0.0) <= self._t_max)
+
+    # Painting
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -2191,16 +1550,17 @@ class MultiWavePanel(QWidget):
 
         self._draw_title(p, r)
 
-        all_samples = [ch["samples"] for ch in self._channels if ch["samples"]]
-        if not all_samples:
+        drawn = [ch for ch in self._channels if ch["samples"]]
+        n = max((len(ch["samples"]) for ch in drawn), default=0)
+        if n < 2:
             p.setPen(QColor(THEME.TEXT_DIM))
             p.setFont(QFont("Monospace", 10))
             p.drawText(r, Qt.AlignmentFlag.AlignCenter, self._placeholder)
-            self._draw_legend(p, r)
+            if self.SHOW_LEGEND:
+                self._draw_legend(p, r)
             return
 
-        n = max(len(s) for s in all_samples)
-        ymin, ymax = self._y_range(all_samples)
+        ymin, ymax = self._y_range([ch["samples"] for ch in drawn])
 
         def sx(i: float) -> float:
             return r.left() + i / max(1, n - 1) * r.width()
@@ -2208,17 +1568,19 @@ class MultiWavePanel(QWidget):
         def sy(v: float) -> float:
             return r.bottom() - (v - ymin) / max(1e-6, ymax - ymin) * r.height()
 
-        for ch in self._channels:
-            if ch["samples"]:
-                self._draw_peak_fills(p, sx, sy, ch)
-        for ch in self._channels:
-            if ch["samples"]:
-                self._draw_waveform(p, sx, sy, ch)
-        for ch in self._channels:
-            if ch["samples"]:
-                self._draw_peak_markers(p, sx, sy, ch)
-        self._draw_axes(p, r, ymin, ymax, n, sx)
-        self._draw_legend(p, r)
+        if self.SHOW_PEDESTAL:
+            self._draw_pedestal(p, r, sy)
+        for ch in drawn:
+            self._draw_peak_fills(p, sx, sy, ch)
+        for ch in drawn:
+            self._draw_waveform(p, sx, sy, ch)
+        for ch in drawn:
+            self._draw_peak_markers(p, sx, sy, ch)
+        draw_wave_axes(p, r, ymin, ymax, n, CLK_MHZ, self.PAD_L)
+        if self.SHOW_LEGEND:
+            self._draw_legend(p, r)
+        if self.SHOW_INFO:
+            self._draw_info(p, r)
 
     def _y_range(self, all_samples):
         flat = [v for s in all_samples for v in s]
@@ -2234,6 +1596,20 @@ class MultiWavePanel(QWidget):
         p.setFont(f)
         p.setPen(QColor(THEME.TEXT))
         p.drawText(int(r.left()), int(r.top() - 8), self._title)
+        if self.TITLE_FIRED and self._channels and self._channels[0]["samples"]:
+            fired = self._channels[0]["fired"]
+            tw = p.fontMetrics().horizontalAdvance(self._title)
+            fired_txt = "  [FIRED]" if fired else "  [—]"
+            p.setPen(QColor(THEME.SUCCESS) if fired else QColor(THEME.TEXT_DIM))
+            p.drawText(int(r.left() + tw), int(r.top() - 8), fired_txt)
+
+    def _draw_pedestal(self, p: QPainter, r: QRectF, sy):
+        ped = self._channels[0]["ped_mean"]
+        if not ped:
+            return
+        y_ped = sy(ped)
+        p.setPen(QPen(QColor(THEME.TEXT_DIM), 1, Qt.PenStyle.DashLine))
+        p.drawLine(int(r.left()), int(y_ped), int(r.right()), int(y_ped))
 
     def _draw_peak_fills(self, p, sx, sy, ch):
         ped = ch["ped_mean"]
@@ -2242,11 +1618,11 @@ class MultiWavePanel(QWidget):
         y_ped    = sy(ped)
         samples  = ch["samples"]
         cn       = len(samples)
-        for pk in ch["peaks"]:
-            base = QColor(ch["color"])
-            if (pk.get("h", 0) <= self._threshold
-                    or not (self._t_min <= pk.get("t", 0.0) <= self._t_max)):
-                base.setAlphaF(0.3)
+        for i, pk in enumerate(ch["peaks"]):
+            base = self._peak_color(ch, i)
+            # dim peaks that fail height threshold or fall outside the time window
+            if not self._passes(pk):
+                base.setAlphaF(self.REJECT_FILL_ALPHA)
             fill = QColor(base)
             fill.setAlphaF(fill.alphaF() * 0.25)
             lft  = max(0, int(pk.get("l", pk["p"])))
@@ -2272,13 +1648,12 @@ class MultiWavePanel(QWidget):
     def _draw_peak_markers(self, p, sx, sy, ch):
         samples = ch["samples"]
         cn      = len(samples)
-        for pk in ch["peaks"]:
+        for i, pk in enumerate(ch["peaks"]):
             pos = int(pk.get("p", 0))
             if pos < 0 or pos >= cn:
                 continue
-            col = QColor(ch["color"])
-            if (pk.get("h", 0) <= self._threshold
-                    or not (self._t_min <= pk.get("t", 0.0) <= self._t_max)):
+            col = self._peak_color(ch, i)
+            if not self._passes(pk):
                 col.setAlphaF(0.4)
             p.setPen(QPen(col, 1.2))
             p.setBrush(col)
@@ -2290,27 +1665,10 @@ class MultiWavePanel(QWidget):
                 QPointF(cx - 4, cy),
             ])
             p.drawPolygon(diamond)
+            # height label above the diamond
             p.setFont(QFont("Monospace", 8))
             p.setPen(col)
             p.drawText(int(cx - 16), int(cy - 7), f"{pk.get('h', 0):.0f}")
-
-    def _draw_axes(self, p, r, ymin, ymax, n, sx):
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.setFont(QFont("Monospace", 8))
-        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-            y = r.bottom() - frac * r.height()
-            p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
-            val = ymin + frac * (ymax - ymin)
-            p.drawText(int(r.left() - self.PAD_L + 2), int(y + 4), f"{val:.0f}")
-        tick_every = max(1, n // 8)
-        for i in range(0, n, tick_every):
-            x = r.left() + i / max(1, n - 1) * r.width()
-            p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
-            ns_val = i * 1e3 / CLK_MHZ
-            p.drawText(int(x - 18), int(r.bottom() + 14), f"{ns_val:g}")
-        p.setFont(QFont("Monospace", 9))
-        p.drawText(int(r.left() + r.width() / 2 - 10),
-                   int(r.bottom() + 26), "ns")
 
     def _draw_legend(self, p: QPainter, r: QRectF):
         if not self._channels:
@@ -2322,9 +1680,7 @@ class MultiWavePanel(QWidget):
 
         entries = []
         for ch in self._channels:
-            peaks_in = [pk for pk in ch.get("peaks", [])
-                        if pk.get("h", 0) > self._threshold
-                        and self._t_min <= pk.get("t", 0.0) <= self._t_max]
+            peaks_in  = [pk for pk in ch["peaks"] if self._passes(pk)]
             t_str     = f" t={peaks_in[0].get('t', 0):.0f}ns" if peaks_in else ""
             fired_txt = "[FIRED]" if ch["fired"] else "[—]"
             label     = f"{ch['name']} {fired_txt}{t_str}"
@@ -2349,10 +1705,52 @@ class MultiWavePanel(QWidget):
             p.drawText(int(lx + 16), int(y + fm.ascent()), label)
             y += lh
 
+    def _draw_info(self, p, r):
+        ch = self._channels[0]
+        above = sum(1 for pk in ch["peaks"] if self._passes(pk))
+        info = (f"ped={ch['ped_mean']:.1f}  rms={ch['ped_rms']:.2f}"
+                f"  peaks={len(ch['peaks'])} ({above} above thr)")
+        p.setFont(QFont("Monospace", 9))
+        fm = p.fontMetrics()
+        tw = fm.horizontalAdvance(info)
+        th = fm.height()
+        box = QRectF(r.right() - tw - 8, r.top() + 4, tw + 6, th + 2)
+        bg = QColor(THEME.BG)
+        bg.setAlphaF(0.75)
+        p.fillRect(box, bg)
+        p.setPen(QColor(THEME.TEXT_DIM))
+        p.drawText(box, Qt.AlignmentFlag.AlignCenter, info)
 
-# ===========================================================================
-#  Coincidence map widget
-# ===========================================================================
+
+class WavePanel(MultiWavePanel):
+    """Single-channel waveform display: peaks colour-coded by index, the
+    pedestal line, a [FIRED] tag and a ped / rms / peaks info box."""
+
+    PER_PEAK_COLORS   = True
+    SHOW_PEDESTAL     = True
+    SHOW_INFO         = True
+    SHOW_LEGEND       = False
+    TITLE_FIRED       = True
+    REJECT_FILL_ALPHA = 0.4
+
+    def _chan_color(self, i: int) -> str:
+        return THEME.ACCENT
+
+    def set_data(self, wave_json: dict, threshold: float,
+                 title: Optional[str] = None,
+                 t_min: float = -math.inf,
+                 t_max: float = math.inf) -> None:
+        """Load waveform from the server JSON response; an error response
+        becomes the placeholder text."""
+        if "error" in wave_json:
+            self.clear(title or self._label,
+                       wave_json.get("error", "channel not found"))
+            return
+        self.set_multi_data({self._label: wave_json}, threshold,
+                            [self._label], title, t_min, t_max)
+
+
+# Coincidence map widget
 
 class CoincidenceMapWidget(HyCalMapWidget):
     """HyCal map coloured by coincidence rate, with informative tooltip."""
@@ -2404,7 +1802,6 @@ class CoincidenceMapWidget(HyCalMapWidget):
         stops = self.palette_stops()
         no_data = self.NO_DATA_COLOR
         seen_zero = self._SEEN_ZERO
-        vmin, vmax = self._vmin, self._vmax
         for name, rect in self._rects.items():
             v = self._values.get(name)
             if v is None or (isinstance(v, float) and math.isnan(v)):
@@ -2412,8 +1809,7 @@ class CoincidenceMapWidget(HyCalMapWidget):
             elif v == 0.0:
                 p.fillRect(rect, seen_zero)
             else:
-                t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                p.fillRect(rect, cmap_qcolor(max(t, 0.0), stops))
+                p.fillRect(rect, cmap_qcolor(self.value_to_t(v), stops))
 
     def _tooltip_text(self, name: str) -> str:
         if self._view_mode == VIEW_INSTANT:
@@ -2451,9 +1847,7 @@ class CoincidenceMapWidget(HyCalMapWidget):
                 f"{denom_label}: {denom:,}")
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# Main window
 
 class MainWindow(QMainWindow):
 
@@ -2465,16 +1859,28 @@ class MainWindow(QMainWindow):
         self._server_url      = server_url
         self._n_events        = 0
         self._local_evio_paths: List[str] = []   # files queued for local analysis
-        self._stats_worker:   Optional[ProcessWorker]        = None
+        self._stats_worker:   Optional[_CoincWorker]         = None
         self._instant_worker: Optional[InstantDisplayWorker] = None
         self._fetcher:  Optional[WaveformFetcher] = None
         self._snapshot: dict = {}
         self._selected_module: str = ""   # module last clicked on the map
 
-        crate_to_roc = _load_crate_to_roc(DAQ_CFG_JSON)
-        daq = _load_daq_map(DAQ_MAP_JSON, crate_to_roc)
+        # Channel keys "<roc>_<slot>_<channel>": the event JSON of the C++
+        # server uses the actual ROC tag, not the crate index, for <roc>.
+        try:
+            crate_to_roc = {crate: tag for tag, crate
+                            in load_roc_tag_map(DAQ_CFG_JSON).items()}
+        except Exception:
+            crate_to_roc = {}
+        daq = {name: f"{crate_to_roc.get(crate, crate)}_{slot}_{chan}"
+               for (crate, slot, chan), name
+               in load_daq_map(MODULES_JSON).items()}
         self._modules = load_modules(MODULES_JSON)
-        self._w_layers: Dict[str, int] = _build_w_module_layers(MODULES_JSON)
+        # W module → ring around the beam hole (1 = innermost)
+        self._w_layers: Dict[str, int] = {
+            m.name: hole_ring(m.row, m.col) for m in self._modules
+            if m.name.startswith("W") and m.row
+        }
         self._neighbor_map = _build_neighbor_map(self._modules)
         physics_names = {m.name for m in self._modules if m.mod_type != "LMS"}
         self._mod_keys: Dict[str, str] = {
@@ -2501,9 +1907,7 @@ class MainWindow(QMainWindow):
         self._veto_timer.timeout.connect(self._poll_veto_positions)
         self._veto_timer.start(VETO_POLL_MS)
 
-    # ------------------------------------------------------------------
-    #  UI construction
-    # ------------------------------------------------------------------
+    # UI construction
 
     def _build_ui(self):
         h_split = QSplitter(Qt.Orientation.Horizontal)
@@ -2527,8 +1931,7 @@ class MainWindow(QMainWindow):
         self._connect_btn.setStyleSheet(self._btn_style())
         self._connect_btn.clicked.connect(self._on_connect)
         sv.addWidget(self._connect_btn)
-        self._conn_label = QLabel("Not connected")
-        self._conn_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
+        self._conn_label = self._dim_label("Not connected")
         sv.addWidget(self._conn_label)
         self._mode_btn = QPushButton("Switch to ET Mode")
         self._mode_btn.setEnabled(False)
@@ -2639,117 +2042,50 @@ class MainWindow(QMainWindow):
         thr_box.setStyleSheet(self._groupbox_style())
         tv = QVBoxLayout(thr_box)
         tv.setSpacing(4)
-        lbl_s = QLabel("Scintillator:")
-        lbl_s.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_s)
-        self._scint_thr_spin = QDoubleSpinBox()
-        self._scint_thr_spin.setRange(0, 100000)
-        self._scint_thr_spin.setValue(DEFAULT_SCINT_THR)
-        self._scint_thr_spin.setDecimals(0)
-        self._scint_thr_spin.setSingleStep(50)
-        self._scint_thr_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label("Scintillator:"))
+        self._scint_thr_spin = self._spin(0, 100000, DEFAULT_SCINT_THR, 50,
+                                          decimals=0)
         tv.addWidget(self._scint_thr_spin)
 
-        lbl_tcut = QLabel("Scint time cut (ns):")
-        lbl_tcut.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_tcut)
+        tv.addWidget(self._dim_label("Scint time cut (ns):"))
+        self._scint_tcut_min = self._spin(0, 10000, DEFAULT_SCINT_TMIN, 4,
+                                          decimals=0, suffix=" ns")
+        self._scint_tcut_max = self._spin(0, 10000, DEFAULT_SCINT_TMAX, 4,
+                                          decimals=0, suffix=" ns")
+        tv.addLayout(self._range_row(self._scint_tcut_min,
+                                     self._scint_tcut_max))
 
-        tcut_row = QHBoxLayout()
-        tcut_row.setSpacing(4)
-        self._scint_tcut_min = QDoubleSpinBox()
-        self._scint_tcut_min.setRange(0, 10000)
-        self._scint_tcut_min.setValue(160.0)
-        self._scint_tcut_min.setDecimals(0)
-        self._scint_tcut_min.setSingleStep(4)
-        self._scint_tcut_min.setSuffix(" ns")
-        self._scint_tcut_min.setEnabled(True)
-        self._scint_tcut_min.setStyleSheet(self._input_style())
-        tcut_row.addWidget(self._scint_tcut_min)
-        lbl_to = QLabel("to")
-        lbl_to.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tcut_row.addWidget(lbl_to)
-        self._scint_tcut_max = QDoubleSpinBox()
-        self._scint_tcut_max.setRange(0, 10000)
-        self._scint_tcut_max.setValue(200.0)
-        self._scint_tcut_max.setDecimals(0)
-        self._scint_tcut_max.setSingleStep(4)
-        self._scint_tcut_max.setSuffix(" ns")
-        self._scint_tcut_max.setEnabled(True)
-        self._scint_tcut_max.setStyleSheet(self._input_style())
-        tcut_row.addWidget(self._scint_tcut_max)
-        tv.addLayout(tcut_row)
-
-        lbl_h = QLabel("HyCal module:")
-        lbl_h.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_h)
-        self._hycal_thr_spin = QDoubleSpinBox()
-        self._hycal_thr_spin.setRange(0, 100000)
-        self._hycal_thr_spin.setValue(DEFAULT_HYCAL_THR)
-        self._hycal_thr_spin.setDecimals(0)
-        self._hycal_thr_spin.setSingleStep(10)
-        self._hycal_thr_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label("HyCal module:"))
+        self._hycal_thr_spin = self._spin(0, 100000, DEFAULT_HYCAL_THR, 10,
+                                          decimals=0)
         tv.addWidget(self._hycal_thr_spin)
 
-        lbl_htcut = QLabel("HyCal time cut (ns):")
-        lbl_htcut.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_htcut)
-        htcut_row = QHBoxLayout()
-        htcut_row.setSpacing(4)
-        self._hycal_tcut_min = QDoubleSpinBox()
-        self._hycal_tcut_min.setRange(0, 10000)
-        self._hycal_tcut_min.setValue(DEFAULT_HYCAL_TMIN)
-        self._hycal_tcut_min.setDecimals(0)
-        self._hycal_tcut_min.setSingleStep(4)
-        self._hycal_tcut_min.setSuffix(" ns")
-        self._hycal_tcut_min.setStyleSheet(self._input_style())
-        htcut_row.addWidget(self._hycal_tcut_min)
-        lbl_hto = QLabel("to")
-        lbl_hto.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        htcut_row.addWidget(lbl_hto)
-        self._hycal_tcut_max = QDoubleSpinBox()
-        self._hycal_tcut_max.setRange(0, 10000)
-        self._hycal_tcut_max.setValue(DEFAULT_HYCAL_TMAX)
-        self._hycal_tcut_max.setDecimals(0)
-        self._hycal_tcut_max.setSingleStep(4)
-        self._hycal_tcut_max.setSuffix(" ns")
-        self._hycal_tcut_max.setStyleSheet(self._input_style())
-        htcut_row.addWidget(self._hycal_tcut_max)
-        tv.addLayout(htcut_row)
+        tv.addWidget(self._dim_label("HyCal time cut (ns):"))
+        self._hycal_tcut_min = self._spin(0, 10000, DEFAULT_HYCAL_TMIN, 4,
+                                          decimals=0, suffix=" ns")
+        self._hycal_tcut_max = self._spin(0, 10000, DEFAULT_HYCAL_TMAX, 4,
+                                          decimals=0, suffix=" ns")
+        tv.addLayout(self._range_row(self._hycal_tcut_min,
+                                     self._hycal_tcut_max))
 
-        lbl_maxlm = QLabel("Max HyCal local maxima (1 = single cluster):")
-        lbl_maxlm.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_maxlm)
-        self._max_lm_spin = QSpinBox()
-        self._max_lm_spin.setRange(1, 20)
-        self._max_lm_spin.setValue(DEFAULT_MAX_LOCAL_MAXIMA)
-        self._max_lm_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label(
+            "Max HyCal local maxima (1 = single cluster):"))
+        self._max_lm_spin = self._spin(1, 20, DEFAULT_MAX_LOCAL_MAXIMA)
         tv.addWidget(self._max_lm_spin)
 
         n_cpu_max = max(1, os.cpu_count() or 1)
-        lbl_cpu = QLabel(f"Parallel CPUs for local files (1–{n_cpu_max}):")
-        lbl_cpu.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_cpu)
-        self._cpu_spin = QSpinBox()
-        self._cpu_spin.setRange(1, n_cpu_max)
-        self._cpu_spin.setValue(min(4, n_cpu_max))
-        self._cpu_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label(
+            f"Parallel CPUs for local files (1–{n_cpu_max}):"))
+        self._cpu_spin = self._spin(1, n_cpu_max, min(4, n_cpu_max))
         tv.addWidget(self._cpu_spin)
 
-        lbl_excl = QLabel("Inner W exclusion layers (0 = none, 16 = all W):")
-        lbl_excl.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_excl)
-        self._excl_spin = QSpinBox()
-        self._excl_spin.setRange(0, 16)
-        self._excl_spin.setValue(0)
-        self._excl_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label(
+            "Inner W exclusion layers (0 = none, 16 = all W):"))
+        self._excl_spin = self._spin(0, 16, 0)
         tv.addWidget(self._excl_spin)
-        lbl_minmods = QLabel("Min HyCal modules fired (cluster cut, 1 = off):")
-        lbl_minmods.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        tv.addWidget(lbl_minmods)
-        self._min_mods_spin = QSpinBox()
-        self._min_mods_spin.setRange(1, 50)
-        self._min_mods_spin.setValue(DEFAULT_MIN_CLUSTER_MODS)
-        self._min_mods_spin.setStyleSheet(self._input_style())
+        tv.addWidget(self._dim_label(
+            "Min HyCal modules fired (cluster cut, 1 = off):"))
+        self._min_mods_spin = self._spin(1, 50, DEFAULT_MIN_CLUSTER_MODS)
         tv.addWidget(self._min_mods_spin)
         lv.addWidget(thr_box)
 
@@ -2825,16 +2161,9 @@ class MainWindow(QMainWindow):
 
         rate_row = QHBoxLayout()
         rate_row.setSpacing(6)
-        lbl_rate = QLabel("Max ET rate:")
-        lbl_rate.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        rate_row.addWidget(lbl_rate)
-        self._max_rate_spin = QSpinBox()
-        self._max_rate_spin.setRange(0, 10000)
-        self._max_rate_spin.setValue(0)
-        self._max_rate_spin.setSuffix(" ev/s")
+        rate_row.addWidget(self._dim_label("Max ET rate:"))
+        self._max_rate_spin = self._spin(0, 10000, 0, 50, suffix=" ev/s")
         self._max_rate_spin.setSpecialValueText("unlimited")
-        self._max_rate_spin.setSingleStep(50)
-        self._max_rate_spin.setStyleSheet(self._input_style())
         self._max_rate_spin.setToolTip(
             "Maximum events per second consumed from the ET ring buffer.\n"
             "0 = process as fast as possible (unlimited).\n"
@@ -2855,14 +2184,8 @@ class MainWindow(QMainWindow):
 
         wfm_row = QHBoxLayout()
         wfm_row.setSpacing(6)
-        lbl_wfm = QLabel("Max records:")
-        lbl_wfm.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        wfm_row.addWidget(lbl_wfm)
-        self._wfm_max_spin = QSpinBox()
-        self._wfm_max_spin.setRange(1, 100000)
-        self._wfm_max_spin.setValue(200)
-        self._wfm_max_spin.setSingleStep(100)
-        self._wfm_max_spin.setStyleSheet(self._input_style())
+        wfm_row.addWidget(self._dim_label("Max records:"))
+        self._wfm_max_spin = self._spin(1, 100000, 200, 100)
         self._wfm_max_spin.setToolTip(
             "Maximum number of coincidence waveform pairs to save.")
         wfm_row.addWidget(self._wfm_max_spin, 1)
@@ -2873,8 +2196,7 @@ class MainWindow(QMainWindow):
         self._wfm_label.setWordWrap(True)
         pv.addWidget(self._wfm_label)
 
-        self._status_label = QLabel("Ready")
-        self._status_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
+        self._status_label = self._dim_label("Ready")
         self._status_label.setWordWrap(True)
         pv.addWidget(self._status_label)
         lv.addWidget(proc_box)
@@ -2887,13 +2209,8 @@ class MainWindow(QMainWindow):
 
         ev_row = QHBoxLayout()
         ev_row.setSpacing(4)
-        lbl_ev = QLabel("Event #")
-        lbl_ev.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
-        ev_row.addWidget(lbl_ev)
-        self._ev_spin = QSpinBox()
-        self._ev_spin.setRange(1, 1)
-        self._ev_spin.setValue(1)
-        self._ev_spin.setStyleSheet(self._input_style())
+        ev_row.addWidget(self._dim_label("Event #"))
+        self._ev_spin = self._spin(1, 1, 1)
         ev_row.addWidget(self._ev_spin, 1)
         ev.addLayout(ev_row)
 
@@ -2903,9 +2220,7 @@ class MainWindow(QMainWindow):
         self._fetch_btn.clicked.connect(self._on_fetch_waveforms)
         ev.addWidget(self._fetch_btn)
 
-        self._sel_mod_label = QLabel("Module: (click map)")
-        self._sel_mod_label.setStyleSheet(
-            f"color:{THEME.TEXT_DIM};font-size:11px;")
+        self._sel_mod_label = self._dim_label("Module: (click map)")
         self._sel_mod_label.setWordWrap(True)
         ev.addWidget(self._sel_mod_label)
         lv.addWidget(ev_box)
@@ -2914,8 +2229,7 @@ class MainWindow(QMainWindow):
         stats_box = QGroupBox("Statistics")
         stats_box.setStyleSheet(self._groupbox_style())
         stv = QVBoxLayout(stats_box)
-        self._stats_label = QLabel("—")
-        self._stats_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
+        self._stats_label = self._dim_label("—")
         self._stats_label.setWordWrap(True)
         stv.addWidget(self._stats_label)
         lv.addWidget(stats_box)
@@ -2935,16 +2249,12 @@ class MainWindow(QMainWindow):
             rb = i * 3 + 1  # row B: setpoint
             rc = i * 3 + 2  # row C: thin separator
 
-            # -- row A: readback -----------------------------------------
             lbl_name = QLabel(vname)
             lbl_name.setStyleSheet(
                 f"color:{THEME.ACCENT};font-size:12px;font-weight:bold;")
             vg.addWidget(lbl_name, ra, 0)
 
-            lbl_rbv_key = QLabel("RBV:")
-            lbl_rbv_key.setStyleSheet(
-                f"color:{THEME.TEXT_DIM};font-size:11px;")
-            vg.addWidget(lbl_rbv_key, ra, 1)
+            vg.addWidget(self._dim_label("RBV:"), ra, 1)
 
             lbl_rbv = QLabel("—")
             lbl_rbv.setStyleSheet(
@@ -2957,18 +2267,9 @@ class MainWindow(QMainWindow):
                 f"color:{THEME.TEXT_DIM};font-size:10px;")
             vg.addWidget(lbl_movn, ra, 3)
 
-            # -- row B: setpoint + move ----------------------------------
-            lbl_set_key = QLabel("Set:")
-            lbl_set_key.setStyleSheet(
-                f"color:{THEME.TEXT_DIM};font-size:11px;")
-            vg.addWidget(lbl_set_key, rb, 1)
+            vg.addWidget(self._dim_label("Set:"), rb, 1)
 
-            spin = QDoubleSpinBox()
-            spin.setRange(-9999, 9999)
-            spin.setDecimals(2)
-            spin.setSingleStep(0.1)
-            spin.setValue(0.0)
-            spin.setStyleSheet(self._input_style())
+            spin = self._spin(-9999, 9999, 0.0, 0.1, decimals=2)
             vg.addWidget(spin, rb, 2)
 
             btn = QPushButton("Move")
@@ -2976,7 +2277,6 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda _, v=vname: self._move_veto(v))
             vg.addWidget(btn, rb, 3)
 
-            # -- row C: separator ----------------------------------------
             sep = QFrame()
             sep.setFrameShape(QFrame.Shape.HLine)
             sep.setStyleSheet(f"color:{THEME.BORDER};")
@@ -3080,9 +2380,7 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(h_split)
 
-    # ------------------------------------------------------------------
-    #  Style helpers
-    # ------------------------------------------------------------------
+    # Style helpers
 
     def _groupbox_style(self) -> str:
         return themed(
@@ -3099,6 +2397,38 @@ class MainWindow(QMainWindow):
             f"QLineEdit:focus,QDoubleSpinBox:focus,QSpinBox:focus{{"
             f"border-color:{THEME.ACCENT_BORDER};}}")
 
+    @staticmethod
+    def _dim_label(text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
+        return lbl
+
+    def _spin(self, lo: float, hi: float, value: float, step: float = 1,
+              decimals: Optional[int] = None, suffix: str = ""):
+        """A QDoubleSpinBox with ``decimals`` when given, else a QSpinBox,
+        in the input style."""
+        if decimals is None:
+            sp = QSpinBox()
+        else:
+            sp = QDoubleSpinBox()
+            sp.setDecimals(decimals)
+        sp.setRange(lo, hi)
+        sp.setValue(value)
+        sp.setSingleStep(step)
+        if suffix:
+            sp.setSuffix(suffix)
+        sp.setStyleSheet(self._input_style())
+        return sp
+
+    def _range_row(self, lo: QWidget, hi: QWidget) -> QHBoxLayout:
+        """``lo`` "to" ``hi`` in one row."""
+        row = QHBoxLayout()
+        row.setSpacing(4)
+        row.addWidget(lo)
+        row.addWidget(self._dim_label("to"))
+        row.addWidget(hi)
+        return row
+
     def _btn_style(self, accent: bool = False) -> str:
         bg  = THEME.ACCENT_STRONG if accent else THEME.BUTTON
         hov = THEME.ACCENT        if accent else THEME.BUTTON_HOVER
@@ -3110,9 +2440,7 @@ class MainWindow(QMainWindow):
             f"QPushButton:disabled{{background:{THEME.PANEL};"
             f"color:{THEME.TEXT_MUTED};}}")
 
-    # ------------------------------------------------------------------
-    #  Slots — connection & scan
-    # ------------------------------------------------------------------
+    # Slots — connection & scan
 
     def _on_connect(self):
         url = self._url_edit.text().rstrip("/")
@@ -3130,13 +2458,7 @@ class MainWindow(QMainWindow):
 
         # Server connection takes priority — clear any local file selection
         # so Start uses the server, not the previously queued EVIO files.
-        self._local_evio_paths.clear()
-        self._file_list.clear()
-        self._local_file_label.setText("No files selected")
-        self._local_file_label.setStyleSheet(
-            f"color:{THEME.TEXT_DIM};font-size:10px;")
-        self._remove_file_btn.setEnabled(False)
-        self._clear_files_btn.setEnabled(False)
+        self._reset_file_queue()
 
         self._apply_config(cfg)
         self._connect_btn.setEnabled(True)
@@ -3154,10 +2476,9 @@ class MainWindow(QMainWindow):
         ch      = dec.EvChannel()
         ch.set_config(cfg_dec)
 
-        added = 0
         for path in paths:
             if path in self._local_evio_paths:
-                continue   # skip duplicates
+                continue
             if ch.open_auto(path) != dec.Status.success:
                 ch.close()
                 continue   # skip unreadable files silently
@@ -3173,7 +2494,6 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(item_text)
             item.setToolTip(path)
             self._file_list.addItem(item)
-            added += 1
 
         if not self._local_evio_paths:
             return
@@ -3187,7 +2507,7 @@ class MainWindow(QMainWindow):
         # Local file mode takes priority — clear any server state.
         self._n_events = 0
         self._et_mode  = False
-        self._conn_label.setText(f"Using local files (no server)")
+        self._conn_label.setText("Using local files (no server)")
         self._conn_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
         self._start_btn.setEnabled(True)
         self._fetch_btn.setEnabled(False)
@@ -3203,10 +2523,7 @@ class MainWindow(QMainWindow):
         self._on_file_selection_changed()
         n = len(self._local_evio_paths)
         if n == 0:
-            self._local_file_label.setText("No files selected")
-            self._local_file_label.setStyleSheet(
-                f"color:{THEME.TEXT_DIM};font-size:10px;")
-            self._clear_files_btn.setEnabled(False)
+            self._reset_file_queue()
             self._start_btn.setEnabled(
                 self._n_events > 0 or self._et_mode)
         else:
@@ -3214,6 +2531,11 @@ class MainWindow(QMainWindow):
 
     def _on_clear_evio_files(self):
         """Remove all files from the queue."""
+        self._reset_file_queue()
+        self._start_btn.setEnabled(self._n_events > 0 or self._et_mode)
+        self._conn_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
+
+    def _reset_file_queue(self):
         self._local_evio_paths.clear()
         self._file_list.clear()
         self._local_file_label.setText("No files selected")
@@ -3221,8 +2543,6 @@ class MainWindow(QMainWindow):
             f"color:{THEME.TEXT_DIM};font-size:10px;")
         self._remove_file_btn.setEnabled(False)
         self._clear_files_btn.setEnabled(False)
-        self._start_btn.setEnabled(self._n_events > 0 or self._et_mode)
-        self._conn_label.setStyleSheet(f"color:{THEME.TEXT_DIM};font-size:11px;")
 
     def _on_file_selection_changed(self):
         self._remove_file_btn.setEnabled(
@@ -3270,12 +2590,15 @@ class MainWindow(QMainWindow):
             (self._instant_worker is not None and self._instant_worker.isRunning())
         )
 
-    def _on_mode_switch(self):
-        """Toggle the server between online (ET) and file mode."""
+    def _stop_workers_and_wait(self, ms: int) -> None:
         if self._any_worker_running():
             self._stop_worker()
-            if self._stats_worker:   self._stats_worker.wait(2000)
-            if self._instant_worker: self._instant_worker.wait(2000)
+            if self._stats_worker:   self._stats_worker.wait(ms)
+            if self._instant_worker: self._instant_worker.wait(ms)
+
+    def _on_mode_switch(self):
+        """Toggle the server between online (ET) and file mode."""
+        self._stop_workers_and_wait(2000)
 
         endpoint = "/api/mode/file" if self._et_mode else "/api/mode/online"
         self._mode_btn.setEnabled(False)
@@ -3307,16 +2630,11 @@ class MainWindow(QMainWindow):
         # Pause/Resume only active in Instant mode while the instant worker runs.
         worker_live = self._instant_worker is not None and self._instant_worker.isRunning()
         if instant and worker_live:
-            if not self._display_paused:
-                self._pause_btn.setEnabled(True)
-                self._resume_btn.setEnabled(False)
-            else:
-                self._pause_btn.setEnabled(False)
-                self._resume_btn.setEnabled(True)
+            self._set_pause_buttons(not self._display_paused,
+                                    self._display_paused)
         else:
             self._display_paused = False
-            self._pause_btn.setEnabled(False)
-            self._resume_btn.setEnabled(False)
+            self._set_pause_buttons(False, False)
 
         # Map view (Coinc Rate / Occupancy) is only meaningful in stats mode.
         # AND/OR mode stays visible because it governs the background stats worker
@@ -3363,13 +2681,26 @@ class MainWindow(QMainWindow):
 
     def _on_pause(self):
         self._display_paused = True
-        self._pause_btn.setEnabled(False)
-        self._resume_btn.setEnabled(True)
+        self._set_pause_buttons(False, True)
 
     def _on_resume(self):
         self._display_paused = False
-        self._pause_btn.setEnabled(True)
-        self._resume_btn.setEnabled(False)
+        self._set_pause_buttons(True, False)
+
+    def _set_pause_buttons(self, pause: bool, resume: bool) -> None:
+        self._pause_btn.setEnabled(pause)
+        self._resume_btn.setEnabled(resume)
+
+    def _set_run_controls_enabled(self, on: bool) -> None:
+        """Cut and processing settings are locked while a run is going."""
+        for w in (self._scint_thr_spin, self._scint_tcut_min,
+                  self._scint_tcut_max, self._hycal_thr_spin,
+                  self._hycal_tcut_min, self._hycal_tcut_max,
+                  self._max_lm_spin, self._cpu_spin, self._excl_spin,
+                  self._min_mods_spin, self._max_rate_spin,
+                  self._rb_and, self._rb_or, self._save_wfm_chk,
+                  self._wfm_max_spin, self._step_chk):
+            w.setEnabled(on)
 
     def _on_screenshot(self):
         import datetime
@@ -3412,16 +2743,18 @@ class MainWindow(QMainWindow):
             active_mod_keys = self._mod_keys
 
         sel_mode = MODE_AND if self._rb_and.isChecked() else MODE_OR
-
-        min_mods = self._min_mods_spin.value()
-
-        scint_t_min = self._scint_tcut_min.value()
-        scint_t_max = self._scint_tcut_max.value()
-
-        hycal_t_min      = self._hycal_tcut_min.value()
-        hycal_t_max      = self._hycal_tcut_max.value()
-        max_local_maxima = self._max_lm_spin.value()
-        n_workers        = self._cpu_spin.value()
+        cuts = CoincCuts(
+            scint_thr=self._scint_thr_spin.value(),
+            hycal_thr=self._hycal_thr_spin.value(),
+            mode=sel_mode,
+            min_mods=self._min_mods_spin.value(),
+            scint_t_min=self._scint_tcut_min.value(),
+            scint_t_max=self._scint_tcut_max.value(),
+            hycal_t_min=self._hycal_tcut_min.value(),
+            hycal_t_max=self._hycal_tcut_max.value(),
+            neighbor_map=self._neighbor_map,
+            max_lm=self._max_lm_spin.value(),
+        )
 
         # --- Waveform collector (optional) ---
         wfm_coll = wfm_path = None
@@ -3436,69 +2769,27 @@ class MainWindow(QMainWindow):
             self._wfm_label.setText(f"Will save to: {wfm_path}")
 
         # --- Stats worker (always) ---
+        common = dict(module_keys=active_mod_keys, scint_keys=self._scint_keys,
+                      cuts=cuts, wfm_collector=wfm_coll,
+                      wfm_save_path=wfm_path, parent=self)
         if self._local_evio_paths:
             self._stats_worker = ProcessWorkerLocal(
                 evio_paths=self._local_evio_paths,
-                module_keys=active_mod_keys,
-                scint_keys=self._scint_keys,
-                scint_thr=self._scint_thr_spin.value(),
-                hycal_thr=self._hycal_thr_spin.value(),
-                mode=sel_mode,
-                min_mods=min_mods,
-                scint_t_min=scint_t_min,
-                scint_t_max=scint_t_max,
-                hycal_t_min=hycal_t_min,
-                hycal_t_max=hycal_t_max,
-                neighbor_map=self._neighbor_map,
-                max_local_maxima=max_local_maxima,
-                wfm_collector=wfm_coll,
-                wfm_save_path=wfm_path,
                 step_through=self._step_chk.isChecked(),
-                n_workers=n_workers,
-                parent=self,
-            )
+                n_workers=self._cpu_spin.value(),
+                **common)
             self._progress.setRange(0, 100)
         elif self._et_mode:
             self._stats_worker = ProcessWorkerET(
                 server_url=self._server_url,
-                module_keys=active_mod_keys,
-                scint_keys=self._scint_keys,
-                scint_thr=self._scint_thr_spin.value(),
-                hycal_thr=self._hycal_thr_spin.value(),
-                mode=sel_mode,
-                min_mods=min_mods,
                 max_rate_hz=float(self._max_rate_spin.value()),
-                scint_t_min=scint_t_min,
-                scint_t_max=scint_t_max,
-                hycal_t_min=hycal_t_min,
-                hycal_t_max=hycal_t_max,
-                neighbor_map=self._neighbor_map,
-                max_local_maxima=max_local_maxima,
-                wfm_collector=wfm_coll,
-                wfm_save_path=wfm_path,
-                parent=self,
-            )
+                **common)
             self._progress.setRange(0, 0)
         else:
             self._stats_worker = ProcessWorker(
                 server_url=self._server_url,
                 n_events=self._n_events,
-                module_keys=active_mod_keys,
-                scint_keys=self._scint_keys,
-                scint_thr=self._scint_thr_spin.value(),
-                hycal_thr=self._hycal_thr_spin.value(),
-                mode=sel_mode,
-                min_mods=min_mods,
-                scint_t_min=scint_t_min,
-                scint_t_max=scint_t_max,
-                hycal_t_min=hycal_t_min,
-                hycal_t_max=hycal_t_max,
-                neighbor_map=self._neighbor_map,
-                max_local_maxima=max_local_maxima,
-                wfm_collector=wfm_coll,
-                wfm_save_path=wfm_path,
-                parent=self,
-            )
+                **common)
             self._progress.setRange(0, 100)
 
         self._stats_worker.progress.connect(self._on_progress)
@@ -3516,8 +2807,8 @@ class MainWindow(QMainWindow):
             self._instant_worker = InstantDisplayWorker(
                 server_url=self._server_url,
                 module_keys=active_mod_keys,
-                hycal_thr=self._hycal_thr_spin.value(),
-                min_mods=min_mods,
+                hycal_thr=cuts.hycal_thr,
+                min_mods=cuts.min_mods,
                 parent=self,
             )
             self._instant_worker.event_ready.connect(self._on_instant_event)
@@ -3527,12 +2818,9 @@ class MainWindow(QMainWindow):
             self._instant_worker = None
 
         # Pause/Resume only meaningful in Instant Event Display mode (ET).
-        if self._et_mode and not self._local_evio_paths and self._display_mode == DISPLAY_INSTANT:
-            self._pause_btn.setEnabled(True)
-            self._resume_btn.setEnabled(False)
-        else:
-            self._pause_btn.setEnabled(False)
-            self._resume_btn.setEnabled(False)
+        self._set_pause_buttons(
+            self._et_mode and not self._local_evio_paths
+            and self._display_mode == DISPLAY_INSTANT, False)
 
         n_local = len(self._local_evio_paths)
         src = (f"{n_local} local file(s)" if self._local_evio_paths
@@ -3540,22 +2828,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText(
             f"{'Accumulating' if self._et_mode else 'Processing'}… "
             f"({src}, mode: {sel_mode})")
-        self._scint_thr_spin.setEnabled(False)
-        self._scint_tcut_min.setEnabled(False)
-        self._scint_tcut_max.setEnabled(False)
-        self._hycal_thr_spin.setEnabled(False)
-        self._hycal_tcut_min.setEnabled(False)
-        self._hycal_tcut_max.setEnabled(False)
-        self._max_lm_spin.setEnabled(False)
-        self._cpu_spin.setEnabled(False)
-        self._excl_spin.setEnabled(False)
-        self._min_mods_spin.setEnabled(False)
-        self._max_rate_spin.setEnabled(False)
-        self._rb_and.setEnabled(False)
-        self._rb_or.setEnabled(False)
-        self._save_wfm_chk.setEnabled(False)
-        self._wfm_max_spin.setEnabled(False)
-        self._step_chk.setEnabled(False)
+        self._set_run_controls_enabled(False)
 
     def _stop_worker(self):
         if self._stats_worker:   self._stats_worker.stop()
@@ -3563,9 +2836,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Stopping…")
         self._start_btn.setEnabled(False)
 
-    # ------------------------------------------------------------------
-    #  Per-worker progress (parallel local-EVIO mode)
-    # ------------------------------------------------------------------
+    # Per-worker progress (parallel local-EVIO mode)
 
     def _setup_worker_prog_rows(self, n_workers: int):
         self._clear_worker_prog_rows()
@@ -3786,8 +3057,7 @@ class MainWindow(QMainWindow):
         if self._any_worker_running():
             return
         self._display_paused = False
-        self._pause_btn.setEnabled(False)
-        self._resume_btn.setEnabled(False)
+        self._set_pause_buttons(False, False)
         self._progress.setRange(0, 100)
         self._progress.setValue(100 if msg == "" else self._progress.value())
         self._clear_worker_prog_rows()
@@ -3800,22 +3070,7 @@ class MainWindow(QMainWindow):
             self._browse_btn.setEnabled(True)
             self._remove_file_btn.setEnabled(self._file_list.currentRow() >= 0)
             self._clear_files_btn.setEnabled(len(self._local_evio_paths) > 0)
-        self._scint_thr_spin.setEnabled(True)
-        self._scint_tcut_min.setEnabled(True)
-        self._scint_tcut_max.setEnabled(True)
-        self._hycal_thr_spin.setEnabled(True)
-        self._hycal_tcut_min.setEnabled(True)
-        self._hycal_tcut_max.setEnabled(True)
-        self._max_lm_spin.setEnabled(True)
-        self._cpu_spin.setEnabled(True)
-        self._excl_spin.setEnabled(True)
-        self._min_mods_spin.setEnabled(True)
-        self._max_rate_spin.setEnabled(True)
-        self._rb_and.setEnabled(True)
-        self._rb_or.setEnabled(True)
-        self._save_wfm_chk.setEnabled(True)
-        self._wfm_max_spin.setEnabled(True)
-        self._step_chk.setEnabled(True)
+        self._set_run_controls_enabled(True)
         self._step_continue_btn.setEnabled(False)
         if msg == "stopped":
             self._status_label.setText("Stopped.")
@@ -3826,9 +3081,7 @@ class MainWindow(QMainWindow):
     def _on_waveforms_saved(self, count: int, path: str):
         self._wfm_label.setText(f"Saved {count} waveform pairs → {path}")
 
-    # ------------------------------------------------------------------
-    #  Slots — waveform browser
-    # ------------------------------------------------------------------
+    # Slots — waveform browser
 
     def _on_module_clicked(self, name: str):
         if not name:
@@ -3850,7 +3103,6 @@ class MainWindow(QMainWindow):
         if self._n_events == 0 and not self._et_mode:
             return
 
-        # Stop any in-flight fetcher
         if self._fetcher and self._fetcher.isRunning():
             self._fetcher.wait(500)
 
@@ -3887,9 +3139,7 @@ class MainWindow(QMainWindow):
             self._wave_module.set_data(
                 data, self._hycal_thr_spin.value(), title)
 
-    # ------------------------------------------------------------------
-    #  Veto position polling
-    # ------------------------------------------------------------------
+    # Veto position polling
 
     def _poll_veto_positions(self):
         for vname in VETO_PV_BASES:
@@ -3908,7 +3158,7 @@ class MainWindow(QMainWindow):
             w["movn"].setText("● moving" if moving else "")
             w["movn"].setStyleSheet(
                 f"color:{THEME.SUCCESS};font-size:10px;" if moving
-                else f"color:transparent;font-size:10px;")
+                else "color:transparent;font-size:10px;")
 
     def _move_veto(self, vname: str):
         """Write the spinbox setpoint to the motor VAL PV."""
@@ -3918,24 +3168,17 @@ class MainWindow(QMainWindow):
             self._status_label.setText(
                 f"{vname} move failed — PV not connected")
 
-    # ------------------------------------------------------------------
-    #  Cleanup
-    # ------------------------------------------------------------------
+    # Cleanup
 
     def closeEvent(self, event):
         self._veto_timer.stop()
-        if self._any_worker_running():
-            self._stop_worker()
-            if self._stats_worker:   self._stats_worker.wait(3000)
-            if self._instant_worker: self._instant_worker.wait(3000)
+        self._stop_workers_and_wait(3000)
         if self._fetcher and self._fetcher.isRunning():
             self._fetcher.wait(1000)
         event.accept()
 
 
-# ===========================================================================
-#  Entry point
-# ===========================================================================
+# Entry point
 
 def main():
     parser = argparse.ArgumentParser(

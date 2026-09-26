@@ -12,10 +12,11 @@ function, and namespace constant exported by the library.
 |---|---|---|
 | [`EvChannel.h`](#evchannelh) | `evc` | `EvChannel`, `status` |
 | [`EtChannel.h`](#etchannelh) | `evc` | `EtChannel` (when `WITH_ET=ON`) |
-| [`EvStruct.h`](#evstructh) | `evc` | `BankHeader`, `SegmentHeader`, `TagSegmentHeader`, `EvNode`, `DataType`, `IsContainer`, `TypeName` |
+| [`EvStruct.h`](#evstructh) | `evc` | `BankHeader`, `SegmentHeader`, `TagSegmentHeader`, `EvNode`, `DataType`, `IsContainer`, `IsString`, `TypeName`, `ForEachFlatBank` |
 | [`DaqConfig.h`](#daqconfigh) | `evc` | `DaqConfig`, `EventType`, `classify_event` |
-| [`load_daq_config.h`](#load_daq_configh) | `evc` | `load_daq_config`, `load_pedestals`, `parse_hex` |
-| [`Fadc250Data.h`](#fadc250datah) | `fdec` | `EventInfo`, `EventData`, `RocData`, `SlotData`, `ChannelData`, `Peak`, `Pedestal`, `DaqPeak`, `DaqWaveResult`, `PulseTemplate`, `DeconvOutput`, quality bitmasks (`Q_PEAK_*`, `Q_PED_*`, `Q_DAQ_*`, `Q_DECONV_*`) |
+| [`DaqKey.h`](#daqkeyh) | `prad2` | `pack_daq_key` |
+| [`load_daq_config.h`](#load_daq_configh) | `evc` | `load_daq_config`, `load_pedestals`, `parse_hex`, `parse_hex_list` |
+| [`Fadc250Data.h`](#fadc250datah) | `fdec` | `TI_TICK_NS`, `TI_TICK_SEC`, `EventInfo`, `EventData`, `RocData`, `SlotData`, `ChannelData`, `ForEachChannel`, `ChannelKey`, `ParseChannelKey`, `Peak`, `Pedestal`, `DaqPeak`, `DaqWaveResult`, `PulseTemplate`, `DeconvOutput`, quality bitmasks (`Q_PEAK_*`, `Q_PED_*`, `Q_DAQ_*`, `Q_DECONV_*`) |
 | [`Fadc250Decoder.h`](#fadc250decoderh) | `fdec` | `Fadc250Decoder` |
 | [`Fadc250RawDecoder.h`](#fadc250rawdecoderh) | `fdec` | `Fadc250RawDecoder` |
 | [`Fadc250FwAnalyzer.h`](#fadc250fwanalyzerh) | `fdec` | `Fadc250FwAnalyzer` |
@@ -28,12 +29,15 @@ function, and namespace constant exported by the library.
 | [`TdcDecoder.h`](#tdcdecoderh) | `tdc` | `TdcDecoder` |
 | [`VtpData.h`](#vtpdatah) | `vtp` | `VtpEventData`, `EcPeak`, `EcCluster`, `VtpBlock` |
 | [`VtpDecoder.h`](#vtpdecoderh) | `vtp` | `VtpDecoder` |
-| [`DscData.h`](#dscdatah) | `dsc` | `DscEventData`, `DSC2_NCH` |
+| [`DscData.h`](#dscdatah) | `dsc` | `DscEventData`, `DSC2_NCH`, `delta_live_ratio` |
 | [`Dsc2Decoder.h`](#dsc2decoderh) | `dsc` | `Dsc2Decoder` |
 | [`SyncData.h`](#syncdatah) | `psync` | `SyncInfo` |
 | [`EpicsData.h`](#epicsdatah) | `epics` | `EpicsRecord`, `ParseEpicsText` |
 | [`EpicsStore.h`](#epicsstoreh) | `epics` | `EpicsStore` |
-| [`InstallPaths.h`](#installpathsh) | `prad2` | `module_dir`, `resolve_data_dir` |
+| [`InstallPaths.h`](#installpathsh) | `prad2` | `module_dir`, `resolve_data_dir`, `database_dir`, `find_database_file`, `is_absolute_path`, `resolve_db_path` |
+| [`EvioFiles.h`](#eviofilesh) | `prad2` | `run_number_from_path`, `discover_split_files` |
+| [`JsonUtil.h`](#jsonutilh) | `prad2` | `read_json_file`, `read_json_elements`, `read_json_array` |
+| [`RunningStats.h`](#runningstatsh) | `prad2` | `RunningStats` |
 
 ---
 
@@ -101,8 +105,19 @@ const uint32_t *GetData (const EvNode &n) const;
 const uint8_t  *GetBytes(const EvNode &n) const;
 size_t          GetDataBytes(const EvNode &n) const;
 const uint8_t  *GetCompositePayload(const EvNode &n, size_t &nbytes) const;
+std::string     GetString(const EvNode &n) const;   // CHARSTAR8/CHAR8 text up to the first NUL
+template <class Fn> void ForEachLeafBank(uint32_t tag, Fn &&fn) const;
 uint32_t       *GetRawBuffer();
+const std::vector<uint32_t> &GetTdcTags() const;   // tags decoded by Tdc(), from SetConfig
+const std::vector<uint32_t> &GetVtpTags() const;   // tags decoded by Vtp(), from SetConfig
 ```
+
+`GetString` returns an empty string for an empty or out-of-buffer bank;
+EVIO pads string banks with NULs and may pack several strings, and only
+the first is read. `ForEachLeafBank` visits, in scan order, every
+non-empty UINT32 bank carrying `tag` that lies inside the buffer and is
+not part of a composite bank, as `fn(const EvNode &bank, uint32_t
+roc_tag)`; `roc_tag` is the parent bank's tag (0 at top level).
 
 ### Lazy data-product accessors (preferred)
 
@@ -201,8 +216,22 @@ by `Scan()`.
 
 `enum DataType` — every evio content-type code (`DATA_BANK`,
 `DATA_SEGMENT`, `DATA_TAGSEGMENT`, `DATA_COMPOSITE`, …).
-`bool IsContainer(uint32_t type)` and `const char *TypeName(uint32_t)`
+`bool IsContainer(uint32_t type)`, `bool IsString(uint32_t type)`
+(`DATA_CHARSTAR8` or `DATA_CHAR8`) and `const char *TypeName(uint32_t)`
 are inline helpers.
+
+```cpp
+template <class Fn>
+bool evc::ForEachFlatBank(const std::vector<uint32_t> &roc_tags,
+                          const std::vector<uint32_t> &nwords,
+                          const std::vector<uint32_t> &words, Fn &&fn);
+```
+
+Walks the replay-tree encoding of a set of leaf banks: bank `i` came from
+ROC `roc_tags[i]` and occupies the next `nwords[i]` entries of `words`;
+calls `fn(roc_tag, data, nwords)` per bank. Returns `false` when the
+lists are inconsistent (nothing is visited on a size mismatch; the walk
+stops at the first bank that overruns `words`).
 
 ---
 
@@ -237,8 +266,9 @@ Selected groups (every field is documented inline in the header):
   as `static constexpr` strings (`product_event_info`, `product_fadc`,
   `product_tdc`, `product_gem`, `product_vtp`, `product_sync`,
   `product_epics`, `product_daq_config`).
-- **Per-channel pedestals** (ADC1881M) — `pedestals` packed by
-  `pack_daq_key(crate, slot, ch)`, plus `get_pedestal(...)`.
+- **Per-channel pedestals** (ADC1881M) — `pedestals` keyed by
+  [`prad2::pack_daq_key`](#daqkeyh)`(crate, slot, ch)`, plus
+  `get_pedestal(...)`.
 - **Companion files** — `hycal_map_file`, `gem_map_file`,
   `pedestal_file`.
 
@@ -255,11 +285,17 @@ bool is_ssp_bank(uint32_t tag)   const;
 static bool is_built_trigger_bank(uint32_t tag);   // 0xFF20-0xFF2F
 static bool is_raw_trigger_bank(uint32_t tag);     // 0xFF10-0xFF1F
 static bool is_trigger_bank(uint32_t tag);         // 0xFF10-0xFF4F
+static bool is_built_physics_event(uint32_t tag);  // 0xFF50-0xFF8F
 static bool trigger_bank_has_timestamps(uint32_t tag);
 static bool trigger_bank_has_run_info(uint32_t tag);
 
 const DataBankInfo *find_data_bank(uint32_t tag) const;
 std::vector<uint32_t> banks_for_product(const std::string &product) const;
+
+static bool is_data_roc(const RocEntry &re);        // crate >= 0, type "", "roc" or "gem"
+int crate_of(uint32_t tag) const;                   // -1 if the tag is unknown
+std::unordered_map<uint32_t, int> roc_crate_map(bool data_rocs_only = false) const;
+std::unordered_map<int, uint32_t> crate_roc_map() const;   // data ROCs only
 ```
 
 ### `evc::EventType`
@@ -273,6 +309,19 @@ EventType classify_event(uint32_t tag, const DaqConfig &cfg);
 
 ---
 
+## `DaqKey.h`
+
+```cpp
+constexpr uint64_t prad2::pack_daq_key(int a, int b, int c);   // a << 32 | b << 16 | c
+```
+
+Packs a three-level DAQ address into one map key, keeping the low 16 bits
+of each field: (crate, slot, channel) for FADC/ADC1881M pedestals,
+(crate, mpd, adc_ch) for SSP/MPD APVs, (roc_tag, slot, channel) for pulse
+templates.
+
+---
+
 ## `load_daq_config.h`
 
 Header-only application-layer JSON loader — depends on `nlohmann/json`,
@@ -280,6 +329,7 @@ not part of the library proper.
 
 ```cpp
 uint32_t evc::parse_hex(const nlohmann::json &j);   // accepts "0xFF50" or int
+std::vector<uint32_t> evc::parse_hex_list(const nlohmann::json &j);   // array; a scalar gives one element
 bool     evc::load_daq_config(const std::string &path, DaqConfig &cfg);
 bool     evc::load_pedestals(const std::string &path, DaqConfig &cfg);
 ```
@@ -310,6 +360,9 @@ Indexed by hardware (slot, channel) for O(1) access.
 | `MAX_ROCS`     | 10  | ROC crates per event |
 | `MAX_PEAKS`    | 8   | peaks per channel waveform |
 
+`TI_TICK_NS = 4.0` and `TI_TICK_SEC = 4e-9`: the 250 MHz TI clock of
+`EventInfo::timestamp`.
+
 ### Event structures
 
 `ChannelData { nsamples, samples[MAX_SAMPLES] }`.
@@ -327,6 +380,21 @@ identifies *which* trigger fired (single value from TI event_type);
 `EventData { info, nrocs, roc_index, rocs[] }` with helpers `clear()` and
 `const RocData *findRoc(uint32_t tag) const`.
 
+```cpp
+template <class F>
+void fdec::ForEachChannel(const RocData &roc, F &&fn, int max_ch = MAX_CHANNELS);
+std::string fdec::ChannelKey(uint32_t roc_tag, int slot, int ch);
+bool fdec::ParseChannelKey(const std::string &key, int &roc_tag, int &slot, int &ch);
+```
+
+`ForEachChannel` calls `fn(slot, ch, const ChannelData &)` for every
+channel of the ROC that carries samples: present slots, `channel_mask`
+bits below `max_ch`, `nsamples > 0`. `ChannelKey` is the decimal
+`"<roc_tag>_<slot>_<channel>"` id used by the viewer API and the
+pulse-template JSON; `ParseChannelKey` returns `false` unless all three
+fields are present, `roc_tag >= 0`, `0 <= slot < MAX_SLOTS` and
+`0 <= ch < MAX_CHANNELS`.
+
 ### Soft-analyzer outputs
 
 `Peak { height, integral, time, pos, left, right, overflow, quality }` —
@@ -343,8 +411,7 @@ cross_sample, peak_sample, integral, window_lo, window_hi, quality }`.
 
 ### Pulse-template / pile-up deconvolution
 
-`PulseTemplate { tau_r_ns, tau_f_ns, is_global, grid_clk_ns,
-grid[GRID_N] }` (where `GRID_OVERSAMPLE = 8`, `GRID_N = MAX_SAMPLES * 8`).
+`PulseTemplate { tau_r_ns, tau_f_ns, is_global }`.
 
 `DeconvOutput { state, n, amplitude[], height[], integral[], t0_ns[],
 tau_r_ns[], tau_f_ns[], chi2_per_dof }`. `clear()`.
@@ -486,6 +553,7 @@ PbWO4, LMS, Veto), loaded from the JSON written by
 
 ```cpp
 bool                LoadFromFile(const std::string &path, const WaveConfig &cfg);
+bool                LoadFromConfig(const WaveConfig &cfg, const std::string &db_dir);
 const PulseTemplate *Lookup(int roc_tag, int slot, int channel) const;
 const PulseTemplate *type_template(const std::string &type_name) const;
 bool                valid() const;
@@ -493,6 +561,11 @@ int                 n_channels_known() const;
 int                 n_types_loaded()   const;
 void                Clear();
 ```
+
+`LoadFromConfig` clears the store, then loads
+`cfg.nnls_deconv.template_file` when `nnls_deconv` is enabled (a relative
+path is taken from `db_dir`); it returns `false` silently when deconv is
+off or no file is configured, otherwise as `LoadFromFile`.
 
 After a successful `LoadFromFile` the store is effectively immutable;
 `Lookup` is concurrent-safe. `LoadFromFile`/`Clear` are not concurrent-
@@ -534,19 +607,23 @@ SSP/MPD/APV GEM readout PODs, indexed by (crate, mpd, adc_ch).
 
 ### Structures
 
-`ApvAddress { crate_id, mpd_id (fiber), adc_ch }` with `pack()` /
-`operator==`.
+`ApvAddress { crate_id, mpd_id (fiber), adc_ch }` with `operator==`.
+Map keys use [`prad2::pack_daq_key`](#daqkeyh)`(crate_id, mpd_id, adc_ch)`.
 
 `ApvData { addr, present, strips[128][6], nstrips, strip_mask[2], flags,
 online_cm[6], has_online_cm }`. Helpers: `clear()`,
-`setStrip(strip, ts, value)`, `hasStrip(strip)`. `clear()`
+`setStrip(strip, ts, value)`, `hasStrip(strip)`, `isFullReadout()`
+(present and all 128 strips sent, i.e. no online zero suppression). `clear()`
 zero-fills `strips` (deterministic for downstream readers that don't
 gate on `hasStrip`).
 
 `MpdData { crate_id, mpd_id, present, napvs, apvs[16] }`. `clear()`.
 
 `SspEventData { nmpds, mpds[64] }`. Helpers: `clear()`,
-`findOrCreateMpd(crate, mpd)`, `findApv(crate, mpd, adc) const`.
+`findOrCreateMpd(crate, mpd)`, `findApv(crate, mpd, adc) const`,
+`hasFullReadout() const`, `forEachApv(fn) const` (calls
+`fn(const MpdData &, int apv_id, const ApvData &)` for every present APV
+in readout order).
 
 ---
 
@@ -620,10 +697,17 @@ blocks[] }`. `clear()`.
 ```cpp
 static int vtp::VtpDecoder::DecodeRoc(
     const uint32_t *data, size_t nwords, uint32_t roc_tag, VtpEventData &evt);
+static bool vtp::VtpDecoder::DecodeReplay(
+    const std::vector<uint32_t> &roc_tags, const std::vector<uint32_t> &nwords,
+    const std::vector<uint32_t> &words, VtpEventData &evt);
 ```
 
-Returns number of ECAL records (peaks + clusters) appended; `0` for
-stub banks.
+`DecodeRoc` returns the number of ECAL records (peaks + clusters)
+appended; `0` for stub banks. `DecodeReplay` decodes the replay tree's
+flat bank list (`vtp_roc_tags` / `vtp_nwords` / `vtp_words`) into `evt`,
+which is cleared first; it returns `false` if the three vectors are
+inconsistent (see `evc::ForEachFlatBank`), keeping the banks before the
+inconsistency.
 
 ---
 
@@ -641,6 +725,16 @@ ref_gated, ref_ungated }`. Helpers: `clear()`,
 `double live_ratio() const` (returns `gated/ungated`, or `-1` when
 ungated is 0).
 
+```cpp
+double dsc::delta_live_ratio(uint32_t gated, uint32_t ungated,
+                             uint32_t prev_gated, uint32_t prev_ungated);
+```
+
+Live fraction over the window since the previous cumulative readout.  A
+counter that moved backward (DSC2 reset or wrap) rebases the previous
+readout to (0, 0); returns `-1` when ungated did not advance or gated
+advanced more than ungated.
+
 Convention: `gated` counters are enabled while NOT busy, so live_fraction
 = gated/ungated. Bank-format details are documented inline in the
 header (legacy 67-word vs PRad-II rflag=1 72-word layout).
@@ -656,13 +750,17 @@ static bool dsc::Dsc2Decoder::DecodeBank(
 
 static bool dsc::Dsc2Decoder::ParsePayload(
     const uint32_t *data, size_t nwords, DscEventData &out);
+static bool dsc::Dsc2Decoder::ParsePayload(
+    const uint32_t *data, size_t nwords, DscEventData &out,
+    std::initializer_list<size_t> probe_offsets);
 ```
 
 `DecodeBank` returns `true` only when the data matches a known layout
 and the slot matches `cfg.slot`; `false` otherwise (out unchanged).
 `ParsePayload` is the lower-level call that fills the per-channel + ref
 arrays without applying the (source, channel) selection — useful for
-diagnostic tools.
+diagnostic tools.  It probes payload offsets {0, 2}; the overload takes a
+custom offset list (dsc_scan uses {0, 2, 3, 5}).
 
 ---
 
@@ -736,6 +834,73 @@ extension. Preference order: env var (e.g. `PRAD2_DATABASE_DIR`) → path
 relative to the calling module (resolved via `dladdr` /
 `GetModuleHandleExW`, so it works for both executables and the Python
 extension `.so`) → build-time `DATABASE_DIR` / `RESOURCE_DIR` constant.
+
+```cpp
+std::string prad2::database_dir();
+std::string prad2::find_database_file(const std::string &name);
+bool        prad2::is_absolute_path(const std::string &path);
+std::string prad2::resolve_db_path(const std::string &path, const std::string &db_dir);
+```
+
+`database_dir()` is `resolve_data_dir("PRAD2_DATABASE_DIR",
+{"../share/prad2evviewer/database", "../../share/prad2evviewer/database"},
+DATABASE_DIR)` with the `DATABASE_DIR` prad2dec was built with (the second
+candidate is the prad2py layout, `<prefix>/lib/prad2py/`).
+`find_database_file(name)` returns `database_dir()/name` if it can be
+opened, else the first readable of `name`, `database/name`,
+`../database/name` (empty if none).
+`resolve_db_path` joins a database-relative config path to `db_dir`;
+empty or absolute paths are returned unchanged.
+
+---
+
+## `EvioFiles.h`
+
+Header-only (usable from ACLiC scripts).
+
+```cpp
+int prad2::run_number_from_path(const std::string &path);
+std::vector<std::string> prad2::discover_split_files(const std::string &path,
+                                                     bool expand_siblings = false);
+```
+
+`run_number_from_path` returns the run of the first `prad_<digits>` /
+`run_<digits>` in the file name (case-insensitive), or `-1`.
+`discover_split_files` resolves an EVIO input to the split files to
+process: a glob (`.../prad_023881.evio.*`) or a directory gives every
+`prad_<run>.evio.<N>` of the run in that directory (run from the file or
+directory name), sorted by suffix, with gaps reported on stderr.  With
+`expand_siblings`, an existing split file or a base name that is not
+itself a file (`prad_023881.evio`) does the same; any other path is
+returned unchanged as `{ path }`.  An empty list means the run or
+directory could not be resolved or nothing matched.
+
+---
+
+## `JsonUtil.h`
+
+Header-only nlohmann::json helpers for the JSON config loaders.
+
+```cpp
+bool prad2::read_json_file(const std::string &path, nlohmann::json &out,
+                           std::string *err = nullptr);
+template <class... T> bool prad2::read_json_elements(const nlohmann::json &arr, T &...out);
+template <class... T> bool prad2::read_json_array(const nlohmann::json &j, const char *key, T &...out);
+```
+
+`read_json_file` parses a file with `//` and `/* */` comments allowed and
+never throws; on failure `out` is untouched and `*err` says why.
+`read_json_elements` assigns `arr[0]`, `arr[1]`, ... to `out...` (false,
+nothing assigned, unless `arr` is an array with enough elements);
+`read_json_array` does the same for `j[key]`.
+
+---
+
+## `RunningStats.h`
+
+`prad2::RunningStats { sum, sum2, count }` — running mean / population
+RMS accumulator: `add(v)`, `mean()` (0 when empty), `rms()` (0 for fewer
+than two entries).
 
 ---
 

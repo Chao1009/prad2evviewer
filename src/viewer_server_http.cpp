@@ -1,4 +1,5 @@
 #include "viewer_server.h"
+#include "evio_data_source.h"
 #include "http_compress.h"
 
 #include <filesystem>
@@ -11,9 +12,7 @@
 namespace fs = std::filesystem;
 using json = nlohmann::json;
 
-// =========================================================================
-// Resource serving
-// =========================================================================
+// ── Resource serving ──────────────────────────────────────────────────────
 
 bool ViewerServer::serveResource(const std::string &uri,
                                  WsServer::connection_ptr con)
@@ -34,39 +33,29 @@ bool ViewerServer::serveResource(const std::string &uri,
 json ViewerServer::listFiles(const std::string &subdir)
 {
     json entries = json::array();
-    if (cfg_.data_dir.empty()) return entries;
+    std::string dir = resolveDataPath(subdir);
+    if (dir.empty()) return entries;
+    auto is_data = [](const fs::path &p) {
+        auto fn = p.filename().string();
+        return fn.find(".evio") != std::string::npos || fn.find(".root") != std::string::npos;
+    };
     try {
         fs::path root(cfg_.data_dir);
-        fs::path dir = subdir.empty() ? root : root / subdir;
-        // security: ensure dir is under root
-        auto canon_root = fs::canonical(root);
-        auto canon_dir  = fs::canonical(dir);
-        if (canon_dir.string().rfind(canon_root.string(), 0) != 0)
-            return entries;
-
         for (auto &entry : fs::directory_iterator(
-                 canon_dir, fs::directory_options::skip_permission_denied)) {
+                 dir, fs::directory_options::skip_permission_denied)) {
             auto rel = fs::relative(entry.path(), root).string();
             if (entry.is_directory()) {
-                // count data files inside (non-recursive quick scan)
+                // count data files inside (recursive scan)
                 int count = 0;
                 try {
                     for (auto &child : fs::recursive_directory_iterator(
-                             entry.path(), fs::directory_options::skip_permission_denied)) {
-                        if (!child.is_regular_file()) continue;
-                        auto fn = child.path().filename().string();
-                        if (fn.find(".evio") != std::string::npos ||
-                            fn.find(".root") != std::string::npos)
-                            count++;
-                    }
+                             entry.path(), fs::directory_options::skip_permission_denied))
+                        if (child.is_regular_file() && is_data(child.path())) count++;
                 } catch (...) {}
                 if (count > 0)
                     entries.push_back(json{{"type", "dir"}, {"name", rel}, {"count", count}});
             } else if (entry.is_regular_file()) {
-                auto fn = entry.path().filename().string();
-                if (fn.find(".evio") == std::string::npos &&
-                    fn.find(".root") == std::string::npos)
-                    continue;
+                if (!is_data(entry.path())) continue;
                 auto sz = entry.file_size();
                 entries.push_back(json{{"type", "file"}, {"name", rel},
                                        {"size", sz},
@@ -84,26 +73,26 @@ json ViewerServer::listFiles(const std::string &subdir)
     return entries;
 }
 
-std::string ViewerServer::resolveDataFile(const std::string &relpath)
+std::string ViewerServer::resolveDataPath(const std::string &rel, bool regular_file)
 {
     if (cfg_.data_dir.empty()) return "";
     try {
-        fs::path full = fs::canonical(fs::path(cfg_.data_dir) / relpath);
-        fs::path root = fs::canonical(fs::path(cfg_.data_dir));
-        if (full.string().rfind(root.string(), 0) != 0) return "";
-        if (!fs::is_regular_file(full)) return "";
+        fs::path root = fs::canonical(cfg_.data_dir);
+        fs::path full = fs::canonical(root / rel);
+        // Component-wise containment: a string-prefix test would also
+        // accept siblings such as <data_dir>2.
+        fs::path inside = full.lexically_relative(root);
+        if (inside.empty() || *inside.begin() == "..") return "";
+        if (regular_file && !fs::is_regular_file(full)) return "";
         return full.string();
     } catch (...) { return ""; }
 }
 
-// =========================================================================
-// Config JSON
-// =========================================================================
+// ── Config JSON ───────────────────────────────────────────────────────────
 
 json ViewerServer::buildConfig()
 {
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
+    auto data = fileData();
 
     auto &app = activeApp();
     json cfg = app.base_config;
@@ -135,16 +124,10 @@ json ViewerServer::buildConfig()
     // data source capabilities
     // In online mode without a file, report EVIO-native capabilities
     DataSourceCaps caps;
-    if (data) {
+    if (data)
         caps = data->caps;
-    } else if (mode_.load() == Mode::Online) {
-        caps.source_type   = "evio";
-        caps.has_waveforms = true;
-        caps.has_peaks     = true;
-        caps.has_pedestals = true;
-        caps.has_epics     = true;
-        caps.has_sync      = true;
-    }
+    else if (mode_.load() == Mode::Online)
+        caps = EvioDataSource::nativeCaps();
     cfg["source"] = {
         {"type", caps.source_type},
         {"has_waveforms", caps.has_waveforms},
@@ -161,9 +144,7 @@ json ViewerServer::buildConfig()
     return cfg;
 }
 
-// =========================================================================
-// Elog post
-// =========================================================================
+// ── Elog post ─────────────────────────────────────────────────────────────
 
 namespace {
 // Minimal base64 decoder (RFC4648). Skips whitespace and '='.
@@ -194,7 +175,7 @@ std::string _b64Decode(const std::string &s)
 
 // Pull <Attachment> blocks out of the elog XML body, base64-decode each,
 // and write the bytes to <dir>/<filename>. The XML is the canonical
-// payload — there is no separate JSON attachment field anymore.
+// payload.
 void _extractXmlAttachments(const std::string &xml, const fs::path &dir)
 {
     static const std::string A_OPEN  = "<Attachment>";
@@ -238,6 +219,36 @@ void _extractXmlAttachments(const std::string &xml, const fs::path &dir)
     }
 }
 
+// <local_save_dir>/run_NNNNNN — one archive directory per run.
+fs::path _runReportDir(const std::string &local_save_dir, uint32_t run)
+{
+    char run_name[32];
+    std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
+    return fs::path(local_save_dir) / run_name;
+}
+
+// Newest *.xml seen in dir and its mtime (0 when stat fails), or nullopt.
+// Never throws: the monitor thread reaches this through
+// hasSavedReportForRun, and a filesystem error (concurrent rmdir,
+// permission flap) must not kill it.
+std::optional<std::pair<fs::path, std::time_t>> _latestReportXml(const fs::path &dir)
+{
+    std::optional<std::pair<fs::path, std::time_t>> best;
+    try {
+        std::error_code ec;
+        fs::directory_iterator it(dir, ec), end;
+        for (; !ec && it != end; it.increment(ec)) {
+            std::error_code fec;
+            if (!it->is_regular_file(fec) || fec || it->path().extension() != ".xml")
+                continue;
+            struct stat st;
+            std::time_t t = ::stat(it->path().c_str(), &st) == 0 ? st.st_mtime : 0;
+            if (!best || t > best->second) best = {it->path(), t};
+        }
+    } catch (...) {}
+    return best;
+}
+
 // Result of the local archive write — both the directory and the XML
 // path so the post step can read back from the same file.
 struct LocalSaveResult {
@@ -256,9 +267,7 @@ LocalSaveResult _saveReportLocally(const std::string &local_save_dir,
         r.error = "local_save_dir not configured";
         return r;
     }
-    char run_name[32];
-    std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
-    r.dir = fs::path(local_save_dir) / run_name;
+    r.dir = _runReportDir(local_save_dir, run);
     std::error_code ec;
     fs::create_directories(r.dir, ec);
     if (ec) {
@@ -349,36 +358,19 @@ json ViewerServer::handleElogPost(const std::string &body)
     // races and quick double-fires from the same client (END + run-change
     // fallback) without burning disk on near-identical snapshots.
     if (run > 0 && app.auto_report_min_interval_ms > 0) {
-        char run_name[32];
-        std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
-        fs::path run_dir = fs::path(app.auto_report_local_save_dir) / run_name;
-        if (fs::exists(run_dir) && fs::is_directory(run_dir)) {
-            std::time_t now_t = std::time(nullptr);
-            int window_sec = app.auto_report_min_interval_ms / 1000;
-            fs::path most_recent;
-            std::time_t most_recent_t = 0;
-            std::error_code ec;
-            for (auto &entry : fs::directory_iterator(run_dir, ec)) {
-                if (!entry.is_regular_file()) continue;
-                if (entry.path().extension() != ".xml") continue;
-                struct stat st;
-                if (::stat(entry.path().c_str(), &st) == 0 &&
-                    st.st_mtime > most_recent_t)
-                {
-                    most_recent_t = st.st_mtime;
-                    most_recent   = entry.path();
-                }
-            }
-            if (most_recent_t && (now_t - most_recent_t) < window_sec) {
-                std::cerr << "Elog post: server-side dup skip for run "
-                          << run << " (recent: " << most_recent
-                          << ", " << (now_t - most_recent_t) << "s old)\n";
-                return {{"ok", true}, {"skipped", true},
-                        {"detail", "server-side dedup: recent save within "
-                                  + std::to_string(window_sec / 60) + " min"},
-                        {"saved_dir", run_dir.string()},
-                        {"saved_xml", most_recent.string()}};
-            }
+        fs::path run_dir = _runReportDir(app.auto_report_local_save_dir, run);
+        auto latest = _latestReportXml(run_dir);
+        std::time_t now_t = std::time(nullptr);
+        int window_sec = app.auto_report_min_interval_ms / 1000;
+        if (latest && latest->second && (now_t - latest->second) < window_sec) {
+            std::cerr << "Elog post: server-side dup skip for run "
+                      << run << " (recent: " << latest->first
+                      << ", " << (now_t - latest->second) << "s old)\n";
+            return {{"ok", true}, {"skipped", true},
+                    {"detail", "server-side dedup: recent save within "
+                              + std::to_string(window_sec / 60) + " min"},
+                    {"saved_dir", run_dir.string()},
+                    {"saved_xml", latest->first.string()}};
         }
     }
 
@@ -466,14 +458,15 @@ json ViewerServer::handleElogPost(const std::string &body)
             {"saved_dir", saved_dir}, {"saved_xml", saved_xml}};
 }
 
-// =========================================================================
-// On-demand auto-report dispatch
-// =========================================================================
+// ── On-demand auto-report dispatch ────────────────────────────────────────
 
 namespace {
-// Compose summary.json next to local_save_dir.  Whole-file rewrite per
-// update — the file stays small (one JSON record per run), and atomic
-// O_TRUNC is fine for our cadence.
+// Seconds a dispatched capture may stay unanswered before the watchdog
+// retries it on the next client.
+constexpr int ELOG_CAPTURE_TIMEOUT_S = 30;
+
+// <local_save_dir>/summary.json; appendAutoReportSummary rewrites the whole
+// file on each update (it stays small).
 fs::path _summaryPath(const std::string &local_save_dir)
 {
     return fs::path(local_save_dir) / "summary.json";
@@ -591,11 +584,8 @@ bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
         return false;
     }
 
-    // Only clients that advertised the on-demand auto-report
-    // capability via client_hello are eligible.  Old (pre-update) tabs
-    // never appear here so the watchdog won't waste 30 s timing them
-    // out — operators see a clean "no responsive client" record
-    // instead of a long stutter.
+    // Only reporter_capable_ clients are eligible, so the watchdog never
+    // waits 30 s on a tab that cannot capture.
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> alive;
     size_t total_clients = 0;
@@ -619,7 +609,6 @@ bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
 
     std::lock_guard<std::mutex> plk(pending_capture_mtx_);
 
-    constexpr int CAPTURE_TIMEOUT_S = 30;
     std::time_t now_t = std::time(nullptr);
 
     PendingCapture pc;
@@ -628,7 +617,7 @@ bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
         // watchdog retry — same request, advance to next candidate
         pc = *pending_capture_;
     } else if (pending_capture_ &&
-               (now_t - pending_capture_->started) < CAPTURE_TIMEOUT_S) {
+               (now_t - pending_capture_->started) <= ELOG_CAPTURE_TIMEOUT_S) {
         // Another capture is already in flight (different request_id);
         // don't clobber it. Per-run on-disk dedup will absorb any
         // genuine duplicate when both finish.
@@ -674,12 +663,8 @@ bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
         {"run",        pc.run},
         {"reason",     pc.reason},
     };
-    try {
-        server_->send(chosen, msg.dump(),
-                      websocketpp::frame::opcode::text);
-    } catch (const std::exception &e) {
-        std::cerr << "AutoReport: send failed (" << e.what()
-                  << "), retrying via watchdog\n";
+    if (!wsSend(chosen, msg.dump())) {
+        std::cerr << "AutoReport: send failed, retrying via watchdog\n";
         return false;
     }
     std::cerr << "AutoReport: dispatched capture_request for run " << run
@@ -691,12 +676,11 @@ bool ViewerServer::dispatchCapture(uint32_t run, const std::string &reason,
 
 void ViewerServer::autoReportWatchdog()
 {
-    constexpr int CAPTURE_TIMEOUT_S = 30;
     std::optional<PendingCapture> stale;
     {
         std::lock_guard<std::mutex> lk(pending_capture_mtx_);
         if (pending_capture_ &&
-            std::time(nullptr) - pending_capture_->started > CAPTURE_TIMEOUT_S)
+            std::time(nullptr) - pending_capture_->started > ELOG_CAPTURE_TIMEOUT_S)
         {
             stale = pending_capture_;
         }
@@ -707,27 +691,32 @@ void ViewerServer::autoReportWatchdog()
     dispatchCapture(stale->run, stale->reason, stale->request_id);
 }
 
-// =========================================================================
-// Deferred autoclear — gates the PRESTART data wipe on capture state
-// =========================================================================
-// Why: with multiple browser tabs connected, every non-chosen tab calling
-// /api/hist/clear on PRESTART wipes the server's histograms while the
-// chosen reporter is still snapping screenshots, and the run-change
-// fallback (when END is missed) dispatches its capture AFTER PRESTART has
-// already broadcast.  Both races land empty data + a low Samples count
-// in the auto-report.  Funnelling PRESTART clears through this delayed,
-// capture-aware scheduler keeps the server's state intact long enough
-// for either the END-driven or run-change-driven capture to complete.
-// Manual /api/hist/clear is intentionally NOT routed here — operator
-// presses must take effect immediately.
-// =========================================================================
+// ── Deferred autoclear (see viewer_server.h) ──────────────────────────────
+
+// Fast-clear (5 s) only when a capture is in flight (dispatch succeeded,
+// pending_capture_ set) or a report for this run is already saved.  When
+// the dispatch fails for lack of a client and nothing is saved, defer the
+// wipe 5 min so a later trigger (run change after END, or a client that
+// connects late) can still capture the pre-wipe data.  Trade-off: during
+// the defer, new-run events keep filling the unwiped histograms, which is
+// accepted over losing the prior run's report outright.
+void ViewerServer::captureAndScheduleClear(uint32_t run, const std::string &reason)
+{
+    int delay_ms = 5000;
+    if (app_online_.auto_report_enabled && run > 0
+        && !dispatchCapture(run, reason) && !hasSavedReportForRun(run)) {
+        delay_ms = 300000;
+        std::cerr << "AutoReport: deferring autoclear 5 min for run " << run
+                  << " — " << reason << " dispatch produced nothing\n";
+    }
+    scheduleAutoClear(delay_ms);
+}
 
 void ViewerServer::scheduleAutoClear(int delay_ms)
 {
-    if (delay_ms < 0) delay_ms = 5000;
     std::lock_guard<std::mutex> lk(autoclear_mtx_);
     // Last-call-wins.  Run-boundary signals fire in sequence (e.g. END
-    // schedules 5 s, then PRESTART arrives and re-schedules 5 s); each
+    // schedules 5 min, then the run change re-schedules 5 s); each
     // refresh anchors the countdown to the most recent boundary.  Tick
     // pauses while pending_capture_ is set, so the actual fire time is
     // (last schedule) + delay + (paused capture duration).
@@ -773,23 +762,17 @@ void ViewerServer::tickAutoClear()
 void ViewerServer::runAutoClearNow()
 {
     std::cerr << "AutoClear: firing — clearing histograms / lms / epics / gem_apv_full\n";
-    auto &app = activeApp();
-    app.clearHistograms();
-    app.clearLms();
-    app.clearEpics();
+    // Per-domain broadcasts keep existing handlers (which do partial UI
+    // resets) in step.  The autoclear_done broadcast piggy-backs on top
+    // so clients can run a single full clearFrontend in one place
+    // instead of inferring it from the three partial resets.
+    for (const char *what : {"hist", "lms", "epics"}) clearDomain(what);
     // Drop the most-recent monitoring-event GEM APV snapshot too — it lives
     // in viewer_server.h (not AppState) and is fed only by the ET reader,
     // so clearHistograms doesn't touch it.  Without this the GEM APV tab in
     // "Source: Monitoring event" mode would keep showing an evt number from
     // the previous run after autoclear fires.
     clearLatestFullApv();
-    // Per-domain broadcasts keep existing handlers (which do partial UI
-    // resets) in step.  The autoclear_done broadcast piggy-backs on top
-    // so clients can run a single full clearFrontend in one place
-    // instead of inferring it from the three partial resets.
-    wsBroadcast("{\"type\":\"hist_cleared\"}");
-    wsBroadcast("{\"type\":\"lms_cleared\"}");
-    wsBroadcast("{\"type\":\"epics_cleared\"}");
     wsBroadcast("{\"type\":\"autoclear_done\"}");
 }
 
@@ -802,20 +785,7 @@ void ViewerServer::clearLatestFullApv()
 #endif
 }
 
-// =========================================================================
-// Auto-report schedule — per-run 45-min checkpoint
-// =========================================================================
-// Two-trigger model (plus END as a last-resort): whichever fires first
-// dispatches the capture for that run; subsequent triggers are dropped by
-// the on-disk per-run dedup inside dispatchCapture.
-//   1) armScheduleForRun(run) — call whenever a control event or physics
-//      event surfaces a run_number.  Idempotent on the same run; restarts
-//      the timer when the run changes.
-//   2) tickAutoReportSchedule() — polled from the same TICK_MS loop as
-//      tickAutoClear / autoReportWatchdog.  Fires dispatchCapture once
-//      elapsed >= schedule_minutes; flips ar_sched_.fired so the same run
-//      isn't re-dispatched on subsequent ticks.
-// =========================================================================
+// ── Auto-report schedule — per-run checkpoint (see viewer_server.h) ───────
 
 void ViewerServer::armScheduleForRun(uint32_t run)
 {
@@ -859,8 +829,7 @@ void ViewerServer::tickAutoReportSchedule()
         // timer long before any physics event arrives, or whenever
         // the autoclear-after-END leaves the new run starved.  All
         // three counters are atomic — no lock needed and no contention
-        // with the EVIO/recon hot path that holds data_mtx.  Set
-        // min_events_for_schedule = 0 to disable (legacy behaviour).
+        // with the EVIO/recon hot path that holds data_mtx.
         int min_evts = app.auto_report_min_events_for_schedule;
         int cap_min  = app.auto_report_schedule_max_wait_min;
         bool ceiling_hit = (cap_min > 0) &&
@@ -914,39 +883,10 @@ bool ViewerServer::hasSavedReportForRun(uint32_t run)
 {
     auto &app = activeApp();
     if (app.auto_report_local_save_dir.empty() || run == 0) return false;
-    char run_name[32];
-    std::snprintf(run_name, sizeof(run_name), "run_%06u", run);
-    fs::path run_dir = fs::path(app.auto_report_local_save_dir) / run_name;
-    std::error_code ec;
-    if (!fs::exists(run_dir, ec) || !fs::is_directory(run_dir, ec))
-        return false;
-    // Manual iterator drive — the range-for syntax uses the throwing
-    // overload of operator++, which would propagate (e.g. on a
-    // concurrent rmdir or a permission flap) all the way out through
-    // dispatchCapture and tickAutoReportSchedule and kill the monitor
-    // thread.  Drive via the (ec)-overload increment instead, and treat
-    // any unexpected error as "no saved report" — the worst case is
-    // one spurious dispatch, vs. losing all auto-clears / watchdogs.
-    try {
-        fs::directory_iterator it(run_dir, ec), end;
-        if (ec) return false;
-        for (; it != end; it.increment(ec)) {
-            if (ec) return false;
-            if (it->is_regular_file(ec) && !ec &&
-                it->path().extension() == ".xml")
-                return true;
-        }
-    } catch (const std::exception &e) {
-        std::cerr << "AutoReport: hasSavedReportForRun(" << run
-                  << ") threw — treating as no save: " << e.what() << "\n";
-        return false;
-    }
-    return false;
+    return _latestReportXml(_runReportDir(app.auto_report_local_save_dir, run)).has_value();
 }
 
-// =========================================================================
-// HTTP handler
-// =========================================================================
+// ── HTTP handler ──────────────────────────────────────────────────────────
 
 void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 {
@@ -974,22 +914,21 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             con->append_header("Content-Encoding", "gzip");
             return;
         }
-        if (wants_gzip && body.size() >= prad2::kGzipMinBytes) {
-            try {
-                con->set_body(prad2::gzip_compress(body));
+        if (wants_gzip) {
+            std::string gz = prad2::gzip_if_large(body);
+            if (!gz.empty()) {
+                con->set_body(gz);
                 con->append_header("Content-Encoding", "gzip");
                 return;
-            } catch (...) {
-                // Fall through to plain body on any zlib failure.
             }
         }
         con->set_body(body);
     };
 
-    // Any exception thrown below (e.g. std::stoi on a malformed %xx in the
-    // URL, json type_error, std::bad_alloc) would otherwise unwind into
-    // websocketpp / asio and terminate the server.  Convert to a 400/500
-    // response and keep the io_context alive.
+    // Any exception thrown below (e.g. a json type_error on a wrongly typed
+    // POST field, std::bad_alloc) would otherwise unwind into websocketpp /
+    // asio and terminate the server.  Convert to a 400/500 response and
+    // keep the io_context alive.
     try {
 
     // --- static resources ---
@@ -1047,25 +986,8 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // --- mode switching ---
     if (uri == "/api/mode/online") {
 #ifdef WITH_ET
-        {
-            std::lock_guard<std::mutex> lk(mode_mtx_);
-            // apply optional ET config overrides (serialised by mode_mtx_)
-            std::string body = con->get_request_body();
-            if (!body.empty()) {
-                auto j = json::parse(body, nullptr, false);
-                if (!j.is_discarded()) {
-                    if (j.contains("host"))    et_cfg_.host    = j["host"];
-                    if (j.contains("port"))    et_cfg_.port    = j["port"];
-                    if (j.contains("et_file")) et_cfg_.et_file = j["et_file"];
-                    if (j.contains("station")) et_cfg_.station = j["station"];
-                }
-            }
-            // bump generation so ET reader reconnects with new config
-            if (mode_.load() == Mode::Online)
-                et_generation_++;
-            et_active_ = true;
-            setMode(Mode::Online);
-        }
+        // optional ET config overrides in the body
+        goOnline(json::parse(con->get_request_body(), nullptr, false));
         reply(json({{"mode", "online"}}).dump());
 #else
         reply(json({{"error", "ET support not compiled"}}).dump());
@@ -1073,15 +995,7 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         return;
     }
     if (uri == "/api/mode/file") {
-        std::lock_guard<std::mutex> lk(mode_mtx_);
-        if (mode_.load() == Mode::Online) {
-#ifdef WITH_ET
-            et_active_ = false;
-#endif
-            std::shared_ptr<FileData> data;
-            { std::lock_guard<std::mutex> lk2(file_data_mtx_); data = file_data_; }
-            setMode(data ? Mode::File : Mode::Idle);
-        }
+        goOffline();
         reply(json({{"mode", mode()}}).dump());
         return;
     }
@@ -1115,7 +1029,6 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 
     // --- waveform/<n>/<key> (file mode only — on-demand single-channel samples) ---
     if (uri.rfind("/api/waveform/", 0) == 0) {
-        // parse /api/waveform/<evnum>/<roc_slot_ch>
         std::string rest = uri.substr(14);
         auto slash = rest.find('/');
         if (slash == std::string::npos) {
@@ -1124,17 +1037,11 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         int evnum = std::atoi(rest.substr(0, slash).c_str());
         std::string chan_key = rest.substr(slash + 1);
 
-        auto event_ptr = std::make_unique<fdec::EventData>();
-        auto ssp_ptr = std::make_unique<ssp::SspEventData>();
-        std::string err = decodeRawEvent(evnum, *event_ptr, ssp_ptr.get());
-        if (!err.empty()) { reply(json({{"error", err}}).dump()); return; }
-
-        accumulate(evnum, *event_ptr, ssp_ptr.get());
-
-        fdec::WaveAnalyzer ana(activeApp().daq_cfg.wave_cfg);
-        ana.SetTemplateStore(&activeApp().template_store);
-        fdec::WaveResult wres;
-        reply(activeApp().encodeWaveformJson(*event_ptr, chan_key, ana, wres).dump());
+        reply(withFileEvent(evnum, [&](fdec::EventData &event, ssp::SspEventData &) {
+            auto ana = app_file_.makeAnalyzer();
+            fdec::WaveResult wres;
+            return app_file_.encodeWaveformJson(event, chan_key, ana, wres);
+        }).dump());
         return;
     }
 
@@ -1145,18 +1052,7 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         if (mode_.load() == Mode::Online) {
             std::lock_guard<std::mutex> lk(ring_mtx_);
             for (auto &e : ring_) {
-                if (e.seq == evnum) {
-                    if (e.cluster_str.empty()) {
-                        // Cache was invalidated by /api/hist_config; we can't
-                        // recompute here without the raw EventData, so report
-                        // pending and let the next live event refill.
-                        reply("{\"error\":\"clusters pending — config changed, "
-                              "wait for next event\"}");
-                    } else {
-                        reply(e.cluster_str);
-                    }
-                    return;
-                }
+                if (e.seq == evnum) { reply(e.cluster_str); return; }
             }
             reply("{\"error\":\"event not in ring buffer\"}"); return;
         }
@@ -1165,8 +1061,6 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     }
 
     // --- gem/calib (one-shot per-APV pedestal noise + global zs_sigma) ---
-    // The frontend caches this and refetches only when the calib_rev
-    // embedded in /api/gem/apv/<n> diverges from the cached value.
     if (uri == "/api/gem/calib") {
         reply(activeApp().apiGemCalib().dump());
         return;
@@ -1196,15 +1090,9 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         return;
     }
 
-    // --- gem/apv/latest_full (most recent monitoring event snapshot) ---
-    // Holds the JSON of the last event where any APV came in firmware
-    // full-readout (nstrips==128).  Encoded by the ET reader with
-    // skip_sw_zs=true so the entire pedestal/noise spectrum is visible
-    // across all 128 channels regardless of the software σ cut.  Updated
-    // on the prescaled DAQ monitoring events; clients learn about updates
-    // through the gem_apv_full_event WS broadcast.  Returns an error blob
-    // when no full-readout event has been captured yet (typical right
-    // after startup or in file mode, where the ET reader doesn't run).
+    // --- gem/apv/latest_full (see latest_full_apv_json_) ---
+    // Error blob until a full-readout event has been captured (e.g. right
+    // after startup, or in file mode where the ET reader doesn't run).
     if (uri == "/api/gem/apv/latest_full") {
 #ifdef WITH_ET
         std::string body, gz;
@@ -1235,27 +1123,21 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             std::lock_guard<std::mutex> lk(ring_mtx_);
             for (auto &e : ring_) {
                 if (e.seq == evnum) {
-                    if (e.gem_apv_str.empty())
-                        reply("{\"error\":\"gem apv pending\"}");
-                    else
-                        reply(e.gem_apv_str, "application/json", &e.gem_apv_gz);
+                    reply(e.gem_apv_str, "application/json", &e.gem_apv_gz);
                     return;
                 }
             }
             reply("{\"error\":\"event not in ring buffer\"}"); return;
         }
 #endif
-        auto event_ptr = std::make_unique<fdec::EventData>();
-        auto ssp_ptr   = std::make_unique<ssp::SspEventData>();
-        std::string err = decodeRawEvent(evnum, *event_ptr, ssp_ptr.get());
-        if (!err.empty()) { reply(json({{"error", err}}).dump()); return; }
-        accumulate(evnum, *event_ptr, ssp_ptr.get());
-        // accumulate() dedupes by event id, so on a re-request gem_sys
-        // may still hold a different event's working buffers.  Force a
-        // re-process (no histogram side effects) so apiGemApv reads the
-        // requested event regardless of cache state.
-        activeApp().prepareGemForView(*ssp_ptr);
-        reply(activeApp().apiGemApv(*ssp_ptr, evnum).dump());
+        reply(withFileEvent(evnum, [&](fdec::EventData &, ssp::SspEventData &ssp_evt) {
+            // accumulate() dedupes by event id, so on a re-request gem_sys
+            // may still hold a different event's working buffers.  Force a
+            // re-process (no histogram side effects) so apiGemApv reads the
+            // requested event regardless of cache state.
+            app_file_.prepareGemForView(ssp_evt);
+            return app_file_.apiGemApv(ssp_evt, evnum);
+        }).dump());
         return;
     }
 
@@ -1278,7 +1160,7 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 
     // MONITOR STATUS — header panel for online mode.  Each value may be <0
     // to mean "not available"; the frontend hides cells independently.
-    //   livetime.ts       ← caget poll (AppState::livetime_cmd)
+    //   livetime.ts       ← caget poll (AppState::livetime_status)
     //   livetime.measured ← DSC2 scaler in EVIO stream (activeApp())
     //   beam.energy       ← caget poll (AppState::beam_energy_status)
     //   beam.current      ← caget poll (AppState::beam_current_status)
@@ -1297,7 +1179,6 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         return;
     }
 
-    // --- clear endpoints (always available, clears active mode's data) ---
     // --- filter endpoints ---
     if (uri == "/api/filter") {
         reply(activeApp().filterToJson().dump()); return;
@@ -1322,22 +1203,9 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     }
 
     // --- clear endpoints (always available, clears active mode's data) ---
-    if (uri == "/api/hist/clear") {
-        activeApp().clearHistograms();
+    if (uri == "/api/hist/clear" || uri == "/api/lms/clear" || uri == "/api/epics/clear") {
+        clearDomain(uri.substr(5, uri.size() - 11));   // "hist" / "lms" / "epics"
         reply("{\"cleared\":true}");
-        wsBroadcast("{\"type\":\"hist_cleared\"}");
-        return;
-    }
-    if (uri == "/api/lms/clear") {
-        activeApp().clearLms();
-        reply("{\"cleared\":true}");
-        wsBroadcast("{\"type\":\"lms_cleared\"}");
-        return;
-    }
-    if (uri == "/api/epics/clear") {
-        activeApp().clearEpics();
-        reply("{\"cleared\":true}");
-        wsBroadcast("{\"type\":\"epics_cleared\"}");
         return;
     }
     // --- shared read-only API routes ---
@@ -1346,57 +1214,14 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 
     // --- file browser ---
     if (uri == "/api/files" || uri.rfind("/api/files?", 0) == 0) {
-        std::string subdir;
-        auto qpos = uri.find('?');
-        if (qpos != std::string::npos) {
-            std::string q = uri.substr(qpos + 1);
-            if (q.rfind("dir=", 0) == 0) {
-                subdir = q.substr(4);
-                // URL-decode
-                std::string dec;
-                for (size_t i = 0; i < subdir.size(); ++i) {
-                    if (subdir[i] == '%' && i + 2 < subdir.size()) {
-                        dec += (char)std::stoi(subdir.substr(i + 1, 2), nullptr, 16);
-                        i += 2;
-                    } else if (subdir[i] == '+') dec += ' ';
-                    else dec += subdir[i];
-                }
-                subdir = dec;
-            }
-        }
-        reply(json({{"entries", listFiles(subdir)}}).dump()); return;
+        reply(json({{"entries", listFiles(queryValue(uri, "dir"))}}).dump()); return;
     }
 
     // --- load file (relative path from data_dir) ---
     if (uri.rfind("/api/load?", 0) == 0) {
-        auto qpos = uri.find('?');
-        std::string query = uri.substr(qpos + 1);
-        std::string relpath;
-        bool do_hist = false;
-        for (size_t pos = 0; pos < query.size();) {
-            size_t amp = query.find('&', pos);
-            if (amp == std::string::npos) amp = query.size();
-            std::string kv = query.substr(pos, amp - pos);
-            auto eq = kv.find('=');
-            if (eq != std::string::npos) {
-                std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
-                if (k == "file") relpath = v;
-                if (k == "hist") do_hist = (v == "1");
-            }
-            pos = amp + 1;
-        }
-        // URL-decode %xx
-        std::string decoded;
-        for (size_t i = 0; i < relpath.size(); ++i) {
-            if (relpath[i] == '%' && i + 2 < relpath.size()) {
-                decoded += (char)std::stoi(relpath.substr(i + 1, 2), nullptr, 16);
-                i += 2;
-            } else if (relpath[i] == '+') decoded += ' ';
-            else decoded += relpath[i];
-        }
-        relpath = decoded;
-
-        std::string fullpath = resolveDataFile(relpath);
+        std::string relpath = queryValue(uri, "file");
+        bool do_hist = queryValue(uri, "hist") == "1";
+        std::string fullpath = resolveDataPath(relpath, true);
         if (fullpath.empty()) { reply("{\"error\":\"invalid path\"}"); return; }
 
         loadFile(fullpath, do_hist);

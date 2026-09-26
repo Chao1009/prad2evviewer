@@ -281,12 +281,21 @@ prad2ana_analysis_example <input_recon.root> [-o output.root] [-n max_events]
 
 ### cosmic_test
 
-Cosmic-ray analysis for commissioning. Reads raw waveform data and
-produces per-channel signal distributions.
+Cosmic-ray and LMS peak check for HyCal. Reads
+`prad_023<run>.000NN_raw.root` (NN = 0 .. file_count-1; e.g. `-r 575`
+reads run 23575) from the current directory. It fits the single-peak
+integral and height spectra of every PbWO4 module and of the lead-glass
+ring, from cosmic (5-70 channel) and LMS (>900 channel) events, and
+writes `cosmic_run_<run>.root`, `cosmic_peak_<run>.dat`,
+`cosmic_eventNum_<run>.dat`, `lms_run_<run>.json` and
+`cosmic_modules_run<run>.json`. Fit plots go to `./fit_canvas/`, which
+must exist. `-j existing.json` instead appends this run to every module
+of an earlier `cosmic_modules_run*.json`. `-L` analyses the lead-glass
+ring alone from single-channel events; it replaces the former
+`prad2ana_cosmic_lg`, writes `cosmic_run_LG_<run>.root` and no LMS file.
 
 ```bash
-prad2ana_cosmic_test <input.root> [-o output.root] \
-    [-D daq_config.json] [-n max_events]
+prad2ana_cosmic_test -r <run> -n <file_count> [-j existing.json] [-L]
 ```
 
 ## ACLiC scripts (`scripts/`)
@@ -347,8 +356,11 @@ cluster-to-hit matching → ROOT tree of matched HC↔GEM pairs and the
 constituent X/Y GEM strip waveforms.
 
 > **Python counterpart**: `analysis/pyscripts/gem_hycal_matching.py` —
-> identical pipeline via `prad2py`, no ROOT, flat TSV/CSV out, identical
-> best-match rule. See [Python counterparts](#python-counterparts-pyscripts).
+> the same pipeline via `prad2py`, no ROOT, flat TSV/CSV out, the same
+> best-match rule. Its HyCal peak choice follows the live monitor
+> (largest integral, no time window) and it matches in double precision,
+> so its matches can differ from the macro's. See
+> [Python counterparts](#python-counterparts-pyscripts).
 
 **Trigger filter.** Only events with `trigger_bits == 0x100`
 (production physics trigger) are reconstructed and written; everything
@@ -375,8 +387,8 @@ Per event (after the trigger cut):
   `HyCalCluster.FormClusters() / ReconstructHits()`.
 - GEM: `GemSystem.ProcessEvent` (pedestal + CM + ZS) →
   `Reconstruct(GemCluster)` → 2-D X×Y matched hits per detector.
-- Lab-frame transform via `RotateDetData` / `TransformDetData` (uses
-  the `runinfo` geometry for HyCal and each GEM).
+- Lab-frame transform via `analysis::ApplyToLab` (uses the `runinfo`
+  geometry for HyCal and each GEM).
 - For each HyCal cluster, draw a line from `(0,0,0)` target through
   the lab-frame centroid (`z = hycal_z` + shower depth); intersect
   each GEM plane and find the closest GEM hit within `N · σ_total`
@@ -403,8 +415,9 @@ match if  |residual| < N · σ_total                      [N defaults to 3]
 The actual residual and `σ_total` are stored per match so downstream
 cuts can be re-tuned without rerunning the macro.  The C++ formula
 lives on `HyCalSystem::PositionResolution(E)` (set via
-`SetPositionResolutionParams(A, B, C)`); the loader helper is
-`script_helpers.h::load_matching_config(...)`.  The Python counterpart
+`SetPositionResolutionParams(A, B, C)`); the parameters are loaded by
+`prad2::PipelineBuilder`, which the macro calls through
+`script_helpers.h::build_script_pipeline(...)`.  The Python counterpart
 uses `_common.load_matching_config()` and `_common.hycal_pos_resolution(...)`.
 
 **Tree layout** (`match`, one entry per physics event):
@@ -544,7 +557,7 @@ scripts.
 
 ### gem_hycal_matching.py
 
-Same pipeline and best-match rule as the C macro of the same name.
+Same best-match rule as the C macro of the same name.
 One row per matched tuple:
 
 | Column | Notes |
@@ -657,20 +670,24 @@ templates documented in
 
 ## Adding a tool
 
-Create `tools/my_tool.cpp`, then add to `CMakeLists.txt`:
+Create `tools/my_tool.cpp`, then add `my_tool` to the `ANA_TOOLS` list
+in `CMakeLists.txt`:
 
 ```cmake
-add_analysis_tool(my_tool tools/my_tool.cpp)
+set(ANA_TOOLS
+    ...
+    hycal_Erecon_check hycal_energy_bowl_shape my_tool)
 ```
 
-The helper takes care of the rest:
+The loop over `ANA_TOOLS` takes care of the rest:
 
-- compiles the source into `prad2ana_my_tool` (matching the install
-  prefix convention),
+- builds target `my_tool` from `tools/my_tool.cpp` with `add_prad_tool`
+  (`cmake/PradHelpers.cmake`), which defines `DATABASE_DIR=...` so
+  install-relative paths resolve and routes the binary to `<build>/bin/`,
 - links `libprad2ana.a` (transitively pulling in `prad2dec`,
   `prad2det`, ROOT),
-- defines `DATABASE_DIR=...` so install-relative paths resolve,
-- routes the binary to `<build>/bin/`.
+- names the binary `prad2ana_my_tool` (matching the install prefix
+  convention) and installs it to `<prefix>/bin/`.
 
 If the new code is *shared* (callable from multiple tools and from
 ACLiC scripts), put the implementation under `src/` and the

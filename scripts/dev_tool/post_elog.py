@@ -8,7 +8,7 @@ Mirrors the prad2_server logic:
       field=lognumber&field=title&limit=20      (server: handleElogCheck)
     Substring server-side, EXACT title match client-side.
 
-  * Post:        PUT <elog_url>/incoming/prad2_report.xml with the XML
+  * Post:        PUT <elog_url>/incoming/prad2_run_<run>.xml with the XML
                  body, cert + key auth                 (server: handleElogPost)
 
 Stdlib only — no `requests`, no `pip install`.
@@ -31,8 +31,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# Defaults match clonfarm11 / clonpc19 setup. Override via flags or by
-# pointing --config at a monitor_config.json.
+# Defaults match clonfarm11 / clonpc19 setup. Override via flags.
 DEFAULT_REPORTS_DIR = "/home/clasrun/prad2_daq/monitor/reports"
 DEFAULT_CERT        = "/home/clasrun/prad2_daq/monitor/keys/elog-cert.pem"
 DEFAULT_KEY         = "/home/clasrun/prad2_daq/monitor/keys/elog-key.pem"
@@ -125,22 +124,19 @@ def check_elog(url: str, book: str, cert: str, key: str, title: str):
 def rewrite_tags(xml_text: str, mapping: dict) -> str:
     """Apply --rewrite-tag old=new replacements inside <Tags><tag>…
     blocks. mapping is {"AutoReport": "Autolog", ...}.  An empty
-    replacement drops the <tag>…</tag> block entirely — used to
-    strip stale tags that aren't in the elog enumeration anymore.
+    replacement drops the <tag>…</tag> block entirely.
     Match is exact-text inside <tag>…</tag>, so body content can't
     accidentally trip the substitution.
     """
     if not mapping:
         return xml_text
-    # Strip surrounding whitespace too when dropping (so we don't leave
-    # blank lines inside <Tags>).
     def _sub(m):
         old = m.group(1)
         if old not in mapping:
             return m.group(0)
         new = mapping[old]
         if new == "":
-            return ""  # drop the entire <tag>…</tag> block
+            return ""
         return f"<tag>{new}</tag>"
     out = re.sub(r"<tag>([^<]*)</tag>", _sub, xml_text)
     # Collapse any blank-only Tags container left behind so the XML
@@ -165,10 +161,7 @@ def post_elog(url: str, cert: str, key: str, xml_path, run: int,
     replay scripts) hit "already processed" and are rejected before
     creating duplicates.
 
-    --rewrite-tags lets us replay older saved XMLs whose <Tags> block
-    still references tags that aren't in the elog's current
-    enumeration (e.g. AutoReport → Autolog) without mutating the
-    on-disk archive.
+    Tag rewrites are applied to a temp copy, never the on-disk archive.
     """
     if run > 0:
         upload_name = f"prad2_run_{run:06d}.xml"
@@ -206,8 +199,6 @@ def post_elog(url: str, cert: str, key: str, xml_path, run: int,
         if rewrite_map:
             try: Path(upload_src).unlink()
             except Exception: pass
-    if isinstance(p, Exception):
-        return 0, str(p)
     out = (p.stdout or "") + (p.stderr or "")
     m = re.search(re.escape(marker) + r"(\d+)\s*$", out)
     if not m:

@@ -6,9 +6,8 @@
 // Euler rotation (Rx * Ry * Rz) then translation.
 // Reusable for HyCal, GEMs, or any planar detector.
 //
-// The rotation matrix is lazily computed on first use and cached.
-// Call prepare() explicitly to force precomputation, or just use
-// toLab()/rotate() — they auto-prepare if needed.
+// The rotation matrix is lazily computed on first use and cached; every
+// accessor auto-prepares.
 //=============================================================================
 
 #include <cmath>
@@ -33,9 +32,8 @@ struct DetectorTransform {
     void invalidate() { prepared_ = false; }
 
     // Set pose (translation in mm + tilts in degrees) and rebuild the
-    // cached rotation matrix in one shot.  Equivalent to writing the six
-    // fields plus invalidate() + prepare(); preferred over field-at-a-
-    // time mutation because it can't leave the cache half-built.
+    // cached rotation matrix in one shot; preferred over field-at-a-time
+    // mutation because it can't leave the cache stale.
     void set(float x_, float y_, float z_,
              float rx_, float ry_, float rz_) {
         x = x_; y = y_; z = z_;
@@ -44,9 +42,7 @@ struct DetectorTransform {
         prepare();
     }
 
-    // Force matrix precomputation (idempotent — first call only).  Call
-    // invalidate() first if you mutated any field after the previous
-    // prepare(), or just use set() to do both at once.
+    // Force matrix precomputation (no-op while the cache is valid).
     void prepare() const {
         if (prepared_) return;
         const float DEG = 3.14159265f / 180.f;
@@ -102,7 +98,7 @@ struct DetectorTransform {
         nx = mat_.r02;  ny = mat_.r12;  nz = mat_.r22;
     }
 
-    // Access the cached matrix directly (auto-prepares).
+    // Cached matrix (auto-prepares).
     const Matrix& matrix() const { prepare(); return mat_; }
 
 private:

@@ -5,7 +5,8 @@ gem_hycal_match_viewer.py — interactive PyQt6 GEM↔HyCal matching viewer.
 Open an EVIO file event-by-event and inspect the GEM↔HyCal coincidence:
   * front view (X-Y) — HyCal geometry with cluster centroids, GEM hits
     projected through the target onto the HyCal plane (one mark per
-    detector, color-coded), and matching circles drawn at N·sigma_total;
+    detector, color-coded), and a dashed line from each HC cluster to its
+    matched GEM hit;
   * side view (Z-Y) — target / GEM planes / HyCal face with hit markers
     and the HyCal→GEM line for each matched HC cluster;
   * match table — one row per (HC cluster × GEM detector) with residual
@@ -17,10 +18,11 @@ Open an EVIO file event-by-event and inspect the GEM↔HyCal coincidence:
   * show/hide — checkboxes per detector + HyCal cluster overlay.
 
 Usage:
-    python scripts/gem_hycal_match_viewer.py <file.evio.00000> [-r RUN]
+    python scripts/gem_hycal_match_viewer.py [file.evio.00000] [-r RUN]
+        [--db DIR] [--theme THEME]
 
-Configuration is read from `database/`:
-  * monitor_config.json        (waveform binning, trigger filter)
+Configuration is read from $PRAD2_DATABASE_DIR when set, else from the
+--db directory (default <repo>/database):
   * daq_config.json            (DAQ + raw decoding)
   * reconstruction_config.json (runinfo pointer + matching constants)
 """
@@ -28,43 +30,24 @@ Configuration is read from `database/`:
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-
-# ---------------------------------------------------------------------------
-# prad2py + analysis._common discovery — walk up from this script to find
-# build/python/ and add analysis/pyscripts/ to sys.path.
-# ---------------------------------------------------------------------------
+from typing import List, Optional, Tuple
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_DIR = _SCRIPT_DIR.parent
-_probe = _SCRIPT_DIR
-for _ in range(5):
-    _probe = _probe.parent
-    for _sub in ("build/python", "build-release/python", "build/Release/python"):
-        _cand = _probe / _sub
-        if _cand.is_dir() and str(_cand) not in sys.path:
-            sys.path.insert(0, str(_cand))
+
+from prad2_env import database_dir, import_prad2py
+prad2py, PRAD2PY_ERROR = import_prad2py()
+HAVE_PRAD2PY = prad2py is not None
 
 # analysis/pyscripts/_common.py — parametric matching helpers shared with
 # the offline TSV/CSV writer (gem_hycal_matching.py).
 _ANA_PY = _REPO_DIR / "analysis" / "pyscripts"
 if _ANA_PY.is_dir() and str(_ANA_PY) not in sys.path:
     sys.path.insert(0, str(_ANA_PY))
-
-try:
-    from prad2py import dec, det
-    HAVE_PRAD2PY = True
-    PRAD2PY_ERROR = ""
-except Exception as _exc:
-    dec = None  # type: ignore
-    det = None  # type: ignore
-    HAVE_PRAD2PY = False
-    PRAD2PY_ERROR = f"{type(_exc).__name__}: {_exc}"
 
 try:
     import _common as C  # type: ignore
@@ -95,49 +78,38 @@ from hycal_geoview import (
     HyCalMapWidget, apply_theme_palette, available_themes,
     load_modules as load_geo_modules, set_theme,
 )
+from evio_io import EvioCursor, iter_physics_records, open_evio
 
 # Per-detector colour palette — same as the web viewer (resources/gem.js).
 GEM_COLORS = [
-    QColor("#ff7f0e"),  # GEM0 — orange
-    QColor("#1f77b4"),  # GEM1 — blue
+    QColor("#1f77b4"),  # GEM0 — blue
+    QColor("#ff7f0e"),  # GEM1 — orange
     QColor("#2ca02c"),  # GEM2 — green
     QColor("#d62728"),  # GEM3 — red
 ]
+GEM_RGB = [c.getRgbF()[:3] for c in GEM_COLORS]   # matplotlib colours
 GEM_NAMES = ["GEM0", "GEM1", "GEM2", "GEM3"]
 
 
-# ============================================================================
-# Data structures
-# ============================================================================
+# ---- Data structures -------------------------------------------------------
 
 class HCCluster:
-    __slots__ = ("idx", "x", "y", "z", "energy", "center_id", "nblocks",
-                 "lab_x", "lab_y", "lab_z")
+    __slots__ = ("idx", "x", "y", "energy", "lab_x", "lab_y", "lab_z")
 
     def __init__(self, idx, h, lab):
         self.idx = idx
         self.x = float(h.x)
         self.y = float(h.y)
-        self.z = 0.0
         self.energy = float(h.energy)
-        self.center_id = int(h.center_id)
-        self.nblocks = int(h.nblocks)
         self.lab_x, self.lab_y, self.lab_z = lab
 
 
 class GEMHit:
-    __slots__ = ("det_id", "lx", "ly", "lab_x", "lab_y", "lab_z",
-                 "x_charge", "y_charge", "x_size", "y_size")
+    __slots__ = ("det_id", "lab_x", "lab_y", "lab_z")
 
-    def __init__(self, det_id, lx, ly, lab, x_charge, y_charge, x_size, y_size):
+    def __init__(self, det_id, lab):
         self.det_id = det_id
-        self.lx = float(lx)
-        self.ly = float(ly)
         self.lab_x, self.lab_y, self.lab_z = lab
-        self.x_charge = float(x_charge)
-        self.y_charge = float(y_charge)
-        self.x_size = int(x_size)
-        self.y_size = int(y_size)
 
 
 class Match:
@@ -163,102 +135,52 @@ class EventResult:
         self.gem: List[List[GEMHit]] = [[], [], [], []]
         self.matches: List[Match] = []   # one entry per (hc, det) best match
 
+    def match_pair(self, m: Match) -> Optional[Tuple[HCCluster, GEMHit]]:
+        """The (HC cluster, GEM hit) of a match, or None if out of range."""
+        if m.hc_idx >= len(self.hc) or m.gem_idx >= len(self.gem[m.det_id]):
+            return None
+        return self.hc[m.hc_idx], self.gem[m.det_id][m.gem_idx]
 
-# ============================================================================
-# Matching loop (parametric sigma — mirrors gem_hycal_matching.py / .C)
-# ============================================================================
 
-def compute_matches(hc: List[HCCluster], gem: List[List[GEMHit]],
-                    pr_A: float, pr_B: float, pr_C: float,
-                    gem_pos_res: List[float], match_nsigma: float
-                    ) -> List[Match]:
-    """For each (HC cluster × GEM detector) pair, find the closest GEM hit
-    inside `match_nsigma · σ_total` at the GEM plane.  At most one match per
-    (HC, det)."""
-    out: List[Match] = []
-    for k, h in enumerate(hc):
-        if h.lab_z <= 0:
-            continue
-        sig_face = C.hycal_pos_resolution(pr_A, pr_B, pr_C, h.energy)
-        for d in range(4):
-            gl = gem[d]
-            if not gl:
-                continue
-            z_gem = gl[0].lab_z
-            if z_gem <= 0:
-                continue
-            scale = z_gem / h.lab_z
-            proj_x = h.lab_x * scale
-            proj_y = h.lab_y * scale
-            sig_hc_at_gem = sig_face * scale
-            sig_gem = gem_pos_res[d] if d < len(gem_pos_res) else 0.1
-            sig_total = math.sqrt(sig_hc_at_gem**2 + sig_gem**2)
-            cut = match_nsigma * sig_total
-            best_gi = -1
-            best_dr = cut
-            for gi, g in enumerate(gl):
-                dx = g.lab_x - proj_x
-                dy = g.lab_y - proj_y
-                dr = math.sqrt(dx*dx + dy*dy)
-                if dr <= best_dr:
-                    best_dr = dr
-                    best_gi = gi
-            if best_gi >= 0:
-                out.append(Match(k, d, best_gi, proj_x, proj_y, best_dr, sig_total))
-    return out
+# ---- Match counting --------------------------------------------------------
+
+def matches_per_det(matches: List[Match]) -> List[int]:
+    """Number of matched hits on each GEM detector."""
+    counts = [0, 0, 0, 0]
+    for m in matches:
+        counts[m.det_id] += 1
+    return counts
 
 
 def event_passes(matches: List[Match], min_hits_per_det: int, min_dets: int) -> bool:
     """Event qualifies if at least `min_dets` GEM detectors each have at
     least `min_hits_per_det` matched hits (counted across all HC clusters)."""
-    counts = [0, 0, 0, 0]
-    for m in matches:
-        counts[m.det_id] += 1
-    n_pass = sum(1 for c in counts if c >= min_hits_per_det)
+    n_pass = sum(1 for c in matches_per_det(matches) if c >= min_hits_per_det)
     return n_pass >= min_dets
 
 
-# ============================================================================
-# Reconstruction pipeline (uses prad2py, matches gem_hycal_matching.py setup)
-# ============================================================================
+# ---- Reconstruction pipeline -----------------------------------------------
 
 class Pipeline:
     """Wraps `_common.setup_pipeline` so the viewer reconstructs identically
     to the offline TSV/CSV writer.  Owns the matching constants too."""
 
     def __init__(self, db_dir: Path, run_num: int, evio_path: Path):
-        self.db_dir = db_dir
-        self.run_num = run_num
-        self.evio_path = evio_path
         self.match_nsigma = 3.0
-        # Initialize via the shared helper.  daq_config="" → installed default;
-        # we override the env var so the helper looks in the user's db_dir.
+        # The helper finds the database via $PRAD2_DATABASE_DIR; point it at
+        # db_dir unless the variable is already set.
         os.environ.setdefault("PRAD2_DATABASE_DIR", str(db_dir))
         self._p = C.setup_pipeline(
             evio_path=str(evio_path),
             run_num=run_num,
         )
         self.daq_cfg      = self._p.cfg
-        self.hycal        = self._p.hycal
-        self.hc_clusterer = self._p.hc_clusterer
         self.gem_sys      = self._p.gem_sys
-        self.gem_clusterer = self._p.gem_clusterer
-        self.wave_ana     = self._p.wave_ana
         self.geo          = self._p.geo
 
-        # Matching config (parametric sigma).  Push A,B,C into HyCalSystem
-        # so PositionResolution(E) works the same as the monitor does.
-        (A, B, Cc), gpr = C.load_matching_config()
-        self.match_A, self.match_B, self.match_C = A, B, Cc
-        self.gem_pos_res = (list(gpr) + [0.1] * 4)[:4] if gpr else [0.1] * 4
-        try:
-            self.hycal.set_position_resolution_params(A, B, Cc)
-        except AttributeError:
-            pass  # binding not yet built — we still use values from Python
+        # Matching config (parametric sigma).
+        self.match_abc, self.gem_pos_res, _ = C.load_matching_config(self._p)
 
-    # -----------------------------------------------------------------------
-    # Per-event reco — returns an EventResult.
-    # -----------------------------------------------------------------------
     def reconstruct(self, fadc_evt, ssp_evt) -> EventResult:
         ev = EventResult()
         ev.event_num = int(fadc_evt.info.event_number)
@@ -267,45 +189,45 @@ class Pipeline:
         # HyCal: waveform → energy → cluster (same logic as gem_hycal_matching.py).
         hc_raw = C.reconstruct_hycal(self._p, fadc_evt)
         for k, h in enumerate(hc_raw):
-            z_local = det.shower_depth(h.center_id, h.energy)
-            lab = (C.transform_hycal(h.x, h.y, z_local, self.geo)
-                   if self.geo else (float(h.x), float(h.y), 0.0))
-            ev.hc.append(HCCluster(k, h, lab))
+            ev.hc.append(HCCluster(k, h, C.hycal_to_lab(self._p, h)))
 
         # GEM: pedestal + CM + ZS → 1D + 2D
         C.reconstruct_gem(self._p, ssp_evt)
         for d in range(min(4, self.gem_sys.get_n_detectors())):
+            xform = self._p.gem_xforms[d]
             for g in self.gem_sys.get_hits(d):
-                lab = (C.transform_gem(g.x, g.y, 0.0, d, self.geo)
-                       if self.geo else (float(g.x), float(g.y), 0.0))
-                ev.gem[d].append(GEMHit(d, g.x, g.y, lab,
-                                        g.x_charge, g.y_charge,
-                                        g.x_size, g.y_size))
+                ev.gem[d].append(GEMHit(d, xform.to_lab(g.x, g.y)))
 
-        # Matching
-        ev.matches = compute_matches(ev.hc, ev.gem,
-                                     self.match_A, self.match_B, self.match_C,
-                                     self.gem_pos_res, self.match_nsigma)
+        ev.matches = self.match(ev.hc, ev.gem)
         return ev
 
+    def match(self, hc: List[HCCluster], gem: List[List[GEMHit]]) -> List[Match]:
+        """Closest GEM hit per (HC cluster × GEM detector) pair inside
+        `match_nsigma · σ_total` at the GEM plane (see C.best_gem_matches)."""
+        hc_lab = [(h.lab_x, h.lab_y, h.lab_z, h.energy) for h in hc]
+        gem_lab = [[(g.lab_x, g.lab_y, g.lab_z) for g in gl] for gl in gem]
+        return [Match(k, d, gi, px, py, dr, st)
+                for k, d, gi, px, py, dr, st, _ in C.best_gem_matches(
+                    hc_lab, gem_lab, self.match_abc, self.gem_pos_res,
+                    self.match_nsigma)]
 
-# ============================================================================
-# HyCal front-view subclass — overlay GEM-projected hits + matching markers.
-# ============================================================================
 
-class FrontView(HyCalMapWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
+# ---- Event + visibility state shared by the front and side views -----------
+
+class _MatchOverlayState:
+    """Mixin for FrontView / SideView; the view supplies _refresh()."""
+
+    def _init_overlay_state(self):
+        self._evt: Optional[EventResult] = None
         self._show_hc = True
         self._show_gem = [True, True, True, True]
         self._show_matches = True
-        self._evt: Optional[EventResult] = None
         self._z_hc = 6225.0   # default; updated when geometry loads
         self._z_gem = [5400.0] * 4
 
     def set_event(self, evt: Optional[EventResult]):
         self._evt = evt
-        self.update()
+        self._refresh()
 
     def set_zs(self, z_hc: float, z_gem: List[float]):
         if z_hc > 0:
@@ -315,14 +237,31 @@ class FrontView(HyCalMapWidget):
                 self._z_gem[i] = z
 
     def set_show_hc(self, on: bool):
-        self._show_hc = on; self.update()
+        self._show_hc = on; self._refresh()
 
     def set_show_gem(self, det_id: int, on: bool):
         if 0 <= det_id < 4:
-            self._show_gem[det_id] = on; self.update()
+            self._show_gem[det_id] = on; self._refresh()
 
     def set_show_matches(self, on: bool):
-        self._show_matches = on; self.update()
+        self._show_matches = on; self._refresh()
+
+
+# ---- HyCal front view: GEM-projected hits + match lines --------------------
+
+class FrontView(_MatchOverlayState, HyCalMapWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._init_overlay_state()
+
+    def _refresh(self):
+        self.update()
+
+    def _to_hc_plane(self, g: GEMHit) -> Tuple[float, float]:
+        """GEM hit projected through the target onto the HyCal plane:
+        (lab_x, lab_y) · z_hc / z_gem."""
+        z_gem = g.lab_z if g.lab_z > 0 else self._z_gem[g.det_id]
+        return C.project_to_z(g.lab_x, g.lab_y, z_gem, self._z_hc)[:2]
 
     def _paint_overlays(self, p: QPainter, w: int, h: int):
         super()._paint_overlays(p, w, h)
@@ -343,7 +282,6 @@ class FrontView(HyCalMapWidget):
                 p.drawText(pt + QPointF(8, -2), f"HC{c.idx}: {c.energy:.0f} MeV")
 
         # GEM hits projected through the target onto HyCal-local x,y.
-        # px = lab_x · (z_hc / z_gem),  py = lab_y · (z_hc / z_gem).
         # HyCal-local equals lab x,y for an untilted HyCal centred at (0,0,z_hc),
         # which is the standard PRad-II geometry; if hycal_x/y or tilts are non-
         # zero the runinfo loader has already absorbed them into lab coords.
@@ -352,51 +290,30 @@ class FrontView(HyCalMapWidget):
                 continue
             color = GEM_COLORS[d]
             for g in ev.gem[d]:
-                z_gem = g.lab_z if g.lab_z > 0 else self._z_gem[d]
-                if z_gem <= 0:
-                    continue
-                scale = self._z_hc / z_gem
-                px = g.lab_x * scale
-                py = g.lab_y * scale
-                qp = self.geo_to_canvas(px, py)
+                qp = self.geo_to_canvas(*self._to_hc_plane(g))
                 p.setPen(QPen(color, 1.4))
                 p.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), 130)))
                 p.drawEllipse(qp, 4.0, 4.0)
 
-        # Matching circle around HC cluster — drawn at HC plane.
-        # Radius = match_nsigma · σ_total at HC plane (project σ_GEM up via
-        # z_hc/z_gem).  We don't have nsigma here, but the match record
-        # carries σ_total directly at the GEM plane; at HC it scales by
-        # z_hc/z_gem.
+        # Dashed line from each HC cluster to its best-match GEM hit
+        # projected onto the HC plane.
         if self._show_matches and ev.matches:
             for m in ev.matches:
-                if not self._show_gem[m.det_id]:
+                pair = ev.match_pair(m)
+                if not self._show_gem[m.det_id] or pair is None:
                     continue
-                if m.hc_idx >= len(ev.hc):
-                    continue
-                c = ev.hc[m.hc_idx]
-                # Best-match GEM hit projected to HC plane → endpoint of line.
-                gl = ev.gem[m.det_id]
-                if m.gem_idx >= len(gl):
-                    continue
-                g = gl[m.gem_idx]
-                z_gem = g.lab_z if g.lab_z > 0 else self._z_gem[m.det_id]
-                scale = self._z_hc / z_gem if z_gem > 0 else 1.0
-                px = g.lab_x * scale
-                py = g.lab_y * scale
+                c, g = pair
                 a = self.geo_to_canvas(c.x, c.y)
-                b = self.geo_to_canvas(px, py)
+                b = self.geo_to_canvas(*self._to_hc_plane(g))
                 pen = QPen(GEM_COLORS[m.det_id], 1.6)
                 pen.setStyle(Qt.PenStyle.DashLine)
                 p.setPen(pen)
                 p.drawLine(a, b)
 
 
-# ============================================================================
-# Side view (Z-Y) — matplotlib canvas
-# ============================================================================
+# ---- Side view (Z-Y) — matplotlib canvas -----------------------------------
 
-class SideView(FigureCanvasQTAgg):
+class SideView(_MatchOverlayState, FigureCanvasQTAgg):
     def __init__(self, parent=None):
         self._fig = Figure(figsize=(6, 4), tight_layout=True)
         super().__init__(self._fig)
@@ -405,37 +322,18 @@ class SideView(FigureCanvasQTAgg):
         self._ax = self._fig.add_subplot(111)
         self._ax.set_xlabel("z (mm)")
         self._ax.set_ylabel("y (mm)")
-        self._evt: Optional[EventResult] = None
-        self._z_hc = 6225.0
-        self._z_gem = [5400.0] * 4
-        self._x_size_gem = [600.0] * 4
+        self._init_overlay_state()
         self._y_size_gem = [600.0] * 4
-        self._show_hc = True
-        self._show_gem = [True, True, True, True]
-        self._show_matches = True
 
     def set_geom(self, z_hc: float, z_gem: List[float],
                  y_size_gem: List[float]):
-        if z_hc > 0:
-            self._z_hc = z_hc
-        for i, z in enumerate(z_gem[:4]):
-            if z > 0:
-                self._z_gem[i] = z
+        self.set_zs(z_hc, z_gem)
         for i, y in enumerate(y_size_gem[:4]):
             if y > 0:
                 self._y_size_gem[i] = y
 
-    def set_event(self, evt: Optional[EventResult]):
-        self._evt = evt
+    def _refresh(self):
         self.redraw()
-
-    def set_show_hc(self, on: bool):    self._show_hc = on;       self.redraw()
-    def set_show_matches(self, on: bool):
-        self._show_matches = on; self.redraw()
-
-    def set_show_gem(self, det_id: int, on: bool):
-        if 0 <= det_id < 4:
-            self._show_gem[det_id] = on; self.redraw()
 
     def redraw(self):
         ax = self._ax
@@ -447,7 +345,7 @@ class SideView(FigureCanvasQTAgg):
         # Detector frames (dashed) — GEM and HyCal active areas in y.
         for d in range(4):
             yh = self._y_size_gem[d] / 2
-            color = (GEM_COLORS[d].redF(), GEM_COLORS[d].greenF(), GEM_COLORS[d].blueF())
+            color = GEM_RGB[d]
             ax.plot([self._z_gem[d], self._z_gem[d]], [-yh, yh],
                     "--", color=color, alpha=0.6, linewidth=1.0)
             ax.text(self._z_gem[d], yh + 20, GEM_NAMES[d],
@@ -470,7 +368,7 @@ class SideView(FigureCanvasQTAgg):
             for d in range(4):
                 if not self._show_gem[d]:
                     continue
-                color = (GEM_COLORS[d].redF(), GEM_COLORS[d].greenF(), GEM_COLORS[d].blueF())
+                color = GEM_RGB[d]
                 xs = [g.lab_z for g in evt.gem[d]]
                 ys = [g.lab_y for g in evt.gem[d]]
                 if xs:
@@ -480,20 +378,12 @@ class SideView(FigureCanvasQTAgg):
             # Matched HC↔GEM lines
             if self._show_matches:
                 for m in evt.matches:
-                    if not self._show_gem[m.det_id]:
+                    pair = evt.match_pair(m)
+                    if not self._show_gem[m.det_id] or pair is None:
                         continue
-                    if m.hc_idx >= len(evt.hc):
-                        continue
-                    c = evt.hc[m.hc_idx]
-                    gl = evt.gem[m.det_id]
-                    if m.gem_idx >= len(gl):
-                        continue
-                    g = gl[m.gem_idx]
-                    color = (GEM_COLORS[m.det_id].redF(),
-                             GEM_COLORS[m.det_id].greenF(),
-                             GEM_COLORS[m.det_id].blueF())
+                    c, g = pair
                     ax.plot([g.lab_z, c.lab_z], [g.lab_y, c.lab_y],
-                            "-", color=color, linewidth=1.0, alpha=0.7)
+                            "-", color=GEM_RGB[m.det_id], linewidth=1.0, alpha=0.7)
 
         # Y range — pad around the largest detector size.
         y_max = max(max(self._y_size_gem) / 2, 50.0)
@@ -502,9 +392,7 @@ class SideView(FigureCanvasQTAgg):
         self.draw_idle()
 
 
-# ============================================================================
-# Main window
-# ============================================================================
+# ---- Main window -----------------------------------------------------------
 
 class GemHycalMatchViewer(QMainWindow):
     def __init__(self, evio_path: Optional[Path] = None,
@@ -521,10 +409,10 @@ class GemHycalMatchViewer(QMainWindow):
                                  "Python bindings and re-run.")
             sys.exit(1)
 
-        self._db_dir = Path(db_dir or os.environ.get(
-            "PRAD2_DATABASE_DIR", _REPO_DIR / "database")).resolve()
+        self._db_dir = Path(db_dir).resolve() if db_dir else database_dir()
         self._run_num = run_num
         self._pipeline: Optional[Pipeline] = None
+        self._cursor: Optional[EvioCursor] = None
         self._physics_index: List[Tuple[int, int]] = []  # (record_idx, sub_idx)
         self._cur_idx = -1
         self._cur_event: Optional[EventResult] = None
@@ -550,7 +438,6 @@ class GemHycalMatchViewer(QMainWindow):
         self.setStatusBar(self._status)
         self._update_status_bar()
 
-        # File menu
         m = self.menuBar().addMenu("&File")
         act_open = QAction("&Open EVIO…", self)
         act_open.setShortcut(QKeySequence.StandardKey.Open)
@@ -681,14 +568,23 @@ class GemHycalMatchViewer(QMainWindow):
                                  f"{type(exc).__name__}: {exc}")
             return
 
-        # Index physics events with a progress dialog.  The channel is
-        # released afterwards — every navigation call opens a fresh channel.
-        ch = dec.EvChannel()
-        ch.set_config(self._pipeline.daq_cfg)
-        if ch.open_auto(str(path)) != dec.Status.success:
-            QMessageBox.critical(self, "Cannot open EVIO", str(path))
+        if self._cursor is not None:
+            self._cursor.close()
+            self._cursor = None
+        self._physics_index = []
+        self._cur_idx = -1
+        self._cur_event = None
+
+        # Index physics events on a channel of their own; navigation then
+        # seeks a cursor kept open on the file.
+        try:
+            self._cursor = EvioCursor(path, self._pipeline.daq_cfg)
+            ch, is_ra = open_evio(path, self._pipeline.daq_cfg)
+        except RuntimeError as exc:
+            QMessageBox.critical(self, "Cannot open EVIO", str(exc))
             return
-        self._physics_index = self._index_physics_events(ch)
+        self._physics_index = self._index_physics_events(ch, is_ra)
+        ch.close()
         if not self._physics_index:
             QMessageBox.information(self, "No physics events",
                                     "Scanned the file but found no physics records.")
@@ -701,16 +597,13 @@ class GemHycalMatchViewer(QMainWindow):
             y_size = []
             for d in range(min(4, self._pipeline.gem_sys.get_n_detectors())):
                 dets = self._pipeline.gem_sys.get_detectors()
-                y_size.append(float(dets[d].planes[1].size))
+                y_size.append(float(dets[d].plane_y.size))
             while len(y_size) < 4:
                 y_size.append(600.0)
             self._side.set_geom(geo.hycal_z, geo.gem_z, y_size)
 
         # Push HyCal modules into the front view.
-        map_rel = self._pipeline.daq_cfg.hycal_map_file or "hycal_map.json"
-        map_path = Path(map_rel)
-        if not map_path.is_absolute():
-            map_path = self._db_dir / map_rel
+        map_path = self._db_dir / "hycal_map.json"
         if map_path.is_file():
             try:
                 modules = load_geo_modules(map_path)
@@ -722,20 +615,14 @@ class GemHycalMatchViewer(QMainWindow):
         self.setWindowTitle(f"GEM↔HyCal Matching Viewer — {path.name}")
         self._goto(0)
 
-    def _index_physics_events(self, ch) -> List[Tuple[int, int]]:
+    def _index_physics_events(self, ch, is_ra: bool) -> List[Tuple[int, int]]:
         idx: List[Tuple[int, int]] = []
         dlg = QProgressDialog("Indexing physics events…", "Cancel", 0, 0, self)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(250)
         dlg.show()
-        rec = 0
         last_ui = time.monotonic()
-        while ch.read() == dec.Status.success:
-            rec += 1
-            if not ch.scan():
-                continue
-            if ch.get_event_type() != dec.EventType.Physics:
-                continue
+        for rec in iter_physics_records(ch, is_ra, dlg.wasCanceled):
             for sub in range(ch.get_n_events()):
                 idx.append((rec, sub))
             now = time.monotonic()
@@ -743,12 +630,7 @@ class GemHycalMatchViewer(QMainWindow):
                 dlg.setLabelText(f"Indexing physics events… {len(idx):,} found")
                 QApplication.processEvents()
                 last_ui = now
-                if dlg.wasCanceled():
-                    break
         dlg.close()
-        # Rewind for sub-event re-decoding.  EvChannel doesn't expose seek;
-        # we keep reading sequentially and decode lazily by record id.
-        # Instead, _goto() opens a fresh channel for each random access.
         return idx
 
     # ---- Navigation -------------------------------------------------------
@@ -765,35 +647,40 @@ class GemHycalMatchViewer(QMainWindow):
             return
         self._cur_idx = idx
         self._cur_event = self._decode_at(idx)
-        if self._cur_event is not None:
-            self._front.set_event(self._cur_event)
-            self._side.set_event(self._cur_event)
-            self._populate_match_table(self._cur_event)
+        self._show_current()
+
+    def _show_current(self):
+        """Show _cur_event in the views and match table, and sync the
+        event spinbox and status bar to _cur_idx."""
+        ev = self._cur_event
+        if ev is not None:
+            self._front.set_event(ev)
+            self._side.set_event(ev)
+            self._populate_match_table(ev)
         self._sb_idx.blockSignals(True)
-        self._sb_idx.setValue(idx); self._sb_idx.blockSignals(False)
+        self._sb_idx.setValue(self._cur_idx); self._sb_idx.blockSignals(False)
         self._update_status_bar()
 
     def _decode_at(self, idx: int) -> Optional[EventResult]:
-        """Fresh channel + sequential read up to the target record/sub-event."""
         if idx < 0 or idx >= len(self._physics_index):
             return None
-        target_rec, target_sub = self._physics_index[idx]
-        ch = dec.EvChannel()
-        ch.set_config(self._pipeline.daq_cfg)
-        if ch.open_auto(str(self._pipeline.evio_path)) != dec.Status.success:
+        rec, sub = self._physics_index[idx]
+        return self._decode_sub(sub) if self._load_record(rec) else None
+
+    def _load_record(self, rec: int) -> bool:
+        """Seek the cursor to record `rec` and scan it."""
+        try:
+            self._cursor.seek(rec)
+        except RuntimeError:
+            return False
+        return bool(self._cursor.ch.scan())
+
+    def _decode_sub(self, sub: int) -> Optional[EventResult]:
+        """Reconstruct sub-event `sub` of the loaded record."""
+        decoded = self._cursor.ch.decode_event(sub, with_ssp=True)
+        if not decoded.get("ok"):
             return None
-        rec = 0
-        while ch.read() == dec.Status.success:
-            rec += 1
-            if rec != target_rec:
-                continue
-            if not ch.scan():
-                return None
-            decoded = ch.decode_event(target_sub, with_ssp=True)
-            if not decoded.get("ok"):
-                return None
-            return self._pipeline.reconstruct(decoded["event"], decoded["ssp"])
-        return None
+        return self._pipeline.reconstruct(decoded["event"], decoded["ssp"])
 
     # ---- Search -----------------------------------------------------------
     def _find_next_matched(self):
@@ -807,63 +694,29 @@ class GemHycalMatchViewer(QMainWindow):
             "Cancel", start, end, self)
         dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
         dlg.setMinimumDuration(250)
-        # Open a fresh channel and walk records sequentially; this is much
-        # faster than calling _decode_at() per event (which reopens the file).
-        ch = dec.EvChannel()
-        ch.set_config(self._pipeline.daq_cfg)
-        if ch.open_auto(str(self._pipeline.evio_path)) != dec.Status.success:
-            return
-        rec = 0
-        target_rec, target_sub = self._physics_index[start] if start < end else (None, None)
-        cursor = start
+        # Each record is loaded and scanned once for all of its sub-events.
+        loaded, ok = -1, False
         last_ui = time.monotonic()
         found = -1
-        while ch.read() == dec.Status.success:
-            rec += 1
-            if cursor >= end:
+        for i in range(start, end):
+            rec, sub = self._physics_index[i]
+            if rec != loaded:
+                loaded, ok = rec, self._load_record(rec)
+            evr = self._decode_sub(sub) if ok else None
+            if evr is not None and event_passes(evr.matches, N, K):
+                found = i
+                self._cur_event = evr
                 break
-            if target_rec is None:
-                break
-            if rec != target_rec:
-                continue
-            if not ch.scan():
-                # Advance past every (rec, sub) on this skipped record.
-                while cursor < end and self._physics_index[cursor][0] == rec:
-                    cursor += 1
-                if cursor < end:
-                    target_rec, target_sub = self._physics_index[cursor]
-                continue
-            # Walk every sub-event in this record while we still need them.
-            while cursor < end and self._physics_index[cursor][0] == rec:
-                _, sub = self._physics_index[cursor]
-                decoded = ch.decode_event(sub, with_ssp=True)
-                if decoded.get("ok"):
-                    evr = self._pipeline.reconstruct(decoded["event"], decoded["ssp"])
-                    if event_passes(evr.matches, N, K):
-                        found = cursor
-                        self._cur_event = evr
-                        break
-                cursor += 1
-                now = time.monotonic()
-                if now - last_ui > 0.1:
-                    dlg.setValue(cursor); QApplication.processEvents()
-                    last_ui = now
-                    if dlg.wasCanceled():
-                        cursor = end
-                        break
-            if found >= 0:
-                break
-            if cursor < end:
-                target_rec, target_sub = self._physics_index[cursor]
+            now = time.monotonic()
+            if now - last_ui > 0.1:
+                dlg.setValue(i + 1); QApplication.processEvents()
+                last_ui = now
+                if dlg.wasCanceled():
+                    break
         dlg.close()
         if found >= 0:
             self._cur_idx = found
-            self._sb_idx.blockSignals(True)
-            self._sb_idx.setValue(found); self._sb_idx.blockSignals(False)
-            self._front.set_event(self._cur_event)
-            self._side.set_event(self._cur_event)
-            self._populate_match_table(self._cur_event)
-            self._update_status_bar()
+            self._show_current()
         else:
             self.statusBar().showMessage(
                 "No matching event found before EOF.", 5000)
@@ -883,23 +736,18 @@ class GemHycalMatchViewer(QMainWindow):
             self._pipeline.match_nsigma = float(v)
         # Re-run matching on the current event without re-decoding.
         if self._cur_event:
-            self._cur_event.matches = compute_matches(
-                self._cur_event.hc, self._cur_event.gem,
-                self._pipeline.match_A, self._pipeline.match_B,
-                self._pipeline.match_C, self._pipeline.gem_pos_res,
-                self._pipeline.match_nsigma)
-            self._front.set_event(self._cur_event)
-            self._side.set_event(self._cur_event)
-            self._populate_match_table(self._cur_event)
+            self._cur_event.matches = self._pipeline.match(
+                self._cur_event.hc, self._cur_event.gem)
+            self._show_current()
 
     # ---- Match table ------------------------------------------------------
     def _populate_match_table(self, evt: EventResult):
         self._tbl.setRowCount(len(evt.matches))
         for r, m in enumerate(evt.matches):
+            _, g = evt.match_pair(m)
             ratio = m.residual / m.sigma_total if m.sigma_total > 0 else float("inf")
             cells = [str(m.hc_idx), GEM_NAMES[m.det_id],
-                     f"{evt.gem[m.det_id][m.gem_idx].lab_x:.2f}",
-                     f"{evt.gem[m.det_id][m.gem_idx].lab_y:.2f}",
+                     f"{g.lab_x:.2f}", f"{g.lab_y:.2f}",
                      f"{m.residual:.2f}", f"{m.sigma_total:.2f}",
                      f"{ratio:.2f}σ"]
             for c, txt in enumerate(cells):
@@ -918,21 +766,14 @@ class GemHycalMatchViewer(QMainWindow):
                 f"event {self._cur_idx + 1} / {len(self._physics_index)}  (decoding…)")
             return
         ev = self._cur_event
-        # Count matched detectors (≥1 hit).
-        per_det = [0, 0, 0, 0]
-        for m in ev.matches:
-            per_det[m.det_id] += 1
-        n_dets = sum(1 for c in per_det if c > 0)
+        per_det = matches_per_det(ev.matches)
+        n_dets = sum(1 for c in per_det if c > 0)   # detectors with ≥1 match
         msg = (f"event {self._cur_idx + 1}/{len(self._physics_index)}  "
                f"(#{ev.event_num})  trig=0x{ev.trigger_bits:08X}  "
                f"HC={len(ev.hc)}  matches={len(ev.matches)} on {n_dets} det "
                f"[{per_det[0]},{per_det[1]},{per_det[2]},{per_det[3]}]")
         self._status.showMessage(msg)
 
-
-# ============================================================================
-# Entry point
-# ============================================================================
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])

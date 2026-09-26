@@ -17,9 +17,11 @@ Two modes:
     channel.  Total figure height scales with the number of EPICS rows so
     the chart stays readable for any cut JSON.  Default x-axis is
     associated_timestamp; pass `--evn` to use associated_evn instead.
+    Written to <report stem>.png unless `-o PATH` is given.
 
 Backend choice: matplotlib's Qt6 backend (no new dependency on top of
-PyQt6 + matplotlib) so the same plot code feeds both modes.
+PyQt6 + matplotlib).  plot_report() draws the figure for both modes and,
+with the EPICS-menu helpers, backs the Filter Report tab of replay_viewer.py.
 """
 
 from __future__ import annotations
@@ -36,9 +38,7 @@ from typing import Iterable, Optional
 import numpy as np
 
 
-# ============================================================================
-# Report loading
-# ============================================================================
+# ---- Report loading --------------------------------------------------------
 
 @dataclass
 class ChannelSeries:
@@ -72,7 +72,7 @@ def load_report(path: str) -> ReportData:
         j = json.load(f)
     points = j.get("points") or []
     if not points:
-        raise SystemExit(f"{path}: report has no 'points' array")
+        raise ValueError(f"{path}: report has no 'points' array")
 
     by_evn: dict[int, dict[str, tuple[bool, float]]] = {}
     times_by_evn: dict[int, float] = {}
@@ -159,9 +159,7 @@ def load_report(path: str) -> ReportData:
     )
 
 
-# ============================================================================
-# Derived quantities + shared plot helpers
-# ============================================================================
+# ---- Derived quantities + shared plot helpers ------------------------------
 
 def get_x(report: ReportData, x_kind: str) -> tuple[np.ndarray, str]:
     """Return (x_array, x_label) for the requested axis kind."""
@@ -249,9 +247,7 @@ _YLABEL_KW = dict(rotation=0, ha="right", va="center", labelpad=8)
 def _draw_status_row(ax, report: ReportData, x: np.ndarray) -> None:
     """One step trace per channel, vertically offset by channel index.
     pass = top of band (i+1), fail = bottom (i).  Y-tick labels are the
-    channel display labels.  Drops NaN-x samples so the step doesn't
-    break across NaN-time checkpoints (matplotlib breaks the line at any
-    NaN in either x or y)."""
+    channel display labels."""
     n_ch = len(report.channels)
     for i, s in enumerate(report.channels.values()):
         y = s.pass_mask.astype(float) + i
@@ -290,7 +286,7 @@ def _draw_livetime_rate(ax_lt, report: ReportData, x: np.ndarray):
     return ax_rt
 
 
-def _title_for(report: ReportData) -> str:
+def title_for(report: ReportData) -> str:
     pieces: list[str] = []
     if report.run_number is not None:
         pieces.append(f"run {report.run_number}")
@@ -317,34 +313,29 @@ def _title_for(report: ReportData) -> str:
     return " — ".join(pieces) if pieces else os.path.basename(report.path)
 
 
-# ============================================================================
-# CLI rendering
-# ============================================================================
+# ---- Figure ----------------------------------------------------------------
 
-def render_cli(report: ReportData, out_path: str, x_kind: str) -> None:
-    """One stacked figure: status / livetime+rate / each EPICS channel."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    epics = [s for s in report.channels.values() if s.is_epics]
-    n_rows = 2 + len(epics)
-
+def _cli_row_heights(n_epics: int) -> list[float]:
     # Heights tuned to keep status + livetime panels readable while EPICS
     # rows stay scannable when many channels are configured.
-    heights = [1.5] + [1.4] + [1.1] * len(epics)
-    fig_h = max(4.5, sum(heights) * 0.95)
-    fig, axes = plt.subplots(
-        n_rows, 1, sharex=True,
-        figsize=(15, fig_h),
-        gridspec_kw={"height_ratios": heights},
-        constrained_layout=True,
-    )
-    if n_rows == 1:
-        axes = np.array([axes])
+    return [1.5] + [1.4] + [1.1] * n_epics
 
+
+def plot_report(fig, report: ReportData, x_kind: str,
+                epics: list[ChannelSeries], *,
+                per_channel_rows: bool = False,
+                note_color: str = "0.4") -> np.ndarray:
+    """Draw `report` into the empty `fig` and return its axes: cut status,
+    livetime + data rate, then the `epics` channels — one row each with
+    `per_channel_rows` (the CLI layout), otherwise overlaid in one row
+    with a legend, or a hint in `note_color` when `epics` is empty.
+    Rejected regions are dimmed on every axis."""
     x, xlabel = get_x(report, x_kind)
     segs = reject_segments(report, x)
+    heights = (_cli_row_heights(len(epics)) if per_channel_rows
+               else [1.4, 1.4, 1.7])
+    axes = fig.subplots(len(heights), 1, sharex=True,
+                        gridspec_kw={"height_ratios": heights})
 
     _draw_status_row(axes[0], report, x)
     shade_rejected(axes[0], segs)
@@ -353,28 +344,85 @@ def render_cli(report: ReportData, out_path: str, x_kind: str) -> None:
     shade_rejected(axes[1], segs)
     shade_rejected(ax_rt, segs)
 
-    for k, s in enumerate(epics):
-        ax = axes[2 + k]
-        xx, yy = _finite_xy(x, s.values)
-        ax.plot(xx, yy, lw=1.0, color="C2")
-        ax.set_ylabel(s.label, fontsize=9, **_YLABEL_KW)
-        ax.grid(axis="x", which="major", alpha=0.25)
-        shade_rejected(ax, segs)
+    if per_channel_rows:
+        for ax, s in zip(axes[2:], epics):
+            xx, yy = _finite_xy(x, s.values)
+            ax.plot(xx, yy, lw=1.0, color="C2")
+            ax.set_ylabel(s.label, fontsize=9, **_YLABEL_KW)
+            ax.grid(axis="x", which="major", alpha=0.25)
+            shade_rejected(ax, segs)
+    else:
+        ax_ep = axes[2]
+        if epics:
+            for s in epics:
+                xx, yy = _finite_xy(x, s.values)
+                ax_ep.plot(xx, yy, lw=1.0, label=s.label)
+            ax_ep.set_ylabel("EPICS", **_YLABEL_KW)
+            ax_ep.legend(loc="upper right", fontsize=8,
+                         ncol=min(len(epics), 4))
+            ax_ep.grid(axis="x", which="major", alpha=0.25)
+        else:
+            ax_ep.text(
+                0.5, 0.5,
+                "No EPICS channels selected — pick from the menu above.",
+                transform=ax_ep.transAxes, ha="center", va="center",
+                color=note_color)
+            ax_ep.set_yticks([])
+        shade_rejected(ax_ep, segs)
 
     axes[-1].set_xlabel(xlabel)
     # Align horizontal ylabels at a common x-position so every panel's
     # plot area starts at the same column (constrained_layout sizes the
     # left margin once for the widest label).
     fig.align_ylabels(axes)
-    fig.suptitle(_title_for(report), fontsize=11)
+    fig.suptitle(title_for(report), fontsize=11)
+    return axes
+
+
+def render_cli(report: ReportData, out_path: str, x_kind: str) -> None:
+    """One stacked figure: status / livetime+rate / each EPICS channel."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    epics = [s for s in report.channels.values() if s.is_epics]
+    fig_h = max(4.5, sum(_cli_row_heights(len(epics))) * 0.95)
+    fig = plt.figure(figsize=(15, fig_h), constrained_layout=True)
+    plot_report(fig, report, x_kind, epics, per_channel_rows=True)
     fig.savefig(out_path, dpi=140)
     plt.close(fig)
     print(f"replay_report_viewer: wrote {out_path}", file=sys.stderr)
 
 
-# ============================================================================
-# GUI
-# ============================================================================
+# ---- GUI -------------------------------------------------------------------
+
+def fill_epics_menu(menu, report: ReportData, parent, on_toggled) -> set[str]:
+    """Rebuild `menu` with one checked action per EPICS channel of `report`
+    (action data = channel name, toggling calls `on_toggled()`) and return
+    the selection that matches it: every EPICS channel name."""
+    from PyQt6.QtGui import QAction
+    menu.clear()
+    for s in report.channels.values():
+        if not s.is_epics:
+            continue
+        act = QAction(s.label, parent)
+        act.setCheckable(True)
+        act.setChecked(True)
+        act.setData(s.name)
+        act.toggled.connect(lambda _checked: on_toggled())
+        menu.addAction(act)
+    return {s.name for s in report.channels.values() if s.is_epics}
+
+
+def checked_epics(menu) -> set[str]:
+    return {a.data() for a in menu.actions() if a.isChecked()}
+
+
+def selected_series(report: ReportData, names: set[str]) -> list[ChannelSeries]:
+    """The channels of `report` named in `names`, sorted by label."""
+    return sorted((report.channels[n] for n in names if n in report.channels),
+                  key=lambda s: s.label)
+
 
 def run_gui(initial_path: Optional[str]) -> int:
     import matplotlib
@@ -385,7 +433,6 @@ def run_gui(initial_path: Optional[str]) -> int:
     from matplotlib.figure import Figure
 
     from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import (
         QApplication, QComboBox, QFileDialog, QHBoxLayout, QLabel,
         QMainWindow, QMenu, QPushButton, QSizePolicy, QToolButton,
@@ -479,9 +526,7 @@ def run_gui(initial_path: Optional[str]) -> int:
             self._replot()
 
         def _on_epics_toggled(self) -> None:
-            self.selected_epics = {
-                a.data() for a in self.menu_epics.actions() if a.isChecked()
-            }
+            self.selected_epics = checked_epics(self.menu_epics)
             self._replot()
 
         # ── Loading + drawing ─────────────────────────────────────────────
@@ -492,69 +537,19 @@ def run_gui(initial_path: Optional[str]) -> int:
                 self.lbl_status.setText(f"error loading {path}: {e}")
                 return
 
-            self.menu_epics.clear()
-            for s in self.report.channels.values():
-                if not s.is_epics:
-                    continue
-                act = QAction(s.label, self)
-                act.setCheckable(True)
-                act.setChecked(True)
-                act.setData(s.name)
-                act.toggled.connect(lambda _checked: self._on_epics_toggled())
-                self.menu_epics.addAction(act)
-            self.selected_epics = {
-                s.name for s in self.report.channels.values() if s.is_epics
-            }
+            self.selected_epics = fill_epics_menu(
+                self.menu_epics, self.report, self, self._on_epics_toggled)
 
             self.lbl_status.setText(
-                f"{path} — {_title_for(self.report)}")
+                f"{path} — {title_for(self.report)}")
             self._replot()
 
         def _replot(self) -> None:
             self.fig.clear()
             r = self.report
-            if r is None:
-                self.canvas.draw_idle()
-                return
-
-            x, xlabel = get_x(r, self.x_kind)
-            segs = reject_segments(r, x)
-
-            axes = self.fig.subplots(
-                3, 1, sharex=True,
-                gridspec_kw={"height_ratios": [1.4, 1.4, 1.7]},
-            )
-
-            _draw_status_row(axes[0], r, x)
-            shade_rejected(axes[0], segs)
-
-            ax_rt = _draw_livetime_rate(axes[1], r, x)
-            shade_rejected(axes[1], segs)
-            shade_rejected(ax_rt, segs)
-
-            ax_ep = axes[2]
-            sel = [r.channels[n] for n in self.selected_epics
-                   if n in r.channels]
-            sel.sort(key=lambda s: s.label)
-            if sel:
-                for s in sel:
-                    xx, yy = _finite_xy(x, s.values)
-                    ax_ep.plot(xx, yy, lw=1.0, label=s.label)
-                ax_ep.set_ylabel("EPICS", **_YLABEL_KW)
-                ax_ep.legend(loc="upper right", fontsize=8, ncol=min(len(sel), 4))
-                ax_ep.grid(axis="x", which="major", alpha=0.25)
-            else:
-                ax_ep.text(
-                    0.5, 0.5,
-                    "No EPICS channels selected — pick from the menu above.",
-                    transform=ax_ep.transAxes, ha="center", va="center",
-                    color="0.4")
-                ax_ep.set_yticks([])
-            shade_rejected(ax_ep, segs)
-
-            axes[-1].set_xlabel(xlabel)
-            self.fig.align_ylabels(axes)
-            self.fig.suptitle(_title_for(r), fontsize=11)
+            if r is not None:
+                plot_report(self.fig, r, self.x_kind,
+                            selected_series(r, self.selected_epics))
             self.canvas.draw_idle()
 
     w = Viewer()
@@ -562,9 +557,7 @@ def run_gui(initial_path: Optional[str]) -> int:
     return app.exec()
 
 
-# ============================================================================
-# Entry point
-# ============================================================================
+# ---- Entry point -----------------------------------------------------------
 
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(
@@ -585,7 +578,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         if not args.report:
             ap.error("--cli requires a report path")
         out = args.out or str(Path(args.report).with_suffix(".png"))
-        report = load_report(args.report)
+        try:
+            report = load_report(args.report)
+        except ValueError as exc:
+            raise SystemExit(str(exc))
         render_cli(report, out, "evn" if args.evn else "time")
         return 0
 

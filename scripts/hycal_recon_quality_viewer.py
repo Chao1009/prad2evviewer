@@ -20,11 +20,8 @@ import argparse
 import hashlib
 import json
 import math
-import os
 import re
-import site
 import sys
-import tempfile
 import traceback
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -44,37 +41,9 @@ try:
 except Exception:
     HAS_SCIPY = False
 
+from prad2_env import find_database_file, fix_qt_lib_path
 
-def _fix_qt_lib_path() -> None:
-    """Match replay_viewer startup workaround for Qt ABI conflicts.
-
-    Re-exec once with PyQt6 bundled Qt6/lib prepended to LD_LIBRARY_PATH so
-    the dynamic linker consistently resolves Qt symbols from one runtime.
-    """
-    sp_list: list[str] = []
-    try:
-        sp_list += site.getsitepackages()
-    except AttributeError:
-        pass
-    try:
-        sp_list.append(site.getusersitepackages())
-    except Exception:
-        pass
-
-    for sp in sp_list:
-        qt6_lib = os.path.join(sp, "PyQt6", "Qt6", "lib")
-        if os.path.isdir(qt6_lib):
-            current = os.environ.get("LD_LIBRARY_PATH", "")
-            entries = [e for e in current.split(":") if e]
-            if qt6_lib not in entries:
-                new_path = qt6_lib + ((":" + current) if current else "")
-                env = os.environ.copy()
-                env["LD_LIBRARY_PATH"] = new_path
-                os.execve(sys.executable, [sys.executable] + sys.argv, env)
-            return
-
-
-_fix_qt_lib_path()
+fix_qt_lib_path()   # before the first PyQt6 import
 
 try:
     from PyQt6.QtCore import QThread, Qt, pyqtSignal
@@ -114,15 +83,15 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
+from hycal_calib import expected_energy  # noqa: E402
 from hycal_geoview import (  # noqa: E402
     HyCalMapWidget,
     THEME,
     apply_theme_palette,
+    atomic_json_write,
     available_themes,
+    edge_depth,
+    hole_ring,
     load_modules,
     set_theme,
 )
@@ -168,18 +137,6 @@ class RunGroup:
     root_mtime: float
 
 
-class QualityMapWidget(HyCalMapWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent, enable_zoom_pan=True, min_size=(520, 520))
-        self._metric_label = ""
-
-    def set_metric_label(self, label: str):
-        self._metric_label = label
-
-    def _colorbar_center_text(self) -> str:
-        return self._metric_label if self._metric_label else super()._colorbar_center_text()
-
-
 class MplCanvas(FigureCanvas):
     def __init__(self, title: str, xlabel: str, ylabel: str):
         self.fig = Figure(figsize=(5, 3), dpi=100, tight_layout=True)
@@ -205,6 +162,34 @@ class MplCanvas(FigureCanvas):
         self.style_ax()
 
 
+def _dspin(form: QFormLayout, label: str, lo: float, hi: float, value: float,
+           step: Optional[float] = None, decimals: Optional[int] = None) -> QDoubleSpinBox:
+    sb = QDoubleSpinBox()
+    if decimals is not None:
+        sb.setDecimals(decimals)
+    sb.setRange(lo, hi)
+    if step is not None:
+        sb.setSingleStep(step)
+    sb.setValue(value)
+    form.addRow(label, sb)
+    return sb
+
+
+def _button_row(dlg: QDialog, ok_text: str = "OK", leading=()) -> QHBoxLayout:
+    """``leading`` buttons, stretch, then <ok_text> (accept) and Cancel (reject)."""
+    row = QHBoxLayout()
+    for btn in leading:
+        row.addWidget(btn)
+    row.addStretch()
+    ok_btn = QPushButton(ok_text)
+    cancel_btn = QPushButton("Cancel")
+    ok_btn.clicked.connect(dlg.accept)
+    cancel_btn.clicked.connect(dlg.reject)
+    row.addWidget(ok_btn)
+    row.addWidget(cancel_btn)
+    return row
+
+
 class FitSettingsDialog(QDialog):
     def __init__(self, settings: FitSettings, parent=None):
         super().__init__(parent)
@@ -215,42 +200,13 @@ class FitSettingsDialog(QDialog):
     def _build_ui(self):
         lay = QVBoxLayout(self)
         form = QFormLayout()
-
-        self.window_fraction = QDoubleSpinBox()
-        self.window_fraction.setRange(0.05, 1.0)
-        self.window_fraction.setSingleStep(0.05)
-        self.window_fraction.setValue(self._settings.window_fraction)
-        form.addRow("Window fraction", self.window_fraction)
-
-        self.min_half_window = QDoubleSpinBox()
-        self.min_half_window.setRange(5.0, 500.0)
-        self.min_half_window.setSingleStep(5.0)
-        self.min_half_window.setValue(self._settings.min_half_window)
-        form.addRow("Min half-window (MeV)", self.min_half_window)
-
-        self.max_half_window = QDoubleSpinBox()
-        self.max_half_window.setRange(10.0, 1000.0)
-        self.max_half_window.setSingleStep(10.0)
-        self.max_half_window.setValue(self._settings.max_half_window)
-        form.addRow("Max half-window (MeV)", self.max_half_window)
-
-        self.min_entries = QDoubleSpinBox()
-        self.min_entries.setDecimals(0)
-        self.min_entries.setRange(1, 1_000_000)
-        self.min_entries.setSingleStep(10)
-        self.min_entries.setValue(self._settings.min_entries)
-        form.addRow("Min entries", self.min_entries)
-
+        s = self._settings
+        self.window_fraction = _dspin(form, "Window fraction", 0.05, 1.0, s.window_fraction, step=0.05)
+        self.min_half_window = _dspin(form, "Min half-window (MeV)", 5.0, 500.0, s.min_half_window, step=5.0)
+        self.max_half_window = _dspin(form, "Max half-window (MeV)", 10.0, 1000.0, s.max_half_window, step=10.0)
+        self.min_entries = _dspin(form, "Min entries", 1, 1_000_000, s.min_entries, step=10, decimals=0)
         lay.addLayout(form)
-        row = QHBoxLayout()
-        ok_btn = QPushButton("OK")
-        cancel_btn = QPushButton("Cancel")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        row.addStretch()
-        row.addWidget(ok_btn)
-        row.addWidget(cancel_btn)
-        lay.addLayout(row)
+        lay.addLayout(_button_row(self))
 
     def values(self) -> FitSettings:
         return FitSettings(
@@ -271,41 +227,15 @@ class ThresholdDialog(QDialog):
     def _build_ui(self):
         lay = QVBoxLayout(self)
         form = QFormLayout()
-
-        self.offset_pct = QDoubleSpinBox()
-        self.offset_pct.setRange(0.1, 100.0)
-        self.offset_pct.setSingleStep(0.5)
-        self.offset_pct.setValue(self._settings.offset_pct)
-        form.addRow("Offset threshold (%)", self.offset_pct)
-
-        self.res_change_pct = QDoubleSpinBox()
-        self.res_change_pct.setRange(0.1, 100.0)
-        self.res_change_pct.setSingleStep(0.5)
-        self.res_change_pct.setValue(self._settings.resolution_change_pct)
-        form.addRow("Resolution change threshold (%)", self.res_change_pct)
-
-        self.jump_pct = QDoubleSpinBox()
-        self.jump_pct.setRange(0.1, 100.0)
-        self.jump_pct.setSingleStep(0.5)
-        self.jump_pct.setValue(self._settings.jump_pct)
-        form.addRow("Jump threshold (%)", self.jump_pct)
-
-        self.slope_abs_threshold = QDoubleSpinBox()
-        self.slope_abs_threshold.setRange(0.001, 100.0)
-        self.slope_abs_threshold.setSingleStep(0.1)
-        self.slope_abs_threshold.setValue(self._settings.slope_abs_threshold)
-        form.addRow("Slope threshold (MeV/index)", self.slope_abs_threshold)
-
+        s = self._settings
+        self.offset_pct = _dspin(form, "Offset threshold (%)", 0.1, 100.0, s.offset_pct, step=0.5)
+        self.res_change_pct = _dspin(form, "Resolution change threshold (%)", 0.1, 100.0,
+                                     s.resolution_change_pct, step=0.5)
+        self.jump_pct = _dspin(form, "Jump threshold (%)", 0.1, 100.0, s.jump_pct, step=0.5)
+        self.slope_abs_threshold = _dspin(form, "Slope threshold (MeV/index)", 0.001, 100.0,
+                                          s.slope_abs_threshold, step=0.1)
         lay.addLayout(form)
-        row = QHBoxLayout()
-        ok_btn = QPushButton("OK")
-        cancel_btn = QPushButton("Cancel")
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        row.addStretch()
-        row.addWidget(ok_btn)
-        row.addWidget(cancel_btn)
-        lay.addLayout(row)
+        lay.addLayout(_button_row(self))
 
     def values(self) -> ThresholdSettings:
         return ThresholdSettings(
@@ -323,32 +253,13 @@ class MapRangeDialog(QDialog):
         self._auto = False
         lay = QVBoxLayout(self)
         form = QFormLayout()
-
-        self.vmin = QDoubleSpinBox()
-        self.vmin.setRange(-1e9, 1e9)
-        self.vmin.setDecimals(6)
-        self.vmin.setValue(float(vmin))
-        form.addRow("Min", self.vmin)
-
-        self.vmax = QDoubleSpinBox()
-        self.vmax.setRange(-1e9, 1e9)
-        self.vmax.setDecimals(6)
-        self.vmax.setValue(float(vmax))
-        form.addRow("Max", self.vmax)
+        self.vmin = _dspin(form, "Min", -1e9, 1e9, float(vmin), decimals=6)
+        self.vmax = _dspin(form, "Max", -1e9, 1e9, float(vmax), decimals=6)
         lay.addLayout(form)
 
-        row = QHBoxLayout()
         auto_btn = QPushButton("Auto")
-        apply_btn = QPushButton("Apply")
-        cancel_btn = QPushButton("Cancel")
         auto_btn.clicked.connect(self._on_auto)
-        apply_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-        row.addWidget(auto_btn)
-        row.addStretch(1)
-        row.addWidget(apply_btn)
-        row.addWidget(cancel_btn)
-        lay.addLayout(row)
+        lay.addLayout(_button_row(self, "Apply", leading=(auto_btn,)))
 
     def _on_auto(self):
         self._auto = True
@@ -356,17 +267,6 @@ class MapRangeDialog(QDialog):
 
     def values(self) -> Tuple[bool, float, float]:
         return self._auto, float(self.vmin.value()), float(self.vmax.value())
-
-
-def _find_database_file(rel_path: str) -> Optional[Path]:
-    candidates = [
-        SCRIPT_DIR.parent / "database" / rel_path,
-        Path.cwd() / "database" / rel_path,
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c.resolve()
-    return None
 
 
 def _settings_hash(settings: FitSettings) -> str:
@@ -460,25 +360,6 @@ def _build_run_groups(runs: List[RunMeta], merge_n: int) -> List[RunGroup]:
     return out
 
 
-def _energy_loss(theta_deg: float) -> float:
-    theta = math.radians(theta_deg)
-    cos_t = math.cos(theta)
-    sec = 1.0 / cos_t if cos_t > 0.01 else 100.0
-    eloss = 0.500 * 1.6 * sec
-    eloss += 0.120 * 1.6 * sec
-    eloss += 0.100 * 2.0 * sec
-    eloss += 0.480 * 1.8 * sec
-    return eloss
-
-
-def _expected_energy_ep(theta_deg: float, ebeam: float) -> float:
-    m_proton = 938.2720813
-    theta = math.radians(theta_deg)
-    cos_t = math.cos(theta)
-    e = ebeam * m_proton / (m_proton + ebeam * (1.0 - cos_t))
-    return max(0.0, e - _energy_loss(theta_deg))
-
-
 def _theta_from_module(x: float, y: float, hycal_z: float) -> float:
     r = math.sqrt(x * x + y * y)
     return math.degrees(math.atan2(r, max(1e-6, hycal_z)))
@@ -490,61 +371,9 @@ def _resolution_percent(peak_center_mev: float, sigma_mev: float) -> float:
     a(%) = (sigma / E) * sqrt(E_GeV) * 100
     where E and sigma are provided in MeV.
     """
-    # Always use fitted peak center as E.
     e_mev = max(1e-6, float(peak_center_mev))
     e_gev = e_mev / 1000.0
     return float(sigma_mev) / e_mev * math.sqrt(max(1e-12, e_gev)) * 100.0
-
-
-def _compute_center_4x4_modules(modules: List[object]) -> Set[str]:
-    """Return module names inside the central signed 4x4 rows/columns.
-
-    This selects the 4 x-columns and 4 y-rows closest to zero (signed
-    coordinates), which corresponds to the center block containing the beam
-    hole region.
-    """
-    if not modules:
-        return set()
-
-    ux = sorted({float(m.x) for m in modules}, key=lambda v: (abs(v), v))
-    uy = sorted({float(m.y) for m in modules}, key=lambda v: (abs(v), v))
-    if len(ux) < 4 or len(uy) < 4:
-        return set()
-
-    x_sel = sorted(ux[:4])
-    y_sel = sorted(uy[:4])
-    # Geometric coordinates are exact map values, but keep small tolerance.
-    x_tol = 1e-6
-    y_tol = 1e-6
-
-    excluded: Set[str] = set()
-    for m in modules:
-        x = float(m.x)
-        y = float(m.y)
-        in_x = any(abs(x - xv) <= x_tol for xv in x_sel)
-        in_y = any(abs(y - yv) <= y_tol for yv in y_sel)
-        if in_x and in_y:
-            excluded.add(str(m.name))
-    return excluded
-
-
-def _compute_outer_8layer_modules(modules: List[object]) -> Set[str]:
-    """Return module names in outermost 8 geometry layers."""
-    if not modules:
-        return set()
-    ux = sorted({abs(float(m.x)) for m in modules}, reverse=True)
-    uy = sorted({abs(float(m.y)) for m in modules}, reverse=True)
-    idx_x = {v: i for i, v in enumerate(ux)}
-    idx_y = {v: i for i, v in enumerate(uy)}
-
-    out: Set[str] = set()
-    for m in modules:
-        dx = idx_x.get(abs(float(m.x)), 9999)
-        dy = idx_y.get(abs(float(m.y)), 9999)
-        depth = min(dx, dy)
-        if depth < 8:
-            out.add(str(m.name))
-    return out
 
 
 def _rebin2_hist(counts: np.ndarray, edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -627,22 +456,14 @@ def _get_hist_key_map(root_path: str) -> Dict[str, str]:
     return out
 
 
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp_fit_", suffix=".json", dir=str(path.parent))
-    os.close(fd)
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, sort_keys=True)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-
 def _gaussian(x: np.ndarray, amp: float, mu: float, sigma: float) -> np.ndarray:
     sigma = max(1e-9, float(sigma))
     return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+
+def _chi2_ndf(x: np.ndarray, y: np.ndarray, y_fit: np.ndarray) -> float:
+    ndf = int(x.size - 3)
+    return float(np.sum((y - y_fit) ** 2 / np.clip(y_fit, 1.0, None)) / ndf) if ndf > 0 else 0.0
 
 
 def _fit_gaussian_array(
@@ -683,11 +504,7 @@ def _fit_gaussian_array(
                 maxfev=10000,
             )
             amp, mu, sigma = float(popt[0]), float(popt[1]), abs(float(popt[2]))
-            y_fit = _gaussian(x, amp, mu, sigma)
-            denom = np.clip(y_fit, 1.0, None)
-            ndf = int(x.size - 3)
-            chi2_ndf = float(np.sum((y - y_fit) ** 2 / denom) / ndf) if ndf > 0 else 0.0
-            return True, mu, sigma, chi2_ndf
+            return True, mu, sigma, _chi2_ndf(x, y, _gaussian(x, amp, mu, sigma))
         except Exception:
             pass
 
@@ -699,81 +516,13 @@ def _fit_gaussian_array(
     mu = float(np.sum(w * x) / sw)
     var = float(np.sum(w * (x - mu) ** 2) / sw)
     sigma = math.sqrt(max(1e-9, var))
-    y_fit = _gaussian(x, amp0, mu, sigma)
-    denom = np.clip(y_fit, 1.0, None)
-    ndf = int(x.size - 3)
-    chi2_ndf = float(np.sum((y - y_fit) ** 2 / denom) / ndf) if ndf > 0 else 0.0
-    return True, mu, sigma, chi2_ndf
+    return True, mu, sigma, _chi2_ndf(x, y, _gaussian(x, amp0, mu, sigma))
 
 
-def _fit_hist_for_module(root_path: str, module_name: str,
+def _fit_hist_for_module(root_paths: List[str], module_name: str,
                          settings: FitSettings,
                          manual_window: Optional[Tuple[float, float]] = None,
                          rebin2: bool = False) -> dict:
-    out = {
-        "status": "unknown",
-        "entries": 0,
-        "mean": None,
-        "sigma": None,
-        "chi2_ndf": None,
-        "fit_xmin": None,
-        "fit_xmax": None,
-    }
-    arrays = _load_hist_arrays(root_path, module_name, rebin2=rebin2)
-    if arrays is None:
-        out["status"] = "missing_hist"
-        return out
-
-    counts, edges = arrays
-    if counts.size == 0 or edges.size < 2:
-        out["status"] = "missing_hist"
-        return out
-
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    entries = int(np.sum(np.clip(counts, 0.0, None)))
-    out["entries"] = entries
-    if entries < settings.min_entries:
-        out["status"] = "low_stats"
-        return out
-
-    peak = float(centers[int(np.argmax(counts))])
-    xmin_axis = float(edges[0])
-    xmax_axis = float(edges[-1])
-
-    if manual_window is not None:
-        fit_xmin = max(xmin_axis, min(manual_window))
-        fit_xmax = min(xmax_axis, max(manual_window))
-        if fit_xmax <= fit_xmin:
-            out["status"] = "bad_manual_window"
-            return out
-    else:
-        half = abs(peak) * settings.window_fraction
-        half = max(settings.min_half_window, min(settings.max_half_window, half))
-        fit_xmin = max(xmin_axis, peak - half)
-        fit_xmax = min(xmax_axis, peak + half)
-
-    ok, mean, sigma, chi2 = _fit_gaussian_array(centers, counts, fit_xmin, fit_xmax)
-    if not ok or mean is None or sigma is None:
-        out["status"] = "fit_failed"
-        out["fit_xmin"] = fit_xmin
-        out["fit_xmax"] = fit_xmax
-        return out
-
-    out.update({
-        "status": "ok",
-        "mean": float(mean),
-        "sigma": float(sigma),
-        "chi2_ndf": float(chi2) if chi2 is not None else None,
-        "fit_xmin": fit_xmin,
-        "fit_xmax": fit_xmax,
-    })
-    return out
-
-
-def _fit_hist_for_module_multi(root_paths: List[str], module_name: str,
-                               settings: FitSettings,
-                               manual_window: Optional[Tuple[float, float]] = None,
-                               rebin2: bool = False) -> dict:
     out = {
         "status": "unknown",
         "entries": 0,
@@ -832,6 +581,28 @@ def _fit_hist_for_module_multi(root_paths: List[str], module_name: str,
         "fit_xmax": fit_xmax,
     })
     return out
+
+
+def _fit_group_module(group: RunGroup, mname: str, xy: Tuple[float, float],
+                      settings: FitSettings, rebin2: bool,
+                      manual_window: Optional[Tuple[float, float]] = None) -> dict:
+    """Fit one module over the group's summed histograms; a good fit also
+    gets the elastic e-p expectation at the module position and the
+    resolution."""
+    one = _fit_hist_for_module([m.root_path for m in group.members], mname, settings,
+                               manual_window=manual_window, rebin2=rebin2)
+    if one.get("status") == "ok":
+        mean = float(one["mean"])
+        sigma = float(one["sigma"])
+        theta = _theta_from_module(xy[0], xy[1], group.hycal_z)
+        expected = expected_energy(theta, group.ebeam)
+        one.update({
+            "theta_deg": theta,
+            "expected_energy": expected,
+            "delta_energy": mean - expected,
+            "resolution": _resolution_percent(mean, sigma),
+        })
+    return one
 
 
 def _load_hist_arrays(root_path: str, module_name: str, rebin2: bool = False) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -938,29 +709,11 @@ class FitWorker(QThread):
                         run_payload = None
 
                 if run_payload is None:
-                    modules = {}
-                    root_paths = [m.root_path for m in run_group.members]
-                    for mname, (mx, my) in self.module_xy.items():
-                        one = _fit_hist_for_module_multi(
-                            root_paths,
-                            mname,
-                            self.fit_settings,
-                            rebin2=(mname in self.rebin_modules),
-                        )
-                        if one.get("status") == "ok":
-                            mean = float(one["mean"])
-                            sigma = float(one["sigma"])
-                            theta = _theta_from_module(mx, my, run_group.hycal_z)
-                            expected = _expected_energy_ep(theta, run_group.ebeam)
-                            delta = mean - expected
-                            resolution = _resolution_percent(mean, sigma)
-                            one.update({
-                                "theta_deg": theta,
-                                "expected_energy": expected,
-                                "delta_energy": delta,
-                                "resolution": resolution,
-                            })
-                        modules[mname] = one
+                    modules = {
+                        mname: _fit_group_module(run_group, mname, xy, self.fit_settings,
+                                                 mname in self.rebin_modules)
+                        for mname, xy in self.module_xy.items()
+                    }
                     run_payload = {
                         "run": run_group.key_run,
                         "label": run_group.label,
@@ -973,7 +726,7 @@ class FitWorker(QThread):
                         "updated_at": datetime.now().isoformat(timespec="seconds"),
                         "modules": modules,
                     }
-                    _atomic_write_json(cpath, run_payload)
+                    atomic_json_write(cpath, run_payload, sort_keys=True)
 
                 self.runReady.emit(run_group.key_run, run_payload)
             self.allDone.emit(True, "Done")
@@ -1000,8 +753,8 @@ class MainWindow(QMainWindow):
         self.resize(1850, 1050)
         apply_theme_palette(self)
 
-        self.modules_json = _find_database_file("hycal_map.json")
-        self.runinfo_json = _find_database_file("runinfo/general.json")
+        self.modules_json = find_database_file("hycal_map.json", use_env=False)
+        self.runinfo_json = find_database_file("runinfo/general.json", use_env=False)
 
         self.fit_settings = FitSettings()
         self.thresholds = ThresholdSettings()
@@ -1116,15 +869,13 @@ class MainWindow(QMainWindow):
         split = QSplitter(Qt.Orientation.Horizontal)
         root.addWidget(split, stretch=1)
 
-        # Left panel
         left = QWidget()
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
-        self.map_widget = QualityMapWidget()
+        self.map_widget = HyCalMapWidget(enable_zoom_pan=True, min_size=(520, 520))
         left_lay.addWidget(self.map_widget)
         split.addWidget(left)
 
-        # Right panel
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
@@ -1172,8 +923,8 @@ class MainWindow(QMainWindow):
         mods = load_modules(self.modules_json)
         self.w_modules = [m for m in mods if m.mod_type == "PbWO4"]
         self.module_xy = {m.name: (float(m.x), float(m.y)) for m in self.w_modules}
-        self.excluded_modules = _compute_center_4x4_modules(self.w_modules)
-        self.rebin_outer_modules = _compute_outer_8layer_modules(self.w_modules)
+        self.excluded_modules = {m.name for m in self.w_modules if hole_ring(m.row, m.col) == 1}
+        self.rebin_outer_modules = {m.name for m in self.w_modules if edge_depth(m.row, m.col) <= 8}
         self.fit_module_xy = {
             name: xy for name, xy in self.module_xy.items()
             if name not in self.excluded_modules
@@ -1334,20 +1085,9 @@ class MainWindow(QMainWindow):
         if not self.run_list:
             return
 
-        runs = sorted(self.run_payloads.keys())
         for mname in self.fit_module_xy:
-            centers = []
-            resolutions = []
-            valid_runs = []
-            for r in runs:
-                mod = self.run_payloads.get(r, {}).get("modules", {}).get(mname, {})
-                if mod.get("status") != "ok":
-                    continue
-                centers.append(float(mod["mean"]))
-                resolutions.append(float(mod["resolution"]))
-                valid_runs.append(r)
-
-            if not valid_runs:
+            valid = self._ok_history(mname)
+            if not valid:
                 self.trends[mname] = {
                     "offset_count": 0,
                     "res_change_count": 0,
@@ -1355,10 +1095,11 @@ class MainWindow(QMainWindow):
                     "jump_count": 0,
                 }
                 continue
+            centers = [float(mod["mean"]) for _, mod in valid]
+            resolutions = [float(mod["resolution"]) for _, mod in valid]
 
             offset_count = 0
-            for r in valid_runs:
-                mod = self.run_payloads[r]["modules"][mname]
+            for _, mod in valid:
                 exp = float(mod.get("expected_energy", 0.0))
                 delta = float(mod.get("delta_energy", 0.0))
                 if exp > 0 and abs(delta) / exp * 100.0 > self.thresholds.offset_pct:
@@ -1395,6 +1136,22 @@ class MainWindow(QMainWindow):
             return None
         return int(self.run_combo.currentData())
 
+    def _module_fit(self, run: int, mname: str) -> dict:
+        return self.run_payloads.get(run, {}).get("modules", {}).get(mname, {})
+
+    def _ok_history(self, mname: str) -> List[Tuple[int, dict]]:
+        """(run, fit) of every run with a good fit of ``mname``, in run order."""
+        return [(r, mod) for r in sorted(self.run_payloads)
+                if (mod := self._module_fit(r, mname)).get("status") == "ok"]
+
+    def _ok_values(self, run: int, field: str) -> Dict[str, float]:
+        out: Dict[str, float] = {}
+        for mname in self.fit_module_xy:
+            mod = self._module_fit(run, mname)
+            if mod.get("status") == "ok" and mod.get(field) is not None:
+                out[mname] = float(mod[field])
+        return out
+
     def refresh_all_views(self):
         self.refresh_map()
         self.refresh_module_views()
@@ -1406,31 +1163,11 @@ class MainWindow(QMainWindow):
             return
 
         metric = self.metric_combo.currentData()
-        label = self.metric_combo.currentText()
-        self.map_widget.set_metric_label(label)
-
         vals: Dict[str, float] = {}
         if metric in {"delta_energy", "chi2_ndf", "resolution", "entries"}:
-            payload = self.run_payloads.get(run, {})
-            mod_map = payload.get("modules", {})
-            for mname in self.fit_module_xy:
-                mod = mod_map.get(mname, {})
-                if mod.get("status") != "ok":
-                    continue
-                v = mod.get(metric)
-                if v is not None:
-                    vals[mname] = float(v)
+            vals = self._ok_values(run, metric)
         elif metric == "resolution_var":
-            payload = self.run_payloads.get(run, {})
-            mod_map = payload.get("modules", {})
-            res_vals: Dict[str, float] = {}
-            for mname in self.fit_module_xy:
-                mod = mod_map.get(mname, {})
-                if mod.get("status") != "ok":
-                    continue
-                rv = mod.get("resolution")
-                if rv is not None:
-                    res_vals[mname] = float(rv)
+            res_vals = self._ok_values(run, "resolution")
             if res_vals:
                 avg_res = float(np.mean(np.array(list(res_vals.values()), dtype=float)))
                 vals = {k: (v - avg_res) ** 2 for k, v in res_vals.items()}
@@ -1439,23 +1176,14 @@ class MainWindow(QMainWindow):
                 vals[mname] = float(self.trends.get(mname, {}).get(metric, 0.0))
 
         self.map_widget.set_values(vals)
-        override = self.map_range_override_by_metric.get(str(metric))
+        auto = (0.0, 1.0)
         if vals:
             vmin = min(vals.values())
             vmax = max(vals.values())
-            if math.isclose(vmin, vmax):
-                vmax = vmin + 1.0
-            self.last_map_auto_range_by_metric[str(metric)] = (vmin, vmax)
-            if override is None:
-                self.map_widget.set_range(vmin, vmax)
-            else:
-                self.map_widget.set_range(override[0], override[1])
-        else:
-            self.last_map_auto_range_by_metric[str(metric)] = (0.0, 1.0)
-            if override is None:
-                self.map_widget.set_range(0.0, 1.0)
-            else:
-                self.map_widget.set_range(override[0], override[1])
+            auto = (vmin, vmin + 1.0 if math.isclose(vmin, vmax) else vmax)
+        self.last_map_auto_range_by_metric[str(metric)] = auto
+        override = self.map_range_override_by_metric.get(str(metric))
+        self.map_widget.set_range(*(override if override is not None else auto))
 
     def _set_adaptive_ylim(self, ax, arrays: List[np.ndarray], min_span: float):
         vals = []
@@ -1490,47 +1218,34 @@ class MainWindow(QMainWindow):
         self.current_module = name if name else None
         self.refresh_module_views()
 
+    def _clear_module_views(self, label: str, detail: str = ""):
+        self.module_label.setText(label)
+        for c in (self.center_canvas, self.res_canvas, self.spec_canvas):
+            c.clear()
+            c.draw_idle()
+        self.detail_label.setText(detail)
+        self._reset_span_selector()
+
     def refresh_module_views(self):
         run = self._selected_run()
         mname = self.current_module
         if run is None or not mname:
-            self.module_label.setText("Click a W module on map")
-            self.center_canvas.clear()
-            self.center_canvas.draw_idle()
-            self.res_canvas.clear()
-            self.res_canvas.draw_idle()
-            self.spec_canvas.clear()
-            self.spec_canvas.draw_idle()
-            self.detail_label.setText("")
-            self._reset_span_selector()
+            self._clear_module_views("Click a W module on map")
             return
 
         if mname in self.excluded_modules:
-            self.module_label.setText(f"Module: {mname} (excluded center 4x4)")
-            self.center_canvas.clear()
-            self.center_canvas.draw_idle()
-            self.res_canvas.clear()
-            self.res_canvas.draw_idle()
-            self.spec_canvas.clear()
-            self.spec_canvas.draw_idle()
-            self.detail_label.setText("This module is excluded from fit and trend calculations.")
-            self._reset_span_selector()
+            self._clear_module_views(f"Module: {mname} (excluded center 4x4)",
+                                     "This module is excluded from fit and trend calculations.")
             return
 
         self.module_label.setText(f"Module: {mname}   Run: {run}")
 
-        valid = []
-        for r in sorted(self.run_payloads.keys()):
-            mod = self.run_payloads.get(r, {}).get("modules", {}).get(mname, {})
-            if mod.get("status") != "ok":
-                continue
-            valid.append((r, mod))
-
+        valid = self._ok_history(mname)
         self._draw_center_trend(valid)
         self._draw_resolution_trend(valid)
         self._draw_spectrum(run, mname)
 
-        current_mod = self.run_payloads.get(run, {}).get("modules", {}).get(mname, {})
+        current_mod = self._module_fit(run, mname)
         status = current_mod.get("status", "unknown")
         mean = current_mod.get("mean")
         sigma = current_mod.get("sigma")
@@ -1629,7 +1344,7 @@ class MainWindow(QMainWindow):
         centers = 0.5 * (edges[:-1] + edges[1:])
         self.spec_canvas.ax.step(centers, counts, where="mid", color="#cccccc", lw=1.0)
 
-        mod = self.run_payloads.get(run, {}).get("modules", {}).get(mname, {})
+        mod = self._module_fit(run, mname)
         if mod.get("status") == "ok":
             mean = float(mod["mean"])
             sigma = float(mod["sigma"])
@@ -1637,8 +1352,7 @@ class MainWindow(QMainWindow):
             amp = float(np.max(counts)) if counts.size else 0.0
             if sigma > 0 and amp > 0:
                 x = np.linspace(np.min(centers), np.max(centers), 500)
-                y = amp * np.exp(-0.5 * ((x - mean) / sigma) ** 2)
-                self.spec_canvas.ax.plot(x, y, color="#f97316", lw=1.6)
+                self.spec_canvas.ax.plot(x, _gaussian(x, amp, mean, sigma), color="#f97316", lw=1.6)
             if expected is not None:
                 self.spec_canvas.ax.axvline(float(expected), color="#9aa4af", ls=":", lw=1.0)
             fx0 = mod.get("fit_xmin")
@@ -1685,25 +1399,8 @@ class MainWindow(QMainWindow):
         if group is None:
             return
 
-        one = _fit_hist_for_module_multi(
-            [m.root_path for m in group.members],
-            mname,
-            self.fit_settings,
-            manual_window=(xmin, xmax),
-            rebin2=(mname in self.rebin_outer_modules),
-        )
-        if one.get("status") == "ok":
-            mx, my = self.module_xy[mname]
-            theta = _theta_from_module(mx, my, group.hycal_z)
-            expected = _expected_energy_ep(theta, group.ebeam)
-            mean = float(one["mean"])
-            sigma = float(one["sigma"])
-            one.update({
-                "theta_deg": theta,
-                "expected_energy": expected,
-                "delta_energy": mean - expected,
-                "resolution": _resolution_percent(mean, sigma),
-            })
+        one = _fit_group_module(group, mname, self.module_xy[mname], self.fit_settings,
+                                mname in self.rebin_outer_modules, manual_window=(xmin, xmax))
 
         payload = self.run_payloads.get(run)
         if not payload:
@@ -1714,7 +1411,7 @@ class MainWindow(QMainWindow):
 
         if self.cache_root is not None:
             cpath = _run_cache_file(self.cache_root, run)
-            _atomic_write_json(cpath, payload)
+            atomic_json_write(cpath, payload, sort_keys=True)
 
         self.compute_trends()
         self.refresh_all_views()

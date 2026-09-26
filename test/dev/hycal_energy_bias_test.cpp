@@ -2,38 +2,19 @@
 #include "HyCalEnergyBias.h"
 #include "HyCalSystem.h"
 #include "PipelineBuilder.h"
+#include "test_util.h"
 
 #include <nlohmann/json.hpp>
 
-#include <cmath>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <string>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 namespace fs = std::filesystem;
 using nlohmann::json;
+using namespace testutil;
 
 namespace {
-
-int failures = 0;
-
-void check(bool condition, const std::string &message)
-{
-    if (condition) return;
-    std::cerr << "FAIL: " << message << '\n';
-    ++failures;
-}
-
-bool close_to(float actual, float expected, float tolerance = 1.e-4f)
-{
-    return std::fabs(actual - expected) <= tolerance;
-}
 
 json make_grid(float center, float upper_left)
 {
@@ -72,9 +53,7 @@ int main()
     check(g1 != nullptr, "find G1");
     if (!w1 || !g1) return 1;
 
-    const fs::path fixture_dir = fs::temp_directory_path() /
-        ("prad2_energy_bias_" + std::to_string(static_cast<long long>(::getpid())));
-    fs::create_directories(fixture_dir);
+    const fs::path fixture_dir = make_temp_dir("prad2_energy_bias_");
     const fs::path ee_path = fixture_dir / "ee.json";
     const fs::path ep_path = fixture_dir / "ep.json";
     write_fixture(ee_path, 0.10f, 0.25f);
@@ -181,10 +160,5 @@ int main()
             "PipelineBuilder exposes resolved ee and ep paths");
 
     fs::remove_all(fixture_dir);
-    if (failures != 0) {
-        std::cerr << failures << " energy-bias test(s) failed\n";
-        return 1;
-    }
-    std::cout << "HyCal energy-bias tests passed\n";
-    return 0;
+    return finish("energy-bias", "HyCal energy-bias");
 }

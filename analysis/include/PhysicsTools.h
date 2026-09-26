@@ -8,17 +8,19 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
-#include <TF1.h>
 #include <TH1F.h>
 #include <TH2F.h>
 #include <array>
+#include <cmath>
 #include <string>
 #include <vector>
 #include <memory>
 
+class TH2Poly;
+class TLorentzVector;
+
 namespace analysis {
 
-// two simple data structures used in physics analysis
 struct GEMHit {
     float x = 0.f;
     float y = 0.f;
@@ -49,6 +51,20 @@ struct DataPoint
 typedef std::pair<DataPoint, DataPoint> MollerEvent;
 typedef std::vector<MollerEvent> MollerData;
 
+// Nominal PbWO4 module size (mm): size_y from hycal_map.json (size_x is 20.77).
+// The fiducial ring bounds below are multiples of it in both x and y.
+inline constexpr double kPbWO4Pitch = 20.75;
+
+// Square-annulus fiducial cut: outside the inner square of half-width
+// inner*pitch and inside the outer square of half-width outer*pitch.
+// Frame-agnostic; the caller picks lab, HyCal or module-centre coordinates.
+inline bool InHyCalRing(double x, double y, double inner, double outer,
+                        double pitch = kPbWO4Pitch)
+{
+    return (std::fabs(x) > pitch * inner || std::fabs(y) > pitch * inner)
+        && (std::fabs(x) < pitch * outer && std::fabs(y) < pitch * outer);
+}
+
 class PhysicsTools
 {
 public:
@@ -59,20 +75,12 @@ public:
     void FillModuleEnergy(int module_id, float energy);
     TH1F *GetModuleEnergyHist(int module_id) const;
 
-    // --- 2D energy vs module index -------------------------------------------
     void FillEnergyVsModule(int module_id, float energy);
     TH2F *GetEnergyVsModuleHist() const { return h2_energy_module_.get(); }
 
-    // --- energy vs scattering angle -------------------------------------------
     void FillEnergyVsTheta(float theta_deg, float energy);
     TH2F *GetEnergyVsThetaHist() const { return h2_energy_theta_.get(); }
 
-    // --- Number of events per module map --------------------------------------
-    void FillNeventsModuleMap(int module_id) {
-        const auto *mod = hycal_.module_by_id(module_id);
-        if (!mod || !mod->is_pwo4()) return;
-        h2_Nevents_moduleMap_->Fill(mod->column + 1, -mod->row - 1);
-    }
     // must be called after all events are processed
     // and also need to call FillModuleEnergy for every event first
     void FillNeventsModuleMap() {
@@ -87,19 +95,17 @@ public:
     }
     TH2F *GetNeventsModuleMapHist() const { return h2_Nevents_moduleMap_.get(); }
 
-    // physics event yield histograms (caller owns the returned histogram)
-    std::unique_ptr<TH1F> GetEpYieldHist(TH2F *energy_theta, float Ebeam);
-    std::unique_ptr<TH1F> GetEeYieldHist(TH2F *energy_theta, float Ebeam);
-    std::unique_ptr<TH1F> GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist);
-
-    // --- Moller event Hist ------------------------------------------------
-    void Fill2armMollerPosHist(float x, float y);
-    TH2F *Get2armMollerPosHist() const { return h2_moller_pos_.get(); }
+    // TH2Poly with one rectangular bin per PbWO4 module, axes ±half_range (mm),
+    // created with `new` in the current directory (caller owns it).
+    // bin_by_index is resized to module_count(): the TH2Poly bin of each
+    // PbWO4 module by module index, -1 for every other module.
+    static TH2Poly *MakeModuleMap(const fdec::HyCalSystem &hycal, const char *name,
+                                  const char *title, double half_range,
+                                  std::vector<int> &bin_by_index);
 
     // --- peak / resolution analysis ------------------------------------------
     // Returns {peak, sigma, chi2} from Gaussian fit.
     std::array<float, 3> FitPeakResolution(int module_id) const;
-    void Resolution2Database(int run_id);
     static std::array<double, 5> fitGaus(TH1F *h, float expectPeak = 0.f,
                                         bool withError = false);
     static std::array<double, 5> fitCrystalBall(TH1F *h, float expectPeak = 0.f,
@@ -111,51 +117,30 @@ public:
                                         bool useCrystalBall = false,
                                         float alpha = 0.5f, float n = 5.0f);
 
-    // --- gain factor analysis ------------------------------------------------
-    // One result row per module.
-    struct GainResult {
-        std::string name;          // module name
-        float lms_peak   = 0.f;   // fitted LMS peak for this module
-        float lms_sigma  = 0.f;
-        float lms_chi2   = 0.f;
-        float g[4]       = {};    // g[1..3] = mod_lms * alpha_ref[j] / lms_ref[j]
-    };
-    // Fit LMS/alpha reference channels and all W-modules;
-    // updates module_gains_ in-place and resets the source histograms.
-    void ComputeModuleGains();
-
-    // Result array indexed by module index (size = module_count).
-    std::vector<GainResult> module_gains_;
-
-    float GetModuleGainFactor(int module_id) const {
-        int module_index = hycal_.id_to_index(module_id);
-        if (module_index < 0 || module_index >= (int)module_gains_.size())
-            return 1.f;
-        return (module_gains_[module_index].g[1] + module_gains_[module_index].g[2]
-            + module_gains_[module_index].g[3]) / 3.f;
-    }
-
     // --- kinematics ----------------------------------------------------------
+    static constexpr float kProtonMass   = 938.272f;     // MeV
+    static constexpr float kElectronMass = 0.51099895f;  // MeV
+
     // Expected energy for elastic e-p or e-e scattering.
     //   theta: scattering angle in degrees
     //   Ebeam: beam energy in MeV
     //   type:  "ep" or "ee"
     static float ExpectedEnergy(float theta_deg, float Ebeam, const std::string &type);
 
-    // Expected scattering angle (inverse of ExpectedEnergy).
-    //   measured_energy: detected energy in MeV
-    //   Ebeam: beam energy in MeV
-    //   type:  "ep" or "ee"
-    // Returns scattering angle in degrees, or 0 if unphysical.
-    static float ExpectedAngle(float measured_energy, float Ebeam, const std::string &type);
+    // Four-momentum of a particle of mass m (MeV) and energy E (MeV) emitted
+    // from the target (origin) towards the hit at (x, y, z).  Returns false and
+    // zeroes p4 when E < m or the hit is at the origin.
+    static bool HitP4(float x, float y, float z, float E, float m, TLorentzVector &p4);
 
     // Energy loss correction for electron passing through target + windows.
     //   theta: scattering angle in degrees
     //   E:     measured energy in MeV
     static float EnergyLoss(float theta_deg, float E);
 
-    // elastic e-e kinematic check for Moller event selection
-    bool isMoller_kinematic(float theta_deg1, float energy1, float theta_deg2, float energy2, float EBeam, float resolution);
+    // elastic e-e kinematic check for Moller event selection: energy sum
+    // within 5 sigma of EBeam and each energy within 3.5 sigma of its
+    // expected value, sigma = resolution * E / sqrt(E in GeV)
+    static bool isMoller_kinematic(float theta_deg1, float energy1, float theta_deg2, float energy2, float EBeam, float resolution);
 
     //physics analysis helpers
 
@@ -170,7 +155,16 @@ public:
     //Get azimuthal angle difference(should be around 180 degrees) of the Moller event
     static float GetMollerPhiDiff(const MollerEvent &event1);
 
+    // The two hits are back to back in phi within max_dev_deg.
+    static bool isBackToBack(const MollerEvent &event, float max_dev_deg)
+    {
+        return std::fabs(GetMollerPhiDiff(event)) < max_dev_deg;
+    }
+
     static float GetPhiAngle(float x, float y);
+
+    // Polar angle (degrees) of (x, y, z) seen from the target (origin).
+    static float GetThetaAngle(float x, float y, float z);
 
     void FillMollerPhiDiff(float phi_diff) { if (moller_phi_diff_) moller_phi_diff_->Fill(phi_diff); }
     void FillMollerXY(float x, float y) { if (moller_x_) moller_x_->Fill(x); if (moller_y_) moller_y_->Fill(y); }
@@ -181,60 +175,16 @@ public:
     TH1F *GetMollerYHist() const { return moller_y_.get(); };
     TH1F *GetMollerZHist() const { return moller_z_.get(); };
 
-    //fill and get gain monitoring replay histograms
-    void Fill_lmsCH_lmsHeight(int lms_id, float height)
-        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_lmsHeight_[lms_id]) h_lmsCH_lmsHeight_[lms_id]->Fill(height); }
-    void Fill_lmsCH_lmsIntegral(int lms_id, float integral)
-        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_lmsIntegral_[lms_id]) h_lmsCH_lmsIntegral_[lms_id]->Fill(integral); }
-    void Fill_lmsCH_alphaHeight(int lms_id, float height)
-        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_alphaHeight_[lms_id]) h_lmsCH_alphaHeight_[lms_id]->Fill(height); }
-    void Fill_lmsCH_alphaIntegral(int lms_id, float integral)
-        { if (lms_id >= 0 && lms_id < 4 && h_lmsCH_alphaIntegral_[lms_id]) h_lmsCH_alphaIntegral_[lms_id]->Fill(integral); }
-    void Fill_modCH_lmsHeight(int module_id, float height)
-        { int module_index = hycal_.id_to_index(module_id); 
-          if (module_index >= 0 && module_index < (int)h_modCH_lmsHeight_.size()) h_modCH_lmsHeight_[module_index]->Fill(height); }
-    void Fill_modCH_lmsIntegral(int module_id, float integral)
-        { int module_index = hycal_.id_to_index(module_id);
-          if (module_index >= 0 && module_index < (int)h_modCH_lmsIntegral_.size()) h_modCH_lmsIntegral_[module_index]->Fill(integral); }
-
-    TH1F *Get_lmsCH_lmsHeightHist(int lms_id) const 
-        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_lmsHeight_[lms_id].get() : nullptr; };
-    TH1F *Get_lmsCH_lmsIntegralHist(int lms_id) const 
-        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_lmsIntegral_[lms_id].get() : nullptr; };
-    TH1F *Get_lmsCH_alphaHeightHist(int lms_id) const 
-        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_alphaHeight_[lms_id].get() : nullptr; };
-    TH1F *Get_lmsCH_alphaIntegralHist(int lms_id) const 
-        { return (lms_id >= 0 && lms_id < 4) ? h_lmsCH_alphaIntegral_[lms_id].get() : nullptr; };
-    TH1F *Get_modCH_lmsHeightHist(int module_id) const
-        { 
-            int module_index = hycal_.id_to_index(module_id);
-            return (module_index >= 0 && module_index < (int)h_modCH_lmsHeight_.size()) ? h_modCH_lmsHeight_[module_index].get() : nullptr; 
-        };
-    TH1F *Get_modCH_lmsIntegralHist(int module_id) const
-        { 
-            int module_index = hycal_.id_to_index(module_id);
-            return (module_index >= 0 && module_index < (int)h_modCH_lmsIntegral_.size()) ? h_modCH_lmsIntegral_[module_index].get() : nullptr; 
-        };
-
 private:
     fdec::HyCalSystem &hycal_;
     std::vector<std::unique_ptr<TH1F>> module_hists_;  // one per module
     std::unique_ptr<TH2F> h2_energy_module_;
     std::unique_ptr<TH2F> h2_energy_theta_;
     std::unique_ptr<TH2F> h2_Nevents_moduleMap_;
-    std::unique_ptr<TH2F> h2_moller_pos_;
     std::unique_ptr<TH1F> moller_phi_diff_;
     std::unique_ptr<TH1F> moller_x_;
     std::unique_ptr<TH1F> moller_y_;
     std::unique_ptr<TH1F> moller_z_;
-
-    //histograms for gain monitoring replay
-    std::unique_ptr<TH1F> h_lmsCH_lmsHeight_[4];
-    std::unique_ptr<TH1F> h_lmsCH_lmsIntegral_[4];
-    std::unique_ptr<TH1F> h_lmsCH_alphaHeight_[4];
-    std::unique_ptr<TH1F> h_lmsCH_alphaIntegral_[4];
-    std::vector<std::unique_ptr<TH1F>> h_modCH_lmsHeight_; //per module
-    std::vector<std::unique_ptr<TH1F>> h_modCH_lmsIntegral_;
 };
 
 } // namespace analysis

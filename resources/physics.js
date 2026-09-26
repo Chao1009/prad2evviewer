@@ -1,6 +1,6 @@
 // physics.js — Physics tab: HyCal cluster XY (left) + Møller XY (top right) + energy vs angle (bottom right)
 //
-// Depends on globals from viewer.js: PL, PC_EPICS, activeTab
+// Depends on globals from viewer.js: PL, PC_EPICS, triggerBitsDef
 
 let physicsData=null, mollerData=null, hycalXyData=null;
 
@@ -29,6 +29,38 @@ function fetchPhysics(){
     return Promise.all([fetchEnergyAngle(), fetchMoller(), fetchHycalXY()]);
 }
 
+// Heatmap trace of a row-major nx*ny histogram with bin centres x0+(i+0.5)*dx,
+// y0+(j+0.5)*dy.  logZ plots log10 of the counts (empty bins blank); the hover
+// text always shows the raw counts.
+function physHeatmap(bins, nx, ny, x0, dx, y0, dy, logZ, hover, logTitle){
+    const z=[], text=[];
+    for(let iy=0;iy<ny;iy++){
+        const row=bins.slice(iy*nx,(iy+1)*nx);
+        z.push(logZ?row.map(v=>v>0?Math.log10(v):null):row);
+        text.push(row.map(v=>String(v)));
+    }
+    return {
+        z,
+        x:Array.from({length:nx},(_,i)=>x0+(i+0.5)*dx),
+        y:Array.from({length:ny},(_,i)=>y0+(i+0.5)*dy),
+        type:'heatmap', colorscale:'Hot', reversescale:false,
+        hovertemplate:hover, text,
+        colorbar:{title:logZ?logTitle:'counts',titleside:'right',
+            titlefont:{size:10,color:THEME.textDim},tickfont:{size:9,color:THEME.textDim}},
+    };
+}
+
+// Layout of the equal-scale X/Y (mm) hit maps.
+function physXYLayout(title, shapes){
+    return {...PL,
+        title:{text:title,font:{size:11,color:THEME.text}},
+        xaxis:{...PL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
+        yaxis:{...PL.yaxis,title:'Y (mm)'},
+        margin:{l:50,r:70,t:30,b:35},
+        shapes,
+    };
+}
+
 // ep elastic scattering: E' = E / (1 + (E/Mp)*(1 - cos(theta)))
 function elasticEp(beamE, thetaDeg){
     const Mp=938.272;
@@ -47,22 +79,7 @@ function plotEnergyAngle(){
     const logZ=document.getElementById('physics-logz').checked;
     const showElastic=document.getElementById('physics-elastic').checked;
 
-    const z=[];
-    for(let iy=0;iy<d.ny;iy++){
-        const row=d.bins.slice(iy*d.nx,(iy+1)*d.nx);
-        z.push(logZ?row.map(v=>v>0?Math.log10(v):null):row);
-    }
-    const x=[];for(let i=0;i<d.nx;i++) x.push(d.angle_min+(i+0.5)*d.angle_step);
-    const y=[];for(let i=0;i<d.ny;i++) y.push(d.energy_min+(i+0.5)*d.energy_step);
-
-    const traces=[{
-        z:z, x:x, y:y,
-        type:'heatmap', colorscale:'Hot', reversescale:false,
-        hovertemplate:'θ=%{x:.2f}° E=%{y:.0f} MeV: %{text}<extra></extra>',
-        text:z.map((row,iy)=>row.map((v,ix)=>String(d.bins[iy*d.nx+ix]))),
-        colorbar:{title:logZ?'log₁₀(counts)':'counts',titleside:'right',
-            titlefont:{size:10,color:THEME.textDim},tickfont:{size:9,color:THEME.textDim}},
-    }];
+    const traces=[physHeatmap(d.bins,d.nx,d.ny,d.angle_min,d.angle_step,d.energy_min,d.energy_step,logZ,'θ=%{x:.2f}° E=%{y:.0f} MeV: %{text}<extra></extra>','log₁₀(counts)')];
 
     if(showElastic && d.beam_energy>0){
         const ex=[],ey=[];
@@ -86,7 +103,6 @@ function plotEnergyAngle(){
         shapes:refShapes('energy_angle'),
     },PC_EPICS);
 
-    // stats line
     const ml=mollerData;
     let stats=`${d.events} evts | beam: ${d.beam_energy>0?d.beam_energy.toFixed(2):'?'} MeV`;
     if(ml) stats+=` | Møller: ${ml.moller_events}`;
@@ -101,14 +117,6 @@ function plotMollerXY(){
         return;
     }
     const logZ=document.getElementById('physics-logz').checked;
-    const z=[];
-    for(let iy=0;iy<d.xy_ny;iy++){
-        const row=d.xy_bins.slice(iy*d.xy_nx,(iy+1)*d.xy_nx);
-        z.push(logZ?row.map(v=>v>0?Math.log10(v):null):row);
-    }
-    const x=[];for(let i=0;i<d.xy_nx;i++) x.push(d.xy_x_min+(i+0.5)*d.xy_x_step);
-    const y=[];for(let i=0;i<d.xy_ny;i++) y.push(d.xy_y_min+(i+0.5)*d.xy_y_step);
-
     const cuts=d.cuts||{};
     const fmtA=v=>v!=null?v.toFixed(2):'?';
     // Trigger tag: which trigger stream feeds this monitor (X17 runs take
@@ -117,7 +125,7 @@ function plotMollerXY(){
     // accept==0 (accept-all) shows no tag.
     const acc=(d.trigger&&d.trigger.trigger_accept)||0;
     let trigNames=[];
-    if(acc && typeof triggerBitsDef!=='undefined' && triggerBitsDef.length)
+    if(acc && triggerBitsDef.length)
         trigNames=triggerBitsDef.filter(t=>acc&(1<<t.bit)).map(t=>t.label||t.name);
     else if(d.trigger_accept_names) trigNames=d.trigger_accept_names;
     const trigTxt=trigNames.length?`[${trigNames.join('+')}] `:'';
@@ -144,20 +152,7 @@ function plotMollerXY(){
         });
     }
 
-    Plotly.react(div,[{
-        z:z, x:x, y:y,
-        type:'heatmap', colorscale:'Hot', reversescale:false,
-        hovertemplate:'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>',
-        text:z.map((row,iy)=>row.map((v,ix)=>String(d.xy_bins[iy*d.xy_nx+ix]))),
-        colorbar:{title:logZ?'log₁₀':'counts',titleside:'right',
-            titlefont:{size:10,color:THEME.textDim},tickfont:{size:9,color:THEME.textDim}},
-    }],{...PL,
-        title:{text:`Møller XY (${d.moller_events} evts) ${cutTxt}`,font:{size:11,color:THEME.text}},
-        xaxis:{...PL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
-        yaxis:{...PL.yaxis,title:'Y (mm)'},
-        margin:{l:50,r:70,t:30,b:35},
-        shapes:shapes,
-    },PC_EPICS);
+    Plotly.react(div,[physHeatmap(d.xy_bins,d.xy_nx,d.xy_ny,d.xy_x_min,d.xy_x_step,d.xy_y_min,d.xy_y_step,logZ,'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>','log₁₀')],physXYLayout(`Møller XY (${d.moller_events} evts) ${cutTxt}`,shapes),PC_EPICS);
 }
 
 function plotHycalXY(){
@@ -168,32 +163,11 @@ function plotHycalXY(){
         return;
     }
     const logZ=document.getElementById('physics-logz').checked;
-    const z=[];
-    for(let iy=0;iy<d.xy_ny;iy++){
-        const row=d.xy_bins.slice(iy*d.xy_nx,(iy+1)*d.xy_nx);
-        z.push(logZ?row.map(v=>v>0?Math.log10(v):null):row);
-    }
-    const x=[];for(let i=0;i<d.xy_nx;i++) x.push(d.xy_x_min+(i+0.5)*d.xy_x_step);
-    const y=[];for(let i=0;i<d.xy_ny;i++) y.push(d.xy_y_min+(i+0.5)*d.xy_y_step);
-
     const c=d.cuts||{};
     const fracPct=((c.energy_frac_min||0.9)*100).toFixed(0);
     const cutTxt=`Ncl=${c.n_clusters||1}, E≥${fracPct}% Eb, blocks∈[${c.nblocks_min||0},${c.nblocks_max||0}]`;
 
-    Plotly.react(div,[{
-        z:z, x:x, y:y,
-        type:'heatmap', colorscale:'Hot', reversescale:false,
-        hovertemplate:'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>',
-        text:z.map((row,iy)=>row.map((v,ix)=>String(d.xy_bins[iy*d.xy_nx+ix]))),
-        colorbar:{title:logZ?'log₁₀':'counts',titleside:'right',
-            titlefont:{size:10,color:THEME.textDim},tickfont:{size:9,color:THEME.textDim}},
-    }],{...PL,
-        title:{text:`HyCal Cluster Hits (${d.events} evts) ${cutTxt}`,font:{size:11,color:THEME.text}},
-        xaxis:{...PL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
-        yaxis:{...PL.yaxis,title:'Y (mm)'},
-        margin:{l:50,r:70,t:30,b:35},
-        shapes:refShapes('hycal_xy'),
-    },PC_EPICS);
+    Plotly.react(div,[physHeatmap(d.xy_bins,d.xy_nx,d.xy_ny,d.xy_x_min,d.xy_x_step,d.xy_y_min,d.xy_y_step,logZ,'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>','log₁₀')],physXYLayout(`HyCal Cluster Hits (${d.events} evts) ${cutTxt}`,refShapes('hycal_xy')),PC_EPICS);
 }
 
 function clearPhysicsFrontend(){
@@ -204,25 +178,14 @@ function clearPhysicsFrontend(){
     document.getElementById('physics-stats').textContent='';
 }
 
-function resizePhysics(){
-    try{Plotly.Plots.resize('physics-plot');}catch(e){}
-    try{Plotly.Plots.resize('moller-xy-plot');}catch(e){}
-    try{Plotly.Plots.resize('hycal-xy-plot');}catch(e){}
-}
-
 function initPhysics(data){
     document.getElementById('physics-logz').onchange=()=>{plotEnergyAngle();plotMollerXY();plotHycalXY();};
     document.getElementById('physics-elastic').onchange=plotEnergyAngle;
 }
 
-// Theme flip — Plotly bakes THEME-derived colors (title/legend/colorbar
-// titlefont, "ep elastic" line, etc.) into traces and layout at draw time,
-// so a chrome-only relayout would leave stale colors behind. Replay the
-// plot functions from cached *Data so titles/traces pick up live THEME.
-if (typeof onThemeChange === 'function') {
-    onThemeChange(() => {
-        plotEnergyAngle();
-        plotMollerXY();
-        plotHycalXY();
-    });
-}
+// Theme flip — titles/traces bake THEME colors at draw time; replot from cache.
+onThemeChange(() => {
+    plotEnergyAngle();
+    plotMollerXY();
+    plotHycalXY();
+});

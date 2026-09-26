@@ -13,7 +13,7 @@
 //
 // Folded onto (−T_RF/2, T_RF/2] so the natural cut "|Δt| < N·σ" works
 // straight off the branch.  See docs/analysis_notes/rf_time_reconstruction_plan.md
-// for the full physics summary (R. Demichelis, 2026-05).
+// for the full physics summary.
 //=============================================================================
 
 #include "TdcData.h"

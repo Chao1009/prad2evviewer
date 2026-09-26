@@ -19,10 +19,6 @@
 
 using namespace gem;
 
-//=============================================================================
-// Strip time-sample helpers (public, see GemCluster.h)
-//=============================================================================
-
 float gem::StripMeanTime(const std::vector<float> &ts_adc, float ts_period)
 {
     // positive samples only; float accumulators — must stay bit-identical to
@@ -89,23 +85,6 @@ bool gem::IsUnimodalPulse(const std::vector<float> &ts_adc)
     return true;
 }
 
-//=============================================================================
-// Construction / destruction
-//=============================================================================
-
-GemCluster::GemCluster()
-{
-    // Default characteristic distances for cross-talk identification (mm)
-    cfg_.charac_dists = {6.4f, 17.6f, 24.4f, 24.8f, 25.2f, 25.6f,
-                         26.0f, 26.4f, 26.8f, 33.6f, 44.8f};
-}
-
-GemCluster::~GemCluster() = default;
-
-//=============================================================================
-// FormClusters — main entry point
-//=============================================================================
-
 void GemCluster::FormClusters(std::vector<StripHit> &hits,
                               std::vector<StripCluster> &clusters) const
 {
@@ -119,21 +98,13 @@ void GemCluster::FormClusters(std::vector<StripHit> &hits,
     for (auto &cluster : clusters)
         reconstructCluster(cluster);
 
-    // mark cross-talk clusters
     setCrossTalk(clusters);
-
-    // filter out bad clusters
     filterClusters(clusters);
 }
-
-//=============================================================================
-// groupHits — sort by strip, then cluster consecutive strips
-//=============================================================================
 
 void GemCluster::groupHits(std::vector<StripHit> &hits,
                            std::vector<StripCluster> &clusters) const
 {
-    // sort by strip number
     std::sort(hits.begin(), hits.end(),
               [](const StripHit &a, const StripHit &b) {
                   return a.strip < b.strip;
@@ -164,10 +135,7 @@ void GemCluster::groupHits(std::vector<StripHit> &hits,
     }
 }
 
-//=============================================================================
-// isGoodStrip — SBS-style strip-level cuts (only called when one is active)
-//=============================================================================
-
+// Only called when a strip cut is active.
 bool GemCluster::isGoodStrip(const StripHit &hit) const
 {
     // pulse shape: strictly rising then strictly falling (empty fails)
@@ -182,10 +150,6 @@ bool GemCluster::isGoodStrip(const StripHit &hit) const
     }
     return true;
 }
-
-//=============================================================================
-// splitCluster — recursively split at local charge minima (valleys)
-//=============================================================================
 
 void GemCluster::splitCluster(std::vector<StripHit>::iterator beg,
                               std::vector<StripHit>::iterator end,
@@ -242,10 +206,6 @@ void GemCluster::splitCluster(std::vector<StripHit>::iterator beg,
         clusters.push_back(std::move(cl));
     }
 }
-
-//=============================================================================
-// reconstructCluster — charge-weighted position + SBS-style quality variables
-//=============================================================================
 
 void GemCluster::reconstructCluster(StripCluster &cluster) const
 {
@@ -307,13 +267,8 @@ void GemCluster::reconstructCluster(StripCluster &cluster) const
     }
 }
 
-//=============================================================================
-// setCrossTalk — mark clusters at characteristic cross-talk distances
-//=============================================================================
-
 namespace {
 
-// Check if all hits in a cluster are cross-talk strips
 inline bool isPureCrossTalk(const StripCluster &cl)
 {
     for (auto &hit : cl.hits)
@@ -349,33 +304,11 @@ inline bool atCTDistance(std::vector<StripCluster>::iterator it,
 
 } // anonymous namespace
 
-// // Below is the original implementation of setCrossTalk().
-
-// void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
-// {
-//     if (cfg_.charac_dists.empty()) return;
-
-//     // sort by peak charge ascending (check weakest clusters first)
-//     std::sort(clusters.begin(), clusters.end(),
-//               [](const StripCluster &a, const StripCluster &b) {
-//                   return a.peak_charge < b.peak_charge;
-//               });
-
-//     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
-//         if (!isPureCrossTalk(*it)) continue;
-//         it->cross_talk = atCTDistance(it, clusters.end(),
-//                                      cfg_.cross_talk_width, cfg_.charac_dists,
-//                                      cfg_.cross_talk_peak_ratio_max);
-//     }
-// }
-
-// Below is the modified implementation of setCrossTalk() that looks at the charge ratio between the weak cluster and the strong cluster
-
 void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
 {
     if (cfg_.charac_dists.empty()) return;
 
-    // Keep the original sorting: weakest to strongest
+    // sort by peak charge ascending (check weakest clusters first)
     std::sort(clusters.begin(), clusters.end(),
               [](const StripCluster &a, const StripCluster &b) {
                   return a.peak_charge < b.peak_charge;
@@ -383,7 +316,6 @@ void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
 
     for (auto it = clusters.begin(); it != clusters.end(); ++it) {
         // candidate cluster must already be made entirely of cross-talk-like strips
-        // and has a peak charge ratio below the threshold.
         if (!isPureCrossTalk(*it)) continue;
         it->cross_talk = atCTDistance(it, clusters.end(),
                                      cfg_.cross_talk_width, cfg_.charac_dists,
@@ -391,21 +323,14 @@ void GemCluster::setCrossTalk(std::vector<StripCluster> &clusters) const
     }
 }
 
-
-//=============================================================================
-// filterClusters — remove bad clusters
-//=============================================================================
-
 void GemCluster::filterClusters(std::vector<StripCluster> &clusters) const
 {
     clusters.erase(
         std::remove_if(clusters.begin(), clusters.end(),
             [this](const StripCluster &cl) {
-                // bad size
                 int sz = static_cast<int>(cl.hits.size());
                 if (sz < cfg_.min_cluster_hits || sz > cfg_.max_cluster_hits)
                     return true;
-                // cross-talk
                 if (cl.cross_talk)
                     return true;
                 // SBS-style quality cuts, each only when enabled; NaN
@@ -427,7 +352,6 @@ void GemCluster::filterClusters(std::vector<StripCluster> &clusters) const
         clusters.end());
 }
 
-//=============================================================================
 // CartesianReconstruct — match X and Y clusters to form 2D hits
 //
 // Mode 0 (ADC-sorted): sort by peak charge, pair 1:1 by rank
@@ -437,7 +361,6 @@ void GemCluster::filterClusters(std::vector<StripCluster> &clusters) const
 //                    (StripCluster::seed_time, filled by reconstructCluster)
 // Both modes record the X/Y seed times, time difference, signed ADC
 // asymmetry and the cluster quality variables on every GEMHit.
-//=============================================================================
 
 static GEMHit makeHit(const StripCluster &xc, const StripCluster &yc,
                        int det_id)
@@ -482,14 +405,11 @@ void GemCluster::CartesianReconstruct(
     if (cfg_.match_mode == 0) {
         std::vector<StripCluster> xc = x_clusters;
         std::vector<StripCluster> yc = y_clusters;
-        std::sort(xc.begin(), xc.end(),
-                  [](const StripCluster &a, const StripCluster &b) {
-                      return a.peak_charge > b.peak_charge;
-                  });
-        std::sort(yc.begin(), yc.end(),
-                  [](const StripCluster &a, const StripCluster &b) {
-                      return a.peak_charge > b.peak_charge;
-                  });
+        const auto by_peak_desc = [](const StripCluster &a, const StripCluster &b) {
+            return a.peak_charge > b.peak_charge;
+        };
+        std::sort(xc.begin(), xc.end(), by_peak_desc);
+        std::sort(yc.begin(), yc.end(), by_peak_desc);
         size_t npairs = std::min(xc.size(), yc.size());
         for (size_t i = 0; i < npairs; ++i)
             container.push_back(makeHit(xc[i], yc[i], det_id));
@@ -502,23 +422,20 @@ void GemCluster::CartesianReconstruct(
 
     for (auto &xc : x_clusters) {
         for (auto &yc : y_clusters) {
-            // ADC asymmetry cut
-            if (adc_asym_cut >= 0.f) {
-                float sum = xc.peak_charge + yc.peak_charge;
-                if (sum > 0.f) {
-                    float asym = std::abs(xc.peak_charge - yc.peak_charge) / sum;
-                    if (asym > adc_asym_cut) continue;
-                }
-            }
+            GEMHit hit = makeHit(xc, yc, det_id);
+
+            // ADC asymmetry cut (NaN, i.e. peak sum <= 0, passes)
+            if (adc_asym_cut >= 0.f && std::abs(hit.adc_asym) > adc_asym_cut)
+                continue;
 
             // timing asymmetry cut (seed mean times; skipped when either
             // is undefined, i.e. the seed has no positive sample)
             if (time_cut >= 0.f &&
                 std::isfinite(xc.seed_time) && std::isfinite(yc.seed_time) &&
-                std::abs(xc.seed_time - yc.seed_time) > time_cut)
+                std::abs(hit.time_diff) > time_cut)
                 continue;
 
-            container.push_back(makeHit(xc, yc, det_id));
+            container.push_back(hit);
         }
     }
 }

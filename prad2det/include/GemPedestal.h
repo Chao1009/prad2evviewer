@@ -9,15 +9,16 @@
 //   2) Per strip — average the CM-corrected values across the 6 time
 //      samples → contribution.  Accumulate into per-strip mean/RMS.
 //
-// After all events, Write() writes a JSON file in the format
-// GemSystem::LoadPedestals reads: one entry per APV with parallel
-// ``offset`` (mean) and ``noise`` (RMS) arrays per strip.
+// After all events, Write() writes the text format GemSystem::LoadPedestals
+// reads: per APV an "APV <crate> -1 <mpd> <adc>" header (the MPD slot is not
+// known here and LoadPedestals ignores it) followed by 128
+// "<strip> <offset> <noise>" lines, offset = mean and noise = RMS.
 //
 // Usage:
 //   gem::GemPedestal ped;
 //   while (read_next_event(ssp_evt))
-//       ped.Accumulate(ssp_evt);
-//   ped.Write("gem_ped.json");
+//       ped.Accumulate(ssp_evt);        // returns the number of APVs folded
+//   if (ped.NumStrips() > 0) ped.Write("gem_ped.txt");
 //=============================================================================
 
 #include <memory>
@@ -36,22 +37,21 @@ public:
     GemPedestal(const GemPedestal &)            = delete;
     GemPedestal &operator=(const GemPedestal &) = delete;
 
-    // Drop all accumulated stats.
     void Clear();
 
-    // Fold one event's SSP data into the running accumulators.  APVs that
-    // are not in full-readout mode (nstrips != 128) are silently skipped
-    // for CM purposes — those strips contributed in online-ZS and can't
-    // be pedestal-corrected offline.
-    void Accumulate(const ssp::SspEventData &evt);
+    // Fold one event's SSP data into the running accumulators and return
+    // the number of APVs folded.  Only full-readout APVs (nstrips == 128)
+    // contribute: online-ZS strips are already pedestal/CM-subtracted by
+    // the firmware.  Returns 0 for a pure online-ZS event.
+    int Accumulate(const ssp::SspEventData &evt);
 
     // Number of APVs that received at least one contribution.
     int NumApvs() const;
     // Number of strips (across all APVs) with at least one contribution.
     int NumStrips() const;
 
-    // Serialize the accumulated mean/RMS to JSON.  Returns the number of
-    // APVs written, or a negative value on I/O failure.
+    // Write the accumulated mean/RMS (offset to 0.001, noise to 0.0001).
+    // Returns the number of APVs written, or a negative value on I/O failure.
     int Write(const std::string &output_path) const;
 
 private:

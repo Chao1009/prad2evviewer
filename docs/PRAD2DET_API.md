@@ -16,6 +16,8 @@ function, and namespace constant exported by the library.
 | [`GemSystem.h`](#gemsystemh) | `gem` | `GemSystem`, `DetectorConfig`, `PlaneConfig`, `ApvConfig`, `ApvPedestal`, `ClusterConfig`, `StripHit`, `StripCluster`, `GEMHit`, `MapStrip()`, `MapApvStrips()` |
 | [`GemCluster.h`](#gemclusterh) | `gem` | `GemCluster` |
 | [`GemPedestal.h`](#gempedestalh) | `gem` | `GemPedestal` |
+| [`GemEventJson.h`](#gemeventjsonh) | `gem` | `ZsApvsToJson()`, `DetectorsToJson()` |
+| [`GemTracking.h`](#gemtrackingh) | `gem` | `TrackLine`, `SeedLine()`, `FitWeightedLine1D()`, `FitWeightedLine()` |
 | [`DetectorTransform.h`](#detectortransformh) | (global) | `DetectorTransform` |
 | [`RunInfoConfig.h`](#runinfoconfigh) | `prad2` | `RunConfig`, `LoadRunConfig()`, `WriteRunConfig()` |
 | [`PipelineBuilder.h`](#pipelinebuilderh) | `prad2` | `PipelineBuilder`, `Pipeline` |
@@ -85,8 +87,8 @@ Member helpers: `energize(adc)` → MeV (incl. non-linear correction);
 | `const Module *module_by_name(const std::string&) const` | |
 | `const Module *module_by_id(int primex_id) const` | |
 | `const Module *module_by_daq(int crate, int slot, int ch) const` | |
-| `double GetCalibConstant(int primex_id) const` | also `GetCalibBaseEnergy`, `GetCalibNonLinearity` |
-| `void SetCalibConstant(int primex_id, double)` | also `SetCalibBaseEnergy`, `SetCalibNonLinearity` |
+| `double GetCalibConstant(int primex_id) const` | |
+| `void SetCalibConstant(int primex_id, double)` | also `SetCalibBaseEnergy`, `SetCalibNonLinearity(id, nl1, nl2 = 0)` |
 | `void PrintCalibConstants(const std::string &output_file) const` | |
 | `const SectorInfo &sector_info(int s) const` | |
 | `int get_sector_id(double x, double y) const` | |
@@ -264,7 +266,7 @@ instantiating a `GemSystem`. `GemSystem::buildStripMap()` delegates to
 |---|---|
 | `void Init(const std::string &map_file)` | Load `gem_map.json` (detectors + APVs). |
 | `void LoadPedestals(const std::string &ped_file, const std::map<int,int> &crate_remap = {})` | Upstream APV-block text format. `crate_remap` maps file-side hardware crate IDs to logical IDs (e.g. 146→1, 147→2). Slot field in headers is ignored. |
-| `void LoadCommonModeRange(const std::string &cm_file, const std::map<int,int> &crate_remap = {})` | Per-APV CM bounds for the Danning algorithm. |
+| `void LoadCommonModeRange(const std::string &cm_file, const std::map<int,int> &crate_remap = {})` | Per-APV CM bounds into `ApvConfig::cm_range_min/max`; not used by the reconstruction. |
 | `void SetReconConfigs(std::vector<ClusterConfig>)` | Per-detector cluster/match parameters; vector clamped/padded to `GetNDetectors()`. |
 | `const std::vector<ClusterConfig>& GetReconConfigs() const` | |
 | `void Clear()` | |
@@ -319,11 +321,54 @@ correction as the live GEM pipeline.
 | Method | Description |
 |---|---|
 | `void Clear()` | drop accumulators |
-| `void Accumulate(const ssp::SspEventData &evt)` | fold one event; APVs in online-ZS (nstrips ≠ 128) are skipped |
+| `int Accumulate(const ssp::SspEventData &evt)` | fold one event's full-readout APVs (online-ZS APVs are skipped); returns the number folded |
 | `int NumApvs() const`, `int NumStrips() const` | |
-| `int Write(const std::string &output_path) const` | JSON in the format `GemSystem::LoadPedestals` reads. Returns APV count or `<0` on failure. |
+| `int Write(const std::string &output_path) const` | APV-block text in the format `GemSystem::LoadPedestals` reads (slot written as -1). Returns APV count or `<0` on failure. |
 
 Non-copyable (`std::unique_ptr<Impl>`).
+
+---
+
+## `GemEventJson.h`
+
+```cpp
+nlohmann::json gem::ZsApvsToJson(const GemSystem &sys, bool round = false,
+                                 const ssp::SspEventData *evt = nullptr);
+nlohmann::json gem::DetectorsToJson(const GemSystem &sys, bool round = false);
+```
+
+JSON view of one processed event (after `ProcessEvent()`, plus
+`Reconstruct()` for the detector block) in the `zs_apvs` / `detectors`
+schema that `gem_dump -m evdump` writes and `gem_event_viewer` draws.
+`ZsApvsToJson` lists every APV with at least one strip that survived zero
+suppression (GemSystem order, or the readout order of `evt`), with
+per-channel charge, max time bin, cross-talk flag and the 6 samples.
+`DetectorsToJson` gives per detector the strip pitches and counts, X/Y
+clusters and 2-D hits.  `round = true` rounds ADC values to 0.1 and
+positions to 0.01 mm (file dumps).
+
+---
+
+## `GemTracking.h`
+
+Header-only straight-line track primitives, templated on the scalar type
+(`float` in the online GEM efficiency monitor, `double` in the Python
+bindings); the fit sums are always `double`.
+
+```cpp
+template <class T> struct TrackLine { T ax, bx, ay, by, chi2_per_dof; };   // x = ax + bx*z, y = ay + by*z
+template <class T> TrackLine<T> SeedLine(T x1, T y1, T z1, T x2, T y2, T z2);
+template <class T> bool FitWeightedLine1D(int N, const T *z, const T *v, const T *w,
+                                          double &a, double &b);
+template <class T> bool FitWeightedLine(int N, const T *z, const T *x, const T *y,
+                                        const T *wx, const T *wy, TrackLine<T> &out);
+```
+
+`SeedLine` is the line through two points (the flat line through point 1
+when `|z2 - z1| < 1e-6`).  `FitWeightedLine` does independent weighted
+least-squares fits in (z, x) and (z, y), with `chi2_per_dof` over
+`2N - 4` degrees of freedom; it returns `false`, leaving `out` untouched,
+when `N < 2` or a fit is singular.
 
 ---
 
@@ -409,7 +454,7 @@ server, Python bindings) share the same wiring.
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |
 | `gem_pos_res` | per-detector σ (mm) |
 | `target_pos_res[3]` | (σx, σy, σz) at target |
-| `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (`1` = legacy `PostMatch` (closest to hycal cluster), other = `PostMatch_upgrade` (optimized matching algorithm, minimizes deltaR between 2 GEM hits)) |
+| `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (branches of `MatchingTools::PostMatch`: `1` = per GEM pair, the hit closest to the HyCal cluster; other = the GEM-hit pair with minimum ΔR between the two hits) |
 | `gem_crate_remap` | derived from `daq_cfg.roc_tags[type=="gem"]` |
 | `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `hycal_energy_bias_ee_path`, `hycal_energy_bias_ep_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
 

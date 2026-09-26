@@ -1,16 +1,14 @@
-/* =========================================================================
- *  Theme tokens
+/* Theme tokens
  *
- *  Default scope (no data-theme attribute) = classic (navy + cyan, the
- *  original palette the monitor GUI shipped with). Set
+ *  Default scope (no data-theme attribute) = classic (navy + cyan). Set
  *  ``document.documentElement.dataset.theme = 'dark' | 'light'`` to flip
- *  to the Apple-inspired palettes (see DESIGN-apple.md).
+ *  to the Apple-inspired palettes.
  *
  *  Every theme must define every token; keep the three lists in sync.
  *
- *  Legacy short aliases (--bg, --panel, --border, --text, --accent, --dim)
- *  point at the new tokens so existing rules and inline styles keep working.
- * ========================================================================= */
+ *  Short aliases (--bg, --panel, --border, --text, --accent, --dim) point at
+ *  the --theme-* tokens; rules and inline styles use them throughout.
+ */
 :root,
 :root[data-theme="classic"] {
     --theme-bg:            #1a1a2e;
@@ -51,7 +49,7 @@
        is always visible against the plot canvas. */
     --theme-cut-shade:     rgba(0,0,0,0.18);
 
-    /* Legacy aliases — keep existing rules and inline styles working. */
+    /* Short aliases (see header). */
     --bg:      var(--theme-bg);
     --panel:   var(--theme-panel);
     --border:  var(--theme-border);
@@ -231,7 +229,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .tab-dot.warn { display:block; background:var(--theme-warn); }
 .tab-dot.alert { display:block; background:var(--theme-danger); }
 
-/* time cut bar (same pattern as color-bar) */
+/* Cut Settings / apply / show controls in the DQ toolbar */
 .tcut-bar {
     display:flex; align-items:center; gap:3px; margin-left:8px;
     font-size:11px; white-space:nowrap;
@@ -245,9 +243,8 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     grid-template-rows:1fr; grid-template-columns:repeat(4, 1fr); gap:2px; padding:2px; }
 .cl-resid-cell { min-width:0; min-height:0; position:relative; }
 .cl-hist-row { flex:none; height:28%; min-height:80px; display:flex; flex-direction:row; }
-.cl-hist-cell { flex:1; min-width:0; position:relative; }
 .cl-stat-row { flex:none; height:18%; min-height:60px; display:flex; flex-direction:row; }
-.cl-stat-cell { flex:1; min-width:0; position:relative; }
+.cl-hist-cell, .cl-stat-cell { flex:1; min-width:0; position:relative; }
 .cluster-info-wrap { flex:1; min-height:80px; overflow-y:auto; font-size:12px; }
 .cl-table-row.selected { background:var(--theme-accent-tint-3); }
 .cl-table-row:hover { background:var(--theme-accent-tint-2); cursor:pointer; }
@@ -271,21 +268,14 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     width: 180px; min-width: 180px; max-width: 180px;
     text-overflow: ellipsis; overflow: hidden; white-space: nowrap;
 }
-/* clear button — right-aligned in toolbar */
-/* reset view button — overlay inside geo canvas */
-.geo-view-reset {
+/* reset-view button and overlay toggle, floating inside the geo canvas */
+.geo-view-reset, .geo-view-overlay {
     position:absolute; top:6px; left:6px; z-index:5;
     background:var(--theme-panel); border:1px solid var(--border); color:var(--dim);
     padding:2px 8px; border-radius:3px; cursor:pointer; font-family:inherit; font-size:11px;
 }
-.geo-view-reset:hover { background:var(--accent); color:var(--theme-on-accent); border-color:var(--accent); }
-.geo-view-overlay {
-    position:absolute; top:6px; left:60px; z-index:5;
-    background:var(--theme-panel); border:1px solid var(--border); color:var(--dim);
-    padding:2px 8px; border-radius:3px; cursor:pointer; font-family:inherit; font-size:11px;
-    user-select:none;
-}
-.geo-view-overlay:hover { background:var(--accent); color:var(--theme-on-accent); border-color:var(--accent); }
+.geo-view-overlay { left:60px; user-select:none; }
+.geo-view-reset:hover, .geo-view-overlay:hover { background:var(--accent); color:var(--theme-on-accent); border-color:var(--accent); }
 .geo-view-overlay input { vertical-align:-1px; margin:0 3px 0 0; }
 .geo-canvas-wrap { flex:1; position:relative; overflow:hidden; }
 .geo-canvas-wrap canvas { position:absolute; top:0; left:0; }
@@ -307,7 +297,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     padding:4px 10px; background:var(--panel); border-bottom:1px solid var(--border);
     font-size:13px; flex:0 0 24px; line-height:16px;
 }
-#cl-detail-header {
+#cl-detail-header, #lms-detail-header {
     flex:0 0 24px; padding:4px 10px; font-size:12px;
     border-top:1px solid var(--border); background:var(--panel);
 }
@@ -316,10 +306,6 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 /* --- LMS panel --- */
 .lms-plot-panel { flex:none; height:50%; min-height:100px; position:relative; }
 .lms-summary-wrap { flex:1; overflow-y:auto; min-height:0; font-size:12px; }
-#lms-detail-header {
-    flex:0 0 24px; padding:4px 10px; font-size:12px;
-    border-top:1px solid var(--border); background:var(--panel);
-}
 /* Pill in the LMS toolbar showing which baseline file the drift detection is
    comparing against.  Hidden when no baseline is configured. */
 .lms-baseline-pill {
@@ -329,7 +315,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     cursor:default;
 }
 .lms-baseline-pill.has-drift { color:var(--theme-danger); border-color:var(--theme-danger); }
-.lms-warn  { color:var(--theme-warn, var(--theme-danger)); font-weight:600; }
+.lms-warn  { color:var(--theme-warn); font-weight:600; }
 .lms-drift { color:var(--theme-danger); font-weight:700; text-transform:uppercase;
              letter-spacing:0.04em; }
 .lms-ok    { color:var(--theme-success); }
@@ -337,10 +323,8 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .cl-table-row.drift-row { background:rgba(220,38,38,0.12); }
 .cl-table-row.drift-row:hover { background:rgba(220,38,38,0.20); cursor:pointer; }
 .cl-table-row.drift-row.selected { background:rgba(220,38,38,0.28); }
-#cl-detail-header .mod-name { color:var(--accent); font-weight:600; }
-#cl-detail-header .mod-daq { color:var(--dim); font-size:11px; }
-.detail-header .mod-name { color:var(--accent); font-weight:600; }
-.detail-header .mod-daq { color:var(--dim); font-size:11px; }
+.detail-header .mod-name, #cl-detail-header .mod-name { color:var(--accent); font-weight:600; }
+.detail-header .mod-daq, #cl-detail-header .mod-daq { color:var(--dim); font-size:11px; }
 
 /* DQ right panel: 4 equal vertical cells */
 .dq-cell { flex:1; min-height:60px; position:relative; overflow:hidden; }
@@ -396,6 +380,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .peaks-table th:first-child, .peaks-table td:first-child { text-align:center; }
 .peaks-table td { padding:3px 8px; text-align:right; border-bottom:1px solid var(--theme-border); }
 .peaks-table tr:hover { background:var(--theme-accent-tint-2); }
+.peaks-table .empty-row td { text-align:center; color:var(--dim); padding:8px; }
 
 .color-bar { display:flex; align-items:center; gap:3px; font-size:11px; color:var(--dim); }
 .range-val { cursor:default; min-width:24px; text-align:center; }
@@ -514,11 +499,13 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .epics-warn { color:var(--theme-warn); font-weight:600; }
 .epics-alert { color:var(--theme-danger); font-weight:600; }
 
-/* --- GEM tab --- */
-.gem-outer { display:none; flex-direction:column; flex:1; min-height:0; }
-.gem-toolbar { display:flex; align-items:center; gap:8px; padding:4px 12px;
+/* --- full-width tabs (GEM, GEM APV, Physics): outer box, toolbar, body --- */
+.gem-outer, .gem-apv-outer, .physics-outer { display:none; flex-direction:column; flex:1; min-height:0; }
+.gem-toolbar, .gem-apv-toolbar, .physics-toolbar { display:flex; align-items:center; gap:8px; padding:4px 12px;
     font-size:12px; color:var(--text); border-bottom:1px solid var(--border); }
-.gem-columns { flex:1; min-height:0; display:flex; gap:4px; padding:4px; }
+.gem-columns, .physics-grid { flex:1; min-height:0; display:flex; gap:4px; padding:4px; }
+
+/* --- GEM tab --- */
 .gem-col-left { flex:2; min-width:0; display:flex; flex-direction:column; }
 .gem-col-right { flex:3; min-width:0; display:flex; flex-direction:column; gap:4px; }
 .gem-col-title { text-align:center; font-size:11px; color:var(--dim); padding:2px 0; }
@@ -539,13 +526,11 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .gem-eff-zhist {
     min-width:0; min-height:0; position:relative;
     border:1px solid var(--border); border-radius:3px;
-    background:var(--canvas);
 }
 .gem-eff-card {
     position:relative; overflow:hidden;
     display:flex; flex-direction:column; align-items:center; justify-content:center;
     padding:4px; border:1px solid var(--border); border-radius:3px;
-    background:var(--canvas);
 }
 /* Translucent left-anchored fill — width = efficiency %, color = tier.
    Sits behind the text (z-index:0) so the percentage stays readable. */
@@ -580,19 +565,17 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .gem-eff-grid-cell { min-width:0; min-height:0; position:relative; }
 
 /* --- GEM APV waveform tab --- */
-.gem-apv-outer { display:none; flex-direction:column; flex:1; min-height:0; }
-.gem-apv-toolbar { display:flex; align-items:center; gap:10px; padding:4px 12px;
-    font-size:12px; color:var(--text); border-bottom:1px solid var(--border); flex-wrap:wrap; }
+.gem-apv-toolbar { gap:10px; flex-wrap:wrap; }
 .gem-apv-toolbar label { display:inline-flex; align-items:center; gap:4px; }
 .gem-apv-toolbar select { font-size:11px; padding:1px 2px; }
 .gem-apv-toolbar button { font-size:11px; padding:2px 8px;
-    background:var(--bg-dim,#1a1a2a); color:var(--text);
+    background:#1a1a2a; color:var(--text);
     border:1px solid var(--border); border-radius:3px; cursor:pointer; }
-.gem-apv-toolbar button:hover { background:var(--bg-hover,#22223a); }
+.gem-apv-toolbar button:hover { background:#22223a; }
 /* Paused state — accent the button so the operator can see at a glance
    that the panel is frozen even when the trace area looks "normal". */
 .gem-apv-toolbar button.gem-apv-paused {
-    background:var(--accent,#ffd166); color:#222; border-color:var(--accent,#ffd166); }
+    background:var(--accent); color:#222; border-color:var(--accent); }
 .gem-apv-body { flex:1; min-height:0; overflow-y:auto; padding:0; }
 .gem-apv-section { padding:6px 8px 8px 8px; min-height:70px;
     border-top:1px solid var(--border); }
@@ -605,11 +588,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .gem-apv-canvas { width:100%; height:100%; display:block; }
 
 /* --- Physics tab --- */
-.physics-outer { display:none; flex-direction:column; flex:1; min-height:0; }
-.physics-toolbar { display:flex; align-items:center; gap:8px; padding:4px 12px;
-    font-size:12px; color:var(--text); border-bottom:1px solid var(--border); }
 .physics-toolbar label { display:flex; align-items:center; gap:4px; }
-.physics-grid { flex:1; min-height:0; display:flex; gap:4px; padding:4px; }
 .physics-cell { flex:1; min-width:0; min-height:0; position:relative; }
 .physics-right { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; gap:4px; }
 .physics-cell-top { flex:3; min-height:0; position:relative; }
@@ -620,7 +599,7 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     border-radius:3px; cursor:pointer; font-family:inherit; font-size:12px; font-weight:600; }
 .report-btn:hover { background:var(--theme-accent-strong); filter:brightness(0.9); }
 
-/* --- elog dialog --- */
+/* --- dialog forms (ET / filter / cut dialogs) --- */
 .elog-form { padding:14px; }
 .elog-form label { display:block; font-size:12px; color:var(--dim); margin-bottom:8px; }
 .elog-form input { display:block; width:100%; margin-top:3px; background:var(--bg);
@@ -629,8 +608,6 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .elog-form-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
 .elog-form-actions button { padding:6px 16px; border-radius:3px; cursor:pointer;
     font-family:inherit; font-size:12px; font-weight:600; border:none; }
-#elog-cancel { background:var(--bg); color:var(--text); border:1px solid var(--border); }
-#elog-cancel:hover { background:var(--border); }
 .elog-status { font-size:11px; margin-top:8px; min-height:16px; }
 
 /* --- cut-settings dialog (declared AFTER .elog-form so equal-specificity

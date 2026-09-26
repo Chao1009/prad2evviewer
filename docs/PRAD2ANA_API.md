@@ -14,11 +14,13 @@ against `libprad2ana.a` (analysis tools, ACLiC scripts in
 
 | Header | Public symbols |
 |---|---|
-| [`Replay.h`](#replayh) | `analysis::Replay`, type aliases `EventVars`, `EventVars_Recon` |
-| [`ConfigSetup.h`](#configsetuph) | `analysis::RunConfig` (alias to `prad2::RunConfig`), `gRunConfig`, `LabTransforms`, `BuildLabTransforms`, `ApplyToLab`, `TransformDetData`, `get_run_str`, `get_run_int` |
-| [`PhysicsTools.h`](#physicstoolsh) | `analysis::PhysicsTools`, `GEMHit`, `HCHit`, `DataPoint`, `MollerEvent`, `MollerData` |
+| [`Replay.h`](#replayh) | `analysis::Replay`, type aliases `EventVars`, `EventVars_Recon`, `FillPeaksFromWaveforms`, `ReconstructGemStrips` |
+| [`ConfigSetup.h`](#configsetuph) | `analysis::RunConfig` (alias to `prad2::RunConfig`), `gRunConfig`, `LabTransforms`, `BuildLabTransforms`, `ApplyToLab`, `ApplyToLocal`, `ApplyToHyCal`, `get_run_str`, `get_run_int` |
+| [`PhysicsTools.h`](#physicstoolsh) | `analysis::PhysicsTools`, `GEMHit`, `HCHit`, `DataPoint`, `MollerEvent`, `MollerData`, `kPbWO4Pitch`, `InHyCalRing` |
 | [`MatchingTools.h`](#matchingtoolsh) | `analysis::MatchingTools`, `MatchHit`, `MatchHit_perChamber`, `MatchFlag`, `ProjectHit`, `GetProjection*`, `GetProjectionHits` |
 | [`gain_factor.h`](#gain_factorh) | `prad2::GainFactor`, `GainFactorTable`, `GainCorrTable`, `FindGainFactorFile`, `LoadGainFactors`, `ComputeGainCorrection` |
+| [`SlowControl.h`](#slowcontrolh) | `analysis::ScalerRow`, `EpicsRow`, `LoadScalerRows`, `LoadEpicsRows`, `SelectDscPair`, `SortByEvent`, `DeltaLivetime`, `ChargeSums` |
+| [`ToolUtils.h`](#toolutilsh) | `analysis::ParseIntOption`, `ParseFloatOption`, `InvalidOption*`, `Is*Name`, `ExpandInputPath`, `CollectInputs`, `RunCommand`, `InitRootThreading`, `TreeEntries`, `DistributeEventBudget`, `RunFilesInRounds`, `ParallelFor`, `RunReplayPool`, `HistList`, `Book`, `AddAll`, `MergeTopLevelHistograms` |
 
 ---
 
@@ -51,12 +53,11 @@ using EventVars_Recon = prad2::ReconEventData;
 ```cpp
 Replay r;
 r.LoadDaqConfig(json_path);          // delegates to evc::load_daq_config
-r.LoadHyCalMap(hycal_map_json_path); // populates daq_map_ + module_types_
+r.LoadHyCalMap(hycal_map_json_path); // populates the internal fdec::HyCalSystem used by moduleName/moduleType/moduleID
 ```
 
 Calling `LoadHyCalMap` is strongly recommended — without it every
-channel reports `MOD_UNKNOWN` and `module_id` encoding falls back to
-HyCal-only conventions.
+channel is unknown (`MOD_UNKNOWN`, `module_id` `-1`) and gets dropped.
 
 ### Channel introspection
 
@@ -116,6 +117,28 @@ type, but accepts events carrying `TBIT_1cl`, `TBIT_2cl`, `TBIT_3cl`,
 the deterministic 10% of 3-cluster events for which
 `event_num % 10 == 8`.
 
+### Re-processing raw replay trees
+
+```cpp
+void FillPeaksFromWaveforms(prad2::RawEventData &ev, const fdec::HyCalSystem &hycal,
+                            const fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
+
+void ReconstructGemStrips(const prad2::RawEventData &ev, const gem::GemSystem &gem_sys,
+                          gem::GemCluster &clusterer, std::vector<gem::GEMHit> &hits,
+                          std::vector<std::array<std::vector<gem::StripCluster>, 2>>
+                              *plane_clusters = nullptr);
+```
+
+`FillPeaksFromWaveforms` re-derives `npeaks` and `peak_height/time/integral`
+of every PbWO4 channel from its stored samples, for raw trees written
+without the peak branches (no module time offset is applied).
+`ReconstructGemStrips` re-runs GEM clustering and X/Y matching, with
+`gem_sys`'s per-detector configs, on the strip hits stored in a raw tree
+(pedestal, common mode and zero suppression already applied): `hits`
+receives the 2D hits of all detectors in detector order, `plane_clusters`
+(when given) the kept clusters as `[det][0 = X, 1 = Y]`.  Strips of an
+unknown detector or plane are skipped.
+
 ---
 
 ## `ConfigSetup.h`
@@ -147,21 +170,16 @@ LabTransforms BuildLabTransforms(const RunConfig &geo = gRunConfig);
 
 template <typename Hit>
 void ApplyToLab(const DetectorTransform &xform, Hit &h);   // in-place lab = R*[h.x,h.y,h.z] + t
+template <typename Hit>
+void ApplyToLocal(const DetectorTransform &xform, Hit &h); // in-place inverse (labToLocal)
+template <typename Hit>
+void ApplyToHyCal(Hit &h, const RunConfig &geo = gRunConfig);   // h.x += target_x, h.y += target_y
 ```
 
 `BuildLabTransforms` populates each `DetectorTransform` via `set(...)`,
 so the rotation matrices are precomputed before `toLab` is called per
-hit. Build once per run and reuse.
-
-### Translation-only calibration shift
-
-```cpp
-void TransformDetData(MollerData &mollers,
-                      float detX, float detY, float ZfromTarget);
-```
-
-Used by `det_calib` to apply per-detector alignment offsets to fitted
-Moller pairs. Not a detector-frame transform — plain arithmetic.
+hit. Build once per run and reuse. `ApplyToHyCal` moves a hit into the
+HyCal coordinate system; project it to the HyCal surface first.
 
 ### Run-number filename parsers
 
@@ -170,15 +188,17 @@ std::string get_run_str(const std::string &file_name);   // "unknown" on failure
 int         get_run_int(const std::string &file_name);   // -1 on failure
 ```
 
-Pulls digits from `prad_<digits>...` style filenames.
+Both use [`prad2::run_number_from_path`](PRAD2DEC_API.md#eviofilesh):
+the first `prad_<digits>` or `run_<digits>` in the file name
+(case-insensitive, directory part ignored).
 
 ---
 
 ## `PhysicsTools.h`
 
 `analysis::PhysicsTools` — owns the per-module energy histograms,
-Moller geometry, gain-monitoring histograms, and the kinematic
-calculations used by epCalib / det_calib / gain_replay / matching.
+Moller geometry, and the kinematic calculations used by the calibration
+and matching tools.
 
 ### Per-event types
 
@@ -193,6 +213,19 @@ typedef std::pair<DataPoint, DataPoint> MollerEvent;
 typedef std::vector<MollerEvent>        MollerData;
 ```
 
+### Fiducial ring (free functions)
+
+```cpp
+inline constexpr double kPbWO4Pitch = 20.75;   // mm, nominal PbWO4 module size
+bool InHyCalRing(double x, double y, double inner, double outer,
+                 double pitch = kPbWO4Pitch);
+```
+
+`InHyCalRing` is a square-annulus cut: outside the inner square of
+half-width `inner*pitch` and inside the outer square of half-width
+`outer*pitch`. It is frame-agnostic; the caller picks lab, HyCal or
+module-centre coordinates.
+
 ### Construction
 
 ```cpp
@@ -201,7 +234,7 @@ explicit PhysicsTools(fdec::HyCalSystem &hycal);
 
 The reference must outlive the `PhysicsTools` instance. Histograms are
 constructed in the body of the constructor (one `TH1F` per HyCal module
-plus the 2-D / Moller / gain-monitor histograms).
+plus the 2-D / Moller histograms).
 
 ### Per-module energy histograms
 
@@ -215,25 +248,23 @@ TH2F *GetEnergyVsModuleHist() const;
 void  FillEnergyVsTheta(float theta_deg, float energy);
 TH2F *GetEnergyVsThetaHist() const;
 
-void  FillNeventsModuleMap(int module_id);
 void  FillNeventsModuleMap();    // populate from filled per-module hists
 TH2F *GetNeventsModuleMapHist() const;
+
+static TH2Poly *MakeModuleMap(const fdec::HyCalSystem &hycal, const char *name,
+                              const char *title, double half_range,
+                              std::vector<int> &bin_by_index);
 ```
 
-### Yield analysis (caller owns the returned histograms)
-
-```cpp
-std::unique_ptr<TH1F> GetEpYieldHist (TH2F *energy_theta, float Ebeam);
-std::unique_ptr<TH1F> GetEeYieldHist (TH2F *energy_theta, float Ebeam);
-std::unique_ptr<TH1F> GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist);
-```
+`MakeModuleMap` builds a `TH2Poly` with one rectangular bin per PbWO4
+module and axes ±`half_range` (mm), created with `new` in the current
+directory (caller owns it). `bin_by_index` is resized to
+`module_count()` and holds the `TH2Poly` bin of each PbWO4 module by
+module index, `-1` for every other module.
 
 ### Moller-event histograms
 
 ```cpp
-void  Fill2armMollerPosHist(float x, float y);
-TH2F *Get2armMollerPosHist() const;
-
 void  FillMollerPhiDiff(float phi_diff);
 void  FillMollerXY    (float x, float y);
 void  FillMollerZ     (float z);
@@ -243,67 +274,58 @@ TH1F *GetMollerYHist()       const;
 TH1F *GetMollerZHist()       const;
 ```
 
-### Resolution / calibration
+### Resolution / peak fits
 
 ```cpp
 std::array<float, 3> FitPeakResolution(int module_id) const;   // {peak, sigma, chi2}
-void                 Resolution2Database(int run_id);
-TF1                  nonLinearity_func_;
+
+static std::array<double, 5> fitGaus(TH1F *h, float expectPeak = 0.f,
+                                     bool withError = false);
+static std::array<double, 5> fitCrystalBall(TH1F *h, float expectPeak = 0.f,
+                                            float alpha = 1.5f, float n = 5.0f,
+                                            bool withError = false);
+static std::array<double, 5> fitPeak(TH1F *h, float expectPeak = 0.f, bool withError = false,
+                                     bool useCrystalBall = false,
+                                     float alpha = 0.5f, float n = 5.0f);
 ```
 
-### Gain analysis
-
-```cpp
-struct GainResult {
-    std::string name;
-    float lms_peak  = 0;
-    float lms_sigma = 0;
-    float lms_chi2  = 0;
-    float g[4]      = {};   // g[1..3] = mod_lms * alpha_ref[j] / lms_ref[j]
-};
-
-void                    ComputeModuleGains();
-std::vector<GainResult> module_gains_;   // indexed by module index
-float                   GetModuleGainFactor(int module_id) const;   // mean of g[1..3]
-```
-
-`ComputeModuleGains` fits LMS / α reference channels and every W-module,
-populates `module_gains_`, and resets the source histograms.
-
-### Gain-monitoring fillers (replay-time histograms)
-
-```cpp
-void Fill_lmsCH_lmsHeight   (int lms_id, float height);
-void Fill_lmsCH_lmsIntegral (int lms_id, float integral);
-void Fill_lmsCH_alphaHeight (int lms_id, float height);
-void Fill_lmsCH_alphaIntegral(int lms_id, float integral);
-void Fill_modCH_lmsHeight   (int module_id, float height);
-void Fill_modCH_lmsIntegral (int module_id, float integral);
-
-TH1F *Get_lmsCH_lmsHeightHist  (int lms_id) const;
-TH1F *Get_lmsCH_lmsIntegralHist(int lms_id) const;
-TH1F *Get_lmsCH_alphaHeightHist(int lms_id) const;
-TH1F *Get_lmsCH_alphaIntegralHist(int lms_id) const;
-TH1F *Get_modCH_lmsHeightHist  (int module_id) const;
-TH1F *Get_modCH_lmsIntegralHist(int module_id) const;
-```
+The static fits return `{mean, sigma, chi2/ndf, mean_error, sigma_error}`;
+the two errors are zero unless `withError` is true.
 
 ### Kinematics (static)
 
 ```cpp
+static constexpr float kProtonMass   = 938.272f;     // MeV
+static constexpr float kElectronMass = 0.51099895f;  // MeV
+
 static float ExpectedEnergy(float theta_deg, float Ebeam,
                             const std::string &type);   // "ep" or "ee"
 static float EnergyLoss   (float theta_deg, float E);   // target + windows
+static bool  HitP4(float x, float y, float z, float E, float m, TLorentzVector &p4);
+static bool  isMoller_kinematic(float theta_deg1, float energy1,
+                                float theta_deg2, float energy2,
+                                float EBeam, float resolution);
 ```
 
-### Moller geometry
+`HitP4` builds the four-momentum of a particle of mass `m` and energy `E`
+(MeV) emitted from the target (origin) towards the hit at `(x, y, z)`; it
+returns `false` and zeroes `p4` when `E < m` or the hit is at the origin.
+`isMoller_kinematic` is the elastic e-e check for Moller selection: the
+energy sum within 5σ of `EBeam` and each energy within 3.5σ of its
+expected value, σ = `resolution` · E / √(E in GeV).
+
+### Moller geometry (static)
 
 ```cpp
-std::array<float, 2> GetMollerCenter(MollerEvent &e1, MollerEvent &e2);
-float                GetMollerZdistance(MollerEvent &e, float Ebeam);
-float                GetMollerPhiDiff (MollerEvent &e1);   // ≈ 180° for elastic ee
-float                GetPhiAngle      (float x, float y);
+static std::array<float, 2> GetMollerCenter(const MollerEvent &e1, const MollerEvent &e2);
+static float GetMollerZdistance(const MollerEvent &e, float Ebeam);
+static float GetMollerPhiDiff  (const MollerEvent &e1);   // ≈ 180° for elastic ee
+static bool  isBackToBack      (const MollerEvent &e, float max_dev_deg);
+static float GetPhiAngle       (float x, float y);
+static float GetThetaAngle     (float x, float y, float z);   // degrees, seen from the target
 ```
+
+`isBackToBack` is `|GetMollerPhiDiff(e)| < max_dev_deg`.
 
 ---
 
@@ -397,7 +419,9 @@ void SetSquareSelection(bool sq);       // true = square cut, false = circular
 `postMatchMethod` is typically supplied from
 `prad2::Pipeline::match_method` (loaded by `PipelineBuilder` from
 `reconstruction_config.json:matching.match_method`).
-`1` selects legacy `PostMatch`(closest to hycal cluster); other values select `PostMatch_upgrade`(optimized matching algorithm, minimizes deltaR between 2 GEM hits).
+Both modes are branches of `PostMatch`: `1` keeps, per upstream/downstream
+GEM pair, the hit closest to the HyCal cluster; any other value picks the
+upstream/downstream GEM-hit pair with minimum ΔR between the two hits.
 
 ---
 
@@ -465,6 +489,76 @@ GainCorrTable prad2::ComputeGainCorrection(const std::string &dir,
 
 `new_adc2mev = old_adc2mev * corr.w[id].avg` is the typical applier
 (see top of header for the worked example).
+
+---
+
+## `SlowControl.h`
+
+Slow-event rows of replayed ROOT files and the live-charge integration
+shared by `prad2ana_replay_filter` and `prad2ana_live_charge`.
+
+`ScalerRow` is a `prad2::RawScalerData` plus `bool good`;
+`EpicsRow { event_number, ti_ticks, unix_time, sync_counter, run_number,
+good, updates }` holds one `epics` row, `updates` mapping channel name to
+the readings the row carries.
+
+```cpp
+bool LoadScalerRows(const std::vector<std::string> &files, std::vector<ScalerRow> &out,
+                    const char *tag, bool *has_good = nullptr);
+bool LoadEpicsRows (const std::vector<std::string> &files, std::vector<EpicsRow> &out,
+                    const char *tag, bool *has_good = nullptr);
+
+std::pair<uint32_t, uint32_t> SelectDscPair(const prad2::RawScalerData &row,
+                                            const std::string &source, int channel);
+template <class Row> std::vector<size_t> SortByEvent(const std::vector<Row> &rows);
+std::vector<double> DeltaLivetime(const std::vector<ScalerRow> &rows,
+                                  const std::vector<size_t> &order,
+                                  const std::string &source, int channel,
+                                  double scale = 1.0);
+```
+
+The loaders append every file's `scalers` / `epics` rows in file order
+(`good` is replay_filter's per-row verdict, `true` without that branch)
+and return `false` when a file cannot be opened.  `DeltaLivetime` gives
+each row's slice-local livetime, Δgated / Δungated since the previous row
+in event order × `scale` (`-1` where undefined), using
+[`dsc::delta_live_ratio`](PRAD2DEC_API.md#dscdatah) with the first row's
+predecessor at (0, 0).
+
+`ChargeSums` accumulates Σ lf_b · Δt · ½(I_a + I_b) over adjacent
+checkpoints with `AddPair(ticks_a, ticks_b, live_fraction_b, current_a,
+current_b, good)`: gated sums (`value_nC`, `live_seconds`,
+`real_seconds`, pair counters) for `good` pairs, `ungated_*` sums for all
+pairs with valid data; `operator+=` merges two sums.
+
+---
+
+## `ToolUtils.h`
+
+Helpers shared by the command-line tools in `analysis/tools/`.
+
+- **Options** — `ParseIntOption` / `ParseFloatOption` (the whole argument
+  must be a number in range; the value is untouched on failure),
+  `InvalidOptionValue(flag, value)` and `InvalidOption(argv, optind,
+  optopt)` (print the getopt error, return exit code 2).
+- **Inputs** — name filters `IsEvioName`, `IsRootName`, `IsRawRootName`,
+  `IsReconRootName`, `IsLmsRootName`; `ExpandInputPath(path, keep)`
+  expands a directory to its regular files passing `keep(name)`, sorted;
+  `CollectInputs(argc, argv, first, keep, max_files = -1)` does this for
+  every argument in order.
+- **Subprocesses** — `RunCommand(argv)` runs a program without a shell
+  and returns its exit status (127 when it could not be started).
+- **Threads** — `InitRootThreading()` (call first in `main`),
+  `TreeEntries(path, tree)`, `DistributeEventBudget(files, tree,
+  max_events)` (per-file entry limits), `RunFilesInRounds(files,
+  nthreads, job, after_round)`, `ParallelFor(n, n_threads, fn)` and
+  `RunReplayPool(inputs, n_threads, daq_config, daq_map, output_for, run,
+  ok)` (one `Replay` per thread).
+- **Histograms** — `HistList`, `Book<H>(reg, args...)` (detached
+  histogram registered in booking order), `AddAll(dst, src)` (pairwise
+  merge of bundles booked the same way) and
+  `MergeTopLevelHistograms(inputs, output)` (sum by name of the top-level
+  histograms of several files).
 
 ---
 

@@ -24,13 +24,6 @@ struct ApvAddress {
     int mpd_id   = -1;   // fiber ID in SSP readout
     int adc_ch   = -1;   // APV ID within MPD
 
-    uint64_t pack() const
-    {
-        return (static_cast<uint64_t>(static_cast<uint16_t>(crate_id)) << 32) |
-               (static_cast<uint64_t>(static_cast<uint16_t>(mpd_id))  << 16) |
-               static_cast<uint64_t>(static_cast<uint16_t>(adc_ch));
-    }
-
     bool operator==(const ApvAddress &o) const
     {
         return crate_id == o.crate_id && mpd_id == o.mpd_id && adc_ch == o.adc_ch;
@@ -64,13 +57,10 @@ struct ApvData {
         strip_mask[0] = strip_mask[1] = 0;
         flags = 0;
         has_online_cm = false;
-        // Zero strips fully — lazy clear (relying on strip_mask) caused
-        // an event-order-dependent divergence between the Python audit
-        // and the C++ server's GEM0 efficiency.  Investigation traced it
-        // to ApvData read paths that didn't gate on hasStrip(), e.g. the
-        // Python `apv.strips` binding's std::copy_n reading the full
-        // 128×6 buffer.  The cost is one ~1.5 KB memset per APV per
-        // event; worth the determinism guarantee.
+        // Zero strips fully, not lazily via strip_mask: some read paths
+        // (e.g. the Python `apv.strips` binding) copy the full 128×6
+        // buffer without gating on hasStrip(), so stale samples would
+        // leak between events.  Costs one ~1.5 KB memset per APV.
         std::memset(strips, 0, sizeof(strips));
     }
 
@@ -91,6 +81,11 @@ struct ApvData {
         int bit = strip & 63;
         return (strip_mask[idx] & (1ULL << bit)) != 0;
     }
+
+    // Full readout: the firmware sent every strip (no online zero
+    // suppression).  nstrips is the authoritative signal; has_online_cm is
+    // not — the MPD can emit CM debug headers while still sending all strips.
+    bool isFullReadout() const { return present && nstrips >= APV_STRIP_SIZE; }
 };
 
 // --- per-MPD data -----------------------------------------------------------
@@ -138,6 +133,29 @@ struct SspEventData {
         m.crate_id = crate;
         m.mpd_id = mpd;
         return &m;
+    }
+
+    // True if any APV in the event is a full readout (ApvData::isFullReadout).
+    bool hasFullReadout() const
+    {
+        for (int i = 0; i < nmpds; ++i)
+            for (const ApvData &apv : mpds[i].apvs)
+                if (apv.isFullReadout()) return true;
+        return false;
+    }
+
+    // Call fn(const MpdData &mpd, int apv_id, const ApvData &apv) for every
+    // present APV of every present MPD, in readout order; apv_id is the
+    // index into mpd.apvs (= adc_ch).
+    template <class Fn>
+    void forEachApv(Fn &&fn) const
+    {
+        for (int i = 0; i < nmpds; ++i) {
+            const MpdData &mpd = mpds[i];
+            if (!mpd.present) continue;
+            for (int a = 0; a < MAX_APVS_PER_MPD; ++a)
+                if (mpd.apvs[a].present) fn(mpd, a, mpd.apvs[a]);
+        }
     }
 
     // Find APV by full address. Returns nullptr if not found.

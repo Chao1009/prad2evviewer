@@ -15,6 +15,9 @@ Usage
     python hycal_snake_scan.py --expert                  # expert operator
     python hycal_snake_scan.py --observer                # read-only monitor
 
+--database (hycal_map.json) and --paths (scan path profiles JSON) override
+the default input files.
+
 Coordinate system
 -----------------
     ptrans_x, ptrans_y = (-126.75, 10.11)  -->  beam at HyCal centre (0,0)
@@ -33,46 +36,32 @@ Requirements
 
 from __future__ import annotations
 
-import argparse
-import math
-import os
-import sys
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGridLayout, QGroupBox, QPushButton, QLabel, QComboBox, QSpinBox,
-    QDoubleSpinBox, QTextEdit, QProgressBar, QMessageBox, QSplitter,
-    QSizePolicy, QFrame, QDialog, QLineEdit, QScrollArea, QSlider,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox, QPushButton,
+    QLabel, QComboBox, QSpinBox, QDoubleSpinBox, QProgressBar, QMessageBox,
+    QSplitter, QFrame, QDialog, QScrollArea, QSlider,
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QFont
+from PyQt6.QtCore import Qt
 
 from scan_utils import (
-    C, Module, load_modules, module_to_ptrans, ptrans_to_module,
-    ptrans_in_limits, filter_scan_modules, DARK_QSS,
-    BEAM_CENTER_X, BEAM_CENTER_Y, DEFAULT_DB_PATH,
+    C, Module, module_to_ptrans, ptrans_in_limits, DARK_QSS,
+    BEAM_CENTER_X, BEAM_CENTER_Y,
 )
 from scan_epics import (
     SPMG, SPMG_LABELS, epics_move_to, epics_stop,
 )
 from scan_engine import (
-    ScanState, ScanEngine, build_scan_path, estimate_scan_time,
+    ScanState, ScanEngine, estimate_scan_time,
     DEFAULT_DWELL, DEFAULT_POS_THRESHOLD, DEFAULT_BEAM_THRESHOLD,
     DEFAULT_VELO_X, DEFAULT_VELO_Y, MAX_LG_LAYERS,
 )
-from scan_geoview import HyCalScanMapWidget, PALETTES, PALETTE_NAMES
 from scan_gui_common import (
-    PATHS_FILE, SCALER_POLL_MS, POLL_MS,
-    open_session_log, format_log_line, append_log_line,
-    build_position_check_panel, EncoderDriftChecker,
-    load_profiles, setup_motor_epics, setup_scaler_epics,
+    ScanWindowBase, run_scan_gui, PROFILE_AUTOGEN, PROFILE_NONE,
+    update_position_check,
 )
 
-
-# ============================================================================
-#  MODULE INFO DIALOG
-# ============================================================================
 
 class ModuleInfoDialog(QDialog):
     """Pop-up showing module details with a Move To button.
@@ -83,11 +72,9 @@ class ModuleInfoDialog(QDialog):
 
     _FIELDS = ("Scaler", "Name", "Type", "Sector", "Row/Col", "Size", "HyCal", "Ptrans", "In limits")
 
-    def __init__(self, ep, log_fn, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
         self._mod: Optional[Module] = None
-        self._ep = ep
-        self._log = log_fn
         self.setStyleSheet(DARK_QSS)
         self.setFixedWidth(360)
 
@@ -146,270 +133,44 @@ class ModuleInfoDialog(QDialog):
         self.setWindowTitle(f"Module {mod.name}")
 
     def _doMove(self):
-        mod = self._mod
-        if not mod: return
-        px, py = module_to_ptrans(mod.x, mod.y)
-        self._log(f"Direct move to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-        if epics_move_to(self._ep, px, py):
-            win = self.parent()
-            if hasattr(win, '_setTarget'):
-                win._setTarget(px, py, mod.name)
-        else:
-            self._log(f"BLOCKED: ptrans({px:.3f}, {py:.3f}) outside limits", level="error")
+        if self._mod: self.parent()._moveToModule(self._mod)
 
 
-# ============================================================================
-#  MAIN WINDOW
-# ============================================================================
+class SnakeScanWindow(ScanWindowBase):
+    TITLE = "HyCal Snake Scan"
+    LOG_PREFIX = "snake_scan"
+    WINDOW_H = 900
+    LEGEND = [("Todo", C.MOD_TODO), ("Skipped", C.MOD_SKIPPED),
+              ("Moving", C.MOD_CURRENT), ("Dwell", C.MOD_DWELL),
+              ("Done", C.MOD_DONE), ("Error", C.MOD_ERROR),
+              ("Start", C.MOD_SELECTED), ("PbGlass", C.MOD_GLASS)]
+    NONE_MSG = "Path: none (direct control only)"
 
-
-class SnakeScanWindow(QMainWindow):
-    _logSignal = pyqtSignal(str, str)
-    AUTOGEN = "(autogen)"
-    NONE = "(none)"
-
-    def __init__(self, motor_ep, scaler_ep, simulation, all_modules,
-                 profiles=None, observer=False):
-        super().__init__()
-        self.ep = motor_ep
-        self.scaler_ep = scaler_ep
-        self.simulation = simulation
-        self.observer = observer
-        self.all_modules = all_modules
-        self._profiles = profiles or {}
-        self._active_profile = self.NONE
-        self._lg_layers = 0
-
-        glass = [m for m in all_modules if m.mod_type == "PbGlass"]
-        self._lg_sx = glass[0].sx if glass else 38.15
-        self._lg_sy = glass[0].sy if glass else 38.15
-
-        self._mod_by_name = {m.name: m for m in all_modules}
-        self._log_lines = []
-        self._log_file = open_session_log("snake_scan", self.simulation, self.observer)
-
-        self.scan_modules = []
-        self.engine = ScanEngine(motor_ep, self.scan_modules, self._log)
-        self._scan_name_to_idx = {m.name: i for i, m in enumerate(self.engine.path)}
-        self._scan_names = {m.name for m in self.scan_modules}
-        self._selected_start_idx = 0
-        self._selected_mod_name = None
+    def _initState(self):
+        self.engine = ScanEngine(self.ep, self.scan_modules, self._log)
         self._mod_dlg: Optional[ModuleInfoDialog] = None
         self._status_labels: Dict[str, QLabel] = {}
-
-        self._encoder_checker = EncoderDriftChecker()
-
-        # target position — set once when a move is commanded
-        self._target_px: Optional[float] = None
-        self._target_py: Optional[float] = None
-        self._target_name: str = ""
         self._last_scan_idx: int = -1  # track scan engine moves
 
-        self._logSignal.connect(self._appendLog)
-        self._buildUI()
+    def _onPathSet(self, path):
+        self.engine = ScanEngine(self.ep, path, self._log)
 
-        if self.observer:
-            self._disableControls()
-        if not self.simulation and not self.observer:
-            disc = self.ep.disconnected_pvs()
-            if disc:
-                self._disableControls()
-                QMessageBox.critical(self, "PV Connection Error",
-                    "Not connected:\n" + "\n".join(f"  {p}" for p in disc))
+    def _beamTripped(self):
+        return self.engine.beam_tripped
 
-        # main poll timer (5 Hz)
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._poll)
-        self._timer.start(POLL_MS)
+    # -- layout --------------------------------------------------------------
 
-        # scaler poll timer
-        self._scaler_timer = QTimer(self)
-        self._scaler_timer.timeout.connect(self._pollScalers)
-        self._scaler_timer.start(SCALER_POLL_MS)
-        self._pollScalers()  # initial read
-
-    # =======================================================================
-    #  Layout — 16:9
-    #
-    #  [TOP BAR: title | mode | ===BEAM=== | state              ]
-    #  [LEFT half                 | RIGHT half                   ]
-    #  [  HyCal geo view          |  Controls (scrollable)       ]
-    #  [  legend row              |  ─────────────────────────── ]
-    #  [  scaler controls         |  Event Log                   ]
-    # =======================================================================
-
-    def _buildUI(self):
-        if self.observer:       suffix = "  [OBSERVER]"
-        elif self.simulation:   suffix = "  [SIMULATION]"
-        else:                   suffix = "  [EXPERT OPERATOR]"
-        self.setWindowTitle("HyCal Snake Scan" + suffix)
-        self.setStyleSheet(DARK_QSS)
-        self.resize(1600, 900)
-
-        central = QWidget()
-        self.setCentralWidget(central)
-        root = QVBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        # ── top bar ──────────────────────────────────────────────────────
-        top = QWidget()
-        top.setFixedHeight(48)
-        top.setStyleSheet("background: #0d1520;")
-        tl = QHBoxLayout(top)
-        tl.setContentsMargins(12, 0, 12, 0)
-
-        lbl = QLabel("HYCAL SNAKE SCAN")
-        lbl.setStyleSheet(f"color: {C.GREEN}; font: bold 17pt 'Consolas'; background: transparent;")
-        tl.addWidget(lbl)
-
-        if self.observer:       mt, mf = "OBSERVER", C.ORANGE
-        elif self.simulation:   mt, mf = "SIMULATION", C.YELLOW
-        else:                   mt, mf = "EXPERT", C.GREEN
-        lbl_mode = QLabel(mt)
-        lbl_mode.setStyleSheet(f"color: {mf}; font: bold 13pt 'Consolas'; background: transparent;")
-        tl.addWidget(lbl_mode)
-        tl.addSpacing(16)
-
-        # prominent beam current
-        beam_frame = QFrame()
-        beam_frame.setStyleSheet(
-            "QFrame { background: #161b22; border: 1px solid #30363d; border-radius: 4px; }")
-        beam_frame.setFixedHeight(36)
-        bf_layout = QHBoxLayout(beam_frame)
-        bf_layout.setContentsMargins(10, 0, 10, 0)
-        bf_layout.setSpacing(6)
-        beam_icon = QLabel("BEAM")
-        beam_icon.setStyleSheet("color: #8b949e; font: bold 12pt 'Consolas'; background: transparent; border: none;")
-        bf_layout.addWidget(beam_icon)
-        self._lbl_beam_val = QLabel("-- nA")
-        self._lbl_beam_val.setStyleSheet(
-            f"color: {C.GREEN}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
-        self._lbl_beam_val.setMinimumWidth(140)
-        bf_layout.addWidget(self._lbl_beam_val)
-        self._lbl_beam_status = QLabel("")
-        self._lbl_beam_status.setStyleSheet(
-            "color: transparent; font: bold 13pt 'Consolas'; background: transparent; border: none;")
-        bf_layout.addWidget(self._lbl_beam_status)
-        tl.addWidget(beam_frame)
-
-        tl.addStretch()
-
-        self._lbl_state = QLabel("IDLE")
-        self._lbl_state.setStyleSheet(
-            f"color: {C.DIM}; font: bold 15pt 'Consolas'; background: transparent;")
-        tl.addWidget(self._lbl_state)
-
-        root.addWidget(top)
-
-        # ── main body — horizontal splitter ──────────────────────────────
-        body_splitter = QSplitter(Qt.Orientation.Horizontal)
-        body_splitter.setContentsMargins(6, 4, 6, 6)
-
-        # --- LEFT half: map + legend + scaler controls ---
-        left = QWidget()
-        left_lo = QVBoxLayout(left)
-        left_lo.setContentsMargins(0, 0, 0, 0)
-        left_lo.setSpacing(2)
-
-        self._canvas_label = QLabel()
-        self._canvas_label.setStyleSheet(f"color: {C.ACCENT}; font: bold 13pt 'Consolas';")
-        left_lo.addWidget(self._canvas_label)
-
-        self._map = HyCalScanMapWidget(self.all_modules)
-        self._map.moduleClicked.connect(self._onCanvasClick)
-        left_lo.addWidget(self._map, stretch=1)
-
-        # reset button overlaid at bottom-right corner, outside the map drawing area
-        self._btn_reset_view = QPushButton("Reset", self._map)
-        self._btn_reset_view.setFixedSize(56, 28)
-        self._btn_reset_view.setStyleSheet(
-            f"QPushButton{{background:rgba(22,27,34,220);color:{C.DIM};"
-            f"border:1px solid #30363d;border-radius:2px;padding:0;"
-            f"font:12pt Consolas;}}"
-            f"QPushButton:hover{{color:{C.TEXT};border-color:{C.ACCENT};}}")
-        self._btn_reset_view.clicked.connect(self._map.resetView)
-        self._map.installEventFilter(self)
-
-        # legend row
-        leg = QHBoxLayout()
-        leg.setSpacing(4); leg.setContentsMargins(0, 0, 0, 0)
-        for label, colour in [("Todo", C.MOD_TODO), ("Skipped", C.MOD_SKIPPED),
-                               ("Moving", C.MOD_CURRENT), ("Dwell", C.MOD_DWELL),
-                               ("Done", C.MOD_DONE), ("Error", C.MOD_ERROR),
-                               ("Start", C.MOD_SELECTED), ("PbGlass", C.MOD_GLASS)]:
-            sw = QLabel(); sw.setFixedSize(10, 10)
-            sw.setStyleSheet(f"background: {colour}; border: none;")
-            leg.addWidget(sw)
-            ll = QLabel(label); ll.setStyleSheet(f"color: {C.DIM}; font: 12pt 'Consolas';")
-            leg.addWidget(ll)
-        leg.addStretch()
-        left_lo.addLayout(leg)
-
-        # scaler controls row
-        sc_row = QHBoxLayout()
-        sc_row.setSpacing(4); sc_row.setContentsMargins(0, 2, 0, 0)
-
-        self._btn_scaler_toggle = QPushButton("Scalers: ON")
-        self._btn_scaler_toggle.setStyleSheet(self._scaler_btn_ss(True))
-        self._btn_scaler_toggle.setFixedHeight(28)
-        self._btn_scaler_toggle.clicked.connect(self._toggleScaler)
-        sc_row.addWidget(self._btn_scaler_toggle)
-
-        self._btn_scaler_auto = QPushButton("Auto")
-        self._btn_scaler_auto.setFixedHeight(28)
-        self._btn_scaler_auto.clicked.connect(self._toggleScalerAuto)
-        self._scaler_auto_on = True
-        self._updateScalerAutoBtn()
-        sc_row.addWidget(self._btn_scaler_auto)
-
-        self._scaler_min_edit = QLineEdit("0")
-        self._scaler_min_edit.setFixedWidth(50); self._scaler_min_edit.setFixedHeight(28)
-        self._scaler_min_edit.setFont(QFont("Consolas", 8))
-        self._scaler_min_edit.setStyleSheet(
-            "QLineEdit{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:2px;padding:1px 4px;}")
-        self._scaler_min_edit.returnPressed.connect(self._applyScalerRange)
-        sc_row.addWidget(self._scaler_min_edit)
-
-        sc_row.addWidget(QLabel("-"))
-
-        self._scaler_max_edit = QLineEdit("1000")
-        self._scaler_max_edit.setFixedWidth(50); self._scaler_max_edit.setFixedHeight(28)
-        self._scaler_max_edit.setFont(QFont("Consolas", 8))
-        self._scaler_max_edit.setStyleSheet(self._scaler_min_edit.styleSheet())
-        self._scaler_max_edit.returnPressed.connect(self._applyScalerRange)
-        sc_row.addWidget(self._scaler_max_edit)
-
-        btn_apply = QPushButton("Apply"); btn_apply.setFixedHeight(28)
-        btn_apply.clicked.connect(self._applyScalerRange)
-        sc_row.addWidget(btn_apply)
-
-        self._btn_scaler_log = QPushButton("Log: OFF"); self._btn_scaler_log.setFixedHeight(28)
-        self._btn_scaler_log.setStyleSheet(self._small_btn_ss(C.DIM))
-        self._btn_scaler_log.clicked.connect(self._toggleScalerLog)
-        sc_row.addWidget(self._btn_scaler_log)
-
-        self._btn_palette = QPushButton(); self._btn_palette.setFixedSize(90, 28)
-        self._btn_palette.setToolTip("Click to cycle colour palette")
-        self._btn_palette.clicked.connect(self._cycleScalerPalette)
-        self._updatePaletteBtn()
-        sc_row.addWidget(self._btn_palette)
-
-        sc_row.addStretch()
-        left_lo.addLayout(sc_row)
-
-        body_splitter.addWidget(left)
-
-        # --- RIGHT half: controls (top 2/3) + log (bottom 1/3) ---
+    def _buildRightPane(self):
+        # controls (top) + event log (bottom)
         right_splitter = QSplitter(Qt.Orientation.Vertical)
 
-        # top area: two columns — left: scan/direct/position, right: motor status
+        # top area: two columns — left: scan/direct control, right: status
         ctrl_columns = QWidget()
         ctrl_cols_lo = QHBoxLayout(ctrl_columns)
         ctrl_cols_lo.setContentsMargins(0, 0, 0, 0)
         ctrl_cols_lo.setSpacing(4)
 
-        # left column: scan control + direct control + position check
+        # left column: scan control + direct control
         left_col_scroll = QScrollArea()
         left_col_scroll.setWidgetResizable(True)
         left_col_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -423,7 +184,7 @@ class SnakeScanWindow(QMainWindow):
         left_col_scroll.setWidget(left_col_widget)
         ctrl_cols_lo.addWidget(left_col_scroll, stretch=1)
 
-        # right column: position check + motor status
+        # right column: position check + motor status + scalers
         right_col_scroll = QScrollArea()
         right_col_scroll.setWidgetResizable(True)
         right_col_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -439,119 +200,11 @@ class SnakeScanWindow(QMainWindow):
         ctrl_cols_lo.addWidget(right_col_scroll, stretch=1)
 
         right_splitter.addWidget(ctrl_columns)
-
-        # event log
-        log_group = QGroupBox("Event Log")
-        log_layout = QVBoxLayout(log_group)
-        log_layout.setContentsMargins(4, 4, 4, 4)
-        self._log_text = QTextEdit()
-        self._log_text.setReadOnly(True)
-        log_layout.addWidget(self._log_text)
-        right_splitter.addWidget(log_group)
+        right_splitter.addWidget(self._buildLogGroup())
 
         right_splitter.setStretchFactor(0, 3)  # controls
         right_splitter.setStretchFactor(1, 2)  # log
-
-        body_splitter.addWidget(right_splitter)
-        body_splitter.setStretchFactor(0, 1)  # left half
-        body_splitter.setStretchFactor(1, 1)  # right half
-
-        root.addWidget(body_splitter, stretch=1)
-        self._updateCanvasLabel()
-
-    # -- scaler control helpers ----------------------------------------------
-
-    @staticmethod
-    def _scaler_btn_ss(on):
-        fg = C.GREEN if on else C.RED
-        return (f"QPushButton{{background:#21262d;color:{fg};"
-                f"border:1px solid #30363d;padding:1px 8px;"
-                f"font:bold 12pt Consolas;border-radius:2px;}}"
-                f"QPushButton:hover{{background:#30363d;}}")
-
-    @staticmethod
-    def _small_btn_ss(fg):
-        return (f"QPushButton{{background:#21262d;color:{fg};"
-                f"border:1px solid #30363d;padding:1px 8px;"
-                f"font:bold 12pt Consolas;border-radius:2px;}}"
-                f"QPushButton:hover{{background:#30363d;}}")
-
-    def _toggleScaler(self):
-        on = not self._map._scaler_enabled
-        self._map.setScalerEnabled(on)
-        self._btn_scaler_toggle.setText("Scalers: ON" if on else "Scalers: OFF")
-        self._btn_scaler_toggle.setStyleSheet(self._scaler_btn_ss(on))
-
-    def _toggleScalerAuto(self):
-        self._scaler_auto_on = not self._scaler_auto_on
-        self._map.setScalerAutoRange(self._scaler_auto_on)
-        self._updateScalerAutoBtn()
-        if self._scaler_auto_on:
-            vmin, vmax = self._map.scalerRange()
-            self._scaler_min_edit.setText(f"{vmin:.0f}")
-            self._scaler_max_edit.setText(f"{vmax:.0f}")
-
-    def _updateScalerAutoBtn(self):
-        if self._scaler_auto_on:
-            self._btn_scaler_auto.setStyleSheet(
-                "QPushButton{background:#d29922;color:#0d1117;"
-                "border:1px solid #d29922;padding:1px 8px;"
-                "font:bold 12pt Consolas;border-radius:2px;}"
-                "QPushButton:hover{background:#e0a82b;}")
-        else:
-            self._btn_scaler_auto.setStyleSheet(self._small_btn_ss(C.YELLOW))
-
-    def _applyScalerRange(self):
-        try:
-            vmin = float(self._scaler_min_edit.text())
-            vmax = float(self._scaler_max_edit.text())
-            if vmin < vmax:
-                self._map.setScalerRange(vmin, vmax)
-                self._scaler_auto_on = False
-                self._map.setScalerAutoRange(False)
-                self._updateScalerAutoBtn()
-        except ValueError:
-            pass
-
-    def _toggleScalerLog(self):
-        on = not self._map._scaler_log
-        self._map.setScalerLogScale(on)
-        self._btn_scaler_log.setText("Log: ON" if on else "Log: OFF")
-        self._btn_scaler_log.setStyleSheet(
-            self._small_btn_ss(C.ACCENT if on else C.DIM))
-
-    def _cycleScalerPalette(self):
-        self._map.cyclePalette()
-        self._updatePaletteBtn()
-
-    def _updatePaletteBtn(self):
-        """Set the palette button background to a CSS linear-gradient of the current palette."""
-        idx = self._map._palette_idx
-        stops = list(PALETTES.values())[idx]
-        css_stops = ", ".join(
-            f"rgb({r},{g},{b}) {int(t * 100)}%" for t, (r, g, b) in stops)
-        self._btn_palette.setStyleSheet(
-            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,{self._palette_grad_stops(stops)});"
-            f"border:1px solid #30363d;border-radius:2px;color:#c9d1d9;"
-            f"font:bold 11pt Consolas;padding:0 4px;}}"
-            f"QPushButton:hover{{border-color:#58a6ff;}}")
-        self._btn_palette.setText(PALETTE_NAMES[idx])
-
-    @staticmethod
-    def _palette_grad_stops(stops):
-        parts = []
-        for t, (r, g, b) in stops:
-            parts.append(f"stop:{t:.2f} rgb({r},{g},{b})")
-        return ",".join(parts)
-
-    def _pollScalers(self):
-        vals = self.scaler_ep.get_all()
-        if vals:
-            self._map.setScalerValues(vals)
-            if self._scaler_auto_on:
-                vmin, vmax = self._map.scalerRange()
-                self._scaler_min_edit.setText(f"{vmin:.0f}")
-                self._scaler_max_edit.setText(f"{vmax:.0f}")
+        return right_splitter
 
     # -- Scan Control --------------------------------------------------------
 
@@ -561,12 +214,12 @@ class SnakeScanWindow(QMainWindow):
 
         r = QHBoxLayout(); r.addWidget(QLabel("Path:"))
         self._profile_combo = QComboBox()
-        self._profile_combo.addItems([self.NONE, self.AUTOGEN] + sorted(self._profiles.keys()))
-        self._profile_combo.setCurrentText(self.NONE)
+        self._profile_combo.addItems([PROFILE_NONE, PROFILE_AUTOGEN] + sorted(self._profiles.keys()))
+        self._profile_combo.setCurrentText(PROFILE_NONE)
         self._profile_combo.activated.connect(self._onPathProfileChanged)
         r.addWidget(self._profile_combo, stretch=1); lo.addLayout(r)
 
-        r = QHBoxLayout(); r.addWidget(QLabel("LG layers (0-2):"))
+        r = QHBoxLayout(); r.addWidget(QLabel(f"LG layers (0-{MAX_LG_LAYERS}):"))
         self._lg_spin = QSpinBox(); self._lg_spin.setRange(0, MAX_LG_LAYERS)
         self._lg_spin.valueChanged.connect(self._onLgLayersChanged)
         r.addWidget(self._lg_spin); lo.addLayout(r)
@@ -678,13 +331,6 @@ class SnakeScanWindow(QMainWindow):
             lo.addLayout(g)
         parent.addWidget(ms)
 
-    def _buildPositionCheck(self, parent):
-        labels = build_position_check_panel(parent)
-        self._lbl_expected = labels["target"]
-        self._lbl_actual = labels["actual"]
-        self._lbl_error = labels["diff"]
-        self._lbl_drift = labels["drift"]
-
     def _buildScalerControl(self, parent):
         sc = QGroupBox("Scalers"); lo = QVBoxLayout(sc)
 
@@ -727,17 +373,6 @@ class SnakeScanWindow(QMainWindow):
 
     # -- canvas helpers ------------------------------------------------------
 
-    def _updateCanvasLabel(self):
-        n_pwo4 = sum(1 for m in self.scan_modules if m.mod_type == "PbWO4")
-        n_lg = sum(1 for m in self.scan_modules if m.mod_type == "PbGlass")
-        base = f"Scan Path: {n_pwo4} PbWO4 + {n_lg} LG" if n_lg else f"Scan Path: {n_pwo4} PbWO4"
-        if not self.scan_modules:
-            base = "Scan Path: none"
-        elif self.engine.path and 0 <= self._selected_start_idx < len(self.engine.path):
-            start_name = self.engine.path[self._selected_start_idx].name
-            base += f"  start: {start_name}"
-        self._canvas_label.setText(f" {base} ")
-
     def _updateCanvas(self):
         if self.observer:
             colors = {}
@@ -747,10 +382,7 @@ class SnakeScanWindow(QMainWindow):
                 elif m.mod_type == "PbWO4": colors[m.name] = C.MOD_PWO4_BG
             for m in self.scan_modules:
                 colors[m.name] = C.MOD_TODO
-            self._map.setModuleColors(colors)
-            rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
-            self._map.setMarkerPosition(*ptrans_to_module(rx, ry))
-            self._map.update(); return
+            self._refreshMap(colors); return
 
         eng = self.engine
         running = eng.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
@@ -780,105 +412,21 @@ class SnakeScanWindow(QMainWindow):
             elif idle and i == self._selected_start_idx: colors[mod.name] = C.MOD_SELECTED
             elif i < si or i >= ei: colors[mod.name] = C.MOD_SKIPPED
             else: colors[mod.name] = C.MOD_TODO
-        self._map.setModuleColors(colors)
-        if idle:
-            self._drawPathPreview(); self._map.setDashPreview([])
-        elif running:
-            self._map.setPathPreview([])
-            self._map.setDashPreview([self._map.modCenter(eng.path[i]) for i in range(eng.current_idx + 1, ei)])
-        rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
-        self._map.setMarkerPosition(*ptrans_to_module(rx, ry))
-        self._map.update()
+        self._refreshMap(colors, None if idle else eng.path[eng.current_idx + 1:ei])
 
-    def _drawPathPreview(self):
-        path = self.engine.path
-        s = self._selected_start_idx
-        if s >= len(path): self._map.setPathPreview([]); return
-        c = self._count_spin.value()
-        e = min(s + c, len(path)) if c > 0 else len(path)
-        self._map.setPathPreview([self._map.modCenter(path[i]) for i in range(s, e)])
-
-    def _onCanvasClick(self, name):
-        if self._selected_mod_name == name:
-            self._selected_mod_name = None; self._map.setHighlight(None)
-            self._updateCanvasLabel(); return
-        self._selected_mod_name = name
-        if name in self._scan_name_to_idx:
-            self._selected_start_idx = self._scan_name_to_idx[name]
-            idx = self._start_combo.findText(name)
-            if idx >= 0: self._start_combo.setCurrentIndex(idx)
-            self._drawPathPreview()
-        self._map.setHighlight(name); self._updateCanvasLabel()
-
+    def _onModuleClicked(self, name):
         idle = self.engine.state in (ScanState.IDLE, ScanState.COMPLETED)
         if idle and not self.observer:
             mod = self._mod_by_name.get(name)
             if mod:
                 if self._mod_dlg is None:
-                    self._mod_dlg = ModuleInfoDialog(self.ep, self._log, parent=self)
-                sv = self._map._scaler_values.get(mod.name)
+                    self._mod_dlg = ModuleInfoDialog(parent=self)
+                sv = self._map._values.get(mod.name)
                 self._mod_dlg.setModule(mod, sv)
                 self._mod_dlg.show()
                 self._mod_dlg.raise_()
 
     # -- commands ------------------------------------------------------------
-
-    def _onStartSelected(self, _):
-        name = self._start_combo.currentText()
-        for i, m in enumerate(self.engine.path):
-            if m.name == name:
-                self._selected_start_idx = i
-                self._drawPathPreview()
-                self._updateCanvasLabel()
-                break
-
-    def _onPathProfileChanged(self, _):
-        name = self._profile_combo.currentText()
-        if name == self._active_profile: return
-        self._active_profile = name
-        if name == self.AUTOGEN:
-            self._lg_spin.setEnabled(True); self._onLgLayersChanged(force=True); return
-        self._lg_spin.setEnabled(False)
-        if name == self.NONE:
-            self._setPath([])
-            self._log("Path: none (direct control only)")
-            return
-        mod_by_name = {m.name: m for m in self.all_modules}
-        path_mods = [mod_by_name[n] for n in self._profiles.get(name, []) if n in mod_by_name]
-        if not path_mods:
-            self._log(f"Profile '{name}' empty", level="error"); return
-        self._setPath(path_mods)
-        self._log(f"Path profile: {name} ({len(path_mods)} modules)")
-
-    def _onLgLayersChanged(self, value=0, force=False):
-        if self._active_profile != self.AUTOGEN: return
-        nl = self._lg_spin.value()
-        if nl == self._lg_layers and not force: return
-        self._lg_layers = nl
-        mods = filter_scan_modules(self.all_modules, nl, self._lg_sx, self._lg_sy)
-        # generate the snake path once at autogen — from now on the order is fixed
-        path, n_unopt = build_scan_path(mods)
-        if n_unopt:
-            self._log(f"WARNING: {n_unopt} modules with unoptimized path", level="warn")
-        self._setPath(path)
-        np_ = sum(1 for m in path if m.mod_type == "PbWO4")
-        ng = sum(1 for m in path if m.mod_type == "PbGlass")
-        self._log(f"LG layers: {nl} ({np_} PbWO4 + {ng} PbGlass = {len(path)})")
-
-    def _setPath(self, path):
-        """Set the scan path. ``path`` is the final ordered list of modules."""
-        self.scan_modules = path
-        self._scan_names = {m.name for m in path}
-        self.engine = ScanEngine(self.ep, path, self._log)
-        self._scan_name_to_idx = {m.name: i for i, m in enumerate(path)}
-        self._selected_start_idx = 0
-        ns = [m.name for m in path]
-        self._start_combo.clear(); self._start_combo.addItems(ns)
-        self._count_spin.setMaximum(len(ns)); self._count_spin.setValue(0)
-        if not path:
-            self._map.setPathPreview([]); self._map.setDashPreview([])
-            self._map.setHighlight(None); self._selected_mod_name = None
-        self._updateCanvasLabel()
 
     def _cmdStart(self):
         self._onStartSelected(0)
@@ -910,47 +458,15 @@ class SnakeScanWindow(QMainWindow):
     def _cmdSkip(self):      self.engine.skip_module()
     def _cmdAckError(self):  self.engine.acknowledge_error()
 
-    def _setTarget(self, px, py, name=""):
-        self._target_px = px
-        self._target_py = py
-        self._target_name = name
-
     def _cmdMoveToModule(self):
         self._onStartSelected(0)
-        if not self.engine.path: return
-        mod = self.engine.path[self._selected_start_idx]
-        px, py = module_to_ptrans(mod.x, mod.y)
-        self._log(f"Direct move to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-        if epics_move_to(self.ep, px, py):
-            self._setTarget(px, py, mod.name)
-        else:
-            self._log(f"BLOCKED: outside limits", level="error")
+        if not self.scan_modules: return
+        self._moveToModule(self.scan_modules[self._selected_start_idx])
 
     def _cmdResetCenter(self):
         self._log(f"Resetting to beam centre ptrans({BEAM_CENTER_X}, {BEAM_CENTER_Y})")
         if epics_move_to(self.ep, BEAM_CENTER_X, BEAM_CENTER_Y):
             self._setTarget(BEAM_CENTER_X, BEAM_CENTER_Y, "Beam Center")
-
-    # -- event filter (reposition overlay button on map resize) ---------------
-
-    def eventFilter(self, obj, event):
-        if obj is self._map and event.type() == event.Type.Resize:
-            btn = self._btn_reset_view
-            btn.move(self._map.width() - btn.width() - 2,
-                     self._map.height() - btn.height() - 2)
-        return super().eventFilter(obj, event)
-
-    # -- logging -------------------------------------------------------------
-
-    def _log(self, msg, level="info"):
-        line = format_log_line(msg, level)
-        self._log_lines.append(line)
-        if self._log_file and not self._log_file.closed:
-            self._log_file.write(line + "\n"); self._log_file.flush()
-        self._logSignal.emit(line, level)
-
-    def _appendLog(self, line, level):
-        append_log_line(self._log_text, line, level)
 
     # -- polling (5 Hz) ------------------------------------------------------
 
@@ -971,33 +487,6 @@ class SnakeScanWindow(QMainWindow):
         self._updateButtons()
         self._updateBeamDisplay()
         self._checkEncoder()
-
-    def _updateBeamDisplay(self):
-        bc = self.ep.get("beam_cur", None)
-        if bc is None:
-            self._lbl_beam_val.setText("-- nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.DIM}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
-            self._lbl_beam_status.setText("")
-            return
-        thresh = self._beam_thresh_spin.value()
-        tripped = self.engine.beam_tripped
-        if tripped:
-            self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.RED}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
-            self._lbl_beam_status.setText("TRIP")
-            self._lbl_beam_status.setStyleSheet(f"color: {C.RED}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
-        elif thresh > 0 and bc < thresh:
-            self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.YELLOW}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
-            self._lbl_beam_status.setText("LOW")
-            self._lbl_beam_status.setStyleSheet(f"color: {C.YELLOW}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
-        else:
-            self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.GREEN}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
-            self._lbl_beam_status.setText("")
-
-    def _checkEncoder(self):
-        self._encoder_checker.update(self.ep, self._log, self._lbl_drift)
 
     def _updateStatus(self):
         for key, lbl in self._status_labels.items():
@@ -1031,37 +520,11 @@ class SnakeScanWindow(QMainWindow):
             sl.setStyleSheet(f"color: {fg}; font: bold 12pt 'Consolas'; "
                              f"background: {bg}; border: 1px solid #30363d; "
                              f"border-radius: 3px; padding: 1px 6px;")
-        # position check — target is set when a move is commanded
-        rx, ry = self.ep.get("x_rbv", 0.0), self.ep.get("y_rbv", 0.0)
-        self._lbl_actual.setText(f"Actual: ({rx:.3f}, {ry:.3f})")
-        px, py = self._target_px, self._target_py
-        if px is not None and py is not None:
-            err = math.sqrt((rx - px)**2 + (ry - py)**2)
-            name_html = f' <b style="color:{C.ACCENT}">{self._target_name}</b>' if self._target_name else ""
-            self._lbl_expected.setText(f"Target:   ({px:.3f}, {py:.3f}){name_html}")
-            # ETA from distance and motor velocities
-            vx = self.ep.get("x_velo", DEFAULT_VELO_X) or DEFAULT_VELO_X
-            vy = self.ep.get("y_velo", DEFAULT_VELO_Y) or DEFAULT_VELO_Y
-            dx, dy = abs(rx - px), abs(ry - py)
-            eta_sec = max(dx / vx if vx > 0 else 0, dy / vy if vy > 0 else 0)
-            if eta_sec >= 60:
-                eta_str = f" ({int(eta_sec)//60}m {int(eta_sec)%60}s)"
-            elif eta_sec >= 1:
-                eta_str = f" ({eta_sec:.0f}s)"
-            else:
-                eta_str = ""
-            scanning = self.engine.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
-            if scanning:
-                ef = C.RED if err > self.engine.pos_threshold else C.GREEN
-                self._lbl_error.setText(f"Diff:   {err:.3f} mm{eta_str}")
-                self._lbl_error.setStyleSheet(f"color: {ef}; font: bold 13pt 'Consolas';")
-            else:
-                self._lbl_error.setText(f"Diff:   {err:.3f} mm{eta_str}")
-                self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
-        else:
-            self._lbl_expected.setText("Target: --")
-            self._lbl_error.setText("Diff:   --")
-            self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
+
+        running = self.engine.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
+        update_position_check(self._pos_labels, self.ep,
+                              self._target_px, self._target_py, self._target_name,
+                              scanning=running, pos_threshold=self.engine.pos_threshold)
 
     def _updateScanInfo(self):
         eng = self.engine
@@ -1111,7 +574,7 @@ class SnakeScanWindow(QMainWindow):
         self._start_combo.setEnabled(not running and has_path)
         self._count_spin.setEnabled(not running and has_path)
         self._profile_combo.setEnabled(not running)
-        self._lg_spin.setEnabled(not running and self._active_profile == self.AUTOGEN)
+        self._lg_spin.setEnabled(not running and self._active_profile == PROFILE_AUTOGEN)
         # dwell/thresholds are only applied at scan start, so lock them while running
         self._dwell_spin.setEnabled(not running)
         self._thresh_spin.setEnabled(not running)
@@ -1119,51 +582,9 @@ class SnakeScanWindow(QMainWindow):
         self._btn_move.setEnabled(not running and has_path)
         self._btn_reset.setEnabled(not running)
 
-    def closeEvent(self, e):
-        self._timer.stop()
-        self._scaler_timer.stop()
-        if self._log_file and not self._log_file.closed:
-            self._log_file.close()
-        self._log_file = None
-        super().closeEvent(e)
-
-
-# ============================================================================
-#  MAIN
-# ============================================================================
-
 
 def main():
-    parser = argparse.ArgumentParser(description="HyCal Snake Scan")
-    parser.add_argument("--expert", action="store_true")
-    parser.add_argument("--observer", action="store_true")
-    parser.add_argument("--database", default=DEFAULT_DB_PATH)
-    parser.add_argument("--paths", default=PATHS_FILE)
-    args = parser.parse_args()
-
-    all_modules = load_modules(args.database)
-    by_type: Dict[str, int] = {}
-    for m in all_modules:
-        by_type[m.mod_type] = by_type.get(m.mod_type, 0) + 1
-    print(f"Loaded {len(all_modules)} modules from {args.database}")
-    for t, n in sorted(by_type.items()):
-        print(f"  {t}: {n}")
-
-    profiles = load_profiles(args.paths)
-    if profiles:
-        print(f"Loaded {len(profiles)} path profiles")
-
-    observer = args.observer
-    simulation = not args.expert and not observer
-
-    motor_ep = setup_motor_epics(observer, simulation)
-    scaler_ep = setup_scaler_epics(simulation, all_modules)
-
-    app = QApplication(sys.argv)
-    win = SnakeScanWindow(motor_ep, scaler_ep, simulation, all_modules,
-                          profiles, observer=observer)
-    win.show()
-    sys.exit(app.exec())
+    run_scan_gui(SnakeScanWindow)
 
 
 if __name__ == "__main__":

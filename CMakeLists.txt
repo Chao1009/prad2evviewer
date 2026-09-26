@@ -1,23 +1,20 @@
 cmake_minimum_required(VERSION 3.14)
 project(prad2evviewer VERSION 1.0.0 LANGUAGES CXX)
 
-# ---------------------------------------------------------------------------
 # Layout
 #   cmake/           helper modules (PradHelpers, WebDeps)
 #   prad2dec/        evio/ET decoder library
 #   prad2det/        HyCal + GEM reconstruction
 #   python/          prad2py pybind11 module          (BUILD_PYTHON)
-#   analysis/        ROOT replay tools + data-source  (BUILD_ANALYSIS)
+#   analysis/        ROOT replay + analysis tools     (BUILD_ANALYSIS)
 #   test/            command-line dump/diagnostic exes
+#   gem/             gem_dump + Python GEM tools
 #   src/             web server + Qt GUI applications (BUILD_GUI)
-# ---------------------------------------------------------------------------
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 include(PradHelpers)        # prad_option, prad_optional_probe, add_prad_tool
 
-# ---------------------------------------------------------------------------
 # Global compile settings
-# ---------------------------------------------------------------------------
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -31,9 +28,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# ---------------------------------------------------------------------------
 # Compile-time paths (auto-discovered, overridable)
-# ---------------------------------------------------------------------------
 if(NOT DEFINED DATABASE_DIR)
     set(DATABASE_DIR "${CMAKE_SOURCE_DIR}/database")
 endif()
@@ -44,35 +39,25 @@ if(NOT DEFINED RESOURCE_DIR)
 endif()
 get_filename_component(RESOURCE_DIR "${RESOURCE_DIR}" ABSOLUTE)
 
-# ---------------------------------------------------------------------------
 # Install-dir conventions — pulled up here so every add_subdirectory()
 # below can use CMAKE_INSTALL_BINDIR / CMAKE_INSTALL_DATADIR / _LIBDIR in
 # its own install() calls.
-# ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 
-# ---------------------------------------------------------------------------
 # HTTP/WebSocket dependencies (json, websocketpp, asio — all header-only).
 # Loaded *before* the core libraries so prad2dec / prad2det can pull
 # nlohmann_json into their own targets (e.g. PulseTemplateStore.cpp).
-# ---------------------------------------------------------------------------
 include(WebDeps)
 
-# ---------------------------------------------------------------------------
 # Core libraries (always built)
-# ---------------------------------------------------------------------------
 add_subdirectory(prad2dec)                    # libprad2dec.a + WITH_ET option
 add_subdirectory(prad2det)                    # libprad2det.a
 
-# ---------------------------------------------------------------------------
 # Diagnostic command-line tools
-# ---------------------------------------------------------------------------
 add_subdirectory(test)    # evio_dump, ped_calc + test/dev tools
 add_subdirectory(gem)     # gem_dump + Python GEM tools
 
-# ---------------------------------------------------------------------------
 # Optional feature: ROOT-based analysis tools + viewer data source
-# ---------------------------------------------------------------------------
 prad_option(BUILD_ANALYSIS ON
     "Build analysis tools and ROOT data-source (requires ROOT)")
 
@@ -83,14 +68,12 @@ if(BUILD_ANALYSIS)
 endif()
 if(BUILD_ANALYSIS)
     include(${ROOT_USE_FILE})
-    message(STATUS "ROOT: using ${ROOT_VERSION}")
+    message(STATUS "ROOT: using ${ROOT_VERSION} at ${ROOT_DIR}")
 endif()
 # prad2srv reads WITH_ROOT to switch root_data_source.cpp in/out.
 set(WITH_ROOT ${BUILD_ANALYSIS})
 
-# ---------------------------------------------------------------------------
 # Server library (linked by prad2_server)
-# ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
 # zlib for HTTP gzip on big JSON payloads (gem_apv ~1.3 MB/event).  Comes
 # pre-installed on most Linux distros and Windows toolchains.
@@ -118,26 +101,19 @@ if(WITH_ROOT)
     target_link_libraries(prad2srv PUBLIC ROOT::Core ROOT::Tree ROOT::RIO)
 endif()
 
-# ---------------------------------------------------------------------------
 # Unified HTTP server
-# ---------------------------------------------------------------------------
 add_executable(prad2_server src/prad2_server.cpp)
-target_compile_definitions(prad2_server PRIVATE
-    DATABASE_DIR="${DATABASE_DIR}" RESOURCE_DIR="${RESOURCE_DIR}")
+target_compile_definitions(prad2_server PRIVATE RESOURCE_DIR="${RESOURCE_DIR}")
 target_link_libraries(prad2_server PRIVATE prad2srv)
 set_target_properties(prad2_server PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-# ---------------------------------------------------------------------------
 # Analysis subdirectory (ROOT-dependent producers)
-# ---------------------------------------------------------------------------
 if(BUILD_ANALYSIS)
     add_subdirectory(analysis)
 endif()
 
-# ---------------------------------------------------------------------------
 # Optional feature: Python bindings (prad2py)
-# ---------------------------------------------------------------------------
 prad_option(BUILD_PYTHON ON "Build Python bindings (prad2py)")
 
 if(BUILD_PYTHON)
@@ -158,9 +134,7 @@ if(BUILD_PYTHON)
     add_subdirectory(python)
 endif()
 
-# ---------------------------------------------------------------------------
 # Optional feature: Qt GUI applications (prad2_client)
-# ---------------------------------------------------------------------------
 # The Python GUIs (hycal_event_viewer, gem_event_viewer) cover per-event
 # inspection; the remaining Qt-native binary is prad2_client, a thin
 # WebEngine wrapper for a remote prad2_server.
@@ -186,7 +160,6 @@ endif()
 if(BUILD_GUI)
     message(STATUS "Qt: using Qt${QT_VERSION_MAJOR}")
 
-    # Thin remote client.
     add_executable(prad2_client src/prad2_client.cpp)
     target_link_libraries(prad2_client PRIVATE
         Qt${QT_VERSION_MAJOR}::Widgets
@@ -195,9 +168,7 @@ if(BUILD_GUI)
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 endif()
 
-# ---------------------------------------------------------------------------
 # Install
-# ---------------------------------------------------------------------------
 install(TARGETS prad2_server evio_dump ped_calc
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(BUILD_GUI)
@@ -218,13 +189,11 @@ configure_file(${CMAKE_SOURCE_DIR}/scripts/shell/prad2_setup.csh.in
 install(FILES scripts/shell/prad2_setup.sh ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# ---------------------------------------------------------------------------
 # Install the scripts/ tree (non-GEM Python tools + auxiliary data files)
 # under share/prad2evviewer/scripts/.  GEM tools live in gem/ and get their
 # own install rule in gem/CMakeLists.txt.  Sibling imports still work
 # because each tool runs from inside its own directory, which Python puts
 # on sys.path.
-# ---------------------------------------------------------------------------
 install(DIRECTORY scripts/
     DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/scripts
     FILES_MATCHING
@@ -241,20 +210,18 @@ install(DIRECTORY scripts/
                                         #   installed explicitly via install(FILES …))
 )
 
-# ---------------------------------------------------------------------------
 # Generate + install thin bin/ wrappers for each user-facing Python tool so
 # they can be launched without needing a sourced prad2_setup.sh (the wrappers set
 # PRAD2_DATABASE_DIR / PRAD2_RESOURCE_DIR / PYTHONPATH on their own).
 #
 # The script path is relative to <prefix>/share/prad2evviewer/ — GEM tools
 # live directly under gem/, the rest under scripts/.
-# ---------------------------------------------------------------------------
 if(BUILD_PYTHON)
     set(_PRAD2_PY_WRAPPERS
-        # "wrapper_name:relative_script_path"
+        # "wrapper_name:relative_script_path[:fixed_leading_arg]"
         "gem_event_viewer:gem/gem_event_viewer.py"
-        "gem_cluster_view:gem/gem_cluster_view.py"
-        "gem_layout:gem/gem_layout.py"
+        "gem_cluster_view:gem/gem_event_viewer.py:--json"
+        "gem_layout:gem/gem_event_viewer.py:--layout"
         "tagger_viewer:scripts/tagger_viewer.py"
         "hycal_scaler_map:scripts/hycal_scaler_map.py"
         "hycal_pedestal_monitor:scripts/hycal_pedestal_monitor.py"
@@ -268,6 +235,11 @@ if(BUILD_PYTHON)
         string(REPLACE ":" ";" _parts "${_entry}")
         list(GET _parts 0 _name)
         list(GET _parts 1 PRAD2_WRAPPER_SCRIPT_REL)
+        set(PRAD2_WRAPPER_ARGS "")
+        list(LENGTH _parts _n)
+        if(_n GREATER 2)
+            list(GET _parts 2 PRAD2_WRAPPER_ARGS)
+        endif()
         configure_file(
             ${CMAKE_SOURCE_DIR}/cmake/prad2_py_wrapper.sh.in
             ${CMAKE_BINARY_DIR}/bin/${_name}
@@ -278,11 +250,10 @@ if(BUILD_PYTHON)
         )
     endforeach()
     unset(PRAD2_WRAPPER_SCRIPT_REL)
+    unset(PRAD2_WRAPPER_ARGS)
 endif()
 
-# ---------------------------------------------------------------------------
 # Summary
-# ---------------------------------------------------------------------------
 message(STATUS "----------------------------------------------------")
 message(STATUS "  ${PROJECT_NAME} ${PROJECT_VERSION}")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")

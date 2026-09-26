@@ -1,7 +1,5 @@
 // ts_dump — dump timestamp information from EVIO events for debugging
 //
-// Usage: ts_dump <input.evio> [-n max_events] [-D daq_config.json]
-//
 // Prints for each physics event:
 //   event#, trigger_bits (hex), TI timestamp (raw ticks), time (sec from first),
 //   unix_time (if available from sync/control events)
@@ -10,6 +8,7 @@
 #include "DaqConfig.h"
 #include "load_daq_config.h"
 #include "Fadc250Data.h"
+#include "InstallPaths.h"
 
 #include <iostream>
 #include <iomanip>
@@ -19,18 +18,16 @@
 
 using namespace evc;
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
+static void usage(const char *prog)
+{
+    std::cerr << "Usage: " << prog << " <input.evio> [-n max_events] [-D daq_config.json]\n";
+}
 
 int main(int argc, char *argv[])
 {
-    std::string input, daq_config_file;
+    std::string input;
+    std::string daq_config_file = prad2::database_dir() + "/daq_config.json";
     int max_events = 50;
-
-    std::string db_dir = DATABASE_DIR;
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
-    daq_config_file = db_dir + "/daq_config.json";
 
     int opt;
     while ((opt = getopt(argc, argv, "n:D:h")) != -1) {
@@ -38,15 +35,13 @@ int main(int argc, char *argv[])
         case 'n': max_events = std::atoi(optarg); break;
         case 'D': daq_config_file = optarg; break;
         default:
-            std::cerr << "Usage: " << argv[0]
-                      << " <input.evio> [-n max_events] [-D daq_config.json]\n";
+            usage(argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
     if (optind < argc) input = argv[optind];
     if (input.empty()) {
-        std::cerr << "Usage: " << argv[0]
-                  << " <input.evio> [-n max_events] [-D daq_config.json]\n";
+        usage(argv[0]);
         return 1;
     }
 
@@ -63,13 +58,10 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    static constexpr double TI_TICK_SEC = 4e-9;
-
     auto event = std::make_unique<fdec::EventData>();
     uint64_t first_ts = 0;
     uint32_t last_sync_unix = 0;
     int total = 0;
-    int buf = 0;
     int lms_count = 0;
 
     std::cout << std::left
@@ -83,12 +75,10 @@ int main(int argc, char *argv[])
               << std::string(72, '-') << "\n";
 
     while (ch.Read() == status::success) {
-        ++buf;
         if (!ch.Scan()) continue;
 
         auto evtype = ch.GetEventType();
 
-        // print control events (sync/prestart/go/end)
         if (evtype == EventType::Sync || evtype == EventType::Prestart ||
             evtype == EventType::Go || evtype == EventType::End) {
             uint32_t ct = ch.Sync().unix_time;
@@ -130,7 +120,7 @@ int main(int argc, char *argv[])
                 first_ts = event->info.timestamp;
 
             double dt = (first_ts != 0 && event->info.timestamp != 0)
-                ? static_cast<double>(event->info.timestamp - first_ts) * TI_TICK_SEC
+                ? static_cast<double>(event->info.timestamp - first_ts) * fdec::TI_TICK_SEC
                 : 0.0;
 
             bool is_lms = (event->info.trigger_bits & (1u << 24)) != 0; // LMS = bit 24 (database/trigger_bits.json)
@@ -158,9 +148,9 @@ done:
               << "Total physics events: " << total << "\n"
               << "LMS events: " << lms_count << "\n"
               << "First TI timestamp: " << first_ts << "\n"
-              << "TI tick: " << TI_TICK_SEC << " sec (250 MHz)\n";
+              << "TI tick: " << fdec::TI_TICK_SEC << " sec (250 MHz)\n";
     if (first_ts != 0 && total > 0) {
-        double total_time = static_cast<double>(event->info.timestamp - first_ts) * TI_TICK_SEC;
+        double total_time = static_cast<double>(event->info.timestamp - first_ts) * fdec::TI_TICK_SEC;
         std::cout << "Time span: " << std::fixed << std::setprecision(2)
                   << total_time << " sec\n";
     }

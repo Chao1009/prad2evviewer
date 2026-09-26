@@ -1,15 +1,12 @@
-// =========================================================================
 // File browser (lazy-loading)
-// =========================================================================
 
 function openFileDialog() {
-    const hdr = document.querySelector('.file-dialog-header span');
+    const hdr = document.querySelector('#file-dialog .file-dialog-header span');
     const list = document.getElementById('file-list');
     const filter = document.getElementById('file-filter');
-    const opts = document.querySelector('.file-dialog-options');
+    const opts = document.querySelector('#file-dialog .file-dialog-options');
 
-    document.getElementById('file-dialog').classList.add('open');
-    document.getElementById('file-backdrop').classList.add('open');
+    setDialogOpen('file', true);
 
     if (!g_dataDirEnabled) {
         hdr.textContent = 'Open EVIO File';
@@ -28,11 +25,6 @@ function openFileDialog() {
 
     fetchDirEntries('', list);
     filter.focus();
-}
-
-function closeFileDialog() {
-    document.getElementById('file-dialog').classList.remove('open');
-    document.getElementById('file-backdrop').classList.remove('open');
 }
 
 function fetchDirEntries(dir, container) {
@@ -75,7 +67,7 @@ function renderEntries(entries, container) {
             const row = document.createElement('div');
             row.className = 'file-item' + (isCurrent ? ' current' : '');
             row.innerHTML = `<span>${fname}</span><span class="fsize">${e.size_mb} MB</span>`;
-            row.onclick = () => { closeFileDialog(); loadNewFile(e.name); };
+            row.onclick = () => { setDialogOpen('file', false); loadNewFile(e.name); };
             container.appendChild(row);
         }
     }
@@ -84,7 +76,6 @@ function renderEntries(entries, container) {
 function filterFileList(text) {
     const filt = text.toLowerCase();
     const list = document.getElementById('file-list');
-    // Filter visible folder/file rows by name
     for (const el of list.querySelectorAll('.file-folder')) {
         const name = el.textContent.toLowerCase();
         const contents = el.nextElementSibling;
@@ -103,20 +94,17 @@ function filterFileList(text) {
 }
 
 let g_currentFile = '';
-let g_histCheckbox = false;
 let g_dataDirEnabled = false;
 let g_dataDir = '';
 
 function loadNewFile(relpath) {
-    g_histCheckbox = document.getElementById('hist-checkbox').checked;
+    const histParam = document.getElementById('hist-checkbox').checked ? '1' : '0';
     document.getElementById('status-bar').textContent = `Loading ${relpath}...`;
-    const histParam = g_histCheckbox ? '1' : '0';
     fetch(`/api/load?file=${encodeURIComponent(relpath)}&hist=${histParam}`).then(r => r.json()).then(data => {
         if (data.error) {
             document.getElementById('status-bar').textContent = data.error;
             return;
         }
-        // show progress overlay and start polling
         showProgress(relpath);
     });
 }
@@ -148,11 +136,10 @@ function pollProgress() {
 }
 
 function fetchOccupancy() {
-    fetch('/api/occupancy').then(r => r.json()).then(data => {
+    return fetch('/api/occupancy').then(r => r.json()).then(data => {
         occData = data.occ || {};
         occTcutData = data.occ_tcut || {};
         occTotal = data.total || 0;
-        // redraw if currently showing occupancy on DQ tab
         if (activeTab === 'dq' && document.getElementById('color-metric').value === 'occupancy') {
             syncDqRange();
             geoDq();

@@ -21,18 +21,14 @@ function setGeoRange(tab, metric, min, max){
 let rangeMin=null, rangeMax=null;
 let updateGeoTooltip=()=>{};  // set in init(), called on data refresh
 
-// Light theme flag — set by report.js captureGeoForTab for print-friendly rendering
-let geoLightTheme=false;
 function geoEmptyColor(type){ return THEME.noData; }
 function geoDimColor(){ return THEME.altBase; }
 function geoStrokeColor(){ return THEME.border; }
 
-// =========================================================================
-// Color scale — click the colorbar to cycle palettes
+// ── Color scale — click the colorbar to cycle palettes ────────────────
 // First two ("rainbow", "blue-yellow") match prad2hvmon's web monitor
 // palettes (resources/monitor_geo_view.js) so the two viewers share a
 // color language.  Cycling starts from "rainbow".
-// =========================================================================
 function _lerpHex(a,b,t){
     const ar=parseInt(a.slice(1,3),16),ag=parseInt(a.slice(3,5),16),ab=parseInt(a.slice(5,7),16);
     const br=parseInt(b.slice(1,3),16),bg=parseInt(b.slice(3,5),16),bb=parseInt(b.slice(5,7),16);
@@ -82,18 +78,20 @@ const PALETTES={
 const PALETTE_NAMES=Object.keys(PALETTES);
 let paletteIdx=0;
 function colorScale(t){ t=Math.max(0,Math.min(1,t)); return PALETTES[PALETTE_NAMES[paletteIdx]](t); }
+// colour-bar canvases of the DQ, cluster and LMS geo toolbars
+const COLORBAR_IDS=['colorbar-canvas','cl-colorbar-canvas','lms-colorbar-canvas'];
 function drawColorBar(){
-    const c=document.getElementById('colorbar-canvas'),x=c.getContext('2d');
-    for(let i=0;i<c.width;i++){x.fillStyle=colorScale(i/c.width);x.fillRect(i,0,1,c.height);}
-    c.title=PALETTE_NAMES[paletteIdx]+' (click to change)';
-    // also draw cluster colorbar
-    for(const cid of ['cl-colorbar-canvas','lms-colorbar-canvas']){
-        const c2=document.getElementById(cid);
-        if(c2){const x2=c2.getContext('2d');
-            for(let i=0;i<c2.width;i++){x2.fillStyle=colorScale(i/c2.width);x2.fillRect(i,0,1,c2.height);}
-            c2.title=PALETTE_NAMES[paletteIdx]+' (click to change)';
-        }
+    for(const id of COLORBAR_IDS){
+        const c=document.getElementById(id);
+        if(!c) continue;
+        const x=c.getContext('2d');
+        for(let i=0;i<c.width;i++){x.fillStyle=colorScale(i/c.width);x.fillRect(i,0,1,c.height);}
+        c.title=PALETTE_NAMES[paletteIdx]+' (click to change)';
     }
+}
+function cyclePalette(){
+    paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
+    drawColorBar(); redrawGeo();
 }
 
 // load DQ color range for current metric from overrides.
@@ -104,11 +102,6 @@ function syncDqRange(){
     updateRangeDisplay();
 }
 
-function updateTimeCutLabel(){
-    // Values are shown in the Cut-Settings dialog (cut_dialog.js).
-    // Kept as a no-op so call sites in config.js / mode-switch don't break.
-}
-
 function updateRangeDisplay(){
     const minEl=document.getElementById('range-min-show');
     const maxEl=document.getElementById('range-max-show');
@@ -116,9 +109,7 @@ function updateRangeDisplay(){
     maxEl.textContent=(rangeMax!==null)?rangeMax.toFixed(0):'auto';
 }
 
-// =========================================================================
-// Geo canvas
-// =========================================================================
+// ── Geo canvas ────────────────────────────────────────────────────────
 let geoViewInit=false;  // has fitView been called at least once?
 let geoDragging=false, geoDragStartX=0, geoDragStartY=0, geoDragX=0, geoDragY=0;
 let geoDragMoved=false;  // true if drag exceeded click threshold
@@ -236,25 +227,18 @@ function d2c(x,y){return[x*scale+offsetX,-y*scale+offsetY];}
 function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
 // Time cut on the geo color map follows the *show* checkbox (visual decision)
 // — separate from the server-side "apply" which gates histogram fill.
-function isTimeCut(){
-    const cb = document.getElementById('cut-show');
-    if (!cb || !cb.checked) return false;
-    const f = histConfig && histConfig.waveform_filter
-        && histConfig.waveform_filter.time;
-    return !!(f && (f.min != null || f.max != null));
-}
+function isTimeCut(){ return !!filterRange('time'); }
 
 // filter peaks by time cut if active
 function peaksInCut(peaks){
     if(!peaks||!peaks.length) return [];
-    if(!isTimeCut()) return peaks;
-    const f = histConfig.waveform_filter.time;
+    const f = filterRange('time');
+    if(!f) return peaks;
     const tmin = f.min != null ? f.min : -Infinity;
     const tmax = f.max != null ? f.max :  Infinity;
     return peaks.filter(p=>p.t>=tmin && p.t<=tmax);
 }
 
-// tallest peak from a list
 function tallest(peaks){
     if(!peaks||!peaks.length) return null;
     let best=peaks[0];
@@ -262,35 +246,24 @@ function tallest(peaks){
     return best;
 }
 
+// occupancy of channel `key` in % (time-cut counts while the time cut is
+// shown), or null before any events have been accumulated
+function occPct(key){
+    if(occTotal<=0) return null;
+    return 100.0*((isTimeCut()?occTcutData:occData)[key]||0)/occTotal;
+}
+
 function modVal(m){
     const key=`${m.roc}_${m.sl}_${m.ch}`;
     const mt=document.getElementById('color-metric').value;
-    if(mt==='occupancy'){
-        if(occTotal<=0) return null;
-        const src=isTimeCut()?occTcutData:occData;
-        return 100.0*(src[key]||0)/occTotal;
-    }
+    if(mt==='occupancy') return occPct(key);
     const d=eventChannels[key];
     if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
-    // 'integral' picks the peak with the largest integral.  Time window
-    // is honoured only when the show-cut checkbox is on AND the filter
-    // has a time range, so the color map matches what the user explicitly
-    // asked for (overlay off ⇒ show the full event).  The peaks coming
-    // from the analyzer are already gated by min_peak_height, so no
-    // separate threshold check is needed here.
+    // 'integral': largest in-window integral (analyzer peaks are already height-gated)
     if(mt==='integral'){
-        if(!d.pk||!d.pk.length) return null;
-        const useTcut = isTimeCut();
-        const f = useTcut ? histConfig.waveform_filter.time : null;
-        const tmin = (f && f.min != null) ? f.min : undefined;
-        const tmax = (f && f.max != null) ? f.max : undefined;
         let best=-1;
-        for(const p of d.pk){
-            if(tmin!==undefined && p.t<tmin) continue;
-            if(tmax!==undefined && p.t>tmax) continue;
-            if(p.i>best) best=p.i;
-        }
+        for(const p of peaksInCut(d.pk)) if(p.i>best) best=p.i;
         return best>=0?best:null;
     }
     const pks=peaksInCut(d.pk);
@@ -314,8 +287,7 @@ let _geoOutlineFn=null, _geoDecorateFn=null;  // stored for hover-only redraws
 function renderGeoFills(colorFn){
     if(!geoCtx)return;
     const ctx=geoCtx;
-    if(geoLightTheme){ctx.fillStyle=THEME.bg;ctx.fillRect(0,0,canvasW,canvasH);}
-    else ctx.clearRect(0,0,canvasW,canvasH);
+    ctx.clearRect(0,0,canvasW,canvasH);
     const focus=geoFocusPbWO4;
     for(let i=0;i<modules.length;i++){
         const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;

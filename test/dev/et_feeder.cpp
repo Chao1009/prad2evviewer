@@ -1,7 +1,7 @@
 // test/dev/et_feeder.cpp — Feed an evio file to an ET system event-by-event
 //
 // Pairs with evet_diff (which reads both the evio file and the ET ring
-// and diffs their raw buffers).
+// and prints their raw buffers side by side).
 //
 // Usage: et_feeder <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms] [-s start] [-n num]
 
@@ -61,7 +61,6 @@ int main(int argc, char* argv[])
     et_sys_id et_id;
     et_att_id att_id;
 
-    // open ET system
     et_wrap::OpenConfig conf;
     conf.set_cast(ET_DIRECT);
     conf.set_host(host.c_str());
@@ -76,21 +75,18 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    // attach to GRAND CENTRAL
     status = et_station_attach(et_id, ET_GRANDCENTRAL, &att_id);
     if (status != ET_OK) {
         std::cerr << "Failed to attach to the ET Grand Central Station.\n";
         return -1;
     }
 
-    // evio file reader
     evc::EvChannel chan;
     if (chan.OpenAuto(evio_file) != evc::status::success) {
         std::cerr << "Failed to open coda file \"" << evio_file << "\"\n";
         return -1;
     }
 
-    // install signal handler
     std::signal(SIGINT, signal_handler);
     int total = 0, fed = 0;
     et_event *ev;
@@ -101,10 +97,8 @@ int main(int argc, char* argv[])
         }
         ++total;
 
-        // skip to start event
         if (total < start_ev) continue;
 
-        // check max events
         if (max_events > 0 && fed >= max_events) break;
 
         system_clock::time_point t0(system_clock::now());

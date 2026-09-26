@@ -4,37 +4,27 @@
 //
 // The RunConfig struct, LoadRunConfig() and WriteRunConfig() live in
 // prad2det/include/RunInfoConfig.h so they can be reused by the viewer,
-// Python bindings and ROOT scripts. This header keeps:
+// Python bindings and ROOT scripts. This header adds:
 //   - the analysis-only gRunConfig global + backward-compat aliases
 //   - BuildLabTransforms() — bridge from RunConfig to DetectorTransform
-//   - TransformDetData(MollerData, ...) for explicit calibration shifts
+//   - ApplyToLab() / ApplyToLocal() / ApplyToHyCal() per-hit helpers
 //   - get_run_str() / get_run_int() filename parsers
 //
 // "Detector-frame → lab-frame" is owned by prad2det's DetectorTransform —
 // build the per-detector poses once via BuildLabTransforms(), then call
-// xform.toLab(x, y[, z]) per hit.  The earlier RotateDetData/TransformDetData
-// helpers duplicated that math and have been retired.
+// xform.toLab(x, y[, z]) per hit.
 //=============================================================================
 
 #include "DetectorTransform.h"
-#include "PhysicsTools.h"
+#include "EvioFiles.h"
 #include "RunInfoConfig.h"
 
-#include <algorithm>
 #include <array>
-#include <cctype>
-#include <cstdio>
-#include <filesystem>
 #include <iostream>
 #include <string>
-#include <vector>
 
 namespace analysis {
 
-namespace fs = std::filesystem;
-
-// Re-export the shared type so existing analysis code that says
-// `analysis::RunConfig` keeps compiling without source changes.
 using RunConfig = ::prad2::RunConfig;
 using ::prad2::LoadRunConfig;
 using ::prad2::WriteRunConfig;
@@ -78,8 +68,8 @@ inline void ApplyToLocal(const DetectorTransform &xform, Hit &h)
     xform.labToLocal(h.x, h.y, h.z, dx, dy, dz);
     h.x = dx; h.y = dy; h.z = dz;
 }
-// Transform a hit position to the HyCal coordinate system (translation only).
-// need to be projected to HyCal surface before calling this.
+// Transform a hit position to the HyCal coordinate system: a shift by
+// (target_x, target_y).  Project the hit to the HyCal surface first.
 template <typename Hit>
 inline void ApplyToHyCal(Hit &h, const RunConfig &geo = gRunConfig)
 {
@@ -88,44 +78,21 @@ inline void ApplyToHyCal(Hit &h, const RunConfig &geo = gRunConfig)
     h.y += dy;
 }
 
-
-// MollerData is a translation-only calibration shift — used by det_calib to
-// apply per-detector alignment offsets to fitted Moller pairs.  Not a
-// detector-frame transform, so it stays as plain arithmetic.
-inline void TransformDetData(MollerData &mollers, float detX, float detY, float ZfromTarget)
-{
-    for (auto &moller : mollers) {
-        moller.first.x  += detX;
-        moller.first.y  += detY;
-        moller.first.z  += ZfromTarget;
-        moller.second.x += detX;
-        moller.second.y += detY;
-        moller.second.z += ZfromTarget;
-    }
-}
-
 // --- run number utilities ---------------------------------------------------
-// Extract the run number embedded in a file name of the form
-// ".../prad_<digits>...". Returns "unknown" / -1 on failure.
-inline std::string get_run_str(const std::string &file_name)
-{
-    std::string fname = fs::path(file_name).filename().string();
-    auto ppos = fname.find("prad_");
-    if (ppos != std::string::npos) {
-        size_t s = ppos + 5;
-        size_t e = s;
-        while (e < fname.size() && std::isdigit((unsigned char)fname[e])) e++;
-        if (e > s) return std::to_string(std::stoul(fname.substr(s, e - s)));
-    }
-    std::cerr << "Warning: cannot extract run number from file name " << file_name << ", using 'unknown'.\n";
-    return "unknown";
-}
-
+// Run number embedded in a file name, as parsed by prad2::run_number_from_path
+// (".../prad_<digits>..." or "run_<digits>").  Returns "unknown" / -1 on failure.
 inline int get_run_int(const std::string &file_name)
 {
-    std::string run_str = get_run_str(file_name);
-    if (run_str == "unknown") return -1;
-    return std::stoi(run_str);
+    const int run = prad2::run_number_from_path(file_name);
+    if (run < 0)
+        std::cerr << "Warning: cannot extract run number from file name " << file_name << ", using 'unknown'.\n";
+    return run;
+}
+
+inline std::string get_run_str(const std::string &file_name)
+{
+    const int run = get_run_int(file_name);
+    return run < 0 ? "unknown" : std::to_string(run);
 }
 
 } // namespace analysis

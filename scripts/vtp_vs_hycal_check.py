@@ -31,12 +31,11 @@ T_BLKHDR, T_BLKTLR, T_EVTHDR, T_TRGTIME = 0x10, 0x11, 0x12, 0x13
 T_EC_PEAK, T_EC_CLUSTER = 0x14, 0x15
 T_TAG_EXP, T_TRIGGER, T_DNV, T_FILLER = 0x1C, 0x1D, 0x1E, 0x1F
 
-TYPE_NAMES = {
+# Defining-word record types tallied per ROC, in report column order.
+TALLY_TYPES = {
     T_BLKHDR: "BLKHDR", T_BLKTLR: "BLKTLR",
     T_EVTHDR: "EVTHDR", T_TRGTIME: "TRGTIME",
     T_EC_PEAK: "EC_PEAK", T_EC_CLUSTER: "EC_CLUSTER",
-    0x16: "HTCC", 0x17: "FT", 0x18: "FTOF", 0x19: "CTOF",
-    0x1A: "CND", 0x1B: "PCU",
     T_TAG_EXP: "TAG_EXP", T_TRIGGER: "TRIGGER",
     T_DNV: "DNV", T_FILLER: "FILLER",
 }
@@ -91,10 +90,10 @@ def decode_vtp_bank(words):
 
 # ---------- HyCal proxy energy from raw FADC samples ------------------------
 
-# Run 24555 uses FADC W_OFFSET = 2950 ns (one of the late TET overrides in the
-# config) with a soft window we'll fix here.  Without -p we have no firmware
-# pedestal — we estimate a per-channel pedestal from the first samples of each
-# waveform.
+# Raw replays made without -p carry no firmware pedestal, so the pedestal is
+# estimated per channel from the first samples of each waveform.  PULSE_LO/HI
+# are fixed for run 24555's FADC window (W_OFFSET = 2950 ns, one of the late
+# TET overrides in the config).
 PED_NSAMP = 4           # use first 4 samples for pedestal
 PULSE_LO, PULSE_HI = 10, 60   # sample range to integrate for a rough peak
 
@@ -211,17 +210,7 @@ def audit_files(file_patterns, max_events_per_file=None, hycal_for_events=20):
             if ev_has_ec:
                 n_events_with_ec += 1
                 if len(sample_records) < hycal_for_events:
-                    # Pull HyCal proxy for this event.
                     nch = getattr(t, "hycal.nch")
-                    try:
-                        import numpy as np
-                        samples = np.frombuffer(
-                            getattr(t, "hycal.samples"), dtype=np.uint16)
-                        # samples is flat (kMaxChannels*200) — but
-                        # we only use first nch*200
-                    except Exception:
-                        samples = None
-                    # Easier: just use ROOT array conversion via list.
                     sm = list(getattr(t, "hycal.samples"))
                     ns = list(getattr(t, "hycal.nsamples"))
                     mt = list(getattr(t, "hycal.module_type"))
@@ -256,16 +245,12 @@ def audit_files(file_patterns, max_events_per_file=None, hycal_for_events=20):
     print("Per-ROC record-type tally")
     print("-" * 78)
     header = f"{'ROC':>6}  {'events':>10}  " + "  ".join(
-        f"{n:>9}" for n in (
-            "BLKHDR", "BLKTLR", "EVTHDR", "TRGTIME",
-            "EC_PEAK", "EC_CLUSTER", "TAG_EXP", "TRIGGER", "DNV", "FILLER"))
+        f"{n:>9}" for n in TALLY_TYPES.values())
     print(header)
     for roc in sorted(roc_type_counts.keys()):
         ct = roc_type_counts[roc]
         row = [f"0x{roc:04x}", f"{roc_event_counts[roc]:>10,}"]
-        for tc in (T_BLKHDR, T_BLKTLR, T_EVTHDR, T_TRGTIME,
-                   T_EC_PEAK, T_EC_CLUSTER, T_TAG_EXP, T_TRIGGER,
-                   T_DNV, T_FILLER):
+        for tc in TALLY_TYPES:
             row.append(f"{ct.get(tc, 0):>9,}")
         print("  ".join(row))
     print()

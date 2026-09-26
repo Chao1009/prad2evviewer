@@ -2,187 +2,46 @@
 // the right (crate, slot, channel) for live-time extraction.
 //
 // For every 0xE115 bank found, walks up to its parent ROC bank to identify
-// which crate it belongs to, parses the per-slot 67-word DSC2 layout, and
+// which crate it belongs to, parses the per-slot DSC2 layout, and
 // reports per-channel gated/ungated counts and the implied live time.
 //
 // On a typical PRad-II run only a single DSC2 module is read out, but the
 // physics-trigger and reference-clock channels both offer a livetime.  This
 // tool prints both so the user can pick.
 //
-// Usage: dsc_scan <input> [-D daq_config.json] [-N n_events] [--all]
+// Accepts a single file, a base name (auto-discovers .00000, .00001, ...),
+// or a directory (processes all .evio* files sorted by name).
 
 #include "EvChannel.h"
 #include "DaqConfig.h"
 #include "load_daq_config.h"
+#include "Dsc2Decoder.h"
+#include "InstallPaths.h"
+#include "evio_inputs.h"
 
 #include <iostream>
 #include <iomanip>
 #include <string>
-#include <cstring>
 #include <cstdlib>
-#include <vector>
 #include <map>
-#include <algorithm>
 #include <getopt.h>
-
-#ifndef _WIN32
-#include <dirent.h>
-#include <sys/stat.h>
-#endif
 
 using namespace evc;
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
+// Layout in DscData.h, parsed by dsc::Dsc2Decoder::ParsePayload.
+static constexpr uint32_t DSC2_BANK_TAG = 0xE115;
 
-// ---- DSC2 layout ----------------------------------------------------------
-// In PRad-II run 024246, the 0xE115 bank is wrapped by a JLab-style
-// SSP/VTP block: 3 prefix words (BLKHDR, EVTHDR, TRGTIME-like), then the
-// 67-word DSC2 scaler payload (no 0xDCA00000 header word — that appears to
-// be replaced by the BLKHDR), then 2 trailer words (FILLER, BLKTLR).
-//
-// 67-word DSC2 payload, per slot:
-//   [0]      placeholder/header (was 0xDCA00000|(slot<<8)|rflag)
-//   [1..16]  TRG  Grp1 (gated/busy)  — 16 channels
-//   [17..32] TDC  Grp1 (gated/busy)  — 16 channels
-//   [33..48] TRG  Grp2 (ungated)     — 16 channels
-//   [49..64] TDC  Grp2 (ungated)     — 16 channels
-//   [65]     Ref  Grp1 (gated/busy)  — 125 MHz clock
-//   [66]     Ref  Grp2 (ungated)     — 125 MHz clock
-//
-// We accept either layout (with or without the 3-word prefix) by trying
-// offsets 0 and 3, picking whichever places the ref words at sensible
-// values (ref_ungated > ref_gated, both non-zero).
-static constexpr uint32_t DSC2_BANK_TAG    = 0xE115;
-static constexpr int      DSC2_NCH         = 16;
-static constexpr double   DSC2_REF_FREQ    = 125.0e6;
-static constexpr int      DSC2_PAYLOAD_W   = 67;
-
-struct Dsc2Slot {
-    uint32_t slot{0};
-    uint32_t trg_gated[DSC2_NCH]{};
-    uint32_t tdc_gated[DSC2_NCH]{};
-    uint32_t trg_ungated[DSC2_NCH]{};
-    uint32_t tdc_ungated[DSC2_NCH]{};
-    uint32_t ref_gated{0};
-    uint32_t ref_ungated{0};
-    int      offset{0};   // payload offset inside the bank
-};
-
-static bool fill_slot_at(const uint32_t *data, size_t nwords, size_t off, Dsc2Slot &s)
+static void usage(const char *prog)
 {
-    if (off + DSC2_PAYLOAD_W > nwords) return false;
-    const uint32_t *p = &data[off + 1];           // skip the [0] header word
-    std::memcpy(s.trg_gated,   p,      DSC2_NCH * 4);
-    std::memcpy(s.tdc_gated,   p + 16, DSC2_NCH * 4);
-    std::memcpy(s.trg_ungated, p + 32, DSC2_NCH * 4);
-    std::memcpy(s.tdc_ungated, p + 48, DSC2_NCH * 4);
-    s.ref_gated   = p[64];
-    s.ref_ungated = p[65];
-    s.offset      = (int)off;
-
-    // Plausibility: ref_ungated must be non-zero and ≥ ref_gated.
-    return s.ref_ungated > 0 && s.ref_ungated >= s.ref_gated;
+    std::cerr << "Usage: " << prog << " <input> [-D daq_config.json] [-N max_events] [--all]\n";
 }
-
-static std::vector<Dsc2Slot> parse_dsc2(const uint32_t *data, size_t nwords)
-{
-    std::vector<Dsc2Slot> out;
-
-    // Probe candidate offsets (header layouts).  The DSC2-firmware "rflag=0xFF"
-    // legacy form puts a 0xDCA0 magic at offset 0; the "rflag=1" form (used in
-    // PRad-II run 024246) wraps the payload in a JLab-style block: BLKHDR,
-    // EVTHDR, TRGTIME, then payload[0]=placeholder, payload[1..16]=TRG_g, ...
-    // i.e. the payload's "header" word lands at bank index 2.
-    static const size_t kProbeOffsets[] = {0, 2, 3, 5};
-
-    Dsc2Slot s{};
-    for (size_t off : kProbeOffsets) {
-        if (off + DSC2_PAYLOAD_W > nwords) continue;
-        uint32_t hdr = data[off];
-        if ((hdr & 0xFFFF0000u) == 0xDCA00000u) {
-            // legacy DSC2 magic header
-            if (!fill_slot_at(data, nwords, off, s)) continue;
-            s.slot = (hdr >> 8) & 0xFF;
-            out.push_back(s);
-            return out;
-        }
-        if (off >= 1 && nwords >= 1 && (data[0] >> 27) == 0x10) {
-            // JLab BLKHDR-wrapped form — slot is in BLKHDR bits 26:22.
-            if (!fill_slot_at(data, nwords, off, s)) continue;
-            s.slot = (data[0] >> 22) & 0x1F;
-            out.push_back(s);
-            return out;
-        }
-    }
-    return out;
-}
-
-// ---- file discovery (same as livetime.cpp) ---------------------------------
-
-static bool is_regular_file(const std::string &p)
-{ struct stat st; return stat(p.c_str(), &st) == 0 && S_ISREG(st.st_mode); }
-static bool is_directory(const std::string &p)
-{ struct stat st; return stat(p.c_str(), &st) == 0 && S_ISDIR(st.st_mode); }
-
-static std::vector<std::string> list_dir(const std::string &dir)
-{
-    std::vector<std::string> e;
-    DIR *d = opendir(dir.c_str()); if (!d) return e;
-    while (auto *en = readdir(d)) {
-        if (en->d_name[0] == '.') continue;
-        std::string f = dir + "/" + en->d_name;
-        if (is_regular_file(f)) e.push_back(f);
-    }
-    closedir(d);
-    return e;
-}
-
-static std::vector<std::string> discover(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (is_regular_file(path)) {
-        auto dot = path.rfind('.');
-        if (dot != std::string::npos) {
-            std::string suf = path.substr(dot + 1);
-            bool split = !suf.empty() && suf.find_first_not_of("0123456789") == std::string::npos;
-            if (split) {
-                std::string base = path.substr(0, dot);
-                auto sl = base.rfind('/');
-                std::string dir = sl != std::string::npos ? base.substr(0, sl) : ".";
-                std::string bn  = sl != std::string::npos ? base.substr(sl + 1) : base;
-                for (auto &f : list_dir(dir)) {
-                    auto fsl = f.rfind('/');
-                    std::string fn = fsl != std::string::npos ? f.substr(fsl + 1) : f;
-                    if (fn.size() > bn.size() && fn.substr(0, bn.size() + 1) == bn + ".")
-                        files.push_back(f);
-                }
-                std::sort(files.begin(), files.end());
-                if (!files.empty()) return files;
-            }
-        }
-        files.push_back(path); return files;
-    }
-    if (is_directory(path)) {
-        for (auto &f : list_dir(path))
-            if (f.find(".evio") != std::string::npos) files.push_back(f);
-        std::sort(files.begin(), files.end());
-    }
-    return files;
-}
-
-// ---- main ------------------------------------------------------------------
 
 int main(int argc, char *argv[])
 {
-    std::string input, dcfg;
+    std::string input;
+    std::string dcfg = prad2::database_dir() + "/daq_config.json";
     int n_events_max = 0;          // 0 = unlimited
     bool dump_all = false;         // print every DSC2 sighting (not just first/last)
-
-    std::string db = DATABASE_DIR;
-    if (auto *e = std::getenv("PRAD2_DATABASE_DIR")) db = e;
-    dcfg = db + "/daq_config.json";
 
     static struct option lopts[] = {
         {"all", no_argument, nullptr, 'a'},
@@ -195,14 +54,13 @@ int main(int argc, char *argv[])
         case 'N': n_events_max = std::atoi(optarg); break;
         case 'a': dump_all = true; break;
         default:
-            std::cerr << "Usage: " << argv[0]
-                      << " <input> [-D daq_config.json] [-N max_events] [--all]\n";
+            usage(argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
     if (optind < argc) input = argv[optind];
     if (input.empty()) {
-        std::cerr << "Usage: " << argv[0] << " <input> [-D daq_config.json] [-N max_events] [--all]\n";
+        usage(argv[0]);
         return 1;
     }
 
@@ -217,7 +75,7 @@ int main(int argc, char *argv[])
     std::map<uint32_t, int> roc_crate;
     for (auto &r : cfg.roc_tags) { roc_name[r.tag] = r.name; roc_crate[r.tag] = r.crate; }
 
-    auto files = discover(input);
+    auto files = devtools::discover_evio_inputs(input);
     if (files.empty()) {
         std::cerr << "No EVIO files found for: " << input << "\n";
         return 1;
@@ -228,14 +86,14 @@ int main(int argc, char *argv[])
     EvChannel ch;
     ch.SetConfig(cfg);
 
-    // Per (parent_tag, slot) keep the most-recent Dsc2Slot we saw and a count
+    // Per (parent_tag, slot) keep the most-recent snapshot we saw and a count
     // of how many SYNC/Physics events carried it.
-    struct Latest { Dsc2Slot last{}; uint64_t hits{0}; uint32_t event_tag{0}; };
+    struct Latest { dsc::DscEventData last{}; uint64_t hits{0}; uint32_t event_tag{0}; };
     std::map<std::pair<uint32_t,int>, Latest> seen;
 
     // For the very first sighting we also remember the values, to compute
     // delta = last - first → trigger live time over the whole scanned span.
-    std::map<std::pair<uint32_t,int>, Dsc2Slot> first_seen;
+    std::map<std::pair<uint32_t,int>, dsc::DscEventData> first_seen;
 
     uint64_t scanned = 0, with_dsc = 0;
     uint64_t sync_count = 0;
@@ -267,38 +125,41 @@ int main(int argc, char *argv[])
                 if (node.parent >= 0 && node.parent < (int)nodes.size())
                     parent_tag = nodes[node.parent].tag;
 
-                auto slots = parse_dsc2(ch.GetData(node), node.data_words);
-                if (slots.empty() && with_dsc <= 2) {
-                    const uint32_t *p = ch.GetData(node);
-                    std::cerr << "DEBUG ev#" << scanned
-                              << " parent=0x" << std::hex << std::setw(4)
-                              << std::setfill('0') << parent_tag
-                              << "  bank=0x" << std::setw(4) << node.tag
-                              << "  words=" << std::dec << std::setfill(' ')
-                              << node.data_words << " — could not parse, first 8w:";
-                    for (size_t i = 0; i < node.data_words && i < 8; ++i)
-                        std::cerr << " 0x" << std::hex << std::setw(8)
-                                  << std::setfill('0') << p[i];
-                    std::cerr << std::dec << std::setfill(' ') << "\n";
-                }
-                for (auto &s : slots) {
-                    auto key = std::make_pair(parent_tag, (int)s.slot);
-                    auto &L  = seen[key];
-                    L.last = s;
-                    L.hits++;
-                    L.event_tag = ch.GetEvHeader().tag;
-                    if (first_seen.find(key) == first_seen.end())
-                        first_seen[key] = s;
-                    if (dump_all) {
-                        std::cout << "ev#" << scanned
-                                  << "  parent=0x" << std::hex << std::setw(4)
+                dsc::DscEventData s;
+                // Probe the decoder's layouts plus offsets 3 and 5 to catch shifted wrappers.
+                if (!dsc::Dsc2Decoder::ParsePayload(ch.GetData(node), node.data_words, s,
+                                                    {0, 2, 3, 5})) {
+                    if (with_dsc <= 2) {
+                        const uint32_t *p = ch.GetData(node);
+                        std::cerr << "DEBUG ev#" << scanned
+                                  << " parent=0x" << std::hex << std::setw(4)
                                   << std::setfill('0') << parent_tag
-                                  << std::setfill(' ') << std::dec
-                                  << "  slot=" << s.slot
-                                  << "  ref_g=" << s.ref_gated
-                                  << "  ref_u=" << s.ref_ungated
-                                  << "\n";
+                                  << "  bank=0x" << std::setw(4) << node.tag
+                                  << "  words=" << std::dec << std::setfill(' ')
+                                  << node.data_words << " — could not parse, first 8w:";
+                        for (size_t i = 0; i < node.data_words && i < 8; ++i)
+                            std::cerr << " 0x" << std::hex << std::setw(8)
+                                      << std::setfill('0') << p[i];
+                        std::cerr << std::dec << std::setfill(' ') << "\n";
                     }
+                    continue;
+                }
+                auto key = std::make_pair(parent_tag, s.slot);
+                auto &L  = seen[key];
+                L.last = s;
+                L.hits++;
+                L.event_tag = ch.GetEvHeader().tag;
+                if (first_seen.find(key) == first_seen.end())
+                    first_seen[key] = s;
+                if (dump_all) {
+                    std::cout << "ev#" << scanned
+                              << "  parent=0x" << std::hex << std::setw(4)
+                              << std::setfill('0') << parent_tag
+                              << std::setfill(' ') << std::dec
+                              << "  slot=" << s.slot
+                              << "  ref_g=" << s.ref_gated
+                              << "  ref_u=" << s.ref_ungated
+                              << "\n";
                 }
             }
 
@@ -330,8 +191,8 @@ int main(int argc, char *argv[])
         auto rn = roc_name.find(parent);
         auto rc = roc_crate.find(parent);
 
-        const Dsc2Slot &s  = L.last;
-        const Dsc2Slot &s0 = first_seen[key];
+        const dsc::DscEventData &s  = L.last;
+        const dsc::DscEventData &s0 = first_seen[key];
 
         std::cout << "\n--- DSC2 module @ ROC tag 0x" << std::hex << std::setw(4)
                   << std::setfill('0') << parent << std::setfill(' ') << std::dec
@@ -340,7 +201,7 @@ int main(int argc, char *argv[])
         if (rc != roc_crate.end()) std::cout << "  crate=" << rc->second;
         std::cout << "  hits=" << L.hits << "\n";
 
-        // cumulative (since first sighting in scan) ratio
+        // cumulative (since GO) and scan-span (last - first sighting) ratios
         uint64_t dref_g = (uint64_t)s.ref_gated   - (uint64_t)s0.ref_gated;
         uint64_t dref_u = (uint64_t)s.ref_ungated - (uint64_t)s0.ref_ungated;
         double  rg_u    = (s.ref_ungated > 0) ? (double)s.ref_gated / (double)s.ref_ungated : -1;
@@ -359,14 +220,14 @@ int main(int argc, char *argv[])
                                const uint32_t *gated, const uint32_t *ungated,
                                const uint32_t *gated0, const uint32_t *ungated0) {
             bool any = false;
-            for (int c = 0; c < DSC2_NCH; ++c)
+            for (int c = 0; c < dsc::DSC2_NCH; ++c)
                 if (ungated[c] != 0) { any = true; break; }
             if (!any) return;
 
             std::cout << "\n  " << label << " channel scaler counts (cumulative since run start):\n"
                       << "   ch  |  gated         ungated         g/u(%)    1-g/u(%) | "
                       << "scan: dg          du              g/u(%)    1-g/u(%)\n";
-            for (int c = 0; c < DSC2_NCH; ++c) {
+            for (int c = 0; c < dsc::DSC2_NCH; ++c) {
                 if (ungated[c] == 0) continue;
                 double r_c  = (double)gated[c] / (double)ungated[c];
                 uint64_t dg = (uint64_t)gated[c]   - (uint64_t)gated0[c];
@@ -389,18 +250,15 @@ int main(int argc, char *argv[])
         print_table("TDC", s.tdc_gated, s.tdc_ungated, s0.tdc_gated, s0.tdc_ungated);
     }
 
-    // Recommendation
     std::cout << "\n=== Recommendation ===\n"
         << "  • The DSC2 scaler bank lives at parent ROC tag 0x0027 (TI master) — fixed for this DAQ.\n"
         << "  • The slot value comes from the JLab BLKHDR (bits 26:22) printed above; record it as is.\n"
         << "  • Live-time convention: in PRad-II run 024246 the (gated, ungated) ratios are ~0.99,\n"
         << "    which means gated counts LIVE time (gate enabled while NOT busy).  Use the\n"
-        << "    formula  live = gated/ungated, NOT 1 - gated/ungated.  If you keep the existing\n"
-        << "    livetime.cpp 1-g/u formula, the reported live time will be the dead-time fraction.\n"
+        << "    formula  live = gated/ungated, NOT 1 - gated/ungated.\n"
         << "  • For per-trigger live time, pick a TRG channel whose ungated count matches the\n"
         << "    expected trigger rate (column 'du' / scan duration).  Channel 2 looks active here.\n"
         << "  • Update database/daq_config.json:\n"
-        << "      \"dsc_scaler\": { \"bank_tag\": \"0xE115\", \"slot\": <slot>, \"source\": \"ref|trg|tdc\", \"channel\": <c> }\n"
-        << "    and verify that AppState::processDscBank uses the live-time convention you want.\n";
+        << "      \"dsc_scaler\": { \"bank_tag\": \"0xE115\", \"slot\": <slot>, \"source\": \"ref|trg|tdc\", \"channel\": <c> }\n";
     return 0;
 }

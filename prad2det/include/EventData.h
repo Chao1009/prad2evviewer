@@ -8,11 +8,10 @@
 //   - analysis tools (reader: ROOT → physics analysis)
 //
 // These structs define the branch layout of ROOT TTrees produced by
-// replay_rawdata ("events" tree) and replay_recon ("recon" tree).
-// Changing a struct here automatically updates all readers and writers.
+// replay_rawdata ("events" tree) and replay_recon ("recon" tree); the
+// TTree branch setup lives in EventData_io.h.
 //
 // NOTE: No ROOT headers needed — uses standard C++ types only.
-//       TTree branch setup uses these as plain arrays.
 //=============================================================================
 
 #include "Fadc250Data.h"   // MAX_SAMPLES, MAX_PEAKS, MAX_ROCS, MAX_SLOTS
@@ -21,6 +20,7 @@
 #include "VtpData.h"       // vtp::MAX_PRAD_CLUSTERS
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -43,6 +43,22 @@ static constexpr int kMaxClusters  = 100;
 static constexpr int kMaxGemHits   = 400;
 static constexpr int kMaxGemClusters = 400;   // 1D GEM clusters, all detectors + planes
 
+namespace detail {
+// Zero rows [0, n) of a per-channel array.
+template <typename T, std::size_t N>
+inline void zero_head(T (&a)[N], int n)
+{
+    std::fill(a, a + std::clamp(n, 0, static_cast<int>(N)), T{});
+}
+template <typename T, std::size_t N, std::size_t M>
+inline void zero_head(T (&a)[N][M], int n)
+{
+    std::fill(&a[0][0], &a[0][0] + std::clamp(n, 0, static_cast<int>(N)) * M, T{});
+}
+template <typename... A>
+inline void zero_rows(int n, A &...arrays) { (zero_head(arrays, n), ...); }
+} // namespace detail
+
 // ── Front-panel trigger bits ───────────────────────────────────────────────
 //
 // Single source of truth for the FP trigger-bit masks carried in the
@@ -54,7 +70,7 @@ static constexpr uint32_t TBIT_1cl   = (1u << 9);    // ssp1, 1-cluster trigger
 static constexpr uint32_t TBIT_2cl   = (1u << 10);   // ssp1, 2-cluster trigger
 static constexpr uint32_t TBIT_3cl   = (1u << 11);   // ssp1, 3-cluster trigger
 static constexpr uint32_t TBIT_lms   = (1u << 24);   // LMS light-monitoring
-static constexpr uint32_t TBIT_alpha = (1u << 25);   // alpha / pulser
+static constexpr uint32_t TBIT_alpha = (1u << 25);   // alpha source
 
 // ── Module type categorisation ────────────────────────────────────────────
 //
@@ -89,6 +105,9 @@ enum ModuleType : uint8_t {
 //   MOD_PbWO4   : 1001..2156   (HyCal W-module IDs + 1000; 1152 modules, sparse)
 //   MOD_VETO    : 3001..3004   (V1..V4)
 //   MOD_LMS     : 3100..3103   (LMSPin=3100, LMS1..3 = 3101..3103)
+static constexpr int kVetoIdBase = 3000;   // V<n>   -> kVetoIdBase + n
+static constexpr int kLmsIdBase  = 3100;   // LMSPin -> kLmsIdBase, LMS<n> -> kLmsIdBase + n
+
 struct RawEventData {
     int      event_num    = 0;
     uint8_t  trigger_type = 0;   // main trigger (from event tag: tag - 0x80)
@@ -168,10 +187,9 @@ struct RawEventData {
     //   vtp_words       — concatenated payload, bank i occupies
     //                     vtp_words[off..off+vtp_nwords[i]) where off =
     //                     Σ vtp_nwords[0..i-1].
-    // Stored raw so future record-type additions (PRAD_CLUSTER — TAG_EXP
-    // 0x1CC, decoded by prad2dec/src/VtpDecoder.cpp — or the still-
-    // unspecified PRad TRIGGER 0x1D bit fields) can be re-decoded offline
-    // without rerunning the replay.
+    // Stored raw so record types (PRAD_CLUSTER — TAG_EXP 0x1CC, decoded by
+    // prad2dec/src/VtpDecoder.cpp — or the still-unspecified PRad TRIGGER
+    // 0x1D bit fields) can be re-decoded offline without rerunning the replay.
     std::vector<uint32_t> vtp_roc_tags;
     std::vector<uint32_t> vtp_nwords;
     std::vector<uint32_t> vtp_words;
@@ -190,6 +208,36 @@ struct RawEventData {
     std::vector<uint32_t> tdc_roc_tags;
     std::vector<uint32_t> tdc_nwords;
     std::vector<uint32_t> tdc_words;
+
+    // Per-event reset for writers.  Only rows [0, nch) are ever filled, so
+    // zeroing those rows keeps every peak slot past npeaks / daq_npeaks at 0.
+    void clear()
+    {
+        event_num    = 0;
+        trigger_type = 0;
+        trigger_bits = 0;
+        timestamp    = 0;
+        detail::zero_rows(nch, npeaks, peak_height, peak_time, peak_integral, peak_quality,
+                          daq_npeaks, daq_peak_vp, daq_peak_integral, daq_peak_time,
+                          daq_peak_cross, daq_peak_pos, daq_peak_coarse, daq_peak_fine,
+                          daq_peak_quality);
+        nch     = 0;
+        gem_nch = 0;
+        clear_banks();
+    }
+
+    // Empty the bank-word vectors; readers call it before GetEntry so input
+    // files without these branches read them as empty.
+    void clear_banks()
+    {
+        ssp_raw.clear();
+        vtp_roc_tags.clear();
+        vtp_nwords.clear();
+        vtp_words.clear();
+        tdc_roc_tags.clear();
+        tdc_nwords.clear();
+        tdc_words.clear();
+    }
 };
 
 // ── Reconstructed replay ("recon" tree) ──────────────────────────────────
@@ -224,7 +272,7 @@ struct ReconEventData {
     std::vector<float>    match_gem_x;
     std::vector<float>    match_gem_y;
     std::vector<float>    match_gem_z;
-    int      matchNum = 0; // number of clusters with matches (for quick access, can be derived from matchFlag)
+    int      matchNum = 0; // entries in mHit_*: clusters with >=2 GEMs matched (one per GEM pair)
     //for quick simple access to each matched hit on HC and GEM planes
     // HC_Energy, HC_x/y/z, GEM_x/y/z (in mm, beam center and target center coordinate)
     float    mHit_E[kMaxClusters] = {};
@@ -304,12 +352,9 @@ struct ReconEventData {
     std::vector<uint32_t> ssp_raw;
 
     // Raw 0xE122 VTP bank words — same flat triple-of-vectors layout as
-    // RawEventData above (bank i occupies vtp_words[off..off+vtp_nwords[i])
-    // where off = Σ vtp_nwords[0..i-1]).  Carried on the recon tree so the
-    // PRAD_CLUSTER (TAG_EXP 0x1CC — trigger-level cluster, see
-    // prad2dec/include/VtpData.h) and still-unspecified TRIGGER (0x1D)
-    // payloads can be studied against reconstructed quantities without a
-    // co-replayed raw file.  Cheap: PRad-II VTP banks are 3–7 words per ROC.
+    // RawEventData above.  Carried on the recon tree so the VTP payloads
+    // can be studied against reconstructed quantities without a co-replayed
+    // raw file.  Cheap: PRad-II VTP banks are 3–7 words per ROC.
     std::vector<uint32_t> vtp_roc_tags;
     std::vector<uint32_t> vtp_nwords;
     std::vector<uint32_t> vtp_words;
@@ -339,6 +384,53 @@ struct ReconEventData {
     // database/hycal_rf_offsets/*.json have already been applied and the
     // result re-folded.  NaN when rf_n_a == 0 for this event.
     float cl_dt_rf[kMaxClusters] = {};
+
+    // Per-event reset.  Readers call it before binding too, so files that
+    // lack the correction / RF branches read the same defaults a writer uses.
+    void clear()
+    {
+        event_num    = 0;
+        trigger_type = 0;
+        trigger_bits = 0;
+        timestamp    = 0;
+        total_energy = 0.f;
+        n_clusters   = 0;
+        n_gem_hits   = 0;
+        n_gem_cl     = 0;
+        matchNum     = 0;
+        std::fill(std::begin(matchFlag), std::end(matchFlag), 0);
+        clear_match_lists();
+        ssp_raw.clear();
+        vtp_roc_tags.clear();
+        vtp_nwords.clear();
+        vtp_words.clear();
+
+        veto_nch = 0;
+        lms_nch  = 0;
+        std::fill(std::begin(veto_npeaks), std::end(veto_npeaks), 0);
+        std::fill(std::begin(lms_npeaks), std::end(lms_npeaks), 0);
+        for (auto *a : {veto_peak_time, veto_peak_height, veto_peak_integral,
+                        lms_peak_time, lms_peak_height, lms_peak_integral})
+            std::fill(&a[0][0], &a[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
+
+        vtp_cl_n = 0;
+        std::fill(std::begin(vtp_cl_time), std::end(vtp_cl_time), 0);
+        std::fill(std::begin(vtp_cl_energy), std::end(vtp_cl_energy), 0);
+        std::fill(std::begin(vtp_cl_center), std::end(vtp_cl_center), 0);
+        std::fill(std::begin(vtp_cl_blocks), std::end(vtp_cl_blocks), 0);
+
+        // Corrections default to 1 (not applied) and cl_dt_rf to NaN, so
+        // "no RF / filtered before clustering" is distinguishable from
+        // "dt = 0 ns" without a separate sentinel branch.
+        rf_n_a = 0;
+        rf_n_b = 0;
+        std::fill(std::begin(rf_ns_a), std::end(rf_ns_a), 0.f);
+        std::fill(std::begin(rf_ns_b), std::end(rf_ns_b), 0.f);
+        std::fill(std::begin(cl_linear_corr), std::end(cl_linear_corr), 1.f);
+        std::fill(std::begin(cl_bias_corr), std::end(cl_bias_corr), 1.f);
+        std::fill(std::begin(cl_dt_rf), std::end(cl_dt_rf),
+                  std::numeric_limits<float>::quiet_NaN());
+    }
 
     // NaN-fill every GEM quality float array (per-hit QA + per-cluster
     // block).  Readers call it before binding so files that predate these
@@ -486,6 +578,18 @@ struct LMSEventData {
     float   peak_height[kMaxChannels][fdec::MAX_PEAKS]   = {};
     float   peak_time[kMaxChannels][fdec::MAX_PEAKS]     = {};
     float   peak_integral[kMaxChannels][fdec::MAX_PEAKS] = {};
+
+    // Per-event reset; same row-limited zeroing as RawEventData::clear().
+    void clear()
+    {
+        event_num    = 0;
+        trigger_type = 0;
+        trigger_bits = 0;
+        timestamp    = 0;
+        event_type   = 0;
+        detail::zero_rows(nch, npeaks, peak_height, peak_time, peak_integral);
+        nch = 0;
+    }
 };
 
 } // namespace prad2

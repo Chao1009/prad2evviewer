@@ -7,12 +7,8 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-
-# ============================================================================
-#  CONSTANTS
-# ============================================================================
 
 # Transporter coordinates when the beam hits HyCal centre (0, 0)
 BEAM_CENTER_X: float = -126.75   # mm
@@ -30,11 +26,14 @@ PTRANS_Y_MAX = 2 * BEAM_CENTER_Y - _LIMIT_RB_Y
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                "..", "database", "hycal_map.json")
 
+# Named scan-path profiles: {"name": ["W1", "W2", ...], ...}
+PATHS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paths.json")
 
-# ============================================================================
-#  COLOUR PALETTE (dark control-room theme)
-# ============================================================================
+# Module types the transporter scans and the FADC scalers read
+SCANNABLE_TYPES = ("PbWO4", "PbGlass")
 
+
+# Colour palette (dark control-room theme)
 class C:
     BG       = "#0d1117"
     PANEL    = "#161b22"
@@ -62,10 +61,6 @@ class C:
     MOD_SKIPPED   = "#15181d"
     PATH_LINE     = "#ffffff"
 
-
-# ============================================================================
-#  MODULE DATA
-# ============================================================================
 
 @dataclass
 class Module:
@@ -98,9 +93,13 @@ def load_modules(json_path: str = DEFAULT_DB_PATH) -> List[Module]:
     return modules
 
 
-# ============================================================================
-#  COORDINATE TRANSFORMS
-# ============================================================================
+def load_profiles(path: str = PATHS_FILE) -> Dict[str, List[str]]:
+    """Load the path profiles JSON, returning ``{}`` if missing."""
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
 
 def module_to_ptrans(mx: float, my: float) -> Tuple[float, float]:
     """HyCal-frame module centre --> transporter set-point."""
@@ -118,14 +117,14 @@ def ptrans_in_limits(x: float, y: float) -> bool:
             PTRANS_Y_MIN <= y <= PTRANS_Y_MAX)
 
 
-# ============================================================================
-#  LG LAYER FILTER
-# ============================================================================
-
 def filter_scan_modules(all_modules: List[Module], lg_layers: int,
-                        lg_sx: float = 38.15, lg_sy: float = 38.15
-                        ) -> List[Module]:
-    """All PbWO4 + PbGlass within lg_layers of PbWO4 bounding box."""
+                        lg_sx: Optional[float] = None,
+                        lg_sy: Optional[float] = None) -> List[Module]:
+    """All PbWO4 + PbGlass within lg_layers of PbWO4 bounding box.
+
+    The layer size defaults to the size of the first PbGlass module in
+    ``all_modules`` (38.15 mm if there is none).
+    """
     pwo4 = [m for m in all_modules if m.mod_type == "PbWO4"]
     if not pwo4:
         return list(all_modules)
@@ -135,6 +134,11 @@ def filter_scan_modules(all_modules: List[Module], lg_layers: int,
     max_y = max(m.y for m in pwo4)
     scan = list(pwo4)
     if lg_layers > 0:
+        glass = [m for m in all_modules if m.mod_type == "PbGlass"]
+        if lg_sx is None:
+            lg_sx = glass[0].sx if glass else 38.15
+        if lg_sy is None:
+            lg_sy = glass[0].sy if glass else 38.15
         mx = lg_layers * lg_sx
         my = lg_layers * lg_sy
         for m in all_modules:
@@ -145,10 +149,7 @@ def filter_scan_modules(all_modules: List[Module], lg_layers: int,
     return scan
 
 
-# ============================================================================
-#  DARK QSS THEME (PyQt6 calibration tools)
-# ============================================================================
-
+# Dark QSS theme for the PyQt6 calibration tools
 DARK_QSS = """
 QMainWindow, QWidget { background: #0d1117; color: #c9d1d9; }
 QLabel { color: #c9d1d9; font: 13pt 'Consolas'; }

@@ -1,11 +1,11 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
-#include "MatchingTools.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -13,20 +13,11 @@
 #include <TH1F.h>
 #include <TH2F.h>
 #include <TH2Poly.h>
-#include <TF1.h>
-#include <TF2.h>
 #include <TGraphErrors.h>
-#include <TKey.h>
-#include <TLatex.h>
 #include <TString.h>
-#include <TSystem.h>
 #include <TCanvas.h>
 #include <TLegend.h>
 #include <TPad.h>
-#include <TROOT.h>
-#include <TStyle.h>
-#include <TClass.h>
-#include <TLorentzVector.h>
 
 #include <iostream>
 #include <array>
@@ -34,30 +25,16 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <algorithm>
-#include <atomic>
-#include <cstdio>
-#include <future>
-#include <map>
 #include <memory>
-#include <mutex>
 #include <limits>
-#include <thread>
 #include <getopt.h>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
-namespace fs = std::filesystem;
 
-// Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
 
-//anagles bin edges
+// scattering-angle bin edges (deg)
 const int Nbins = 33;
 const Double_t binEdge[Nbins+1] = {
     0.500, 0.550, 0.600, 0.650, 0.700, 0.750, 0.775, 0.800, 0.825, 0.850,
@@ -80,6 +57,7 @@ struct HistResult {
     std::vector<std::unique_ptr<TH1F>> h1_Erecon_theta_center;
     std::vector<std::unique_ptr<TH1F>> h1_Erecon_theta_edge;
     std::vector<std::unique_ptr<TH1F>> h1_E_modules;
+    HistList all;
     long long events_processed = 0;
 };
 
@@ -90,90 +68,23 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
 static void mergeHistResult(HistResult &destination, const HistResult &source)
 {
-    destination.h2_hit_module_hycal->Add(source.h2_hit_module_hycal.get());
-    destination.h2_hit_module_gem->Add(source.h2_hit_module_gem.get());
-    destination.h2_hit_hycal->Add(source.h2_hit_hycal.get());
-    destination.h2_hit_gem->Add(source.h2_hit_gem.get());
-    destination.h1_yield_theta->Add(source.h1_yield_theta.get());
-    for (int i = 0; i < Nbins; ++i) {
-        destination.h1_Erecon_theta[i]->Add(source.h1_Erecon_theta[i].get());
-        destination.h1_Erecon_theta_center[i]->Add(source.h1_Erecon_theta_center[i].get());
-        destination.h1_Erecon_theta_edge[i]->Add(source.h1_Erecon_theta_edge[i].get());
-    }
-    destination.h2_Erecon_theta->Add(source.h2_Erecon_theta.get());
-    destination.h2_Erecon_theta_center->Add(source.h2_Erecon_theta_center.get());
-    destination.h2_Erecon_theta_edge->Add(source.h2_Erecon_theta_edge.get());
-    for (int i = 0; i < 1156; ++i) {
-        destination.h1_E_modules[i]->Add(source.h1_E_modules[i].get());
-    }
+    AddAll(destination.all, source.all);
     destination.events_processed += source.events_processed;
 }
 
-static std::vector<std::string> collectRootFiles(const std::string &path);
-
-static std::string shell_quote(const std::string &value)
-{
-    std::string quoted = "'";
-    for (char ch : value) {
-        if (ch == '\'') quoted += "'\\''";
-        else quoted += ch;
-    }
-    return quoted + "'";
-}
-
-static std::string outputFileName(const std::string &output_name, bool corr = false)
-{
-    const fs::path output_path(output_name);
-    const std::string file_name = output_path.filename().string()
-        + (corr ? ".corr" : "") + ".root";
-    return (output_path.parent_path() / file_name).string();
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            std::string name = entry.path().filename().string();
-            if (entry.is_regular_file() &&
-                name.find("_recon") != std::string::npos &&
-                name.size() >= 5 && name.compare(name.size() - 5, 5, ".root") == 0)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-
-bool inHyCal(float xmm, float ymm) {
-    const float module = 20.75; // mm
-    return (fabs(xmm) > module * 2.5 || fabs(ymm) > module * 2.5)
-        && (fabs(xmm) < module * 15. && fabs(ymm) < module * 15.);
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
+    std::string db_dir = prad2::database_dir();
 
     // ── Argument parsing ─────────────────────────────────────────────────────
     std::string output_name;
     int  max_events  = -1;
     int  num_threads = 4;
     int  num_files   = -1;
-    bool worker_mode = false;
-    bool corr = false;
 
+    // getopt_long_only reports an unknown word option such as '-xyz' as one
+    // unrecognized option instead of splitting it into short options.
     static option long_options[] = {
-        {"corr", no_argument, nullptr, 'c'},
         {nullptr, 0, nullptr, 0}
     };
     int opt;
@@ -187,24 +98,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Collect all input files
-    std::vector<std::string> root_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        if (num_files > 0) {
-            int remaining = num_files - static_cast<int>(root_files.size());
-            if (remaining <= 0) break;
-            int take = std::min(remaining, static_cast<int>(f.size()));
-            root_files.insert(root_files.end(), f.begin(), f.begin() + take);
-            if (static_cast<int>(root_files.size()) >= num_files) break;
-        } else {
-            root_files.insert(root_files.end(), f.begin(), f.end());
-        }
-    }
+    std::vector<std::string> root_files =
+        CollectInputs(argc, argv, optind, IsReconRootName, num_files);
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_Erecon_check <input_recon.root|dir> [more...] "
-                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads] [-corr]\n";
+                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads]\n";
         return 1;
     }
 
@@ -212,93 +111,49 @@ int main(int argc, char *argv[])
         std::cerr << "No output prefix provided. Please pass -o <output_prefix>.\n";
         return 1;
     }
-    ROOT::EnableThreadSafety();
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TH1F");
-    TClass::GetClass("TH2F");
+    InitRootThreading();
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
-    std::vector<long long> file_limits(root_files.size(), -1);
-    if (max_events >= 0) {
-        long long remaining = max_events;
-        for (size_t i = 0; i < root_files.size(); ++i) {
-            TFile input_file(root_files[i].c_str(), "READ");
-            auto *tree = input_file.IsOpen()
-                ? dynamic_cast<TTree *>(input_file.Get("recon")) : nullptr;
-            const long long entries = tree ? tree->GetEntries() : 0;
-            file_limits[i] = std::max(0LL, std::min(entries, remaining));
-            remaining -= file_limits[i];
-        }
-    }
+    const auto file_limits = DistributeEventBudget(root_files, "recon", max_events);
 
     auto merged = makeHistResult("");
-    const int threads_count = std::max(1, std::min(num_threads,
-        static_cast<int>(root_files.size())));
-    const int rounds = (static_cast<int>(root_files.size()) + threads_count - 1)
-        / threads_count;
-    std::mutex io_mutex;
-    std::cout << "Processing " << root_files.size() << " file(s) with "
-              << threads_count << " thread(s), " << rounds << " round(s)\n";
-
-    for (int round = 0; round < rounds; ++round) {
-        const int first = round * threads_count;
-        const int last = std::min(first + threads_count,
-                                  static_cast<int>(root_files.size()));
-        std::vector<std::unique_ptr<HistResult>> results(last - first);
-        std::vector<std::thread> workers;
-        workers.reserve(last - first);
-
-        for (int file_index = first; file_index < last; ++file_index) {
-            workers.emplace_back([&, file_index, first]() {
-                auto result = makeHistResult(Form("worker%d", file_index - first));
-                const long long limit = max_events >= 0 ? file_limits[file_index] : -1;
-                const bool ok = processRootFile(root_files[file_index], gRunConfig,
-                                                db_dir, limit, result.get());
-                results[file_index - first] = std::move(result);
-                std::lock_guard<std::mutex> lock(io_mutex);
-                std::cout << "[worker " << (file_index - first) << "] file "
-                          << file_index << " / " << (root_files.size() - 1)
-                          << ": " << root_files[file_index] << " -> "
-                          << (ok ? "OK" : "FAILED") << "\n";
-            });
-        }
-        for (auto &worker : workers) worker.join();
-        for (const auto &result : results) {
-            if (result) mergeHistResult(*merged, *result);
-        }
-    }
+    std::vector<std::unique_ptr<HistResult>> results(root_files.size());
+    RunFilesInRounds(root_files, num_threads,
+        [&](int idx, int slot) {
+            auto result = makeHistResult(Form("worker%d", slot));
+            const bool ok = processRootFile(root_files[idx], gRunConfig, db_dir,
+                                            file_limits[idx], result.get());
+            results[idx] = std::move(result);
+            return ok;
+        },
+        [&](int first, int last) {
+            for (int i = first; i < last; ++i) {
+                if (!results[i]) continue;
+                mergeHistResult(*merged, *results[i]);
+                results[i].reset();
+            }
+        });
 
     // Fit the merged histograms, fill new histograms with the fit results
-    auto h1_deltaE_module = std::make_unique<TH1F>("h1_deltaE_module", "Delta E (Module);#Delta E [MeV];Modules",
-        1000, -50, 50);
-    auto h2_deltaE_module_map = std::make_unique<TH2Poly>(
-        "h2_deltaE_module_map", "Delta E (Module) Map;X [mm];Y [mm];#Delta E [MeV]",
-        -360., 360., -360., 360.);
-    auto h1_resolution_module = std::make_unique<TH1F>("h1_resolution_module", "Resolution (Module);#sigma_{E}/E*#sqrt{E} [%];Modules",
-        50, 2.5, 3.5);
-    auto h2_resolution_module_map = std::make_unique<TH2Poly>(
-        "h2_resolution_module_map", "Resolution (Module) Map;X [mm];Y [mm];#sigma_{E}/E*#sqrt{E} [%]",
-        -360., 360., -360., 360.);
-
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
+
+    // Both maps get the same polygon bins, so one bin table serves both.
+    std::vector<int> map_bins;
+    auto h1_deltaE_module = std::make_unique<TH1F>("h1_deltaE_module", "Delta E (Module);#Delta E [MeV];Modules",
+        1000, -50, 50);
+    std::unique_ptr<TH2Poly> h2_deltaE_module_map(analysis::PhysicsTools::MakeModuleMap(
+        hycal, "h2_deltaE_module_map", "Delta E (Module) Map;X [mm];Y [mm];#Delta E [MeV]",
+        360., map_bins));
+    auto h1_resolution_module = std::make_unique<TH1F>("h1_resolution_module", "Resolution (Module);#sigma_{E}/E*#sqrt{E} [%];Modules",
+        50, 2.5, 3.5);
+    std::unique_ptr<TH2Poly> h2_resolution_module_map(analysis::PhysicsTools::MakeModuleMap(
+        hycal, "h2_resolution_module_map", "Resolution (Module) Map;X [mm];Y [mm];#sigma_{E}/E*#sqrt{E} [%]",
+        360., map_bins));
     analysis::PhysicsTools physics(hycal);
 
-    std::vector<int> deltaE_polygon_bins(1156, -1);
-    std::vector<int> resolution_polygon_bins(1156, -1);
-    for (int i = 0; i < 1156; ++i) {
-        const auto *mod = hycal.module_by_id(i + 1001);
-        if (!mod || mod->size_x <= 0. || mod->size_y <= 0.) continue;
-        deltaE_polygon_bins[i] = h2_deltaE_module_map->AddBin(
-            mod->x - 0.5 * mod->size_x, mod->y - 0.5 * mod->size_y,
-            mod->x + 0.5 * mod->size_x, mod->y + 0.5 * mod->size_y);
-        resolution_polygon_bins[i] = h2_resolution_module_map->AddBin(
-            mod->x - 0.5 * mod->size_x, mod->y - 0.5 * mod->size_y,
-            mod->x + 0.5 * mod->size_x, mod->y + 0.5 * mod->size_y);
-    }
     h2_deltaE_module_map->GetZaxis()->SetTitle("#Delta E [MeV]");
     h2_deltaE_module_map->SetMinimum(-10.);
     h2_deltaE_module_map->SetMaximum(10.);
@@ -339,82 +194,41 @@ int main(int argc, char *argv[])
             resolution = std::round(resolution * 100.f) / 100.f;
 
             // Each module has its own polygon bin; assign rather than accumulate.
-            const int polygon_bin = deltaE_polygon_bins[i];
-            if (polygon_bin > 0)
+            const int polygon_bin = map_bins[mod->index];
+            if (polygon_bin > 0) {
                 h2_deltaE_module_map->SetBinContent(polygon_bin, delta_energy);
-            const int resolution_polygon_bin = resolution_polygon_bins[i];
-            if (resolution_polygon_bin > 0)
-                h2_resolution_module_map->SetBinContent(resolution_polygon_bin, resolution);
+                h2_resolution_module_map->SetBinContent(polygon_bin, resolution);
+            }
         }
     }
-    std::vector<double> angle_points;
-    std::vector<double> angle_center_points;
-    std::vector<double> angle_edge_points;
+    // Per angle bin fits of all clusters (0), center hits (1) and edge hits (2).
+    struct FitSeries {
+        std::vector<double> angle, energy, energy_error, resolution, resolution_error;
+    };
+    std::array<FitSeries, 3> series;
     std::vector<double> expected_angle_points;
-    std::vector<double> energy_points;
-    std::vector<double> energy_center_points;
-    std::vector<double> energy_edge_points;
     std::vector<double> expect_energy_points;
-    std::vector<double> sigma_points;
-    std::vector<double> sigma_center_points;
-    std::vector<double> sigma_edge_points;
-    std::vector<double> peak_error_points;
-    std::vector<double> peak_error_center_points;
-    std::vector<double> peak_error_edge_points;
-    std::vector<double> sigma_error_points;
-    std::vector<double> sigma_error_center_points;
-    std::vector<double> sigma_error_edge_points;
-    std::vector<double> resolution_points;
-    std::vector<double> resolution_center_points;
-    std::vector<double> resolution_edge_points;
-    std::vector<double> resolution_error_points;
-    std::vector<double> resolution_error_center_points;
-    std::vector<double> resolution_error_edge_points;
     for (int i = 0; i < Nbins; ++i) {
         const double angle = 0.5 * (binEdge[i] + binEdge[i + 1]);
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
             angle, gRunConfig.Ebeam, "ep");
-        const auto fit_histogram = [&](TH1F *hist) {
-            return hist->GetEntries() >= 200
-                ? physics.fitPeak(hist, static_cast<float>(expected_energy), true)
-                : std::array<double, 5>{0., 0., 0., 0., 0.};
-        };
-        const auto fit_all = fit_histogram(merged->h1_Erecon_theta[i].get());
-        const auto fit_center = fit_histogram(merged->h1_Erecon_theta_center[i].get());
-        const auto fit_edge = fit_histogram(merged->h1_Erecon_theta_edge[i].get());
-
-        const auto add_fit = [&](const std::array<double, 5> &fit,
-                                 std::vector<double> &energy,
-                                 std::vector<double> &sigma,
-                                 std::vector<double> &peak_error,
-                                 std::vector<double> &sigma_error,
-                                 std::vector<double> &resolution,
-                                 std::vector<double> &resolution_error,
-                                 std::vector<double> &angles) {
-            if (fit[0] <= 0. || fit[1] <= 0.) return false;
-            angles.push_back(angle);
-            energy.push_back(fit[0]);
-            sigma.push_back(fit[1]);
-            peak_error.push_back(fit[3]);
-            sigma_error.push_back(fit[4]);
-            resolution.push_back(100.0 * fit[1] / fit[0] * std::sqrt(fit[0] / 1000.0));
-            resolution_error.push_back(100.0 * fit[4] / fit[0] * std::sqrt(fit[0] / 1000.0));
-            return true;
-        };
-
-        const bool has_all = add_fit(fit_all, energy_points, sigma_points,
-                                     peak_error_points, sigma_error_points,
-                                                                         resolution_points, resolution_error_points,
-                                                                         angle_points);
-        const bool has_center = add_fit(fit_center, energy_center_points, sigma_center_points,
-                                        peak_error_center_points, sigma_error_center_points,
-                                                                                resolution_center_points, resolution_error_center_points,
-                                                                                angle_center_points);
-        const bool has_edge = add_fit(fit_edge, energy_edge_points, sigma_edge_points,
-                                      peak_error_edge_points, sigma_error_edge_points,
-                                                                            resolution_edge_points, resolution_error_edge_points,
-                                                                            angle_edge_points);
-        if (has_all || has_center || has_edge) {
+        TH1F *const hists[3] = {merged->h1_Erecon_theta[i].get(),
+                                merged->h1_Erecon_theta_center[i].get(),
+                                merged->h1_Erecon_theta_edge[i].get()};
+        bool has_fit = false;
+        for (int k = 0; k < 3; ++k) {
+            if (hists[k]->GetEntries() < 200) continue;
+            const auto fit = physics.fitPeak(hists[k], static_cast<float>(expected_energy), true);
+            if (fit[0] <= 0. || fit[1] <= 0.) continue;
+            FitSeries &s = series[k];
+            s.angle.push_back(angle);
+            s.energy.push_back(fit[0]);
+            s.energy_error.push_back(fit[3]);
+            s.resolution.push_back(100.0 * fit[1] / fit[0] * std::sqrt(fit[0] / 1000.0));
+            s.resolution_error.push_back(100.0 * fit[4] / fit[0] * std::sqrt(fit[0] / 1000.0));
+            has_fit = true;
+        }
+        if (has_fit) {
             expected_angle_points.push_back(angle);
             expect_energy_points.push_back(expected_energy);
         }
@@ -429,38 +243,30 @@ int main(int argc, char *argv[])
     upper_pad.Draw();
     lower_pad.Draw();
 
-    TGraphErrors gErecon_vs_theta(static_cast<int>(energy_points.size()));
-    TGraphErrors gErecon_vs_theta_center(static_cast<int>(energy_center_points.size()));
-    TGraphErrors gErecon_vs_theta_edge(static_cast<int>(energy_edge_points.size()));
+    const auto sized_graph = [&](int k) {
+        return TGraphErrors(static_cast<int>(series[k].angle.size()));
+    };
+    TGraphErrors gErecon_vs_theta[3] = {sized_graph(0), sized_graph(1), sized_graph(2)};
+    TGraphErrors gResolution_vs_theta[3] = {sized_graph(0), sized_graph(1), sized_graph(2)};
     TGraph gExpectedE_vs_theta(static_cast<int>(expected_angle_points.size()));
-    TGraphErrors gResolution_vs_theta(static_cast<int>(resolution_points.size()));
-    TGraphErrors gResolution_vs_theta_center(static_cast<int>(resolution_center_points.size()));
-    TGraphErrors gResolution_vs_theta_edge(static_cast<int>(resolution_edge_points.size()));
     for (size_t i = 0; i < expected_angle_points.size(); ++i) {
         gExpectedE_vs_theta.SetPoint(i, expected_angle_points[i], expect_energy_points[i]);
     }
-    for (size_t i = 0; i < energy_points.size(); ++i) {
-        gErecon_vs_theta.SetPoint(i, angle_points[i], energy_points[i]);
-        gErecon_vs_theta.SetPointError(i, 0.0, peak_error_points[i]);
-        gResolution_vs_theta.SetPoint(i, angle_points[i], resolution_points[i]);
-        gResolution_vs_theta.SetPointError(i, 0.0, resolution_error_points[i]);
-    }
-    for (size_t i = 0; i < energy_center_points.size(); ++i) {
-        gErecon_vs_theta_center.SetPoint(i, angle_center_points[i], energy_center_points[i]);
-        gErecon_vs_theta_center.SetPointError(i, 0.0, peak_error_center_points[i]);
-        gResolution_vs_theta_center.SetPoint(i, angle_center_points[i], resolution_center_points[i]);
-        gResolution_vs_theta_center.SetPointError(i, 0.0, resolution_error_center_points[i]);
-    }
-    for (size_t i = 0; i < energy_edge_points.size(); ++i) {
-        gErecon_vs_theta_edge.SetPoint(i, angle_edge_points[i], energy_edge_points[i]);
-        gErecon_vs_theta_edge.SetPointError(i, 0.0, peak_error_edge_points[i]);
-        gResolution_vs_theta_edge.SetPoint(i, angle_edge_points[i], resolution_edge_points[i]);
-        gResolution_vs_theta_edge.SetPointError(i, 0.0, resolution_error_edge_points[i]);
+    for (int k = 0; k < 3; ++k) {
+        const FitSeries &s = series[k];
+        for (size_t i = 0; i < s.angle.size(); ++i) {
+            gErecon_vs_theta[k].SetPoint(i, s.angle[i], s.energy[i]);
+            gErecon_vs_theta[k].SetPointError(i, 0.0, s.energy_error[i]);
+            gResolution_vs_theta[k].SetPoint(i, s.angle[i], s.resolution[i]);
+            gResolution_vs_theta[k].SetPointError(i, 0.0, s.resolution_error[i]);
+        }
     }
 
-    const auto axis_range = [](const std::vector<double> &values,
-                               const std::vector<double> &errors,
-                               double fallback_min, double fallback_max) {
+    // Extend [lo, hi] over values +- errors padded by 8% of their span, or
+    // over [0, 1] when they span nothing.
+    const auto include_range = [](double &lo, double &hi,
+                                  const std::vector<double> &values,
+                                  const std::vector<double> &errors) {
         double min_value = std::numeric_limits<double>::max();
         double max_value = std::numeric_limits<double>::lowest();
         for (size_t i = 0; i < values.size(); ++i) {
@@ -468,105 +274,94 @@ int main(int argc, char *argv[])
             min_value = std::min(min_value, values[i] - error);
             max_value = std::max(max_value, values[i] + error);
         }
-        if (!(max_value > min_value)) return std::pair<double, double>{fallback_min, fallback_max};
-        const double padding = 0.08 * (max_value - min_value);
-        return std::pair<double, double>{min_value - padding, max_value + padding};
+        double range_min = 0.0, range_max = 1.0;
+        if (max_value > min_value) {
+            const double padding = 0.08 * (max_value - min_value);
+            range_min = min_value - padding;
+            range_max = max_value + padding;
+        }
+        lo = std::min(lo, range_min);
+        hi = std::max(hi, range_max);
     };
 
     double energy_min_value = std::numeric_limits<double>::max();
     double energy_max_value = std::numeric_limits<double>::lowest();
-    const auto include_energy_range = [&](const std::vector<double> &values,
-                                          const std::vector<double> &errors) {
-        const auto range = axis_range(values, errors, 0.0, 1.0);
-        energy_min_value = std::min(energy_min_value, range.first);
-        energy_max_value = std::max(energy_max_value, range.second);
-    };
-    include_energy_range(energy_points, peak_error_points);
-    include_energy_range(energy_center_points, peak_error_center_points);
-    include_energy_range(energy_edge_points, peak_error_edge_points);
-    include_energy_range(expect_energy_points, {});
+    double resolution_min_value = std::numeric_limits<double>::max();
+    double resolution_max_value = std::numeric_limits<double>::lowest();
+    for (const FitSeries &s : series) {
+        include_range(energy_min_value, energy_max_value, s.energy, s.energy_error);
+        include_range(resolution_min_value, resolution_max_value, s.resolution, s.resolution_error);
+    }
+    include_range(energy_min_value, energy_max_value, expect_energy_points, {});
     if (!(energy_max_value > energy_min_value)) {
         energy_min_value = 0.0;
         energy_max_value = 1.0;
     }
-
-    double resolution_min_value = std::numeric_limits<double>::max();
-    double resolution_max_value = std::numeric_limits<double>::lowest();
-    const auto include_resolution_range = [&](const std::vector<double> &values,
-                                               const std::vector<double> &errors) {
-        const auto range = axis_range(values, errors, 0.0, 1.0);
-        resolution_min_value = std::min(resolution_min_value, range.first);
-        resolution_max_value = std::max(resolution_max_value, range.second);
-    };
-    include_resolution_range(resolution_points, resolution_error_points);
-    include_resolution_range(resolution_center_points, resolution_error_center_points);
-    include_resolution_range(resolution_edge_points, resolution_error_edge_points);
     if (!(resolution_max_value > resolution_min_value)) {
         resolution_min_value = 0.0;
         resolution_max_value = 1.0;
     }
 
+    struct SeriesStyle {
+        Style_t marker;
+        Color_t color;
+        const char *label;
+        const char *legend_option;
+    };
+    const SeriesStyle series_style[3] = {
+        {20, kBlue + 1, "All", "ep"},
+        {21, kGreen + 2, "Center", "p"},
+        {22, kOrange + 1, "Edge", "p"}};
+    // The first graph carries the frame, so it is drawn with the axes.
+    const auto draw_series = [&](TGraphErrors *graphs) {
+        for (int k = 0; k < 3; ++k) {
+            graphs[k].SetMarkerStyle(series_style[k].marker);
+            graphs[k].SetMarkerColor(series_style[k].color);
+            graphs[k].SetLineColor(series_style[k].color);
+            graphs[k].Draw(k == 0 ? "AP" : "P SAME");
+        }
+    };
+
     upper_pad.cd();
-    gErecon_vs_theta.SetTitle("Reconstructed energy vs angle; ;E_{recon} [MeV]");
-    gErecon_vs_theta.SetMarkerStyle(20);
-    gErecon_vs_theta.SetMarkerColor(kBlue + 1);
-    gErecon_vs_theta.SetLineColor(kBlue + 1);
-    gErecon_vs_theta.GetXaxis()->SetLimits(binEdge[0], binEdge[Nbins]);
-    gErecon_vs_theta.GetXaxis()->SetLabelSize(0.0);
-    gErecon_vs_theta.GetXaxis()->SetTitleSize(0.0);
-    gErecon_vs_theta.GetYaxis()->SetLabelSize(0.045);
-    gErecon_vs_theta.GetYaxis()->SetTitleSize(0.045);
-    gErecon_vs_theta.GetYaxis()->SetTitleOffset(0.81);
-    gErecon_vs_theta.GetYaxis()->CenterTitle();
-    gErecon_vs_theta.SetMinimum(energy_min_value);
-    gErecon_vs_theta.SetMaximum(energy_max_value);
-    gErecon_vs_theta.Draw("AP");
-    gErecon_vs_theta_center.SetMarkerStyle(21);
-    gErecon_vs_theta_center.SetMarkerColor(kGreen + 2);
-    gErecon_vs_theta_center.SetLineColor(kGreen + 2);
-    gErecon_vs_theta_center.Draw("P SAME");
-    gErecon_vs_theta_edge.SetMarkerStyle(22);
-    gErecon_vs_theta_edge.SetMarkerColor(kOrange + 1);
-    gErecon_vs_theta_edge.SetLineColor(kOrange + 1);
-    gErecon_vs_theta_edge.Draw("P SAME");
+    TGraphErrors &gErecon_frame = gErecon_vs_theta[0];
+    gErecon_frame.SetTitle("Reconstructed energy vs angle; ;E_{recon} [MeV]");
+    gErecon_frame.GetXaxis()->SetLimits(binEdge[0], binEdge[Nbins]);
+    gErecon_frame.GetXaxis()->SetLabelSize(0.0);
+    gErecon_frame.GetXaxis()->SetTitleSize(0.0);
+    gErecon_frame.GetYaxis()->SetLabelSize(0.045);
+    gErecon_frame.GetYaxis()->SetTitleSize(0.045);
+    gErecon_frame.GetYaxis()->SetTitleOffset(0.81);
+    gErecon_frame.GetYaxis()->CenterTitle();
+    gErecon_frame.SetMinimum(energy_min_value);
+    gErecon_frame.SetMaximum(energy_max_value);
+    draw_series(gErecon_vs_theta);
     gExpectedE_vs_theta.SetLineColor(kRed + 1);
     gExpectedE_vs_theta.SetLineWidth(2);
     gExpectedE_vs_theta.Draw("L SAME");
     TLegend energy_legend(0.62, 0.78, 0.93, 0.92);
-    energy_legend.AddEntry(&gErecon_vs_theta, "All", "ep");
-    energy_legend.AddEntry(&gErecon_vs_theta_center, "Center", "p");
-    energy_legend.AddEntry(&gErecon_vs_theta_edge, "Edge", "p");
+    for (int k = 0; k < 3; ++k)
+        energy_legend.AddEntry(&gErecon_vs_theta[k], series_style[k].label,
+                               series_style[k].legend_option);
     energy_legend.AddEntry(&gExpectedE_vs_theta, "Expected E", "l");
     energy_legend.Draw();
 
     lower_pad.cd();
-    gResolution_vs_theta.SetTitle("Energy resolution vs angle;Scattering angle [deg];#sigma / E * #sqrt{E[GeV]} [%]");
-    gResolution_vs_theta.SetMarkerStyle(20);
-    gResolution_vs_theta.SetMarkerColor(kBlue + 1);
-    gResolution_vs_theta.SetLineColor(kBlue + 1);
-    gResolution_vs_theta.GetXaxis()->SetLimits(binEdge[0], binEdge[Nbins]);
-    gResolution_vs_theta.GetXaxis()->SetLabelSize(0.060);
-    gResolution_vs_theta.GetXaxis()->SetTitleSize(0.070);
-    gResolution_vs_theta.GetXaxis()->SetTitleOffset(1.05);
-    gResolution_vs_theta.GetYaxis()->SetLabelSize(0.08);
-    gResolution_vs_theta.GetYaxis()->SetTitleSize(0.08);
-    gResolution_vs_theta.GetYaxis()->SetTitleOffset(0.58);
-    gResolution_vs_theta.GetYaxis()->CenterTitle();
-    gResolution_vs_theta.SetMinimum(resolution_min_value);
-    gResolution_vs_theta.SetMaximum(resolution_max_value);
-    gResolution_vs_theta.Draw("AP");
-    gResolution_vs_theta_center.SetMarkerStyle(21);
-    gResolution_vs_theta_center.SetMarkerColor(kGreen + 2);
-    gResolution_vs_theta_center.SetLineColor(kGreen + 2);
-    gResolution_vs_theta_center.Draw("P SAME");
-    gResolution_vs_theta_edge.SetMarkerStyle(22);
-    gResolution_vs_theta_edge.SetMarkerColor(kOrange + 1);
-    gResolution_vs_theta_edge.SetLineColor(kOrange + 1);
-    gResolution_vs_theta_edge.Draw("P SAME");
+    TGraphErrors &gResolution_frame = gResolution_vs_theta[0];
+    gResolution_frame.SetTitle("Energy resolution vs angle;Scattering angle [deg];#sigma / E * #sqrt{E[GeV]} [%]");
+    gResolution_frame.GetXaxis()->SetLimits(binEdge[0], binEdge[Nbins]);
+    gResolution_frame.GetXaxis()->SetLabelSize(0.060);
+    gResolution_frame.GetXaxis()->SetTitleSize(0.070);
+    gResolution_frame.GetXaxis()->SetTitleOffset(1.05);
+    gResolution_frame.GetYaxis()->SetLabelSize(0.08);
+    gResolution_frame.GetYaxis()->SetTitleSize(0.08);
+    gResolution_frame.GetYaxis()->SetTitleOffset(0.58);
+    gResolution_frame.GetYaxis()->CenterTitle();
+    gResolution_frame.SetMinimum(resolution_min_value);
+    gResolution_frame.SetMaximum(resolution_max_value);
+    draw_series(gResolution_vs_theta);
     c_reconE.Update();
 
-
-    const std::string output_file_name = outputFileName(output_name, corr);
+    const std::string output_file_name = output_name + ".root";
     TFile output_file(output_file_name.c_str(), "RECREATE");
     if (output_file.IsZombie()) {
         std::cerr << "Cannot create output file " << output_file_name << "\n";
@@ -608,31 +403,31 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
 {
     auto result = std::make_unique<HistResult>();
     const std::string name_suffix = suffix.empty() ? "" : "_" + suffix;
-    result->h2_hit_module_hycal = std::make_unique<TH2F>(
+    result->h2_hit_module_hycal = Book<TH2F>(result->all,
         Form("h2_hit_module_hycal%s", name_suffix.c_str()),
         "HyCal Hit Distribution (Module);(X_{hycal}-X_{cell center})/d_{cell size};(Y_{hycal}-Y_{cell center})/d_{cell size}",
         100, -0.5, 0.5, 100, -0.5, 0.5);
-    result->h2_hit_module_gem = std::make_unique<TH2F>(
+    result->h2_hit_module_gem = Book<TH2F>(result->all,
         Form("h2_hit_module_gem%s", name_suffix.c_str()),
         "GEM Hit Distribution (Module);(X_{gem}-X_{cell center})/d_{cell size};(Y_{gem}-Y_{cell center})/d_{cell size}",
         100, -0.5, 0.5, 100, -0.5, 0.5);
-    result->h2_hit_hycal = std::make_unique<TH2F>(
+    result->h2_hit_hycal = Book<TH2F>(result->all,
         Form("h2_hit_hycal%s", name_suffix.c_str()),
         "HyCal Hit Distribution;X [mm];Y [mm]", 720, -360, 360, 720, -360, 360);
-    result->h2_hit_gem = std::make_unique<TH2F>(
+    result->h2_hit_gem = Book<TH2F>(result->all,
         Form("h2_hit_gem%s", name_suffix.c_str()),
         "GEM Hit Distribution;X [mm];Y [mm]", 720, -360, 360, 720, -360, 360);
-    result->h1_yield_theta = std::make_unique<TH1F>(
+    result->h1_yield_theta = Book<TH1F>(result->all,
         Form("h1_yield_theta%s", name_suffix.c_str()),
         "Yield vs Theta;#theta [deg];Yield/binWidth", Nbins, binEdge);
 
-    result->h2_Erecon_theta = std::make_unique<TH2F>(
+    result->h2_Erecon_theta = Book<TH2F>(result->all,
         Form("h2_Erecon_theta%s", name_suffix.c_str()),
         "Reconstructed Energy vs Scattering Angles;#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
-    result->h2_Erecon_theta_center = std::make_unique<TH2F>(
+    result->h2_Erecon_theta_center = Book<TH2F>(result->all,
         Form("h2_Erecon_theta_center%s", name_suffix.c_str()),
         "Reconstructed Energy vs Scattering Angles (Center);#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
-    result->h2_Erecon_theta_edge = std::make_unique<TH2F>(
+    result->h2_Erecon_theta_edge = Book<TH2F>(result->all,
         Form("h2_Erecon_theta_edge%s", name_suffix.c_str()),
         "Reconstructed Energy vs Scattering Angles (Edge);#theta [deg];E_{recon} [MeV]", 320, 0, 8, 10000, 0, 5000);
 
@@ -640,15 +435,15 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
     result->h1_Erecon_theta_center.reserve(Nbins);
     result->h1_Erecon_theta_edge.reserve(Nbins);
     for (int i = 0; i < Nbins; ++i) {
-        result->h1_Erecon_theta.push_back(std::make_unique<TH1F>(
+        result->h1_Erecon_theta.push_back(Book<TH1F>(result->all,
             Form("h1_Erecon_theta_%d%s", i, name_suffix.c_str()),
             Form("Reconstructed Energy in angles [%.3f-%.3f deg];E_{recon} [MeV];Counts", binEdge[i], binEdge[i+1]),
             energy_bins, energy_min, energy_max));
-        result->h1_Erecon_theta_center.push_back(std::make_unique<TH1F>(
+        result->h1_Erecon_theta_center.push_back(Book<TH1F>(result->all,
             Form("h1_Erecon_theta_center_%d%s", i, name_suffix.c_str()),
             Form("Reconstructed Energy in angles [%.3f-%.3f deg] (Center);E_{recon} [MeV]; Counts", binEdge[i], binEdge[i+1]),
             energy_bins, energy_min, energy_max));
-        result->h1_Erecon_theta_edge.push_back(std::make_unique<TH1F>(
+        result->h1_Erecon_theta_edge.push_back(Book<TH1F>(result->all,
             Form("h1_Erecon_theta_edge_%d%s", i, name_suffix.c_str()),
             Form("Reconstructed Energy in angles [%.3f-%.3f deg] (Edge);E_{recon} [MeV]; Counts", binEdge[i], binEdge[i+1]),
             energy_bins, energy_min, energy_max));
@@ -657,7 +452,7 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
     result->h1_E_modules.reserve(1156);
     for (int i = 0; i < 1156; ++i) {
         const int mod_id = i + 1001;
-        result->h1_E_modules.push_back(std::make_unique<TH1F>(
+        result->h1_E_modules.push_back(Book<TH1F>(result->all,
             Form("h1_E_mod_%d%s", mod_id, name_suffix.c_str()),
             Form("Module W%d cluster energy;E (MeV);Counts", mod_id - 1000),
             energy_bins, energy_min, energy_max));
@@ -691,7 +486,6 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         tree->GetEntry(entry);
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
         if (event.n_clusters != 1) continue;
-        //if (event.matchNum != 1) continue;
         if (event.cl_nblocks[0] < 3) continue;
 
         HCHit hc_hit;
@@ -702,45 +496,18 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         hc_hit.energy = event.cl_energy[0];
         gem_hit.x = event.mHit_gx[0][0];
         gem_hit.y = event.mHit_gy[0][0];
-        gem_hit.z = event.mHit_gz[0][0];
 
-        gem_hit.z = 0.f;
-        event.matchNum = 0;
-
-        if (gem_hit.z != 0.f) {
-            const float scale = hc_hit.z / gem_hit.z;
-            gem_hit.x *= scale;
-            gem_hit.y *= scale;
-            gem_hit.z *= scale;
-            ApplyToHyCal(gem_hit, run_config);
-        }
         ApplyToHyCal(hc_hit, run_config);
-        if (!inHyCal(hc_hit.x, hc_hit.y)) continue;
+        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.5, 15.)) continue;
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
-        const float dx = hc_hit.x - gem_hit.x;
-        const float dy = hc_hit.y - gem_hit.y;
-        float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
-        float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
-        if (xd_hycal < -0.5f) xd_hycal += 1.0f;
-        if (xd_hycal >  0.5f) xd_hycal -= 1.0f;
-        if (yd_hycal < -0.5f) yd_hycal += 1.0f;
-        if (yd_hycal >  0.5f) yd_hycal -= 1.0f;
-        float xd_gem = (gem_hit.x - mod->x) / mod->size_x;
-        float yd_gem = (gem_hit.y - mod->y) / mod->size_y;
-        if (xd_gem < -0.5f) xd_gem += 1.0f;
-        if (xd_gem >  0.5f) xd_gem -= 1.0f;
-        if (yd_gem < -0.5f) yd_gem += 1.0f;
-        if (yd_gem >  0.5f) yd_gem -= 1.0f;
+        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
+        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y, true);
 
-        float theta = std::atan2(
-            std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z)
+        const float theta = std::atan2(
+            std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
             * 180.0f / M_PI;
-        if (event.matchNum != 1)
-            theta = std::atan2(
-                std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
-                * 180.0f / M_PI;
         const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta);
         if (theta_bin >= 1 && theta_bin <= Nbins) {
             result->h1_yield_theta->Fill(
@@ -762,8 +529,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
         const int module_index = mod->id - 1001;
         if (module_index < 0 || module_index >= 1156) continue;
-        //if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f)
-            result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
+        result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
         result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
         result->h2_hit_gem->Fill(gem_hit.x, gem_hit.y);
         result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);

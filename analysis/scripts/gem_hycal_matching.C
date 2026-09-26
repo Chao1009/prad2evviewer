@@ -106,9 +106,8 @@
 //       "match_023867_seg0.root")
 //============================================================================
 
-#include "EvChannel.h"
 #include "DaqConfig.h"
-#include "load_daq_config.h"
+#include "EvioFiles.h"
 #include "Fadc250Data.h"
 #include "SspData.h"
 #include "WaveAnalyzer.h"
@@ -120,28 +119,20 @@
 #include "RunInfoConfig.h"
 
 #include "PhysicsTools.h"
-#include "ConfigSetup.h"      // analysis::ApplyToLab
-#include "PipelineBuilder.h"  // prad2::PipelineBuilder — one-stop wiring
-#include "script_helpers.h"   // discover_split_files, resolve_db_path
+#include "ConfigSetup.h"      // analysis::gRunConfig
+#include "MatchingTools.h"    // analysis::ClusterToLab, GemHitToLab
+#include "PipelineBuilder.h"  // prad2::Pipeline
+#include "script_helpers.h"   // build_script_pipeline, for_each_physics_event
 
-#include <TError.h>          // Printf() — line-flushed message output
 #include <TFile.h>
 #include <TTree.h>
-#include <TString.h>
-#include <TSystem.h>
+#include <TString.h>           // Printf() — line-flushed message output
 
-#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <iostream>
-#include <map>
-#include <memory>
 #include <string>
 #include <vector>
-
-using namespace evc;
 
 namespace {
 
@@ -311,26 +302,7 @@ append_strips(EventVars &ev, int mi, int plane,
 
 } // anonymous namespace
 
-//=============================================================================
-// Tiny probe — call this from the ROOT prompt right after `.L file.C+`.
-//   gem_hycal_matching_probe(7)
-// If THIS prints `[probe] called with 7` and returns 14, the .so loads
-// cleanly and basic dispatch works.  If even this dies silently, the
-// problem is at .so load time (despite `.L` appearing to succeed); if
-// this works but the real function crashes, the issue is specific to
-// `gem_hycal_matching`'s body or wrapper.
-//=============================================================================
-extern "C" int gem_hycal_matching_probe(int x)
-{
-    std::fprintf(stderr, "[probe] called with %d\n", x);
-    std::fflush(stderr);
-    return x * 2;
-}
-
-//=============================================================================
-// Forward declaration of the full 11-arg version so the convenience
-// overloads below can delegate to it.
-//=============================================================================
+// Full 11-arg version, no defaults (defined below).
 int gem_hycal_matching(const char *evio_path,
                          const char *out_path,
                          const char *gem_ped_file,
@@ -343,10 +315,10 @@ int gem_hycal_matching(const char *evio_path,
                          const char *gem_map_file,
                          const char *hc_map_file);
 
-// Convenience overloads — bottom-class to the full 11-arg version with
-// empty-string defaults (auto-discovery via runinfo).  Adding these
-// sidesteps a cling default-arg-marshalling bug that SEGVs at the call
-// site for 2..N arg invocations of the full signature.
+// Convenience overloads forwarding to the full version with "" path
+// defaults (auto-discovery via runinfo).  Overloads instead of default
+// arguments: cling mis-marshals many mixed-type (`const char*` with
+// long/int/float) defaults and SEGVs at the call site.
 int gem_hycal_matching(const char *evio_path, const char *out_path)
 {
     return gem_hycal_matching(evio_path, out_path,
@@ -372,25 +344,7 @@ int gem_hycal_matching(const char *evio_path, const char *out_path,
                                 "", "", "");
 }
 
-//=============================================================================
 // Entry point — full version
-//=============================================================================
-// NOTE on the function signature:
-//
-// The full version takes 11 explicit args (no defaults).  Cling has a
-// long-standing bug marshalling many mixed-type default arguments
-// (`const char*` interleaved with `long`, `int`, `float`) — a 2-arg call
-// like `gem_hycal_matching(path, out)` would SEGV at the call site
-// before the function body even runs, because the default values get
-// synthesized with the wrong calling convention.
-//
-// To dodge that entirely we expose convenience overloads (2-arg, 3-arg,
-// 4-arg) that bottom-class to the full 11-arg version with empty-string
-// path defaults.  Empty strings are treated the same as nullptr by the
-// `blank` lambda inside the function.
-//
-// To override paths, use empty strings for the ones you want auto-
-// discovered from runinfo (e.g. ped="" cm="" calib="").
 int gem_hycal_matching(const char *evio_path,
                          const char *out_path,
                          const char *gem_ped_file,
@@ -403,47 +357,19 @@ int gem_hycal_matching(const char *evio_path,
                          const char *gem_map_file,
                          const char *hc_map_file)
 {
-    // Raw fprintf+fflush as the FIRST thing — if Printf were buggy from
-    // a dynamically loaded .so, this still shows.  If even THIS doesn't
-    // fire, the crash is at the call site itself (the function body is
-    // never executing) and we need a gdb backtrace.
-    std::fprintf(stderr,
-                 "[gem_hycal_matching] ENTRY: evio=%s out=%s\n",
-                 evio_path ? evio_path : "(null)",
-                 out_path  ? out_path  : "(null)");
-    std::fflush(stderr);
-
-    // Treat null / empty interchangeably so callers who pass nullptr
-    // (e.g. through a wrapper) still get the auto-discovery path.
-    auto blank = [](const char *s) -> bool { return !s || !*s; };
     Printf("[gem_hycal_matching] entered: evio=%s out=%s",
            evio_path ? evio_path : "(null)",
            out_path  ? out_path  : "(null)");
 
     //---- detector pipeline (DAQ config, runinfo, HyCal, GEM) ----------------
-    // One call wires daq_config + reconstruction_config + runinfo +
-    // HyCalSystem (Init + LoadCalibration + position-resolution) + GemSystem
-    // (Init + LoadPedestals + LoadCommonModeRange + per-detector configs)
-    // + DetectorTransforms.  Crate-remap derivation, JSON parsing, and
-    // [GEMSYS]/[GEMCFG]/[PEDSUM] diagnostic prints all live inside.
     prad2::Pipeline pipeline;
-    try {
-        pipeline = prad2::PipelineBuilder()
-            .set_daq_config(blank(daq_config)        ? "" : daq_config)
-            .set_hycal_calib(blank(hc_calib_file)    ? "" : hc_calib_file)
-            .set_gem_pedestal(blank(gem_ped_file)    ? "" : gem_ped_file)
-            .set_gem_common_mode(blank(gem_cm_file)  ? "" : gem_cm_file)
-            .set_hycal_map(blank(hc_map_file)        ? "" : hc_map_file)
-            .set_gem_map(blank(gem_map_file)         ? "" : gem_map_file)
-            .set_run_number(run_num > 0 ? run_num : -1)
-            .set_run_number_from_evio(evio_path ? evio_path : "")
-            .build();
-    } catch (const std::exception &e) {
-        Printf("[ERROR] %s", e.what());
+    if (!build_script_pipeline(pipeline, evio_path, run_num, daq_config,
+                               hc_calib_file, gem_ped_file, gem_cm_file,
+                               hc_map_file, gem_map_file))
         return 1;
-    }
 
     auto &cfg            = pipeline.daq_cfg;
+    const auto crate_map = cfg.roc_crate_map();
     auto &geo            = pipeline.run_cfg;
     auto &hycal          = pipeline.hycal;
     auto &gem_sys        = pipeline.gem;
@@ -452,27 +378,22 @@ int gem_hycal_matching(const char *evio_path,
     auto &gem_xforms     = pipeline.gem_transforms;
 
     // Mirror into gRunConfig for any out-of-tree code that reads the
-    // analysis-side global (kept behind the same alias path as before).
+    // analysis-side global.
     analysis::gRunConfig = geo;
-
-    // Bank-tag → logical-crate map.  Only the HyCal channel walk uses it
-    // (one lookup per FADC channel); GEM-side crate remap is already inside
-    // the builder via pipeline.gem_crate_remap.
-    std::map<int, int> crate_map;
-    for (const auto &re : cfg.roc_tags) crate_map[(int)re.tag] = re.crate;
 
     // HyCal cluster + GEM cluster + WaveAnalyzer all hold per-event scratch,
     // so they live outside the pipeline (one per event loop, not one per
     // run).  HyCalCluster needs the wired-up HyCalSystem reference.
     fdec::HyCalCluster hc_clusterer(hycal);
     hc_clusterer.SetConfig(pipeline.hycal_cluster_cfg);
-    hc_clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster gem_clusterer;
 
     //---- EVIO discovery -----------------------------------------------------
-    EvChannel ch;
-    ch.SetConfig(cfg);
-    auto evio_files = discover_split_files(evio_path ? evio_path : "");
+    auto evio_files = prad2::discover_split_files(evio_path ? evio_path : "");
+    if (evio_files.empty()) {
+        Printf("[ERROR] no EVIO files found for %s", evio_path ? evio_path : "(null)");
+        return 1;
+    }
     Printf("[setup] EVIO       : %zu split file(s) for input %s",
            evio_files.size(), evio_path ? evio_path : "(null)");
     for (const auto &f : evio_files) Printf("           %s", f.c_str());
@@ -491,271 +412,166 @@ int gem_hycal_matching(const char *evio_path,
 
     //---- event loop ---------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
-    // Heap-allocate the big POD-ish structs.  ssp::SspEventData and
-    // fdec::EventData both contain large fixed-size sample arrays
-    // (hundreds of KB to MB) and putting them on the stack overflows the
-    // guard page at function entry — the SEGV happens *before* the body
-    // even runs, so no Printf or fprintf at "line 1" can fire.  Same
-    // pattern as gem_dump.cpp and analysis/Replay.cpp.
-    auto fadc_evt_ptr = std::make_unique<fdec::EventData>();
-    auto ssp_evt_ptr  = std::make_unique<ssp::SspEventData>();
-    auto &fadc_evt    = *fadc_evt_ptr;
-    auto &ssp_evt     = *ssp_evt_ptr;
     fdec::WaveAnalyzer ana;
-    fdec::WaveResult   wres;
 
-    long n_read = 0, n_phys = 0, n_kept = 0, n_filled = 0;
-    long n_files_open = 0;
+    long n_filled = 0;
     long total_clusters = 0, total_matches = 0, total_strips = 0;
     long total_gem_2d   = 0;
     long gem_2d_per_det[4] = {0, 0, 0, 0};
 
-    for (const auto &fpath : evio_files) {
-        if (ch.OpenAuto(fpath) != status::success) {
-            Printf("[WARN] skip (cannot open): %s", fpath.c_str());
-            continue;
+    EvioScanStats scan;
+    for_each_physics_event(cfg, evio_files, max_events, scan,
+                           [&](const fdec::EventData &fadc_evt, const ssp::SspEventData &ssp_evt) {
+        ev.clear();
+        ev.event_num    = static_cast<int>(fadc_evt.info.event_number);
+        ev.trigger_bits = fadc_evt.info.trigger_bits;
+
+        // ---------- HyCal: waveform → energy → clusters ----------
+        const auto hc_hits_raw = reconstruct_hycal_event(
+            fadc_evt, crate_map, hycal, ana, hc_clusterer,
+            geo.hc_time_win_lo, geo.hc_time_win_hi);
+
+        // detector frame → lab/target-centered frame, at shower depth
+        std::vector<analysis::HCHit> hc_hits;
+        hc_hits.reserve(hc_hits_raw.size());
+        for (const auto &h : hc_hits_raw)
+            hc_hits.push_back(analysis::ClusterToLab(hycal_xform, h));
+
+        // ---------- GEM: pedestal → CM → ZS → 1D + 2D ----------
+        gem_sys.Clear();
+        gem_sys.ProcessEvent(ssp_evt);
+        gem_sys.Reconstruct(gem_clusterer);
+
+        // Per-detector lab-frame hit lists for matching.
+        std::vector<analysis::GEMHit> gem_lab[4];
+        for (int d = 0; d < gem_sys.GetNDetectors() && d < 4; ++d) {
+            const auto &raw = gem_sys.GetHits(d);
+            gem_2d_per_det[d] += static_cast<long>(raw.size());
+            total_gem_2d     += static_cast<long>(raw.size());
+            for (const auto &h : raw)
+                gem_lab[d].push_back(analysis::GemHitToLab(gem_xforms, h));
         }
-        ++n_files_open;
-        Printf("[file %ld/%zu] %s",
-               n_files_open, evio_files.size(), fpath.c_str());
 
-        while (ch.Read() == status::success) {
-            ++n_read;
-            if (!ch.Scan()) continue;
-            if (ch.GetEventType() != EventType::Physics) continue;
+        // ---------- record HyCal clusters in tree ----------
+        ev.ncl = static_cast<int>(hc_hits.size());
+        for (int k = 0; k < ev.ncl; ++k) {
+            const auto &h = hc_hits[k];
+            ev.hc_x.push_back(h.x);
+            ev.hc_y.push_back(h.y);
+            ev.hc_z.push_back(h.z);
+            ev.hc_energy.push_back(h.energy);
+            ev.hc_center.push_back(h.center_id);
+            ev.hc_nblocks.push_back(hc_hits_raw[k].nblocks);
+            ev.hc_flag.push_back(h.flag);
+            // σ_HC at the HyCal face (mm) — see HyCalSystem::PositionResolution
+            ev.hc_sigma.push_back(hycal.PositionResolution(h.energy));
+        }
 
-        for (int i = 0; i < ch.GetNEvents(); ++i) {
-            ssp_evt.clear();
-            hc_clusterer.Clear();
-            if (!ch.DecodeEvent(i, fadc_evt, &ssp_evt)) continue;
-            ++n_phys;
+        // ---------- best-match per HC cluster × GEM detector ------------
+        // Geometry and best-match rule: see the file header.
+        for (int k = 0; k < ev.ncl; ++k) {
+            const auto &h = hc_hits[k];
+            if (h.z <= 0.f) continue;
+            const float sigma_face = ev.hc_sigma[k];
 
-            // Trigger filter: keep only events with trigger_bits exactly
-            // == 0x100.  We still gate against max_events / progress on
-            // n_phys (raw physics count) so behavior is consistent
-            // regardless of how many events pass the trigger cut.
-            if (fadc_evt.info.trigger_bits != 0x100u) {
-                if (max_events > 0 && n_phys >= max_events) goto done;
-                continue;
-            }
-            ++n_kept;
+            for (int d = 0; d < 4; ++d) {
+                const auto &gl = gem_lab[d];
+                if (gl.empty()) continue;
+                // GEM z (lab) is the same for every hit on plane d —
+                // just read the first one we have.
+                const float z_gem = gl.front().z;
+                if (z_gem <= 0.f) continue;
+                const float scale  = z_gem / h.z;
+                const float proj_x = h.x * scale;
+                const float proj_y = h.y * scale;
+                const float sig_hc_at_gem = sigma_face * scale;
+                const float sig_gem = (d < (int)gem_pos_res.size())
+                                        ? gem_pos_res[d] : 0.1f;
+                const float sig_total = std::sqrt(
+                    sig_hc_at_gem * sig_hc_at_gem + sig_gem * sig_gem);
+                const float cut = match_nsigma * sig_total;
 
-            ev.clear();
-            ev.event_num    = static_cast<int>(fadc_evt.info.event_number);
-            ev.trigger_bits = fadc_evt.info.trigger_bits;
-
-            // ---------- HyCal: waveform → energy → clusters ----------
-            for (int r = 0; r < fadc_evt.nrocs; ++r) {
-                auto &roc = fadc_evt.rocs[r];
-                if (!roc.present) continue;
-                auto cit = crate_map.find(roc.tag);
-                if (cit == crate_map.end()) continue;     // not in roc_tags
-                const int crate = cit->second;
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    auto &slot = roc.slots[s];
-                    if (!slot.present) continue;
-                    for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                        if (!(slot.channel_mask & (1ull << c))) continue;
-                        const auto *mod = hycal.module_by_daq(crate, s, c);
-                        if (!mod || !mod->is_hycal()) continue;
-                        auto &cd = slot.channels[c];
-                        if (cd.nsamples <= 0) continue;
-                        ana.Analyze(cd.samples, cd.nsamples, wres);
-                        if (wres.npeaks <= 0) continue;
-                        // Pick the largest peak inside the trigger window
-                        // (100..200 ns matches the live-monitor default).
-                        int   best = -1;
-                        float best_h = -1.f;
-                        for (int p = 0; p < wres.npeaks; ++p) {
-                            const auto &pk = wres.peaks[p];
-                            if (pk.time > geo.hc_time_win_lo && pk.time < geo.hc_time_win_hi
-                                && pk.height > best_h) {
-                                best_h = pk.height; best = p;
-                            }
-                        }
-                        if (best < 0) continue;
-                        float energy = static_cast<float>(
-                            mod->energize(wres.peaks[best].integral));
-                        hc_clusterer.AddHit(mod->index, energy, 0.f);
+                // Find the closest GEM hit on detector d — must be
+                // within `cut`.  best_dr starts at cut so any candidate
+                // outside the window is automatically rejected.
+                int   best_gi = -1;
+                float best_dr = cut;
+                for (size_t gi = 0; gi < gl.size(); ++gi) {
+                    const float dx = gl[gi].x - proj_x;
+                    const float dy = gl[gi].y - proj_y;
+                    const float dr = std::sqrt(dx*dx + dy*dy);
+                    if (dr <= best_dr) {
+                        best_dr = dr;
+                        best_gi = static_cast<int>(gi);
                     }
                 }
-            }
-            hc_clusterer.FormClusters();
-            std::vector<fdec::ClusterHit> hc_hits_raw;
-            hc_clusterer.ReconstructHits(hc_hits_raw);
+                if (best_gi < 0) continue;
 
-            // Convert HyCal cluster list to HCHit so we can apply the
-            // shared lab transform via hycal_xform.toLab().
-            std::vector<analysis::HCHit> hc_hits;
-            hc_hits.reserve(hc_hits_raw.size());
-            for (const auto &h : hc_hits_raw) {
-                analysis::HCHit hh;
-                hh.x = h.x; hh.y = h.y;
-                hh.z = fdec::shower_depth(h.center_id, h.energy);
-                hh.energy    = h.energy;
-                hh.center_id = h.center_id;
-                hh.flag      = h.flag;
-                hc_hits.push_back(hh);
-            }
-            // detector-frame  →  lab/target-centered frame
-            for (auto &h : hc_hits) analysis::ApplyToLab(hycal_xform, h);
+                const auto &g       = gl[best_gi];
+                const auto &raw_g   = gem_sys.GetHits(d)[best_gi];
+                const auto *xc = find_constituent(
+                    gem_sys.GetPlaneClusters(d, 0),
+                    raw_g.x, raw_g.x_charge);
+                const auto *yc = find_constituent(
+                    gem_sys.GetPlaneClusters(d, 1),
+                    raw_g.y, raw_g.y_charge);
 
-            // ---------- GEM: pedestal → CM → ZS → 1D + 2D ----------
-            gem_sys.Clear();
-            gem_sys.ProcessEvent(ssp_evt);
-            gem_sys.Reconstruct(gem_clusterer);
+                const int mi = ev.nmatch;
+                ev.m_hc_idx.push_back(k);
+                ev.m_det.push_back(d);
+                ev.m_gem_x.push_back(g.x);
+                ev.m_gem_y.push_back(g.y);
+                ev.m_gem_z.push_back(g.z);
+                ev.m_gem_x_charge.push_back(raw_g.x_charge);
+                ev.m_gem_y_charge.push_back(raw_g.y_charge);
+                ev.m_gem_x_size.push_back(raw_g.x_size);
+                ev.m_gem_y_size.push_back(raw_g.y_size);
+                ev.m_proj_x.push_back(proj_x);
+                ev.m_proj_y.push_back(proj_y);
+                ev.m_residual.push_back(best_dr);
+                ev.m_sigma_total.push_back(sig_total);
 
-            // Per-detector lab-frame hit lists for matching.
-            std::vector<analysis::GEMHit> gem_lab[4];
-            for (int d = 0; d < gem_sys.GetNDetectors() && d < 4; ++d) {
-                const auto &raw = gem_sys.GetHits(d);
-                gem_2d_per_det[d] += static_cast<long>(raw.size());
-                total_gem_2d     += static_cast<long>(raw.size());
-                for (const auto &h : raw) {
-                    analysis::GEMHit gh;
-                    gh.x = h.x; gh.y = h.y; gh.z = 0.f;
-                    gh.det_id = d;
-                    gem_lab[d].push_back(gh);
+                if (xc) {
+                    ev.m_xcl_position.push_back(xc->position);
+                    ev.m_xcl_total.push_back(xc->total_charge);
+                    ev.m_xcl_peak.push_back(xc->peak_charge);
+                    ev.m_xcl_max_tb.push_back(xc->max_timebin);
+                } else {
+                    ev.m_xcl_position.push_back(0.f);
+                    ev.m_xcl_total.push_back(0.f);
+                    ev.m_xcl_peak.push_back(0.f);
+                    ev.m_xcl_max_tb.push_back(-1);
                 }
-                for (auto &h : gem_lab[d]) analysis::ApplyToLab(gem_xforms[d], h);
-            }
-
-            // ---------- record HyCal clusters in tree ----------
-            ev.ncl = static_cast<int>(hc_hits.size());
-            for (int k = 0; k < ev.ncl; ++k) {
-                const auto &h = hc_hits[k];
-                ev.hc_x.push_back(h.x);
-                ev.hc_y.push_back(h.y);
-                ev.hc_z.push_back(h.z);
-                ev.hc_energy.push_back(h.energy);
-                ev.hc_center.push_back(h.center_id);
-                ev.hc_nblocks.push_back(hc_hits_raw[k].nblocks);
-                ev.hc_flag.push_back(h.flag);
-                // σ_HC at the HyCal face (mm) — see HyCalSystem::PositionResolution
-                ev.hc_sigma.push_back(hycal.PositionResolution(h.energy));
-            }
-
-            // ---------- best-match per HC cluster × GEM detector ------------
-            // For each HyCal cluster, draw a line from (0,0,0) target through
-            // the cluster centroid (lab); intersect with each GEM z-plane.
-            // Per (HC cluster, GEM det) pair, keep AT MOST one row — the
-            // candidate with the smallest 2D residual that's still inside
-            // the match_nsigma · σ_total window.  A GEM hit can win against
-            // multiple HC clusters (no GEM-side exclusivity).
-            for (int k = 0; k < ev.ncl; ++k) {
-                const auto &h = hc_hits[k];
-                if (h.z <= 0.f) continue;
-                const float sigma_face = ev.hc_sigma[k];
-
-                for (int d = 0; d < 4; ++d) {
-                    const auto &gl = gem_lab[d];
-                    if (gl.empty()) continue;
-                    // GEM z (lab) is the same for every hit on plane d —
-                    // just read the first one we have.
-                    const float z_gem = gl.front().z;
-                    if (z_gem <= 0.f) continue;
-                    const float scale  = z_gem / h.z;
-                    const float proj_x = h.x * scale;
-                    const float proj_y = h.y * scale;
-                    const float sig_hc_at_gem = sigma_face * scale;
-                    const float sig_gem = (d < (int)gem_pos_res.size())
-                                            ? gem_pos_res[d] : 0.1f;
-                    const float sig_total = std::sqrt(
-                        sig_hc_at_gem * sig_hc_at_gem + sig_gem * sig_gem);
-                    const float cut = match_nsigma * sig_total;
-
-                    // Find the closest GEM hit on detector d — must be
-                    // within `cut`.  best_dr starts at cut so any candidate
-                    // outside the window is automatically rejected.
-                    int   best_gi = -1;
-                    float best_dr = cut;
-                    for (size_t gi = 0; gi < gl.size(); ++gi) {
-                        const float dx = gl[gi].x - proj_x;
-                        const float dy = gl[gi].y - proj_y;
-                        const float dr = std::sqrt(dx*dx + dy*dy);
-                        if (dr <= best_dr) {
-                            best_dr = dr;
-                            best_gi = static_cast<int>(gi);
-                        }
-                    }
-                    if (best_gi < 0) continue;
-
-                    const auto &g       = gl[best_gi];
-                    const auto &raw_g   = gem_sys.GetHits(d)[best_gi];
-                    // Look up the X and Y constituent clusters by the
-                    // (position, total_charge) values that GEMHit copied
-                    // verbatim from each StripCluster.
-                    const auto *xc = find_constituent(
-                        gem_sys.GetPlaneClusters(d, 0),
-                        raw_g.x, raw_g.x_charge);
-                    const auto *yc = find_constituent(
-                        gem_sys.GetPlaneClusters(d, 1),
-                        raw_g.y, raw_g.y_charge);
-
-                    const int mi = ev.nmatch;
-                    ev.m_hc_idx.push_back(k);
-                    ev.m_det.push_back(d);
-                    ev.m_gem_x.push_back(g.x);
-                    ev.m_gem_y.push_back(g.y);
-                    ev.m_gem_z.push_back(g.z);
-                    ev.m_gem_x_charge.push_back(raw_g.x_charge);
-                    ev.m_gem_y_charge.push_back(raw_g.y_charge);
-                    ev.m_gem_x_size.push_back(raw_g.x_size);
-                    ev.m_gem_y_size.push_back(raw_g.y_size);
-                    ev.m_proj_x.push_back(proj_x);
-                    ev.m_proj_y.push_back(proj_y);
-                    ev.m_residual.push_back(best_dr);
-                    ev.m_sigma_total.push_back(sig_total);
-
-                    if (xc) {
-                        ev.m_xcl_position.push_back(xc->position);
-                        ev.m_xcl_total.push_back(xc->total_charge);
-                        ev.m_xcl_peak.push_back(xc->peak_charge);
-                        ev.m_xcl_max_tb.push_back(xc->max_timebin);
-                    } else {
-                        ev.m_xcl_position.push_back(0.f);
-                        ev.m_xcl_total.push_back(0.f);
-                        ev.m_xcl_peak.push_back(0.f);
-                        ev.m_xcl_max_tb.push_back(-1);
-                    }
-                    if (yc) {
-                        ev.m_ycl_position.push_back(yc->position);
-                        ev.m_ycl_total.push_back(yc->total_charge);
-                        ev.m_ycl_peak.push_back(yc->peak_charge);
-                        ev.m_ycl_max_tb.push_back(yc->max_timebin);
-                    } else {
-                        ev.m_ycl_position.push_back(0.f);
-                        ev.m_ycl_total.push_back(0.f);
-                        ev.m_ycl_peak.push_back(0.f);
-                        ev.m_ycl_max_tb.push_back(-1);
-                    }
-
-                    auto xs = append_strips(ev, mi, 0, xc);
-                    ev.m_xcl_first.push_back(xs.first);
-                    ev.m_xcl_nstrips.push_back(xs.second);
-                    auto ys = append_strips(ev, mi, 1, yc);
-                    ev.m_ycl_first.push_back(ys.first);
-                    ev.m_ycl_nstrips.push_back(ys.second);
-
-                    ++ev.nmatch;
+                if (yc) {
+                    ev.m_ycl_position.push_back(yc->position);
+                    ev.m_ycl_total.push_back(yc->total_charge);
+                    ev.m_ycl_peak.push_back(yc->peak_charge);
+                    ev.m_ycl_max_tb.push_back(yc->max_timebin);
+                } else {
+                    ev.m_ycl_position.push_back(0.f);
+                    ev.m_ycl_total.push_back(0.f);
+                    ev.m_ycl_peak.push_back(0.f);
+                    ev.m_ycl_max_tb.push_back(-1);
                 }
+
+                auto xs = append_strips(ev, mi, 0, xc);
+                ev.m_xcl_first.push_back(xs.first);
+                ev.m_xcl_nstrips.push_back(xs.second);
+                auto ys = append_strips(ev, mi, 1, yc);
+                ev.m_ycl_first.push_back(ys.first);
+                ev.m_ycl_nstrips.push_back(ys.second);
+
+                ++ev.nmatch;
             }
-
-            tree->Fill();
-            ++n_filled;
-            total_clusters += ev.ncl;
-            total_matches  += ev.nmatch;
-            total_strips   += ev.nstrips;
-
-            if (max_events > 0 && n_phys >= max_events) goto done;
         }
-        if (n_phys > 0 && n_phys % 5000 == 0)
-            Printf("[progress] %ld physics events", n_phys);
-        }
-        ch.Close();
-    }
 
-done:
+        tree->Fill();
+        ++n_filled;
+        total_clusters += ev.ncl;
+        total_matches  += ev.nmatch;
+        total_strips   += ev.nstrips;
+    });
+
     auto t1 = std::chrono::steady_clock::now();
     double secs = std::chrono::duration<double>(t1 - t0).count();
 
@@ -763,11 +579,7 @@ done:
     tree->Write();
     fout.Close();
 
-    Printf("--- summary ---");
-    Printf("  EVIO files opened     : %ld / %zu", n_files_open, evio_files.size());
-    Printf("  EVIO records          : %ld", n_read);
-    Printf("  physics events        : %ld", n_phys);
-    Printf("  passed trig cut 0x100 : %ld", n_kept);
+    print_scan_summary(scan, evio_files.size());
     Printf("  tree entries written  : %ld", n_filled);
     Printf("  total HyCal clusters  : %ld", total_clusters);
     Printf("  total GEM 2D hits     : %ld  (det0=%ld det1=%ld det2=%ld det3=%ld)",

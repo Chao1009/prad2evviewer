@@ -19,15 +19,43 @@ namespace fdec
 static constexpr int ISLAND_GROUP_RESERVE = 50;
 static constexpr int POS_RECON_HITS       = 15;
 
-//=============================================================================
-// shower_depth (free function — declared in HyCalCluster.h)
-//
-// Maximum-shower-development depth into the calorimeter face for an EM
-// shower of energy E, t = X0 · (ln(E/Ec) − Cf), with Cf = 0.5 for photons.
-// Constants verbatim from the legacy analysis::PhysicsTools::GetShowerDepth
-// (PRadAnalyzer lineage) and not expected to change — they're physical
-// properties of the W and G modules.
-//=============================================================================
+namespace
+{
+
+// Log-weighted centroid around a centre module.  Offsets are in module sizes;
+// the centre itself, at (0, 0), seeds the sums with its own weight.
+struct LogCentroid {
+    float wx = 0.f, wy = 0.f, wtot;
+    int   n;
+
+    explicit LogCentroid(float center_weight)
+        : wtot(center_weight), n(center_weight > 0.f ? 1 : 0) {}
+
+    void add(float dx, float dy, float w)
+    {
+        if (w > 0.f) {
+            wx += dx * w;
+            wy += dy * w;
+            wtot += w;
+            ++n;
+        }
+    }
+
+    // position in mm; the module centre when nothing carries weight
+    void position(const Module &center, float &x, float &y) const
+    {
+        if (wtot > 0.f) {
+            x = center.x + (wx / wtot) * center.size_x;
+            y = center.y + (wy / wtot) * center.size_y;
+        } else {
+            x = center.x;
+            y = center.y;
+        }
+    }
+};
+
+} // namespace
+
 float shower_depth(int center_id, float energy_mev)
 {
     if (energy_mev <= 0.f) return 0.f;
@@ -35,10 +63,6 @@ float shower_depth(int center_id, float energy_mev)
         return 8.6f  * (std::log(energy_mev / 1.1f)  - 0.5f);
     return            26.7f * (std::log(energy_mev / 2.84f) - 0.5f);  // PbGlass
 }
-
-//=============================================================================
-// Construction / setup
-//=============================================================================
 
 HyCalCluster::HyCalCluster(const HyCalSystem &sys)
     : sys_(sys)
@@ -58,9 +82,7 @@ void HyCalCluster::SetProfile(IClusterProfile *prof)
     SetProfile(std::shared_ptr<const IClusterProfile>(prof));
 }
 
-//=============================================================================
-// Per-event interface
-//=============================================================================
+// --- per-event interface ----------------------------------------------------
 
 void HyCalCluster::Clear()
 {
@@ -82,10 +104,9 @@ void HyCalCluster::FormClusters()
     clusters_.clear();
     groups_.clear();
 
-    // step 1: group adjacent hits using DFS
     group_hits();
 
-    // step 2: find maxima and split each group
+    // find maxima and split each group
     for (auto &group : groups_)
         split_cluster(group);
 
@@ -122,22 +143,8 @@ void HyCalCluster::ReconstructMatched(std::vector<RecoResult> &out) const
     }
 }
 
-//=============================================================================
-// Seed-driven BFS grouping (multi-pulse aware)
-//
-// Pulses are sorted by energy descending; the largest unconsumed pulse that
-// passes min_center_energy becomes a cluster seed and grows an island via
-// BFS through module neighbours.  For each neighbour module, the LARGEST
-// unconsumed pulse whose time lies within ±seed_time_window of the seed is
-// added to the group and marked consumed.  Pulses that fall outside the
-// seed's window stay alive in the pool and can seed a later cluster at a
-// different timing within the same event.
-//
-// When seed_time_window <= 0 the dt gate is bypassed and the algorithm
-// degenerates to the legacy "all connected pulses" behaviour — single-pulse
-// callers see no change.
-//=============================================================================
-
+// Seed-driven BFS grouping (multi-pulse aware); the algorithm is described at
+// ClusterConfig::seed_time_window in HyCalCluster.h.
 void HyCalCluster::group_hits()
 {
     // Build per-module pulse lists.  Multiple pulses on the same module
@@ -190,10 +197,8 @@ void HyCalCluster::grow_island(int seed_idx, int group_id, std::vector<int> &gro
             // Per neighbour MODULE, pick at most one pulse to add to this
             // group: the LARGEST-energy unconsumed pulse whose time lies
             // within ±seed_time_window of the seed (or any unconsumed
-            // pulse when gating is off).  Largest-amplitude is more
-            // reliable than closest-in-time — small pulses have noisy
-            // peak times.  Other pulses on the same module remain in
-            // the pool for a different seed at a different timing.
+            // pulse when gating is off).  Other pulses on the same module
+            // remain in the pool for a different seed at a different timing.
             int best_k = -1;
             for (int k : mod_to_hits_[ni]) {
                 if (consumed_[k]) continue;
@@ -211,9 +216,7 @@ void HyCalCluster::grow_island(int seed_idx, int group_id, std::vector<int> &gro
     }
 }
 
-//=============================================================================
-// Split cluster — find local maxima, distribute hits
-//=============================================================================
+// --- split cluster: find local maxima, distribute hits ----------------------
 
 void HyCalCluster::split_cluster(const std::vector<int> &group)
 {
@@ -254,9 +257,9 @@ std::vector<int> HyCalCluster::find_maxima(const std::vector<int> &group) const
             continue;
 
         bool is_max = true;
-        // include corners when checking for maxima (same as old code).  With
-        // multi-pulse modules, only the pulse that joined this group counts
-        // — others on the same module belong to a different (later) seed.
+        // include corners when checking for maxima.  With multi-pulse
+        // modules, only the pulse that joined this group counts — others on
+        // the same module belong to a different (later) seed.
         sys_.for_each_neighbor(hit.index, true, [&](int ni) {
             if (!is_max) return;
             for (int hj : mod_to_hits_[ni]) {
@@ -274,10 +277,7 @@ std::vector<int> HyCalCluster::find_maxima(const std::vector<int> &group) const
     return local_max;
 }
 
-//=============================================================================
-// Hit splitting — distribute shared hits among multiple maxima
-//=============================================================================
-
+// Distribute shared hits among multiple maxima.
 void HyCalCluster::split_hits(const std::vector<int> &maxima,
                                const std::vector<int> &group)
 {
@@ -339,7 +339,7 @@ float HyCalCluster::calculate_energy_square(const ModuleCluster &cluster) const
 
         double dx, dy;
         sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
-        if (std::fabs(dx) < 2.51 && std::fabs(dy) < 2.51)
+        if (qdist_in_5x5(dx, dy))
             energy_square += hit.energy;
     }
     return energy_square;
@@ -372,12 +372,11 @@ void HyCalCluster::eval_fraction(const std::vector<int> &maxima,
                 if (hit.index == center_hit.index || split.frac[j][i] == 0.f)
                     continue;
 
-                // check if within 3x3 using pre-computed neighbors
                 const auto &hit_mod = sys_.module(hit.index);
                 double dx, dy;
                 sys_.qdist(center_mod, hit_mod, dx, dy);
 
-                if (std::abs(dx) < 1.01 && std::abs(dy) < 1.01 && count < POS_RECON_HITS) {
+                if (qdist_in_3x3(dx, dy) && count < POS_RECON_HITS) {
                     float frac_E = hit.energy * split.norm_frac(i, j);
                     temp[count] = {static_cast<float>(dx), static_cast<float>(dy), frac_E};
                     tot_E += frac_E;
@@ -386,73 +385,46 @@ void HyCalCluster::eval_fraction(const std::vector<int> &maxima,
             }
 
             // reconstruct position (log-weighted)
-            float wx = 0.f, wy = 0.f;
-            float wtot = get_weight(center_hit.energy, tot_E);
+            LogCentroid acc(get_weight(center_hit.energy, tot_E));
+            for (int k = 0; k < count; ++k)
+                acc.add(temp[k].x, temp[k].y, get_weight(temp[k].E, tot_E));
 
-            for (int k = 0; k < count; ++k) {
-                float w = get_weight(temp[k].E, tot_E);
-                if (w > 0.f) {
-                    wx += temp[k].x * w;
-                    wy += temp[k].y * w;
-                    wtot += w;
-                }
-            }
-
+            // the centre is rounded to float before the shift, unlike
+            // LogCentroid::position; the split fractions depend on it
             float cx = center_mod.x, cy = center_mod.y;
-            if (wtot > 0.f) {
-                cx += (wx / wtot) * center_mod.size_x;
-                cy += (wy / wtot) * center_mod.size_y;
+            if (acc.wtot > 0.f) {
+                cx += (acc.wx / acc.wtot) * center_mod.size_x;
+                cy += (acc.wy / acc.wtot) * center_mod.size_y;
             }
 
             // update fractions with new center position
             for (int j = 0; j < nhits; ++j) {
                 auto &hit = hits_[group[j]];
-                split.frac[j][i] = get_profile_frac_at(cx, cy, tot_E, hit) * tot_E;
+                split.frac[j][i] = ProfileFractionAt(cx, cy, tot_E, hit.index) * tot_E;
             }
         }
     }
     split.sum_frac(nhits, nmax);
 }
 
-//=============================================================================
-// Position reconstruction — log-weighted centroid
-//=============================================================================
+// --- position reconstruction: log-weighted centroid -------------------------
 
 ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
 {
     const auto &center_mod = sys_.module(cl.center.index);
 
-    struct BaseHit { float x, y, E; };
-    BaseHit temp[POS_RECON_HITS];
+    // weights of the 3x3 neighbors relative to the total cluster energy
+    LogCentroid acc(get_weight(cl.center.energy, cl.energy));
     int count = 0;
-
-    // gather 3x3 neighbors
     for (auto &hit : cl.hits) {
         if (hit.index == cl.center.index) continue;
         if (count >= POS_RECON_HITS) break;
 
         double dx, dy;
         sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
-        if (std::abs(dx) < 1.01 && std::abs(dy) < 1.01) {
-            temp[count++] = {static_cast<float>(dx), static_cast<float>(dy), hit.energy};
-        }
-    }
-
-    // total energy
-    float tot_E = cl.energy;
-
-    // weighted position
-    float wx = 0.f, wy = 0.f;
-    float wtot = get_weight(cl.center.energy, tot_E);
-    int npos = (wtot > 0.f) ? 1 : 0;
-
-    for (int i = 0; i < count; ++i) {
-        float w = get_weight(temp[i].E, tot_E);
-        if (w > 0.f) {
-            wx += temp[i].x * w;
-            wy += temp[i].y * w;
-            wtot += w;
-            npos++;
+        if (qdist_in_3x3(dx, dy)) {
+            acc.add(dx, dy, get_weight(hit.energy, cl.energy));
+            ++count;
         }
     }
 
@@ -467,15 +439,8 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     result.leakage = cl.leakage;
     result.energy_square = cl.energy_square;
 
-    // get weighted position
-    if (wtot > 0.f) {
-        result.x = center_mod.x + (wx / wtot) * center_mod.size_x;
-        result.y = center_mod.y + (wy / wtot) * center_mod.size_y;
-    } else {
-        result.x = center_mod.x;
-        result.y = center_mod.y;
-    }
-    result.npos = npos;
+    acc.position(center_mod, result.x, result.y);
+    result.npos = acc.n;
 
     // if available, update the weighted position with leakage correction
     if (cl.has_leakage_position) {
@@ -493,9 +458,9 @@ ClusterHit HyCalCluster::reconstruct_pos(const ModuleCluster &cl) const
     if (config_.non_linear_corr) {
         // 1/linear_corr = E_rec/E_exp
         // = 1 + nl1*(E_rec-E_base)/1000 + nl2*((E_rec-E_base)/1000)^2
-        const float nl1 = sys_.GetCalibNonLinearity1(center_mod.id);
-        const float nl2 = sys_.GetCalibNonLinearity2(center_mod.id);
-        const float base_energy = sys_.GetCalibBaseEnergy(center_mod.id);
+        const float nl1 = center_mod.cal_non_linear_1;
+        const float nl2 = center_mod.cal_non_linear_2;
+        const float base_energy = center_mod.cal_base_energy;
         const float delta_gev = (cl.energy - base_energy) / 1000.f;
         float non_linear_factor = 1.f / (1.f + nl1 * delta_gev
                                                + nl2 * delta_gev * delta_gev);
@@ -610,48 +575,26 @@ HyCalCluster::LeakagePoint HyCalCluster::reconstruct_leakage_position(
     float total_energy) const
 {
     const auto &center_mod = sys_.module(cl.center.index);
-    LeakagePoint pos;
-    pos.x = center_mod.x;
-    pos.y = center_mod.y;
-    pos.energy = total_energy;
-
-    float wx = 0.f, wy = 0.f;
-    float wtot = get_weight(cl.center.energy, total_energy);
-    pos.npos = (wtot > 0.f) ? 1 : 0;
+    LogCentroid acc(get_weight(cl.center.energy, total_energy));
 
     for (const auto &hit : cl.hits) {
         if (hit.index == cl.center.index) continue;
 
         double dx, dy;
         sys_.qdist(center_mod, sys_.module(hit.index), dx, dy);
-        if (std::abs(dx) >= 1.01 || std::abs(dy) >= 1.01) continue;
-
-        float w = get_weight(hit.energy, total_energy);
-        if (w > 0.f) {
-            wx += static_cast<float>(dx) * w;
-            wy += static_cast<float>(dy) * w;
-            wtot += w;
-            pos.npos++;
-        }
+        if (qdist_in_3x3(dx, dy))
+            acc.add(dx, dy, get_weight(hit.energy, total_energy));
     }
 
     for (const auto &leak : leaks) {
-        if (leak.energy <= 0.f) continue;
-        if (std::abs(leak.dx) >= 1.01 || std::abs(leak.dy) >= 1.01) continue;
-
-        float w = get_weight(leak.energy, total_energy);
-        if (w > 0.f) {
-            wx += static_cast<float>(leak.dx) * w;
-            wy += static_cast<float>(leak.dy) * w;
-            wtot += w;
-            pos.npos++;
-        }
+        if (leak.energy > 0.f && qdist_in_3x3(leak.dx, leak.dy))
+            acc.add(leak.dx, leak.dy, get_weight(leak.energy, total_energy));
     }
 
-    if (wtot > 0.f) {
-        pos.x = center_mod.x + (wx / wtot) * center_mod.size_x;
-        pos.y = center_mod.y + (wy / wtot) * center_mod.size_y;
-    }
+    LeakagePoint pos;
+    acc.position(center_mod, pos.x, pos.y);
+    pos.energy = total_energy;
+    pos.npos = acc.n;
     return pos;
 }
 
@@ -682,9 +625,7 @@ double HyCalCluster::eval_cluster_profile(const LeakagePoint &pos,
     return (count > 0) ? est / count : std::numeric_limits<double>::infinity();
 }
 
-//=============================================================================
-// Profile helpers
-//=============================================================================
+// --- profile helpers --------------------------------------------------------
 
 float HyCalCluster::get_profile_frac(const ModuleHit &center, const ModuleHit &hit) const
 {
@@ -726,28 +667,17 @@ ProfileValue HyCalCluster::get_pwo_profile_value_at(float cx, float cy, float cE
     return profile_->GetFractionValue(ModuleType::PbWO4, dist, cE);
 }
 
-float HyCalCluster::get_profile_frac_at(float cx, float cy, float cE,
-                                          const ModuleHit &hit) const
+float HyCalCluster::ProfileFractionAt(float cx, float cy, float cE,
+                                      int module_index) const
 {
-    const auto &m = sys_.module(hit.index);
+    const auto &m = sys_.module(module_index);
     return get_profile_value_at(cx, cy, cE, m.x, m.y, m.sector, m.type).frac;
 }
 
-//=============================================================================
-// CollectNeighborTiming — emit (seed, neighbour, dt) rows without applying any
-// timing cut, for picking the production value of seed_time_window from real
-// data.
-//
-// Seed selection mirrors group_hits(): largest-energy pulse passing
-// min_center_energy that hasn't already been claimed AS A SEED in this
-// scan.  After selecting a seed, every other pulse within ±max_qdist on
-// each axis is emitted — neighbour pulses themselves are NOT consumed,
-// so a pulse may appear as a neighbour of more than one seed (intentional:
-// the study is about the dt landscape, not about cluster assignment).
-//
-// Const-friendly: works on local mod_to_hits / consumed scratch so it
-// doesn't disturb the per-event state used by FormClusters().
-//=============================================================================
+// Seed selection mirrors group_hits(); every other pulse within ±max_qdist on
+// each axis is emitted, so a pulse may appear as a neighbour of more than one
+// seed (the study is about the dt landscape, not cluster assignment).  Works
+// on local scratch so the per-event state used by FormClusters() is untouched.
 void HyCalCluster::CollectNeighborTiming(std::vector<SeedNeighborTiming> &out,
                                           double max_qdist) const
 {
@@ -775,9 +705,6 @@ void HyCalCluster::CollectNeighborTiming(std::vector<SeedNeighborTiming> &out,
         if (seed_claimed[seed]) continue;
         if (hits_[seed].energy < config_.min_center_energy) break;
 
-        // Claim this seed and any pulses on the SAME module within the
-        // tight seed-claim window so we don't emit multiple seeds for the
-        // same physics event in the same module.
         const float st = hits_[seed].time;
         const int   sm = hits_[seed].index;
         for (int k : mod_hits[sm])

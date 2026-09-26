@@ -3,25 +3,15 @@
 //=============================================================================
 
 #include "PhysicsTools.h"
-#include "InstallPaths.h"
 #include <TF1.h>
-#include <TSpectrum.h>
+#include <TH2Poly.h>
+#include <TLorentzVector.h>
 #include <TMath.h>
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
-#include <fstream>
-#include <iostream>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 namespace analysis {
 
-// Physical constants
-static constexpr float M_PROTON  = 938.272f;   // MeV
-static constexpr float M_ELECTRON = 0.51099895f;    // MeV
 static constexpr float DEG2RAD = 3.14159265f / 180.f;
 
 PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
@@ -45,10 +35,6 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
         "h2_Nevents_moduleMap", "Number of Events per Module;Column;Row",
         34, 0.5, 34.5, 34, -34.5, -0.5);
 
-    h2_moller_pos_ = std::make_unique<TH2F>(
-        "h2_moller_pos", "Moller 2-arm Hit Position;X (mm);Y (mm)",
-        200, -500, 500, 200, -500, 500);
-
     moller_phi_diff_ = std::make_unique<TH1F>(
         "h_moller_phi_diff", "Moller Phi Difference;Phi_{e1} - Phi_{e2} (deg);Counts",
         40, -20, 20);
@@ -61,39 +47,14 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     moller_z_ = std::make_unique<TH1F>(
         "h_moller_z", "Moller Z Position (HyCal);Z (mm);Counts",
         1000, 5000, 8000);
-
-    // histograms for gain monitoring replay
-    for (int ch = 0; ch < 4; ++ch) {
-        h_lmsCH_lmsHeight_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_lmsHeight", ch), Form("LMS%d Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
-        h_lmsCH_lmsIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_lmsIntegral", ch), Form("LMS%d Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 40000);
-        h_lmsCH_alphaHeight_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_alphaHeight", ch), Form("LMS%d Alpha Peak Height;Height (ADC);Counts", ch), 1000, 0, 4000);
-        h_lmsCH_alphaIntegral_[ch] = std::make_unique<TH1F>(
-            Form("h_lmsCH%d_alphaIntegral", ch), Form("LMS%d Alpha Peak Integral;Integral (ADC*ns);Counts", ch), 1000, 0, 400000);
-    }
-    module_gains_.resize(nmod);
-    for (int i = 0; i < nmod; ++i)
-        module_gains_[i].name = hycal_.module(i).name;
-
-    h_modCH_lmsHeight_.resize(nmod);
-    h_modCH_lmsIntegral_.resize(nmod);
-    for (int i = 0; i < nmod; ++i) {
-        auto &mod = hycal_.module(i);
-        std::string name_height = "h_mod" + mod.name + "_lmsHeight";
-        std::string title_height = mod.name + " LMS Peak Height;Height (ADC);Counts";
-        h_modCH_lmsHeight_[i] = std::make_unique<TH1F>(name_height.c_str(), title_height.c_str(), 1000, 0, 4000);
-        std::string name_integral = "h_mod" + mod.name + "_lmsIntegral";
-        std::string title_integral = mod.name + " LMS Peak Integral;Integral (ADC*ns);Counts";
-        h_modCH_lmsIntegral_[i] = std::make_unique<TH1F>(name_integral.c_str(), title_integral.c_str(), 1000, 0, 40000);
-    }
 }
 
 PhysicsTools::~PhysicsTools() = default;
 
+namespace {
+
 // Crystal Ball: p[0]=amp, p[1]=mean, p[2]=sigma, p[3]=alpha, p[4]=n
-static double crystalBallFunc(double *x, double *p)
+double crystalBallFunc(double *x, double *p)
 {
     double amp   = p[0];
     double mu    = p[1];
@@ -109,6 +70,107 @@ static double crystalBallFunc(double *x, double *p)
         return amp * a * std::pow(b - t, -n);
     }
 }
+
+// Fit window of fitGaus / fitCrystalBall.
+struct PeakWindow {
+    double height = 0.;   // content of the peak bin
+    double peak0  = 0.;   // centre of the peak bin
+    double sigma0 = 0.;   // expected width, 3% / sqrt(E in GeV)
+    double lo = 0., hi = 0.;
+};
+
+// Peak: the largest local maximum with its bin in [loMul, hiMul] * expectPeak,
+// else the global maximum.  Window: grown from the peak while bins exceed
+// threshFrac of its height, widened to at least 2.5 sigma0 and shrunk to at
+// most maxSpan sigma0, from bin centre to bin centre.  Returns false when
+// the histogram is not fittable (< 100 entries, < 4 bins, empty peak or
+// window).  Sets Poisson bin errors (Sumw2) for the chi-square fit.
+bool findPeakWindow(TH1F *h, float expectPeak, double loMul, double hiMul,
+                    double threshFrac, double maxSpan, PeakWindow &w)
+{
+    if (!h || h->GetEntries() < 100) return false;
+
+    const int nBins = h->GetNbinsX();
+    if (nBins < 4) return false;
+
+    int peakBin = -1;
+    double peakHeight = 0.;
+
+    if (std::isfinite(expectPeak) && expectPeak > 0.) {
+        int firstBin = h->GetXaxis()->FindFixBin(loMul * expectPeak);
+        int lastBin  = h->GetXaxis()->FindFixBin(hiMul * expectPeak);
+        firstBin = std::max(1, firstBin);
+        lastBin  = std::min(nBins, lastBin);
+
+        for (int bin = firstBin; bin <= lastBin; ++bin) {
+            const double content = h->GetBinContent(bin);
+            const double left = (bin > 1) ? h->GetBinContent(bin - 1) : content;
+            const double right = (bin < nBins) ? h->GetBinContent(bin + 1) : content;
+            if (content > 0. && content >= left && content >= right && content > peakHeight) {
+                peakBin = bin;
+                peakHeight = content;
+            }
+        }
+    }
+
+    if (peakBin < 0) {
+        peakBin = h->GetMaximumBin();
+        peakHeight = h->GetBinContent(peakBin);
+    }
+    if (peakHeight <= 0.) return false;
+
+    const double threshold = threshFrac * peakHeight;
+    const double peak0 = h->GetBinCenter(peakBin);
+    const double sigma0 = 0.03 * sqrt(peak0 * 1000.);
+    int leftBin = peakBin;
+    int rightBin = peakBin;
+    while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
+    while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 2.5 * sigma0
+           && (leftBin > 1 || rightBin < nBins)) {
+        if (leftBin > 1) --leftBin;
+        if (rightBin < nBins) ++rightBin;
+    }
+    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) > maxSpan * sigma0
+           && (leftBin > 1 || rightBin < nBins)) {
+        ++leftBin;
+        --rightBin;
+    }
+
+    const double lo = h->GetBinCenter(leftBin);
+    const double hi = h->GetBinCenter(rightBin);
+    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return false;
+
+    // ROOT's chi-square fit uses the histogram bin errors. Sumw2 initializes
+    // Poisson statistical errors for an unweighted histogram and preserves them
+    // correctly if the histogram is filled again later.
+    if (h->GetSumw2N() == 0) h->Sumw2();
+
+    w = {peakHeight, peak0, sigma0, lo, hi};
+    return true;
+}
+
+// Fit f over its range and return {mean, sigma, chi2/ndf, mean_error,
+// sigma_error} from its parameters 1 and 2, all zero when the fit failed.
+// The fitted TF1 stays attached to the histogram, so it is drawn with it and
+// persisted when the histogram is written to a ROOT file.
+std::array<double, 5> fitPeakModel(TH1F *h, TF1 &f, bool withError)
+{
+    const int fitStatus = h->Fit(&f, "RQ");
+    if (fitStatus != 0) return {0., 0., 0., 0., 0.};
+
+    const double mean = f.GetParameter(1);
+    const double sigma = std::abs(f.GetParameter(2));
+    if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
+        return {0., 0., 0., 0., 0.};
+
+    const double chi2 = (f.GetNDF() > 0) ? f.GetChisquare() / f.GetNDF() : 0.;
+    return {mean, sigma, chi2,
+            withError ? f.GetParError(1) : 0.,
+            withError ? f.GetParError(2) : 0.};
+}
+
+} // anonymous namespace
 
 void PhysicsTools::FillModuleEnergy(int module_id, float energy)
 {   
@@ -140,67 +202,19 @@ void PhysicsTools::FillEnergyVsTheta(float theta_deg, float energy)
         h2_energy_theta_->Fill(theta_deg, energy);
 }
 
-std::unique_ptr<TH1F> PhysicsTools::GetEpYieldHist(TH2F *energy_theta, float Ebeam)
+TH2Poly *PhysicsTools::MakeModuleMap(const fdec::HyCalSystem &hycal, const char *name,
+                                     const char *title, double half_range,
+                                     std::vector<int> &bin_by_index)
 {
-    if (!energy_theta) return nullptr;
-
-    auto h_ep = std::make_unique<TH1F>("ep_yield", "Elastic e-p Yield;Scattering Angle (deg);Counts", 80, 0, 8);
-    h_ep->SetDirectory(nullptr);
-    for (int i = 1; i <= energy_theta->GetNbinsX(); i++) {
-        for (int j = 1; j <= energy_theta->GetNbinsY(); j++) {
-            float theta = energy_theta->GetXaxis()->GetBinCenter(i);
-            float E = energy_theta->GetYaxis()->GetBinCenter(j);
-            float E_expected = ExpectedEnergy(theta, Ebeam, "ep");
-            if (std::abs(E - E_expected) < E_expected*0.026f/std::sqrt(E_expected/1000.f)) {
-                float count = energy_theta->GetBinContent(i, j);
-                h_ep->Fill(theta, count);
-            }
-        }
+    auto *poly = new TH2Poly(name, title, -half_range, half_range, -half_range, half_range);
+    bin_by_index.assign(hycal.module_count(), -1);
+    for (int m = 0; m < hycal.module_count(); ++m) {
+        const auto &mod = hycal.module(m);
+        if (!mod.is_pwo4()) continue;
+        bin_by_index[m] = poly->AddBin(mod.x - 0.5 * mod.size_x, mod.y - 0.5 * mod.size_y,
+                                       mod.x + 0.5 * mod.size_x, mod.y + 0.5 * mod.size_y);
     }
-    return h_ep;
-}
-
-std::unique_ptr<TH1F> PhysicsTools::GetEeYieldHist(TH2F *energy_theta, float Ebeam)
-{
-    if (!energy_theta) return nullptr;
-
-    auto h_ee = std::make_unique<TH1F>("ee_yield", "Elastic e-e Yield;Scattering Angle (deg);Counts", 80, 0, 8);
-    h_ee->SetDirectory(nullptr);
-    for (int i = 1; i <= energy_theta->GetNbinsX(); i++) {
-        for (int j = 1; j <= energy_theta->GetNbinsY(); j++) {
-            float theta = energy_theta->GetXaxis()->GetBinCenter(i);
-            float E = energy_theta->GetYaxis()->GetBinCenter(j);
-            float E_expected = ExpectedEnergy(theta, Ebeam, "ee");
-            if (std::abs(E - E_expected) < E_expected*0.026f/std::sqrt(E_expected/1000.f)) {
-                float count = energy_theta->GetBinContent(i, j);
-                h_ee->Fill(theta, count);
-            }
-        }
-    }
-    return h_ee;
-}
-
-std::unique_ptr<TH1F> PhysicsTools::GetYieldRatioHist(TH1F *ep_hist, TH1F *ee_hist)
-{
-    if (!ep_hist || !ee_hist) return nullptr;
-
-    auto h_ratio = std::make_unique<TH1F>("yield_ratio", "Yield Ratio (e-p / e-e);Scattering Angle (deg);Ratio", 80, 0, 8);
-    h_ratio->SetDirectory(nullptr);
-    for (int i = 1; i <= ep_hist->GetNbinsX(); i++) {
-        float theta = ep_hist->GetXaxis()->GetBinCenter(i);
-        float ep_count = ep_hist->GetBinContent(i);
-        float ee_count = ee_hist->GetBinContent(i);
-        if (ee_count > 0) {
-            h_ratio->Fill(theta, ep_count / ee_count);
-        }
-    }
-    return h_ratio;
-}
-
-void PhysicsTools::Fill2armMollerPosHist(float x, float y)
-{
-    if (h2_moller_pos_)
-        h2_moller_pos_->Fill(x, y);
+    return poly;
 }
 
 std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
@@ -214,7 +228,6 @@ std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
 
     const double resolution = 0.035; // 3.5% / sqrt(E/1000) energy resolution
 
-    // estimate sigma from energy resolution: sigma = E * resolution / sqrt(E/1000)
     auto estimateSigma = [&](double E) -> double {
         return (E > 0.) ? E * resolution / std::sqrt(E / 1000.) : 1.;
     };
@@ -256,31 +269,6 @@ std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
     return {static_cast<float>(mean), static_cast<float>(sigma), static_cast<float>(chi2)};
 }
 
-void PhysicsTools::Resolution2Database(int run_id)
-{
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    std::string filename = db_dir + Form("/recon/run_%d.dat", run_id);
-
-    std::ofstream out(filename);
-    if (!out.is_open()) {
-        std::cerr << "Failed to open file for writing: " << filename << std::endl;
-        return;
-    }
-
-    int module_count = hycal_.module_count();
-    for (int m = 0; m < module_count; m++) {
-        int module_id = hycal_.module(m).id;
-        auto [peak, sigma, chi2] = FitPeakResolution(module_id);
-        if (peak > 0 && sigma > 0) {
-            std::string name = hycal_.module(m).name;
-            out << name << " " << peak << " " << sigma << " " << chi2 << "\n";
-        }
-    }
-}
-
 float PhysicsTools::ExpectedEnergy(float theta_deg, float Ebeam, const std::string &type)
 {
     float theta = theta_deg * DEG2RAD;
@@ -290,18 +278,18 @@ float PhysicsTools::ExpectedEnergy(float theta_deg, float Ebeam, const std::stri
     if (type == "ep") {
         // elastic e-p: E' = E * M / (M + E*(1 - cos_t))
         // where M = proton mass
-        float expectE = Ebeam * M_PROTON / (M_PROTON + Ebeam * (1.f - cos_t));
+        float expectE = Ebeam * kProtonMass / (kProtonMass + Ebeam * (1.f - cos_t));
         float eloss = EnergyLoss(theta_deg, expectE);
         return expectE - eloss;
     }
     if (type == "ee") {
         // Moller scattering: exact lab-frame formula from 4-momentum conservation
         // E' = m * [(gamma+1) + (gamma-1)*cos^2(theta)] / [(gamma+1) - (gamma-1)*cos^2(theta)]
-        float gamma = Ebeam / M_ELECTRON;
+        float gamma = Ebeam / kElectronMass;
         float num = (gamma + 1.f) + (gamma - 1.f) * cos_t * cos_t;
         float den = (gamma + 1.f) - (gamma - 1.f) * cos_t * cos_t;
         if (den <= 0) return 0.f;
-        float expectE = M_ELECTRON * num / den;
+        float expectE = kElectronMass * num / den;
         float eloss = EnergyLoss(theta_deg, expectE);
         return expectE - eloss;
     }
@@ -329,77 +317,26 @@ float PhysicsTools::EnergyLoss(float theta_deg, float E)
     return eloss;  // total energy loss in MeV
 }
 
-float PhysicsTools::ExpectedAngle(float measured_energy, float Ebeam, const std::string &type)
+bool PhysicsTools::HitP4(float x, float y, float z, float E, float m, TLorentzVector &p4)
 {
-    // Inverse of ExpectedEnergy: given measured energy, calculate scattering angle.
-    // Uses iterative approach to handle energy loss.
-    
-    if (measured_energy <= 0.f || Ebeam <= 0.f) return 0.f;
-    
-    // Initial guess: assume no energy loss
-    float theta_deg = 0.1f;  // start small
-    
-    // Iterate to converge (typically 3-4 iterations)
-    for (int iter = 0; iter < 5; ++iter) {
-        // Energy before energy loss
-        float E_primary = measured_energy + EnergyLoss(theta_deg, measured_energy);
-        
-        // Now solve: given E_primary, find theta such that ExpectedEnergy(theta) = E_primary
-        float theta = theta_deg * DEG2RAD;
-        float gamma = Ebeam / M_ELECTRON;
-        
-        if (type == "ep") {
-            // For e-p: E' = E * M / (M + E*(1 - cos_t))
-            // Rearrange: M + E*(1 - cos_t) = E * M / E'
-            //            1 - cos_t = (E * M / E' - M) / E = M/E * (E/E' - 1)
-            //            cos_t = 1 - (M/E) * (E/E' - 1) = 1 + (M/E) * (1 - E/E')
-            float cos_t = 1.f + (M_PROTON / Ebeam) * (1.f - E_primary / Ebeam);
-            if (cos_t > 1.f) cos_t = 1.f;
-            if (cos_t < -1.f) cos_t = -1.f;
-            theta_deg = std::acos(cos_t) * 180.f / static_cast<float>(TMath::Pi());
-        }
-        else if (type == "ee") {
-            // For Moller: E' = m * [(gamma+1) + (gamma-1)*cos^2(theta)] / [(gamma+1) - (gamma-1)*cos^2(theta)]
-            // Rearrange to solve for cos²(theta):
-            // cos²(theta) = (gamma+1) * (E_primary - m) / [(gamma-1) * (E_primary + m)]
-            // where m = M_ELECTRON
-            
-            float numerator = (gamma + 1.f) * (E_primary - M_ELECTRON);
-            float denominator = (gamma - 1.f) * (E_primary + M_ELECTRON);
-            
-            if (denominator <= 0.f || numerator <= 0.f) return 0.f;
-            
-            float cos2_t = numerator / denominator;
-            if (cos2_t > 1.f) cos2_t = 1.f;
-            if (cos2_t < 0.f) cos2_t = 0.f;
-            
-            float cos_t = std::sqrt(cos2_t);
-            theta_deg = std::acos(cos_t) * 180.f / static_cast<float>(TMath::Pi());
-        }
-        else {
-            return 0.f;
-        }
+    const float norm = std::sqrt(x * x + y * y + z * z);
+    if (E < m || norm <= 0.f) {
+        p4.SetXYZT(0., 0., 0., 0.);
+        return false;
     }
-    
-    return theta_deg;
+    const float p = std::sqrt(E * E - m * m);
+    p4.SetXYZT(p * (x / norm), p * (y / norm), p * (z / norm), E);
+    return true;
 }
-
 
 bool PhysicsTools::isMoller_kinematic(float theta_deg1, float energy1, float theta_deg2, float energy2, float EBeam, float resolution)
 {
     float expectE1 = ExpectedEnergy(theta_deg1, EBeam, "ee");
     float expectE2 = ExpectedEnergy(theta_deg2, EBeam, "ee");
 
-    bool E_sum = false, E1_ok = false, E2_ok = false, phi_ok = false;
-
-    if(fabs(energy1 + energy2 - EBeam) < 5.f * resolution * EBeam / sqrt(EBeam/1000.f)) 
-        E_sum = true;
-    if(fabs(energy1 - expectE1) < 3.5f * expectE1 * resolution / sqrt(expectE1/1000.f)) 
-        E1_ok = true;
-    if(fabs(energy2 - expectE2) < 3.5f * expectE2 * resolution / sqrt(expectE2/1000.f)) 
-        E2_ok = true;
-
-    return E_sum && E1_ok && E2_ok;
+    return fabs(energy1 + energy2 - EBeam) < 5.f * resolution * EBeam / sqrt(EBeam/1000.f)
+        && fabs(energy1 - expectE1) < 3.5f * expectE1 * resolution / sqrt(expectE1/1000.f)
+        && fabs(energy2 - expectE2) < 3.5f * expectE2 * resolution / sqrt(expectE2/1000.f);
 }
 
 std::array<float, 2> PhysicsTools::GetMollerCenter(const MollerEvent &event1,
@@ -438,13 +375,12 @@ float PhysicsTools::GetMollerZdistance(const MollerEvent &event, float Ebeam)
 {
     float R1 = sqrt(event.first.x*event.first.x + event.first.y*event.first.y);
     float R2 = sqrt(event.second.x*event.second.x + event.second.y*event.second.y);
-    float z = sqrt( (Ebeam + M_ELECTRON) * R1 * R2 / (2.*M_ELECTRON) );
+    float z = sqrt( (Ebeam + kElectronMass) * R1 * R2 / (2.*kElectronMass) );
     return z;
 }
 
 float PhysicsTools::GetMollerPhiDiff(const MollerEvent &event1)
 {
-    // Calculate the azimuthal angle difference (phi) for a Moller event
     float x1 = event1.first.x, y1 = event1.first.y;
     float x2 = event1.second.x, y2 = event1.second.y;
     float phi1 = GetPhiAngle(x1, y1);
@@ -461,7 +397,10 @@ float PhysicsTools::GetPhiAngle(float x, float y)
     return phi;
 }
 
-//for gain factor monitoring
+float PhysicsTools::GetThetaAngle(float x, float y, float z)
+{
+    return std::atan2(std::sqrt(x * x + y * y), z) * 180.0 / M_PI;
+}
 
 std::array<double, 5> PhysicsTools::fitPeak(TH1F *h, float expectPeak, bool withError,
                                             bool useCrystalBall,
@@ -478,82 +417,12 @@ std::array<double, 5> PhysicsTools::fitPeak(TH1F *h, float expectPeak, bool with
 // Returns all zeroes if the histogram or fit is invalid.
 std::array<double, 5> PhysicsTools::fitGaus(TH1F *h, float expectPeak, bool withError)
 {
-    if (!h || h->GetEntries() < 100) return {0., 0., 0., 0., 0.};
+    PeakWindow w;
+    if (!findPeakWindow(h, expectPeak, 0.8, 1.2, 0.4, 4.5, w)) return {0., 0., 0., 0., 0.};
 
-    const int nBins = h->GetNbinsX();
-    if (nBins < 4) return {0., 0., 0., 0., 0.};
-
-    int peakBin = -1;
-    double peakHeight = 0.;
-
-    // Prefer the largest local maximum within +/-20% of the expected peak.
-    if (std::isfinite(expectPeak) && expectPeak > 0.) {
-        int firstBin = h->GetXaxis()->FindFixBin(0.8 * expectPeak);
-        int lastBin  = h->GetXaxis()->FindFixBin(1.2 * expectPeak);
-        firstBin = std::max(1, firstBin);
-        lastBin  = std::min(nBins, lastBin);
-
-        for (int bin = firstBin; bin <= lastBin; ++bin) {
-            const double content = h->GetBinContent(bin);
-            const double left = (bin > 1) ? h->GetBinContent(bin - 1) : content;
-            const double right = (bin < nBins) ? h->GetBinContent(bin + 1) : content;
-            if (content > 0. && content >= left && content >= right && content > peakHeight) {
-                peakBin = bin;
-                peakHeight = content;
-            }
-        }
-    }
-
-    // Fall back to the global maximum when no peak is found near expectPeak.
-    if (peakBin < 0) {
-        peakBin = h->GetMaximumBin();
-        peakHeight = h->GetBinContent(peakBin);
-    }
-    if (peakHeight <= 0.) return {0., 0., 0., 0., 0.};
-
-    const double threshold = 0.4 * peakHeight;
-    const double peak0 = h->GetBinCenter(peakBin);
-    const double sigma0 = 0.03 * sqrt(peak0 * 1000.);
-    int leftBin = peakBin;
-    int rightBin = peakBin;
-    while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
-    while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 2.5 * sigma0
-           && (leftBin > 1 || rightBin < nBins)) {
-        if (leftBin > 1) --leftBin;
-        if (rightBin < nBins) ++rightBin;
-    }
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) > 4.5 * sigma0
-           && (leftBin > 1 || rightBin < nBins)) {
-        ++leftBin;
-        --rightBin;
-    }
-
-    const double lo = h->GetBinCenter(leftBin);
-    const double hi = h->GetBinCenter(rightBin);
-    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0., 0., 0.};
-
-    // ROOT's chi-square fit uses the histogram bin errors. Sumw2 initializes
-    // Poisson statistical errors for an unweighted histogram and preserves them
-    // correctly if the histogram is filled again later.
-    if (h->GetSumw2N() == 0) h->Sumw2();
-
-    TF1 gaus("_fg_", "gaus", lo, hi);
-    gaus.SetParameters(peakHeight, peak0, sigma0);
-    // Keep the fitted TF1 attached to the histogram so it is drawn with the
-    // histogram and persisted when the histogram is written to a ROOT file.
-    const int fitStatus = h->Fit(&gaus, "RQ");
-    if (fitStatus != 0) return {0., 0., 0., 0., 0.};
-
-    const double mean = gaus.GetParameter(1);
-    const double sigma = std::abs(gaus.GetParameter(2));
-    if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
-        return {0., 0., 0., 0., 0.};
-
-    double chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.;
-    return {mean, sigma, chi2,
-            withError ? gaus.GetParError(1) : 0.,
-            withError ? gaus.GetParError(2) : 0.};
+    TF1 gaus("_fg_", "gaus", w.lo, w.hi);
+    gaus.SetParameters(w.height, w.peak0, w.sigma0);
+    return fitPeakModel(h, gaus, withError);
 }
 
 // Fit a peak near expectPeak with a Crystal Ball and return
@@ -562,134 +431,22 @@ std::array<double, 5> PhysicsTools::fitGaus(TH1F *h, float expectPeak, bool with
 std::array<double, 5> PhysicsTools::fitCrystalBall(TH1F *h, float expectPeak,
                                                   float alpha, float n, bool withError)
 {
-    if (!h || h->GetEntries() < 100) return {0., 0., 0., 0., 0.};
+    PeakWindow w;
+    if (!findPeakWindow(h, expectPeak, 0.7, 1.3, 0.05, 6.0, w)) return {0., 0., 0., 0., 0.};
 
-    const int nBins = h->GetNbinsX();
-    if (nBins < 4) return {0., 0., 0., 0., 0.};
-
-    int peakBin = -1;
-    double peakHeight = 0.;
-
-    if (std::isfinite(expectPeak) && expectPeak > 0.) {
-        int firstBin = h->GetXaxis()->FindFixBin(0.7 * expectPeak);
-        int lastBin  = h->GetXaxis()->FindFixBin(1.3 * expectPeak);
-        firstBin = std::max(1, firstBin);
-        lastBin  = std::min(nBins, lastBin);
-
-        for (int bin = firstBin; bin <= lastBin; ++bin) {
-            const double content = h->GetBinContent(bin);
-            const double left = (bin > 1) ? h->GetBinContent(bin - 1) : content;
-            const double right = (bin < nBins) ? h->GetBinContent(bin + 1) : content;
-            if (content > 0. && content >= left && content >= right && content > peakHeight) {
-                peakBin = bin;
-                peakHeight = content;
-            }
-        }
-    }
-
-    if (peakBin < 0) {
-        peakBin = h->GetMaximumBin();
-        peakHeight = h->GetBinContent(peakBin);
-    }
-    if (peakHeight <= 0.) return {0., 0., 0., 0., 0.};
-
-    const double threshold = 0.05 * peakHeight;
-    const double peak0 = h->GetBinCenter(peakBin);
-    const double sigma0 = 0.03 * sqrt(peak0 * 1000.);
-    int leftBin = peakBin;
-    int rightBin = peakBin;
-    while (leftBin > 1 && h->GetBinContent(leftBin) > threshold) --leftBin;
-    while (rightBin < nBins && h->GetBinContent(rightBin) > threshold) ++rightBin;
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) < 2.5 * sigma0
-           && (leftBin > 1 || rightBin < nBins)) {
-        if (leftBin > 1) --leftBin;
-        if (rightBin < nBins) ++rightBin;
-    }
-    while ((h->GetBinCenter(rightBin) - h->GetBinCenter(leftBin)) > 6.0 * sigma0
-           && (leftBin > 1 || rightBin < nBins)) {
-        ++leftBin;
-        --rightBin;
-    }
-
-    const double lo = h->GetBinCenter(leftBin);
-    const double hi = h->GetBinCenter(rightBin);
-    if (!(hi > lo) || !std::isfinite(sigma0) || sigma0 <= 0.) return {0., 0., 0., 0., 0.};
-
-    if (h->GetSumw2N() == 0) h->Sumw2();
-
-    TF1 cb("_fcb_", crystalBallFunc, lo, hi, 5);
+    TF1 cb("_fcb_", crystalBallFunc, w.lo, w.hi, 5);
     cb.SetParName(0, "amp");
     cb.SetParName(1, "mean");
     cb.SetParName(2, "sigma");
     cb.SetParName(3, "alpha");
     cb.SetParName(4, "n");
-    cb.SetParameters(peakHeight, peak0, sigma0, alpha, n);
-    cb.SetParLimits(0, 0.0, 5.0 * peakHeight);
-    cb.SetParLimits(1, lo, hi);
-    cb.SetParLimits(2, 1e-6, std::max(hi - lo, 1e-3));
+    cb.SetParameters(w.height, w.peak0, w.sigma0, alpha, n);
+    cb.SetParLimits(0, 0.0, 5.0 * w.height);
+    cb.SetParLimits(1, w.lo, w.hi);
+    cb.SetParLimits(2, 1e-6, std::max(w.hi - w.lo, 1e-3));
     cb.SetParLimits(3, 0.5, 4.0);
     cb.SetParLimits(4, 1.01, 20.0);
-
-    // Keep the fitted TF1 attached to the histogram for ROOT output and redraw.
-    const int fitStatus = h->Fit(&cb, "RQ");
-    if (fitStatus != 0) return {0., 0., 0., 0., 0.};
-
-    const double mean = cb.GetParameter(1);
-    const double sigma = std::abs(cb.GetParameter(2));
-    if (!std::isfinite(mean) || !std::isfinite(sigma) || sigma <= 0.)
-        return {0., 0., 0., 0., 0.};
-
-    const double chi2 = (cb.GetNDF() > 0) ? cb.GetChisquare() / cb.GetNDF() : 0.;
-    return {mean, sigma, chi2,
-            withError ? cb.GetParError(1) : 0.,
-            withError ? cb.GetParError(2) : 0.};
-}
-
-void PhysicsTools::ComputeModuleGains()
-{
-    // --- fit LMS and alpha reference channels (index 1..3) ---
-    double lms_ref[4]   = {}, alpha_ref[4] = {};
-    for (int i = 1; i <= 3; ++i) {
-        auto r = fitGaus(h_lmsCH_lmsIntegral_[i].get());
-        lms_ref[i] = r[0];
-        auto a = fitGaus(h_lmsCH_alphaIntegral_[i].get());
-        alpha_ref[i] = a[0];
-    }
-
-    // --- update module_gains_ in-place ---
-    int nmod = hycal_.module_count();
-    for (int i = 0; i < nmod; ++i) {
-        auto &mod = hycal_.module(i);
-        auto &res = module_gains_[i];
-        // reset numeric fields
-        res.lms_peak = res.lms_sigma = res.lms_chi2 = 0.f;
-        res.g[0] = res.g[1] = res.g[2] = res.g[3] = 0.f;
-
-        if (!mod.is_hycal()) continue;
-        if (mod.name.empty() || mod.name[0] != 'W') continue;
-
-        TH1F *h = (i < (int)h_modCH_lmsIntegral_.size())
-                  ? h_modCH_lmsIntegral_[i].get() : nullptr;
-        auto r = fitGaus(h);
-        if (r[0] <= 0.) continue;
-
-        res.lms_peak  = static_cast<float>(r[0]);
-        res.lms_sigma = static_cast<float>(r[1]);
-        res.lms_chi2  = static_cast<float>(r[2]);
-        for (int j = 1; j <= 3; ++j) {
-            res.g[j] = (lms_ref[j] > 0. && alpha_ref[j] > 0.)
-                       ? static_cast<float>(r[0] * alpha_ref[j] / lms_ref[j])
-                       : 1.f;
-        }
-    }
-
-    // --- reset histograms for next fill cycle ---
-    for (int i = 1; i <= 3; ++i) {
-        if (h_lmsCH_lmsIntegral_[i])   h_lmsCH_lmsIntegral_[i]->Reset();
-        if (h_lmsCH_alphaIntegral_[i]) h_lmsCH_alphaIntegral_[i]->Reset();
-    }
-    for (auto &h : h_modCH_lmsIntegral_)
-        if (h) h->Reset();
+    return fitPeakModel(h, cb, withError);
 }
 
 }

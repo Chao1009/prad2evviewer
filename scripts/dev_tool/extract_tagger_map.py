@@ -6,7 +6,7 @@ human-readable counter names) can consume.
 
 Run:
     pip install openpyxl       # one-time (if not already present)
-    python scripts/extract_tagger_map.py \
+    python scripts/dev_tool/extract_tagger_map.py \
         [--in docs/Tagger_translation_0.xlsx] \
         [--out database/tagger_map.json]
 

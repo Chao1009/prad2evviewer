@@ -1,7 +1,3 @@
-// =========================================================================
-// data_source.cpp — Factory function for creating data sources
-// =========================================================================
-
 #include "data_source.h"
 #include "evio_data_source.h"
 #include "DaqConfig.h"
@@ -18,7 +14,6 @@ std::unique_ptr<DataSource> createDataSource(
     const std::unordered_map<int, uint32_t> &crate_to_roc,
     const fdec::HyCalSystem *hycal)
 {
-    // detect file type by extension
     std::string lower = path;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 

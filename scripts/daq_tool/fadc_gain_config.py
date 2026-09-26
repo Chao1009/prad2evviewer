@@ -21,8 +21,10 @@ Workflow inside the GUI
 Optional CLI shortcuts (still always open the GUI):
     python fadc_gain_config.py
     python fadc_gain_config.py -c database/calibration/adc_to_mev_factors_cosmic.json
+    python fadc_gain_config.py --pbwo4-gain 0.15 --pbglass-gain 0.12
     python fadc_gain_config.py -o /path/to/adchycal_gain.cnf
     python fadc_gain_config.py -i existing.cnf
+    python fadc_gain_config.py -d /path/to/database --theme light
 """
 
 from __future__ import annotations
@@ -33,21 +35,32 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from PyQt6.QtCore import Qt, QRectF, pyqtSignal
+from PyQt6.QtGui import QColor, QPen, QFont, QDoubleValidator
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QLineEdit, QTextEdit, QSplitter, QFileDialog,
+    QDoubleSpinBox, QGroupBox, QFormLayout, QToolTip, QInputDialog,
+    QMessageBox,
+)
 
-SCRIPT_DIR = Path(__file__).resolve().parent
+from daq_common import btn_style, iter_fav3, load_module_info, render_fav3
+from prad2_env import find_database_file
+from hycal_geoview import (
+    HyCalMapWidget as _HyCalMapBase,
+    AUX_TYPES, CHANNELS_PER_SLOT, CRATE_NAMES, Module,
+    ColorRangeControl,
+    THEME, apply_theme_palette, set_theme, available_themes, themed,
+    cmap_qcolor,
+)
 
-NUM_CRATES = 7
-CRATE_NAMES = [f"adchycal{i}" for i in range(1, NUM_CRATES + 1)]
-CHANNELS_PER_SLOT = 16
 
 DEFAULT_UNMAPPED_GAIN = 0.0    # nonexistent channel — disable
 DEFAULT_LMS_GAIN  = 1.0
 DEFAULT_VETO_GAIN = 1.0
 
 
-# ---------------------------------------------------------------------------
-#  Database auto-discovery
-# ---------------------------------------------------------------------------
+# ---- Database auto-discovery ----
 
 def find_database_dir(explicit: Optional[str] = None) -> Path:
     if explicit:
@@ -56,44 +69,14 @@ def find_database_dir(explicit: Optional[str] = None) -> Path:
             sys.exit(f"error: --database path does not exist: {p}")
         return p
 
-    candidates = [
-        SCRIPT_DIR / ".." / ".." / "database",
-        Path.cwd() / "database",
-        Path.cwd(),
-    ]
-    for c in candidates:
-        if (c / "hycal_map.json").is_file():
-            return c.resolve()
-    sys.exit("error: could not locate database directory "
-             "(looked for hycal_map.json)")
+    found = find_database_file("hycal_map.json", use_env=False)
+    if found is None:
+        sys.exit("error: could not locate database directory "
+                 "(looked for hycal_map.json)")
+    return found.parent
 
 
-def load_modules(db_dir: Path) -> Dict[str, str]:
-    """Return {module_name: module_type} for all HyCal modules."""
-    with open(db_dir / "hycal_map.json") as f:
-        mods = json.load(f)
-    return {m["n"]: m["t"] for m in mods}
-
-
-def load_daq_map(db_dir: Path) -> List[Tuple[str, int, int, int]]:
-    """Return list of (name, crate, slot, channel) from hycal_map.json.
-
-    Records without a "daq" block (boosters, V1-V4 in PRad-1) are skipped.
-    """
-    with open(db_dir / "hycal_map.json") as f:
-        entries = json.load(f)
-    out: List[Tuple[str, int, int, int]] = []
-    for e in entries:
-        d = e.get("daq")
-        if not d:
-            continue
-        out.append((e["n"], d["crate"], d["slot"], d["channel"]))
-    return out
-
-
-# ---------------------------------------------------------------------------
-#  Gain source
-# ---------------------------------------------------------------------------
+# ---- Gain source ----
 
 def load_calibration(path: Path) -> Dict[str, float]:
     """Return {module_name: gain_factor} from a calibration JSON file."""
@@ -143,9 +126,7 @@ def safe_cap_gains(gains: Dict[str, float],
             for k, v in gains.items()}
 
 
-# ---------------------------------------------------------------------------
-#  Config text rendering / parsing
-# ---------------------------------------------------------------------------
+# ---- Config text rendering / parsing ----
 
 def format_gain(g: float) -> str:
     return f"{g:.6f}"
@@ -153,207 +134,58 @@ def format_gain(g: float) -> str:
 
 def render_cnf(daq: List[Tuple[str, int, int, int]],
                gains_by_name: Dict[str, float],
-               header_comments: Optional[List[str]] = None,
-               ) -> Tuple[str, int]:
+               header_comments: Optional[List[str]] = None) -> str:
     """Build the ``.cnf`` text from a per-module gain dict.
 
-    Returns ``(text, num_unmapped_channels)``.  Channels for which no
-    module is present in the DAQ map at the given (crate, slot, channel)
-    get the fallback :data:`DEFAULT_UNMAPPED_GAIN`.
+    Channels for which no module is present in the DAQ map at the given
+    (crate, slot, channel) get the fallback :data:`DEFAULT_UNMAPPED_GAIN`.
     """
     slots: Dict[Tuple[int, int], Dict[int, Tuple[str, float]]] = {}
     for name, crate, slot, ch in daq:
-        if crate < 0 or slot < 0 or ch < 0:
-            continue
         gain = gains_by_name.get(name, DEFAULT_UNMAPPED_GAIN)
         slots.setdefault((crate, slot), {})[ch] = (name, gain)
+
+    blocks: Dict[Tuple[int, int], Tuple[str, List[str]]] = {}
+    for (crate, slot), ch_map in slots.items():
+        gains: List[str] = []
+        names: List[str] = []
+        for ch in range(CHANNELS_PER_SLOT):
+            name, g = ch_map.get(ch, (f"ch{ch}:unmapped",
+                                      DEFAULT_UNMAPPED_GAIN))
+            gains.append(format_gain(g))
+            names.append(name)
+        blocks[(crate, slot)] = (f"# slot {slot}: {', '.join(names)}", gains)
 
     lines: List[str] = ["# adchycal_gain.cnf",
                         "# Generated by fadc_gain_config.py"]
     if header_comments:
         lines.extend(header_comments)
     lines.append("")
-
-    unmapped = 0
-    for ci in range(NUM_CRATES):
-        crate_slots = sorted(s for (c, s) in slots if c == ci)
-        if not crate_slots:
-            continue
-        lines.append(f"FAV3_CRATE {CRATE_NAMES[ci]}")
-        for slot in crate_slots:
-            ch_map = slots[(ci, slot)]
-            gains: List[str] = []
-            names: List[str] = []
-            for ch in range(CHANNELS_PER_SLOT):
-                entry = ch_map.get(ch)
-                if entry is None:
-                    gains.append(format_gain(DEFAULT_UNMAPPED_GAIN))
-                    names.append(f"ch{ch}:unmapped")
-                    unmapped += 1
-                else:
-                    name, g = entry
-                    gains.append(format_gain(g))
-                    names.append(name)
-            lines.append(f"# slot {slot}: {', '.join(names)}")
-            lines.append(f"FAV3_SLOT {slot}")
-            lines.append(f"FAV3_ALLCH_GAIN {' '.join(gains)}")
-        lines.append("FAV3_CRATE end")
-        lines.append("")
-
-    return "\n".join(lines), unmapped
+    lines += render_fav3(blocks, "FAV3_ALLCH_GAIN")
+    return "\n".join(lines)
 
 
 def parse_cnf_text(text: str,
                    daq: List[Tuple[str, int, int, int]]) -> Dict[str, float]:
     """Parse ``.cnf`` text, return ``{module_name: gain}`` for mapped channels."""
-    name_to_ci = {n: i for i, n in enumerate(CRATE_NAMES)}
-    daq_lookup: Dict[Tuple[int, int, int], str] = {}
-    for name, crate, slot, ch in daq:
-        if crate >= 0 and slot >= 0 and ch >= 0:
-            daq_lookup[(crate, slot, ch)] = name
-
+    daq_lookup = {(crate, slot, ch): name for name, crate, slot, ch in daq}
     gains: Dict[str, float] = {}
-    current_crate_idx = -1
-    current_slot = -1
-
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        parts = line.split()
-        kw = parts[0]
-        if kw == "FAV3_CRATE":
-            cname = parts[1] if len(parts) > 1 else ""
-            current_crate_idx = (
-                -1 if cname == "end" else name_to_ci.get(cname, -1))
-        elif kw == "FAV3_SLOT" and len(parts) > 1:
-            try:
-                current_slot = int(parts[1])
-            except ValueError:
-                current_slot = -1
-        elif (kw == "FAV3_ALLCH_GAIN"
-              and current_crate_idx >= 0 and current_slot >= 0):
-            for ch, val in enumerate(parts[1:1 + CHANNELS_PER_SLOT]):
-                name = daq_lookup.get((current_crate_idx, current_slot, ch))
-                if name:
-                    try:
-                        gains[name] = float(val)
-                    except ValueError:
-                        pass
+    for crate, slot, vals in iter_fav3(text, "FAV3_ALLCH_GAIN"):
+        for ch, val in enumerate(vals[:CHANNELS_PER_SLOT]):
+            name = daq_lookup.get((crate, slot, ch))
+            if name:
+                try:
+                    gains[name] = float(val)
+                except ValueError:
+                    pass
     return gains
 
 
-# ---------------------------------------------------------------------------
-#  GUI: HyCal geo-view editor
-# ---------------------------------------------------------------------------
-
-# LMS / V module display positions, slotted in a row below HyCal so that
-# they remain visible on the geo-view (matches trigger_mask_editor).
-_BOTTOM_Y = -640.0
-_BOTTOM_SZ = 50.0
-_LMS_V_XPOS = {
-    "LMS1": -200.0, "LMS2": -145.0, "LMS3": -90.0,
-    "V1":     35.0, "V2":     90.0, "V3":   145.0, "V4":  200.0,
-}
-_LABEL_NAMES = set(_LMS_V_XPOS.keys())
-
-
-class _ModuleInfo:
-    __slots__ = ("name", "mod_type", "x", "y", "sx", "sy",
-                 "crate", "slot", "channel")
-
-    def __init__(self, name, mod_type, x, y, sx, sy,
-                 crate=-1, slot=-1, channel=-1):
-        self.name = name
-        self.mod_type = mod_type
-        self.x = x
-        self.y = y
-        self.sx = sx
-        self.sy = sy
-        self.crate = crate
-        self.slot = slot
-        self.channel = channel
-
-
-def _load_module_info(db_dir: Path) -> List[_ModuleInfo]:
-    """Load HyCal modules joined with the DAQ map for the GUI."""
-    with open(db_dir / "hycal_map.json") as f:
-        entries = json.load(f)
-
-    daq_by_name: Dict[str, Tuple[int, int, int]] = {}
-    for e in entries:
-        d = e.get("daq")
-        if d:
-            daq_by_name[e["n"]] = (d["crate"], d["slot"], d["channel"])
-
-    modules: List[_ModuleInfo] = []
-    for m in entries:
-        name = m["n"]
-        g = m.get("geo") or {}
-        if name in _LMS_V_XPOS:
-            x, y, sx, sy = _LMS_V_XPOS[name], _BOTTOM_Y, _BOTTOM_SZ, _BOTTOM_SZ
-        else:
-            x, y, sx, sy = g.get("x", 0.0), g.get("y", 0.0), g.get("sx", 0.0), g.get("sy", 0.0)
-        crate, slot, ch = daq_by_name.get(name, (-1, -1, -1))
-        modules.append(_ModuleInfo(name, m["t"], x, y, sx, sy, crate, slot, ch))
-
-    # Defensive backfill for any _LMS_V_XPOS name that has a daq mapping but
-    # somehow isn't in the modules array.  In practice every deployed
-    # hycal_map.json carries LMS1-3 + V1-V4 as full records, and LMSP has no
-    # daq entry, so this loop is usually a no-op — kept for robustness.
-    have = {m.name for m in modules}
-    for name in _LMS_V_XPOS:
-        if name in have:
-            continue
-        crate, slot, ch = daq_by_name.get(name, (-1, -1, -1))
-        if crate >= 0:
-            t = "Veto" if name.startswith("V") else "LMS"
-            modules.append(_ModuleInfo(name, t, _LMS_V_XPOS[name],
-                                       _BOTTOM_Y, _BOTTOM_SZ, _BOTTOM_SZ,
-                                       crate, slot, ch))
-    return modules
-
-
-# PyQt + hycal_geoview imports (script is always GUI-only).
-sys.path.insert(0, str(SCRIPT_DIR.parent))
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QColor, QPen, QFont, QDoubleValidator
-from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QTextEdit, QSplitter, QFileDialog,
-    QDoubleSpinBox, QGroupBox, QFormLayout, QToolTip, QInputDialog,
-    QMessageBox,
-)
-from hycal_geoview import (
-    HyCalMapWidget as _HyCalMapBase,
-    Module as _Module,
-    ColorRangeControl,
-    THEME, apply_theme_palette, set_theme, available_themes, themed,
-    cmap_qcolor,
-)
-
-
-def _btn_style(checked_color: Optional[str] = None) -> str:
-    base = themed(
-        f"QPushButton{{background:{THEME.BUTTON};color:{THEME.TEXT};"
-        f"border:1px solid {THEME.BORDER};padding:6px 14px;"
-        f"font:10pt;border-radius:8px;}}"
-        f"QPushButton:hover{{background:{THEME.BUTTON_HOVER};}}")
-    if checked_color:
-        base += themed(
-            f"QPushButton:checked{{background:{checked_color};"
-            f"color:{THEME.TEXT};border:1px solid {checked_color};}}")
-    return base
-
-
-# ---------------------------------------------------------------------------
-#  HyCal geo-view widget
-# ---------------------------------------------------------------------------
+# ---- HyCal geo-view widget ----
 # Two interaction modes (selected via the editor's right-panel buttons):
 #   * Edit (default): click on a module emits ``moduleEditRequested`` with
 #     the current gain.  The editor opens a popup dialog to set a new value.
-#   * Set:  drag-paint the value carried by ``_paint_value``.  Use a
-#     value of 0 to mask channels off.
+#   * Set:  drag-paint the value carried by ``_paint_value``.
 # At drag end ``paintCommitted`` fires with the batch of
 # ``(name, prior_override_or_None)`` tuples so the editor can record the
 # action on its undo stack.
@@ -366,11 +198,12 @@ class _HyCalGainMap(_HyCalMapBase):
     moduleEditRequested = pyqtSignal(str, float)   # name, current gain
     paintCommitted = pyqtSignal(list)              # [(name, prior_value_or_None), ...]
 
-    def __init__(self, modules: List[_ModuleInfo], parent=None):
+    def __init__(self, modules: List[Module], parent=None):
         super().__init__(parent, shrink=0.92, margin_top=10,
                          margin_bottom=40, include_lms=True,
-                         show_colorbar=True, min_size=(500, 500))
-        self._mod_map: Dict[str, _ModuleInfo] = {m.name: m for m in modules}
+                         label_types=AUX_TYPES, show_colorbar=True,
+                         min_size=(500, 500))
+        self._mod_map: Dict[str, Module] = {m.name: m for m in modules}
         self._gains: Dict[str, float] = {}
         self._overrides: Dict[str, float] = {}
 
@@ -380,9 +213,7 @@ class _HyCalGainMap(_HyCalMapBase):
         self._drag_visited: Set[str] = set()
         self._drag_batch: List[Tuple[str, Optional[float]]] = []
 
-        base_modules = [_Module(m.name, m.mod_type, m.x, m.y, m.sx, m.sy)
-                        for m in modules]
-        self.set_modules(base_modules)
+        self.set_modules(modules)
         self.set_range(0.0, 1.0)
 
     # ---- public API ----
@@ -400,10 +231,6 @@ class _HyCalGainMap(_HyCalMapBase):
 
     def set_paint_value(self, v: float) -> None:
         self._paint_value = float(v)
-
-    @property
-    def paint_mode(self) -> str:
-        return self._paint_mode
 
     def set_gains(self, gains: Dict[str, float],
                   overrides: Optional[Dict[str, float]] = None) -> None:
@@ -428,7 +255,6 @@ class _HyCalGainMap(_HyCalMapBase):
         stops = self.palette_stops()
         no_data = self.NO_DATA_COLOR
         null_color = QColor(THEME.DANGER)
-        vmin, vmax = self._vmin, self._vmax
         for name, rect in self._rects.items():
             m = self._mod_map.get(name)
             if m is None or m.crate < 0:
@@ -438,12 +264,10 @@ class _HyCalGainMap(_HyCalMapBase):
             if v == 0.0:
                 p.fillRect(rect, null_color)
             else:
-                t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                t = max(0.0, min(1.0, t))
-                p.fillRect(rect, cmap_qcolor(t, stops))
+                p.fillRect(rect, cmap_qcolor(self.value_to_t(v), stops))
 
     def _paint_overlays(self, p, w, h):
-        # White border around modules whose gain was set via the GUI.
+        # Highlight border around modules whose gain was set via the GUI.
         sel_pen = QPen(QColor(THEME.SELECT_BORDER), 1.5)
         sel_pen.setCosmetic(True)
         p.setPen(sel_pen)
@@ -452,18 +276,7 @@ class _HyCalGainMap(_HyCalMapBase):
             rect = self._rects.get(name)
             if rect is not None:
                 p.drawRect(rect)
-        # LMS / V text labels
-        p.setPen(QColor(THEME.TEXT))
-        p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
-        for name in _LABEL_NAMES:
-            r = self._rects.get(name)
-            if r is not None:
-                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
-        # Hover highlight
-        if self._hovered and self._hovered in self._rects:
-            p.setPen(QPen(QColor(THEME.ACCENT), 2.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._hovered])
+        super()._paint_overlays(p, w, h)
 
     def _paint_after_colorbar(self, p, w, h):
         p.setPen(QColor(THEME.TEXT_DIM))
@@ -525,11 +338,8 @@ class _HyCalGainMap(_HyCalMapBase):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
-        # Defer to the base inline-range edit feature first — this would
-        # otherwise be swallowed by our paint-mode dispatch below.
         if self._check_inline_range_edit_click(pos):
             return
-        # Click on the colour bar cycles palettes (base widget feature)
         if self._cb_rect and self._cb_rect.contains(pos):
             self.cycle_palette()
             return
@@ -537,7 +347,6 @@ class _HyCalGainMap(_HyCalMapBase):
         if not found:
             return
         if self._paint_mode == PAINT_MODE_EDIT:
-            # Editor will show a popup dialog
             self.moduleEditRequested.emit(found, self._gains.get(found, 0.0))
         else:
             self._paint_dragging = True
@@ -573,13 +382,10 @@ class _HyCalGainMap(_HyCalMapBase):
         self._drag_visited.clear()
         self._drag_batch = []
 
-    def wheelEvent(self, event):
-        event.ignore()
-
 
 class _GainEditor(QMainWindow):
     def __init__(self,
-                 modules: List[_ModuleInfo],
+                 modules: List[Module],
                  daq: List[Tuple[str, int, int, int]],
                  mod_types: Dict[str, str],
                  db_dir: Path,
@@ -593,7 +399,6 @@ class _GainEditor(QMainWindow):
         self.setWindowTitle("FADC Gain Editor")
         self.resize(1600, 900)
 
-        self._modules = modules
         self._daq = daq
         self._mod_types = mod_types
         self._db_dir = db_dir
@@ -602,10 +407,10 @@ class _GainEditor(QMainWindow):
         self._pbwo4 = pbwo4_gain
         self._pbglass = pbglass_gain
         self._output_path = output_path
-        self._mod_map: Dict[str, _ModuleInfo] = {m.name: m for m in modules}
+        self._mod_map: Dict[str, Module] = {m.name: m for m in modules}
 
         apply_theme_palette(self)
-        # Window-scoped stylesheet so QLabel / QRadioButton / QDoubleSpinBox
+        # Window-scoped stylesheet so QLabel / QDoubleSpinBox / QLineEdit
         # (which don't reliably pick up the QPalette on Windows native style)
         # render text against the dark surfaces correctly.
         self.setStyleSheet(themed(
@@ -630,15 +435,13 @@ class _GainEditor(QMainWindow):
         self._history: List[List[Tuple[str, Optional[float]]]] = []
 
         # Colormap range control built later in _build_right_panel; until
-        # then any _notify_range_values() call is a no-op.
+        # then _after_change() skips it.
         self._range_ctrl: Optional[ColorRangeControl] = None
 
         self._map = _HyCalGainMap(modules)
         merged = dict(self._base_gains)
         merged.update(overrides)
         self._map.set_gains(merged, overrides)
-        # Color range defaults to [0, 1] (set in _HyCalGainMap.__init__);
-        # user can click Auto in the Color Range control to fit to data.
 
         self._build_right_panel()
 
@@ -668,14 +471,9 @@ class _GainEditor(QMainWindow):
     # ---- helpers ----
 
     def _compute_base_gains(self) -> Dict[str, float]:
-        base: Dict[str, float] = {}
-        for name, crate, slot, ch in self._daq:
-            if crate < 0 or slot < 0 or ch < 0:
-                continue
-            mt = self._mod_types.get(name)
-            base[name] = resolve_gain(name, mt, self._cal,
-                                      self._pbwo4, self._pbglass)
-        return base
+        return {name: resolve_gain(name, self._mod_types.get(name), self._cal,
+                                   self._pbwo4, self._pbglass)
+                for name, _, _, _ in self._daq}
 
     def _diff_overrides(self,
                         candidate: Dict[str, float]) -> Dict[str, float]:
@@ -686,11 +484,35 @@ class _GainEditor(QMainWindow):
                 out[name] = val
         return out
 
-    def _notify_range_values(self) -> None:
-        """Tell the range control the gain dict changed.  Re-fits if the
-        Auto button is in persistent (pinned) mode; otherwise no-op."""
+    def _after_change(self) -> None:
+        """The map's gains changed: tell the range control (it re-fits if
+        the Auto button is pinned) and refresh the .cnf preview."""
         if self._range_ctrl is not None:
             self._range_ctrl.notify_values_changed(self._map.gains)
+        self._refresh_text()
+
+    def _commit(self, gains: Dict[str, float],
+                overrides: Dict[str, float]) -> None:
+        self._map.set_gains(gains, overrides)
+        self._after_change()
+
+    def _apply_changes(self, changes: Dict[str, float]) -> int:
+        """Set ``{name: gain}`` as GUI edits, recorded as one undo batch.
+        Channels already overridden to that gain are skipped.  Returns the
+        number of channels changed."""
+        gains = dict(self._map.gains)
+        overrides = dict(self._map.overrides)
+        batch: List[Tuple[str, Optional[float]]] = []
+        for name, v in changes.items():
+            if gains.get(name) == v and overrides.get(name) == v:
+                continue
+            batch.append((name, overrides.get(name)))
+            gains[name] = v
+            overrides[name] = v
+        if batch:
+            self._history.append(batch)
+            self._commit(gains, overrides)
+        return len(batch)
 
     def _rebuild_from_base(self,
                            keep_overrides: bool = True) -> None:
@@ -699,9 +521,7 @@ class _GainEditor(QMainWindow):
         overrides = self._map.overrides if keep_overrides else {}
         merged = dict(self._base_gains)
         merged.update(overrides)
-        self._map.set_gains(merged, overrides)
-        self._notify_range_values()
-        self._refresh_text()
+        self._commit(merged, overrides)
 
     # ---- right panel ----
 
@@ -721,7 +541,7 @@ class _GainEditor(QMainWindow):
             f"color:{THEME.TEXT_DIM};font:9pt Monospace;"))
         cal_row.addWidget(self._cal_label, 1)
         btn_load_cal = QPushButton("Load Calibration…")
-        btn_load_cal.setStyleSheet(_btn_style())
+        btn_load_cal.setStyleSheet(btn_style())
         btn_load_cal.clicked.connect(self._load_calibration_file)
         cal_row.addWidget(btn_load_cal)
         sform.addRow(cal_row)
@@ -743,10 +563,7 @@ class _GainEditor(QMainWindow):
         v.addWidget(src_grp)
 
         # ---- Color Range group ----
-        # Reusable widget from hycal_geoview: min/max edits + Auto button.
         # auto_fit="minmax_nonzero" ignores zero-valued (masked) channels.
-        # Click the Auto button for a one-shot fit; double-click to keep
-        # auto-fitting after every edit.
         range_grp = QGroupBox("Color Range")
         rlayout = QHBoxLayout(range_grp)
         rlayout.setContentsMargins(8, 4, 8, 4)
@@ -759,11 +576,6 @@ class _GainEditor(QMainWindow):
         v.addWidget(range_grp)
 
         # ---- Edit group ----
-        # Default click-on-module opens a popup to set its gain.  Toggling
-        # Set switches to drag-paint mode — clicks/drags apply the value
-        # in the line edit (use 0 to mask channels off).  Set All applies
-        # the value to every DAQ-mapped channel.  Undo reverts the last
-        # action; Reset discards all GUI edits.
         edit_grp = QGroupBox("Edit")
         elayout = QHBoxLayout(edit_grp)
         elayout.setContentsMargins(8, 4, 8, 4)
@@ -777,7 +589,7 @@ class _GainEditor(QMainWindow):
 
         self._btn_set = QPushButton("Set")
         self._btn_set.setStyleSheet(
-            _btn_style(checked_color=THEME.ACCENT_STRONG))
+            btn_style(checked_color=THEME.ACCENT_STRONG))
         self._btn_set.setCheckable(True)
         self._btn_set.setToolTip(
             "Toggle set mode — click or drag modules to apply the value "
@@ -785,18 +597,18 @@ class _GainEditor(QMainWindow):
         self._btn_set.toggled.connect(self._on_set_toggled)
 
         self._btn_set_all = QPushButton("Set All")
-        self._btn_set_all.setStyleSheet(_btn_style())
+        self._btn_set_all.setStyleSheet(btn_style())
         self._btn_set_all.setToolTip(
             "Apply the value to every DAQ-mapped channel (use 0 to mask all)")
         self._btn_set_all.clicked.connect(self._on_set_all)
 
         self._btn_undo = QPushButton("Undo")
-        self._btn_undo.setStyleSheet(_btn_style())
+        self._btn_undo.setStyleSheet(btn_style())
         self._btn_undo.setToolTip("Revert the most recent edit")
         self._btn_undo.clicked.connect(self._undo)
 
         self._btn_reset = QPushButton("Reset")
-        self._btn_reset.setStyleSheet(_btn_style())
+        self._btn_reset.setStyleSheet(btn_style())
         self._btn_reset.setToolTip(
             "Discard all manual edits, revert to loaded base")
         self._btn_reset.clicked.connect(self._reset_overrides)
@@ -812,8 +624,6 @@ class _GainEditor(QMainWindow):
         v.addWidget(edit_grp)
 
         # ---- Safe Cap group ----
-        # One-shot clamp of every DAQ-mapped channel to [min, max].  Min is
-        # floored at 0 (gains are non-negative), max defaults to 0.15.
         cap_grp = QGroupBox("Safe Cap")
         clayout = QHBoxLayout(cap_grp)
         clayout.setContentsMargins(8, 4, 8, 4)
@@ -833,7 +643,7 @@ class _GainEditor(QMainWindow):
         self._sb_cap_max.setToolTip("Upper bound")
 
         self._btn_cap = QPushButton("Apply Safe Cap")
-        self._btn_cap.setStyleSheet(_btn_style())
+        self._btn_cap.setStyleSheet(btn_style())
         self._btn_cap.setToolTip(
             "Clamp every DAQ-mapped channel's gain to [Min, Max]")
         self._btn_cap.clicked.connect(self._on_apply_safe_cap)
@@ -850,11 +660,11 @@ class _GainEditor(QMainWindow):
 
         # ---- File row ----
         btn_load_cnf = QPushButton("Load .cnf…")
-        btn_load_cnf.setStyleSheet(_btn_style())
+        btn_load_cnf.setStyleSheet(btn_style())
         btn_load_cnf.clicked.connect(self._load_cnf_file)
 
         btn_save = QPushButton("Save .cnf…")
-        btn_save.setStyleSheet(_btn_style())
+        btn_save.setStyleSheet(btn_style())
         btn_save.clicked.connect(self._save_as)
 
         row = QHBoxLayout()
@@ -928,29 +738,10 @@ class _GainEditor(QMainWindow):
                 QMessageBox.StandardButton.No
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._bulk_apply(v, f"Set all to {v:.6g}")
-
-    def _bulk_apply(self, value: float, status_msg: str) -> None:
-        """Apply ``value`` to every DAQ-mapped channel; record one undo batch."""
-        gains = dict(self._map.gains)
-        overrides = dict(self._map.overrides)
-        batch: List[Tuple[str, Optional[float]]] = []
-        for name, m in self._mod_map.items():
-            if m.crate < 0:
-                continue
-            if (gains.get(name) == value and overrides.get(name) == value):
-                continue
-            batch.append((name, overrides.get(name)))
-            gains[name] = value
-            overrides[name] = value
-        if not batch:
-            self._status.setText("Nothing to change")
-            return
-        self._history.append(batch)
-        self._map.set_gains(gains, overrides)
-        self._notify_range_values()
-        self._refresh_text()
-        self._status.setText(f"{status_msg} — {len(batch)} channel(s)")
+        n = self._apply_changes(
+            {name: v for name, m in self._mod_map.items() if m.crate >= 0})
+        self._status.setText(f"Set all to {v:.6g} — {n} channel(s)" if n
+                             else "Nothing to change")
 
     def _on_apply_safe_cap(self) -> None:
         try:
@@ -973,28 +764,17 @@ class _GainEditor(QMainWindow):
         ) != QMessageBox.StandardButton.Yes:
             return
 
-        gains = dict(self._map.gains)
-        overrides = dict(self._map.overrides)
-        batch: List[Tuple[str, Optional[float]]] = []
-        for name, m in self._mod_map.items():
-            if m.crate < 0:
-                continue
-            new_v = capped.get(name)
-            if new_v is None or new_v == gains.get(name):
-                continue
-            batch.append((name, overrides.get(name)))
-            gains[name] = new_v
-            overrides[name] = new_v
-        if not batch:
+        gains = self._map.gains
+        n = self._apply_changes(
+            {name: capped[name] for name, m in self._mod_map.items()
+             if m.crate >= 0 and name in capped
+             and capped[name] != gains.get(name)})
+        if not n:
             self._status.setText("Safe Cap: all channels already in range")
             return
-        self._history.append(batch)
-        self._map.set_gains(gains, overrides)
-        self._notify_range_values()
-        self._refresh_text()
         self._status.setText(
             f"Safe-capped to [{min_cap:.6g}, {max_cap:.6g}] — "
-            f"{len(batch)} channel(s)")
+            f"{n} channel(s)")
 
     def _on_default_changed(self, _) -> None:
         self._pbwo4 = self._sb_pbwo4.value()
@@ -1002,8 +782,7 @@ class _GainEditor(QMainWindow):
         self._rebuild_from_base(keep_overrides=True)
 
     def _on_module_edit_requested(self, name: str, current: float) -> None:
-        """Open a popup dialog to set ``name``'s gain.  Apply / Enter
-        commits and closes; Cancel / Esc / X discards."""
+        """Open a popup dialog to set ``name``'s gain."""
         m = self._mod_map.get(name)
         crate_str = (f"  ({CRATE_NAMES[m.crate]} slot {m.slot} ch {m.channel})"
                      if m and m.crate >= 0 else "")
@@ -1013,27 +792,16 @@ class _GainEditor(QMainWindow):
             current, 0.0, 100.0, 6)
         if not ok:
             return
-        prior = self._map.overrides.get(name)
-        self._history.append([(name, prior)])
-
-        gains = dict(self._map.gains)
-        overrides = dict(self._map.overrides)
-        gains[name] = new_val
-        overrides[name] = new_val
-        self._map.set_gains(gains, overrides)
-
-        self._notify_range_values()
-        self._refresh_text()
+        self._apply_changes({name: new_val})
         self._status.setText(f"Set {name} = {new_val:.6g}")
 
     def _on_paint_committed(self,
                             batch: List[Tuple[str, Optional[float]]]) -> None:
-        """Drag-paint (mask) finished — record batch onto the undo stack."""
+        """Drag-paint finished — record the batch onto the undo stack."""
         if not batch:
             return
         self._history.append(list(batch))
-        self._notify_range_values()
-        self._refresh_text()
+        self._after_change()
         self._status.setText(f"Masked {len(batch)} module(s)")
 
     def _undo(self) -> None:
@@ -1050,9 +818,7 @@ class _GainEditor(QMainWindow):
             else:
                 overrides[name] = prior
                 gains[name] = prior
-        self._map.set_gains(gains, overrides)
-        self._notify_range_values()
-        self._refresh_text()
+        self._commit(gains, overrides)
         self._status.setText(f"Undone {len(batch)} edit(s)")
 
     def _on_hover(self, name: str) -> None:
@@ -1075,7 +841,7 @@ class _GainEditor(QMainWindow):
         cal_line = (f"# calibration : {self._cal_path}"
                     if self._cal_path
                     else "# calibration : (none)")
-        text, _ = render_cnf(
+        text = render_cnf(
             self._daq, self._map.gains,
             [cal_line,
              f"# edits applied : {len(self._map.overrides)}",
@@ -1083,10 +849,8 @@ class _GainEditor(QMainWindow):
         self._text.setPlainText(text)
 
     def _reset_overrides(self) -> None:
-        self._map.set_gains(self._base_gains, {})
         self._history.clear()
-        self._notify_range_values()
-        self._refresh_text()
+        self._commit(self._base_gains, {})
         self._status.setText("All edits cleared")
 
     def _load_calibration_file(self) -> None:
@@ -1136,17 +900,13 @@ class _GainEditor(QMainWindow):
         merged = dict(self._base_gains)
         merged.update(loaded)
         self._history.clear()
-        self._map.set_gains(merged, overrides)
-        self._notify_range_values()
-        self._refresh_text()
+        self._commit(merged, overrides)
         self._status.setText(
             f"Loaded {Path(path).name}: {len(loaded)} channels, "
             f"{len(overrides)} differ from base")
 
 
-# ---------------------------------------------------------------------------
-#  Main
-# ---------------------------------------------------------------------------
+# ---- Main ----
 
 def main():
     parser = argparse.ArgumentParser(
@@ -1172,8 +932,10 @@ def main():
     db_dir = find_database_dir(args.database)
     print(f"database : {db_dir}")
 
-    mod_types = load_modules(db_dir)
-    daq = load_daq_map(db_dir)
+    modules = load_module_info(db_dir)
+    mod_types = {m.name: m.mod_type for m in modules}
+    daq = [(m.name, m.crate, m.slot, m.channel)
+           for m in modules if m.crate >= 0]
     print(f"modules  : {len(mod_types)}   daq entries: {len(daq)}")
 
     cal: Dict[str, float] = {}
@@ -1199,11 +961,9 @@ def main():
             initial_overrides = parse_cnf_text(f.read(), daq)
         print(f"input cnf: {input_path}  ({len(initial_overrides)} channels)")
 
-    modules_info = _load_module_info(db_dir)
-
     set_theme(args.theme)
     app = QApplication.instance() or QApplication(sys.argv)
-    win = _GainEditor(modules_info, daq, mod_types, db_dir,
+    win = _GainEditor(modules, daq, mod_types, db_dir,
                       cal=cal, cal_path=cal_path,
                       pbwo4_gain=args.pbwo4_gain,
                       pbglass_gain=args.pbglass_gain,

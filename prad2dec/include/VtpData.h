@@ -67,6 +67,12 @@ struct PradCluster {
 
     bool     is_pbwo4() const { return (id & 0x800) != 0; }
     uint16_t module()   const { return is_pbwo4() ? (id & 0x7FF) : id; }
+    // Seed module as a HyCal id (recon tree vtp_cl_center): G<n> → n,
+    // W<n> → 1000 + n.
+    uint16_t hycal_id() const
+    {
+        return static_cast<uint16_t>(module() + (is_pbwo4() ? 1000 : 0));
+    }
 };
 
 // VTP block (0x10 BLKHDR + 0x11 BLKTLR pair; 0x12 / 0x13 header data)

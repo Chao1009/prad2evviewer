@@ -9,13 +9,13 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
+#include "JsonUtil.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -65,26 +65,35 @@ struct HyCalEnergyBias {
         return cluster_energy > ep_threshold();
     }
 
+    // Grid cell of a hit at (x, y) on `module`; the bias-table producer
+    // (hycal_energy_bowl_shape) bins with the same rule.  False for a
+    // non-finite position or a module without size.
+    static bool cell(const Module &module, float x, float y,
+                     int &column, int &row)
+    {
+        if (!std::isfinite(x) || !std::isfinite(y) ||
+            module.size_x <= 0. || module.size_y <= 0.)
+            return false;
+        const auto [local_x, local_y] = module.cell_offset(x, y);
+        column = std::clamp(
+            static_cast<int>(std::floor((local_x + 0.5f) * GRID_SIZE)),
+            0, GRID_SIZE - 1);
+        row = std::clamp(
+            static_cast<int>(std::floor((local_y + 0.5f) * GRID_SIZE)),
+            0, GRID_SIZE - 1);
+        return true;
+    }
+
     float bias(const Module &module, float x, float y,
                float cluster_energy) const
     {
+        int column, row;
         if (!module.is_pwo4() || module.index < 0 ||
-            !std::isfinite(x) || !std::isfinite(y) ||
-            !std::isfinite(cluster_energy) ||
-            module.size_x <= 0. || module.size_y <= 0.)
+            !std::isfinite(cluster_energy) || !cell(module, x, y, column, row))
             return 0.f;
 
         const auto &table = is_ep(cluster_energy) ? ep : ee;
         if (module.index >= static_cast<int>(table.size())) return 0.f;
-
-        const float local_x = static_cast<float>((x - module.x) / module.size_x);
-        const float local_y = static_cast<float>((y - module.y) / module.size_y);
-        const int column = std::clamp(
-            static_cast<int>(std::floor((local_x + 0.5f) * GRID_SIZE)),
-            0, GRID_SIZE - 1);
-        const int row = std::clamp(
-            static_cast<int>(std::floor((local_y + 0.5f) * GRID_SIZE)),
-            0, GRID_SIZE - 1);
         return table[module.index][row * GRID_SIZE + column];
     }
 
@@ -106,17 +115,15 @@ inline int LoadHyCalEnergyBiasFile(const std::string &path,
     table.assign(hycal.module_count(), {});
     if (path.empty()) return 0;
 
-    std::ifstream input(path);
-    if (!input) {
-        std::cerr << "Warning: cannot open HyCal energy-bias file " << path
-                  << ", using zero bias.\n";
+    nlohmann::json j;
+    std::string err;
+    if (!prad2::read_json_file(path, j, &err)) {
+        std::cerr << "Warning: " << err << ", using zero bias.\n";
         return 0;
     }
-
-    auto json = nlohmann::json::parse(input, nullptr, false, true);
-    if (json.is_discarded() || !json.is_object()) {
-        std::cerr << "Warning: failed to parse HyCal energy-bias file "
-                  << path << ", using zero bias.\n";
+    if (!j.is_object()) {
+        std::cerr << "Warning: HyCal energy-bias file " << path
+                  << " is not a JSON object, using zero bias.\n";
         return 0;
     }
 
@@ -124,8 +131,8 @@ inline int LoadHyCalEnergyBiasFile(const std::string &path,
     for (int module_index = 0; module_index < hycal.module_count(); ++module_index) {
         const auto &module = hycal.module(module_index);
         if (!module.is_pwo4()) continue;
-        auto module_it = json.find(module.name);
-        if (module_it == json.end() || !module_it->is_object()) continue;
+        auto module_it = j.find(module.name);
+        if (module_it == j.end() || !module_it->is_object()) continue;
 
         for (int row = 0; row < HyCalEnergyBias::GRID_SIZE; ++row) {
             auto row_it = module_it->find("y" + std::to_string(row));

@@ -1,25 +1,25 @@
 // bind_det.cpp — pybind11 bindings for prad2det (prad2py.det submodule).
 //
-// Phase 2a: GEM reconstruction.
+// GEM:
 //   prad2py.det.GemSystem            (detector hierarchy + processing)
 //   prad2py.det.GemCluster           (clustering algorithm)
 //   prad2py.det.ClusterConfig        (tuning knobs for GemCluster)
 //   prad2py.det.StripHit / StripCluster / GEMHit   (per-event outputs)
 //   prad2py.det.ApvConfig / PlaneConfig / DetectorConfig / ApvPedestal
+//   prad2py.det.GemPedestal, map_strip / seed_line / fit_weighted_line / ...
+// HyCal:     HyCalSystem / Module / HyCalCluster / HyCalClusterConfig / ...
+// Geometry:  DetectorTransform
+// Wiring:    PipelineBuilder / Pipeline / RunConfig / HyCalTimeCuts / ...
 //
-// Phase 2b (HyCal) and 2c (DetectorTransform) plug in alongside these —
-// each gets its own `py::class_<...>` block below.  EpicsStore moved to
-// the dec submodule (prad2py.dec.EpicsStore) when it migrated to prad2dec.
-//
-// Usage sketch (matches the C++ driver in test/gem_dump.cpp):
+// GEM usage sketch (the C++ driver is gem/gem_dump.cpp):
 //
 //     from prad2py import dec, det
 //     cfg = dec.load_daq_config()
-//     ch  = dec.EvChannel(); ch.set_config(cfg); ch.open(path)
+//     ch  = dec.EvChannel(); ch.set_config(cfg); ch.open_auto(path)
 //
 //     gsys = det.GemSystem()
 //     gsys.init("database/gem_map.json")
-//     gsys.load_pedestals("database/gem_ped.json")    # optional
+//     gsys.load_pedestals("gem_ped.txt")              # optional
 //     gcl = det.GemCluster()
 //
 //     while ch.read() == dec.Status.success:
@@ -34,13 +34,15 @@
 //             for h in gsys.get_all_hits():   # list[GEMHit]
 //                 print(h.det_id, h.x, h.y, h.x_charge, h.y_charge)
 
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
+#include "bind_common.h"
+
 #include <pybind11/stl.h>
 
 #include "GemSystem.h"
 #include "GemCluster.h"
 #include "GemPedestal.h"
+#include "GemEventJson.h"
+#include "GemTracking.h"
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
 #include "HyCalTimeCuts.h"
@@ -48,31 +50,28 @@
 #include "RfTime.h"
 #include "DetectorTransform.h"
 #include "PipelineBuilder.h"
+#include "InstallPaths.h"
 #include "RunInfoConfig.h"
 #include "SspData.h"
 
-#include <cstring>
 #include <cstdio>
+#include <optional>
 #include <string>
 
-namespace py = pybind11;
-
-// -------------------------------------------------------------------------
-// GEM bindings
-// -------------------------------------------------------------------------
+// ---- GEM ----------------------------------------------------------------
 static void bind_gem(py::module_ &m)
 {
     // --- stateless strip-mapping (shared with GemSystem::buildStripMap) -----
     // Exposed at module level so Python layout / diagnostic scripts
-    // (gem/gem_strip_map.py, gem/gem_layout.py) hit the same C++
-    // implementation the reconstruction uses — no more drifting duplicates.
+    // (gem/gem_strip_map.py, gem/gem_view.py) hit the same C++
+    // implementation the reconstruction uses.
 
     m.def("map_strip", &gem::MapStrip,
           py::arg("ch"), py::arg("plane_index"), py::arg("orient"),
           py::arg("pin_rotate")     = 0,
           py::arg("shared_pos")     = -1,
           py::arg("hybrid_board")   = true,
-          py::arg("apv_channels")   = 128,
+          py::arg("apv_channels")   = ssp::APV_STRIP_SIZE,
           py::arg("readout_center") = 32,
           "Map one APV25 channel index to the plane-wide strip number.  "
           "Pure function — same 6-step pipeline used by "
@@ -83,10 +82,45 @@ static void bind_gem(py::module_ &m)
           py::arg("pin_rotate")     = 0,
           py::arg("shared_pos")     = -1,
           py::arg("hybrid_board")   = true,
-          py::arg("apv_channels")   = 128,
+          py::arg("apv_channels")   = ssp::APV_STRIP_SIZE,
           py::arg("readout_center") = 32,
           "Compute plane-wide strip numbers for every channel of one APV.  "
           "Returns a Python list of length `apv_channels`.");
+
+    // --- straight-line track primitives (GemTracking.h), in double -----------
+
+    m.def("seed_line",
+        [](double x1, double y1, double z1, double x2, double y2, double z2) {
+            const auto L = gem::SeedLine(x1, y1, z1, x2, y2, z2);
+            return py::make_tuple(L.ax, L.bx, L.ay, L.by);
+        },
+        py::arg("x1"), py::arg("y1"), py::arg("z1"),
+        py::arg("x2"), py::arg("y2"), py::arg("z2"),
+        "Line through two lab-frame points, x(z) = ax + bx*z and "
+        "y(z) = ay + by*z.  Returns (ax, bx, ay, by); |z2 - z1| < 1e-6 "
+        "gives the flat line through point 1.");
+
+    m.def("fit_weighted_line",
+        [](const std::vector<double> &z, const std::vector<double> &x,
+           const std::vector<double> &y, const std::vector<double> &w_x,
+           const std::optional<std::vector<double>> &w_y) -> py::object {
+            const size_t n = z.size();
+            if (x.size() != n || y.size() != n || w_x.size() != n
+                || (w_y && w_y->size() != n))
+                throw py::value_error(
+                    "fit_weighted_line: z, x, y, w_x, w_y differ in length");
+            gem::TrackLine<double> L;
+            if (!gem::FitWeightedLine(static_cast<int>(n), z.data(), x.data(),
+                                      y.data(), w_x.data(),
+                                      w_y ? w_y->data() : w_x.data(), L))
+                return py::none();
+            return py::make_tuple(L.ax, L.bx, L.ay, L.by, L.chi2_per_dof);
+        },
+        py::arg("z"), py::arg("x"), py::arg("y"), py::arg("w_x"),
+        py::arg("w_y") = py::none(),
+        "Independent weighted least-squares fits in (z, x) and (z, y); w_y "
+        "defaults to w_x.  Returns (ax, bx, ay, by, chi2_per_dof) with "
+        "dof = 2N - 4, or None when N < 2 or a fit is singular.");
 
     // --- configuration leaves ------------------------------------------------
 
@@ -134,9 +168,8 @@ static void bind_gem(py::module_ &m)
         .def_readwrite("cm_range_max", &gem::ApvConfig::cm_range_max)
         .def("pedestal",
             [](const gem::ApvConfig &c, int ch) -> const gem::ApvPedestal& {
-                if (ch < 0 || ch >= 128)
-                    throw py::index_error("APV channel out of range [0,128)");
-                return c.pedestal[ch];
+                return c.pedestal[checked_index(ch, ssp::APV_STRIP_SIZE,
+                                                "APV channel out of range [0,128)")];
             },
             py::arg("ch"),
             py::return_value_policy::reference_internal,
@@ -154,18 +187,7 @@ static void bind_gem(py::module_ &m)
         .def_readonly("position",    &gem::StripHit::position)
         .def_readonly("cross_talk",  &gem::StripHit::cross_talk)
         .def_property_readonly("ts_adc",
-            [](const gem::StripHit &h) {
-                // Copy into a fresh numpy array — safer than viewing into
-                // the C++ vector, which could dangle if the StripHit is
-                // moved / the owning GemSystem is cleared.
-                auto arr = py::array_t<float>(
-                    static_cast<py::ssize_t>(h.ts_adc.size()));
-                if (!h.ts_adc.empty())
-                    std::memcpy(arr.mutable_data(),
-                                h.ts_adc.data(),
-                                h.ts_adc.size() * sizeof(float));
-                return arr;
-            },
+            [](const gem::StripHit &h) { return to_numpy(h.ts_adc); },
             "Time-sample ADC values after pedestal + common-mode correction "
             "(numpy float32, one entry per SSP time sample).");
 
@@ -204,8 +226,9 @@ static void bind_gem(py::module_ &m)
     // --- GemCluster (configurable clustering algorithm) ---------------------
 
     py::class_<gem::ClusterConfig>(m, "ClusterConfig",
-        "Tuning knobs for GemCluster.  Defaults reproduce the mpd_gem_view_ssp "
-        "reconstruction chain.")
+        "Tuning knobs for GemCluster.  Defaults follow the mpd_gem_view_ssp "
+        "reconstruction chain, with an empty charac_dists (cross-talk "
+        "flagging off); production values come from reconstruction_config.json.")
         .def(py::init<>())
         .def_readwrite("min_cluster_hits",   &gem::ClusterConfig::min_cluster_hits)
         .def_readwrite("max_cluster_hits",   &gem::ClusterConfig::max_cluster_hits)
@@ -253,43 +276,29 @@ static void bind_gem(py::module_ &m)
     // --- GemSystem (the main entry point) -----------------------------------
 
     py::class_<gem::GemSystem>(m, "GemSystem",
-        "PRad-II GEM detector system: loads gem_map.json / gem_ped.json, "
+        "PRad-II GEM detector system: loads gem_map.json and pedestals, "
         "processes SspEventData (pedestal subtraction, common-mode correction, "
         "zero suppression, strip mapping), and hands off to GemCluster for "
         "2-D reconstruction.")
         .def(py::init<>())
 
         // initialization
-        .def("init",
-            [](gem::GemSystem &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                self.Init(path);
-            },
-            py::arg("map_file"),
+        .def("init", &gem::GemSystem::Init,
+            py::arg("map_file"), release_gil(),
             "Load the detector hierarchy and APV mapping from a JSON file "
             "(typically database/gem_map.json).")
-        .def("load_pedestals",
-            [](gem::GemSystem &self, const std::string &path,
-               const std::map<int, int> &crate_remap) {
-                py::gil_scoped_release rel;
-                self.LoadPedestals(path, crate_remap);
-            },
+        .def("load_pedestals", &gem::GemSystem::LoadPedestals,
             py::arg("ped_file"),
-            py::arg("crate_remap") = std::map<int, int>{},
+            py::arg("crate_remap") = std::map<int, int>{}, release_gil(),
             "Load per-strip pedestal mean/RMS.  Required before ProcessEvent "
             "for real zero suppression — defaults keep all strips silent.  "
             "`crate_remap` (file-side hardware crate ID → logical crate ID "
             "in gem_map.json) defaults to identity; pass {tag: crate, ...} "
             "from daq_cfg.roc_tags when the pedestal file uses raw EVIO "
             "bank crate IDs (e.g. 146 → 1, 147 → 2 for PRad-II).")
-        .def("load_common_mode_range",
-            [](gem::GemSystem &self, const std::string &path,
-               const std::map<int, int> &crate_remap) {
-                py::gil_scoped_release rel;
-                self.LoadCommonModeRange(path, crate_remap);
-            },
+        .def("load_common_mode_range", &gem::GemSystem::LoadCommonModeRange,
             py::arg("cm_file"),
-            py::arg("crate_remap") = std::map<int, int>{},
+            py::arg("crate_remap") = std::map<int, int>{}, release_gil(),
             "Optional per-APV common-mode suppression window file.  "
             "`crate_remap` semantics match load_pedestals.")
 
@@ -297,20 +306,12 @@ static void bind_gem(py::module_ &m)
         .def("clear", &gem::GemSystem::Clear,
             "Reset per-event working buffers.  Call before every "
             "process_event().")
-        .def("process_event",
-            [](gem::GemSystem &self, const ssp::SspEventData &evt) {
-                py::gil_scoped_release rel;
-                self.ProcessEvent(evt);
-            },
-            py::arg("ssp_evt"),
+        .def("process_event", &gem::GemSystem::ProcessEvent,
+            py::arg("ssp_evt"), release_gil(),
             "Run pedestal + common-mode + zero-suppression over every APV in "
             "the given SspEventData.  Results feed reconstruct().")
-        .def("reconstruct",
-            [](gem::GemSystem &self, gem::GemCluster &cl) {
-                py::gil_scoped_release rel;
-                self.Reconstruct(cl);
-            },
-            py::arg("clusterer"),
+        .def("reconstruct", &gem::GemSystem::Reconstruct,
+            py::arg("clusterer"), release_gil(),
             "Cluster the per-plane strip hits and match X/Y clusters into "
             "2-D GEMHits via the supplied GemCluster instance.")
         .def("set_recon_configs", &gem::GemSystem::SetReconConfigs,
@@ -370,6 +371,23 @@ static void bind_gem(py::module_ &m)
              py::arg("apv_index"), py::arg("ch"), py::arg("ts"),
              "Pedestal + common-mode-corrected ADC for (APV, channel, time "
              "sample); valid after process_event().")
+        .def("zs_apvs_json",
+            [](const gem::GemSystem &self, bool round) {
+                return gem::ZsApvsToJson(self, round).dump();
+            },
+            py::arg("round") = false,
+            "JSON text of the per-APV zero-suppressed channels (the "
+            "`zs_apvs` list gem_dump -m evdump writes); valid after "
+            "process_event().  round=True rounds ADC values to 0.1.")
+        .def("detectors_json",
+            [](const gem::GemSystem &self, bool round) {
+                return gem::DetectorsToJson(self, round).dump();
+            },
+            py::arg("round") = false,
+            "JSON text of the per-detector clusters and 2-D hits (the "
+            "`detectors` list gem_dump -m evdump writes); valid after "
+            "reconstruct().  round=True rounds positions to 0.01 mm and "
+            "charges to 0.1.")
         .def("get_apv_frame",
             [](const gem::GemSystem &self, int apv_idx) {
                 // Copy into a fresh (128, 6) float32 array in strip-major
@@ -438,38 +456,29 @@ static void bind_gem(py::module_ &m)
     // --- GemPedestal -------------------------------------------------------
     py::class_<gem::GemPedestal>(m, "GemPedestal",
         "Accumulate GEM per-strip pedestals from SSP raw data, then write "
-        "a JSON file that GemSystem.load_pedestals can consume.  Same "
+        "the APV-block text file GemSystem.load_pedestals reads.  Same "
         "algorithm as `gem_dump -m ped` — both call this class.")
         .def(py::init<>())
         .def("clear", &gem::GemPedestal::Clear,
              "Drop all accumulated stats.")
-        .def("accumulate",
-            [](gem::GemPedestal &self, const ssp::SspEventData &evt) {
-                py::gil_scoped_release rel;
-                self.Accumulate(evt);
-            },
-            py::arg("ssp_event"),
+        .def("accumulate", &gem::GemPedestal::Accumulate,
+            py::arg("ssp_event"), release_gil(),
             "Fold one event's SSP data into the running pedestal "
-            "accumulators.  APVs with nstrips != 128 (online-ZS) are "
-            "silently skipped.")
+            "accumulators and return the number of APVs folded.  Only "
+            "full-readout APVs (nstrips == 128) contribute, so a pure "
+            "online-ZS event returns 0.")
         .def_property_readonly("num_apvs", &gem::GemPedestal::NumApvs,
              "Number of APVs with at least one contribution.")
         .def_property_readonly("num_strips", &gem::GemPedestal::NumStrips,
              "Number of strips (across all APVs) with at least one "
              "contribution.")
-        .def("write",
-            [](const gem::GemPedestal &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                return self.Write(path);
-            },
-            py::arg("output_path"),
-            "Serialize the accumulated mean/RMS to JSON.  Returns the "
+        .def("write", &gem::GemPedestal::Write,
+            py::arg("output_path"), release_gil(),
+            "Write the accumulated mean/RMS as APV-block text.  Returns the "
             "number of APVs written, or a negative value on I/O failure.");
 }
 
-// -------------------------------------------------------------------------
-// HyCal bindings
-// -------------------------------------------------------------------------
+// ---- HyCal --------------------------------------------------------------
 static void bind_hycal(py::module_ &m)
 {
     // --- free helpers (module-level under prad2py.det) ----------------------
@@ -487,6 +496,7 @@ static void bind_hycal(py::module_ &m)
         .value("PbGlass", fdec::ModuleType::PbGlass)
         .value("PbWO4",   fdec::ModuleType::PbWO4)
         .value("LMS",     fdec::ModuleType::LMS)
+        .value("Veto",    fdec::ModuleType::Veto)
         .value("Unknown", fdec::ModuleType::Unknown);
 
     py::enum_<fdec::Sector>(m, "Sector")
@@ -548,18 +558,13 @@ static void bind_hycal(py::module_ &m)
         .def_readonly("cal_non_linear_1",  &fdec::Module::cal_non_linear_1)
         .def_readonly("cal_non_linear_2",  &fdec::Module::cal_non_linear_2)
         .def("energize", &fdec::Module::energize, py::arg("adc"),
-             "Convert a pedestal-subtracted ADC value to MeV, including the "
-             "non-linear correction term.")
+             "Convert a pedestal-subtracted ADC value to MeV "
+             "(cal_factor * adc; 0 for adc < 0).")
         .def("is_pwo4",  &fdec::Module::is_pwo4)
         .def("is_glass", &fdec::Module::is_glass)
         .def("is_hycal", &fdec::Module::is_hycal)
         .def_property_readonly("neighbors",
-            [](const fdec::Module &m) {
-                py::list out;
-                for (int i = 0; i < m.neighbor_count; ++i)
-                    out.append(m.neighbors[i]);
-                return out;
-            },
+            [](const fdec::Module &m) { return list_of(m.neighbors, m.neighbor_count); },
             "Pre-computed cross-sector neighbor list (NeighborInfo[]).  "
             "Same-sector neighbors are resolved via the sector grid instead.")
         .def("__repr__", [](const fdec::Module &m) {
@@ -576,20 +581,12 @@ static void bind_hycal(py::module_ &m)
         "HyCal detector geometry + DAQ map + calibration.  Initialized once "
         "per job and then immutable — no per-event state lives here.")
         .def(py::init<>())
-        .def("init",
-            [](fdec::HyCalSystem &self, const std::string &map_path) {
-                py::gil_scoped_release rel;
-                return self.Init(map_path);
-            },
-            py::arg("map_path"),
+        .def("init", &fdec::HyCalSystem::Init,
+            py::arg("map_path"), release_gil(),
             "Load HyCal module geometry + DAQ map from hycal_map.json.  "
             "Returns True on success.")
-        .def("load_calibration",
-            [](fdec::HyCalSystem &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                return self.LoadCalibration(path);
-            },
-            py::arg("calib_path"),
+        .def("load_calibration", &fdec::HyCalSystem::LoadCalibration,
+            py::arg("calib_path"), release_gil(),
             "Load per-module calibration constants from a JSON file.  "
             "Returns the number of modules matched, or -1 on error.")
 
@@ -807,11 +804,7 @@ static void bind_hycal(py::module_ &m)
              py::arg("module_index"), py::arg("energy"), py::arg("time"),
              "Add a hit for the module at `module_index` with the given "
              "calibrated energy (MeV) and time (ns).")
-        .def("form_clusters",
-            [](fdec::HyCalCluster &self) {
-                py::gil_scoped_release rel;
-                self.FormClusters();
-            },
+        .def("form_clusters", &fdec::HyCalCluster::FormClusters, release_gil(),
             "Run the island grouping + splitting algorithm over the hits "
             "accumulated via add_hit().")
         .def("reconstruct_hits",
@@ -851,9 +844,7 @@ static void bind_hycal(py::module_ &m)
             "pulses.  Use to inform HyCalClusterConfig.seed_time_window.");
 }
 
-// -------------------------------------------------------------------------
-// Helper bindings (Phase 2c)
-// -------------------------------------------------------------------------
+// ---- DetectorTransform --------------------------------------------------
 static void bind_transform(py::module_ &m)
 {
     py::class_<DetectorTransform::Matrix>(m, "TransformMatrix",
@@ -943,19 +934,16 @@ static void bind_transform(py::module_ &m)
 #undef PRAD2_BIND_TRANSFORM_AXIS
 }
 
-// -------------------------------------------------------------------------
-// PipelineBuilder bindings — one-stop wiring of HyCal + GEM detectors.
-// -------------------------------------------------------------------------
+// ---- PipelineBuilder — one-stop wiring of HyCal + GEM detectors ---------
 //
-// Mirrors the C++ side at prad2det/include/PipelineBuilder.h: the builder
-// loads daq_config + reconstruction_config + runinfo, initializes both
-// detectors with calibration / pedestals / per-detector cluster configs,
-// and constructs the lab-frame DetectorTransforms.  Replaces ~100 LOC of
-// JSON parsing + Init/Load* orchestration in analysis/pyscripts/_common.py.
+// Mirrors prad2det/include/PipelineBuilder.h: the builder loads daq_config +
+// reconstruction_config + runinfo, initializes both detectors with
+// calibration / pedestals / per-detector cluster configs, and constructs the
+// lab-frame DetectorTransforms.
 //
 // Usage (Python):
 //
-//   from prad2py import det
+//   from prad2py import dec, det
 //   p = (det.PipelineBuilder()
 //          .set_run_number_from_evio(evio_path)
 //          .build())
@@ -1083,27 +1071,15 @@ static void bind_pipeline(py::module_ &m)
                                                       p.gem_transforms.end());
             },
             "Per-detector lab transforms (list of 4 DetectorTransform).")
-        .def_property_readonly("hycal_pos_res",
-            [](const prad2::Pipeline &p) {
-                return std::vector<float>(p.hycal_pos_res.begin(),
-                                          p.hycal_pos_res.end());
-            },
-            "[A, B, C] coefficients of HyCal-face position resolution.")
-        .def_property_readonly("hycal_energy_res",
-            [](const prad2::Pipeline &p) {
-                return std::vector<float>(p.hycal_energy_res.begin(),
-                                          p.hycal_energy_res.end());
-            },
-            "[A, B, C] coefficients of HyCal energy resolution.")
-            .def_readonly("hycal_energy_bias_nominal",
+        .def_readonly("hycal_pos_res",      &prad2::Pipeline::hycal_pos_res,
+                      "[A, B, C] coefficients of HyCal-face position resolution.")
+        .def_readonly("hycal_energy_res",   &prad2::Pipeline::hycal_energy_res,
+                      "[A, B, C] coefficients of HyCal energy resolution.")
+        .def_readonly("hycal_energy_bias_nominal",
                       &prad2::Pipeline::hycal_energy_bias_nominal)
         .def_readonly("gem_pos_res",        &prad2::Pipeline::gem_pos_res)
-        .def_property_readonly("target_pos_res",
-            [](const prad2::Pipeline &p) {
-                return std::vector<float>(p.target_pos_res.begin(),
-                                          p.target_pos_res.end());
-            },
-            "[sigma_x, sigma_y, sigma_z] of the target gas distribution.")
+        .def_readonly("target_pos_res",     &prad2::Pipeline::target_pos_res,
+                      "[sigma_x, sigma_y, sigma_z] of the target gas distribution.")
         .def_readonly("gem_crate_remap",    &prad2::Pipeline::gem_crate_remap,
                       "Hardware crate ID -> logical crate ID for GEM (from "
                       "daq_cfg.roc_tags entries with type=='gem').")
@@ -1126,10 +1102,15 @@ static void bind_pipeline(py::module_ &m)
     // Python (otherwise each setter would copy a fresh builder).
     py::class_<prad2::PipelineBuilder>(m, "PipelineBuilder",
         "Fluent builder.  Empty path strings fall back to defaults; relative "
-        "paths resolve via PRAD2_DATABASE_DIR (or set_database_dir override). "
+        "paths resolve against set_database_dir(), which defaults to the "
+        "prad2py.DATABASE_DIR lookup (PRAD2_DATABASE_DIR first).  "
         "build() throws on missing daq_config; missing runinfo / hycal_map / "
         "gem_map / calibration / pedestals warn and proceed.")
-        .def(py::init<>())
+        .def(py::init([] {
+            prad2::PipelineBuilder b;
+            b.set_database_dir(prad2::database_dir());
+            return b;
+        }))
         .def("set_database_dir",     &prad2::PipelineBuilder::set_database_dir,
              py::arg("path"), py::return_value_policy::reference_internal)
         .def("set_daq_config",       &prad2::PipelineBuilder::set_daq_config,
@@ -1158,27 +1139,21 @@ static void bind_pipeline(py::module_ &m)
         .def("set_log_pedestal_checksum",
              &prad2::PipelineBuilder::set_log_pedestal_checksum,
              py::arg("enabled"), py::return_value_policy::reference_internal)
-        .def("build",
-            [](prad2::PipelineBuilder &self) {
-                py::gil_scoped_release rel;
-                return self.build();
-            },
+        .def("build", &prad2::PipelineBuilder::build, release_gil(),
             "Run all the wiring; returns a Pipeline.  Releases the GIL "
             "during the (potentially slow) Init/LoadCalibration/LoadPedestals "
             "calls so Python threads can keep running.");
 }
 
-// -------------------------------------------------------------------------
-// Submodule entry point — called from prad2py.cpp
-// -------------------------------------------------------------------------
+// Entry point called from prad2py.cpp.
 void register_det(py::module_ &m)
 {
     auto det = m.def_submodule("det",
-        "prad2det bindings — GEM + HyCal reconstruction and slow-control "
-        "helpers.");
+        "prad2det bindings — GEM + HyCal reconstruction, detector "
+        "transforms and PipelineBuilder.");
 
-    bind_gem(det);       // 2a
-    bind_hycal(det);     // 2b
-    bind_transform(det); // 2c
-    bind_pipeline(det);  // 2d — one-stop wiring (PipelineBuilder)
+    bind_gem(det);
+    bind_hycal(det);
+    bind_transform(det);
+    bind_pipeline(det);
 }

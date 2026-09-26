@@ -1,10 +1,8 @@
 #pragma once
-// =========================================================================
-// viewer_server.h — Unified HTTP/WebSocket server for PRad-II event viewer
+// Unified HTTP/WebSocket server for the PRad-II event viewer.
 //
 // Combines file-based viewing and online ET monitoring into a single server.
 // Mode switching between "idle", "file", and "online" via API or user actions.
-// =========================================================================
 
 #include "data_source.h"
 #include "app_state.h"
@@ -21,7 +19,7 @@
 #include <chrono>
 #include <ctime>
 #include <deque>
-#include <map>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -59,14 +57,9 @@ struct RingEntry {
     // Pre-compressed gzip bytes for the big payload — deflated once per
     // event in the ET reader thread so each viewer's HTTP request just
     // copies the cached blob instead of re-running zlib.  Empty when
-    // gem_apv_str is empty (e.g. GEM disabled).
+    // gem_apv_str is below kGzipMinBytes (e.g. the GEM-disabled stub) or
+    // compression failed; reply() then serves the plain body.
     std::string gem_apv_gz;
-
-    // Raw event copies kept so /api/hist_config can recompute cluster_str
-    // (and re-encode json_str) under a new time/threshold window without
-    // waiting for new events to arrive.  ~8MB per entry — bounded by ring_size_.
-    std::shared_ptr<fdec::EventData>    event_data;
-    std::shared_ptr<ssp::SspEventData>  ssp_data;
 };
 
 // ── ViewerServer ─────────────────────────────────────────────────────────
@@ -93,14 +86,11 @@ public:
     ViewerServer();
     ~ViewerServer();
 
-    // Initialize application state. Must be called before run/startAsync.
+    // Initialize application state. Must be called before run.
     void init(const Config &cfg);
 
     // Run the server (blocking). Loads initial file, then serves.
     void run();
-
-    // Start server in a background thread. Returns the actual port.
-    int startAsync(int port = 0);
 
     // Stop the server and all background threads.
     void stop();
@@ -109,10 +99,7 @@ public:
     // Non-blocking: spawns a background load thread.
     void loadFile(const std::string &path, bool hist);
 
-    int  port() const { return port_; }
     std::string mode() const;
-    bool isLoading() const { return progress_.loading.load(); }
-    nlohmann::json getProgress() const { return progress_.toJson(); }
 
     // Active AppState for the current mode.
     AppState &activeApp();
@@ -124,6 +111,14 @@ private:
     std::mutex mode_mtx_;       // serialises mode transitions
 
     void setMode(Mode m);       // set + broadcast
+#ifdef WITH_ET
+    // Enter online mode (or reconnect when already online).  When
+    // et_overrides is an object, its host / port / et_file / station keys
+    // replace the ET settings first.
+    void goOnline(const nlohmann::json &et_overrides = nlohmann::json::object());
+#endif
+    // Leave online mode: file mode if a file is loaded, else idle.
+    void goOffline();
 
     // ── Dual AppState (file vs online, never mixed) ──────────────────────
     AppState    app_file_;
@@ -135,11 +130,10 @@ private:
 
     // ── WebSocket ────────────────────────────────────────────────────────
     std::unique_ptr<WsServer> server_;
-    std::thread server_thread_;
     std::set<websocketpp::connection_hdl,
              std::owner_less<websocketpp::connection_hdl>> ws_clients_;
     // Clients that have advertised the on-demand auto-report protocol via
-    // a client_hello message. Pre-update tabs (no hello sent) stay out of
+    // a client_hello message. Tabs that never sent a hello stay out of
     // this set, so dispatchCapture skips them — the watchdog never burns
     // 30 s on a client that wouldn't know what to do with capture_request.
     std::set<websocketpp::connection_hdl,
@@ -147,6 +141,10 @@ private:
     std::mutex ws_mtx_;
 
     void wsBroadcast(const std::string &msg);
+    bool wsSend(websocketpp::connection_hdl hdl, const std::string &msg);  // text frame; false on failure
+    // Clear the active mode's "hist", "lms" or "epics" accumulators and
+    // broadcast <what>_cleared.  False for any other name.
+    bool clearDomain(const std::string &what);
     void handleWsMessage(websocketpp::connection_hdl hdl,
                          const std::string &payload);
 
@@ -169,12 +167,16 @@ private:
     // ── File mode ────────────────────────────────────────────────────────
     std::shared_ptr<FileData> file_data_;
     std::mutex file_data_mtx_;
+    std::shared_ptr<FileData> fileData() {
+        std::lock_guard<std::mutex> lk(file_data_mtx_);
+        return file_data_;
+    }
 
     std::unique_ptr<DataSource> data_source_;
     std::mutex data_source_mtx_;
     std::unordered_map<int, uint32_t> crate_to_roc_;  // for ROOT data sources
 
-    mutable Progress progress_;
+    Progress progress_;
     std::atomic<bool> hist_enabled_{false};
     std::thread load_thread_;
     std::mutex load_mtx_;
@@ -182,8 +184,8 @@ private:
     // On-demand accumulation: mirrors the online-mode logic for file browsing.
     // - Preprocessed (hist_enabled_): all events already processed by
     //   buildHistograms(); further calls are no-ops.
-    // - Not preprocessed: processEvent/processGemEvent are called once per
-    //   event as the user browses (deduped by ondemand_processed_).
+    // - Not preprocessed: processEvent is called once per event as the user
+    //   browses (deduped by ondemand_processed_).
     // Any new accumulation added to processEvent() automatically follows
     // this pattern — no per-endpoint code is needed.
     std::unordered_set<int> ondemand_processed_;
@@ -194,13 +196,27 @@ private:
     std::vector<int> filtered_indices_;   // 1-based event indices passing filter
     void buildFilteredIndex();
     std::string applyFilter(const nlohmann::json &fj);
+    std::string loadFilterFile(const std::string &path);  // read + applyFilter
     void clearFilter();
+    // After a filter change: clear both modes' histograms + LMS, forget the
+    // on-demand accumulation, re-index the file and rebuild preprocessed
+    // histograms, then broadcast hist_cleared.
+    void resetAfterFilterChange();
 
     void buildHistograms();
     void loadFileInternal(const std::string &filepath);
 
     std::string decodeRawEvent(int ev1, fdec::EventData &event,
                                ssp::SspEventData *ssp_evt = nullptr);
+    // Decode event ev1 of the loaded file, accumulate() it, and return
+    // on_raw(event, ssp).  If on_recon is set and the file is a ROOT recon
+    // file, returns on_recon(recon) instead (no accumulation).  Decode
+    // failures return {"error": ...}.  No lock is held while the callbacks run.
+    using RawEventFn   = std::function<nlohmann::json(fdec::EventData &,
+                                                      ssp::SspEventData &)>;
+    using ReconEventFn = std::function<nlohmann::json(const prad2::ReconEventData &)>;
+    nlohmann::json withFileEvent(int ev1, const RawEventFn &on_raw,
+                                 const ReconEventFn &on_recon = nullptr);
     nlohmann::json decodeEvent(int ev1);
     nlohmann::json computeClusters(int ev1);
 
@@ -242,7 +258,7 @@ private:
     // metric on its own cadence (per-metric poll_sec); a metric whose
     // command is empty stays at -1.0.  Avoids a build-time EPICS dependency
     // by shelling out to whatever tool the host provides (typically caget).
-    //   - livetime_       ← AppState::livetime_cmd        (TS, percent)
+    //   - livetime_       ← AppState::livetime_status     (TS, percent)
     //   - beam_energy_    ← AppState::beam_energy_status  (MeV)
     //   - beam_current_   ← AppState::beam_current_status (nA)
     // The DSC2-derived "measured" livetime companion lives on
@@ -261,7 +277,9 @@ private:
     void setupServer(int port);
     bool serveResource(const std::string &uri, WsServer::connection_ptr con);
     nlohmann::json listFiles(const std::string &subdir = "");
-    std::string resolveDataFile(const std::string &relpath);
+    // Canonical <data_dir>/<rel> if it exists inside data_dir (and is a
+    // regular file when regular_file is set), else "".
+    std::string resolveDataPath(const std::string &rel, bool regular_file = false);
     nlohmann::json buildConfig();
     nlohmann::json handleElogPost(const std::string &body);
     void onHttp(WsServer *srv, websocketpp::connection_hdl hdl);
@@ -309,14 +327,21 @@ private:
     void checkSaveDirWritable();
 
     // ---- Deferred autoclear (run-boundary path) ----------------------------
-    // scheduleAutoClear() — called from etReaderThread on END / PRESTART /
-    // run-change — starts a server-side wipe of hist+lms+epics after a
-    // delay (5 s at every current call site).  The countdown PAUSES while
-    // pending_capture_ is set, so a run-change-fallback capture firing on
-    // the first physics of the new run still snapshots the prior run's
-    // data before the wipe.  Last-call-wins: repeated calls re-anchor the
-    // countdown to the most recent boundary.  Manual /api/hist/clear etc.
-    // bypass this entirely so operator presses are immediate.
+    // captureAndScheduleClear() — called from etReaderThread on END and on a
+    // run-number change — dispatches the auto-report capture for the run
+    // that ended and schedules a server-side wipe of hist+lms+epics after
+    // 5 s (5 min when no capture started and no report is saved yet).  The
+    // countdown PAUSES while pending_capture_ is set, so a run-change-
+    // fallback capture firing on the first physics of the new run still
+    // snapshots the prior run's data before the wipe.  Last-call-wins:
+    // repeated calls re-anchor the countdown to the most recent boundary.
+    // Manual /api/hist/clear etc. bypass this entirely so operator presses
+    // are immediate.
+    // Why server-side: when browser tabs cleared on PRESTART themselves,
+    // non-chosen tabs wiped the histograms while the chosen reporter was
+    // still capturing, and a run-change-fallback capture (END missed) could
+    // land after the wipe — both gave empty auto-reports with a low Samples
+    // count.  Keep run-boundary wipes here, not in the clients.
     struct AutoClearState {
         bool                                  pending      = false;
         int                                   remaining_ms = 0;
@@ -325,6 +350,7 @@ private:
     std::mutex      autoclear_mtx_;
     AutoClearState  autoclear_state_;
 
+    void captureAndScheduleClear(uint32_t run, const std::string &reason);
     void scheduleAutoClear(int delay_ms);
     void tickAutoClear();
     void runAutoClearNow();

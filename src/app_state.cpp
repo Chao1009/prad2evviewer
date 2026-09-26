@@ -1,20 +1,16 @@
 #include "app_state.h"
-#include "data_source.h"
-#include "load_daq_config.h"
+#include "EventData.h"
+#include "GemTracking.h"
 #include "Fadc250FwAnalyzer.h"
 
+#include <algorithm>
 #include <array>
-#include <fstream>
-#include <iostream>
 #include <limits>
 #include <cmath>
-#include <cstdlib>
 
 using json = nlohmann::json;
 
-//=============================================================================
-// PeakFilter — JSON parse / serialize
-//=============================================================================
+// ---- PeakFilter — JSON parse / serialize -----------------------------------
 namespace {
 
 // Set out to filter[axis][bound] iff that field exists and is numeric.
@@ -75,126 +71,43 @@ json PeakFilter::toJson(const json &quality_bits_def) const
     return out;
 }
 
-static json histToJson(const Histogram &h, float mn, float mx, float st)
-{
-    if (h.bins.empty())
-        return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
-                {"min", mn}, {"max", mx}, {"step", st}};
-    return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
-            {"min", mn}, {"max", mx}, {"step", st}};
-}
-
-//=============================================================================
-// GEM efficiency monitor — internal helpers
-//=============================================================================
+// ---- GEM efficiency monitor — internal helpers -----------------------------
 namespace {
 
-struct Line3D {
-    float ax = 0.f, bx = 0.f;        // x(z) = ax + bx·z
-    float ay = 0.f, by = 0.f;        // y(z) = ay + by·z
-    float chi2_per_dof = 0.f;
-};
+using Line3D = gem::TrackLine<float>;
 
-// Two-point seed line in lab frame.  Caller guarantees z1 != z2 (HyCal vs GEM).
-Line3D seedLine(float x1, float y1, float z1, float x2, float y2, float z2)
+// Local (px, py) where the lab-frame line through points 1 and 2 crosses a
+// detector's local z = 0 plane.  Both points go through labToLocal, so the
+// tilted-plane intersection reduces to a 1-D interpolation along local z.
+// A line parallel to the plane yields point 2's local (x, y).
+void intersectLocalPlane(const DetectorTransform &xform,
+                         float x1, float y1, float z1,
+                         float x2, float y2, float z2,
+                         float &px, float &py)
 {
-    Line3D L{};
-    float dz = z2 - z1;
-    if (std::abs(dz) < 1e-6f) { L.ax = x1; L.ay = y1; return L; }
-    L.bx = (x2 - x1) / dz;  L.ax = x1 - L.bx * z1;
-    L.by = (y2 - y1) / dz;  L.ay = y1 - L.by * z1;
-    return L;
-}
-
-// Independent weighted LSQ fits in (z, x) and (z, y) — 4-parameter line.
-// `wy = nullptr` reuses `wx` for both axes (the common case where σ_x = σ_y);
-// pass distinct arrays for anisotropic per-point uncertainties (e.g. the
-// target point in loo-target-in, where σ_target_z couples differently into
-// σ_x_eff and σ_y_eff via the slope).  dof = 2N - 4.
-bool fitWeightedLine(int N,
-                     const float *z, const float *x, const float *y,
-                     const float *wx, const float *wy,
-                     Line3D &out)
-{
-    if (N < 2) return false;
-    if (wy == nullptr) wy = wx;
-    // x-fit
-    double Swx=0, Szx=0, Szzx=0, Sx=0, Sxz=0;
-    for (int i = 0; i < N; ++i) {
-        double wi = wx[i];
-        Swx  += wi;
-        Szx  += wi * z[i];
-        Szzx += wi * z[i] * z[i];
-        Sx   += wi * x[i];
-        Sxz  += wi * x[i] * z[i];
-    }
-    double Dx = Swx * Szzx - Szx * Szx;
-    if (std::abs(Dx) < 1e-9) return false;
-    double bx = (Swx * Sxz - Szx * Sx) / Dx;
-    double ax = (Sx - bx * Szx) / Swx;
-    // y-fit
-    double Swy=0, Szy=0, Szzy=0, Sy=0, Syz=0;
-    for (int i = 0; i < N; ++i) {
-        double wi = wy[i];
-        Swy  += wi;
-        Szy  += wi * z[i];
-        Szzy += wi * z[i] * z[i];
-        Sy   += wi * y[i];
-        Syz  += wi * y[i] * z[i];
-    }
-    double Dy = Swy * Szzy - Szy * Szy;
-    if (std::abs(Dy) < 1e-9) return false;
-    double by = (Swy * Syz - Szy * Sy) / Dy;
-    double ay = (Sy - by * Szy) / Swy;
-    out.ax = (float)ax; out.bx = (float)bx;
-    out.ay = (float)ay; out.by = (float)by;
-    int dof = 2 * N - 4;
-    if (dof > 0) {
-        double chi2 = 0;
-        for (int i = 0; i < N; ++i) {
-            double dxp = (ax + bx * z[i]) - x[i];
-            double dyp = (ay + by * z[i]) - y[i];
-            chi2 += wx[i] * dxp * dxp + wy[i] * dyp * dyp;
-        }
-        out.chi2_per_dof = (float)(chi2 / dof);
-    } else {
-        out.chi2_per_dof = 0.f;
-    }
-    return true;
-}
-
-// Convenience overload: same weight for x and y at every point.
-inline bool fitWeightedLine(int N,
-                            const float *z, const float *x, const float *y,
-                            const float *w, Line3D &out)
-{
-    return fitWeightedLine(N, z, x, y, w, nullptr, out);
-}
-
-// Project a lab-frame line onto a detector's local plane (z_local = 0) using
-// the labToLocal-then-1D-interpolate trick.
-void projectLineToLocal(const DetectorTransform &xform, const Line3D &L,
-                        float &px, float &py)
-{
-    float ax1 = L.ax,                 ay1 = L.ay,                 z1 = 0.f;
-    float ax2 = L.ax + L.bx * 1000.f, ay2 = L.ay + L.by * 1000.f, z2 = 1000.f;
     float l1x, l1y, l1z, l2x, l2y, l2z;
-    xform.labToLocal(ax1, ay1, z1, l1x, l1y, l1z);
-    xform.labToLocal(ax2, ay2, z2, l2x, l2y, l2z);
+    xform.labToLocal(x1, y1, z1, l1x, l1y, l1z);
+    xform.labToLocal(x2, y2, z2, l2x, l2y, l2z);
     float dz = l2z - l1z;
-    if (std::abs(dz) < 1e-6f) { px = l1x; py = l1y; return; }
+    if (std::abs(dz) < 1e-6f) { px = l2x; py = l2y; return; }
     float s = -l1z / dz;
     px = l1x + s * (l2x - l1x);
     py = l1y + s * (l2y - l1y);
 }
 
+// Project a lab-frame line onto a detector's local plane (z_local = 0).
+void projectLineToLocal(const DetectorTransform &xform, const Line3D &L,
+                        float &px, float &py)
+{
+    intersectLocalPlane(xform, L.ax, L.ay, 0.f,
+                        L.ax + L.bx * 1000.f, L.ay + L.by * 1000.f, 1000.f,
+                        px, py);
+}
+
 }  // anonymous namespace
 
-//=============================================================================
-// Per-event processing
-//=============================================================================
+// ---- Per-event processing --------------------------------------------------
 
-// Encode peak array for one channel.
 static json encodePeaks(const fdec::WaveResult &wres)
 {
     json parr = json::array();
@@ -264,37 +177,24 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
     for (int r = 0; r < event.nrocs; ++r) {
         auto &roc = event.rocs[r];
         if (!roc.present) continue;
-        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-            if (!roc.slots[s].present) continue;
-            auto &slot = roc.slots[s];
-            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                if (!(slot.channel_mask & (1ull << c))) continue;
-                auto &cd = slot.channels[c];
-                if (cd.nsamples <= 0) continue;
+        fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+            ana.SetChannelKey(roc.tag, s, c);
+            ana.Analyze(cd.samples, cd.nsamples, wres);
 
-                ana.SetChannelKey(roc.tag, s, c);
-                ana.Analyze(cd.samples, cd.nsamples, wres);
-                std::string key = std::to_string(roc.tag) + "_"
-                                + std::to_string(s) + "_" + std::to_string(c);
-
-                json ch_j = {
-                    {"pm", std::round(wres.ped.mean * 10) / 10},
-                    {"pr", std::round(wres.ped.rms * 10) / 10},
-                    {"pk", encodePeaks(wres)},
-                };
-                if (include_samples) {
-                    json sarr = json::array();
-                    for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
-                    ch_j["s"] = std::move(sarr);
-                    // Embed firmware-emulator output alongside the samples so
-                    // the waveform tab's DAQ overlay works for ring-buffer
-                    // events (online mode) — /api/waveform is file-mode only.
-                    ch_j["daq"] = encodeChannelDaq(cd, wres.ped.mean,
-                                                   daq_cfg.fadc250_fw);
-                }
-                channels[key] = std::move(ch_j);
+            json ch_j = {
+                {"pm", std::round(wres.ped.mean * 10) / 10},
+                {"pr", std::round(wres.ped.rms * 10) / 10},
+                {"pk", encodePeaks(wres)},
+            };
+            if (include_samples) {
+                json sarr = json::array();
+                for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
+                ch_j["s"] = std::move(sarr);
+                ch_j["daq"] = encodeChannelDaq(cd, wres.ped.mean,
+                                               daq_cfg.fadc250_fw);
             }
-        }
+            channels[fdec::ChannelKey(roc.tag, s, c)] = std::move(ch_j);
+        });
     }
     return {{"event", ev_id}, {"channels", channels},
             {"event_number", event.info.event_number},
@@ -306,12 +206,10 @@ json AppState::encodeEventJson(fdec::EventData &event, int ev_id,
 json AppState::encodeWaveformJson(fdec::EventData &event, const std::string &chan_key,
                                   fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
 {
-    // parse "roc_slot_ch" key
     int roc_tag = 0, sl = 0, ch = 0;
-    if (std::sscanf(chan_key.c_str(), "%d_%d_%d", &roc_tag, &sl, &ch) != 3)
+    if (!fdec::ParseChannelKey(chan_key, roc_tag, sl, ch))
         return {{"error", "invalid channel key"}};
 
-    // find the channel in the event
     for (int r = 0; r < event.nrocs; ++r) {
         auto &roc = event.rocs[r];
         if (!roc.present || roc.tag != roc_tag) continue;
@@ -339,18 +237,87 @@ json AppState::encodeWaveformJson(fdec::EventData &event, const std::string &cha
 void AppState::projectToHyCalLocal(float Gx, float Gy, float Gz,
                                    float &px, float &py) const
 {
-    // Transform target and source points into HyCal-local frame, then linearly
-    // interpolate along the line to the local z=0 plane.  Equivalent to
-    // intersecting the lab-frame line with the tilted HyCal plane, but cleaner
-    // because the math reduces to a 1D parametric solve.
-    float Tx, Ty, Tz, gx, gy, gz;
-    hycal_transform.labToLocal(target_x, target_y, target_z, Tx, Ty, Tz);
-    hycal_transform.labToLocal(Gx, Gy, Gz, gx, gy, gz);
-    float dz = gz - Tz;
-    if (std::abs(dz) < 1e-6f) { px = gx; py = gy; return; }
-    float s = -Tz / dz;
-    px = Tx + s * (gx - Tx);
-    py = Ty + s * (gy - Ty);
+    intersectLocalPlane(hycal_transform, target_x, target_y, target_z,
+                        Gx, Gy, Gz, px, py);
+}
+
+void AppState::feedClusterChannel(fdec::HyCalCluster &cl, const fdec::Module &mod,
+                                  const fdec::ChannelData &cd,
+                                  const fdec::WaveResult &wres, bool is_adc1881m,
+                                  float &energy_sum) const
+{
+    auto feed = [&](float adc, float time) {
+        float energy = (mod.cal_factor > 0.)
+            ? static_cast<float>(mod.energize(adc))
+            : adc * adc_to_mev;
+        cl.AddHit(mod.index, energy, time);
+        energy_sum += energy;
+    };
+
+    if (is_adc1881m) {
+        float adc = cd.samples[0];
+        if (adc <= 0) return;
+        feed(adc, 0.f);
+    } else if (cluster_cfg.seed_time_window > 0.f) {
+        // Multi-pulse: hand every analyzer-detected peak to the clusterer,
+        // which applies the seed-anchored time gate.  No pre-window — the
+        // gate is the cut.
+        for (int p = 0; p < wres.npeaks; ++p) {
+            const auto &pk = wres.peaks[p];
+            if (pk.integral <= 0) continue;
+            feed(pk.integral, pk.time);
+        }
+    } else {
+        // Largest-integral peak across all detected peaks (no time gate);
+        // the Waveform-Tab peak_filter does not apply to clustering.
+        float adc = bestPeak(wres);
+        if (adc <= 0) return;
+        feed(adc, 0.f);
+    }
+}
+
+void AppState::feedClusterEvent(const fdec::EventData &event, fdec::WaveAnalyzer &ana,
+                                fdec::WaveResult &wres, fdec::HyCalCluster &cl,
+                                std::vector<float> *mod_energy) const
+{
+    const bool is_adc1881m = (daq_cfg.adc_format == "adc1881m");
+    for (int r = 0; r < event.nrocs; ++r) {
+        const auto &roc = event.rocs[r];
+        if (!roc.present) continue;
+        auto cit = roc_to_crate.find(roc.tag);
+        if (cit == roc_to_crate.end()) continue;
+        const int crate = cit->second;
+
+        fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+            const auto *mod = hycal.module_by_daq(crate, s, c);
+            if (!mod || !mod->is_hycal()) return;
+            if (!is_adc1881m) {
+                ana.SetChannelKey(roc.tag, s, c);
+                ana.Analyze(cd.samples, cd.nsamples, wres);
+            }
+            float energy = 0.f;
+            feedClusterChannel(cl, *mod, cd, wres, is_adc1881m, energy);
+            if (mod_energy && energy > 0.f) (*mod_energy)[mod->index] = energy;
+        });
+    }
+}
+
+// One /api/clusters record.  center_id is the PrimEx ID; modules[] (and the
+// caller's hits{} keys) are module indices.  A null center gives an empty name.
+static json clusterJson(int id, const fdec::Module *center, int center_id,
+                        float x, float y, float energy, int nblocks, int npos,
+                        json modules)
+{
+    return {
+        {"id", id},
+        {"center", center ? center->name : std::string()},
+        {"center_id", center_id},
+        {"x", std::round(x * 10) / 10},
+        {"y", std::round(y * 10) / 10},
+        {"energy", std::round(energy * 10) / 10},
+        {"nblocks", nblocks}, {"npos", npos},
+        {"modules", std::move(modules)},
+    };
 }
 
 json AppState::computeClustersJson(fdec::EventData &event, int ev_id,
@@ -360,76 +327,12 @@ json AppState::computeClustersJson(fdec::EventData &event, int ev_id,
         return {{"event", ev_id}, {"hits", json::object()}, {"clusters", json::array()},
                 {"info", "trigger filtered"}};
 
-    bool is_adc1881m = (daq_cfg.adc_format == "adc1881m");
     fdec::HyCalCluster clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
 
     int nmod = hycal.module_count();
     std::vector<float> mod_energy(nmod, 0.f);
-
-    for (int r = 0; r < event.nrocs; ++r) {
-        auto &roc = event.rocs[r];
-        if (!roc.present) continue;
-        auto cit = roc_to_crate.find(roc.tag);
-        if (cit == roc_to_crate.end()) continue;
-        int crate = cit->second;
-
-        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-            if (!roc.slots[s].present) continue;
-            auto &slot = roc.slots[s];
-            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                if (!(slot.channel_mask & (1ull << c))) continue;
-                auto &cd = slot.channels[c];
-                if (cd.nsamples <= 0) continue;
-
-                const auto *mod = hycal.module_by_daq(crate, s, c);
-                if (!mod || !mod->is_hycal()) continue;
-
-                if (is_adc1881m) {
-                    float adc_val = cd.samples[0];
-                    if (adc_val <= 0) continue;
-                    float energy = (mod->cal_factor > 0.)
-                        ? static_cast<float>(mod->energize(adc_val))
-                        : adc_val * adc_to_mev;
-                    mod_energy[mod->index] = energy;
-                    clusterer.AddHit(mod->index, energy, 0.f);
-                    continue;
-                }
-
-                ana.SetChannelKey(roc.tag, s, c);
-                ana.Analyze(cd.samples, cd.nsamples, wres);
-                if (wres.npeaks <= 0) continue;
-
-                if (cluster_cfg.seed_time_window > 0.f) {
-                    // Multi-pulse mode — push every detected peak; the
-                    // clusterer applies the seed-anchored time gate.
-                    float total = 0.f;
-                    for (int p = 0; p < wres.npeaks; ++p) {
-                        const auto &pk = wres.peaks[p];
-                        float adc_val = pk.integral;
-                        if (adc_val <= 0) continue;
-                        float energy = (mod->cal_factor > 0.)
-                            ? static_cast<float>(mod->energize(adc_val))
-                            : adc_val * adc_to_mev;
-                        clusterer.AddHit(mod->index, energy, pk.time);
-                        total += energy;
-                    }
-                    if (total > 0.f) mod_energy[mod->index] = total;
-                } else {
-                    // Legacy: largest-integral peak across all detected
-                    // peaks (no time gate) — Waveform-Tab peak_filter is
-                    // decoupled.
-                    float adc_val = bestPeak(wres);
-                    if (adc_val <= 0) continue;
-                    float energy = (mod->cal_factor > 0.)
-                        ? static_cast<float>(mod->energize(adc_val))
-                        : adc_val * adc_to_mev;
-                    mod_energy[mod->index] = energy;
-                    clusterer.AddHit(mod->index, energy, 0.f);
-                }
-            }
-        }
-    }
+    feedClusterEvent(event, ana, wres, clusterer, &mod_energy);
 
     clusterer.FormClusters();
 
@@ -446,15 +349,9 @@ json AppState::computeClustersJson(fdec::EventData &event, int ev_id,
         auto &cmod = hycal.module(r.cluster->center.index);
         json indices = json::array();
         for (auto &h : r.cluster->hits) indices.push_back(h.index);
-        cl_arr.push_back({
-            {"id", static_cast<int>(cl_arr.size())},
-            {"center", cmod.name}, {"center_id", cmod.id},
-            {"x", std::round(r.hit.x * 10) / 10},
-            {"y", std::round(r.hit.y * 10) / 10},
-            {"energy", std::round(r.hit.energy * 10) / 10},
-            {"nblocks", r.hit.nblocks}, {"npos", r.hit.npos},
-            {"modules", indices},
-        });
+        cl_arr.push_back(clusterJson((int)cl_arr.size(), &cmod, cmod.id,
+                                     r.hit.x, r.hit.y, r.hit.energy,
+                                     r.hit.nblocks, r.hit.npos, std::move(indices)));
     }
 
     return {{"event", ev_id}, {"hits", hits_j}, {"clusters", cl_arr}};
@@ -481,15 +378,16 @@ void AppState::recordSyncTime(uint32_t unix_time, uint64_t last_ti_ts)
     sync_rel_sec = ti_delta_sec(last_ti_ts, lms_first_ts);
 }
 
-void AppState::processEvent(fdec::EventData &event,
+void AppState::processEvent(fdec::EventData &event, const ssp::SspEventData *ssp,
                             fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
 {
-    // --- check which consumers need this event ---
+    if (ssp) processGemEvent(*ssp);
+
     uint32_t tb = event.info.trigger_bits;
     bool do_hist    = waveform_trigger(tb);
     bool do_cluster = cluster_trigger(tb);
-    bool do_lms     = lms_trigger.accept != 0 && lms_trigger(tb);
-    bool do_alpha   = alpha_trigger.accept != 0 && alpha_trigger(tb);
+    bool do_lms     = lms_trigger.matchesExplicit(tb);
+    bool do_alpha   = alpha_trigger.matchesExplicit(tb);
 
     if (!do_hist && !do_cluster && !do_lms && !do_alpha) {
         std::lock_guard<std::mutex> lk(data_mtx);
@@ -507,7 +405,6 @@ void AppState::processEvent(fdec::EventData &event,
     // so isolated hits below the cluster threshold still count).
     float total_module_energy = 0.f;
 
-    // LMS timing
     double lms_time = 0;
 
     // acquire both locks for the merged pass
@@ -545,126 +442,84 @@ void AppState::processEvent(fdec::EventData &event,
             if (cit != roc_to_crate.end()) crate = cit->second;
         }
 
-        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-            if (!roc.slots[s].present) continue;
-            auto &slot = roc.slots[s];
-            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                if (!(slot.channel_mask & (1ull << c))) continue;
-                auto &cd = slot.channels[c];
-                if (cd.nsamples <= 0) continue;
+        fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+            // ── analyze ONCE ──
+            // peak_for_lms_alpha: best peak within lms_time_min/max
+            // (`lms_monitor.time_cut`).
+            float peak_for_lms_alpha = -1;
+            if (!is_adc1881m) {
+                ana.SetChannelKey(roc.tag, s, c);
+                ana.Analyze(cd.samples, cd.nsamples, wres);
+                peak_for_lms_alpha = bestPeakInWindow(wres, lms_time_min, lms_time_max);
+            } else {
+                wres.npeaks = 0;
+                peak_for_lms_alpha = cd.samples[0];
+            }
 
-                // ── analyze ONCE ──
-                // peak_for_lms_alpha keeps the historical time-window semantics
-                // (now driven by lms_time_min/max from `lms_monitor.time_cut`).
-                // peak_for_cluster has no time cut — Waveform-Tab filter is
-                // intentionally decoupled from clustering input; per-cluster
-                // cuts will be added back later in their own knob.
-                float peak_for_lms_alpha = -1;
-                float peak_for_cluster   = -1;
-                if (!is_adc1881m) {
-                    ana.SetChannelKey(roc.tag, s, c);
-                    ana.Analyze(cd.samples, cd.nsamples, wres);
-                    peak_for_lms_alpha = bestPeakInWindow(wres, lms_time_min, lms_time_max);
-                    peak_for_cluster   = bestPeak(wres);
-                } else {
-                    wres.npeaks = 0;
-                    peak_for_lms_alpha = peak_for_cluster = cd.samples[0];
+            // ── histogram consumer ──
+            // Peaks are already gated by the analyzer's height threshold.
+            // Apply peak_filter (when enabled) on top.  Time hist gets
+            // every passing peak; height/integral hists get the
+            // best-integral passing peak (preserves per-event semantics).
+            if (do_hist && !is_adc1881m) {
+                std::string key = fdec::ChannelKey(roc.tag, s, c);
+                bool any_peak = false, any_passing = false;
+                float bestI = -1, bestH = -1;
+                for (int p = 0; p < wres.npeaks; ++p) {
+                    auto &pk = wres.peaks[p];
+                    any_peak = true;
+                    if (peak_filter.enable && !peak_filter(pk)) continue;
+                    any_passing = true;
+                    auto &ph = pos_histograms[key];
+                    if (ph.bins.empty()) ph.init(hist_cfg.time);
+                    ph.fill(pk.time, hist_cfg.time);
+                    if (pk.integral > bestI) { bestI = pk.integral; bestH = pk.height; }
                 }
-
-                // ── histogram consumer ──
-                // Peaks are already gated by the analyzer's height threshold.
-                // Apply peak_filter (when enabled) on top.  Time hist gets
-                // every passing peak; height/integral hists get the
-                // best-integral passing peak (preserves per-event semantics).
-                if (do_hist && !is_adc1881m) {
-                    std::string key = std::to_string(roc.tag) + "_"
-                                   + std::to_string(s) + "_" + std::to_string(c);
-                    bool any_peak = false, any_passing = false;
-                    float bestI = -1, bestH = -1;
-                    for (int p = 0; p < wres.npeaks; ++p) {
-                        auto &pk = wres.peaks[p];
-                        any_peak = true;
-                        if (peak_filter.enable && !peak_filter(pk)) continue;
-                        any_passing = true;
-                        auto &ph = pos_histograms[key];
-                        if (ph.bins.empty()) ph.init(pos_nbins);
-                        ph.fill(pk.time, hist_cfg.pos_min, hist_cfg.pos_step);
-                        if (pk.integral > bestI) { bestI = pk.integral; bestH = pk.height; }
-                    }
-                    if (bestI >= 0) {
-                        auto &h = histograms[key];
-                        if (h.bins.empty()) h.init(hist_nbins);
-                        h.fill(bestI, hist_cfg.bin_min, hist_cfg.bin_step);
-                        auto &hh = height_histograms[key];
-                        if (hh.bins.empty()) hh.init(height_nbins);
-                        hh.fill(bestH, hist_cfg.height_min, hist_cfg.height_step);
-                    }
-                    if (any_peak)    occupancy[key]++;
-                    if (any_passing) occupancy_tcut[key]++;
+                if (bestI >= 0) {
+                    auto &h = histograms[key];
+                    if (h.bins.empty()) h.init(hist_cfg.integral);
+                    h.fill(bestI, hist_cfg.integral);
+                    auto &hh = height_histograms[key];
+                    if (hh.bins.empty()) hh.init(hist_cfg.height);
+                    hh.fill(bestH, hist_cfg.height);
                 }
+                if (any_peak)    occupancy[key]++;
+                if (any_passing) occupancy_tcut[key]++;
+            }
 
-                // ── cluster consumer ──
-                if (do_cluster && crate >= 0) {
-                    const auto *mod = hycal.module_by_daq(crate, s, c);
-                    if (mod && mod->is_hycal()) {
-                        if (is_adc1881m) {
-                            float adc_val = (float)cd.samples[0];
-                            if (adc_val > 0) {
-                                float energy = (mod->cal_factor > 0.)
-                                    ? static_cast<float>(mod->energize(adc_val))
-                                    : adc_val * adc_to_mev;
-                                clusterer.AddHit(mod->index, energy, 0.f);
-                                total_module_energy += energy;
-                            }
-                        } else if (cluster_cfg.seed_time_window > 0.f) {
-                            // Multi-pulse: hand every analyzer-detected peak
-                            // to the clusterer (which applies the seed-anchored
-                            // time gate).  No pre-window — the gate is the cut.
-                            for (int p = 0; p < wres.npeaks; ++p) {
-                                const auto &pk = wres.peaks[p];
-                                if (pk.integral <= 0) continue;
-                                float energy = (mod->cal_factor > 0.)
-                                    ? static_cast<float>(mod->energize(pk.integral))
-                                    : pk.integral * adc_to_mev;
-                                clusterer.AddHit(mod->index, energy, pk.time);
-                                total_module_energy += energy;
-                            }
-                        } else if (peak_for_cluster > 0) {
-                            float energy = (mod->cal_factor > 0.)
-                                ? static_cast<float>(mod->energize(peak_for_cluster))
-                                : peak_for_cluster * adc_to_mev;
-                            clusterer.AddHit(mod->index, energy, 0.f);
-                            total_module_energy += energy;
-                        }
-                    }
-                }
+            // ── cluster consumer (reuses this channel's wres) ──
+            if (do_cluster && crate >= 0) {
+                const auto *mod = hycal.module_by_daq(crate, s, c);
+                if (mod && mod->is_hycal())
+                    feedClusterChannel(clusterer, *mod, cd, wres, is_adc1881m,
+                                       total_module_energy);
+            }
 
-                // ── LMS consumer ──
-                if (do_lms && crate >= 0) {
-                    const auto *mod = hycal.module_by_daq(crate, s, c);
-                    if (mod) {
-                        float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
-                        if (val > 0) {
-                            auto &hist = lms_history[mod->index];
-                            if (static_cast<int>(hist.size()) < lms_max_history)
-                                hist.push_back({lms_time, val});
-                            // Always track the latest reading, even after history saturates,
-                            // so the LMS/Alpha ref correction stays current.
-                            latest_lms_integral[mod->index] = val;
-                        }
-                    }
-                }
-
-                // ── Alpha consumer (Am-241 reference) ──
-                if (do_alpha && crate >= 0) {
-                    const auto *mod = hycal.module_by_daq(crate, s, c);
-                    if (mod) {
-                        float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
-                        if (val > 0) latest_alpha_integral[mod->index] = val;
+            // ── LMS consumer ──
+            if (do_lms && crate >= 0) {
+                const auto *mod = hycal.module_by_daq(crate, s, c);
+                if (mod) {
+                    float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
+                    if (val > 0) {
+                        auto &hist = lms_history[mod->index];
+                        if (static_cast<int>(hist.size()) < lms_max_history)
+                            hist.push_back({lms_time, val});
+                        // Always track the latest reading, even after history saturates,
+                        // so the LMS/Alpha ref correction stays current.
+                        latest_lms_integral[mod->index] = val;
                     }
                 }
             }
-        }
+
+            // ── Alpha consumer (Am-241 reference) ──
+            if (do_alpha && crate >= 0) {
+                const auto *mod = hycal.module_by_daq(crate, s, c);
+                if (mod) {
+                    float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
+                    if (val > 0) latest_alpha_integral[mod->index] = val;
+                }
+            }
+        });
     }
 
     // --- post-loop: clustering + physics histograms ---
@@ -673,325 +528,216 @@ void AppState::processEvent(fdec::EventData &event,
         std::vector<fdec::ClusterHit> reco_hits;
         clusterer.ReconstructHits(reco_hits);
 
-        struct ClusterInfo { float lx, ly, lz, theta; };
-        std::vector<ClusterInfo> cinfo(reco_hits.size());
-        for (size_t i = 0; i < reco_hits.size(); ++i) {
-            auto &rh = reco_hits[i];
-            auto &ci = cinfo[i];
-            // Use shower depth as z_local so the lab cluster sits at the
-            // shower-max plane, not the front face.  GEM-projection lever
-            // arms (hcz / z_gem) depend on this — at PRad scale the
-            // ~10 cm depth shifts predicted GEM positions by ~1-2 mm.
-            const float z_local = fdec::shower_depth(rh.center_id, rh.energy);
-            hycal_transform.toLab(rh.x, rh.y, z_local, ci.lx, ci.ly, ci.lz);
-            float dx = ci.lx - target_x, dy = ci.ly - target_y, dz = ci.lz - target_z;
-            float rv = std::sqrt(dx*dx + dy*dy);
-            ci.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
-        }
-
-        // Per-Ncl bucket index (-1 if Ncl falls outside the nclusters_hist
-        // range, in which case the bucketed hists get no fill — same
-        // semantics as Histogram::fill underflow/overflow).
-        int ncl_bucket = -1;
-        {
-            float fb = ((float)reco_hits.size() - nclusters_hist_min) / nclusters_hist_step;
-            if (fb >= 0.f) {
-                int b = (int)fb;
-                if (b < (int)cluster_energy_hist_by_ncl.size())
-                    ncl_bucket = b;
-            }
-        }
-        for (size_t i = 0; i < reco_hits.size(); ++i) {
-            cluster_energy_hist.fill(reco_hits[i].energy, cl_hist_min, cl_hist_step);
-            nblocks_hist.fill(reco_hits[i].nblocks, nblocks_hist_min, nblocks_hist_step);
-            if (ncl_bucket >= 0) {
-                cluster_energy_hist_by_ncl[ncl_bucket].fill(
-                    reco_hits[i].energy, cl_hist_min, cl_hist_step);
-                nblocks_hist_by_ncl[ncl_bucket].fill(
-                    reco_hits[i].nblocks, nblocks_hist_min, nblocks_hist_step);
-            }
-        }
-        nclusters_hist.fill(reco_hits.size(), nclusters_hist_min, nclusters_hist_step);
-        raw_energy_hist.fill(total_module_energy, raw_energy_hist_min, raw_energy_hist_step);
-        cluster_events_processed++;
-
-        bool physics_accept = physics_trigger(tb);
-        bool moller_accept  = moller_trigger(tb);
-        if (physics_accept || moller_accept) {
-            float Eb = beam_energy.load();
-            if (physics_accept) {
-                for (size_t i = 0; i < reco_hits.size(); ++i) {
-                    energy_angle_hist.fill(cinfo[i].theta, reco_hits[i].energy,
-                        ea_angle_min, ea_angle_step, ea_energy_min, ea_energy_step);
-                }
-            }
-            // Møller monitor — own trigger gate (physics.moller in
-            // monitor_config.json): X17 takes the Møller sample from the
-            // 2-cluster trigger; PRad-II raw-sum runs inherit the physics
-            // filter above.
-            if (moller_accept && reco_hits.size() == 2 && Eb > 0) {
-                float esum = reco_hits[0].energy + reco_hits[1].energy;
-                bool energy_ok = std::abs(esum - Eb) < moller_energy_tol * Eb;
-                bool angle_ok = false;
-                for (int j = 0; j < 2; ++j)
-                    if (cinfo[j].theta >= moller_angle_min && cinfo[j].theta <= moller_angle_max)
-                        angle_ok = true;
-                if (energy_ok && angle_ok) {
-                    moller_events++;
-                    for (int j = 0; j < 2; ++j) {
-                        moller_xy_hist.fill(cinfo[j].lx, cinfo[j].ly,
-                            moller_xy_x_min, moller_xy_x_step, moller_xy_y_min, moller_xy_y_step);
-                    }
-                }
-            }
-            // HyCal cluster-hit XY: single-cluster ep-elastic candidates.
-            // Same gate is reused (when configured) for GEM↔HyCal residuals.
-            bool ep_cand = false;
-            if (physics_accept && (int)reco_hits.size() == hxy_n_clusters && Eb > 0) {
-                const auto &cl = reco_hits[0];
-                bool nb_ok = cl.nblocks >= hxy_nblocks_min && cl.nblocks <= hxy_nblocks_max;
-                bool e_ok  = cl.energy  >= hxy_energy_frac_min * Eb;
-                if (nb_ok && e_ok) {
-                    ep_cand = true;
-                    hycal_xy_hist.fill(cinfo[0].lx, cinfo[0].ly,
-                        hxy_x_min, hxy_x_step, hxy_y_min, hxy_y_step);
-                    hycal_xy_events++;
-                }
-            }
-            // GEM↔HyCal matching residuals.  Reference is the FIRST cluster's
-            // HyCal-local xy — for ep candidates that's the only cluster, for
-            // multi-cluster events it's the leading reconstructed hit.  The
-            // residual lives at the HyCal plane, so σ_GEM is projected through
-            // the target onto that plane: σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)².
-            if (physics_accept && gem_enabled
-                && (ep_cand || !gem_match_require_ep) && !reco_hits.empty()) {
-                const float ref_x = reco_hits[0].x, ref_y = reco_hits[0].y;
-                const float sigma_hc = hycal.PositionResolution(reco_hits[0].energy);
-                const float z_hc = cinfo[0].lz;
-                const int n_dets = std::min<int>(gem_sys.GetNDetectors(),
-                                                 (int)gem_dx_hist.size());
-                for (int d = 0; d < n_dets; ++d) {
-                    auto &xform = gem_transforms[d];
-                    const float z_gem  = (xform.z != 0.f) ? xform.z : 1.f;
-                    const float s_gem  = (d < (int)gem_pos_res.size())
-                                            ? gem_pos_res[d] : 0.1f;
-                    const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
-                    const float s_total = std::sqrt(sigma_hc*sigma_hc
-                                                  + s_gem_at_hc*s_gem_at_hc);
-                    const float cut = gem_match_nsigma * s_total;
-                    for (auto &h : gem_sys.GetHits(d)) {
-                        float lx, ly, lz;
-                        xform.toLab(h.x, h.y, lx, ly, lz);
-                        float px, py;
-                        projectToHyCalLocal(lx, ly, lz, px, py);
-                        float dxr = px - ref_x, dyr = py - ref_y;
-                        if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
-                            gem_dx_hist[d].fill(dxr, gem_resid_min, gem_resid_step);
-                            gem_dy_hist[d].fill(dyr, gem_resid_min, gem_resid_step);
-                            gem_match_hits[d]++;
-                        }
-                    }
-                }
-                gem_match_events++;
-            }
-            // GEM tracking efficiency — per HyCal cluster, no target assumption.
-            // Builds per-detector lab-frame hit lists once and runs Pass A / B
-            // for each cluster passing min_cluster_energy.
-            if (physics_accept && gem_enabled && !reco_hits.empty()) {
-                const int n_gem = std::min<int>(gem_sys.GetNDetectors(),
-                                                (int)gem_transforms.size());
-                std::vector<std::vector<LabHit>> hits_by_det(n_gem);
-                for (int d = 0; d < n_gem; ++d) {
-                    auto &xform = gem_transforms[d];
-                    for (auto &h : gem_sys.GetHits(d)) {
-                        float lx, ly, lz;
-                        xform.toLab(h.x, h.y, lx, ly, lz);
-                        hits_by_det[d].push_back({lx, ly, lz});
-                    }
-                }
-                for (size_t i = 0; i < reco_hits.size(); ++i) {
-                    if (reco_hits[i].energy < gem_eff_min_cluster_energy) continue;
-                    runGemEfficiency((int)event.info.event_number,
-                                     cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
-                                     reco_hits[i].energy,
-                                     hits_by_det);
-                }
-            }
-        }
+        std::vector<PhysCluster> cls;
+        cls.reserve(reco_hits.size());
+        for (auto &rh : reco_hits)
+            cls.push_back(physCluster(rh.x, rh.y, rh.center_id, rh.energy, rh.nblocks));
+        const bool physics_accept = physics_trigger(tb);
+        std::vector<std::vector<LabHit>> gem_lab;
+        if (physics_accept && gem_enabled) gem_lab = gemLabHits();
+        fillClusterMonitors(cls, total_module_energy, gem_lab, true,
+                            physics_accept, moller_trigger(tb),
+                            (int)event.info.event_number);
     }
 
     events_processed++;
     if (do_lms) lms_events++;
 }
 
-void AppState::processReconEvent(const ReconEventData &recon)
+void AppState::processReconEvent(const prad2::ReconEventData &recon)
 {
     uint32_t tb = recon.trigger_bits;
-    bool do_cluster = cluster_trigger(tb);
-    bool do_physics = physics_trigger(tb);
-    bool do_moller  = moller_trigger(tb);
+    const int ncl = std::clamp(recon.n_clusters, 0, prad2::kMaxClusters);
+    const int ngh = std::clamp(recon.n_gem_hits, 0, prad2::kMaxGemHits);
+    const bool any = ncl > 0;
 
     std::lock_guard<std::mutex> lk(data_mtx);
     events_processed++;
 
-    if (do_cluster && !recon.clusters.empty()) {
+    // Recon path has no per-module energies, so the closest analog
+    // to the raw energy sum is the sum of cluster energies (the same
+    // value the GUI shows in the cluster-tab summary as "ECl Sum").
+    std::vector<PhysCluster> cls;
+    cls.reserve(ncl);
+    float total_cluster_energy = 0.f;
+    for (int i = 0; i < ncl; ++i) {
+        const float energy = recon.cl_energy[i];
+        cls.push_back(physCluster(recon.cl_x[i], recon.cl_y[i], recon.cl_center[i],
+                                  energy, recon.cl_nblocks[i]));
+        total_cluster_energy += energy;
+    }
+    // Recon GEM hits carry detector-local x,y just like the live gem_sys hits.
+    std::vector<std::vector<LabHit>> gem_lab(gem_enabled ? gem_transforms.size() : 0);
+    for (int k = 0; k < ngh; ++k) {
+        const int d = recon.det_id[k];
+        if (d >= (int)gem_lab.size()) continue;
+        float lx, ly, lz;
+        gem_transforms[d].toLab(recon.gem_x[k], recon.gem_y[k], lx, ly, lz);
+        gem_lab[d].push_back({lx, ly, lz});
+    }
+    fillClusterMonitors(cls, total_cluster_energy, gem_lab,
+                        any && cluster_trigger(tb), any && physics_trigger(tb),
+                        any && moller_trigger(tb), recon.event_num);
+}
+
+AppState::PhysCluster AppState::physCluster(float x, float y, int center_id,
+                                            float energy, int nblocks) const
+{
+    PhysCluster c{x, y, 0.f, 0.f, 0.f, 0.f, energy, nblocks};
+    // Use shower depth as z_local so the lab cluster sits at the
+    // shower-max plane, not the front face.  GEM-projection lever
+    // arms (hcz / z_gem) depend on this — at PRad scale the
+    // ~10 cm depth shifts predicted GEM positions by ~1-2 mm.
+    const float z_local = fdec::shower_depth(center_id, energy);
+    hycal_transform.toLab(x, y, z_local, c.lx, c.ly, c.lz);
+    float dx = c.lx - target_x, dy = c.ly - target_y, dz = c.lz - target_z;
+    float rv = std::sqrt(dx*dx + dy*dy);
+    c.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
+    return c;
+}
+
+std::vector<std::vector<AppState::LabHit>> AppState::gemLabHits() const
+{
+    const int n_gem = std::min<int>(gem_sys.GetNDetectors(),
+                                    (int)gem_transforms.size());
+    std::vector<std::vector<LabHit>> hits_by_det(n_gem);
+    for (int d = 0; d < n_gem; ++d) {
+        auto &xform = gem_transforms[d];
+        for (auto &h : gem_sys.GetHits(d)) {
+            float lx, ly, lz;
+            xform.toLab(h.x, h.y, lx, ly, lz);
+            hits_by_det[d].push_back({lx, ly, lz});
+        }
+    }
+    return hits_by_det;
+}
+
+void AppState::fillClusterMonitors(const std::vector<PhysCluster> &cls,
+                                   float raw_energy_sum,
+                                   const std::vector<std::vector<LabHit>> &gem_lab,
+                                   bool cluster_hists, bool physics_accept,
+                                   bool moller_accept, int event_id)
+{
+    if (cluster_hists) {
+        // Per-Ncl bucket index (-1 if Ncl falls outside the nclusters_hist
+        // range, in which case the bucketed hists get no fill — same
+        // semantics as Histogram::fill underflow/overflow).
         int ncl_bucket = -1;
         {
-            float fb = ((float)recon.clusters.size() - nclusters_hist_min)
-                       / nclusters_hist_step;
+            float fb = ((float)cls.size() - nclusters_axis.min) / nclusters_axis.step;
             if (fb >= 0.f) {
                 int b = (int)fb;
                 if (b < (int)cluster_energy_hist_by_ncl.size())
                     ncl_bucket = b;
             }
         }
-        // Recon path has no per-module energies, so the closest analog
-        // to the raw energy sum is the sum of cluster energies (the same
-        // value the GUI shows in the cluster-tab summary as "ECl Sum").
-        float total_cluster_energy = 0.f;
-        for (auto &cl : recon.clusters) {
-            cluster_energy_hist.fill(cl.energy, cl_hist_min, cl_hist_step);
-            nblocks_hist.fill(cl.nblocks, nblocks_hist_min, nblocks_hist_step);
-            total_cluster_energy += cl.energy;
+        for (auto &c : cls) {
+            cluster_energy_hist.fill(c.energy, cluster_energy_axis);
+            nblocks_hist.fill(c.nblocks, nblocks_axis);
             if (ncl_bucket >= 0) {
-                cluster_energy_hist_by_ncl[ncl_bucket].fill(
-                    cl.energy, cl_hist_min, cl_hist_step);
-                nblocks_hist_by_ncl[ncl_bucket].fill(
-                    cl.nblocks, nblocks_hist_min, nblocks_hist_step);
+                cluster_energy_hist_by_ncl[ncl_bucket].fill(c.energy, cluster_energy_axis);
+                nblocks_hist_by_ncl[ncl_bucket].fill(c.nblocks, nblocks_axis);
             }
         }
-        nclusters_hist.fill(recon.clusters.size(), nclusters_hist_min, nclusters_hist_step);
-        raw_energy_hist.fill(total_cluster_energy, raw_energy_hist_min, raw_energy_hist_step);
+        nclusters_hist.fill(cls.size(), nclusters_axis);
+        raw_energy_hist.fill(raw_energy_sum, raw_energy_axis);
         cluster_events_processed++;
     }
 
-    if ((do_physics || do_moller) && !recon.clusters.empty()) {
-        struct CI { float lx, ly, lz, theta; };
-        std::vector<CI> cinfo(recon.clusters.size());
-        for (size_t i = 0; i < recon.clusters.size(); ++i) {
-            auto &cl = recon.clusters[i];
-            auto &ci = cinfo[i];
-            // Same shower-depth correction as the EVIO path above.
-            const float z_local = fdec::shower_depth(cl.center_id, cl.energy);
-            hycal_transform.toLab(cl.x, cl.y, z_local, ci.lx, ci.ly, ci.lz);
-            float dx = ci.lx - target_x, dy = ci.ly - target_y, dz = ci.lz - target_z;
-            float r = std::sqrt(dx*dx + dy*dy);
-            ci.theta = std::atan2(r, dz) * (180.f / 3.14159265f);
-        }
-        if (do_physics) {
-            for (size_t i = 0; i < recon.clusters.size(); ++i)
-                energy_angle_hist.fill(cinfo[i].theta, recon.clusters[i].energy,
-                    ea_angle_min, ea_angle_step, ea_energy_min, ea_energy_step);
-        }
-
-        float Eb = beam_energy.load();
-        // Møller monitor — own trigger gate, same as the EVIO path above.
-        if (do_moller && recon.clusters.size() == 2 && Eb > 0) {
-            float esum = recon.clusters[0].energy + recon.clusters[1].energy;
-            bool energy_ok = std::abs(esum - Eb) < moller_energy_tol * Eb;
-            bool angle_ok = false;
+    if (!physics_accept && !moller_accept) return;
+    float Eb = beam_energy.load();
+    if (physics_accept) {
+        for (auto &c : cls)
+            energy_angle_hist.fill(c.theta, c.energy, ea_angle_axis, ea_energy_axis);
+    }
+    // Møller monitor — own trigger gate (see AppState::moller_trigger).
+    if (moller_accept && cls.size() == 2 && Eb > 0) {
+        float esum = cls[0].energy + cls[1].energy;
+        bool energy_ok = std::abs(esum - Eb) < moller_energy_tol * Eb;
+        bool angle_ok = false;
+        for (int j = 0; j < 2; ++j)
+            if (cls[j].theta >= moller_angle_min && cls[j].theta <= moller_angle_max)
+                angle_ok = true;
+        if (energy_ok && angle_ok) {
+            moller_events++;
             for (int j = 0; j < 2; ++j)
-                if (cinfo[j].theta >= moller_angle_min && cinfo[j].theta <= moller_angle_max)
-                    angle_ok = true;
-            if (energy_ok && angle_ok) {
-                moller_events++;
-                for (int j = 0; j < 2; ++j) {
-                    moller_xy_hist.fill(cinfo[j].lx, cinfo[j].ly,
-                        moller_xy_x_min, moller_xy_x_step, moller_xy_y_min, moller_xy_y_step);
-                }
-            }
+                moller_xy_hist.fill(cls[j].lx, cls[j].ly, moller_x_axis, moller_y_axis);
         }
-        // HyCal cluster-hit XY: single-cluster ep-elastic candidates.
-        bool ep_cand = false;
-        if (do_physics && (int)recon.clusters.size() == hxy_n_clusters && Eb > 0) {
-            const auto &cl = recon.clusters[0];
-            bool nb_ok = cl.nblocks >= hxy_nblocks_min && cl.nblocks <= hxy_nblocks_max;
-            bool e_ok  = cl.energy  >= hxy_energy_frac_min * Eb;
-            if (nb_ok && e_ok) {
-                ep_cand = true;
-                hycal_xy_hist.fill(cinfo[0].lx, cinfo[0].ly,
-                    hxy_x_min, hxy_x_step, hxy_y_min, hxy_y_step);
-                hycal_xy_events++;
-            }
+    }
+    // HyCal cluster-hit XY: single-cluster ep-elastic candidates.
+    // Same gate is reused (when configured) for GEM↔HyCal residuals.
+    bool ep_cand = false;
+    if (physics_accept && !cls.empty() && (int)cls.size() == hxy_n_clusters && Eb > 0) {
+        const auto &cl = cls[0];
+        bool nb_ok = cl.nblocks >= hxy_nblocks_min && cl.nblocks <= hxy_nblocks_max;
+        bool e_ok  = cl.energy  >= hxy_energy_frac_min * Eb;
+        if (nb_ok && e_ok) {
+            ep_cand = true;
+            hycal_xy_hist.fill(cl.lx, cl.ly, hxy_x_axis, hxy_y_axis);
+            hycal_xy_events++;
         }
-        // GEM↔HyCal matching residuals (ROOT recon path uses recon.gem_hits,
-        // which carry detector-local x,y just like the live gem_sys hits).
-        // Same parametric cut as the live path:
-        //   σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)²,  cut = nsigma · σ_total.
-        if (do_physics && gem_enabled
-            && (ep_cand || !gem_match_require_ep) && !recon.clusters.empty()) {
-            const float ref_x = recon.clusters[0].x, ref_y = recon.clusters[0].y;
-            const float sigma_hc = hycal.PositionResolution(recon.clusters[0].energy);
-            const float z_hc = cinfo[0].lz;
-            const int n_dets = (int)gem_dx_hist.size();
-            for (auto &gh : recon.gem_hits) {
-                if (gh.det_id < 0 || gh.det_id >= n_dets) continue;
-                if (gh.det_id >= (int)gem_transforms.size()) continue;
-                auto &xform = gem_transforms[gh.det_id];
-                float lx, ly, lz;
-                xform.toLab(gh.x, gh.y, lx, ly, lz);
+    }
+    // GEM↔HyCal matching residuals.  Reference is the FIRST cluster's
+    // HyCal-local xy — for ep candidates that's the only cluster, for
+    // multi-cluster events it's the leading reconstructed hit.  The
+    // residual lives at the HyCal plane, so σ_GEM is scaled to that plane
+    // by z_hc/z_gem.
+    if (physics_accept && gem_enabled
+        && (ep_cand || !gem_match_require_ep) && !cls.empty()) {
+        const float ref_x = cls[0].x, ref_y = cls[0].y;
+        const float sigma_hc = hycal.PositionResolution(cls[0].energy);
+        const float z_hc = cls[0].lz;
+        const int n_dets = std::min<int>(gem_lab.size(), gem_dx_hist.size());
+        for (int d = 0; d < n_dets; ++d) {
+            auto &xform = gem_transforms[d];
+            const float z_gem  = (xform.z != 0.f) ? xform.z : 1.f;
+            const float s_gem  = gemPosRes(d);
+            const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
+            const float s_total = std::sqrt(sigma_hc*sigma_hc
+                                          + s_gem_at_hc*s_gem_at_hc);
+            const float cut = gem_match_nsigma * s_total;
+            for (auto &h : gem_lab[d]) {
                 float px, py;
-                projectToHyCalLocal(lx, ly, lz, px, py);
+                projectToHyCalLocal(h[0], h[1], h[2], px, py);
                 float dxr = px - ref_x, dyr = py - ref_y;
-                const float z_gem = (xform.z != 0.f) ? xform.z : 1.f;
-                const float s_gem = (gh.det_id < (int)gem_pos_res.size())
-                                        ? gem_pos_res[gh.det_id] : 0.1f;
-                const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
-                const float s_total = std::sqrt(sigma_hc*sigma_hc
-                                              + s_gem_at_hc*s_gem_at_hc);
-                const float cut = gem_match_nsigma * s_total;
                 if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
-                    gem_dx_hist[gh.det_id].fill(dxr, gem_resid_min, gem_resid_step);
-                    gem_dy_hist[gh.det_id].fill(dyr, gem_resid_min, gem_resid_step);
-                    gem_match_hits[gh.det_id]++;
+                    gem_dx_hist[d].fill(dxr, gem_resid_axis);
+                    gem_dy_hist[d].fill(dyr, gem_resid_axis);
+                    gem_match_hits[d]++;
                 }
             }
-            gem_match_events++;
         }
-        // GEM tracking efficiency (recon path mirrors the live-data path).
-        if (do_physics && gem_enabled && !recon.clusters.empty()) {
-            const int n_gem = std::min<int>(gem_sys.GetNDetectors(),
-                                            (int)gem_transforms.size());
-            std::vector<std::vector<LabHit>> hits_by_det(n_gem);
-            for (auto &gh : recon.gem_hits) {
-                if (gh.det_id < 0 || gh.det_id >= n_gem) continue;
-                auto &xform = gem_transforms[gh.det_id];
-                float lx, ly, lz;
-                xform.toLab(gh.x, gh.y, lx, ly, lz);
-                hits_by_det[gh.det_id].push_back({lx, ly, lz});
-            }
-            for (size_t i = 0; i < recon.clusters.size(); ++i) {
-                if (recon.clusters[i].energy < gem_eff_min_cluster_energy) continue;
-                runGemEfficiency(recon.event_num,
-                                 cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
-                                 recon.clusters[i].energy,
-                                 hits_by_det);
-            }
+        gem_match_events++;
+    }
+    // GEM tracking efficiency (leave-one-out) for each cluster passing
+    // min_cluster_energy.
+    if (physics_accept && gem_enabled && !cls.empty()) {
+        for (auto &c : cls) {
+            if (c.energy < gem_eff_min_cluster_energy) continue;
+            runGemEfficiency(event_id, c.lx, c.ly, c.lz, c.energy, gem_lab);
         }
     }
 }
 
-json AppState::encodeReconClustersJson(const ReconEventData &recon, int ev_id)
+json AppState::encodeReconClustersJson(const prad2::ReconEventData &recon, int ev_id)
 {
     json hits_j = json::object();
     json cl_arr = json::array();
 
-    for (size_t i = 0; i < recon.clusters.size(); ++i) {
-        auto &cl = recon.clusters[i];
-        std::string center_name;
-        if (cl.center_id >= 0 && cl.center_id < hycal.module_count())
-            center_name = hycal.module(cl.center_id).name;
-        hits_j[std::to_string(cl.center_id)] =
-            std::round(cl.energy * 100) / 100;
-        cl_arr.push_back({
-            {"id", (int)i}, {"center", center_name},
-            {"center_id", cl.center_id},
-            {"x", std::round(cl.x * 10) / 10},
-            {"y", std::round(cl.y * 10) / 10},
-            {"energy", std::round(cl.energy * 10) / 10},
-            {"nblocks", cl.nblocks}, {"npos", 0},
-            {"modules", json::array({cl.center_id})},
-        });
+    // The recon tree has no per-module energies: hits{} and modules[] carry
+    // only the center module.
+    const int ncl = std::clamp(recon.n_clusters, 0, prad2::kMaxClusters);
+    for (int i = 0; i < ncl; ++i) {
+        const int center_id = recon.cl_center[i];
+        const float energy  = recon.cl_energy[i];
+        const auto *center = hycal.module_by_id(center_id);
+        json modules = json::array();
+        if (center) {
+            hits_j[std::to_string(center->index)] = std::round(energy * 100) / 100;
+            modules.push_back(center->index);
+        }
+        cl_arr.push_back(clusterJson(i, center, center_id, recon.cl_x[i], recon.cl_y[i],
+                                     energy, recon.cl_nblocks[i], 0, std::move(modules)));
     }
     return {{"event", ev_id}, {"hits", hits_j}, {"clusters", cl_arr}};
 }
@@ -1009,27 +755,38 @@ void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
     if (!gem_enabled || ssp_evt.nmpds == 0) return;
     prepareGemForView(ssp_evt);
 
-    // Strip-level diagnostic: fill per-detector occupancy over the active
-    // strip extent (smaller than PlaneConfig.size on the beam-hole side
-    // because pos=11 reuses pos=10 via shared_pos) so the heatmap matches
-    // the dashed detector frame drawn in the GUI.  No target assumption is
-    // made here — lab-frame plots live in the matching/efficiency views.
+    // Strip-level diagnostic: per-detector occupancy over the active strip
+    // extent, in detector-local coords.  No target assumption is made here —
+    // lab-frame plots live in the matching/efficiency views.
     std::lock_guard<std::mutex> lk(data_mtx);
     const int n_dets = std::min<int>(gem_sys.GetNDetectors(),
                                      (int)gem_transforms.size());
-    for (int d = 0; d < n_dets; ++d) {
-        auto xr = gem_sys.GetActiveExtent(d, 0);
-        auto yr = gem_sys.GetActiveExtent(d, 1);
-        const float xStep = (xr.second - xr.first) / GEM_OCC_NX;
-        const float yStep = (yr.second - yr.first) / GEM_OCC_NY;
+    for (int d = 0; d < n_dets; ++d)
         for (auto &h : gem_sys.GetHits(d))
-            gem_occupancy[d].fill(h.x, h.y, xr.first, xStep, yr.first, yStep);
-    }
+            fillActiveGrid(gem_occupancy[d], d, h.x, h.y);
 }
 
-//=============================================================================
-// GEM API builders
-//=============================================================================
+// ---- GEM API builders ------------------------------------------------------
+
+std::string AppState::gemDetName(int d) const
+{
+    return (d < gem_sys.GetNDetectors()) ? gem_sys.GetDetectors()[d].name
+                                         : ("GEM" + std::to_string(d));
+}
+
+nlohmann::json AppState::gemDetJson(int d) const
+{
+    json dj = {{"id", d}, {"name", gemDetName(d)}};
+    if (d < gem_sys.GetNDetectors()) {
+        const auto &det = gem_sys.GetDetectors()[d];
+        const auto &e = gem_active_ext[d];
+        dj["x_size"]   = det.planes[0].size;
+        dj["y_size"]   = det.planes[1].size;
+        dj["x_active"] = json::array({e[0], e[1]});
+        dj["y_active"] = json::array({e[2], e[3]});
+    }
+    return dj;
+}
 
 nlohmann::json AppState::apiGemHits() const
 {
@@ -1113,9 +870,11 @@ nlohmann::json AppState::apiGemConfig() const
             {"x_size", det.planes[0].size},
             {"y_size", det.planes[1].size}
         };
-        auto &t = gem_transforms[d];
-        lj["position"] = json::array({t.x, t.y, t.z});
-        lj["tilting"]  = json::array({t.rx, t.ry, t.rz});
+        if (d < (int)gem_transforms.size()) {
+            auto &t = gem_transforms[d];
+            lj["position"] = json::array({t.x, t.y, t.z});
+            lj["tilting"]  = json::array({t.rx, t.ry, t.rz});
+        }
         layers.push_back(lj);
     }
     result["layers"] = layers;
@@ -1133,19 +892,7 @@ nlohmann::json AppState::apiGemOccupancy() const
     std::lock_guard<std::mutex> lk(data_mtx);
     json dets = json::array();
     for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
-        auto &det = gem_sys.GetDetectors()[d];
-        // Active strip extent in detector-local coords (mm).  See
-        // GemSystem::GetActiveExtent — tighter than PlaneConfig.size on the
-        // inner-edge side; matches the bin range used in processGemEvent.
-        auto xr = gem_sys.GetActiveExtent(d, 0);
-        auto yr = gem_sys.GetActiveExtent(d, 1);
-        json dj;
-        dj["id"] = det.id;
-        dj["name"] = det.name;
-        dj["x_size"] = det.planes[0].size;
-        dj["y_size"] = det.planes[1].size;
-        dj["x_active"] = json::array({xr.first, xr.second});
-        dj["y_active"] = json::array({yr.first, yr.second});
+        json dj = gemDetJson(d);
         dj["nx"] = GEM_OCC_NX;
         dj["ny"] = GEM_OCC_NY;
         dj["bins"] = gem_occupancy[d].bins;
@@ -1169,10 +916,8 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
         result["apvs"]      = json::array();
         return result;
     }
-    // Global software N-sigma multiplier and pedestal calibration revision.
-    // The frontend pairs this zs_sigma with the per-APV noise[] from
-    // /api/gem/calib to draw the threshold band; gem_calib_rev lets it
-    // detect when the cached calib payload is stale and needs re-fetching.
+    // The frontend pairs zs_sigma with the per-APV noise[] from
+    // /api/gem/calib to draw the threshold band (see gem_calib_rev).
     result["zs_sigma"]  = gem_sys.GetZeroSupThreshold();
     result["calib_rev"] = gem_calib_rev.load();
 
@@ -1204,10 +949,7 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
     //   no_hit_fr          — firmware full-readout (nstrips==128) but no survivors
     //   full_readout       — firmware sent all 128 channels (nstrips==128)
     //   present            — APV showed up in this event's SSP data
-    // Per-APV pedestal noise lives on /api/gem/calib (one-shot, cached
-    // by the frontend until calib_rev changes).
-    constexpr int N_STRIPS = 128;
-    constexpr int N_TS     = 6;
+    // Per-APV pedestal noise lives on /api/gem/calib.
     json apvs = json::array();
     for (int i = 0; i < gem_sys.GetNApvs(); ++i) {
         auto &cfg = gem_sys.GetApvConfig(i);
@@ -1216,10 +958,9 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
 
         const ssp::ApvData *raw = ssp_evt.findApv(cfg.crate_id, cfg.mpd_id, cfg.adc_ch);
         bool present = (raw != nullptr) && raw->present;
-        // Firmware full-readout: every channel present in the SSP stream.
         // Used by the "Latest full-readout" mode to single out the
         // prescaled monitoring events that bypass online ZS.
-        bool full_readout = present && raw->nstrips >= N_STRIPS;
+        bool full_readout = raw && raw->isFullReadout();
         if (full_readout && any_full_readout) *any_full_readout = true;
 
         json raw_arr = json::array();
@@ -1228,10 +969,10 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
         json fw_hit_arr = json::array();
         bool any_hit = false;
 
-        for (int s = 0; s < N_STRIPS; ++s) {
+        for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s) {
             json raw_row  = json::array();
             json proc_row = json::array();
-            for (int t = 0; t < N_TS; ++t) {
+            for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t) {
                 if (present)
                     raw_row.push_back(static_cast<int>(raw->strips[s][t]));
                 else
@@ -1243,10 +984,6 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
             }
             raw_arr.push_back(std::move(raw_row));
             proc_arr.push_back(std::move(proc_row));
-            // In snapshot (skip_sw_zs) mode, every channel of a full-readout
-            // APV is marked as a hit so the client's signal-only filter
-            // doesn't hide it.  Firmware-ZS'd APVs keep their normal mask
-            // (mixed events are rare in practice but handled correctly).
             bool sw_hit = present && gem_sys.IsChannelHit(i, s);
             bool hit = (skip_sw_zs && full_readout) ? true : sw_hit;
             if (hit) any_hit = true;
@@ -1260,7 +997,7 @@ nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum,
         json cm_val = nullptr;
         if (present && raw->has_online_cm) {
             json cm_arr = json::array();
-            for (int t = 0; t < N_TS; ++t)
+            for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t)
                 cm_arr.push_back(static_cast<int>(raw->online_cm[t]));
             cm_val = std::move(cm_arr);
         }
@@ -1311,13 +1048,12 @@ nlohmann::json AppState::apiGemCalib() const
     result["zs_sigma"]  = gem_enabled ? gem_sys.GetZeroSupThreshold() : 0.f;
     json apvs = json::array();
     if (gem_enabled) {
-        constexpr int N_STRIPS = 128;
         for (int i = 0; i < gem_sys.GetNApvs(); ++i) {
             auto &cfg = gem_sys.GetApvConfig(i);
             if (cfg.crate_id < 0 || cfg.mpd_id < 0 || cfg.adc_ch < 0)
                 continue;
             json noise_arr = json::array();
-            for (int s = 0; s < N_STRIPS; ++s)
+            for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s)
                 noise_arr.push_back(std::round(cfg.pedestal[s].noise * 10.f) / 10.f);
             apvs.push_back({{"id", i}, {"noise", std::move(noise_arr)}});
         }
@@ -1332,9 +1068,7 @@ void AppState::setGemZsSigma(float v)
     gem_sys.SetZeroSupThreshold(v);
 }
 
-//=============================================================================
-// GEM efficiency monitor — main entry, init, clear, snapshot serialization
-//=============================================================================
+// ---- GEM efficiency monitor — init, clear, run, snapshot JSON -------------
 
 void AppState::initGemEfficiency()
 {
@@ -1348,9 +1082,7 @@ void AppState::initGemEfficiency()
         gem_eff_grid_den[d].init(gem_eff_grid_nx, gem_eff_grid_ny);
     }
     gem_eff_snapshot = GemEffSnapshot{};
-    int nbins = (int)std::lround((gem_eff_z_target_max - gem_eff_z_target_min)
-                                  / gem_eff_z_target_step);
-    gem_eff_z_target_hist.init(nbins);
+    gem_eff_z_target_hist.init(gem_eff_z_target_axis);
 }
 
 void AppState::clearGemEfficiency()
@@ -1359,12 +1091,7 @@ void AppState::clearGemEfficiency()
     for (auto &n : gem_eff_den) n = 0;
     for (auto &h : gem_eff_grid_num) h.clear();
     for (auto &h : gem_eff_grid_den) h.clear();
-    for (int d = 0; d < 4; ++d) {
-        gem_eff_diag_call[d] = 0;
-        gem_eff_diag_3matched[d] = 0;
-        gem_eff_diag_pass_chi2[d] = 0;
-        gem_eff_diag_pass_resid[d] = 0;
-    }
+    for (auto &g : gem_eff_diag) g = {};
     gem_eff_snapshot = GemEffSnapshot{};
     gem_eff_z_target_hist.clear();
 }
@@ -1387,27 +1114,26 @@ void AppState::runGemEfficiency(int event_id,
     const float sigma_hc = hycal.PositionResolution(hc_energy);
     const float w_h      = 1.f / (sigma_hc * sigma_hc);
     const float lever_hc = (hcz != target_z) ? (hcz - target_z) : 1.f;
-    auto sigmaGem = [&](int d) -> float {
-        return (d >= 0 && d < (int)gem_pos_res.size()) ? gem_pos_res[d] : 0.1f;
+    // Anchor-candidate window on detector d: match_nsigma · σ_total.
+    auto anchorCut = [&](int d) -> float {
+        const float s_hc_at_gem = sigma_hc * std::abs((gem_transforms[d].z - target_z)
+                                                      / lever_hc);
+        const float s_gem       = gemPosRes(d);
+        return gem_eff_match_nsigma * std::sqrt(s_hc_at_gem*s_hc_at_gem + s_gem*s_gem);
     };
+    // GEM-only window: match_nsigma · σ_GEM[d] (fit residuals, test detector).
+    auto gemCut = [&](int d) -> float { return gem_eff_match_nsigma * gemPosRes(d); };
 
-    // Find closest GEM-d hit (in detector-local coords) within
-    // match_nsigma · σ_total of a predicted local point.  -1 if none in window.
-    auto findClosest = [&](int d, float pred_lx, float pred_ly,
+    // Find the closest GEM-d hit (in detector-local coords) within `cut` of a
+    // predicted local point.  -1 if none in window.
+    auto findClosest = [&](int d, float pred_lx, float pred_ly, float cut,
                            int &out_idx,
                            float &out_lab_x, float &out_lab_y, float &out_lab_z) {
         out_idx = -1;
         if (d < 0 || d >= n_dets) return;
         const auto &hits = hits_by_det[d];
         int max_n = std::min((int)hits.size(), gem_eff_max_hits_per_det);
-        if (max_n == 0) return;
         const auto &xform = gem_transforms[d];
-        const float z_gem        = xform.z;
-        const float s_hc_at_gem  = sigma_hc * std::abs((z_gem - target_z) / lever_hc);
-        const float s_gem        = sigmaGem(d);
-        const float s_total      = std::sqrt(s_hc_at_gem*s_hc_at_gem
-                                            + s_gem*s_gem);
-        const float cut          = gem_eff_match_nsigma * s_total;
         float best_d2 = cut * cut;
         for (int i = 0; i < max_n; ++i) {
             const auto &h = hits[i];
@@ -1442,10 +1168,10 @@ void AppState::runGemEfficiency(int event_id,
     struct Anchor {
         bool   valid = false;
         Line3D fit;
-        bool   matched[GEM_EFF_MAX_DETS] = {false,false,false,false};
-        float  cand_lx[GEM_EFF_MAX_DETS] = {0,0,0,0};
-        float  cand_ly[GEM_EFF_MAX_DETS] = {0,0,0,0};
-        float  cand_lz[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        bool   matched[GEM_EFF_MAX_DETS] = {};
+        float  cand_lx[GEM_EFF_MAX_DETS] = {};
+        float  cand_ly[GEM_EFF_MAX_DETS] = {};
+        float  cand_lz[GEM_EFF_MAX_DETS] = {};
     };
 
     // Target-seeded LOO is the production-default path; we use a passed-in
@@ -1457,12 +1183,12 @@ void AppState::runGemEfficiency(int event_id,
         Anchor a{};
         Line3D seed;
         if (S < 0) {
-            seed = seedLine(target_x, target_y, target_z, hcx, hcy, hcz);
+            seed = gem::SeedLine(target_x, target_y, target_z, hcx, hcy, hcz);
         } else {
             const auto &hits_s = hits_by_det[S];
             if (seed_idx < 0 || seed_idx >= (int)hits_s.size()) return a;
             const auto &g0 = hits_s[seed_idx];
-            seed = seedLine(hcx, hcy, hcz, g0[0], g0[1], g0[2]);
+            seed = gem::SeedLine(hcx, hcy, hcz, g0[0], g0[1], g0[2]);
             a.matched[S] = true;
             a.cand_lx[S] = g0[0]; a.cand_ly[S] = g0[1]; a.cand_lz[S] = g0[2];
         }
@@ -1472,7 +1198,7 @@ void AppState::runGemEfficiency(int event_id,
             float pred_lx, pred_ly;
             projectLineToLocal(gem_transforms[d], seed, pred_lx, pred_ly);
             int idx; float lab_x, lab_y, lab_z;
-            findClosest(d, pred_lx, pred_ly, idx, lab_x, lab_y, lab_z);
+            findClosest(d, pred_lx, pred_ly, anchorCut(d), idx, lab_x, lab_y, lab_z);
             if (idx >= 0) {
                 a.matched[d] = true;
                 a.cand_lx[d] = lab_x; a.cand_ly[d] = lab_y; a.cand_lz[d] = lab_z;
@@ -1483,8 +1209,8 @@ void AppState::runGemEfficiency(int event_id,
         int nmatch = 0;
         for (int d = 0; d < n_dets; ++d) if (a.matched[d]) ++nmatch;
         if (nmatch < 3) return a;
-        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
-            gem_eff_diag_3matched[diag_test_d]++;
+        if (S < 0 && diag_test_d >= 0)
+            gem_eff_diag[diag_test_d].n_3matched++;
         // Build fit arrays: HyCal (+ optionally target) + matched GEMs.
         float zarr[CAP], xarr[CAP], yarr[CAP], wxarr[CAP], wyarr[CAP];
         int   N = 0;
@@ -1494,9 +1220,8 @@ void AppState::runGemEfficiency(int event_id,
             // σ_target_z couples to the transverse measurement at z=target_z
             // through the slope: σ_x_eff² = σ_target_x² + (bx_est·σ_z)².
             // Slope estimate from the target → HyCal lever arm.
-            const float lever = (hcz != target_z) ? (hcz - target_z) : 1.f;
-            const float bx_est = (hcx - target_x) / lever;
-            const float by_est = (hcy - target_y) / lever;
+            const float bx_est = (hcx - target_x) / lever_hc;
+            const float by_est = (hcy - target_y) / lever_hc;
             const float sx2 = gem_eff_target_sigma_x * gem_eff_target_sigma_x
                               + (bx_est * gem_eff_target_sigma_z)
                               * (bx_est * gem_eff_target_sigma_z);
@@ -1510,17 +1235,14 @@ void AppState::runGemEfficiency(int event_id,
         for (int d = 0; d < n_dets; ++d) {
             if (!a.matched[d]) continue;
             zarr[N] = a.cand_lz[d]; xarr[N] = a.cand_lx[d]; yarr[N] = a.cand_ly[d];
-            const float s = sigmaGem(d);
+            const float s = gemPosRes(d);
             wxarr[N] = wyarr[N] = 1.f / (s * s);
             ++N;
         }
-        if (!fitWeightedLine(N, zarr, xarr, yarr, wxarr, wyarr, a.fit)) return a;
-        if (a.fit.chi2_per_dof > gem_eff_max_chi2) {
-            a.matched[0] = a.matched[1] = a.matched[2] = a.matched[3] = false;
-            return a;
-        }
-        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
-            gem_eff_diag_pass_chi2[diag_test_d]++;
+        if (!gem::FitWeightedLine(N, zarr, xarr, yarr, wxarr, wyarr, a.fit)) return a;
+        if (a.fit.chi2_per_dof > gem_eff_max_chi2) return Anchor{};
+        if (S < 0 && diag_test_d >= 0)
+            gem_eff_diag[diag_test_d].n_pass_chi2++;
         // Per-detector fit-residual gate on the 3 anchors.
         for (int d = 0; d < n_dets; ++d) {
             if (!a.matched[d]) continue;
@@ -1528,15 +1250,11 @@ void AppState::runGemEfficiency(int event_id,
             const float py = a.fit.ay + a.fit.by * a.cand_lz[d];
             const float dx = a.cand_lx[d] - px;
             const float dy = a.cand_ly[d] - py;
-            const float s  = sigmaGem(d);
-            const float c  = gem_eff_match_nsigma * s;
-            if (dx*dx + dy*dy > c*c) {
-                a.matched[0] = a.matched[1] = a.matched[2] = a.matched[3] = false;
-                return a;
-            }
+            const float c  = gemCut(d);
+            if (dx*dx + dy*dy > c*c) return Anchor{};
         }
-        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
-            gem_eff_diag_pass_resid[diag_test_d]++;
+        if (S < 0 && diag_test_d >= 0)
+            gem_eff_diag[diag_test_d].n_pass_resid++;
         a.valid = true;
         return a;
     };
@@ -1579,9 +1297,8 @@ void AppState::runGemEfficiency(int event_id,
     GemEffSnapshot &snap = gem_eff_snapshot;
     bool any_valid = false;
     for (int test_d = 0; test_d < n_dets; ++test_d) {
-        if (gem_eff_loo_mode == GemEffLooMode::TargetSeed
-            && test_d >= 0 && test_d < 4)
-            gem_eff_diag_call[test_d]++;
+        if (gem_eff_loo_mode == GemEffLooMode::TargetSeed)
+            gem_eff_diag[test_d].n_call++;
         Anchor a = buildAnchor(test_d);
         if (!a.valid) continue;
         gem_eff_den[test_d]++;
@@ -1590,46 +1307,15 @@ void AppState::runGemEfficiency(int event_id,
         float pred_lx, pred_ly;
         projectLineToLocal(gem_transforms[test_d], a.fit, pred_lx, pred_ly);
         int idx; float lab_x, lab_y, lab_z;
-        const float s_test = sigmaGem(test_d);
-        // Reuse findClosest's gate by temporarily using a tighter window:
-        // it normally uses σ_total but here we want σ_GEM only.  Inline
-        // the search to keep findClosest unchanged.
-        idx = -1;
-        const auto &hits_t = hits_by_det[test_d];
-        const int max_n = std::min((int)hits_t.size(), gem_eff_max_hits_per_det);
-        const float cut_t = gem_eff_match_nsigma * s_test;
-        float best_d2 = cut_t * cut_t;
-        for (int i = 0; i < max_n; ++i) {
-            const auto &h = hits_t[i];
-            float lx, ly, lz;
-            gem_transforms[test_d].labToLocal(h[0], h[1], h[2], lx, ly, lz);
-            float dxr = lx - pred_lx, dyr = ly - pred_ly;
-            float d2 = dxr*dxr + dyr*dyr;
-            if (d2 < best_d2) {
-                best_d2 = d2;
-                idx = i;
-                lab_x = h[0]; lab_y = h[1]; lab_z = h[2];
-            }
-        }
+        findClosest(test_d, pred_lx, pred_ly, gemCut(test_d), idx, lab_x, lab_y, lab_z);
         if (idx >= 0) gem_eff_num[test_d]++;
-        // Local-coord eff grid: bin the predicted point on test_d's plane
-        // over the *active* strip extent (smaller than PlaneConfig.size on
-        // the beam-hole side because the inner-edge APV reuses strip numbers
-        // via shared_pos — see GemSystem::GetActiveExtent).  Predictions
-        // outside the active extent fall in the Histogram2D out-of-range
-        // branch (no fill), so the heatmap matches the dashed detector
-        // frame drawn in the GUI.
+        // Local-coord eff grid: the predicted point on test_d's plane,
+        // binned over its active strip extent.
         if (test_d < (int)gem_eff_grid_den.size()
             && test_d < gem_sys.GetNDetectors()) {
-            auto xr = gem_sys.GetActiveExtent(test_d, 0);
-            auto yr = gem_sys.GetActiveExtent(test_d, 1);
-            const float xStep = (xr.second - xr.first) / gem_eff_grid_nx;
-            const float yStep = (yr.second - yr.first) / gem_eff_grid_ny;
-            gem_eff_grid_den[test_d].fill(pred_lx, pred_ly,
-                                           xr.first, xStep, yr.first, yStep);
+            fillActiveGrid(gem_eff_grid_den[test_d], test_d, pred_lx, pred_ly);
             if (idx >= 0)
-                gem_eff_grid_num[test_d].fill(pred_lx, pred_ly,
-                                               xr.first, xStep, yr.first, yStep);
+                fillActiveGrid(gem_eff_grid_num[test_d], test_d, pred_lx, pred_ly);
         }
 
         // Snapshot — record the latest successful LOO test for the GUI.
@@ -1675,9 +1361,8 @@ void AppState::runGemEfficiency(int event_id,
         any_valid = true;
     }
     if (any_valid) {
-        // Closest approach of the fit line to the lab z-axis:
-        //   minimize r²(z)=(ax+bx·z)²+(ay+by·z)² → z = -(ax·bx + ay·by)/(bx²+by²)
-        // Using the LAST valid LOO anchor's fit as the per-event representative.
+        // Closest approach to the lab z-axis (see GemEffSnapshot), using the
+        // LAST valid LOO anchor's fit as the per-event representative.
         const float bx = snap.bx, by = snap.by;
         const float den = bx*bx + by*by;
         if (den > 1e-12f) {
@@ -1686,16 +1371,13 @@ void AppState::runGemEfficiency(int event_id,
             snap.z_target_lab    = z_lab;
             snap.z_target_offset = z_offset;
             snap.z_target_valid  = true;
-            gem_eff_z_target_hist.fill(z_offset,
-                                       gem_eff_z_target_min,
-                                       gem_eff_z_target_step);
+            gem_eff_z_target_hist.fill(z_offset, gem_eff_z_target_axis);
         }
     }
 }
 
 nlohmann::json AppState::gemEffSnapshotJson() const
 {
-    using nlohmann::json;
     const auto &s = gem_eff_snapshot;
     if (!s.valid) return json(nullptr);
     json dets = json::array();
@@ -1727,9 +1409,7 @@ nlohmann::json AppState::gemEffSnapshotJson() const
     return out;
 }
 
-//=============================================================================
-// Clearing
-//=============================================================================
+// ---- Clearing --------------------------------------------------------------
 
 void AppState::clearHistograms()
 {

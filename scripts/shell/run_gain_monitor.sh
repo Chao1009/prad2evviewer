@@ -74,20 +74,17 @@ for (( i=0; i<NCPU; i++ )); do
     PIDS+=($!)
 done
 
-# Wait for all background jobs
 echo "Waiting for ${#PIDS[@]} jobs..."
 for PID in "${PIDS[@]}"; do
     wait "${PID}"
 done
 echo "All jobs done."
 
-# Merge partial root files
 FINALFILE="${OUTPUTDIR}/prad_${RUN}_LMS.root"
 echo "Merging into ${FINALFILE}"
 hadd -f "${FINALFILE}" "${PARTFILES[@]}"
 rm -f "${PARTFILES[@]}"
 
-# Fit the merged file
 echo "Fitting ${FINALFILE}"
 prad2ana_gain_fitter -r "${RUN}" -d "${OUTPUTDIR}"
 

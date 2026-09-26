@@ -15,26 +15,22 @@
 //
 // Global offsets network resolution algorithm developed by Mingyu Li, implemented and optimized by Yuan Li
 
-#include "Replay.h"
+#include "ConfigSetup.h"
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
-#include "WaveAnalyzer.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
-#include "load_daq_config.h"
 #include "RunInfoConfig.h"
-#include "gain_factor.h"
 #include "HyCalTimeCalib.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TH1F.h>
 #include <TH2Poly.h>
 #include <TChain.h>
 #include <TFitResult.h>
-#include <TFile.h>
-#include <TText.h>
 
 #include <iostream>
 #include <fstream>
@@ -57,45 +53,18 @@
 
 #include <nlohmann/json.hpp>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 namespace fs = std::filesystem;
 
 using EventVars = prad2::RawEventData;
 using namespace analysis;
 
-// ── File collection helper ───────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            if (entry.is_regular_file() &&
-                entry.path().filename().string().find("_raw.root") != std::string::npos)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
+    std::string db_dir = prad2::database_dir();
 
     // ── Argument parsing ─────────────────────────────────────────────────────
-    std::string output_path_name, daq_config_file;
+    std::string output_path_name;
     int  max_events  = -1;
-    int  num_threads = 4;
     bool validation = false;
     std::string validation_file;
 
@@ -109,12 +78,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Collect all input files
-    std::vector<std::string> root_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        root_files.insert(root_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> root_files = CollectInputs(argc, argv, optind, IsRawRootName);
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_module_time_calib <input_raw.root|dir> [more...] "
@@ -159,9 +123,12 @@ int main(int argc, char *argv[])
                   << "; aborting before fitting.\n";
         return 1;
     }
-    if (validation_file.empty()) prad2::LoadHyCalTimeCalib(db_dir + "/" + "hycal_time_offsets/time_calib.json", hycal);
-    else prad2::LoadHyCalTimeCalib(validation_file, hycal);
-    analysis::PhysicsTools physics(hycal);
+    const std::string time_calib_file = validation_file.empty()
+        ? db_dir + "/hycal_time_offsets/time_calib.json" : validation_file;
+    const auto tc = prad2::LoadHyCalTimeCalib(time_calib_file, hycal);
+    std::cerr << "Main: time calib " << tc.n_overrides << " module overrides";
+    if (tc.n_unknown) std::cerr << " (" << tc.n_unknown << " unknown modules skipped)";
+    std::cerr << ", default=" << tc.default_off << " ns from " << time_calib_file << "\n";
     fdec::HyCalCluster clusterer(hycal);
     fdec::ClusterConfig cl_cfg;
     clusterer.SetConfig(cl_cfg);
@@ -187,11 +154,9 @@ int main(int argc, char *argv[])
         double chi2_ndf = 0.0;
         bool fit_ok = false;
         bool valid = false;
-        bool used = false;
     };
 
     std::vector<PairResult> pair_results;
-    std::map<PairKey, std::size_t> pair_index;
     std::map<PairKey, TH1F*> delta_t_hists;
     const int nbins = 200;
     const float lo = -10.f;
@@ -221,7 +186,6 @@ int main(int argc, char *argv[])
             h->SetDirectory(nullptr);
 
             pair_results.push_back(PairResult{key, mod.id, nbr.id, name, std::move(h)});
-            pair_index[key] = pair_results.size() - 1;
             delta_t_hists[key] = pair_results.back().hist.get();
         });
     }
@@ -237,7 +201,6 @@ int main(int argc, char *argv[])
         if ((ev->trigger_bits & prad2::TBIT_sum) == 0) continue;
         if (ev->nch > 70) continue;
 
-        // Reconstruct clusters for this event.
         clusterer.Clear();
         for (int j = 0; j < ev->nch; ++j) {
             const auto *mod = hycal.module_by_id(ev->module_id[j]);
@@ -256,7 +219,7 @@ int main(int argc, char *argv[])
                 }
             }
             if (bestIdx < 0) continue;
-            adc = ev->peak_integral[j][bestIdx] * ev->gain_factor[j]; // apply gain factor
+            adc = ev->peak_integral[j][bestIdx] * ev->gain_factor[j];
             float energy = (mod->cal_factor > 0)
                 ? static_cast<float>(mod->energize(adc)) : 0.f;
             clusterer.AddHit(mod->index, energy, ev->peak_time[j][bestIdx]);
@@ -317,7 +280,6 @@ int main(int argc, char *argv[])
     }
 
     // Gaussian fit for each neighbor-pair delta-t histogram.
-    // Store the fit summary in the in-memory vector for later analysis.
     constexpr double mean_error_floor = 0.01;
     for (auto &row : pair_results) {
         auto *hist = row.hist.get();
@@ -345,7 +307,6 @@ int main(int argc, char *argv[])
             {x_lo, x_hi}
         };
 
-        bool fitted = false;
         for (const auto &[fit_lo, fit_hi] : candidate_ranges) {
             if (!std::isfinite(fit_lo) || !std::isfinite(fit_hi) || fit_hi <= fit_lo) {
                 continue;
@@ -375,16 +336,10 @@ int main(int argc, char *argv[])
             row.mean_error = std::max(row.mean_error, mean_error_floor);
             row.chi2_ndf = chi2_ndf;
             row.valid = std::isfinite(row.chi2_ndf);
-            fitted = true;
             break;
-        }
-
-        if (!fitted) {
-            continue;
         }
     }
 
-    // cout the pair results valid number out of the total pair number
     std::size_t valid_count = 0;
     for (const auto &row : pair_results) {
         if (row.valid) ++valid_count;
@@ -401,18 +356,6 @@ int main(int argc, char *argv[])
     }
 
     int reference_module = 1495;
-    /*std::size_t max_degree = 0;
-    for (const auto &kv : adjacency) {
-        if (kv.second.size() > max_degree) {
-            max_degree = kv.second.size();
-            reference_module = kv.first;
-        }
-    }*/
-
-    if (reference_module < 0) {
-        std::cerr << "No valid timing network could be built from the fitted pair means.\n";
-        return 1;
-    }
 
     std::set<int> connected;
     std::queue<int> q;
@@ -580,14 +523,10 @@ int main(int argc, char *argv[])
         if (root_file.IsOpen()) {
             constexpr double map_min = -8.0;
             constexpr double map_max = 8.0;
-            auto *h_offset_map = new TH2Poly(
-                "h_offset_map",
-                "HyCal timing offsets; x (mm); y (mm); offset (ns)",
-                -500.0,
-                500.0,
-                -500.0,
-                500.0
-            );
+            std::vector<int> offset_bins;
+            auto *h_offset_map = PhysicsTools::MakeModuleMap(
+                hycal, "h_offset_map", "HyCal timing offsets; x (mm); y (mm); offset (ns)",
+                500.0, offset_bins);
             h_offset_map->SetDirectory(&root_file);
             h_offset_map->SetContour(255);
             h_offset_map->SetStats(false);
@@ -605,38 +544,24 @@ int main(int argc, char *argv[])
             h_offset_map->SetLineColor(kBlack);
             h_offset_map->SetLineWidth(1);
 
-            std::map<int, int> offset_bin_map;
             int bad_poly_bins = 0;
-            for (int m = 0; m < hycal.module_count(); ++m) {
-                auto &mod = hycal.module(m);
-                if (!mod.is_pwo4()) continue;
-
-                const double x1 = mod.x - 0.5 * mod.size_x;
-                const double x2 = mod.x + 0.5 * mod.size_x;
-                const double y1 = mod.y - 0.5 * mod.size_y;
-                const double y2 = mod.y + 0.5 * mod.size_y;
-
-                const int bin_id = h_offset_map->AddBin(x1, y1, x2, y2);
-                offset_bin_map[mod.id] = bin_id;
-                if (bin_id <= 0) {
-                    ++bad_poly_bins;
-                }
-            }
-
             int clamped_low = 0;
             int clamped_high = 0;
             for (int m = 0; m < hycal.module_count(); ++m) {
                 auto &mod = hycal.module(m);
                 if (!mod.is_pwo4()) continue;
 
-                const auto it = offset_bin_map.find(mod.id);
-                if (it == offset_bin_map.end() || it->second <= 0) continue;
+                const int bin = offset_bins[mod.index];
+                if (bin <= 0) {
+                    ++bad_poly_bins;
+                    continue;
+                }
 
                 const bool has_offset = module_offsets.count(mod.id) > 0;
                 const double offset_value = has_offset ? module_offsets.at(mod.id) : 0.0;
                 if (offset_value < map_min) ++clamped_low;
                 if (offset_value > map_max) ++clamped_high;
-                h_offset_map->SetBinContent(it->second, std::clamp(offset_value, map_min, map_max));
+                h_offset_map->SetBinContent(bin, std::clamp(offset_value, map_min, map_max));
             }
 
             if (bad_poly_bins > 0) {

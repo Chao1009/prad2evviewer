@@ -22,7 +22,6 @@ static inline status et_status(int code, bool verbose = false)
 EtChannel::EtChannel(size_t chunk_buf)
 : EvChannel(0), et_id(nullptr), stat_id(ID_NULL), att_id(ID_NULL)
 {
-    // large enough chunk
     pe.resize(chunk_buf);
     sconf.set_cue(ET_STATION_CUE);
     sconf.set_user(ET_STATION_USER_MULTI);
@@ -32,7 +31,7 @@ EtChannel::EtChannel(size_t chunk_buf)
     sconf.set_prescale(1);
 }
 
-// Connect a ET system and create a monitor station with pre-settings
+// Open the ET system (the station is created later by Open())
 status EtChannel::Connect(const std::string &ip, int port, const std::string &et_file)
 {
     if (IsETOpen()) {
@@ -108,7 +107,6 @@ void EtChannel::Disconnect()
     }
 }
 
-// read an event
 status EtChannel::Read()
 {
     // buffers are not empty, just get the first element from it
@@ -153,16 +151,6 @@ status EtChannel::Read()
     return status::success;
 }
 
-// helper functions
-template<class Func, class... Args>
-inline bool ev_filter(Func beg, Func end, Args&&... args)
-{
-    for (auto it = beg; it != end; ++it) {
-        if (!(*it)(args...)) return false;
-    }
-    return true;
-}
-
 template<class Func>
 std::vector<uint32_t> copy_event(const uint32_t *buf, bool swap, Func fil_beg, Func fil_end)
 {
@@ -192,7 +180,6 @@ std::vector<uint32_t> copy_event(const uint32_t *buf, bool swap, Func fil_beg, F
     return event;
 }
 
-// copy event to the buffer
 bool EtChannel::copyEvent(et_event **pe, int nread)
 {
     if (nread <= 0) {
@@ -201,13 +188,12 @@ bool EtChannel::copyEvent(et_event **pe, int nread)
 
     void *data;
     size_t len, bytes = sizeof(uint32_t);
-    int endian, swap;
+    int swap;
 
     for (int i = 0; i < nread; ++i) {
         // get event data and attributes from ET
         et_event_getdata(pe[i], &data);
         et_event_getlength(pe[i], &len);
-        // et_event_getendian(pe[i], &endian);
         et_event_needtoswap(pe[i], &swap);
 
         // size of the buffer

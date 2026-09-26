@@ -5,14 +5,15 @@
 // hycal_energy_bias_test.
 //
 // Covers the three public helpers (StripMeanTime, TimeSampleCorrelation,
-// IsUnimodalPulse), the StripCluster / GEMHit quality fields, every new
-// ClusterConfig cut on its own, the unchanged mode-1 X/Y time cut, and the
+// IsUnimodalPulse), the StripCluster / GEMHit quality fields, every quality
+// ClusterConfig cut on its own, the mode-1 X/Y time cut, and the
 // reconstruction_config.json parsing + [GEMCFG] log via PipelineBuilder.
 //=============================================================================
 
 #include "GemCluster.h"
 #include "GemSystem.h"
 #include "PipelineBuilder.h"
+#include "test_util.h"
 
 #include <nlohmann/json.hpp>
 
@@ -27,32 +28,14 @@
 #include <random>
 #include <sstream>
 #include <string>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 namespace fs = std::filesystem;
 using nlohmann::json;
+using namespace testutil;
 
 namespace {
-
-int failures = 0;
-
-void check(bool condition, const std::string &message)
-{
-    if (condition) return;
-    std::cerr << "FAIL: " << message << '\n';
-    ++failures;
-}
-
-bool close_to(float actual, float expected, float tolerance = 1.e-4f)
-{
-    return std::fabs(actual - expected) <= tolerance;
-}
 
 bool same_bits(float a, float b)
 {
@@ -160,7 +143,7 @@ std::vector<gem::StripHit> make_plane()
     // F
     h.push_back(make_strip(600, {-10.f, 5.f, 40.f, 10.f, -4.f, -6.f}));
     h.push_back(make_strip(601, {-10.f, 5.f, 30.f, 10.f, -4.f, -6.f}));
-    // shuffle so FormClusters has to sort
+    // reverse so FormClusters has to sort
     std::reverse(h.begin(), h.end());
     return h;
 }
@@ -238,9 +221,7 @@ bool knobs_disabled(const gem::ClusterConfig &c)
 
 int main()
 {
-    // ---------------------------------------------------------------------
-    // StripMeanTime
-    // ---------------------------------------------------------------------
+    // ---- StripMeanTime ----
     check(close_to(gem::StripMeanTime({0, 100, 200, 100, 0, 0}, 25.f), 75.f),
           "StripMeanTime {0,100,200,100,0,0} @25 = 75 ns");
     check(close_to(gem::StripMeanTime({0, 100, 200, 100, 0, 0}), 75.f),
@@ -255,7 +236,6 @@ int main()
           "StripMeanTime with no positive sample is NaN");
     check(std::isnan(gem::StripMeanTime({}, 25.f)), "StripMeanTime of empty is NaN");
     {
-        // bit-identity with the pre-change seed mean time
         std::mt19937 rng(12345);
         std::uniform_real_distribution<float> adc(-60.f, 1500.f);
         std::uniform_int_distribution<int> len(0, 9);
@@ -272,9 +252,7 @@ int main()
         check(mismatches == 0, "StripMeanTime is bit-identical to the legacy seed mean time");
     }
 
-    // ---------------------------------------------------------------------
-    // TimeSampleCorrelation
-    // ---------------------------------------------------------------------
+    // ---- TimeSampleCorrelation ----
     const std::vector<float> pulse = {10, 50, 100, 60, 20, 5};
     std::vector<float> reversed(pulse.rbegin(), pulse.rend());
     check(close_to(gem::TimeSampleCorrelation(pulse, pulse), 1.f, 1e-6f),
@@ -292,9 +270,7 @@ int main()
     check(std::isnan(gem::TimeSampleCorrelation({1.f}, {2.f})),
           "TimeSampleCorrelation size < 2 = NaN");
 
-    // ---------------------------------------------------------------------
-    // IsUnimodalPulse
-    // ---------------------------------------------------------------------
+    // ---- IsUnimodalPulse ----
     check(gem::IsUnimodalPulse(pulse), "IsUnimodalPulse rising/falling = true");
     check(!gem::IsUnimodalPulse({0, 100, 200, 100, 20, 25}), "IsUnimodalPulse tail bump = false");
     check(!gem::IsUnimodalPulse({10, 50, 100, 100, 20, 5}), "IsUnimodalPulse flat pair at peak = false");
@@ -303,9 +279,7 @@ int main()
     check(gem::IsUnimodalPulse({1, 2, 3, 4, 5, 6}), "IsUnimodalPulse peak at last sample = true");
     check(!gem::IsUnimodalPulse({}), "IsUnimodalPulse empty = false");
 
-    // ---------------------------------------------------------------------
-    // Default config: no new cut acts, quality fields filled
-    // ---------------------------------------------------------------------
+    // ---- Default config: no quality cut acts, quality fields filled ----
     const std::vector<std::pair<int, int>> all6 =
         {{100, 5}, {200, 4}, {300, 3}, {400, 1}, {500, 3}, {600, 2}};
     std::vector<gem::StripHit> hits_after;
@@ -354,9 +328,7 @@ int main()
         check(close_to(f->seed_sum_adc, 35.f), "F seed_sum_adc includes negative samples");
     } else check(false, "cluster F present");
 
-    // ---------------------------------------------------------------------
-    // Each new cut on its own
-    // ---------------------------------------------------------------------
+    // ---- Each quality cut on its own ----
     {
         gem::ClusterConfig cfg = base_config();
         cfg.strip_unimodal = true;
@@ -423,9 +395,7 @@ int main()
         check(find_cluster(cls, 400) != nullptr, "NaN min_ts_corr (single strip) passes");
     }
 
-    // ---------------------------------------------------------------------
-    // makeHit fields (both match modes) and the mode-1 time cut
-    // ---------------------------------------------------------------------
+    // ---- makeHit fields (both match modes) and the mode-1 time cut ----
     {
         gem::GemCluster gc;
         gem::ClusterConfig cfg = base_config();
@@ -502,7 +472,7 @@ int main()
         check(out.size() == 1 && out[0].time_diff < -50.f,
               "mode 1: time cut disabled keeps the late pair with its time_diff");
 
-        // asymmetry sum <= 0 → NaN adc_asym, cut skipped as before
+        // asymmetry sum <= 0 → NaN adc_asym, cut skipped
         std::vector<gem::StripCluster> zx(1), zy(1);
         zx[0].peak_charge = 0.f;
         zy[0].peak_charge = 0.f;
@@ -511,9 +481,7 @@ int main()
               "hand-built clusters: NaN adc_asym / times, pair kept");
     }
 
-    // ---------------------------------------------------------------------
-    // Config plumbing: shipped configs parse with every new cut disabled
-    // ---------------------------------------------------------------------
+    // ---- Config plumbing: shipped configs parse with every quality cut disabled ----
     const std::string expect_log =
         " strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1";
     for (const char *name : {"reconstruction_config.json", "reconstruction_config_x17.json"}) {
@@ -535,9 +503,7 @@ int main()
     }
     {
         // explicit values + per-detector override; bad shapes are ignored
-        const fs::path dir = fs::temp_directory_path() /
-            ("prad2_gem_quality_" + std::to_string(static_cast<long long>(::getpid())));
-        fs::create_directories(dir);
+        const fs::path dir = make_temp_dir("prad2_gem_quality_");
         const fs::path path = dir / "recon.json";
         json root;
         auto &d = root["gem"]["default"];
@@ -581,10 +547,5 @@ int main()
         fs::remove_all(dir);
     }
 
-    if (failures != 0) {
-        std::cerr << failures << " GEM quality test(s) failed\n";
-        return 1;
-    }
-    std::cout << "GEM quality tests passed\n";
-    return 0;
+    return finish("GEM quality", "GEM quality");
 }

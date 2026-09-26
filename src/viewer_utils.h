@@ -1,32 +1,26 @@
 #pragma once
-//=============================================================================
-// viewer_utils.h — shared utilities for the event viewer/monitor
-//=============================================================================
 
 #include "DetectorTransform.h"
 #include "Fadc250Data.h"
 #include "WaveAnalyzer.h"
 
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <cmath>
 
 // --- TI timestamp conversion ------------------------------------------------
-// TI clock runs at 250 MHz → 4 ns per tick
-static constexpr double TI_TICK_SEC = 4e-9;
-
-// Safe (now − base) seconds.  Both args are uint64 TI ticks; this guards
-// against the classic sign-of-life bug:
-//   uint64_t a - uint64_t b  with a < b  → wraps to ~2^64
-//   ~2^64 × 4 ns = ~73,786,976,288 s, which is what shows up in the
-//   EPICS monitor when a snapshot has no TI anchor (timestamp = 0) and
-//   the anchor t0 was captured later.
-// Treats now == 0 as "no anchor yet" → returns 0 (snapshot stays at the
-// origin instead of producing a fake huge offset).  Negative deltas
-// (now < base, can happen across an ET reconnect or out-of-order events)
-// return as honest negatives instead of wrapping.
+// Safe (now − base) seconds for uint64 TI ticks: a plain unsigned difference
+// with now < base wraps to ~2^64 × 4 ns ≈ 7.4e10 s.  now == 0 means "no anchor
+// yet" and returns 0; now < base (ET reconnect, out-of-order events) returns
+// an honest negative.
 inline double ti_delta_sec(uint64_t now, uint64_t base) {
+    using fdec::TI_TICK_SEC;
     if (now == 0) return 0.0;
     if (base == 0) return static_cast<double>(now) * TI_TICK_SEC;
     return (now >= base)
@@ -55,17 +49,98 @@ inline std::string contentType(const std::string &path) {
     return "application/octet-stream";
 }
 
-// --- Histogram (used by both viewer and monitor) ----------------------------
+// --- URL query helpers ------------------------------------------------------
+// Percent-decode s.  A '%' not followed by two hex digits is kept as is.
+// '+' means a space in a query string but not in a path segment.
+inline std::string urlDecode(std::string_view s, bool plus_as_space = true)
+{
+    auto hex = [](char c) {
+        return std::isdigit((unsigned char)c) ? c - '0'
+                                              : std::tolower((unsigned char)c) - 'a' + 10;
+    };
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()
+            && std::isxdigit((unsigned char)s[i + 1])
+            && std::isxdigit((unsigned char)s[i + 2])) {
+            out += (char)(hex(s[i + 1]) * 16 + hex(s[i + 2]));
+            i += 2;
+        } else if (s[i] == '+' && plus_as_space) {
+            out += ' ';
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// Decoded values of every `key=value` pair in the query part of uri.
+inline std::vector<std::string> queryValues(std::string_view uri, std::string_view key)
+{
+    std::vector<std::string> values;
+    auto q = uri.find('?');
+    if (q == std::string_view::npos) return values;
+    std::string_view query = uri.substr(q + 1);
+    for (size_t pos = 0; pos < query.size();) {
+        size_t amp = query.find('&', pos);
+        if (amp == std::string_view::npos) amp = query.size();
+        std::string_view kv = query.substr(pos, amp - pos);
+        if (kv.size() > key.size() && kv.compare(0, key.size(), key) == 0
+            && kv[key.size()] == '=')
+            values.push_back(urlDecode(kv.substr(key.size() + 1)));
+        pos = amp + 1;
+    }
+    return values;
+}
+
+// First decoded value of `key` in the query part of uri, or def.
+inline std::string queryValue(std::string_view uri, std::string_view key,
+                              std::string def = {})
+{
+    auto values = queryValues(uri, key);
+    return values.empty() ? def : values.front();
+}
+
+// --- Histogram --------------------------------------------------------------
+// Uniform binning from min in steps of step; configured in
+// monitor_config.json as {min, max, step} (or with key prefixes such as
+// angle_min / x_min when one block holds several axes).  With T = int the
+// bounds stay integers (fractional JSON values truncate) and nbins() floors
+// (max - min) / step.
+template <typename T>
+struct BasicHistAxis {
+    T min = 0, max = 1, step = 1;
+    int nbins() const { return std::max(1, (int)std::ceil((max - min) / step)); }
+    // Reads <pfx>min / <pfx>max / <pfx>step where present.
+    void parse(const nlohmann::json &j, const std::string &pfx = "") {
+        if (j.contains(pfx + "min"))  min  = j[pfx + "min"];
+        if (j.contains(pfx + "max"))  max  = j[pfx + "max"];
+        if (j.contains(pfx + "step")) step = j[pfx + "step"];
+    }
+    // Writes <pfx>min / <pfx>max / <pfx>step into out.
+    void toJson(nlohmann::json &out, const std::string &pfx) const {
+        out[pfx + "min"] = min; out[pfx + "max"] = max; out[pfx + "step"] = step;
+    }
+    nlohmann::json toJson() const { return {{"min", min}, {"max", max}, {"step", step}}; }
+};
+using HistAxis    = BasicHistAxis<float>;
+using IntHistAxis = BasicHistAxis<int>;
+
 struct Histogram {
     int underflow = 0, overflow = 0;
     std::vector<int> bins;
     void init(int n) { bins.assign(n, 0); underflow = overflow = 0; }
+    template <typename T>
+    void init(const BasicHistAxis<T> &a) { init(a.nbins()); }
     void fill(float v, float bmin, float bstep) {
         if (v < bmin) { ++underflow; return; }
         int b = (int)((v - bmin) / bstep);
         if (b >= (int)bins.size()) { ++overflow; return; }
         ++bins[b];
     }
+    template <typename T>
+    void fill(float v, const BasicHistAxis<T> &a) { fill(v, a.min, a.step); }
     void clear() { std::fill(bins.begin(), bins.end(), 0); underflow = overflow = 0; }
 };
 
@@ -73,11 +148,15 @@ struct Histogram2D {
     int nx = 0, ny = 0;
     std::vector<int> bins;  // row-major: bins[iy*nx + ix]
     void init(int nx_, int ny_) { nx = nx_; ny = ny_; bins.assign(nx * ny, 0); }
+    void init(const HistAxis &ax, const HistAxis &ay) { init(ax.nbins(), ay.nbins()); }
     void fill(float vx, float vy, float xmin, float xstep, float ymin, float ystep) {
         int ix = (int)((vx - xmin) / xstep);
         int iy = (int)((vy - ymin) / ystep);
         if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) return;
         bins[iy * nx + ix]++;
+    }
+    void fill(float vx, float vy, const HistAxis &ax, const HistAxis &ay) {
+        fill(vx, vy, ax.min, ax.step, ay.min, ay.step);
     }
     void clear() { std::fill(bins.begin(), bins.end(), 0); }
 };
@@ -87,47 +166,12 @@ struct Histogram2D {
 // (daq_config.json fadc250_waveform.analyzer); per-tab Waveform-Tab cuts
 // live in PeakFilter (monitor_config.json waveform.filter).
 struct HistConfig {
-    float bin_min     = 0;
-    float bin_max     = 20000;
-    float bin_step    = 100;
-    float pos_min     = 0;
-    float pos_max     = 400;
-    float pos_step    = 4;
-    float height_min  = 0;
-    float height_max  = 4000;
-    float height_step = 10;
+    HistAxis integral{0.f, 20000.f, 100.f};
+    HistAxis time{0.f, 400.f, 4.f};
+    HistAxis height{0.f, 4000.f, 10.f};
 };
 
-// --- Event-level filters (loaded from external JSON, applied per-event) ------
-// Each filter has enable=false by default; disabled filters are skipped.
-
-struct WaveformFilter {
-    bool  enable       = false;
-    std::vector<std::string> modules;   // HyCal module names; empty = no module restriction
-    int   n_peaks_min  = 1;             // qualifying-peak count range
-    int   n_peaks_max  = 999999;
-    float time_min     = -1e30f;        // peak time range (omit = no cut)
-    float time_max     =  1e30f;
-    float integral_min = -1e30f;        // peak integral range
-    float integral_max =  1e30f;
-    float height_min   = -1e30f;        // peak height range
-    float height_max   =  1e30f;
-};
-
-struct ClusterFilter {
-    bool  enable       = false;
-    int   n_min        = 0;             // qualifying-cluster count range
-    int   n_max        = 999999;
-    float energy_min   = 0;             // per-cluster energy range
-    float energy_max   = 1e30f;
-    int   size_min     = 1;             // per-cluster nblocks range
-    int   size_max     = 999999;
-    std::vector<std::string> includes_modules;  // cluster must contain >= includes_min of these
-    int   includes_min = 1;
-    std::vector<std::string> center_modules;    // cluster center must be in this list
-};
-
-// --- LMS entry (shared between viewer FileData and monitor globals) ---------
+// --- LMS entry --------------------------------------------------------------
 struct LmsEntry {
     double time_sec;    // seconds since first LMS event (from TI timestamp)
     float  integral;    // peak integral within timing cut (or raw ADC for ADC1881M)
@@ -151,8 +195,8 @@ inline float bestPeakInWindow(const fdec::WaveResult &wres,
     return best;
 }
 
-// Best peak integral across all detected peaks (no time cut) — clustering
-// input after the per-tab cut decoupling.
+// Best peak integral across all detected peaks (no time cut) — the
+// single-pulse clustering input.
 inline float bestPeak(const fdec::WaveResult &wres)
 {
     float best = -1;
