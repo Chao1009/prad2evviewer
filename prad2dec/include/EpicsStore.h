@@ -56,15 +56,14 @@ public:
     // Returns true if found, false if channel unknown or no snapshot before this event.
     bool GetValue(int32_t event_number, const std::string &channel, float &value) const;
 
-    // Get all channel values from the most recent snapshot at or before event_number.
-    // Returns pointer to the values array (indexed by channel id), or nullptr if none.
-    // Use GetChannelId() to map names to indices.
     struct Snapshot {
         int32_t              event_number;
         uint64_t             timestamp;
         std::vector<float>   values;     // indexed by channel id
     };
 
+    // Most recent snapshot at or before event_number, or nullptr if none.
+    // Use GetChannelId() to map names to indices into its values.
     const Snapshot *FindSnapshot(int32_t event_number) const;
 
     // --- channel info -------------------------------------------------------
@@ -73,10 +72,8 @@ public:
     int  GetChannelId(const std::string &name) const;
     const std::string &GetChannelName(int id) const { return channel_names_[id]; }
 
-    // all known channel names
     const std::vector<std::string> &GetChannelNames() const { return channel_names_; }
 
-    // number of snapshots stored
     int  GetSnapshotCount() const { return static_cast<int>(snapshots_.size()); }
 
     // direct snapshot access by index (0 = oldest)

@@ -7,7 +7,7 @@
 // and exposes the per-type aggregates (PbGlass / PbWO4 / LMS / Veto)
 // from its `_by_type` block.  Per-channel τ_r / τ_f entries in the JSON
 // are read only to learn each channel's module type — the per-channel
-// shapes themselves are no longer used.  The deconvolver gets one
+// shapes themselves are not used.  The deconvolver gets one
 // shape per category, which keeps the inputs well-conditioned (a
 // well-fit median across many channels) and avoids amplifying noise
 // from low-statistics single-channel fits.
@@ -49,16 +49,20 @@ public:
 
     // Load the per-type templates from the JSON written by
     // `fit_pulse_template.py`.  `cfg.nnls_deconv` provides the τ-range
-    // gates each per-type entry must satisfy to be accepted, and
-    // `cfg.clk_mhz` sets the precomputed grid sample period so the
-    // deconv hot loop can skip per-sample exp().  Returns true on
-    // success — `valid()` will then be true and at least one per-type
-    // template is present.  False on file-not-found, parse error, or
-    // empty contents; logs a one-line warning to stderr in any failure
-    // path.
+    // gates each per-type entry must satisfy to be accepted.  Returns
+    // true on success — `valid()` will then be true and at least one
+    // per-type template is present.  False on file-not-found, parse
+    // error, or empty contents; logs a one-line warning to stderr in any
+    // failure path.
     //
     // Re-loading is allowed; the existing contents are dropped first.
     bool LoadFromFile(const std::string &path, const WaveConfig &cfg);
+
+    // Clear, then load cfg.nnls_deconv.template_file if nnls_deconv is
+    // enabled; a relative path is taken from db_dir (prad2::resolve_db_path).
+    // Returns false, silently, when deconv is off or no file is configured,
+    // otherwise as LoadFromFile().
+    bool LoadFromConfig(const WaveConfig &cfg, const std::string &db_dir);
 
     // Look up the deconv template for a channel identified by its
     // (roc_tag, slot, channel) triple — the same triple the fitter
@@ -93,16 +97,9 @@ public:
     void Clear();
 
 private:
-    static uint64_t pack_key(int roc_tag, int slot, int channel)
-    {
-        return (static_cast<uint64_t>(roc_tag) << 40) |
-               (static_cast<uint64_t>(slot)    << 20) |
-               static_cast<uint64_t>(channel);
-    }
-
-    // (roc_tag, slot, channel) → "PbGlass" / "PbWO4" / "LMS" / "Veto".
-    // Built from each per-channel entry's `module_type` field at load
-    // time; per-channel τ values are intentionally not stored.
+    // prad2::pack_daq_key(roc_tag, slot, channel) → "PbGlass" / "PbWO4" /
+    // "LMS" / "Veto".  Built from each per-channel entry's `module_type`
+    // field at load time; per-channel τ values are intentionally not stored.
     std::unordered_map<uint64_t, std::string>      channel_type_;
 
     // Per-type templates from the file's `_by_type` block — keyed by

@@ -10,35 +10,24 @@ lie on the connecting line (within tolerance) are auto-inserted.
 
 Usage
 -----
-    python calibration/hycal_path_editor.py
+    python calibration/scan_path_editor.py [--database hycal_map.json] [--paths paths.json]
 """
 
 from __future__ import annotations
 
 import json
 import math
-import os
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from typing import Dict, List, Tuple
 
-from scan_utils import C, Module, load_modules, filter_scan_modules, DEFAULT_DB_PATH
+from scan_utils import (C, Module, load_modules, load_profiles, filter_scan_modules,
+                        DEFAULT_DB_PATH, PATHS_FILE)
 
 
-# ============================================================================
-#  PATH PROFILES
-# ============================================================================
+# -- Path profiles ------------------------------------------------------------
 
-PATHS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "paths.json")
 MAX_LG_LAYERS = 6
-
-
-def load_paths(filepath: str = PATHS_FILE) -> Dict[str, List[str]]:
-    if os.path.exists(filepath):
-        with open(filepath) as f:
-            return json.load(f)
-    return {}
 
 
 def save_paths(profiles: Dict[str, List[str]], filepath: str = PATHS_FILE):
@@ -53,9 +42,7 @@ def save_paths(profiles: Dict[str, List[str]], filepath: str = PATHS_FILE):
         f.write("}\n")
 
 
-# ============================================================================
-#  AUTO-INSERT: find modules on the line between two points
-# ============================================================================
+# -- Auto-insert: find modules on the line between two points -----------------
 
 def _point_to_segment_dist(px, py, ax, ay, bx, by) -> float:
     """Distance from point (px,py) to segment (ax,ay)-(bx,by)."""
@@ -97,10 +84,6 @@ def find_intermediate_modules(
     return [m for _, m in hits]
 
 
-# ============================================================================
-#  GUI
-# ============================================================================
-
 class PathEditorGUI:
 
     CANVAS_SIZE = 680
@@ -113,17 +96,6 @@ class PathEditorGUI:
         self.all_modules = all_modules
         self._mod_by_name: Dict[str, Module] = {m.name: m for m in all_modules}
         self._paths_file = paths_file
-        self._lg_layers = 0
-
-        # Precompute PbWO4 bbox for layer filter
-        pwo4 = [m for m in all_modules if m.mod_type == "PbWO4"]
-        self._pwo4_min_x = min(m.x for m in pwo4)
-        self._pwo4_max_x = max(m.x for m in pwo4)
-        self._pwo4_min_y = min(m.y for m in pwo4)
-        self._pwo4_max_y = max(m.y for m in pwo4)
-        glass = [m for m in all_modules if m.mod_type == "PbGlass"]
-        self._lg_sx = glass[0].sx if glass else 38.15
-        self._lg_sy = glass[0].sy if glass else 38.15
 
         self._selectable: set = set()   # names of selectable modules
         self._update_selectable(0)
@@ -131,7 +103,7 @@ class PathEditorGUI:
         # Current path & profile
         self._path: List[str] = []      # ordered module names
         self._profile_name: str = ""
-        self._profiles = load_paths(self._paths_file)
+        self._profiles = load_profiles(self._paths_file)
 
         # Canvas state
         self._cell_ids: Dict[str, int] = {}
@@ -144,10 +116,8 @@ class PathEditorGUI:
     # -- selectable filter ---------------------------------------------------
 
     def _update_selectable(self, lg_layers: int):
-        self._lg_layers = lg_layers
         self._selectable = {m.name for m in
-                            filter_scan_modules(self.all_modules, lg_layers,
-                                                self._lg_sx, self._lg_sy)}
+                            filter_scan_modules(self.all_modules, lg_layers)}
 
     # -- UI ------------------------------------------------------------------
 
@@ -258,8 +228,7 @@ class PathEditorGUI:
         self._y_max = y_max
 
     def _mod_to_canvas(self, m: Module) -> Tuple[float, float, float, float]:
-        cx = self._ox + (m.x - self._x_min) * self._scale
-        cy = self._oy + (self._y_max - m.y) * self._scale
+        cx, cy = self._mod_center(m)
         hw = m.sx * self._scale * self.MOD_SHRINK / 2
         hh = m.sy * self._scale * self.MOD_SHRINK / 2
         return (cx - hw, cy - hh, cx + hw, cy + hh)
@@ -268,6 +237,13 @@ class PathEditorGUI:
         cx = self._ox + (m.x - self._x_min) * self._scale
         cy = self._oy + (self._y_max - m.y) * self._scale
         return cx, cy
+
+    def _module_color(self, m: Module, path_set) -> str:
+        if m.name in path_set:
+            return C.MOD_INPATH
+        if m.name in self._selectable:
+            return C.MOD_TODO
+        return C.MOD_GLASS if m.mod_type == "PbGlass" else C.MOD_EXCLUDED
 
     def _draw_modules(self):
         self._canvas.delete("all")
@@ -278,16 +254,9 @@ class PathEditorGUI:
             if m.mod_type == "LMS":
                 continue
             x0, y0, x1, y1 = self._mod_to_canvas(m)
-            if m.name in path_set:
-                color = C.MOD_INPATH
-            elif m.name in self._selectable:
-                color = C.MOD_TODO
-            elif m.mod_type == "PbGlass":
-                color = C.MOD_GLASS
-            else:
-                color = C.MOD_EXCLUDED
             rid = self._canvas.create_rectangle(
-                x0, y0, x1, y1, fill=color, outline="", width=0,
+                x0, y0, x1, y1, fill=self._module_color(m, path_set),
+                outline="", width=0,
                 tags=(f"mod_{m.name}",))
             self._cell_ids[m.name] = rid
 
@@ -311,21 +280,9 @@ class PathEditorGUI:
     def _refresh_canvas(self):
         """Lightweight refresh: recolor modules and redraw path line."""
         path_set = set(self._path)
-        for m in self.all_modules:
-            if m.mod_type == "LMS":
-                continue
-            rid = self._cell_ids.get(m.name)
-            if rid is None:
-                continue
-            if m.name in path_set:
-                color = C.MOD_INPATH
-            elif m.name in self._selectable:
-                color = C.MOD_TODO
-            elif m.mod_type == "PbGlass":
-                color = C.MOD_GLASS
-            else:
-                color = C.MOD_EXCLUDED
-            self._canvas.itemconfigure(rid, fill=color)
+        for name, rid in self._cell_ids.items():
+            self._canvas.itemconfigure(
+                rid, fill=self._module_color(self._mod_by_name[name], path_set))
         self._draw_path_line()
         self._update_canvas_label()
         self._update_path_list()
@@ -400,7 +357,7 @@ class PathEditorGUI:
 
         r_lg = tk.Frame(sf, bg=C.BG)
         r_lg.pack(fill="x", padx=6, pady=4)
-        tk.Label(r_lg, text="LG layers (0-6):", bg=C.BG, fg=C.TEXT,
+        tk.Label(r_lg, text=f"LG layers (0-{MAX_LG_LAYERS}):", bg=C.BG, fg=C.TEXT,
                  font=("Consolas", 9)).pack(side="left")
         self._lg_var = tk.IntVar(value=0)
         tk.Spinbox(r_lg, from_=0, to=MAX_LG_LAYERS,
@@ -441,7 +398,6 @@ class PathEditorGUI:
 
     def _on_lg_changed(self):
         self._update_selectable(self._lg_var.get())
-        self._draw_modules()
         self._refresh_canvas()
 
     def _on_load_profile(self, _event=None):
@@ -500,10 +456,6 @@ class PathEditorGUI:
             self._path.clear()
             self._refresh_canvas()
 
-
-# ============================================================================
-#  MAIN
-# ============================================================================
 
 def main():
     import argparse

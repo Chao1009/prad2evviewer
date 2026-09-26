@@ -13,6 +13,7 @@
 #include "InstallPaths.h"
 #include "MatchingTools.h"
 #include "PipelineBuilder.h"
+#include "ToolUtils.h"
 
 #include <TChain.h>
 #include <TFile.h>
@@ -28,7 +29,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <limits>
 #include <memory>
 #include <random>
@@ -38,10 +38,6 @@
 #include <unordered_map>
 #include <unistd.h>
 #include <vector>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 namespace fs = std::filesystem;
 
@@ -129,23 +125,6 @@ void printUsage(const char *prog)
         << "  -m  replay HyCal module table (default: <db>/hycal_module.txt)\n"
         << "  -s  G4 HyCal geometry order file (default: auto-detect "
         << "hycal_module_shuffled.dat)\n";
-}
-
-std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (const auto &entry : fs::directory_iterator(path)) {
-            if (!entry.is_regular_file()) continue;
-            const auto name = entry.path().filename().string();
-            if (name.find(".root") != std::string::npos)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
 }
 
 bool hasBranch(TTree &tree, const char *name)
@@ -320,15 +299,6 @@ ModuleMap loadModuleMap(const std::string &module_table,
     return out;
 }
 
-void clearReconEvent(prad2::ReconEventData &ev)
-{
-    ev = prad2::ReconEventData{};
-    std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
-    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
-    std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
-              std::numeric_limits<float>::quiet_NaN());
-}
-
 uint16_t clampToU16(float value)
 {
     if (!std::isfinite(value) || value <= 0.f)
@@ -483,21 +453,15 @@ int main(int argc, char *argv[])
         }
     }
 
-    std::vector<std::string> input_files;
-    for (int i = optind; i < argc; ++i) {
-        auto files = collectRootFiles(argv[i]);
-        input_files.insert(input_files.end(), files.begin(), files.end());
-    }
+    std::vector<std::string> input_files =
+        analysis::CollectInputs(argc, argv, optind, analysis::IsRootName);
 
     if (input_files.empty()) {
         printUsage(argv[0]);
         return 1;
     }
 
-    const std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    const std::string db_dir = prad2::database_dir();
     if (module_table.empty())
         module_table = db_dir + "/hycal_module.txt";
     if (g4_module_order.empty())
@@ -618,10 +582,7 @@ int main(int argc, char *argv[])
     clusterer.SetConfig(pipeline.hycal_cluster_cfg);
     clusterer.SetProfile(pipeline.hycal_profile);
     analysis::MatchingTools matching(pipeline.match_method);
-    matching.SetMatchRange(pipeline.run_cfg.matching_radius);
-    matching.SetSquareSelection(pipeline.run_cfg.matching_use_square);
-    matching.SetEnergyDependent(pipeline.run_cfg.matching_energy_dependent);
-    matching.SetMatchSigma(pipeline.run_cfg.matching_sigma);
+    matching.Configure(pipeline.run_cfg);
 
     std::vector<float> module_energy(pipeline.hycal.module_count(), 0.f);
     std::mt19937 smear_rng(kHyCalSmearSeed);
@@ -632,7 +593,7 @@ int main(int argc, char *argv[])
         if (max_events >= 0 && processed >= max_events)
             break;
 
-        clearReconEvent(*ev);
+        ev->clear();
         ev->event_num = event_id ? **event_id : static_cast<int>(processed);
         std::fill(module_energy.begin(), module_energy.end(), 0.f);
 
@@ -727,58 +688,7 @@ int main(int argc, char *argv[])
                 gem_z[i] - kTargetCenterMm);
         }
 
-        std::vector<analysis::HCHit> hc_match_hits;
-        std::vector<analysis::GEMHit> gem_match_hits[4];
-        hc_match_hits.reserve(ev->n_clusters);
-        for (int i = 0; i < ev->n_clusters; ++i) {
-            hc_match_hits.push_back({
-                ev->cl_x[i], ev->cl_y[i], ev->cl_z[i],
-                ev->cl_energy[i], ev->cl_center[i], ev->cl_flag[i]});
-        }
-        for (int i = 0; i < ev->n_gem_hits; ++i) {
-            const int d = ev->det_id[i];
-            if (d < 0 || d >= 4)
-                continue;
-            gem_match_hits[d].push_back({
-                ev->gem_x[i], ev->gem_y[i], ev->gem_z[i], ev->det_id[i]});
-        }
-
-        const auto matched_hits = matching.Match(
-            hc_match_hits,
-            gem_match_hits[0], gem_match_hits[1],
-            gem_match_hits[2], gem_match_hits[3]);
-        const auto matched_hits_chamber = matching.MatchPerChamber(
-            hc_match_hits,
-            gem_match_hits[0], gem_match_hits[1],
-            gem_match_hits[2], gem_match_hits[3]);
-
-        for (const auto &m : matched_hits_chamber) {
-            const int cl_idx = m.hycal_idx;
-            if (cl_idx < 0 || cl_idx >= ev->n_clusters)
-                continue;
-            for (int d = 0; d < 4; ++d) {
-                for (const auto &gh : m.gem_hits[d]) {
-                    ev->add_match(cl_idx, d, gh.x, gh.y, gh.z);
-                }
-            }
-            ev->matchFlag[cl_idx] = m.mflag;
-        }
-
-        ev->matchNum = std::min(static_cast<int>(matched_hits.size()),
-                                prad2::kMaxClusters);
-        for (int i = 0; i < ev->matchNum; ++i) {
-            const auto &m = matched_hits[i];
-            ev->mHit_E[i] = m.hycal_hit.energy;
-            ev->mHit_x[i] = m.hycal_hit.x;
-            ev->mHit_y[i] = m.hycal_hit.y;
-            ev->mHit_z[i] = m.hycal_hit.z;
-            for (int d = 0; d < 2; ++d) {
-                ev->mHit_gx[i][d] = m.gem[d].x;
-                ev->mHit_gy[i][d] = m.gem[d].y;
-                ev->mHit_gz[i][d] = m.gem[d].z;
-                ev->mHit_gid[i][d] = m.gem[d].det_id;
-            }
-        }
+        analysis::MatchReconEvent(*ev, matching);
 
         tree_out.Fill();
         ++processed;

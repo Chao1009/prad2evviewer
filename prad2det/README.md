@@ -12,7 +12,7 @@ front-end data from `prad2dec` and produces physics-level outputs
 | `HyCalCluster` | Island clustering with log-weighted center-of-gravity, profile-based shower split, and shower-depth correction on top of a `HyCalSystem`. See [`docs/technical_notes/hycal_clustering/hycal_clustering.md`](../docs/technical_notes/hycal_clustering/hycal_clustering.md). |
 | `GemSystem` | GEM detector hierarchy and per-event chain: pedestal subtraction, sorting common-mode, zero-suppression, and APV → strip mapping. Full-readout vs online-zero-suppressed mode is auto-detected per APV. |
 | `GemCluster` | Per-plane strip clustering (group + split + charge-weighted position) followed by X/Y matching (Cartesian-with-cuts or ADC-sorted). See [`docs/technical_notes/gem_clustering/gem_clustering.md`](../docs/technical_notes/gem_clustering/gem_clustering.md). |
-| `GemPedestal` | Pedestal / common-mode JSON I/O for the GEM pipeline. |
+| `GemPedestal` | Per-strip GEM pedestal accumulator; writes the APV-block text file `GemSystem::LoadPedestals` reads. |
 | `DetectorTransform` | 3×3 rotation + translation for the detector → lab-frame transform; the rotation matrix is cached and invalidated through the `set(...)` mutators. |
 | `RunInfoConfig` | Header-only loader for the run-period geometry / calibration JSON (`runinfo`). Picks the largest `run_number` ≤ the requested run. |
 | `PipelineBuilder` | Fluent helper that wires up an entire reconstruction pipeline (HyCal + GEM + transforms + matching parameters) from the standard config files. |
@@ -54,7 +54,7 @@ livetime, histograms); those stay in the caller.
 // GEM — per-event pipeline
 gem::GemSystem gsys;
 gsys.Init("database/gem_map.json");
-gsys.LoadPedestals("gem_ped.json");     // required only for full-readout data
+gsys.LoadPedestals("gem_ped.txt");      // required only for full-readout data
 gem::GemCluster gcl;
 
 for each event {

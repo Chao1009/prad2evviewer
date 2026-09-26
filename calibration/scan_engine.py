@@ -10,18 +10,14 @@ from __future__ import annotations
 import math
 import threading
 import time
-from typing import List, Optional, Set
+from typing import Set
 
-from scan_utils import Module, module_to_ptrans, ptrans_in_limits, filter_scan_modules
+from scan_utils import module_to_ptrans
 from scan_epics import (
-    SPMG, epics_move_to, epics_stop, epics_pause, epics_resume,
-    epics_is_moving, epics_read_rbv,
+    epics_move_to, epics_stop, epics_pause, epics_resume,
+    epics_read_rbv, epics_wait_move_done,
 )
 
-
-# ============================================================================
-#  CONSTANTS
-# ============================================================================
 
 DEFAULT_DWELL = 120.0         # seconds
 DEFAULT_POS_THRESHOLD = 0.5   # mm
@@ -31,10 +27,6 @@ DEFAULT_VELO_X = 50.0         # mm/s
 DEFAULT_VELO_Y = 5.0          # mm/s
 MAX_LG_LAYERS = 2
 
-
-# ============================================================================
-#  PATH BUILDING
-# ============================================================================
 
 def build_scan_path(scan_modules):
     from collections import defaultdict
@@ -96,23 +88,14 @@ def estimate_scan_time(path, start, count, dwell, vx=DEFAULT_VELO_X, vy=DEFAULT_
     return total_move + (end - start) * dwell
 
 
-# ============================================================================
-#  SCAN STATE
-# ============================================================================
-
 class ScanState:
     IDLE = "IDLE"; MOVING = "MOVING"; DWELLING = "DWELLING"
     PAUSED = "PAUSED"; ERROR = "ERROR"; COMPLETED = "COMPLETED"
 
 
-# ============================================================================
-#  SCAN ENGINE
-# ============================================================================
-
 class ScanEngine:
     def __init__(self, epics, modules, log_fn):
         self.ep = epics
-        self.all_modules = modules
         # ``modules`` is already the ordered path (caller-prepared)
         self.path = list(modules)
         self.log = log_fn
@@ -190,7 +173,9 @@ class ScanEngine:
                 self.log(f"[{i+1}/{len(self.path)}] Moving to {mod.name}  ptrans({px:.3f}, {py:.3f})")
                 if not epics_move_to(self.ep, px, py):
                     self.log(f"SKIPPED {mod.name}: outside limits", level="warn"); continue
-                if not self._wait_move_done(px, py):
+                if not epics_wait_move_done(self.ep, px, py, pos_threshold=self.pos_threshold,
+                                            timeout=MOVE_TIMEOUT, aborted=self._interrupted,
+                                            hold_if_paused=self._hold_paused, log=self.log):
                     if self._stop.is_set(): break
                     if self._skip.is_set():
                         self._skip.clear()
@@ -216,33 +201,14 @@ class ScanEngine:
             else:
                 self.state = ScanState.IDLE
 
-    def _wait_move_done(self, target_x: float, target_y: float):
-        """Wait for the motor to stop and be at the target position.
+    def _interrupted(self):
+        return self._stop.is_set() or self._skip.is_set()
 
-        "On position" requires BOTH MOVN=0 AND RBV within pos_threshold
-        of the target.  Checking only MOVN is unsafe because MOVN is
-        still 0 in the brief window after issuing a move command before
-        the IOC has processed it — a check in that window would declare
-        the move "done" before it started.
-
-        Returns False on stop, skip, or timeout; the caller decides
-        which happened by inspecting ``self._stop`` / ``self._skip``.
-        """
-        t0 = time.time()
-        while not self._stop.is_set() and not self._skip.is_set():
-            while self._paused and not self._stop.is_set():
-                self.state = ScanState.PAUSED; time.sleep(0.1)
-            if self._stop.is_set() or self._skip.is_set(): return False
+    def _hold_paused(self):
+        while self._paused and not self._stop.is_set():
+            self.state = ScanState.PAUSED; time.sleep(0.1)
+        if not self._interrupted():
             self.state = ScanState.MOVING
-            if not epics_is_moving(self.ep):
-                rbv_x, rbv_y = epics_read_rbv(self.ep)
-                err = math.sqrt((rbv_x - target_x)**2 + (rbv_y - target_y)**2)
-                if err <= self.pos_threshold:
-                    return True
-            if time.time() - t0 > MOVE_TIMEOUT:
-                self.log(f"MOVE TIMEOUT after {MOVE_TIMEOUT:.0f}s", level="error"); return False
-            time.sleep(0.1)
-        return False
 
     def _wait_dwell(self):
         end = time.time() + self.dwell_time

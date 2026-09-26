@@ -8,21 +8,19 @@
 //=============================================================================
 
 #include "HyCalSystem.h"
+#include "DaqKey.h"
+#include "JsonUtil.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <iostream>
 #include <algorithm>
-#include <cstring>
-#include <iomanip>
 
 using json = nlohmann::json;
 
 namespace fdec
 {
 
-//=============================================================================
-// Static helpers
-//=============================================================================
+// --- static helpers ---------------------------------------------------------
 
 ModuleType HyCalSystem::parse_type(const std::string &t)
 {
@@ -80,61 +78,58 @@ int HyCalSystem::line_intersect(double x1, double y1, double x2, double y2,
     return (out1 ? 1 : 0) + (out2 ? 2 : 0);
 }
 
-//=============================================================================
-// Init — load modules + daq from one merged JSON, compute sectors, build neighbors
-//=============================================================================
-
 bool HyCalSystem::Init(const std::string &map_path)
 {
-    std::ifstream f(map_path);
-    if (!f.is_open()) {
-        std::cerr << "HyCalSystem: cannot open " << map_path << std::endl;
-        return false;
-    }
-
     json jdata;
-    try { jdata = json::parse(f); }
-    catch (const json::parse_error &e) {
-        std::cerr << "HyCalSystem: JSON parse error in " << map_path
-                  << ": " << e.what() << std::endl;
+    std::string err;
+    if (!prad2::read_json_file(map_path, jdata, &err)) {
+        std::cerr << "HyCalSystem: " << err << std::endl;
         return false;
     }
-
     if (!jdata.is_array()) {
         std::cerr << "HyCalSystem: " << map_path
                   << " is not a JSON array" << std::endl;
         return false;
     }
 
-    modules_.clear();
-    modules_.reserve(jdata.size());
+    // Parse into a local list so an entry missing n / t / geo leaves the
+    // system unchanged and returns false.
+    std::vector<Module> mods;
+    mods.reserve(jdata.size());
+    try {
+        for (auto &jm : jdata) {
+            Module m;
+            m.name   = jm.at("n").get<std::string>();
+            m.type   = parse_type(jm.at("t").get<std::string>());
+            const auto &geo = jm.at("geo");
+            m.size_x = geo.at("sx").get<double>();
+            m.size_y = geo.at("sy").get<double>();
+            m.x      = geo.at("x").get<double>();
+            m.y      = geo.at("y").get<double>();
+            m.id     = name_to_id(m.name);
+            m.index  = static_cast<int>(mods.size());
+
+            // DAQ block is optional — entries without it (e.g. boosters in
+            // prad2hvmon, V1-V4 in PRad-1) leave m.daq at the default {-1,-1,-1}.
+            if (jm.contains("daq")) {
+                const auto &d = jm["daq"];
+                m.daq = {d.at("crate").get<int>(),
+                         d.at("slot").get<int>(),
+                         d.at("channel").get<int>()};
+            }
+
+            mods.push_back(std::move(m));
+        }
+    } catch (const json::exception &e) {
+        std::cerr << "HyCalSystem: JSON error in " << map_path
+                  << ": " << e.what() << std::endl;
+        return false;
+    }
+
+    modules_ = std::move(mods);
     name_map_.clear();
     id_map_.clear();
     daq_map_.clear();
-
-    for (auto &jm : jdata) {
-        Module m;
-        m.name   = jm.at("n").get<std::string>();
-        m.type   = parse_type(jm.at("t").get<std::string>());
-        const auto &geo = jm.at("geo");
-        m.size_x = geo.at("sx").get<double>();
-        m.size_y = geo.at("sy").get<double>();
-        m.x      = geo.at("x").get<double>();
-        m.y      = geo.at("y").get<double>();
-        m.id     = name_to_id(m.name);
-        m.index  = static_cast<int>(modules_.size());
-
-        // DAQ block is optional — entries without it (e.g. boosters in
-        // prad2hvmon, V1-V4 in PRad-1) leave m.daq at the default {-1,-1,-1}.
-        if (jm.contains("daq")) {
-            const auto &d = jm["daq"];
-            m.daq = {d.at("crate").get<int>(),
-                     d.at("slot").get<int>(),
-                     d.at("channel").get<int>()};
-        }
-
-        modules_.push_back(std::move(m));
-    }
 
     n_modules_ = static_cast<int>(modules_.size());
 
@@ -145,10 +140,9 @@ bool HyCalSystem::Init(const std::string &map_path)
             id_map_[modules_[i].id] = i;
         const auto &d = modules_[i].daq;
         if (d.crate >= 0)
-            daq_map_[pack_daq(d.crate, d.slot, d.channel)] = i;
+            daq_map_[prad2::pack_daq_key(d.crate, d.slot, d.channel)] = i;
     }
 
-    // --- compute sectors, layout, grids, and neighbors ----------------------
     compute_sectors();
 
     for (auto &m : modules_)
@@ -160,10 +154,7 @@ bool HyCalSystem::Init(const std::string &map_path)
     return true;
 }
 
-//=============================================================================
-// Sector ID from position relative to center boundary
-//=============================================================================
-
+// Sector ID from position relative to the center (PbWO4) boundary.
 static int sector_from_center_bounds(double x, double y,
                                      double cx1, double cy1, double cx2, double cy2)
 {
@@ -181,10 +172,7 @@ int HyCalSystem::get_sector_id(double x, double y) const
     return sector_from_center_bounds(x, y, x1, y1, x2, y2);
 }
 
-//=============================================================================
-// Sector computation — find bounding boxes for each sector
-//=============================================================================
-
+// Assign each module a sector and find the bounding box of each sector.
 void HyCalSystem::compute_sectors()
 {
     constexpr int NS = static_cast<int>(Sector::Max);
@@ -244,10 +232,7 @@ void HyCalSystem::compute_sectors()
     }
 }
 
-//=============================================================================
-// Layout assignment — set flags, row, column (PrimEx-specific)
-//=============================================================================
-
+// Set layout flags, row and column (PrimEx-specific).
 void HyCalSystem::assign_layout(Module &m) const
 {
     if (!m.is_hycal()) return;
@@ -311,10 +296,7 @@ void HyCalSystem::assign_layout(Module &m) const
     }
 }
 
-//=============================================================================
-// Quantized distance — the core algorithm from PRadHyCalDetector
-//=============================================================================
-
+// Quantized distance — the core algorithm from PRadHyCalDetector.
 void HyCalSystem::qdist(double x1, double y1, int s1,
                         double x2, double y2, int s2,
                         double &dx, double &dy) const
@@ -377,10 +359,7 @@ void HyCalSystem::qdist(double x1, double y1, int s1,
     dy = (y2 - y1) / sec1.msize_y;
 }
 
-//=============================================================================
-// Build sector grids — map (row, col) → module index per sector
-//=============================================================================
-
+// Map (row, col) → module index per sector.
 void HyCalSystem::build_sector_grids()
 {
     // Grid dimensions per sector (must match assign_layout row/col ranges)
@@ -404,10 +383,7 @@ void HyCalSystem::build_sector_grids()
     }
 }
 
-//=============================================================================
-// Build cross-sector neighbors — only edge modules need qdist
-//=============================================================================
-
+// Cross-sector neighbors — only edge modules need qdist.
 void HyCalSystem::build_neighbors()
 {
     for (auto &m : modules_) m.neighbor_count = 0;
@@ -441,7 +417,7 @@ void HyCalSystem::build_neighbors()
             double dx, dy;
             qdist(m1.x, m1.y, m1.sector, m2.x, m2.y, m2.sector, dx, dy);
 
-            if (std::abs(dx) < 1.01 && std::abs(dy) < 1.01) {
+            if (qdist_in_3x3(dx, dy)) {
                 float fdx = static_cast<float>(dx);
                 float fdy = static_cast<float>(dy);
                 float dist = std::sqrt(fdx * fdx + fdy * fdy);
@@ -456,9 +432,7 @@ void HyCalSystem::build_neighbors()
     }
 }
 
-//=============================================================================
-// Module lookup
-//=============================================================================
+// --- module lookup and calibration ------------------------------------------
 
 const Module *HyCalSystem::module_by_name(const std::string &name) const
 {
@@ -468,13 +442,13 @@ const Module *HyCalSystem::module_by_name(const std::string &name) const
 
 const Module *HyCalSystem::module_by_id(int primex_id) const
 {
-    auto it = id_map_.find(primex_id);
-    return (it != id_map_.end()) ? &modules_[it->second] : nullptr;
+    const int i = id_to_index(primex_id);
+    return i >= 0 ? &modules_[i] : nullptr;
 }
 
 const Module *HyCalSystem::module_by_daq(int crate, int slot, int ch) const
 {
-    auto it = daq_map_.find(pack_daq(crate, slot, ch));
+    auto it = daq_map_.find(prad2::pack_daq_key(crate, slot, ch));
     return (it != daq_map_.end()) ? &modules_[it->second] : nullptr;
 }
 
@@ -484,53 +458,24 @@ double HyCalSystem::GetCalibConstant(int primex_id) const
     return m ? m->cal_factor : 0.;
 }
 
-double HyCalSystem::GetCalibBaseEnergy(int primex_id) const
-{
-    const Module *m = module_by_id(primex_id);
-    return m ? m->cal_base_energy : 0.;
-}
-
-double HyCalSystem::GetCalibNonLinearity1(int primex_id) const
-{
-    const Module *m = module_by_id(primex_id);
-    return m ? m->cal_non_linear_1 : 0.;
-}
-
-double HyCalSystem::GetCalibNonLinearity2(int primex_id) const
-{
-    const Module *m = module_by_id(primex_id);
-    return m ? m->cal_non_linear_2 : 0.;
-}
-
 void HyCalSystem::SetCalibConstant(int primex_id, double factor)
 {
-    auto it = id_map_.find(primex_id);
-    if (it != id_map_.end())
-        modules_[it->second].cal_factor = factor;
+    const int i = id_to_index(primex_id);
+    if (i >= 0) modules_[i].cal_factor = factor;
 }
 
 void HyCalSystem::SetCalibBaseEnergy(int primex_id, double energy)
 {
-    auto it = id_map_.find(primex_id);
-    if (it != id_map_.end())
-        modules_[it->second].cal_base_energy = energy;
-}
-
-void HyCalSystem::SetCalibNonLinearity(int primex_id, double nl)
-{
-    auto it = id_map_.find(primex_id);
-    if (it != id_map_.end()) {
-        modules_[it->second].cal_non_linear_1 = nl;
-        modules_[it->second].cal_non_linear_2 = 0.;
-    }
+    const int i = id_to_index(primex_id);
+    if (i >= 0) modules_[i].cal_base_energy = energy;
 }
 
 void HyCalSystem::SetCalibNonLinearity(int primex_id, double nl1, double nl2)
 {
-    auto it = id_map_.find(primex_id);
-    if (it != id_map_.end()) {
-        modules_[it->second].cal_non_linear_1 = nl1;
-        modules_[it->second].cal_non_linear_2 = nl2;
+    const int i = id_to_index(primex_id);
+    if (i >= 0) {
+        modules_[i].cal_non_linear_1 = nl1;
+        modules_[i].cal_non_linear_2 = nl2;
     }
 }
 
@@ -558,16 +503,10 @@ void HyCalSystem::PrintCalibConstants(const std::string &output_file) const
 
 int HyCalSystem::LoadCalibration(const std::string &calib_path)
 {
-    std::ifstream f(calib_path);
-    if (!f.is_open()) {
-        std::cerr << "HyCalSystem::LoadCalibration: cannot open " << calib_path << "\n";
-        return -1;
-    }
-
     json j;
-    try { j = json::parse(f, nullptr, true, true); }
-    catch (const json::parse_error &e) {
-        std::cerr << "HyCalSystem::LoadCalibration: parse error: " << e.what() << "\n";
+    std::string err;
+    if (!prad2::read_json_file(calib_path, j, &err)) {
+        std::cerr << "HyCalSystem::LoadCalibration: " << err << "\n";
         return -1;
     }
 

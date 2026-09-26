@@ -61,9 +61,7 @@ DEFAULT_HYCAL_MAP = (Path(__file__).resolve().parents[2]
                      / "database" / "hycal_map.json")
 
 
-# ───────────────────────────────────────────────────────────────────────
-# helpers
-# ───────────────────────────────────────────────────────────────────────
+# ── helpers ────────────────────────────────────────────────────────────
 
 def _load_module_types(path: Path) -> dict:
     """name → type ('PbWO4' | 'PbGlass' | 'Veto' | 'LMS')."""
@@ -128,9 +126,7 @@ def _resolve_channels(hv_names: list,
     raise SystemExit(f"[hv_event_filter] unknown --scope {scope!r}")
 
 
-# ───────────────────────────────────────────────────────────────────────
-# main
-# ───────────────────────────────────────────────────────────────────────
+# ── main ───────────────────────────────────────────────────────────────
 
 def main():
     ap = argparse.ArgumentParser(
@@ -190,12 +186,10 @@ def main():
         ch_tree = f["hv_channels"]
 
         ev_at_arrival = hv_tree["event_number_at_arrival"].array(library="np").astype(np.int64)
-        t_unix_s      = hv_tree["t_unix_s"].array(library="np")
         dv_2d         = hv_tree["dv"].array(library="np")
         names         = ch_tree["name"].array(library="np").tolist()
         names         = [str(n) for n in names]
 
-        # Pick the events-side tree
         evt_tree_name = args.event_tree
         if evt_tree_name is None:
             for cand in ("recon", "events"):

@@ -15,8 +15,8 @@ Per-pulse fits give a population of (τ_r, τ_f, A, t0, χ²/dof) values per
 channel.  We summarise them with median + MAD (robust against the noisy
 tail of the population) and emit one entry per channel into a JSON file.
 
-The output is intended as the input to the future pile-up deconvolution
-step — see docs/technical_notes/waveform_analysis/wave_analysis.md.
+The output feeds the pile-up deconvolution (prad2dec PulseTemplateStore);
+see docs/technical_notes/waveform_analysis/wave_analysis.md.
 
 Plotting
 --------
@@ -27,7 +27,8 @@ With `--plot-dir <dir>` set, we:
     pulses but failed the gate),
   * write one diagnostic PNG per picked channel (raw pulses + median-fit
     overlay) under <plot-dir>/{good,bad,explicit}/<name>.png,
-  * write a summary PNG with the global τ_r / τ_f / χ² distributions.
+  * write summary PNGs with the global τ_r / τ_f / χ² distributions
+    (per-channel medians and pooled per-pulse fits).
 
 Use `--plot-channels W001,W002,...` to force-plot specific channels in
 addition to the auto-picked ones.
@@ -36,29 +37,33 @@ Usage
 -----
     python fit_pulse_template.py <evio_path> [<evio_path> ...] -o out.json
                                  [--max-events N]
+                                 [--max-pulses-per-channel N]
                                  [--min-pulses N]
                                  [--chi2-max X]
-                                 [--height-min ADC]
+                                 [--height-min ADC] [--height-rms-mult X]
+                                 [--model two_tau|two_tau_p]
+                                 [--model-err-floor F]
+                                 [--pre-samples N] [--post-samples N]
                                  [--channels W001,W002,…]
                                  [--plot-dir plots/]
                                  [--n-plot-good N] [--n-plot-bad N]
                                  [--plot-channels W001,W002,…]
                                  [--no-summary-plot]
+                                 [--progress-every N]
+                                 [--daq-config FILE] [--hc-map-file FILE]
 
 Each `<evio_path>` accepts the same shapes as the other analysis scripts —
 glob, directory, or single split file.  Multiple paths are concatenated.
-Run `--help` for the full list.
+Run `--help` for option details.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
-import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 
@@ -76,39 +81,18 @@ TYPE_COLORS = {"PbGlass": "C0", "PbWO4": "C1",
                "LMS":     "C2", "Veto":  "C3", "Unknown": "0.5"}
 
 
-# ---------------------------------------------------------------------------
-# Pulse model
-# ---------------------------------------------------------------------------
-#
+# ---- Pulse model ----
 # Fitting itself runs in C++ via dec.WaveAnalyzer.fit_pulse_shape() —
 # three-parameter Levenberg-Marquardt on the unit-amplitude two-tau model
 # (T(t; t0, τ_r, τ_f) / T_max), with the per-pulse peak-height
 # normalisation that decouples shape from amplitude.  See
 # prad2dec/src/WaveAnalyzer.cpp::FitPulseShape for the implementation.
-#
-# We keep a small Python `two_tau_unit` here only for the diagnostic
-# plot overlay (drawn once per channel from the median fit params) — the
-# fitting hot path no longer touches it.
-
-def two_tau_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float) -> np.ndarray:
-    """Two-tau pulse normalized to unit peak height — for plot overlays.
-    The C++ fitter has its own copy."""
-    out = np.zeros_like(t, dtype=np.float64)
-    mask = t > t0
-    if not mask.any():
-        return out
-    dt = t[mask] - t0
-    raw = (1.0 - np.exp(-dt / tau_r)) * np.exp(-dt / tau_f)
-    u = tau_r / (tau_r + tau_f)
-    t_max = (1.0 - u) * (u ** (tau_r / tau_f))
-    out[mask] = raw / t_max
-    return out
-
 
 def two_tau_p_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float,
                    p: float) -> np.ndarray:
-    """[1 - exp(-(t-t0)/τ_r)]^p · exp(-(t-t0)/τ_f), peak normalised to 1.
-    For plot overlays only; C++ FitPulseShapeTwoTauP is the real fitter."""
+    """[1 - exp(-(t-t0)/τ_r)]^p · exp(-(t-t0)/τ_f), peak normalised to 1;
+    p = 1 is the plain two-tau model.  For plot overlays only; the C++
+    FitPulseShape / FitPulseShapeTwoTauP are the real fitters."""
     out = np.zeros_like(t, dtype=np.float64)
     mask = t > t0
     if not mask.any():
@@ -124,9 +108,7 @@ def two_tau_p_unit(t: np.ndarray, t0: float, tau_r: float, tau_f: float,
     return out
 
 
-# ---------------------------------------------------------------------------
-# Per-channel accumulator
-# ---------------------------------------------------------------------------
+# ---- Per-channel accumulator ----
 
 @dataclass
 class ChannelStats:
@@ -231,20 +213,7 @@ def finalize_channel(s: ChannelStats, min_pulses: int, chi2_max: float
     return rec
 
 
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
-
-def _import_pyplot():
-    """Headless matplotlib import.  None if matplotlib is unavailable."""
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        return plt
-    except ImportError:
-        return None
-
+# ---- Plotting ----
 
 def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
                  out_png: Path, label: str = "") -> None:
@@ -265,13 +234,9 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
         med_tau_f = float(np.median(st.tau_f))
         med_pk    = float(np.median(st.peak_amp))
         t_dense   = np.linspace(0, (pre + post) * clk_ns, 400)
-        if st.p_list:
-            med_p = float(np.median(st.p_list))
-            unit_curve = two_tau_p_unit(t_dense, med_t0, med_tau_r,
-                                        med_tau_f, med_p)
-        else:
-            med_p = None
-            unit_curve = two_tau_unit(t_dense, med_t0, med_tau_r, med_tau_f)
+        med_p     = float(np.median(st.p_list)) if st.p_list else None
+        unit_curve = two_tau_p_unit(t_dense, med_t0, med_tau_r, med_tau_f,
+                                    1.0 if med_p is None else med_p)
 
         # Top — raw scale.
         for s in st.sample_pulses:
@@ -320,6 +285,33 @@ def plot_channel(plt, st: ChannelStats, clk_ns: float, pre: int, post: int,
     plt.close(fig)
 
 
+def _split_hist(ax, arrays: Dict[str, np.ndarray], bins, xlabel: str,
+                title: str, ylabel: str, count_sym: str,
+                log: bool = False) -> None:
+    """One histogram per module type, overlaid; legend shows per-type counts."""
+    if log:
+        ax.set_xscale("log")
+    for t, arr in arrays.items():
+        if arr.size == 0:
+            continue
+        ax.hist(arr, bins=bins,
+                color=TYPE_COLORS.get(t),
+                alpha=0.65, label=f"{t} ({count_sym}={arr.size})")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+
+
+def _wide_bottom_axis(fig, axes):
+    """Merge the bottom row of a 3×3 subplot grid into one full-width axis."""
+    gs = axes[2, 0].get_gridspec()
+    for a in axes[2, :]:
+        a.remove()
+    return fig.add_subplot(gs[2, :])
+
+
 def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
                  out_png: Path) -> None:
     """Global histograms of every fit parameter, split by module type
@@ -346,39 +338,25 @@ def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
     p_arr    = (np.array([s["p"]["median"] for s in have])
                 if has_p else None)
 
-    def _split_hist(ax, x, bins, xlabel, title, log=False):
-        """One histogram per type, overlaid; legend shows per-type counts."""
-        if log:
-            ax.set_xscale("log")
-        for t in types_present:
-            mask = type_masks[t]
-            n = int(mask.sum())
-            if n == 0:
-                continue
-            ax.hist(x[mask], bins=bins,
-                    color=TYPE_COLORS.get(t),
-                    alpha=0.65, label=f"{t} (N={n})")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("channels")
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
+    def _hist(ax, x, bins, xlabel, title, log=False):
+        _split_hist(ax, {t: x[type_masks[t]] for t in types_present},
+                    bins, xlabel, title, "channels", "N", log)
 
     fig, axes = plt.subplots(3, 3, figsize=(15, 12))
 
-    _split_hist(axes[0, 0], t0,    60, "t0 (ns) — channel median",      "pulse onset t0")
-    _split_hist(axes[0, 1], tau_r, 60, "τ_r (ns) — channel median",     "rise time τ_r")
-    _split_hist(axes[0, 2], tau_f, 60, "τ_f (ns) — channel median",     "fall time τ_f")
+    _hist(axes[0, 0], t0,    60, "t0 (ns) — channel median",      "pulse onset t0")
+    _hist(axes[0, 1], tau_r, 60, "τ_r (ns) — channel median",     "rise time τ_r")
+    _hist(axes[0, 2], tau_f, 60, "τ_f (ns) — channel median",     "fall time τ_f")
 
     if has_p:
-        _split_hist(axes[1, 0], p_arr, 60, "p — channel median",        "rise-edge exponent p")
+        _hist(axes[1, 0], p_arr, 60, "p — channel median",        "rise-edge exponent p")
     else:
         axes[1, 0].set_visible(False)
 
     pk_bins = np.logspace(np.log10(max(peak_amp.min(), 1.0)),
                           np.log10(max(peak_amp.max(), 10.0)), 60)
-    _split_hist(axes[1, 1], peak_amp, pk_bins, "peak amplitude (ADC) — channel median",
-                "peak amplitude", log=True)
+    _hist(axes[1, 1], peak_amp, pk_bins, "peak amplitude (ADC) — channel median",
+          "peak amplitude", log=True)
 
     chi2_bins = np.logspace(np.log10(max(chi2.min(), 1e-2)),
                             np.log10(max(chi2.max(), 10.0)), 60)
@@ -395,10 +373,7 @@ def plot_summary(plt, summaries: List[Dict], min_pulses: int, chi2_max: float,
     ax.grid(True, alpha=0.3)
 
     # Bottom row: τ_r vs τ_f scatter, full width.
-    gs = axes[2, 0].get_gridspec()
-    for a in axes[2, :]:
-        a.remove()
-    ax_sc = fig.add_subplot(gs[2, :])
+    ax_sc = _wide_bottom_axis(fig, axes)
     sc = ax_sc.scatter(tau_r, tau_f, c=np.log10(np.clip(chi2, 1e-2, None)),
                        s=10, cmap="viridis")
     fig.colorbar(sc, ax=ax_sc, label="log₁₀(χ²/dof)")
@@ -444,21 +419,10 @@ def plot_summary_per_pulse(plt, stats: Dict[str, "ChannelStats"],
                            key=lambda t: -len(pool[t]["tau_r"]))
     has_p = any(len(pool[t]["p"]) > 0 for t in types_present)
 
-    def _split_hist(ax, key, bins, xlabel, title, log=False):
-        if log:
-            ax.set_xscale("log")
-        for t in types_present:
-            arr = np.asarray(pool[t][key], dtype=np.float64)
-            if arr.size == 0:
-                continue
-            ax.hist(arr, bins=bins,
-                    color=TYPE_COLORS.get(t),
-                    alpha=0.65, label=f"{t} (n={arr.size})")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel("pulses")
-        ax.set_title(title)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
+    def _hist(ax, key, bins, xlabel, title, log=False):
+        _split_hist(ax, {t: np.asarray(pool[t][key], dtype=np.float64)
+                         for t in types_present},
+                    bins, xlabel, title, "pulses", "n", log)
 
     # Auto-range bins from the pooled data so type-tails are visible.
     def _range_bins(key, n=80, log=False):
@@ -473,31 +437,28 @@ def plot_summary_per_pulse(plt, stats: Dict[str, "ChannelStats"],
 
     fig, axes = plt.subplots(3, 3, figsize=(15, 12))
 
-    _split_hist(axes[0, 0], "t0",    _range_bins("t0"),
-                "t0 (ns) — per pulse",       "pulse onset t0")
-    _split_hist(axes[0, 1], "tau_r", _range_bins("tau_r"),
-                "τ_r (ns) — per pulse",      "rise time τ_r")
-    _split_hist(axes[0, 2], "tau_f", _range_bins("tau_f"),
-                "τ_f (ns) — per pulse",      "fall time τ_f")
+    _hist(axes[0, 0], "t0",    _range_bins("t0"),
+          "t0 (ns) — per pulse",       "pulse onset t0")
+    _hist(axes[0, 1], "tau_r", _range_bins("tau_r"),
+          "τ_r (ns) — per pulse",      "rise time τ_r")
+    _hist(axes[0, 2], "tau_f", _range_bins("tau_f"),
+          "τ_f (ns) — per pulse",      "fall time τ_f")
 
     if has_p:
-        _split_hist(axes[1, 0], "p", _range_bins("p"),
-                    "p — per pulse",         "rise-edge exponent p")
+        _hist(axes[1, 0], "p", _range_bins("p"),
+              "p — per pulse",         "rise-edge exponent p")
     else:
         axes[1, 0].set_visible(False)
 
-    _split_hist(axes[1, 1], "peak_amp", _range_bins("peak_amp", log=True),
-                "peak amplitude (ADC) — per pulse",
-                "peak amplitude", log=True)
+    _hist(axes[1, 1], "peak_amp", _range_bins("peak_amp", log=True),
+          "peak amplitude (ADC) — per pulse",
+          "peak amplitude", log=True)
 
-    _split_hist(axes[1, 2], "chi2", _range_bins("chi2", log=True),
-                "χ²/dof — per pulse", "fit quality", log=True)
+    _hist(axes[1, 2], "chi2", _range_bins("chi2", log=True),
+          "χ²/dof — per pulse", "fit quality", log=True)
 
     # Bottom row: per-pulse τ_r vs τ_f scatter, full width, by type.
-    gs = axes[2, 0].get_gridspec()
-    for a in axes[2, :]:
-        a.remove()
-    ax_sc = fig.add_subplot(gs[2, :])
+    ax_sc = _wide_bottom_axis(fig, axes)
     for t in types_present:
         tr = np.asarray(pool[t]["tau_r"])
         tf = np.asarray(pool[t]["tau_f"])
@@ -534,9 +495,7 @@ def select_plot_targets(stats: Dict[str, ChannelStats], min_pulses: int,
     return [n for _, n in good[:n_good]], [n for _, n in bad[:n_bad]]
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ---- Main ----
 
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -634,28 +593,29 @@ def main() -> None:
     # resulting evio_files with the concatenated multi-input list below.
     p = C.setup_pipeline(
         evio_path=args.evio_paths[0],
-        max_events=args.max_events,
         daq_config=args.daq_config,
         hc_map_file=args.hc_map_file,
     )
     p.evio_files = all_files
 
-    clk_mhz = float(p.cfg.wave_cfg.clk_mhz)
-    clk_ns  = (1000.0 / clk_mhz) if clk_mhz > 0 else 4.0
+    clk_ns = float(p.cfg.wave_cfg.clk_ns)
     pre, post = args.pre_samples, args.post_samples
+    with_p = args.model == "two_tau_p"
+    fit_pulse = (dec.WaveAnalyzer.fit_pulse_shape_two_tau_p if with_p
+                 else dec.WaveAnalyzer.fit_pulse_shape)
 
     stats: Dict[str, ChannelStats] = {}
     # cache: (roc_tag, slot, ch) -> (name, chan_id, module_type)
     name_cache: Dict[Tuple[int, int, int], Tuple[str, str, str]] = {}
 
-    def _key_for(roc_tag: int, crate: Optional[int], s: int, c: int
-                 ) -> Tuple[str, str, str]:
+    def _key_for(roc_tag: int, s: int, c: int) -> Tuple[str, str, str]:
         cached = name_cache.get((roc_tag, s, c))
         if cached is not None:
             return cached
         chan_id = f"{roc_tag}_{s}_{c}"
         name = chan_id
         mtype = "Unknown"
+        crate = p.crate_map.get(roc_tag)
         if crate is not None:
             mod = p.hycal.module_by_daq(crate, s, c)
             if mod is not None:
@@ -666,168 +626,102 @@ def main() -> None:
         name_cache[(roc_tag, s, c)] = (name, chan_id, mtype)
         return name, chan_id, mtype
 
-    ch = dec.EvChannel()
-    ch.set_config(p.cfg)
+    n_pulses_attempted = n_pulses_used = 0
+    loop_stats = C.LoopStats()
 
-    n_phys = n_pulses_attempted = n_pulses_used = 0
-    n_files_open = 0
-    t0_wall = time.monotonic()
-    progress_every = max(1, int(args.progress_every))
-    next_progress = progress_every
-
-    def _emit_progress(file_idx: int, file_total: int, fname: str) -> None:
-        elapsed = time.monotonic() - t0_wall
-        rate = n_phys / elapsed if elapsed > 0 else 0.0
-        print(f"  [progress] file {file_idx}/{file_total} {Path(fname).name}  "
-              f"phys={n_phys}  fit_attempted={n_pulses_attempted}  "
+    def _emit_progress(st: C.LoopStats) -> None:
+        elapsed = st.elapsed
+        rate = st.n_phys / elapsed if elapsed > 0 else 0.0
+        print(f"  [progress] file {st.n_files_open}/{len(p.evio_files)} "
+              f"{Path(st.cur_file).name}  "
+              f"phys={st.n_phys}  fit_attempted={n_pulses_attempted}  "
               f"fit_used={n_pulses_used}  "
               f"rate={rate:.0f} ev/s  elapsed={elapsed:.1f}s",
               flush=True)
 
     try:
-        for fpath in p.evio_files:
-            if ch.open_auto(fpath) != dec.Status.success:
-                print(f"[WARN] skip (cannot open): {fpath}", flush=True)
-                continue
-            n_files_open += 1
-            print(f"[file {n_files_open}/{len(p.evio_files)}] {fpath}", flush=True)
-            done = False
-
-            while ch.read() == dec.Status.success:
-                if not ch.scan():
-                    continue
-                if ch.get_event_type() != dec.EventType.Physics:
+        for fadc_evt, _ in C.iter_physics_events(
+                p, loop_stats, with_ssp=False, max_events=args.max_events,
+                accept=None, progress=_emit_progress,
+                progress_every=args.progress_every):
+            for roc_tag, s, c, cd in C.iter_fadc_channels(fadc_evt):
+                name, chan_id, mtype = _key_for(roc_tag, s, c)
+                if chan_filter and name not in chan_filter:
                     continue
 
-                for i in range(ch.get_n_events()):
-                    decoded = ch.decode_event(i, with_ssp=False)
-                    if not decoded["ok"]:
-                        continue
-                    n_phys += 1
-                    if args.max_events and n_phys >= args.max_events:
-                        done = True
+                samples = np.asarray(cd.samples, dtype=np.uint16)
+                ped, rms, peaks = p.wave_ana.analyze(samples)
 
-                    fadc_evt = decoded["event"]
-                    for ri in range(fadc_evt.nrocs):
-                        roc = fadc_evt.roc(ri)
-                        if not roc.present:
-                            continue
-                        crate = p.crate_map.get(roc.tag)
-                        for s in roc.present_slots():
-                            slot = roc.slot(s)
-                            for c in slot.present_channels():
-                                cd = slot.channel(c)
-                                if cd.nsamples <= 0:
-                                    continue
-                                name, chan_id, mtype = _key_for(roc.tag, crate, s, c)
-                                if chan_filter and name not in chan_filter:
-                                    continue
+                if len(peaks) != 1:
+                    continue
+                pk = peaks[0]
+                if pk.quality != 0:
+                    continue
+                if pk.height < args.height_min:
+                    continue
+                if pk.height < args.height_rms_mult * rms:
+                    continue
+                if pk.overflow:
+                    continue
 
-                                samples = np.asarray(cd.samples, dtype=np.uint16)
-                                ped, rms, peaks = p.wave_ana.analyze(samples)
+                lo, hi = pk.pos - pre, pk.pos + post + 1
+                if lo < 0 or hi > samples.shape[0]:
+                    continue
 
-                                if len(peaks) != 1:
-                                    continue
-                                pk = peaks[0]
-                                if pk.quality != 0:
-                                    continue
-                                if pk.height < args.height_min:
-                                    continue
-                                if pk.height < args.height_rms_mult * rms:
-                                    continue
-                                if pk.overflow:
-                                    continue
+                # The C++ fitter takes the raw uint16 slice and does the
+                # pedestal subtraction itself.
+                slice_u16 = samples[lo:hi]
+                rel_peak  = pk.pos - lo
 
-                                lo, hi = pk.pos - pre, pk.pos + post + 1
-                                if lo < 0 or hi > samples.shape[0]:
-                                    continue
+                st = stats.get(name)
+                if st is None:
+                    st = ChannelStats(name=name, channel_id=chan_id,
+                                      module_type=mtype)
+                    stats[name] = st
+                if st.n_used >= args.max_pulses_per_channel:
+                    continue
 
-                                # Hand the raw uint16 slice straight to the
-                                # C++ fitter — no float64 conversion, no
-                                # pedsub in Python.
-                                slice_u16 = samples[lo:hi]
-                                rel_peak  = pk.pos - lo
+                st.n_attempted += 1
+                n_pulses_attempted += 1
+                st.ped_mean_sum += float(ped)
+                st.ped_rms_sum  += float(rms)
+                st.ped_n        += 1
 
-                                st = stats.get(name)
-                                if st is None:
-                                    st = ChannelStats(name=name, channel_id=chan_id,
-                                                      module_type=mtype)
-                                    stats[name] = st
-                                if st.n_used >= args.max_pulses_per_channel:
-                                    continue
+                fit = fit_pulse(slice_u16, rel_peak, float(ped), float(rms),
+                                clk_ns, args.model_err_floor)
+                if not fit.ok:
+                    continue
+                st.tau_r.append(fit.tau_r_ns)
+                st.tau_f.append(fit.tau_f_ns)
+                st.t0.append(fit.t0_ns)
+                if with_p:
+                    st.p_list.append(fit.p)
+                st.peak_amp.append(fit.peak_amp)
+                st.chi2.append(fit.chi2_per_dof)
+                st.n_used += 1
+                n_pulses_used += 1
 
-                                st.n_attempted += 1
-                                n_pulses_attempted += 1
-                                st.ped_mean_sum += float(ped)
-                                st.ped_rms_sum  += float(rms)
-                                st.ped_n        += 1
-
-                                if args.model == "two_tau_p":
-                                    fit = dec.WaveAnalyzer.fit_pulse_shape_two_tau_p(
-                                        slice_u16, rel_peak,
-                                        float(ped), float(rms), clk_ns,
-                                        args.model_err_floor)
-                                    if not fit.ok:
-                                        continue
-                                    st.tau_r.append(fit.tau_r_ns)
-                                    st.tau_f.append(fit.tau_f_ns)
-                                    st.t0.append(fit.t0_ns)
-                                    st.p_list.append(fit.p)
-                                    st.peak_amp.append(fit.peak_amp)
-                                    st.chi2.append(fit.chi2_per_dof)
-                                else:  # two_tau
-                                    fit = dec.WaveAnalyzer.fit_pulse_shape(
-                                        slice_u16, rel_peak,
-                                        float(ped), float(rms), clk_ns,
-                                        args.model_err_floor)
-                                    if not fit.ok:
-                                        continue
-                                    st.tau_r.append(fit.tau_r_ns)
-                                    st.tau_f.append(fit.tau_f_ns)
-                                    st.t0.append(fit.t0_ns)
-                                    st.peak_amp.append(fit.peak_amp)
-                                    st.chi2.append(fit.chi2_per_dof)
-                                st.n_used += 1
-                                n_pulses_used += 1
-
-                                # Cache raw pulses + their peak amps for the
-                                # diagnostic plots (normalised stack vs
-                                # median fit).  Pedsub on the fly here so
-                                # the cache lives in absolute ADC like the
-                                # fit's input.  Only when plotting is on.
-                                if plotting and len(st.sample_pulses) < PULSE_CACHE:
-                                    st.sample_pulses.append(
-                                        slice_u16.astype(np.float64) - ped)
-                                    st.sample_peak_amps.append(fit.peak_amp)
-
-                if n_phys >= next_progress:
-                    _emit_progress(n_files_open, len(p.evio_files), fpath)
-                    # Bump past every threshold this CODA read crossed, so
-                    # we always have a fresh next-target rather than firing
-                    # repeatedly on the same plateau.
-                    while next_progress <= n_phys:
-                        next_progress += progress_every
-
-                if done:
-                    break
-
-            ch.close()
-            if done:
-                break
+                # Cache raw pulses + their peak amps for the diagnostic
+                # plots (normalised stack vs median fit).  Pedsub on the
+                # fly here so the cache lives in absolute ADC like the
+                # fit's input.
+                if plotting and len(st.sample_pulses) < PULSE_CACHE:
+                    st.sample_pulses.append(
+                        slice_u16.astype(np.float64) - ped)
+                    st.sample_peak_amps.append(fit.peak_amp)
     except KeyboardInterrupt:
         print("\n[interrupted — writing partial results]", flush=True)
 
-    elapsed = time.monotonic() - t0_wall
-    print(f"[done] {n_phys} phys events  /  {n_pulses_attempted} fits attempted"
+    elapsed = loop_stats.elapsed
+    print(f"[done] {loop_stats.n_phys} phys events  /  {n_pulses_attempted} fits attempted"
           f"  /  {n_pulses_used} converged  /  {len(stats)} channels"
           f"  /  {elapsed:.1f}s", flush=True)
 
-    # Aggregate + write JSON.
     out: Dict = {
         "_meta": {
             "inputs": list(args.evio_paths),
             "n_evio_splits": len(p.evio_files),
-            "n_phys_events": n_phys,
+            "n_phys_events": loop_stats.n_phys,
             "n_pulses_attempted": n_pulses_attempted,
             "n_pulses_used": n_pulses_used,
             "n_channels": len(stats),
@@ -859,12 +753,9 @@ def main() -> None:
         out[name] = rec
         summaries.append({"name": name, **rec})
 
-    # Per-type aggregate (median ± MAD across channel medians) for each
-    # fit parameter.  This is what the C++ PulseTemplateStore actually
-    # uses for deconvolution — one shape per category (PbGlass / PbWO4 /
-    # LMS / Veto) for every channel of that type.  The per-channel
-    # entries above are kept for diagnostics + so the store can build
-    # its (roc, slot, channel) → module_type lookup at load time.
+    # The per-channel entries above are kept for diagnostics and so the
+    # store can build its (roc, slot, channel) → module_type lookup at
+    # load time.
     out["_by_type"] = aggregate_by_type(summaries, args.min_pulses)
 
     out_path = Path(args.out)
@@ -876,12 +767,11 @@ def main() -> None:
     # ---- plotting ----------------------------------------------------------
     if not plotting:
         return
-    plt = _import_pyplot()
+    plt = C.import_pyplot()
     if plt is None:
         print("[plot] matplotlib unavailable — skipping", flush=True)
         return
 
-    # Auto-pick best/worst, then add the user's explicit list.
     good_names, bad_names = select_plot_targets(
         stats, args.min_pulses, args.chi2_max,
         args.n_plot_good, args.n_plot_bad)
@@ -890,25 +780,16 @@ def main() -> None:
           f"good={len(good_names)}  bad={len(bad_names)}  "
           f"explicit={len(extra_plot)}", flush=True)
 
-    for name in good_names:
+    targets = ([(n, "good", "[good]") for n in good_names]
+               + [(n, "bad", "[bad]") for n in bad_names]
+               + [(n, "explicit", "") for n in sorted(extra_plot)])
+    for name, sub, label in targets:
         st = stats.get(name)
         if st is None or not st.sample_pulses:
+            print(f"[plot] no pulses for {sub} channel {name}", flush=True)
             continue
         plot_channel(plt, st, clk_ns, pre, post,
-                     plot_dir / "good" / f"{name}.png", label="[good]")
-    for name in bad_names:
-        st = stats.get(name)
-        if st is None or not st.sample_pulses:
-            continue
-        plot_channel(plt, st, clk_ns, pre, post,
-                     plot_dir / "bad" / f"{name}.png", label="[bad]")
-    for name in sorted(extra_plot):
-        st = stats.get(name)
-        if st is None or not st.sample_pulses:
-            print(f"[plot] no pulses for explicit channel {name}", flush=True)
-            continue
-        plot_channel(plt, st, clk_ns, pre, post,
-                     plot_dir / "explicit" / f"{name}.png")
+                     plot_dir / sub / f"{name}.png", label=label)
 
     if not args.no_summary_plot:
         plot_summary(plt, summaries, args.min_pulses, args.chi2_max,

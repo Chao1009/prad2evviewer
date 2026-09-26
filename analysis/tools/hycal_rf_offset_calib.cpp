@@ -1,7 +1,7 @@
 //=============================================================================
 // hycal_rf_offset_calib — fit per-module HyCal→RF time offsets.
 //
-// Reads recon ROOT files produced by prad2ana_replay_recon (which now carry
+// Reads recon ROOT files produced by prad2ana_replay_recon (which carry
 // `cl_dt_rf`, `cl_center`, `cl_time`, and the RF arrays) and emits a
 // database/hycal_rf_offsets/<run>.json that the next recon pass picks up.
 //
@@ -18,8 +18,9 @@
 //
 // Per-module fit: Gaussian + flat background in a ±fit_window_ns range
 // around the bin maximum.  A module passes when entries ≥ min_entries AND
-// the fit converges; otherwise the JSON gets `offset_ns: 0.0` and the
-// sidecar CSV flags it as "uncalibrated".
+// the fit converges to a finite mean within ±T_RF/2; otherwise it is left out
+// of the JSON (the recon then uses its `default` of 0) and the optional CSV
+// records why (no-hist, low-stats, fit-failed, ...).
 //
 // Usage:
 //   prad2ana_hycal_rf_offset_calib                                   \
@@ -27,7 +28,8 @@
 //       -o database/hycal_rf_offsets/24840.json                      \
 //       [--min-energy 200]   [--min-entries 100]                     \
 //       [--fit-window 1.5]   [--canvas qc_24840.pdf]                 \
-//       [--db database/hycal_map.json]
+//       [--csv 24840.csv]    [--allow-multi]                         \
+//       [--hycal-map database/hycal_map.json]
 //=============================================================================
 
 #include "EventData.h"
@@ -42,10 +44,7 @@
 #include <TFile.h>
 #include <TH1F.h>
 #include <TLatex.h>
-#include <TLine.h>
-#include <TLegend.h>
 #include <TStyle.h>
-#include <TSystem.h>
 #include <TTree.h>
 
 #include <nlohmann/json.hpp>
@@ -188,14 +187,8 @@ int main(int argc, char **argv)
     // Load HyCal map so we have module names + types for the per-module loop.
     fdec::HyCalSystem hycal;
     std::string map_path = cfg.hycal_map;
-    if (map_path.find('/') == std::string::npos) {
-        std::string db_dir = prad2::resolve_data_dir(
-            "PRAD2_DATABASE_DIR",
-            {"../share/prad2evviewer/database"},
-            DATABASE_DIR);
-        if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
-        map_path = db_dir + "/" + map_path;
-    }
+    if (map_path.find('/') == std::string::npos)
+        map_path = prad2::database_dir() + "/" + map_path;
     if (!hycal.Init(map_path)) {
         std::cerr << "Cannot load HyCal map from " << map_path << "\n";
         return 1;
@@ -203,7 +196,6 @@ int main(int argc, char **argv)
     std::cerr << "[setup] HyCal map : " << map_path
               << " (" << hycal.module_count() << " modules)\n";
 
-    // Chain the inputs.
     TChain chain("recon");
     for (const auto &f : cfg.inputs) {
         const int n = chain.Add(f.c_str());
@@ -215,19 +207,14 @@ int main(int argc, char **argv)
     }
     std::cerr << "[setup] total entries: " << chain.GetEntries() << "\n";
 
-    // Bind only the branches we need (cheap when reading 150k+ events).
+    // Read only the branches we need (cheap when reading 150k+ events).
     prad2::ReconEventData ev;
     chain.SetBranchStatus("*", 0);
     for (auto *b : {"n_clusters", "cl_energy", "cl_center", "cl_time",
                     "cl_dt_rf", "rf_n_a"}) {
         chain.SetBranchStatus(b, 1);
     }
-    chain.SetBranchAddress("n_clusters", &ev.n_clusters);
-    chain.SetBranchAddress("cl_energy",  ev.cl_energy);
-    chain.SetBranchAddress("cl_center",  ev.cl_center);
-    chain.SetBranchAddress("cl_time",    ev.cl_time);
-    chain.SetBranchAddress("cl_dt_rf",   ev.cl_dt_rf);
-    chain.SetBranchAddress("rf_n_a",     &ev.rf_n_a);
+    prad2::SetReconReadBranches(&chain, ev);
 
     // Per-module histograms.
     const int   n_mods = hycal.module_count();
@@ -241,10 +228,7 @@ int main(int argc, char **argv)
     TH1F h_all  ("h_dt_all",   "All clusters;#Deltat (ns);entries", nbins, lo, hi);
     TH1F h_hiE  ("h_dt_hiE",   "High-E single-cluster;#Deltat (ns);entries",
                  nbins, lo, hi);
-    TH1F h_unf  ("h_unfolded", "(cl_time-rf_ns_a[0]) high-E;ns;entries",
-                 200, -150, 150);
 
-    // Counters.
     long long n_seen = 0, n_kept = 0;
 
     const Long64_t N = chain.GetEntries();
@@ -267,7 +251,7 @@ int main(int argc, char **argv)
                 std::string name = "h_dt_" + mod->name;
                 std::string ttl  = mod->name + ";#Deltat (ns);entries";
                 hist[idx] = new TH1F(name.c_str(), ttl.c_str(), nbins, lo, hi);
-                hist[idx]->SetDirectory(nullptr);  // not associated with any file
+                hist[idx]->SetDirectory(nullptr);
             }
             hist[idx]->Fill(dt);
             h_all.Fill(dt);

@@ -1,44 +1,25 @@
-// Reset all frontend state (used by Clear All and mode switching)
+// Reset all frontend state (used by Clear All, autoclear and mode switching)
 function clearFrontend(){
     occData={}; occTcutData={}; occTotal=0;
-    eventChannels={}; currentWaveform=null; currentHist={};
+    eventChannels={};
 
-    // reset waveform stacking state
-    wfStackTraces=[]; wfStackModKey=''; wfStackEnabled=false;
-    wfDaqEnabled=false;
-    wfRequestId++;  // invalidate any in-flight waveform fetches
+    // reset waveform Stack/DAQ modes
+    setWfMode(false,false);
     lastHistModule='';
-    document.getElementById('wf-stack').checked=false;
-    document.getElementById('wf-stack-count').style.display='none';
-    document.getElementById('btn-wf-stack-reset').style.display='none';
-    document.getElementById('wf-daq').checked=false;
-    document.getElementById('wf-daq-info').style.display='none';
-    document.getElementById('peaks-table-soft').style.display='';
-    document.getElementById('peaks-table-daq').style.display='none';
 
     // blank DQ plots but keep selected module
-    Plotly.react('waveform-div',[], wfLayout(selectedModule?selectedModule.n:'', wfWindowNs()), PC2);
-    Plotly.react('heighthist-div',[],{...PL,title:{text:'Height Histogram',font:{size:10,color:'#555'}}},PC2);
-    Plotly.react('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
-    Plotly.react('poshist-div',[],{...PL,title:{text:'Peak Position',font:{size:10,color:'#555'}}},PC2);
-    document.getElementById('peaks-tbody').innerHTML='';
-    document.getElementById('peaks-tbody-daq').innerHTML='';
+    resetDqPlots(selectedModule?selectedModule.n:'');
 
     // cluster tab
-    initClHist(); plotClHist(); plotClStatHists();
+    resetClusterHists();
     clusterData=null; clusterEvent=-1; selectedCluster=-1;
     currentNclustHist=null; currentNblocksHist=null;
     document.getElementById('cl-select').innerHTML='<option value="all">All</option>';
-    document.getElementById('cl-detail-header').innerHTML=
-        '<span class="cl-info-text">Click a module or select a cluster</span>';
+    showClusterDetail();
     document.getElementById('cl-tbody').innerHTML='';
 
     // LMS tab
-    lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
-    _lmsHistRaw=null; _lmsHistModName=null;
-    Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
-    document.getElementById('lms-detail-header').innerHTML=
-        '<span class="cl-info-text">Click a module to view LMS history</span>';
+    lmsSummaryData=null; resetLmsSelection();
     document.getElementById('lms-tbody').innerHTML='';
     document.getElementById('lms-ref-select').innerHTML='<option value="-1">None</option>';
 
@@ -50,13 +31,9 @@ function clearFrontend(){
     // Cluster-tab GEM overlay cache — nullify so the next event refetches
     // and redrawGeo() (below) draws the cluster geo without stale dots.
     gemHits=null; gemHitsEvent=-1;
-    // GEM APV waveform tab — drop cached payload, clear the canvas registry,
-    // and empty the body so previously rendered traces aren't left visible.
-    // Also reset gemApvBuiltKey: buildGemApvSections() uses it as an
-    // idempotency guard ("same detector layout → skip rebuild"), so without
-    // this reset the next fetch with the same layout would early-return and
-    // leave the body empty + gemApvCanvases unpopulated, producing a blank
-    // GEM APV auto-report screenshot.
+    // GEM APV waveform tab — drop cached payload and canvases and empty the
+    // body.  gemApvBuiltKey must be reset too: buildGemApvSections() skips the
+    // rebuild for an unchanged layout, which would leave the body blank.
     gemApvData=null;
     gemApvCanvases.clear();
     gemApvBuiltKey='';
@@ -89,12 +66,7 @@ function openEtDialog(){
     document.getElementById('et-input-file').value=etc.et_file||'/tmp/et_sys_prad2';
     document.getElementById('et-input-station').value=etc.station||'prad2_monitor';
     document.getElementById('et-status-msg').textContent='';
-    document.getElementById('et-backdrop').classList.add('open');
-    document.getElementById('et-dialog').classList.add('open');
-}
-function closeEtDialog(){
-    document.getElementById('et-backdrop').classList.remove('open');
-    document.getElementById('et-dialog').classList.remove('open');
+    setDialogOpen('et',true);
 }
 
 function applyConfig(data){
@@ -125,34 +97,13 @@ function applyConfig(data){
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
     triggerTypeDef=data.trigger_type||[];
-    // load per-tab trigger filters from server config
     const tf=data.trigger_filter||{};
     for(const [tab, filt] of Object.entries(tf)){
         tabTrigFilter[tab]={accept:filt.trigger_accept||0, reject:filt.trigger_reject||0};
     }
     buildTriggerFilterUI();
     restoreTrigFilterFromTab();
-    // cluster histogram configs
-    if(data.cluster_hist){
-        clHistMin=data.cluster_hist.min||0;
-        clHistMax=data.cluster_hist.max||3000;
-        clHistStep=data.cluster_hist.step||10;
-    }
-    if(data.nclusters_hist){
-        nclustMin=data.nclusters_hist.min||0;
-        nclustMax=data.nclusters_hist.max||20;
-        nclustStep=data.nclusters_hist.step||1;
-    }
-    if(data.nblocks_hist){
-        nblocksMin=data.nblocks_hist.min||0;
-        nblocksMax=data.nblocks_hist.max||40;
-        nblocksStep=data.nblocks_hist.step||1;
-    }
-    if(data.raw_energy_hist){
-        rawEnergyMin=data.raw_energy_hist.min||0;
-        rawEnergyMax=data.raw_energy_hist.max||6000;
-        rawEnergyStep=data.raw_energy_hist.step||20;
-    }
+    applyClBinning({energy:data.cluster_hist, nclust:data.nclusters_hist, nblocks:data.nblocks_hist, raw:data.raw_energy_hist});
     initClHist();
     if(data.lms){
         g_lmsWarnThresh=data.lms.warn_threshold||0.1;
@@ -233,7 +184,6 @@ function applyConfig(data){
     initReport(data);
     initEpics(data);
     initPhysics(data);
-    updateTimeCutLabel();
     mode=data.mode||'file';
     etAvailable=data.et_available||false;
     if(data.et_config) window._etConfig=data.et_config;
@@ -245,7 +195,6 @@ function applyConfig(data){
     g_currentFile=data.current_file||'';
     g_dataDirEnabled=data.data_dir_enabled||false;
     g_dataDir=data.data_dir||'';
-    g_histCheckbox=histEnabled;
 
     const hcb=document.getElementById('hist-checkbox');
     if(hcb) hcb.checked=histEnabled;

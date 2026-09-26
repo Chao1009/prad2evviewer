@@ -3,7 +3,8 @@
 //
 // Usage: replay_rawdata <evio_file_or_dir> [more files/dirs...]
 //                       -o output_dir [-f max_files] [-n max_events] [-p] [-j num_threads]
-//                       [-c daq_config.json] [-d hycal_map.json] [--Ecalib] [--noWaveform]
+//                       [-c daq_config.json] [-d hycal_map.json] [-x] [-z threshold]
+//                       [--Ecalib] [--noWaveform]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
@@ -13,134 +14,24 @@
 //   -d  HyCal map file (default: <db>/hycal_map.json)
 //   -x  run the X17 reconstruction path
 //   -z  override GEM zero-suppression threshold (sigma)
-//   --Ecalib  enable Ecalib mode, throw out extra branches to reduce output size
-//   --noWaveform  disable saving raw waveform samples
+//   --Ecalib  enable Ecalib mode, throw out extra branches to reduce output size (implies -p)
+//   --noWaveform  disable saving raw waveform samples (implies -p)
 //=============================================================================
 
 #include "Replay.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
+#include "GainCorrCompute.h"
+#include "ToolUtils.h"
 
 #include <iostream>
 #include <string>
-#include <cstdlib>
 #include <getopt.h>
 #include <filesystem>
 #include <algorithm>
 #include <vector>
-#include <map>
-#include <thread>
-#include <atomic>
-#include <mutex>
-#include <limits>
-#include <cmath>
-
-#include <TFileMerger.h>
-#include <TClass.h>
-#include <TROOT.h>
-#include <TH1F.h>
-#include "gain_factor.h"
-
-#include <cerrno>
-#include <cstring>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
-
-// Auto-run replay_gainCorr if no gain-correction file exists for this run.
-// Returns true when the file is ready; prints a warning and returns false on
-// failure (the replay continues with identity gain correction).
-static bool ensureGainCorr(int run_num,
-                            const std::string &db_dir,
-                            const std::vector<std::string> &evio_files,
-                            int num_files,
-                            const std::string &daq_config,
-                            const std::string &daq_map,
-                            int num_threads)
-{
-    std::string gain_corr_dir = db_dir + "/gain_factor/gain_correction";
-    if (!prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty())
-        return true;   // already exists
-
-    std::cout << "[gain_corr] No gain-correction file for run " << run_num
-              << "; launching prad2ana_replay_gainCorr...\n";
-
-    // Locate the binary beside this executable.
-    std::string gainCorr_exe = prad2::module_dir() + "/prad2ana_replay_gainCorr";
-
-    // Temporary directory for intermediate *_lms.root files.
-    // replay_gainCorr deletes them (no -s flag); we clean up the dir itself.
-    char tmpl[] = "./prad2_lms_XXXXXX";
-    char *tmp = mkdtemp(tmpl);
-    if (!tmp) {
-        std::cerr << "[gain_corr] mkdtemp failed: " << std::strerror(errno) << "\n";
-        return false;
-    }
-    std::string tmp_dir(tmp);
-
-    // Build argv for execvp — no shell, so no command-injection risk.
-    std::vector<std::string> arg_strs;
-    arg_strs.push_back(gainCorr_exe);
-    for (int i = 0; i < num_files; ++i)
-        arg_strs.push_back(evio_files[i]);
-    arg_strs.push_back("-o"); arg_strs.push_back(tmp_dir);
-    arg_strs.push_back("-j"); arg_strs.push_back(std::to_string(num_threads));
-    if (!daq_config.empty()) { arg_strs.push_back("-c"); arg_strs.push_back(daq_config); }
-    if (!daq_map.empty())    { arg_strs.push_back("-d"); arg_strs.push_back(daq_map); }
-
-    std::vector<char *> argv_vec;
-    for (auto &s : arg_strs) argv_vec.push_back(const_cast<char *>(s.c_str()));
-    argv_vec.push_back(nullptr);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        execvp(gainCorr_exe.c_str(), argv_vec.data());
-        std::cerr << "[gain_corr] execvp failed: " << std::strerror(errno) << "\n";
-        _exit(1);
-    }
-    if (pid < 0) {
-        std::cerr << "[gain_corr] fork failed: " << std::strerror(errno) << "\n";
-        std::filesystem::remove_all(tmp_dir);
-        return false;
-    }
-
-    int wstatus = 0;
-    waitpid(pid, &wstatus, 0);
-    std::filesystem::remove_all(tmp_dir);
-
-    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
-        std::cerr << "[gain_corr] replay_gainCorr exited with code "
-                  << WEXITSTATUS(wstatus) << "\n";
-        return false;
-    }
-    if (prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty()) {
-        std::cerr << "[gain_corr] Output not found in " << gain_corr_dir << "\n";
-        return false;
-    }
-    std::cout << "[gain_corr] Gain-correction file ready.\n";
-    return true;
-}
-
-static std::vector<std::string> collectEvioFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (std::filesystem::is_directory(path)) {
-        for (auto &entry : std::filesystem::directory_iterator(path)) {
-            if (entry.is_regular_file() &&
-                entry.path().filename().string().find(".evio") != std::string::npos)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
 
 static std::string makeOutputFile(const std::string &evio_path)
 {
@@ -158,61 +49,11 @@ static const struct option long_options[] = {
     {nullptr, 0, nullptr, 0}
 };
 
-static bool parseIntOption(const char *text, int &value)
-{
-    if (!text || *text == '\0') return false;
-    char *end = nullptr;
-    errno = 0;
-    const long parsed = std::strtol(text, &end, 10);
-    if (errno == ERANGE || *end != '\0'
-            || parsed < std::numeric_limits<int>::min()
-            || parsed > std::numeric_limits<int>::max())
-        return false;
-    value = static_cast<int>(parsed);
-    return true;
-}
-
-static bool parseFloatOption(const char *text, float &value)
-{
-    if (!text || *text == '\0') return false;
-    char *end = nullptr;
-    errno = 0;
-    const float parsed = std::strtof(text, &end);
-    if (errno == ERANGE || *end != '\0' || !std::isfinite(parsed)) return false;
-    value = parsed;
-    return true;
-}
-
-static int invalidOptionValue(const char *flag, const char *value)
-{
-    std::cerr << "Invalid value for " << flag << ": "
-              << (value ? value : "(missing)") << "\n";
-    return 2;
-}
-
-static int invalidOption(char *argv[], int optind, int optopt)
-{
-    if (optopt != 0)
-        std::cerr << "Invalid option or missing argument: -"
-                  << static_cast<char>(optopt) << "\n";
-    else
-        std::cerr << "Invalid option: "
-                  << (optind > 0 ? argv[optind - 1] : "(unknown)") << "\n";
-    return 2;
-}
-
 int main(int argc, char *argv[])
 {
-    // Initialize ROOT for multi-threading
-    ROOT::EnableThreadSafety();
-    
-    // Force ROOT dictionary initialization in main thread
-    // This prevents concurrent TClass::Init calls
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
+    analysis::InitRootThreading();
 
-    std::string daq_config, daq_map, output_dir, recon_config;
+    std::string daq_config, daq_map, output_dir;
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
@@ -222,10 +63,7 @@ int main(int argc, char *argv[])
     float zerosup_override = 5.f;
     bool x17 = false;
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string db_dir = prad2::database_dir();
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     opterr = 0;
@@ -234,40 +72,36 @@ int main(int argc, char *argv[])
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f':
-                if (!parseIntOption(optarg, max_files))
-                    return invalidOptionValue("-f", optarg);
+                if (!ParseIntOption(optarg, max_files))
+                    return InvalidOptionValue("-f", optarg);
                 break;
             case 'n':
-                if (!parseIntOption(optarg, max_events))
-                    return invalidOptionValue("-n", optarg);
+                if (!ParseIntOption(optarg, max_events))
+                    return InvalidOptionValue("-n", optarg);
                 break;
             case 'c': daq_config = optarg; break;
             case 'd': daq_map = optarg; break;
             case 'j':
-                if (!parseIntOption(optarg, num_threads) || num_threads <= 0)
-                    return invalidOptionValue("-j", optarg);
+                if (!ParseIntOption(optarg, num_threads) || num_threads <= 0)
+                    return InvalidOptionValue("-j", optarg);
                 break;
             case 'p': peaks = true; break;
             case 'x': x17 = true; break;
             case 'z':
-                if (!parseFloatOption(optarg, zerosup_override)
+                if (!ParseFloatOption(optarg, zerosup_override)
                         || zerosup_override < 0.f)
-                    return invalidOptionValue("-z", optarg);
+                    return InvalidOptionValue("-z", optarg);
                 break;
             case 1000: Ecalib = true; peaks = true; break;
             case 1001: noWaveform = true; peaks = true; break;
             case '?':
             default:
-                return invalidOption(argv, optind, optopt);
+                return InvalidOption(argv, optind, optopt);
         }
     }
 
     // collect input files (can be files, directories, or mixed)
-    std::vector<std::string> evio_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectEvioFiles(argv[i]);
-        evio_files.insert(evio_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> evio_files = CollectInputs(argc, argv, optind, IsEvioName);
 
     if (evio_files.empty() || output_dir.empty()) {
         std::cerr << "Usage: replay_rawdata <evio_file_or_dir> [more files/dirs...] -o output_dir\n"
@@ -295,75 +129,25 @@ int main(int argc, char *argv[])
 
     if(daq_map.empty()) daq_map = db_dir + "/hycal_map.json";
 
-    // Group files by run number; ensure gain correction for every distinct run.
-    {
-        std::map<int, std::vector<std::string>> run_files_map;
-        for (int i = 0; i < num_files; ++i)
-            run_files_map[get_run_int(evio_files[i])].push_back(evio_files[i]);
-
-        std::cout << "Detected " << run_files_map.size() << " run(s):";
-        for (auto &[rn, rf] : run_files_map)
-            std::cout << " run" << rn << " (" << rf.size() << " file(s))";
-        std::cout << "\n";
-
-        for (auto &[rn, rf] : run_files_map)
-            ensureGainCorr(rn, db_dir, rf, static_cast<int>(rf.size()),
-                           daq_config, daq_map, num_threads);
-    }
+    const std::vector<std::string> inputs(evio_files.begin(), evio_files.begin() + num_files);
+    EnsureGainCorr(inputs, db_dir, daq_config, daq_map, num_threads);
 
     int run_num = get_run_int(evio_files[0]);
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
-    if(recon_config.empty()) {
-        if(x17) recon_config = db_dir + "/reconstruction_config_x17.json";
-        else recon_config = db_dir + "/reconstruction_config.json";
-    }
+    const std::string recon_config = db_dir + (x17 ? "/reconstruction_config_x17.json"
+                                                   : "/reconstruction_config.json");
 
-    // shared work queue: atomic index into file list
-    std::atomic<int> next_file{0};
-    std::mutex io_mtx;
-    std::atomic<int> errors{0};
-
-    auto worker = [&]() {
-        // each thread gets its own Replay instance (own EvChannel, own buffers)
-        analysis::Replay replay;
-        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        // Module-type dispatch comes from hycal_map.json's "t" field — single
-        // source of truth for whether a channel is PbGlass / PbWO4 / Veto /
-        // LMS.  LoadHyCalMap also fills the (crate,slot,ch)→name lookup; both
-        // were two separate calls before the schema merge.
-        replay.LoadHyCalMap(daq_map);
-        std::cerr << "Using HyCal map: " << daq_map << "\n";
-
-        while (true) {
-            int idx = next_file.fetch_add(1);
-            if (idx >= num_files) break;
-
-            std::string out = output_dir + "/" + makeOutputFile(evio_files[idx]);
-            bool ok = replay.Process(evio_files[idx], out, gRunConfig, db_dir, recon_config, max_events, peaks, daq_config,
+    std::cerr << "Using HyCal map: " << daq_map << "\n";
+    const int errors = RunReplayPool(inputs, num_threads, daq_config, daq_map,
+        [&](const std::string &in) { return output_dir + "/" + makeOutputFile(in); },
+        [&](Replay &replay, const std::string &in, const std::string &out) {
+            return replay.Process(in, out, gRunConfig, db_dir, recon_config, max_events, peaks, daq_config,
                 zerosup_override, Ecalib, noWaveform);
-
-            std::lock_guard<std::mutex> lk(io_mtx);
-            if (ok) {
-                std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                          << evio_files[idx] << " -> " << out << "\n";
-            } else {
-                std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
-                          << evio_files[idx] << "\n";
-                errors++;
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-    for (int i = 0; i < num_threads; ++i)
-        threads.emplace_back(worker);
-    for (auto &t : threads)
-        t.join();
+        });
 
     std::cout << "Done: " << num_files << " files"
-              << (errors > 0 ? ", " + std::to_string(errors.load()) + " errors" : "")
+              << (errors > 0 ? ", " + std::to_string(errors) + " errors" : "")
               << "\n";
 
     return errors > 0 ? 1 : 0;

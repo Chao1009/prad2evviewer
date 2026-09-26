@@ -1,7 +1,6 @@
-// viewer.js — Orchestrator: init, tabs, event navigation, WebSocket, mode switching
-// =========================================================================
-// State
-// =========================================================================
+// viewer.js — Orchestrator: shared state, init, tab switching, event navigation
+
+// ── State ─────────────────────────────────────────────────────────────
 let modules=[], totalEvents=0, currentEvent=1;
 let currentEventNumber=0, currentTriggerBits=0;  // DAQ event number + trigger from last loaded event
 let currentEventKind='physics';                  // 'physics' | 'sync' | 'epics' | 'prestart' | ...
@@ -30,41 +29,57 @@ let refreshEventMs=200, refreshRingMs=500, refreshHistMs=2000, refreshLmsMs=2000
 // occupancy data (fetched once per file load when histograms enabled)
 let occData={}, occTcutData={}, occTotal=0;
 
-let activeTab='dq';  // 'dq' or 'cluster'
+let activeTab='dq';  // key of TAB_PANELS
 
-// =========================================================================
-// Plotly shared config — PL is a GETTER so it tracks the active theme.
-// =========================================================================
+// ── Plotly shared config — PL is a GETTER so it tracks the active theme ──
 Object.defineProperty(window, 'PL', { get: () => plotlyLayout() });
 const PC2={responsive:true,displayModeBar:false};
 const PC_EPICS={responsive:true,displayModeBar:true,
     modeBarButtonsToRemove:['sendDataToCloud','lasso2d','select2d'],
     displaylogo:false};
 
+// POST `body` as JSON; resolves to the parsed JSON reply.
+function postJson(url, body){
+    return fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(body)}).then(r=>r.json());
+}
+
 // ── Plotly plot registry ──────────────────────────────────────────────
-// All Plotly divs register here with their tab and default layout.
-// Provides unified init, resize-by-tab, and resize-all.
-const plotRegistry=[];  // [{id, tab, layout, config}]
+// All Plotly divs register here with their tab and empty-state title.
+const plotRegistry=[];  // [{id, tab, title, config}]
 
 function registerPlot(id, tab, title, config){
+    plotRegistry.push({id, tab, title, config: config||PC2});
+}
+
+// Built on every call so the empty state follows the active theme.
+function emptyPlotLayout(p){
     const layout = plotlyLayout();
-    if(title) layout.title={text:title, font:{size:10,color:THEME.textMuted}};
-    plotRegistry.push({id, tab, layout, config: config||PC2});
+    if(p.title) layout.title={text:p.title, font:{size:10,color:THEME.textMuted}};
+    return layout;
 }
 
 function initRegisteredPlots(){
     for(const p of plotRegistry)
-        Plotly.newPlot(p.id, [], p.layout, p.config);
+        Plotly.newPlot(p.id, [], emptyPlotLayout(p), p.config);
+}
+
+// Blank a registered plot back to its empty state.
+function resetPlot(id){
+    const p=plotRegistry.find(q=>q.id===id);
+    if(p) Plotly.react(id, [], emptyPlotLayout(p), p.config);
+}
+
+function resizePlots(...ids){
+    for(const id of ids) try{Plotly.Plots.resize(id);}catch(e){}
 }
 
 function resizePlotsForTab(tab){
-    for(const p of plotRegistry)
-        if(p.tab===tab) try{Plotly.Plots.resize(p.id);}catch(e){}
+    resizePlots(...plotRegistry.filter(p=>p.tab===tab).map(p=>p.id));
 }
 
 function resizeAllPlots(){
-    for(const p of plotRegistry)
-        try{Plotly.Plots.resize(p.id);}catch(e){}
+    resizePlots(...plotRegistry.map(p=>p.id));
 }
 
 function redrawGeo(){
@@ -82,42 +97,21 @@ function geoHandleClick(cx,cy){
             document.getElementById('cl-select').value='all';
             geoCluster(); updateClusterTable(); showClusterDetail();
         } else if(activeTab==='lms'){
-            lmsSelectedModule=-1;
-            currentLmsData=null;
-            _lmsHistRaw=null; _lmsHistModName=null;
-            Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:THEME.textMuted}}},PC2);
-            document.getElementById('lms-detail-header').innerHTML=
-                '<span class="cl-info-text">Click a module to view LMS history</span>';
+            resetLmsSelection();
             updateLmsTable(); geoLms();
         } else {
             selectedModule=null;
-            currentWaveform=null;
-            currentHist={};
             document.getElementById('detail-header').innerHTML=
                 '<div class="empty-msg">Click a module to view details</div>';
-            Plotly.react('waveform-div',[], wfLayout('', wfWindowNs()), PC2);
-            Plotly.react('heighthist-div',[],{...PL,title:{text:'Height Histogram',font:{size:10,color:THEME.textMuted}}},PC2);
-            Plotly.react('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:THEME.textMuted}}},PC2);
-            Plotly.react('poshist-div',[],{...PL,title:{text:'Position Histogram',font:{size:10,color:THEME.textMuted}}},PC2);
-            document.getElementById('peaks-tbody').innerHTML='';
+            resetDqPlots('');
             geoDq();
         }
         return;
     }
     if(activeTab==='cluster'){
         selectedModule=null;
-        const idx=modules.indexOf(m);
-        if(clusterData && clusterData.clusters && clusterData.clusters.length){
-            const clusters=clusterData.clusters;
-            let found=-1;
-            for(let ci=0;ci<clusters.length;ci++){
-                if(clusters[ci].modules&&clusters[ci].modules.includes(idx)){ found=ci; break; }
-            }
-            if(found<0) selectedCluster=-1;
-            else selectedCluster=(selectedCluster===found)?-1:found;
-        } else {
-            selectedCluster=-1;
-        }
+        const found=clusterOfModule(modules.indexOf(m));
+        selectedCluster=(found<0||selectedCluster===found)?-1:found;
         document.getElementById('cl-select').value=selectedCluster>=0?selectedCluster:'all';
         geoCluster(); updateClusterTable(); showClusterDetail();
     } else if(activeTab==='lms'){
@@ -131,9 +125,7 @@ function geoHandleClick(cx,cy){
     }
 }
 
-// =========================================================================
-// Event loading (works for both file and online mode)
-// =========================================================================
+// ── Event loading (file and online mode) ──────────────────────────────
 let eventRequestId = 0;  // increments on each fetch, stale responses ignored
 
 // Build sample label: "Sample 100 (Evt. 99)"
@@ -142,14 +134,12 @@ function sampleLabel(){
     return `Sample ${currentEvent}${evn}`;
 }
 
-// Update status bar based on active tab
 function decodeTriggerBits(bits){
     if(!bits) return '';
     const names=[];
     for(const d of triggerBitsDef){
         if(bits & (1<<d.bit)) names.push(d.name);
     }
-    // include hex and decoded names
     let s=` trig=0x${bits.toString(16)}`;
     if(names.length) s+=` [${names.join('+')}]`;
     return s;
@@ -213,13 +203,20 @@ function updateStatusBar(){
     }
 }
 
-// =========================================================================
-// Trigger filter — accept/reject events by trigger bits
-// =========================================================================
+// ── Trigger filter — accept/reject events by trigger bits ─────────────
 // Each trigger bit has 3 states: unchecked (ignore), accept (green), reject (red).
 // Accept: event must have at least one accepted bit set.
 // Reject: event must NOT have any rejected bit set.
 // If no accept bits selected, accept-all (only reject mask applies).
+
+// Set a trigger checkbox to state st (0 ignore, 1 accept, 2 reject) and
+// colour its label to match.
+function setTrigCbState(cb, st){
+    cb.dataset.state=String(st);
+    cb.checked=st===1;
+    cb.indeterminate=st===2;
+    cb.parentElement.className=['','trig-accept','trig-reject'][st];
+}
 
 function buildTriggerFilterUI(){
     const bar=document.getElementById('trigger-filter-bar');
@@ -240,18 +237,15 @@ function buildTriggerFilterUI(){
         cb.type='checkbox';
         cb.dataset.bit=bit;
         cb.dataset.mask=mask;
-        cb.dataset.state='0'; // 0=ignore, 1=accept, 2=reject
+        cb.dataset.state='0';
         cb.indeterminate=false;
         cb.checked=false;
         cb.addEventListener('click', ()=>{
-            let st=parseInt(cb.dataset.state);
-            st=(st+1)%3;
+            // state is read by saveTrigFilterToTab right away; the visuals
+            // wait until the browser has applied its own checkbox toggle
+            const st=(parseInt(cb.dataset.state)+1)%3;
             cb.dataset.state=String(st);
-            setTimeout(()=>{
-                if(st===0){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
-                else if(st===1){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
-                else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
-            },0);
+            setTimeout(()=>setTrigCbState(cb,st),0);
             saveTrigFilterToTab();
         });
         lbl.appendChild(cb);
@@ -260,15 +254,12 @@ function buildTriggerFilterUI(){
     }
 
     document.getElementById('trig-filter-clear').onclick=()=>{
-        for(const cb of container.querySelectorAll('input[type="checkbox"]')){
-            cb.dataset.state='0'; cb.checked=false; cb.indeterminate=false;
-            cb.parentElement.className='';
-        }
+        for(const cb of container.querySelectorAll('input[type="checkbox"]'))
+            setTrigCbState(cb,0);
         saveTrigFilterToTab();
     };
 }
 
-// save checkbox states → active tab's accept/reject masks
 function saveTrigFilterToTab(){
     const tf=trigFilter();
     tf.accept=0; tf.reject=0;
@@ -281,19 +272,11 @@ function saveTrigFilterToTab(){
     if(mode==='file' && totalEvents>0) loadEvent(currentEvent);
 }
 
-// restore checkboxes from active tab's masks
 function restoreTrigFilterFromTab(){
     const tf=trigFilter();
     for(const cb of document.querySelectorAll('#trigger-filter-checks input[type="checkbox"]')){
         const m=parseInt(cb.dataset.mask);
-        let st='0';
-        if(tf.accept & m) st='1';
-        else if(tf.reject & m) st='2';
-        cb.dataset.state=st;
-        const lbl=cb.parentElement;
-        if(st==='0'){ cb.checked=false; cb.indeterminate=false; lbl.className=''; }
-        else if(st==='1'){ cb.checked=true; cb.indeterminate=false; lbl.className='trig-accept'; }
-        else { cb.checked=false; cb.indeterminate=true; lbl.className='trig-reject'; }
+        setTrigCbState(cb, tf.accept&m?1:tf.reject&m?2:0);
     }
 }
 
@@ -304,9 +287,7 @@ function passesTriggerFilter(triggerBits){
     return true;
 }
 
-// =========================================================================
-// Auto Report mode
-// =========================================================================
+// ── Auto Report mode ──────────────────────────────────────────────────
 // Fully server-driven.  The server detects run boundaries (END /
 // PRESTART control events, run-number flip on physics events as a
 // fallback), picks one alive WS client, and sends a 'capture_request'.
@@ -322,12 +303,11 @@ function passesTriggerFilter(triggerBits){
 
 let autoPostEnabled=false;     // server-controlled, from /api/config
 let autoIsReporting=false;     // true while we're handling a capture_request
-// Mirrored from /api/config -> auto_report.{partial_threshold_events,
-// min_events_for_schedule}.  report.js reads them for the empty-state
-// header banner.  0 disables the corresponding marker.  Defaults match
-// the server's so an unconfigured deployment still flags zeros.
+// Mirrored from /api/config -> auto_report.partial_threshold_events.
+// report.js reads it for the empty-state header banner.  0 disables the
+// marker.  The default matches the server's so an unconfigured deployment
+// still flags zeros.
 let autoReportPartialThreshold=1000;
-let autoReportMinEventsForSchedule=100;
 
 function autoStatusEl(){ return document.getElementById('auto-status'); }
 
@@ -355,10 +335,6 @@ function autoUpdateStatus(){
 function autoSetReporting(on){
     autoIsReporting = !!on;
     autoUpdateStatus();
-    // Local UI clears + the server-side data wipe are both driven by
-    // the server's autoclear scheduler — when it fires, every client
-    // (including this one) gets an autoclear_done broadcast that runs
-    // clearFrontend in lockstep.  Nothing to flush here.
 }
 
 // Called from initReport() once /api/config has arrived.
@@ -366,15 +342,8 @@ function applyAutoReportConfig(cfg){
     if(!cfg) return;
     autoPostEnabled = !!cfg.enabled;
     autoUpdateStatus();
-    // Surface server-configured thresholds to report.js's empty-state
-    // banner.  Fallbacks (1000 / 100) match the server defaults, so a
-    // server that hasn't been rebuilt with the new keys still gets sane
-    // behaviour.  0 from the server explicitly disables the corresponding
-    // marker (legacy quiet-mode).
     if(typeof cfg.partial_threshold_events === 'number')
         autoReportPartialThreshold = cfg.partial_threshold_events;
-    if(typeof cfg.min_events_for_schedule === 'number')
-        autoReportMinEventsForSchedule = cfg.min_events_for_schedule;
 }
 
 // Manual Clear All — operator-driven, immediate.  Run-boundary
@@ -389,10 +358,6 @@ function doClearAll(){
     ]).then(clearFrontend).catch(()=>{
         document.getElementById('status-bar').textContent='Error clearing data';
     });
-}
-
-function initAutoReport(){
-    autoUpdateStatus();
 }
 
 let navDirection=1;  // +1=forward, -1=backward (for trigger filter auto-skip)
@@ -414,15 +379,9 @@ function loadEventData(reqId, data, manual) {
     if (tf.accept || tf.reject) {
         const tb = data.trigger_bits || 0;
         if (!passesTriggerFilter(tb)) {
-            if (mode==='file') {
-                const next = data.event + navDirection;
-                if (next >= 1 && next <= totalEvents) {
-                    loadEvent(next);
-                } else {
-                    document.getElementById('status-bar').textContent =
-                        `No matching event (trigger filter active)`;
-                }
-            }
+            if (mode==='file' && !stepEvent(navDirection))
+                document.getElementById('status-bar').textContent =
+                    `No matching event (trigger filter active)`;
             // in online mode, just discard this event silently
             return;
         }
@@ -449,15 +408,8 @@ function loadEventData(reqId, data, manual) {
         // Right panel is per-event-independent (efficiency cards + last-good
         // snapshot), refreshed on the histogram cadence by fetchGemAccum.
     } else if(activeTab==='gem_apv'){
-        // Route through the gem_apv tab's pause + source gate so a paused
-        // panel stays frozen and a 'Latest full-readout' panel ignores the
-        // per-event stream (it follows gem_apv_full_event instead).  The
-        // `manual` flag (threaded from loadEvent → loadEventData) signals
-        // user navigation, which bypasses pause — pause is for the live
-        // WS push, not for "I clicked next/prev".  Pre-update viewers
-        // without the gate function fall back to direct fetch.
-        if(typeof gemApvOnLiveEvent==='function') gemApvOnLiveEvent(currentEvent, 'event', !!manual);
-        else if(typeof fetchGemApvData==='function') fetchGemApvData(currentEvent);
+        // Pause + source gate; user navigation (manual) bypasses pause.
+        gemApvOnLiveEvent(currentEvent, 'event', !!manual);
     } else {
         geoDq();
     }
@@ -486,15 +438,28 @@ function loadEvent(evnum) {
         .catch(err => { document.getElementById('status-bar').textContent = `Error: ${err}`; });
 }
 
+// Load the previous (dir=-1) or next (dir=+1) event, staying within the
+// event-filter result when one is applied.  Returns false at either end.
+function stepEvent(dir){
+    let t;
+    if(filteredIndices){
+        const pos=filteredIndices.indexOf(currentEvent);
+        if(pos<0) return false;
+        t=filteredIndices[pos+dir];
+    } else t=currentEvent+dir;
+    if(t===undefined||t<1||t>totalEvents) return false;
+    navDirection=dir;
+    loadEvent(t);
+    return true;
+}
+
 function loadLatestEvent() {
     const reqId = ++eventRequestId;
     fetch('/api/event/latest').then(r => r.json()).then(d => loadEventData(reqId, d, false))
         .catch(err => { document.getElementById('status-bar').textContent = `Error: ${err}`; });
 }
 
-// =========================================================================
-// Draggable dividers
-// =========================================================================
+// ── Draggable dividers ────────────────────────────────────────────────
 function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, minB, onResize){
     const div=document.getElementById(divId);
     let active=false;
@@ -520,9 +485,21 @@ function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, min
     });
 }
 
-// =========================================================================
-// Tab switching
-// =========================================================================
+// ── Tab switching ─────────────────────────────────────────────────────
+// Panels shown for each tab (keys match the data-tab values); every other
+// id in ALL_TAB_PANEL_IDS is hidden.  report.js also uses the table to
+// scope its screenshot capture and to hide the other panels in the clone.
+const TAB_PANELS={
+    dq:      ['geo-panel','div-main','geo-toolbar-dq','detail-panel'],
+    lms:     ['geo-panel','div-main','geo-toolbar-lms','lms-panel'],
+    cluster: ['geo-panel','div-main','geo-toolbar-cl','cluster-panel'],
+    gem:     ['gem-outer'],
+    gem_apv: ['gem-apv-outer'],
+    epics:   ['epics-outer'],
+    physics: ['physics-outer'],
+};
+const ALL_TAB_PANEL_IDS=[...new Set(Object.values(TAB_PANELS).flat())];
+
 function switchTab(tab, opts){
     if(tab===activeTab) return;
     activeTab=tab;
@@ -534,19 +511,10 @@ function switchTab(tab, opts){
     document.querySelectorAll('.tab').forEach(t=>{
         t.classList.toggle('active', t.dataset.tab===tab);
     });
-    const fullTab=tab==='epics'||tab==='physics'||tab==='gem'||tab==='gem_apv';
-    document.getElementById('geo-panel').style.display        = fullTab ? 'none' : '';
-    document.getElementById('div-main').style.display         = fullTab ? 'none' : '';
-    document.getElementById('geo-toolbar-dq').style.display   = tab==='dq' ? 'flex' : 'none';
-    document.getElementById('geo-toolbar-cl').style.display   = tab==='cluster' ? 'flex' : 'none';
-    document.getElementById('geo-toolbar-lms').style.display  = tab==='lms' ? 'flex' : 'none';
-    document.getElementById('detail-panel').style.display     = tab==='dq' ? 'flex' : 'none';
-    document.getElementById('cluster-panel').style.display    = tab==='cluster' ? 'flex' : 'none';
-    document.getElementById('lms-panel').style.display        = tab==='lms' ? 'flex' : 'none';
-    document.getElementById('epics-outer').style.display      = tab==='epics' ? 'flex' : 'none';
-    document.getElementById('physics-outer').style.display    = tab==='physics' ? 'flex' : 'none';
-    document.getElementById('gem-outer').style.display        = tab==='gem' ? 'flex' : 'none';
-    document.getElementById('gem-apv-outer').style.display    = tab==='gem_apv' ? 'flex' : 'none';
+    const shown=TAB_PANELS[tab]||[];
+    for(const id of ALL_TAB_PANEL_IDS)
+        document.getElementById(id).style.display=
+            !shown.includes(id)?'none':(id==='geo-panel'||id==='div-main')?'':'flex';
 
     // --- per-tab actions: fetch data + resize after layout settles ---
     const tabActions = {
@@ -559,19 +527,14 @@ function switchTab(tab, opts){
         epics:   { fetch(){ fetchEpicsChannels(); fetchEpicsLatest(); fetchAllEpicsSlots(); } },
         physics: { fetch(){ fetchPhysics(); } },
         gem:     { fetch(){ fetchGemAccum(); },
-                   after(){ resizeGem(); } },
+                   after(){ resizePlots(...GEM_OCC_IDS, 'gem-eff-zhist'); } },
         gem_apv: { fetch(){
                        // Honour pause across tab switches — if the operator
                        // froze the panel on event N, switching away and back
                        // shouldn't clobber that frame.  Otherwise pull from
                        // the active source (current event or latest full).
-                       if (typeof gemApvPaused !== 'undefined' && gemApvPaused
-                           && typeof gemApvData !== 'undefined' && gemApvData) {
-                           if (typeof renderGemApvPanels === 'function') renderGemApvPanels();
-                           return;
-                       }
-                       if (typeof refreshGemApv === 'function') refreshGemApv(currentEvent);
-                       else if (typeof fetchGemApvData === 'function') fetchGemApvData(currentEvent);
+                       if (gemApvPaused && gemApvData) { renderGemApvPanels(); return; }
+                       refreshGemApv(currentEvent);
                    },
                    after(){ resizeGemApv(); } },
     };
@@ -588,14 +551,25 @@ function switchTab(tab, opts){
     updateStatusBar();
 }
 
-// Init
-// =========================================================================
+// ── Modal dialogs: #<name>-dialog + #<name>-backdrop, shown with class 'open'
+function setDialogOpen(name, on){
+    for(const s of ['-backdrop','-dialog'])
+        document.getElementById(name+s).classList.toggle('open', on);
+}
+
+// Close the dialog from its backdrop, its header × (#<name>-dialog-close)
+// and any extra buttons; returns the close function.
+function wireDialogClose(name, ...extraIds){
+    const close=()=>setDialogOpen(name, false);
+    for(const id of [name+'-backdrop', name+'-dialog-close', ...extraIds])
+        document.getElementById(id).onclick=close;
+    return close;
+}
+
+// ── Init ──────────────────────────────────────────────────────────────
 function init(){
     drawColorBar(); initGeo();
-    document.getElementById('colorbar-canvas').onclick=()=>{
-        paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
-        drawColorBar(); redrawGeo();
-    };
+    for(const id of COLORBAR_IDS) document.getElementById(id).onclick=cyclePalette;
     registerPlot('waveform-div', 'dq', null);
     registerPlot('heighthist-div','dq', 'Height Histogram');
     registerPlot('inthist-div',  'dq', 'Integral Histogram');
@@ -656,14 +630,6 @@ function init(){
         geoCluster(); updateClusterTable(); showClusterDetail();
     };
     document.getElementById('cl-log-scale').onchange=()=>{ if(activeTab==='cluster') geoCluster(); };
-    document.getElementById('cl-colorbar-canvas').onclick=()=>{
-        paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
-        drawColorBar(); redrawGeo();
-    };
-    document.getElementById('lms-colorbar-canvas').onclick=()=>{
-        paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
-        drawColorBar(); redrawGeo();
-    };
 
     registerPlot('cl-energy-hist',  'cluster', 'Cluster Energy');
     registerPlot('cl-rawe-hist',   'cluster', 'Raw Energy Sum');
@@ -683,60 +649,30 @@ function init(){
     setupDivider('div-cl-eh','x',
         ()=>document.querySelector('.cl-hist-cell'),
         ()=>document.querySelector('.cl-hist-row'),
-        ()=>0, 80, 80, ()=>{
-            try{Plotly.Plots.resize('cl-energy-hist');}catch(e){}
-            try{Plotly.Plots.resize('cl-rawe-hist');}catch(e){}
-        });
+        ()=>0, 80, 80, ()=>resizePlots('cl-energy-hist','cl-rawe-hist'));
 
     // cluster stat row column divider
     setupDivider('div-cl-stat','x',
         ()=>document.querySelector('.cl-stat-cell'),
         ()=>document.querySelector('.cl-stat-row'),
-        ()=>0, 80, 80, ()=>{
-            try{Plotly.Plots.resize('cl-nclust-hist');}catch(e){}
-            try{Plotly.Plots.resize('cl-nblocks-hist');}catch(e){}
-        });
+        ()=>0, 80, 80, ()=>resizePlots('cl-nclust-hist','cl-nblocks-hist'));
 
-    // waveform stacking controls — reset checkbox to match JS state (browser may restore old form state)
-    document.getElementById('wf-stack').checked=false;
+    // waveform Stack / DAQ toggles (DAQ = firmware Mode 1/2/3 emulation: TET,
+    // NSB/NSA, Vp, T markers per the FADC250 manual) — reset to match JS
+    // state (browser may restore old form state)
+    setWfMode(false,false);
+    // Stack and DAQ are mutually exclusive — DAQ annotations don't compose
+    // with overlaid events.
     document.getElementById('wf-stack').onchange=e=>{
-        wfStackEnabled=e.target.checked;
-        document.getElementById('wf-stack-count').style.display=wfStackEnabled?'':'none';
-        document.getElementById('btn-wf-stack-reset').style.display=wfStackEnabled?'':'none';
-        if(!wfStackEnabled){ wfStackTraces=[]; wfStackModKey=''; }
-        // Stack and DAQ modes are mutually exclusive — turning Stack on
-        // disables DAQ annotations (they don't compose meaningfully).
-        if(wfStackEnabled && wfDaqEnabled){
-            wfDaqEnabled=false;
-            document.getElementById('wf-daq').checked=false;
-            document.getElementById('wf-daq-info').style.display='none';
-            document.getElementById('peaks-table-soft').style.display='';
-            document.getElementById('peaks-table-daq').style.display='none';
-        }
+        setWfMode(e.target.checked,false);
         if(selectedModule) showWaveform(selectedModule);
     };
     document.getElementById('btn-wf-stack-reset').onclick=()=>{
         wfStackTraces=[]; wfStackModKey='';
         if(selectedModule) showWaveform(selectedModule);
     };
-
-    // waveform DAQ mode (firmware Mode 1/2/3 emulation) — annotates the plot
-    // with TET, NSB/NSA, Vp, T markers per the FADC250 manual.
-    document.getElementById('wf-daq').checked=false;
     document.getElementById('wf-daq').onchange=e=>{
-        wfDaqEnabled=e.target.checked;
-        const info=document.getElementById('wf-daq-info');
-        info.style.display=wfDaqEnabled?'':'none';
-        document.getElementById('peaks-table-soft').style.display=wfDaqEnabled?'none':'';
-        document.getElementById('peaks-table-daq').style.display=wfDaqEnabled?'':'none';
-        // Mutually exclusive with Stack.
-        if(wfDaqEnabled && wfStackEnabled){
-            wfStackEnabled=false;
-            document.getElementById('wf-stack').checked=false;
-            document.getElementById('wf-stack-count').style.display='none';
-            document.getElementById('btn-wf-stack-reset').style.display='none';
-            wfStackTraces=[]; wfStackModKey='';
-        }
+        setWfMode(false,e.target.checked);
         if(selectedModule) showWaveform(selectedModule);
     };
 
@@ -752,10 +688,7 @@ function init(){
         ()=>document.getElementById('cl-hist-panel'),
         ()=>document.getElementById('cluster-panel'),
         ()=>0,
-        80, 80, ()=>{
-            try{Plotly.Plots.resize('cl-energy-hist');}catch(e){}
-            try{Plotly.Plots.resize('cl-rawe-hist');}catch(e){}
-        });
+        80, 80, ()=>resizePlots('cl-energy-hist','cl-rawe-hist'));
 
     registerPlot('lms-plot', 'lms', 'LMS History');
     registerPlot('physics-plot',       'physics', null, PC_EPICS);
@@ -767,56 +700,24 @@ function init(){
     initRegisteredPlots();
 
     // GEM APV tab toolbar (Process / Signal Only / Shared Y / sample mask).
-    if (typeof setupGemApvControls === 'function') setupGemApvControls();
+    setupGemApvControls();
 
     setupDivider('div-lms-ht','y',
         ()=>document.getElementById('lms-plot-panel'),
         ()=>document.getElementById('lms-panel'),
         ()=>0,
-        80, 80, ()=>{try{Plotly.Plots.resize('lms-plot');}catch(e){}});
+        80, 80, ()=>resizePlots('lms-plot'));
     document.getElementById('lms-color-metric').onchange=geoLms;
     document.getElementById('lms-log-scale').onchange=geoLms;
-
-    // LMS range editors
-    function lmsRangeGet(isMax){
-        const mt=document.getElementById('lms-color-metric').value;
-        return getGeoRange('lms',mt)[isMax?1:0];
-    }
-    function lmsRangeSet(isMax, v){
-        const mt=document.getElementById('lms-color-metric').value;
-        const r=getGeoRange('lms',mt);
-        if(isMax) setGeoRange('lms',mt,r[0],v);
-        else setGeoRange('lms',mt,v,r[1]);
-    }
-    setupRangeEdit('lms-range-min-btn','lms-range-min-edit','lms-range-min-show',
-        ()=>lmsRangeGet(false), v=>lmsRangeSet(false,v), geoLms);
-    setupRangeEdit('lms-range-max-btn','lms-range-max-edit','lms-range-max-show',
-        ()=>lmsRangeGet(true), v=>lmsRangeSet(true,v), geoLms);
     document.getElementById('lms-ref-select').onchange=e=>{
         g_lmsRefIndex=parseInt(e.target.value);
         fetchLmsSummary();
-        if(lmsSelectedModule>=0){
-            const name=lmsSummaryData&&lmsSummaryData.modules&&lmsSummaryData.modules[String(lmsSelectedModule)]
-                ?lmsSummaryData.modules[String(lmsSelectedModule)].name:'';
-            fetchLmsHistory(lmsSelectedModule, name);
-        }
+        refreshSelectedLmsHistory();
     };
 
     // --- file mode nav ---
-    document.getElementById('btn-prev').onclick=()=>{
-        navDirection=-1;
-        if(filteredIndices){
-            const pos=filteredIndices.indexOf(currentEvent);
-            if(pos>0) loadEvent(filteredIndices[pos-1]);
-        } else { if(currentEvent>1) loadEvent(currentEvent-1); }
-    };
-    document.getElementById('btn-next').onclick=()=>{
-        navDirection=1;
-        if(filteredIndices){
-            const pos=filteredIndices.indexOf(currentEvent);
-            if(pos>=0&&pos<filteredIndices.length-1) loadEvent(filteredIndices[pos+1]);
-        } else { if(currentEvent<totalEvents) loadEvent(currentEvent+1); }
-    };
+    document.getElementById('btn-prev').onclick=()=>stepEvent(-1);
+    document.getElementById('btn-next').onclick=()=>stepEvent(1);
     document.getElementById('ev-input').onchange=e=>{
         const v=parseInt(e.target.value);
         if(filteredIndices){
@@ -831,16 +732,11 @@ function init(){
 
     // --- file browser ---
     document.getElementById('btn-open').onclick = openFileDialog;
-    document.getElementById('file-dialog-close').onclick = closeFileDialog;
-    document.getElementById('file-backdrop').onclick = closeFileDialog;
+    wireDialogClose('file');
     document.getElementById('file-filter').oninput = e => filterFileList(e.target.value);
     document.addEventListener('keydown', e => {
-        if (e.key === 'Escape') {
-            if (document.getElementById('file-dialog').classList.contains('open'))
-                closeFileDialog();
-            if (document.getElementById('et-dialog').classList.contains('open'))
-                closeEtDialog();
-        }
+        if (e.key === 'Escape')
+            document.querySelectorAll('.file-dialog.open').forEach(d => setDialogOpen(d.id.replace(/-dialog$/, ''), false));
     });
 
     // --- range editing ---
@@ -873,29 +769,18 @@ function init(){
         });
         edit.addEventListener('blur',()=>{ applyEdit(); });
     }
-    // DQ range editors
-    function dqRangeApply(){
-        const mt=document.getElementById('color-metric').value;
-        setGeoRange('dq', mt, rangeMin, rangeMax);
-        updateRangeDisplay(); geoDq();
+    // Min/max editors (ids <prefix>range-{min,max}-{btn,edit,show}) of the
+    // colour range stored per (tab, metric) in geoRangeOverrides.
+    function bindRangeEditors(prefix, tab, metricFn, onApply){
+        ['min','max'].forEach((w,i)=>setupRangeEdit(
+            `${prefix}range-${w}-btn`, `${prefix}range-${w}-edit`, `${prefix}range-${w}-show`,
+            ()=>getGeoRange(tab,metricFn())[i],
+            v=>{ const r=getGeoRange(tab,metricFn()).slice(); r[i]=v; setGeoRange(tab,metricFn(),r[0],r[1]); },
+            onApply));
     }
-    setupRangeEdit('range-min-btn','range-min-edit','range-min-show',
-        ()=>rangeMin, v=>{rangeMin=v;}, dqRangeApply);
-    setupRangeEdit('range-max-btn','range-max-edit','range-max-show',
-        ()=>rangeMax, v=>{rangeMax=v;}, dqRangeApply);
-    // Cluster range editors
-    function clRangeApply(){ geoCluster(); }
-    setupRangeEdit('cl-range-min-btn','cl-range-min-edit','cl-range-min-show',
-        ()=>getGeoRange('cluster','energy')[0],
-        v=>{const r=getGeoRange('cluster','energy');setGeoRange('cluster','energy',v,r[1]);},
-        clRangeApply);
-    setupRangeEdit('cl-range-max-btn','cl-range-max-edit','cl-range-max-show',
-        ()=>getGeoRange('cluster','energy')[1],
-        v=>{const r=getGeoRange('cluster','energy');setGeoRange('cluster','energy',r[0],v);},
-        clRangeApply);
-
-    // Threshold edit lives in the Cut-Settings dialog (cut_dialog.js); no
-    // toolbar control here.
+    bindRangeEditors('','dq',()=>document.getElementById('color-metric').value,()=>{syncDqRange();geoDq();});
+    bindRangeEditors('cl-','cluster',()=>'energy',geoCluster);
+    bindRangeEditors('lms-','lms',()=>document.getElementById('lms-color-metric').value,geoLms);
 
     // --- online mode nav ---
     document.getElementById('ring-select').onchange=e=>{
@@ -904,7 +789,6 @@ function init(){
     };
     document.getElementById('ring-select').onfocus=()=>{ updateRingSelector(); };
     document.getElementById('follow-status').onclick=()=>{ autoFollow=true; updateFollowStatus(); loadLatestEvent(); };
-    // per-tab clear buttons
 
     // Theme toggle — cycles dark → light → classic → dark
     const themeBtn = document.getElementById('btn-theme');
@@ -933,11 +817,7 @@ function init(){
         // ref lines) bake THEME.cutShade at draw time, so a relayout
         // chrome patch isn't enough.  Re-run showWaveform to regenerate
         // the layout (calls wfLayout + showHistograms internally).
-        if (typeof selectedModule !== 'undefined' && selectedModule
-            && typeof showWaveform === 'function') {
-            if (typeof lastHistModule !== 'undefined') lastHistModule = '';
-            showWaveform(selectedModule);
-        }
+        if (selectedModule) { lastHistModule = ''; showWaveform(selectedModule); }
     });
 
     // Clear All — resets all tabs' data for new run
@@ -946,7 +826,7 @@ function init(){
     // Auto-report status pill — server picks the chosen client per END /
     // run-change; pill reflects auto_report.enabled and lights green
     // while we're the chosen reporter.
-    initAutoReport();
+    autoUpdateStatus();
 
     // mode toggle button — opens ET dialog when going online
     document.getElementById('btn-mode-toggle').onclick=()=>{
@@ -962,11 +842,7 @@ function init(){
 
 
     // ET connect dialog
-    const etBackdrop=document.getElementById('et-backdrop');
-    const etDialog=document.getElementById('et-dialog');
-    document.getElementById('et-dialog-close').onclick=()=>closeEtDialog();
-    document.getElementById('et-cancel').onclick=()=>closeEtDialog();
-    etBackdrop.onclick=()=>closeEtDialog();
+    const closeEtDialog=wireDialogClose('et','et-cancel');
     document.getElementById('et-connect').onclick=()=>{
         const cfg={
             host:    document.getElementById('et-input-host').value,
@@ -975,11 +851,7 @@ function init(){
             station: document.getElementById('et-input-station').value,
         };
         document.getElementById('et-status-msg').textContent='Connecting...';
-        fetch('/api/mode/online',{
-            method:'POST',
-            headers:{'Content-Type':'application/json'},
-            body:JSON.stringify(cfg),
-        }).then(r=>r.json()).then(d=>{
+        postJson('/api/mode/online', cfg).then(d=>{
             if(d.error){
                 document.getElementById('et-status-msg').textContent='Error: '+d.error;
             } else {
@@ -993,7 +865,6 @@ function init(){
 
     // geo mouse
     const tip=document.getElementById('geo-tooltip');
-    // build tooltip text for a module
     function tooltipText(m){
         let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
         if(activeTab==='lms' && lmsSummaryData){
@@ -1002,22 +873,20 @@ function init(){
             if(md){
                 const rmsPct=md.mean>0?(md.rms/md.mean*100).toFixed(1):'--';
                 t+=`\nLMS Mean: ${md.mean.toFixed(1)}  RMS: ${md.rms.toFixed(2)}  (${rmsPct}%)`;
-                t+=`\n${md.count} pts  ${md.warn?'⚠ WARNING':'OK'}`;
+                t+=`\n${md.count} pts  ${lmsState(md)!=='ok'?'⚠ WARNING':'OK'}`;
             } else { t+='\nNo LMS data'; }
         } else if(activeTab==='cluster' && clusterData){
             const idx=modules.indexOf(m);
             const energy=clusterData.hits?clusterData.hits[String(idx)]:0;
             if(energy) t+=`\nEnergy: ${energy.toFixed(1)} MeV`;
-            const clusters=clusterData.clusters||[];
-            for(let ci=0;ci<clusters.length;ci++){
-                if(clusters[ci].modules&&clusters[ci].modules.includes(idx)){
-                    t+=`\nCluster #${ci} (${clusters[ci].center}, ${clusters[ci].energy.toFixed(0)} MeV)`;
-                    break;
-                }
+            const ci=clusterOfModule(idx);
+            if(ci>=0){
+                const cl=clusterData.clusters[ci];
+                t+=`\nCluster #${ci} (${cl.center}, ${cl.energy.toFixed(0)} MeV)`;
             }
         } else {
-            const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
             const key=`${m.roc}_${m.sl}_${m.ch}`;
+            const d=eventChannels[key];
             if(d&&d.pk&&d.pk.length){
                 const pks=peaksInCut(d.pk);
                 const bp=tallest(pks);
@@ -1026,12 +895,9 @@ function init(){
                 else t+=`\nPed ${d.pm.toFixed(1)}  (no peaks${tc?' in time cut':''})`;
             }
             else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
-            if(occTotal>0){
-                const tc=isTimeCut();
-                const occ=tc?occTcutData:occData;
-                const pct=100.0*(occ[key]||0)/occTotal;
-                t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${tc?' tcut':''})`;
-            } else if(histEnabled===false){
+            const pct=occPct(key);
+            if(pct!==null) t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${isTimeCut()?' tcut':''})`;
+            else if(histEnabled===false){
                 t+=`\nOcc: not computed (enable histograms)`;
             }
         }
@@ -1052,7 +918,7 @@ function init(){
             tip.style.left=(e.clientX-r.left+14)+'px';tip.style.top=(e.clientY-r.top-8)+'px';
         }else tip.style.display='none';
     });
-    // click is now handled via geoHandleClick (called from mouseup when drag threshold not exceeded)
+    // clicks go through geoHandleClick (geo.js mouseup below the drag threshold)
     geoCanvas.addEventListener('mouseleave',()=>{
         hoveredModule=null;tip.style.display='none';
         renderGeoOutlines(_geoOutlineFn, _geoDecorateFn);
@@ -1060,14 +926,8 @@ function init(){
     document.addEventListener('keydown',e=>{
         if(e.target.tagName==='INPUT'||e.target.tagName==='SELECT')return;
         if(mode==='file'){
-            if(filteredIndices){
-                const pos=filteredIndices.indexOf(currentEvent);
-                if(e.key==='ArrowLeft'&&pos>0){navDirection=-1;loadEvent(filteredIndices[pos-1]);}
-                if(e.key==='ArrowRight'&&pos<filteredIndices.length-1){navDirection=1;loadEvent(filteredIndices[pos+1]);}
-            } else {
-                if(e.key==='ArrowLeft'&&currentEvent>1){navDirection=-1;loadEvent(currentEvent-1);}
-                if(e.key==='ArrowRight'&&currentEvent<totalEvents){navDirection=1;loadEvent(currentEvent+1);}
-            }
+            if(e.key==='ArrowLeft') stepEvent(-1);
+            if(e.key==='ArrowRight') stepEvent(1);
         } else {
             if(e.key==='ArrowLeft'||e.key==='ArrowRight'){
                 // navigate ring buffer

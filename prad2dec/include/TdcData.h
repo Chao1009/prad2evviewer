@@ -3,7 +3,8 @@
 // TdcData.h — pre-allocated event data for V1190 TDC readout (0xE107)
 //
 // The 0xE107 bank is emitted by rol2.c after reformatting the raw v1190/v1290
-// hardware stream. Each 32-bit word is a single TDC hit packed as:
+// hardware stream (docs/rols/clonbanks_20260406.xml). Each 32-bit word is a
+// single TDC hit packed as:
 //
 //   bits 31:27 — slot       (5 bits, 0-31)
 //   bit  26    — edge       (0 = leading, 1 = trailing)
@@ -27,11 +28,10 @@ namespace tdc
 
 // --- TDC tick calibration --------------------------------------------------
 // Single source of truth for converting the 19-bit TDC value to ns. Raffaella's
-// dedicated calibration gives 23.436 ps per TDC channel; earlier estimates from
-// Sergey Boyarinov (2026-05-05) were ~24 ps for the rol2-normalized stream, with
-// the underlying V1190 LSB after the V1190→V1290 left-shift at 25 ps. Use
-// TDC_LSB_NS rather than embedding a magic constant in analysis code.
-static constexpr double TDC_LSB_NS = 23.436e-3; // 23.436 ps per TDC ch, from Raffaella
+// dedicated calibration gives 23.436 ps per TDC channel (nominal LSB after the
+// V1190→V1290 left-shift: 25 ps). Use TDC_LSB_NS rather than embedding a magic
+// constant in analysis code.
+static constexpr double TDC_LSB_NS = 23.436e-3;
 
 // --- PRad-II RF reference cabling ------------------------------------------
 // Channels 0 and 8 of slot 16 in ROC 0x40 carry the divided CEBAF RF
@@ -47,7 +47,7 @@ static constexpr uint8_t  RF_CH_B    = 8;
 // 4096 comfortably covers a saturated tagger event without heap growth.
 static constexpr int MAX_TDC_HITS = 4096;
 
-// Optional per-slot/channel index for fast lookup.
+// V1190 addressing limits.
 static constexpr int MAX_TDC_SLOTS    = 32;   // V1190 slot field is 5 bits
 static constexpr int MAX_TDC_CHANNELS = 128;  // V1190 has 128 channels/board
 
@@ -58,7 +58,7 @@ struct TdcHit
     uint8_t  slot;      // 5-bit slot, V1190 board position in the VME crate
     uint8_t  channel;   // 7-bit channel, 0-127
     uint8_t  edge;      // 0 = leading, 1 = trailing
-    uint32_t value;     // 19-bit TDC value (LSB = 25 ps after rol2 shift)
+    uint32_t value;     // 19-bit TDC value (× TDC_LSB_NS for ns)
 };
 
 // --- full event data --------------------------------------------------------

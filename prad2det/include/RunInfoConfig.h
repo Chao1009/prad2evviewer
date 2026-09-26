@@ -30,14 +30,19 @@
 //   * gem_pedestals: pick one entry (largest from_run <= run_num),
 //     override gem.pedestal_file / gem.common_mode_file on the merged
 //     result.  No chaining — each pedestal table row is self-contained.
+//   * beam_target_positions / hycal_dead_modules: same single-entry pick,
+//     overriding `target` / the dead-module list.
 //
 // `run_number` is accepted as an alias for `from_run`, and either of the
 // new blocks may be omitted — older runinfo files (no defaults, no
 // gem_pedestals; gem.pedestal_file inline in each entry) still load.
 //
-// Header-only (nlohmann::json + std).  Lives in prad2det/include/ so all
-// libraries can pull it in without dragging analysis/ROOT dependencies.
+// Header-only (nlohmann::json + std, plus prad2dec's JsonUtil.h).  Lives in
+// prad2det/include/ so all libraries can pull it in without dragging
+// analysis/ROOT dependencies.
 //=============================================================================
+
+#include "JsonUtil.h"
 
 #include <nlohmann/json.hpp>
 
@@ -56,8 +61,6 @@
 namespace prad2 {
 
 // Holds all run-specific detector geometry and beam parameters.
-// Defaults match the historical 2.2 GeV setup so single-run tools that
-// fail to load a runinfo file still produce sensible numbers.
 struct RunConfig {
     std::string energy_calib_file;
     float default_adc2mev = 0.12f;
@@ -89,7 +92,7 @@ struct RunConfig {
     bool  matching_use_square = true;
     bool  matching_energy_dependent = true;
     float matching_sigma = 5.f;
-    // For gain correction: which run to use as reference for computing the correction factors.  If negative, use the latest run with gain factors available.
+    // For gain correction: which run to use as reference for computing the correction factors (negative = none).
     std::string gain_data_dir = "";
     int gain_ref_run = 23915;
     // Optional per-module HyCal peak-time window file (relative to database
@@ -106,15 +109,20 @@ struct RunConfig {
     std::vector<std::string> hycal_dead_modules;
 };
 
-// Returns a RunConfig populated by chaining all matching `configurations`
-// entries (and one `gem_pedestals` entry) from `path`.
-//
-// Selection rule:
-//   * configurations: every entry with from_run <= run_num (or every
-//     entry when run_num < 0), applied in ascending from_run order.
-//   * gem_pedestals: the single entry with the largest from_run <= run_num
-//     (latest overall when run_num < 0).
-// `run_number` is accepted as an alias for `from_run`.
+namespace detail {
+// Pull the trigger-run integer off an entry; supports `from_run` (new)
+// and `run_number` (legacy alias).  Returns -1 if neither is present.
+inline int RunEntryFromRun(const nlohmann::json &e)
+{
+    if (e.contains("from_run"))   return e["from_run"].get<int>();
+    if (e.contains("run_number")) return e["run_number"].get<int>();
+    return -1;
+}
+} // namespace detail
+
+// Returns a RunConfig populated from `path` following the lookup rules at
+// the top of this file.  Detector positions are returned relative to the
+// target (beam-centre frame).
 //
 // On any failure (file missing, parse error, no "configurations" array,
 // no matching entry) emits a warning and returns the default-constructed
@@ -124,16 +132,10 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
 {
     RunConfig result;
 
-    std::ifstream f(path);
-    if (!f) {
-        std::cerr << "Warning: cannot open runinfo file " << path
-                  << ", using defaults.\n";
-        return result;
-    }
-    auto cfg = nlohmann::json::parse(f, nullptr, false, true);
-    if (cfg.is_discarded()) {
-        std::cerr << "Warning: failed to parse " << path
-                  << ", using defaults.\n";
+    nlohmann::json cfg;
+    std::string err;
+    if (!read_json_file(path, cfg, &err)) {
+        std::cerr << "Warning: " << err << ", using defaults.\n";
         return result;
     }
     if (!cfg.contains("configurations") || !cfg["configurations"].is_array()) {
@@ -142,21 +144,13 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
         return result;
     }
 
-    // Pull the trigger-run integer off an entry; supports `from_run` (new)
-    // and `run_number` (legacy alias).  Returns -1 if neither is present.
-    auto entry_from_run = [](const nlohmann::json &e) -> int {
-        if (e.contains("from_run"))   return e["from_run"].get<int>();
-        if (e.contains("run_number")) return e["run_number"].get<int>();
-        return -1;
-    };
-
     // Pick the largest entry with from_run <= run_num (or the largest
-    // overall when run_num < 0).  Used by the gem_pedestals lookup.
+    // overall when run_num < 0).
     auto pick_best = [&](const nlohmann::json &arr) -> std::pair<const nlohmann::json *, int> {
         const nlohmann::json *best = nullptr;
         int best_run = -1;
         for (const auto &e : arr) {
-            int rn = entry_from_run(e);
+            int rn = detail::RunEntryFromRun(e);
             if (rn < 0) continue;
             if (run_num < 0) {
                 if (rn > best_run) { best = &e; best_run = rn; }
@@ -175,7 +169,7 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
     {
         std::vector<std::pair<int, const nlohmann::json *>> chain;
         for (const auto &e : arr) {
-            int rn = entry_from_run(e);
+            int rn = detail::RunEntryFromRun(e);
             if (rn < 0) continue;
             if (run_num >= 0 && rn > run_num) continue;
             chain.emplace_back(rn, &e);
@@ -186,8 +180,8 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
     };
 
     // Field-by-field overlay.  Called with `defaults` first (if present),
-    // then the picked configurations entry — each pass only writes fields
-    // it actually contains, so the period entry overlays defaults.
+    // then each chained configurations entry — each pass only writes fields
+    // it actually contains, so later entries overlay earlier ones.
     auto apply_entry = [&](const nlohmann::json &c) {
         if (c.contains("beam_energy")) result.Ebeam = c["beam_energy"].get<float>();
         if (c.contains("calibration")) {
@@ -195,23 +189,11 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
             if (cal.contains("file"))            result.energy_calib_file = cal["file"].get<std::string>();
             if (cal.contains("default_adc2mev")) result.default_adc2mev   = cal["default_adc2mev"].get<float>();
         }
-        if (c.contains("target") && c["target"].is_array() && c["target"].size() >= 3) {
-            result.target_x = c["target"][0].get<float>();
-            result.target_y = c["target"][1].get<float>();
-            result.target_z = c["target"][2].get<float>();
-        }
+        read_json_array(c, "target", result.target_x, result.target_y, result.target_z);
         if (c.contains("hycal")) {
             const auto &h = c["hycal"];
-            if (h.contains("position") && h["position"].is_array() && h["position"].size() >= 3) {
-                result.hycal_x = h["position"][0].get<float>();
-                result.hycal_y = h["position"][1].get<float>();
-                result.hycal_z = h["position"][2].get<float>();
-            }
-            if (h.contains("tilting") && h["tilting"].is_array() && h["tilting"].size() >= 3) {
-                result.hycal_tilt_x = h["tilting"][0].get<float>();
-                result.hycal_tilt_y = h["tilting"][1].get<float>();
-                result.hycal_tilt_z = h["tilting"][2].get<float>();
-            }
+            read_json_array(h, "position", result.hycal_x, result.hycal_y, result.hycal_z);
+            read_json_array(h, "tilting", result.hycal_tilt_x, result.hycal_tilt_y, result.hycal_tilt_z);
         }
         if (c.contains("gem") && c["gem"].is_object()) {
             const auto &g = c["gem"];
@@ -222,26 +204,14 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
                     if (!d.contains("id")) continue;
                     int id = d["id"].get<int>();
                     if (id < 0 || id >= 4) continue;
-                    if (d.contains("position") && d["position"].is_array() && d["position"].size() >= 3) {
-                        result.gem_x[id] = d["position"][0].get<float>();
-                        result.gem_y[id] = d["position"][1].get<float>();
-                        result.gem_z[id] = d["position"][2].get<float>();
-                    }
-                    if (d.contains("tilting") && d["tilting"].is_array() && d["tilting"].size() >= 3) {
-                        result.gem_tilt_x[id] = d["tilting"][0].get<float>();
-                        result.gem_tilt_y[id] = d["tilting"][1].get<float>();
-                        result.gem_tilt_z[id] = d["tilting"][2].get<float>();
-                    }
+                    read_json_array(d, "position", result.gem_x[id], result.gem_y[id], result.gem_z[id]);
+                    read_json_array(d, "tilting", result.gem_tilt_x[id], result.gem_tilt_y[id], result.gem_tilt_z[id]);
                 }
             }
         }
         if (c.contains("time_cuts")) {
             const auto &tc = c["time_cuts"];
-            if (tc.contains("hc_time_window") && tc["hc_time_window"].is_array()
-                    && tc["hc_time_window"].size() >= 2) {
-                result.hc_time_win_lo = tc["hc_time_window"][0].get<float>();
-                result.hc_time_win_hi = tc["hc_time_window"][1].get<float>();
-            }
+            read_json_array(tc, "hc_time_window", result.hc_time_win_lo, result.hc_time_win_hi);
             if (tc.contains("hycal_module_file"))
                 result.hycal_time_cut_file = tc["hycal_module_file"].get<std::string>();
             if (tc.contains("hycal_rf_offsets"))
@@ -299,12 +269,8 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
     int best_beam_run = -1;
     if (cfg.contains("beam_target_positions") && cfg["beam_target_positions"].is_array()) {
         auto [btp, btp_run] = pick_best(cfg["beam_target_positions"]);
-        if (btp != nullptr && btp->contains("target") && (*btp)["target"].is_array() && (*btp)["target"].size() >= 3) {
-            result.target_x = (*btp)["target"][0].get<float>();
-            result.target_y = (*btp)["target"][1].get<float>();
-            result.target_z = (*btp)["target"][2].get<float>();
+        if (btp != nullptr && read_json_array(*btp, "target", result.target_x, result.target_y, result.target_z))
             best_beam_run = btp_run;
-        }
     }
 
     // 5) HyCal dead modules: independent lookup. Each entry replaces the
@@ -331,7 +297,8 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
     std::cerr << " from " << path << "\n";
 
     // If gain_data_dir is empty (not set in JSON, or explicitly set to ""),
-    // fall back to <db>/gain_factor derived from the runinfo file location.
+    // fall back to <db>/gain_factor/gain_correction derived from the runinfo
+    // file location.
     if (result.gain_data_dir.empty()) {
         result.gain_data_dir =
             std::filesystem::path(path).parent_path().parent_path().string()
@@ -428,13 +395,8 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
 
     auto &arr = cfg["configurations"];
     bool replaced = false;
-    auto entry_from_run = [](const nlohmann::json &e) -> int {
-        if (e.contains("from_run"))   return e["from_run"].get<int>();
-        if (e.contains("run_number")) return e["run_number"].get<int>();
-        return -1;
-    };
     for (auto &e : arr) {
-        if (entry_from_run(e) == run_num) {
+        if (detail::RunEntryFromRun(e) == run_num) {
             // Merge entry into e field-by-field: existing keys are updated
             // in-place (preserving their original position); new keys are
             // appended at the end.
@@ -447,11 +409,7 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
     if (!replaced) arr.push_back(entry);
 
     std::sort(arr.begin(), arr.end(), [](const nlohmann::json &a, const nlohmann::json &b) {
-     int ra = a.contains("from_run")   ? a["from_run"].get<int>()
-         : a.contains("run_number") ? a["run_number"].get<int>() : -1;
-     int rb = b.contains("from_run")   ? b["from_run"].get<int>()
-         : b.contains("run_number") ? b["run_number"].get<int>() : -1;
-        return ra < rb;
+        return detail::RunEntryFromRun(a) < detail::RunEntryFromRun(b);
     });
 
     std::string tmp = path + ".tmp";
@@ -461,30 +419,11 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
             std::cerr << "Error: cannot write " << tmp << "\n";
             return false;
         }
-        // Custom JSON dump with 3-decimal precision for floats
-        // First, recursively limit float precision
-        std::function<void(nlohmann::json&)> limit_precision = [&](nlohmann::json& j) {
-            if (j.is_object()) {
-                for (auto& [key, val] : j.items()) {
-                    if (val.is_number_float()) {
-                        double d = val.get<double>();
-                        // Round to 3 decimal places
-                        d = std::round(d * 1000.0) / 1000.0;
-                        j[key] = d;
-                    } else if (val.is_array() || val.is_object()) {
-                        limit_precision(val);
-                    }
-                }
-            } else if (j.is_array()) {
-                for (auto& val : j) {
-                    if (val.is_number_float()) {
-                        double d = val.get<double>();
-                        d = std::round(d * 1000.0) / 1000.0;
-                        val = d;
-                    } else if (val.is_array() || val.is_object()) {
-                        limit_precision(val);
-                    }
-                }
+        // Round floats to 1e-3 before dumping.
+        std::function<void(nlohmann::json&)> limit_precision = [&](nlohmann::json &j) {
+            for (auto &v : j) {
+                if (v.is_number_float()) v = std::round(v.get<double>() * 1000.0) / 1000.0;
+                else if (v.is_structured()) limit_precision(v);
             }
         };
         limit_precision(cfg);
@@ -492,7 +431,6 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
         std::string output = cfg.dump(4);
         
         // Compact arrays with 3 numbers on one line: [ num, num, num ]
-        // Pattern: "[\n    number,\n    number,\n    number\n    ]"
         std::regex array_pattern(R"(\[\s*(-?[\d.]+),\s*(-?[\d.]+),\s*(-?[\d.]+)\s*\])");
         output = std::regex_replace(output, array_pattern, "[$1, $2, $3]");
         

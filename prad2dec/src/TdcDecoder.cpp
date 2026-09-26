@@ -1,9 +1,40 @@
 #include "TdcDecoder.h"
+#include "EvStruct.h"
 
 #include <cmath>
 #include <limits>
 
 using namespace tdc;
+
+namespace
+{
+
+TdcHit decode_hit(uint32_t w, uint32_t roc_tag)
+{
+    TdcHit h;
+    h.roc_tag = roc_tag;
+    h.slot    = static_cast<uint8_t>((w >> 27) & 0x1F);
+    h.edge    = static_cast<uint8_t>((w >> 26) & 0x1);
+    h.channel = static_cast<uint8_t>((w >> 19) & 0x7F);
+    h.value   = w & 0x7FFFF;
+    return h;
+}
+
+void push_rf(RfTimeData &out, const TdcHit &h,
+             uint8_t rf_slot, uint8_t rf_ch_a, uint8_t rf_ch_b)
+{
+    if (h.slot != rf_slot || h.edge != 0) return;   // leading edges only
+    float t_ns = static_cast<float>(h.value * TDC_LSB_NS);
+    if (h.channel == rf_ch_a) {
+        if (out.n_a < RfTimeData::MAX_HITS_PER_CH)
+            out.ns_a[out.n_a++] = t_ns;
+    } else if (h.channel == rf_ch_b) {
+        if (out.n_b < RfTimeData::MAX_HITS_PER_CH)
+            out.ns_b[out.n_b++] = t_ns;
+    }
+}
+
+} // namespace
 
 int TdcDecoder::DecodeRoc(const uint32_t *data, size_t nwords,
                           uint32_t roc_tag, TdcEventData &evt)
@@ -11,13 +42,7 @@ int TdcDecoder::DecodeRoc(const uint32_t *data, size_t nwords,
     int appended = 0;
     for (size_t i = 0; i < nwords; ++i) {
         if (evt.n_hits >= MAX_TDC_HITS) break;
-        uint32_t w = data[i];
-        TdcHit &h = evt.hits[evt.n_hits++];
-        h.roc_tag = roc_tag;
-        h.slot    = static_cast<uint8_t>((w >> 27) & 0x1F);
-        h.edge    = static_cast<uint8_t>((w >> 26) & 0x1);
-        h.channel = static_cast<uint8_t>((w >> 19) & 0x7F);
-        h.value   = w & 0x7FFFF;
+        evt.hits[evt.n_hits++] = decode_hit(data[i], roc_tag);
         ++appended;
     }
     return appended;
@@ -29,16 +54,11 @@ int TdcDecoder::DecodeReplay(const std::vector<uint32_t> &roc_tags,
                              TdcEventData &evt)
 {
     evt.clear();
-    if (roc_tags.size() != nwords.size()) return 0;
-
     int total = 0;
-    size_t off = 0;
-    for (size_t i = 0; i < roc_tags.size(); ++i) {
-        size_t n = nwords[i];
-        if (off + n > words.size()) break;        // truncated/corrupt entry
-        total += DecodeRoc(words.data() + off, n, roc_tags[i], evt);
-        off += n;
-    }
+    evc::ForEachFlatBank(roc_tags, nwords, words,
+        [&](uint32_t roc, const uint32_t *d, size_t n) {
+            total += DecodeRoc(d, n, roc, evt);
+        });
     return total;
 }
 
@@ -65,16 +85,8 @@ void RfTimeDecoder::Extract(const TdcEventData &all, RfTimeData &out,
     out.clear();
     for (int i = 0; i < all.n_hits; ++i) {
         const TdcHit &h = all.hits[i];
-        if (h.roc_tag != rf_roc_tag) continue;
-        if (h.slot    != rf_slot)    continue;
-        if (h.edge    != 0)          continue;   // leading edges only
-        if (h.channel == rf_ch_a) {
-            if (out.n_a < RfTimeData::MAX_HITS_PER_CH)
-                out.ns_a[out.n_a++] = static_cast<float>(h.value * TDC_LSB_NS);
-        } else if (h.channel == rf_ch_b) {
-            if (out.n_b < RfTimeData::MAX_HITS_PER_CH)
-                out.ns_b[out.n_b++] = static_cast<float>(h.value * TDC_LSB_NS);
-        }
+        if (h.roc_tag == rf_roc_tag)
+            push_rf(out, h, rf_slot, rf_ch_a, rf_ch_b);
     }
 }
 
@@ -86,29 +98,10 @@ void RfTimeDecoder::DecodeReplay(const std::vector<uint32_t> &roc_tags,
                                  uint8_t rf_ch_a,    uint8_t rf_ch_b)
 {
     out.clear();
-    if (roc_tags.size() != nwords.size()) return;
-
-    size_t off = 0;
-    for (size_t i = 0; i < roc_tags.size(); ++i) {
-        size_t n = nwords[i];
-        if (off + n > words.size()) break;
-        if (roc_tags[i] != rf_roc_tag) { off += n; continue; }
-        for (size_t k = 0; k < n; ++k) {
-            uint32_t w = words[off + k];
-            uint8_t slot = static_cast<uint8_t>((w >> 27) & 0x1F);
-            if (slot != rf_slot) continue;
-            uint8_t edge = static_cast<uint8_t>((w >> 26) & 0x1);
-            if (edge != 0) continue;
-            uint8_t chan = static_cast<uint8_t>((w >> 19) & 0x7F);
-            float t_ns = static_cast<float>((w & 0x7FFFF) * TDC_LSB_NS);
-            if (chan == rf_ch_a) {
-                if (out.n_a < RfTimeData::MAX_HITS_PER_CH)
-                    out.ns_a[out.n_a++] = t_ns;
-            } else if (chan == rf_ch_b) {
-                if (out.n_b < RfTimeData::MAX_HITS_PER_CH)
-                    out.ns_b[out.n_b++] = t_ns;
-            }
-        }
-        off += n;
-    }
+    evc::ForEachFlatBank(roc_tags, nwords, words,
+        [&](uint32_t roc, const uint32_t *d, size_t n) {
+            if (roc != rf_roc_tag) return;
+            for (size_t k = 0; k < n; ++k)
+                push_rf(out, decode_hit(d[k], roc), rf_slot, rf_ch_a, rf_ch_b);
+        });
 }

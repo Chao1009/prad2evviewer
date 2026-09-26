@@ -1,15 +1,17 @@
 #include "PipelineBuilder.h"
 
+#include "EvioFiles.h"
+#include "InstallPaths.h"
+#include "JsonUtil.h"
+#include "SspData.h"
 #include "load_daq_config.h"
 
 #include <nlohmann/json.hpp>
 
-#include <cstdlib>
-#include <fstream>
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 #include <limits>
-#include <regex>
 #include <sstream>
 #include <stdexcept>
 #include <cctype>
@@ -19,44 +21,7 @@ using nlohmann::json;
 
 namespace prad2 {
 
-// =========================================================================
-// internal helpers
-// =========================================================================
-
 namespace {
-
-bool is_absolute_path(const std::string &p)
-{
-    if (p.empty()) return false;
-    if (p[0] == '/' || p[0] == '\\') return true;
-    if (p.size() >= 2 && p[1] == ':') return true;  // Windows drive letter
-    return false;
-}
-
-int sniff_run_from_basename(const std::string &path)
-{
-    if (path.empty()) return -1;
-    // Strip directory.
-    auto slash = path.find_last_of("/\\");
-    std::string base = (slash == std::string::npos) ? path
-                                                    : path.substr(slash + 1);
-    static const std::regex pat(R"((?:prad|run)_0*(\d+))",
-                                std::regex_constants::icase);
-    std::smatch m;
-    if (std::regex_search(base, m, pat)) {
-        try { return std::stoi(m[1].str()); } catch (...) {}
-    }
-    return -1;
-}
-
-json parse_json_file(const std::string &path)
-{
-    std::ifstream f(path);
-    if (!f) return json::object();
-    auto j = json::parse(f, nullptr, /*allow_exceptions=*/false,
-                         /*ignore_comments=*/true);
-    return j.is_discarded() ? json::object() : j;
-}
 
 bool read_json_bool(const json &obj, const char *key, bool def)
 {
@@ -142,10 +107,6 @@ void apply_hycal_cluster_overrides(const json &j, fdec::ClusterConfig &cfg)
 
 } // namespace
 
-// =========================================================================
-// fluent setters
-// =========================================================================
-
 PipelineBuilder &PipelineBuilder::set_database_dir(std::string p)      { database_dir_         = std::move(p); return *this; }
 PipelineBuilder &PipelineBuilder::set_daq_config(std::string p)        { daq_config_path_      = std::move(p); return *this; }
 
@@ -169,7 +130,7 @@ PipelineBuilder &PipelineBuilder::set_run_number(int n)                { run_num
 
 PipelineBuilder &PipelineBuilder::set_run_number_from_evio(const std::string &p)
 {
-    int n = sniff_run_from_basename(p);
+    int n = prad2::run_number_from_path(p);
     if (n > 0) run_number_ = n;
     return *this;
 }
@@ -194,31 +155,28 @@ PipelineBuilder &PipelineBuilder::set_path_resolver(
     return *this;
 }
 
-// =========================================================================
-// build()
-// =========================================================================
-
 Pipeline PipelineBuilder::build()
 {
     // --- resolve effective log target -------------------------------------
     std::ostream *log = log_stream_default_ ? &std::cerr : log_stream_;
-    auto LOG = [log](const std::string &line) {
-        if (log) (*log) << line << '\n';
+    // One line per call; a fresh stream keeps manipulators from leaking.
+    auto LOG = [log](const auto &...parts) {
+        if (!log) return;
+        std::ostringstream oss;
+        (oss << ... << parts);
+        (*log) << oss.str() << '\n';
     };
 
     // --- resolve database dir + path resolver -----------------------------
-    std::string db_dir = database_dir_;
-    if (db_dir.empty()) {
-        if (const char *env = std::getenv("PRAD2_DATABASE_DIR"))
-            db_dir = env;
-        else
-            db_dir = "database";
-    }
+    const std::string db_dir = database_dir_.empty() ? prad2::database_dir() : database_dir_;
     auto resolve = [&](const std::string &p) -> std::string {
-        if (p.empty()) return p;
-        if (is_absolute_path(p)) return p;
+        if (p.empty() || prad2::is_absolute_path(p)) return p;
         if (path_resolver_) return path_resolver_(p);
-        return db_dir + "/" + p;
+        return prad2::resolve_db_path(p, db_dir);
+    };
+    // The builder override if set, else the default.
+    auto pick = [&](const std::string &over, const std::string &def) {
+        return resolve(over.empty() ? def : over);
     };
 
     Pipeline out;
@@ -229,22 +187,16 @@ Pipeline PipelineBuilder::build()
         // If the caller knows the source path, surface it; otherwise leave
         // empty so logs make it obvious nothing was loaded by the builder.
         out.daq_config_path = daq_config_path_;
-        std::ostringstream oss;
-        oss << "[setup] DAQ config : (caller-supplied)"
-            << (daq_config_path_.empty() ? "" : " " + daq_config_path_);
-        LOG(oss.str());
+        LOG("[setup] DAQ config : (caller-supplied)",
+            daq_config_path_.empty() ? "" : " " + daq_config_path_);
     } else {
-        std::string daq_path = daq_config_path_.empty()
-            ? resolve("daq_config.json")
-            : resolve(daq_config_path_);
+        const std::string daq_path = pick(daq_config_path_, "daq_config.json");
         if (daq_path.empty() || !evc::load_daq_config(daq_path, out.daq_cfg)) {
             throw std::runtime_error(
                 "PipelineBuilder: cannot load DAQ config '" + daq_path + "'");
         }
         out.daq_config_path = daq_path;
-        std::ostringstream oss;
-        oss << "[setup] DAQ config : " << daq_path;
-        LOG(oss.str());
+        LOG("[setup] DAQ config : ", daq_path);
     }
 
     // --- 2. GEM crate remap from daq_cfg.roc_tags ------------------------
@@ -253,43 +205,36 @@ Pipeline PipelineBuilder::build()
             out.gem_crate_remap[(int)re.tag] = re.crate;
 
     // --- 3. recon config (soft — falls back to library defaults) ----------
-    std::string recon_path = recon_config_path_.empty()
-        ? resolve("reconstruction_config.json")
-        : resolve(recon_config_path_);
-    json recon = parse_json_file(recon_path);
+    const std::string recon_path = pick(recon_config_path_, "reconstruction_config.json");
+    json recon = json::object();
+    std::string recon_err;
+    prad2::read_json_file(recon_path, recon, &recon_err);
     if (recon.empty()) {
-        std::ostringstream oss;
-        oss << "[WARN] PipelineBuilder: cannot load reconstruction_config '"
-            << recon_path << "' — proceeding with library defaults.";
-        LOG(oss.str());
+        LOG("[WARN] PipelineBuilder: cannot load reconstruction_config '",
+            recon_path, "'", recon_err.empty() ? "" : " (" + recon_err + ")",
+            " — proceeding with library defaults.");
     } else {
         out.recon_config_path = recon_path;
     }
 
     // --- 4. runinfo (soft — defaults to RunConfig{} if absent) ------------
-    std::string ri_path = runinfo_path_;
-    if (ri_path.empty() && recon.contains("runinfo")
-            && recon["runinfo"].is_string())
-        ri_path = recon["runinfo"].get<std::string>();
-    ri_path = resolve(ri_path);
+    std::string recon_runinfo;
+    if (recon.contains("runinfo") && recon["runinfo"].is_string())
+        recon_runinfo = recon["runinfo"].get<std::string>();
+    const std::string ri_path = pick(runinfo_path_, recon_runinfo);
 
     out.run_number = run_number_;
     if (!ri_path.empty()) {
-        if (run_number_ > 0) {
-            std::ostringstream oss;
-            oss << "[setup] Run number : " << run_number_;
-            LOG(oss.str());
-        } else {
+        if (run_number_ > 0)
+            LOG("[setup] Run number : ", run_number_);
+        else
             LOG("[setup] Run number : (latest entry — no run-number override)");
-        }
         out.run_cfg      = prad2::LoadRunConfig(ri_path, run_number_);
         out.runinfo_path = ri_path;
-        std::ostringstream oss;
-        oss << "[setup] RunInfo    : " << ri_path
-            << "  beam=" << static_cast<int>(out.run_cfg.Ebeam)
-            << " MeV  hycal_z=" << std::fixed << std::setprecision(1)
-            << out.run_cfg.hycal_z << " mm";
-        LOG(oss.str());
+        LOG("[setup] RunInfo    : ", ri_path,
+            "  beam=", static_cast<int>(out.run_cfg.Ebeam),
+            " MeV  hycal_z=", std::fixed, std::setprecision(1),
+            out.run_cfg.hycal_z, " mm");
     } else {
         LOG("[WARN] PipelineBuilder: no runinfo path resolved — using default "
             "RunConfig (geometry/calibration paths empty).");
@@ -306,39 +251,24 @@ Pipeline PipelineBuilder::build()
     }
 
     // --- 6. HyCal map (soft — leaves hycal default-constructed on failure) -
-    std::string hc_map = hycal_map_path_.empty()
-        ? resolve("hycal_map.json")
-        : resolve(hycal_map_path_);
+    const std::string hc_map = pick(hycal_map_path_, "hycal_map.json");
     if (hc_map.empty()) {
         LOG("[WARN] PipelineBuilder: no HyCal map resolved.");
     } else if (!out.hycal.Init(hc_map)) {
-        std::ostringstream oss;
-        oss << "[WARN] PipelineBuilder: HyCalSystem.Init failed for '"
-            << hc_map << "'.";
-        LOG(oss.str());
+        LOG("[WARN] PipelineBuilder: HyCalSystem.Init failed for '", hc_map, "'.");
     } else {
         out.hycal_map_path = hc_map;
     }
 
-    if (recon.contains("hycal") && recon["hycal"].is_object()) {
-        const auto &h = recon["hycal"];
-        if (h.contains("energy_resolution") && h["energy_resolution"].is_array() &&
-                h["energy_resolution"].size() >= 3) {
-            out.hycal_energy_res[0] = h["energy_resolution"][0].get<float>();
-            out.hycal_energy_res[1] = h["energy_resolution"][1].get<float>();
-            out.hycal_energy_res[2] = h["energy_resolution"][2].get<float>();
-        }
-    }
+    if (recon.contains("hycal") && recon["hycal"].is_object())
+        prad2::read_json_array(recon["hycal"], "energy_resolution",
+            out.hycal_energy_res[0], out.hycal_energy_res[1], out.hycal_energy_res[2]);
     out.hycal.SetEnergyResolutionParams(
         out.hycal_energy_res[0], out.hycal_energy_res[1], out.hycal_energy_res[2]);
-    {
-        std::ostringstream oss;
-        oss << "[setup] HC sigma_E : E*sqrt("
-            << std::fixed << std::setprecision(3) << out.hycal_energy_res[0]
-            << "^2/E_GeV+" << out.hycal_energy_res[2]
-            << "^2+" << out.hycal_energy_res[1] << "^2/E_GeV^2)/100";
-        LOG(oss.str());
-    }
+    LOG("[setup] HC sigma_E : E*sqrt(",
+        std::fixed, std::setprecision(3), out.hycal_energy_res[0],
+        "^2/E_GeV+", out.hycal_energy_res[2],
+        "^2+", out.hycal_energy_res[1], "^2/E_GeV^2)/100");
 
     // --- 6a. Shared cluster profile --------------------------------------
     const std::string pwo_profile = resolve("cluster_profiles/prof_pwo.dat");
@@ -366,15 +296,11 @@ Pipeline PipelineBuilder::build()
     }
 
     // --- 7. HyCal calibration --------------------------------------------
-    std::string hc_calib = hycal_calib_path_.empty()
-        ? resolve(out.run_cfg.energy_calib_file)
-        : resolve(hycal_calib_path_);
+    const std::string hc_calib = pick(hycal_calib_path_, out.run_cfg.energy_calib_file);
     if (!hc_calib.empty()) {
         int n = out.hycal.LoadCalibration(hc_calib);
         out.hycal_calib_path = hc_calib;
-        std::ostringstream oss;
-        oss << "[setup] HC calib   : " << hc_calib << " (" << n << " modules)";
-        LOG(oss.str());
+        LOG("[setup] HC calib   : ", hc_calib, " (", n, " modules)");
     } else {
         LOG("[WARN] no HyCal calibration file — energies will be wrong.");
     }
@@ -391,19 +317,17 @@ Pipeline PipelineBuilder::build()
             : true;
 
         if (!enable_time_calib) {
-            (void)prad2::LoadHyCalTimeCalib("", out.hycal, 0.f);
+            (void)prad2::LoadHyCalTimeCalib("", out.hycal, 0.f, log);
             out.hycal_time_calib_path.clear();
             LOG("[setup] HC t calib: disabled by recon config (hycal.time_calib=false), using 0 ns offsets.");
         } else {
-            std::string hc_time_calib_path = hycal_time_calib_path_.empty()
-                ? ((has_hycal_cfg
-                    && recon["hycal"].contains("time_calib_file")
+            std::string recon_file;
+            if (has_hycal_cfg && recon["hycal"].contains("time_calib_file")
                     && recon["hycal"]["time_calib_file"].is_string())
-                        ? resolve(recon["hycal"]["time_calib_file"].get<std::string>())
-                        : std::string())
-                : resolve(hycal_time_calib_path_);
+                recon_file = recon["hycal"]["time_calib_file"].get<std::string>();
+            const std::string hc_time_calib_path = pick(hycal_time_calib_path_, recon_file);
             const auto time_calib = prad2::LoadHyCalTimeCalib(
-                hc_time_calib_path, out.hycal, 0.f);
+                hc_time_calib_path, out.hycal, 0.f, log);
             out.hycal_time_calib_path = hc_time_calib_path;
 
             std::ostringstream oss;
@@ -412,6 +336,8 @@ Pipeline PipelineBuilder::build()
                 oss << "  per-module=" << time_calib.n_overrides
                     << " (" << hc_time_calib_path << ")";
             }
+            if (time_calib.n_unknown > 0)
+                oss << "  unknown=" << time_calib.n_unknown;
             LOG(oss.str());
         }
     }
@@ -421,12 +347,10 @@ Pipeline PipelineBuilder::build()
     // so per-event callers can use a single code path.  The path comes
     // from runinfo's `time_cuts.hycal_module_file` unless overridden.
     {
-        std::string hc_time_path = hycal_time_cut_path_.empty()
-            ? resolve(out.run_cfg.hycal_time_cut_file)
-            : resolve(hycal_time_cut_path_);
+        const std::string hc_time_path = pick(hycal_time_cut_path_, out.run_cfg.hycal_time_cut_file);
         out.hycal_time_cuts = prad2::LoadHyCalTimeCuts(
             hc_time_path, out.hycal,
-            out.run_cfg.hc_time_win_lo, out.run_cfg.hc_time_win_hi);
+            out.run_cfg.hc_time_win_lo, out.run_cfg.hc_time_win_hi, log);
         out.hycal_time_cut_path = hc_time_path;
 
         std::ostringstream oss;
@@ -437,6 +361,8 @@ Pipeline PipelineBuilder::build()
             oss << "  per-module=" << out.hycal_time_cuts.n_overrides
                 << " (" << hc_time_path << ")";
         }
+        if (out.hycal_time_cuts.n_unknown > 0)
+            oss << "  unknown=" << out.hycal_time_cuts.n_unknown;
         LOG(oss.str());
     }
 
@@ -445,11 +371,9 @@ Pipeline PipelineBuilder::build()
     // so the per-event Δt fill uses a single call.  Path comes from
     // runinfo's `time_cuts.hycal_rf_offsets` unless overridden.
     {
-        std::string rf_off_path = hycal_rf_offset_path_.empty()
-            ? resolve(out.run_cfg.hycal_rf_offset_file)
-            : resolve(hycal_rf_offset_path_);
+        const std::string rf_off_path = pick(hycal_rf_offset_path_, out.run_cfg.hycal_rf_offset_file);
         out.hycal_rf_offsets = prad2::LoadHyCalRfOffsets(
-            rf_off_path, out.hycal, 0.f);
+            rf_off_path, out.hycal, 0.f, log);
         out.hycal_rf_offset_path = rf_off_path;
 
         std::ostringstream oss;
@@ -459,43 +383,33 @@ Pipeline PipelineBuilder::build()
             oss << "  per-module=" << out.hycal_rf_offsets.n_overrides
                 << " (" << rf_off_path << ")";
         }
+        if (out.hycal_rf_offsets.n_unknown > 0)
+            oss << "  unknown=" << out.hycal_rf_offsets.n_unknown;
         LOG(oss.str());
     }
 
     // --- 8. matching (HyCal sigma + GEM sigma + target sigma) ------------
     if (recon.contains("matching")) {
         const auto &m = recon["matching"];
-        if (m.contains("hycal_pos_res") && m["hycal_pos_res"].is_array()
-                && m["hycal_pos_res"].size() >= 3) {
-            out.hycal_pos_res[0] = m["hycal_pos_res"][0].get<float>();
-            out.hycal_pos_res[1] = m["hycal_pos_res"][1].get<float>();
-            out.hycal_pos_res[2] = m["hycal_pos_res"][2].get<float>();
-        }
+        prad2::read_json_array(m, "hycal_pos_res",
+            out.hycal_pos_res[0], out.hycal_pos_res[1], out.hycal_pos_res[2]);
         if (m.contains("gem_pos_res") && m["gem_pos_res"].is_array()) {
             out.gem_pos_res.clear();
             for (auto &v : m["gem_pos_res"])
                 out.gem_pos_res.push_back(v.get<float>());
         }
-        if (m.contains("target_pos_res") && m["target_pos_res"].is_array()
-                && m["target_pos_res"].size() >= 3) {
-            out.target_pos_res[0] = m["target_pos_res"][0].get<float>();
-            out.target_pos_res[1] = m["target_pos_res"][1].get<float>();
-            out.target_pos_res[2] = m["target_pos_res"][2].get<float>();
-        }
+        prad2::read_json_array(m, "target_pos_res",
+            out.target_pos_res[0], out.target_pos_res[1], out.target_pos_res[2]);
         if (m.contains("match_method") && m["match_method"].is_number_integer()) {
             out.match_method = m["match_method"].get<int>();
         }
     }
     out.hycal.SetPositionResolutionParams(
         out.hycal_pos_res[0], out.hycal_pos_res[1], out.hycal_pos_res[2]);
-    {
-        std::ostringstream oss;
-        oss << "[setup] HC sigma(E)= sqrt(("
-            << std::fixed << std::setprecision(3) << out.hycal_pos_res[0]
-            << "/sqrt(E_GeV))^2+(" << out.hycal_pos_res[1]
-            << "/E_GeV)^2+" << out.hycal_pos_res[2] << "^2) mm";
-        LOG(oss.str());
-    }
+    LOG("[setup] HC sigma(E)= sqrt((",
+        std::fixed, std::setprecision(3), out.hycal_pos_res[0],
+        "/sqrt(E_GeV))^2+(", out.hycal_pos_res[1],
+        "/E_GeV)^2+", out.hycal_pos_res[2], "^2) mm");
     {
         std::ostringstream oss;
         oss << "[setup] GEM sigma  : [";
@@ -525,12 +439,10 @@ Pipeline PipelineBuilder::build()
                 out.hycal, out.run_cfg.Ebeam);
             out.hycal_cluster_cfg.energy_bias = out.hycal_energy_bias;
 
-            std::ostringstream oss;
-            oss << "[setup] HC E bias : beam=" << out.run_cfg.Ebeam
-                << " MeV  set=" << set.nominal_mev
-                << " MeV  ee_cells=" << out.hycal_energy_bias->ee_cells_loaded
-                << "  ep_cells=" << out.hycal_energy_bias->ep_cells_loaded;
-            LOG(oss.str());
+            LOG("[setup] HC E bias : beam=", out.run_cfg.Ebeam,
+                " MeV  set=", set.nominal_mev,
+                " MeV  ee_cells=", out.hycal_energy_bias->ee_cells_loaded,
+                "  ep_cells=", out.hycal_energy_bias->ep_cells_loaded);
             if (out.hycal_energy_bias->ee_cells_loaded == 0 ||
                 out.hycal_energy_bias->ep_cells_loaded == 0) {
                 LOG("[WARN] HC E bias : one or both parameter files loaded no cells; zero-bias fallback is active.");
@@ -541,32 +453,24 @@ Pipeline PipelineBuilder::build()
     } else {
         LOG("[setup] HC E bias : disabled");
     }
-    {
-        std::ostringstream oss;
-        oss << "[setup] HC cluster : min_mod_E=" << out.hycal_cluster_cfg.min_module_energy
-            << "  min_ctr_E=" << out.hycal_cluster_cfg.min_center_energy
-            << "  min_cl_E=" << out.hycal_cluster_cfg.min_cluster_energy
-            << "  split_iter=" << out.hycal_cluster_cfg.split_iter
-            << "  nonlin=" << (out.hycal_cluster_cfg.non_linear_corr ? "on" : "off")
-            << "  E_bias=" << (out.hycal_cluster_cfg.energy_bias_correction ? "on" : "off")
-            << "  seed_t_win=" << out.hycal_cluster_cfg.seed_time_window << "ns"
-            << (out.hycal_cluster_cfg.seed_time_window > 0.f ? " (gated)" : " (off)");
-        LOG(oss.str());
-    }
+    LOG("[setup] HC cluster : min_mod_E=", out.hycal_cluster_cfg.min_module_energy,
+        "  min_ctr_E=", out.hycal_cluster_cfg.min_center_energy,
+        "  min_cl_E=", out.hycal_cluster_cfg.min_cluster_energy,
+        "  split_iter=", out.hycal_cluster_cfg.split_iter,
+        "  nonlin=", out.hycal_cluster_cfg.non_linear_corr ? "on" : "off",
+        "  E_bias=", out.hycal_cluster_cfg.energy_bias_correction ? "on" : "off",
+        "  seed_t_win=", out.hycal_cluster_cfg.seed_time_window, "ns",
+        out.hycal_cluster_cfg.seed_time_window > 0.f ? " (gated)" : " (off)");
 
     // --- 10. GEM map (soft — gem stays default-constructed on failure) ---
-    std::string gem_map = gem_map_path_.empty()
-        ? resolve("gem_map.json")
-        : resolve(gem_map_path_);
+    const std::string gem_map = pick(gem_map_path_, "gem_map.json");
     if (gem_map.empty()) {
         LOG("[WARN] PipelineBuilder: no GEM map resolved — GEM disabled.");
     } else {
         out.gem.Init(gem_map);
         out.gem_map_path = gem_map;
-        std::ostringstream oss;
-        oss << "[setup] GEM map    : " << gem_map
-            << "  (" << out.gem.GetNDetectors() << " detectors)";
-        LOG(oss.str());
+        LOG("[setup] GEM map    : ", gem_map,
+            "  (", out.gem.GetNDetectors(), " detectors)");
     }
 
     if (!out.gem_crate_remap.empty()) {
@@ -583,29 +487,21 @@ Pipeline PipelineBuilder::build()
     }
 
     // --- 11. GEM pedestals -----------------------------------------------
-    std::string ped_path = gem_pedestal_path_.empty()
-        ? resolve(out.run_cfg.gem_pedestal_file)
-        : resolve(gem_pedestal_path_);
+    const std::string ped_path = pick(gem_pedestal_path_, out.run_cfg.gem_pedestal_file);
     if (!ped_path.empty()) {
         out.gem.LoadPedestals(ped_path, out.gem_crate_remap);
         out.gem_pedestal_path = ped_path;
-        std::ostringstream oss;
-        oss << "[setup] GEM peds   : " << ped_path;
-        LOG(oss.str());
+        LOG("[setup] GEM peds   : ", ped_path);
     } else {
         LOG("[WARN] no GEM pedestal file — full-readout data reconstructs empty.");
     }
 
     // --- 12. GEM common-mode range ---------------------------------------
-    std::string cm_path = gem_common_mode_path_.empty()
-        ? resolve(out.run_cfg.gem_common_mode_file)
-        : resolve(gem_common_mode_path_);
+    const std::string cm_path = pick(gem_common_mode_path_, out.run_cfg.gem_common_mode_file);
     if (!cm_path.empty()) {
         out.gem.LoadCommonModeRange(cm_path, out.gem_crate_remap);
         out.gem_common_mode_path = cm_path;
-        std::ostringstream oss;
-        oss << "[setup] GEM CM     : " << cm_path;
-        LOG(oss.str());
+        LOG("[setup] GEM CM     : ", cm_path);
     }
 
     // --- 12b. GEM strip-level cuts (sourced from reconstruction_config)
@@ -631,32 +527,26 @@ Pipeline PipelineBuilder::build()
         long n_strips = 0;
         for (int ai = 0; ai < n_apvs; ++ai) {
             const auto &apv = out.gem.GetApvConfig(ai);
-            for (int ch = 0; ch < 128; ++ch) {
+            for (int ch = 0; ch < ssp::APV_STRIP_SIZE; ++ch) {
                 sum_noise += apv.pedestal[ch].noise;
                 sum_off   += apv.pedestal[ch].offset;
                 ++n_strips;
             }
         }
-        std::ostringstream oss;
-        oss << "[PEDSUM] n_apvs=" << n_apvs
-            << " n_strips=" << n_strips
-            << " sum_noise=" << std::fixed << std::setprecision(6) << sum_noise
-            << " sum_offset=" << sum_off;
-        LOG(oss.str());
+        LOG("[PEDSUM] n_apvs=", n_apvs,
+            " n_strips=", n_strips,
+            " sum_noise=", std::fixed, std::setprecision(6), sum_noise,
+            " sum_offset=", sum_off);
     }
 
     // --- 13. GEMSYS dump (post-Init globals) -----------------------------
-    {
-        std::ostringstream oss;
-        oss << "[GEMSYS] common_mode_thr=" << out.gem.GetCommonModeThreshold()
-            << " zero_sup_thr="    << out.gem.GetZeroSupThreshold()
-            << " cross_talk_thr="  << out.gem.GetCrossTalkThreshold()
-            << " min_peak="        << out.gem.GetMinPeakAdc()
-            << " min_sum="         << out.gem.GetMinSumAdc()
-            << " rej_first="       << (int)out.gem.GetRejectFirstTimebin()
-            << " rej_last="        << (int)out.gem.GetRejectLastTimebin();
-        LOG(oss.str());
-    }
+    LOG("[GEMSYS] common_mode_thr=", out.gem.GetCommonModeThreshold(),
+        " zero_sup_thr=",    out.gem.GetZeroSupThreshold(),
+        " cross_talk_thr=",  out.gem.GetCrossTalkThreshold(),
+        " min_peak=",        out.gem.GetMinPeakAdc(),
+        " min_sum=",         out.gem.GetMinSumAdc(),
+        " rej_first=",       (int)out.gem.GetRejectFirstTimebin(),
+        " rej_last=",        (int)out.gem.GetRejectLastTimebin());
 
     // --- 14. GEM per-detector cluster configs ----------------------------
     {
@@ -674,25 +564,23 @@ Pipeline PipelineBuilder::build()
             // [GEMCFG] dump (matches Python audit byte-for-byte).
             for (int d = 0; d < (int)per.size(); ++d) {
                 const auto &c = per[d];
-                std::ostringstream oss;
-                oss << "[GEMCFG] d" << d
-                    << " min_hits=" << c.min_cluster_hits
-                    << " max_hits=" << c.max_cluster_hits
-                    << " consec="   << c.consecutive_thres
-                    << " split="    << c.split_thres
-                    << " xtalk="    << c.cross_talk_width
-                    << " xtalk_peak_ratio_max=" << c.cross_talk_peak_ratio_max
-                    << " match_mode=" << c.match_mode
-                    << " asym="     << c.match_adc_asymmetry
-                    << " tdiff="    << c.match_time_diff
-                    << " tperiod="  << c.ts_period
-                    << " strip_t=[" << c.strip_time_min << "," << c.strip_time_max << "]"
-                    << " unimodal=" << (int)c.strip_unimodal
-                    << " seed_peak=" << c.seed_min_peak_adc
-                    << " seed_sum=" << c.seed_min_sum_adc
-                    << " strip_dt=" << c.strip_time_agreement
-                    << " ts_corr="  << c.strip_ts_corr_min;
-                LOG(oss.str());
+                LOG("[GEMCFG] d", d,
+                    " min_hits=", c.min_cluster_hits,
+                    " max_hits=", c.max_cluster_hits,
+                    " consec=",   c.consecutive_thres,
+                    " split=",    c.split_thres,
+                    " xtalk=",    c.cross_talk_width,
+                    " xtalk_peak_ratio_max=", c.cross_talk_peak_ratio_max,
+                    " match_mode=", c.match_mode,
+                    " asym=",     c.match_adc_asymmetry,
+                    " tdiff=",    c.match_time_diff,
+                    " tperiod=",  c.ts_period,
+                    " strip_t=[", c.strip_time_min, ",", c.strip_time_max, "]",
+                    " unimodal=", (int)c.strip_unimodal,
+                    " seed_peak=", c.seed_min_peak_adc,
+                    " seed_sum=", c.seed_min_sum_adc,
+                    " strip_dt=", c.strip_time_agreement,
+                    " ts_corr=",  c.strip_ts_corr_min);
             }
             out.gem.SetReconConfigs(std::move(per));
         }

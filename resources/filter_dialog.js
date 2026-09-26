@@ -2,11 +2,8 @@
 // Called from init() in viewer.js
 
 function initFilterDialog(){
-    // Filter dialog
-    const fltBackdrop=document.getElementById('filter-backdrop');
-    const fltDialog=document.getElementById('filter-dialog');
     function openFilterDialog(){
-        fltBackdrop.classList.add('active'); fltDialog.classList.add('active');
+        setDialogOpen('filter', true);
         document.getElementById('flt-status-msg').textContent='';
         // populate from current filter state
         fetch('/api/filter').then(r=>r.json()).then(f=>{
@@ -34,7 +31,6 @@ function initFilterDialog(){
             toggleFilterFields();
         }).catch(()=>{});
     }
-    function closeFilterDialog(){ fltBackdrop.classList.remove('active'); fltDialog.classList.remove('active'); }
     function toggleFilterFields(){
         const wfOn=document.getElementById('flt-wf-enable').checked;
         document.getElementById('flt-wf-fields').style.opacity=wfOn?'1':'0.4';
@@ -65,15 +61,12 @@ function initFilterDialog(){
     }
 
     document.getElementById('btn-filter').onclick=()=>openFilterDialog();
-    document.getElementById('filter-dialog-close').onclick=()=>closeFilterDialog();
-    document.getElementById('flt-cancel').onclick=()=>closeFilterDialog();
-    fltBackdrop.onclick=()=>closeFilterDialog();
+    const closeFilterDialog=wireDialogClose('filter','flt-cancel');
     document.getElementById('flt-wf-enable').onchange=toggleFilterFields;
     document.getElementById('flt-cl-enable').onchange=toggleFilterFields;
     document.getElementById('flt-tt-enable').onchange=toggleFilterFields;
     document.getElementById('flt-apply').onclick=()=>{
         const fj={};
-        // trigger type
         if(document.getElementById('flt-tt-enable').checked){
             const accept=[];
             document.querySelectorAll('#flt-tt-checks input[type="checkbox"]').forEach(cb=>{
@@ -81,7 +74,6 @@ function initFilterDialog(){
             });
             fj.trigger_type={enable:true, accept};
         }
-        // waveform
         const wf={enable:document.getElementById('flt-wf-enable').checked};
         const wfMods=parseModuleList(document.getElementById('flt-wf-modules').value);
         if(wfMods.length) wf.modules=wfMods;
@@ -94,7 +86,6 @@ function initFilterDialog(){
         const hmin=optFloat('flt-wf-hmin'); if(hmin!=null) wf.height_min=hmin;
         const hmax=optFloat('flt-wf-hmax'); if(hmax!=null) wf.height_max=hmax;
         fj.waveform=wf;
-        // clustering
         const cl={enable:document.getElementById('flt-cl-enable').checked};
         cl.n_min=parseInt(document.getElementById('flt-cl-nmin').value)||0;
         cl.n_max=parseInt(document.getElementById('flt-cl-nmax').value)||999999;
@@ -109,12 +100,11 @@ function initFilterDialog(){
         fj.clustering=cl;
 
         document.getElementById('flt-status-msg').textContent='Applying filter...';
-        fetch('/api/filter/load',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(fj)})
-            .then(r=>r.json()).then(d=>{
-                if(d.error){ document.getElementById('flt-status-msg').textContent='Error: '+d.error; return; }
-                closeFilterDialog();
-                fetchConfigAndApply();
-            }).catch(()=>{ document.getElementById('flt-status-msg').textContent='Request failed'; });
+        postJson('/api/filter/load', fj).then(d=>{
+            if(d.error){ document.getElementById('flt-status-msg').textContent='Error: '+d.error; return; }
+            closeFilterDialog();
+            fetchConfigAndApply();
+        }).catch(()=>{ document.getElementById('flt-status-msg').textContent='Request failed'; });
     };
     document.getElementById('flt-clear').onclick=()=>{
         document.getElementById('flt-status-msg').textContent='Clearing filter...';

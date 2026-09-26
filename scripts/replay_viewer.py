@@ -43,72 +43,37 @@ Command-Line Usage at Counting House Computer
 ------------------
    ssh clonfarm11
    source /home/clasrun/prad2_daq/prad2_env.csh
-   python /data/soft/prad2evviewer/scripts/replay_viewer.py
+   python /data/soft/prad2evviewer/scripts/replay_viewer.py [quick_check.root]
 """
 from __future__ import annotations
 
+import html
 import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 from typing import Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# Workaround: on some Linux systems the system libQt6DBus.so.6 is compiled
-# against a different Qt version than PyQt6's bundled Qt6Core, causing an
-# undefined-symbol error with version Qt_6_PRIVATE_API.
-# Fix: prepend PyQt6's bundled Qt6 lib dir to LD_LIBRARY_PATH so the linker
-# picks up ALL bundled Qt6 libs (including DBus) before the system ones.
-# We re-exec the interpreter once with the updated env so the setting takes
-# effect before any shared library is loaded.  On machines without the
-# conflict (e.g., system-installed PyQt6 matching system Qt) the bundled
-# lib dir will not exist and this is a no-op.
-# ---------------------------------------------------------------------------
-def _fix_qt_lib_path() -> None:
-    import site
-    sp_list: list[str] = []
-    try:
-        sp_list += site.getsitepackages()
-    except AttributeError:
-        pass
-    try:
-        sp_list.append(site.getusersitepackages())
-    except AttributeError:
-        pass
-    for sp in sp_list:
-        qt6_lib = os.path.join(sp, "PyQt6", "Qt6", "lib")
-        if os.path.isdir(qt6_lib):
-            current = os.environ.get("LD_LIBRARY_PATH", "")
-            if qt6_lib not in current.split(":"):
-                # Re-exec with updated LD_LIBRARY_PATH so the dynamic linker
-                # prefers the bundled Qt6 libs over system Qt6 libs.
-                new_path = qt6_lib + (":" + current if current else "")
-                env = os.environ.copy()
-                env["LD_LIBRARY_PATH"] = new_path
-                os.execve(sys.executable, [sys.executable] + sys.argv, env)
-            return  # already set — carry on normally
+from prad2_env import fix_qt_lib_path
 
-_fix_qt_lib_path()
+fix_qt_lib_path()   # before the first PyQt6 import
 
 from PyQt6.QtCore import (
     QPointF, QProcess, QProcessEnvironment, QRectF, QThread, Qt, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QColor, QFont, QImage, QPainter, QPen, QPixmap,
+    QColor, QFont, QImage, QPainter, QPen, QPixmap,
 )
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QComboBox,
-    QDialog, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMainWindow, QMenu, QPushButton, QScrollArea,
-    QSizePolicy, QSlider, QSplitter, QSpinBox, QStackedWidget,
+    QApplication, QCheckBox, QComboBox,
+    QDialog, QFileDialog, QFormLayout, QHBoxLayout,
+    QLabel, QLineEdit, QMainWindow, QMenu, QPushButton,
+    QSizePolicy, QSplitter, QSpinBox,
     QTabWidget, QTextEdit, QToolButton, QVBoxLayout, QWidget,
 )
 
-# ---------------------------------------------------------------------------
 # Optional ROOT file reading
-# ---------------------------------------------------------------------------
 try:
     import numpy as np
     import uproot
@@ -116,10 +81,9 @@ try:
 except ImportError:
     HAS_UPROOT = False
 
-# ---------------------------------------------------------------------------
 # Optional matplotlib (for embedded filter report chart)
-# ---------------------------------------------------------------------------
 try:
+    from matplotlib import rc_context
     from matplotlib.backends.backend_qtagg import (
         FigureCanvasQTAgg, NavigationToolbar2QT as _MplNavToolbar,
     )
@@ -128,49 +92,35 @@ try:
 except ImportError:
     HAS_MATPLOTLIB = False
 
-# ---------------------------------------------------------------------------
 # Shared HyCal infrastructure
-# ---------------------------------------------------------------------------
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, SCRIPT_DIR)
-
+from evio_io import (  # noqa: E402
+    LOCAL_DATA_BASE, REMOTE_DATA_BASE, REMOTE_HOST,
+    check_disk_space, fmt_bytes, local_evio_in_range, scp_bash,
+)
 from hycal_geoview import (  # noqa: E402
-    PALETTES, PALETTE_NAMES, THEME, HyCalMapWidget,
-    apply_theme_palette, available_themes, cmap_qcolor,
-    load_modules, set_theme, themed,
+    MENU_QSS, PALETTES, PALETTE_NAMES, THEME, HyCalMapWidget, ZoomHistWidget,
+    apply_theme_palette, available_themes, cmap_rgb_array,
+    load_modules, nice_ticks, set_theme, themed,
 )
 
-# ---------------------------------------------------------------------------
 # Path constants
-# ---------------------------------------------------------------------------
+SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 DB_DIR       = os.path.join(os.path.dirname(SCRIPT_DIR), "database")
 MODULES_JSON = os.path.join(DB_DIR, "hycal_map.json")
 
-# ---------------------------------------------------------------------------
 # Optional replay_report_viewer (for embedded filter report chart)
-# ---------------------------------------------------------------------------
-_TOOLS_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "analysis", "tools")
 try:
-    if _TOOLS_DIR not in sys.path:
-        sys.path.insert(0, _TOOLS_DIR)
     from replay_report_viewer import (  # noqa: E402
-        load_report         as _rrv_load_report,
-        get_x               as _rrv_get_x,
-        reject_segments     as _rrv_reject_segments,
-        shade_rejected      as _rrv_shade_rejected,
-        _draw_status_row    as _rrv_draw_status,
-        _draw_livetime_rate as _rrv_draw_lt_rate,
-        _finite_xy          as _rrv_finite_xy,
-        _title_for          as _rrv_title_for,
+        checked_epics   as _rrv_checked_epics,
+        fill_epics_menu as _rrv_fill_epics_menu,
+        load_report     as _rrv_load_report,
+        plot_report     as _rrv_plot_report,
+        selected_series as _rrv_selected_series,
+        title_for       as _rrv_title_for,
     )
     HAS_REPORT_VIEWER = True
 except ImportError:
     HAS_REPORT_VIEWER = False
-
-_REMOTE_HOST      = "clondaq2"
-_REMOTE_DATA_BASE = "/data/stage2"
-_LOCAL_DATA_BASE  = "/data/evio/data"
-_EVIO_BYTES_PER_FILE_EST = int(2.1 * 1024 ** 3)
 
 # Replay tools — match the names used by other scripts
 _PRAD2_BIN_DIR    = "/data/soft/prad2evviewer/build/bin"
@@ -180,39 +130,58 @@ _QUICK_CHECK_CMD    = os.path.join(_PRAD2_BIN_DIR, "prad2ana_quick_check")
 _RECON_BASE       = "/data/replay_recon"
 
 
-# ===========================================================================
-#  Helpers
-# ===========================================================================
+# ---- Helpers ----
 
-def _fmt_bytes(b: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if b < 1024:
-            return f"{b:.1f} {unit}"
-        b //= 1024
-    return f"{b:.1f} PB"
+def _run_tag(run: str) -> Optional[str]:
+    """'24100' -> 'prad_024100'; None if blank or not an integer."""
+    try:
+        return f"prad_{int(run):06d}"
+    except ValueError:
+        return None
 
 
-def _nice_ticks(lo: float, hi: float, max_ticks: int = 6) -> List[float]:
-    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
-        return [lo] if math.isfinite(lo) else []
-    raw = (hi - lo) / max(max_ticks - 1, 1)
-    mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
-    step = mag
-    for c in (1, 2, 2.5, 5, 10):
-        if c * mag >= raw:
-            step = c * mag
-            break
-    start = math.ceil(lo / step) * step
-    ticks, v = [], start
-    while v <= hi + step * 0.01:
-        ticks.append(v)
-        v += step
-    return ticks
+def _run_dirs(run: str, host: str, remote_base: str, local_base: str
+              ) -> Optional[Tuple[str, str, str, str, str]]:
+    """(run tag, host, remote run dir, local base, local run dir) for the
+    SCP fields, blank fields taking the defaults; None without a valid run."""
+    tag = _run_tag(run)
+    if tag is None:
+        return None
+    local_base = local_base.strip() or LOCAL_DATA_BASE
+    return (tag, host.strip() or REMOTE_HOST,
+            f"{remote_base.strip() or REMOTE_DATA_BASE}/{tag}",
+            local_base, os.path.join(local_base, tag))
 
 
-# ===========================================================================
-#  Background worker — loads quick_check ROOT data in a QThread
-# ===========================================================================
+def _disk_summary_html(needed: int, free: int, prefix: str = "") -> str:
+    ok = free >= needed
+    return (f"<span style='color:{'#3fb950' if ok else '#f85149'}'>{prefix}"
+            f"need {fmt_bytes(needed)}, free {fmt_bytes(free)}"
+            f"{'  ✓' if ok else '  ✗ (insufficient)'}</span>")
+
+
+def _disk_check_html(dirs, f_start: int, f_end: int) -> str:
+    """Disk-space check of files [f_start, f_end] for ``dirs`` from
+    _run_dirs(), as label HTML."""
+    _tag, host, remote_run_dir, local_base, local_run_dir = dirs
+    try:
+        needed, free = check_disk_space(host, remote_run_dir, local_base,
+                                        f_start, f_end, local_run_dir)
+    except RuntimeError as exc:
+        return f"<span style='color:#f85149'>SSH error: {exc}</span>"
+    except Exception as exc:
+        return f"<span style='color:#f85149'>Error: {exc}</span>"
+    return _disk_summary_html(needed, free)
+
+
+def _opt(cmd: List[str], flag: str, value: str, skip: Optional[str] = None):
+    """Append ``flag value`` to ``cmd`` unless the value is blank or ``skip``."""
+    value = value.strip()
+    if value and value != skip:
+        cmd += [flag, value]
+
+
+# ---- Background worker ----
 
 class _RootLoader(QThread):
     """Load quick_check ROOT file off the UI thread."""
@@ -234,76 +203,40 @@ class _RootLoader(QThread):
             self.finished.emit({}, str(exc))
 
 
+# (histogram path in the quick_check file, ResultsPanel widget attribute)
+_HIST_PLOTS = (
+    ("hit_pos",                            "_hit_pos_widget"),
+    ("energy_plots/one_cluster_energy",    "_h_1cl"),
+    ("energy_plots/two_cluster_energy",    "_h_2cl"),
+    ("energy_plots/clusters_energy",       "_h_all"),
+    ("energy_plots/total_energy",          "_h_tot"),
+    ("energy_plots/h2_energy_theta",       "_ev_theta_widget"),
+    ("physics_yields/ep_yield",            "_h_ep"),
+    ("physics_yields/ee_yield",            "_h_ee"),
+    ("physics_yields/yield_ratio",         "_h_ratio"),
+    ("moller_analysis/h_moller_z",         "_h_moller_z"),
+    ("moller_analysis/h_moller_phi_diff",  "_h_moller_phi"),
+    ("moller_analysis/h_moller_x",         "_h_moller_x"),
+    ("moller_analysis/h_moller_y",         "_h_moller_y"),
+    ("moller_analysis/h2_moller_pos",      "_moller_2arm"),
+)
+
+
 def _load_root(path: str) -> dict:
     """Read a quick_check ROOT output file into numpy arrays."""
-    import numpy as _np
     out: dict = {}
     with uproot.open(path) as f:
-        # ---- top-level 2D: hit position ----
-        if "hit_pos" in f:
-            h = f["hit_pos"]
-            out["hit_pos"] = (h.values().tolist(),
-                              h.axis(0).edges().tolist(),
-                              h.axis(1).edges().tolist())
-
-        # ---- energy_plots ----
-        ep = f.get("energy_plots")
-        if ep is not None:
-            # 1D spectra (live inside energy_plots/)
-            for key in ("one_cluster_energy", "two_cluster_energy",
-                        "clusters_energy", "total_energy"):
-                obj = ep.get(key)
-                if obj is not None:
-                    out[key] = (obj.values().tolist(),
-                                obj.axis().edges().tolist())
-
-            # 2D histograms in energy_plots
-            for key in ("energy_vs_theta", "h2_energy_theta", "h2_energy_module"):
-                obj = ep.get(key)
-                if obj is not None:
-                    try:
-                        out[f"energy_plots/{key}"] = (
-                            obj.values().tolist(),
-                            obj.axis(0).edges().tolist(),
-                            obj.axis(1).edges().tolist(),
-                        )
-                    except Exception:
-                        pass
-
-        # ---- physics_yields ----
-        py_ = f.get("physics_yields")
-        if py_ is not None:
-            for key in ("ep_yield", "ee_yield", "yield_ratio"):
-                obj = py_.get(key)
-                if obj is not None:
-                    out[f"physics_yields/{key}"] = (
-                        obj.values().tolist(),
-                        obj.axis().edges().tolist(),
-                    )
-
-        # ---- moller_analysis ----
-        ma = f.get("moller_analysis")
-        if ma is not None:
-            # 1D histograms (actual names have h_ prefix)
-            for key in ("h_moller_z", "h_moller_phi_diff",
-                        "h_moller_x", "h_moller_y"):
-                obj = ma.get(key)
-                if obj is not None:
-                    out[f"moller/{key}"] = (
-                        obj.values().tolist(),
-                        obj.axis().edges().tolist(),
-                    )
-            # 2D Moller position
-            obj = ma.get("h2_moller_pos")
-            if obj is not None:
-                try:
-                    out["moller/h2_moller_pos"] = (
-                        obj.values().tolist(),
-                        obj.axis(0).edges().tolist(),
-                        obj.axis(1).edges().tolist(),
-                    )
-                except Exception:
-                    pass
+        # (values, edges) of a 1-D, (values, x edges, y edges) of a 2-D
+        # histogram; one that cannot be read is skipped.
+        for key, _attr in _HIST_PLOTS:
+            obj = f.get(key)
+            if obj is None:
+                continue
+            try:
+                out[key] = (obj.values().tolist(),
+                            *(ax.edges().tolist() for ax in obj.axes))
+            except Exception:
+                pass
 
         # ---- module_energy: per-module hit counts and mean energies ----
         me = f.get("module_energy")
@@ -322,7 +255,7 @@ def _load_root(path: str) -> dict:
                 if total > 0:
                     edges = h.axis().edges()
                     mids  = (edges[:-1] + edges[1:]) / 2.0
-                    module_means[mod_key] = float((_np.asarray(vals) * mids).sum() / total)
+                    module_means[mod_key] = float((np.asarray(vals) * mids).sum() / total)
                 else:
                     module_means[mod_key] = 0.0
             out["module_counts"] = module_counts
@@ -331,47 +264,43 @@ def _load_root(path: str) -> dict:
     return out
 
 
-# ===========================================================================
-#  1-D histogram widget
-# ===========================================================================
+# ---- 1-D histogram widget ----
 
-class Hist1DWidget(QWidget):
+_LOG_BTN_QSS = (
+    "QPushButton{background:#21262d;color:#8b949e;border:1px solid #30363d;"
+    "border-radius:3px;font:8pt Consolas;padding:0 3px;}"
+    "QPushButton:checked{background:#1f6feb;color:#fff;border-color:#388bfd;}"
+    "QPushButton:hover{border-color:#58a6ff;color:#c9d1d9;}")
+
+
+def _log_toggle(parent: QWidget, text: str, slot) -> QPushButton:
+    """Small checkable log-scale button floating over a plot."""
+    btn = QPushButton(text, parent)
+    btn.setCheckable(True)
+    btn.setFixedSize(36, 18)
+    btn.setStyleSheet(_LOG_BTN_QSS)
+    btn.clicked.connect(slot)
+    return btn
+
+
+class Hist1DWidget(ZoomHistWidget):
     """Lightweight 1-D histogram display with zoom drag and right-click unzoom."""
 
-    PAD_L, PAD_R, PAD_T, PAD_B = 55, 16, 24, 36
     BAR_COLOR = "#3fb950"
+    BAR_GAP = 0.5
+    X_LABEL_W = 56
+    X_LABEL_FMT = ".4g"
 
     def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
         self._default_title = title
-        self._values: List[float] = []
-        self._edges:  List[float] = []
         self._title = title
-        self._x_lo = 0.0
-        self._x_hi = 1.0
-        self._drag_start: Optional[float] = None
-        self._drag_cur:   Optional[float] = None
-        self._log_x = False
         self._log_y = False
         self.setMinimumSize(200, 120)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMouseTracking(True)
-        _lbss = ("QPushButton{background:#21262d;color:#8b949e;border:1px solid #30363d;"
-                 "border-radius:3px;font:8pt Consolas;padding:0 3px;}"
-                 "QPushButton:checked{background:#1f6feb;color:#fff;border-color:#388bfd;}"
-                 "QPushButton:hover{border-color:#58a6ff;color:#c9d1d9;}")
-        self._btn_log_x = QPushButton("logX", self)
-        self._btn_log_x.setCheckable(True)
-        self._btn_log_x.setFixedSize(36, 18)
-        self._btn_log_x.setStyleSheet(_lbss)
-        self._btn_log_x.clicked.connect(self._toggle_log_x)
-        self._btn_log_y = QPushButton("logY", self)
-        self._btn_log_y.setCheckable(True)
-        self._btn_log_y.setFixedSize(36, 18)
-        self._btn_log_y.setStyleSheet(_lbss)
-        self._btn_log_y.clicked.connect(self._toggle_log_y)
+        self._btn_log_x = _log_toggle(self, "logX", self._toggle_log_x)
+        self._btn_log_y = _log_toggle(self, "logY", self._toggle_log_y)
         self._cache_pm: Optional[QPixmap] = None
-        self._cached_sx_state: Optional[tuple] = None
+        self._plotted = False   # the cached pixmap holds a plot (not a placeholder)
         # Crystal Ball auto-fit
         self.auto_cb_fit: bool = False
         # Asymmetric fit window around peak: (left_width, right_width) in data units.
@@ -484,61 +413,8 @@ class Hist1DWidget(QWidget):
         except Exception:
             pass
 
-    def clear(self):
-        self._values = []
-        self._edges  = []
-        self._title  = self._default_title
+    def _on_view_changed(self):
         self._cache_pm = None
-        self.update()
-
-    # -- geometry helpers --
-
-    def _plot_rect(self):
-        w, h = self.width(), self.height()
-        return (self.PAD_L, self.PAD_T,
-                w - self.PAD_L - self.PAD_R,
-                h - self.PAD_T - self.PAD_B)
-
-    def _sx_to_data(self, sx: float) -> float:
-        px, _py, pw, _ph = self._plot_rect()
-        if pw <= 0 or self._x_hi == self._x_lo:
-            return self._x_lo
-        return self._x_lo + (sx - px) / pw * (self._x_hi - self._x_lo)
-
-    # -- mouse events --
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            px, py, pw, ph = self._plot_rect()
-            mx, my = event.position().x(), event.position().y()
-            if px <= mx <= px + pw and py <= my <= py + ph + self.PAD_B:
-                self._drag_start = self._sx_to_data(mx)
-                self._drag_cur   = self._drag_start
-                self.update()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_start is not None:
-            self._drag_cur = self._sx_to_data(event.position().x())
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
-            d_end = self._sx_to_data(event.position().x())
-            span = self._x_hi - self._x_lo
-            if abs(d_end - self._drag_start) > span * 0.01:
-                self._x_lo = min(self._drag_start, d_end)
-                self._x_hi = max(self._drag_start, d_end)
-                self._cache_pm = None
-            self._drag_start = self._drag_cur = None
-            self.update()
-
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(themed(
-            "QMenu{background:#161b22;color:#c9d1d9;border:1px solid #30363d;}"
-            "QMenu::item:selected{background:#1f6feb;}"))
-        menu.addAction("Unzoom").triggered.connect(self._unzoom)
-        menu.exec(event.globalPos())
 
     def _toggle_log_x(self):
         self._log_x = self._btn_log_x.isChecked()
@@ -554,76 +430,38 @@ class Hist1DWidget(QWidget):
         self._cache_pm = None
         self.update()
 
-    def _unzoom(self):
-        if self._edges:
-            self._x_lo, self._x_hi = self._edges[0], self._edges[-1]
-            if self._log_x:
-                pos = [e for e in self._edges if e > 0]
-                if pos:
-                    self._x_lo = pos[0]
-        self._cache_pm = None
-        self.update()
-
     # -- paint (QPixmap cache: bars cached, only drag overlay redrawn on mouse-move) --
 
     def _rebuild_cache(self):
         w, h = self.width(), self.height()
+        self._plotted = False
         if w <= 0 or h <= 0:
             self._cache_pm = None
-            self._cached_sx_state = None
             return
         pm = QPixmap(w, h)
         pm.fill(QColor(THEME.CANVAS))
+        self._cache_pm = pm
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
-        if self._title:
-            p.setPen(QColor(THEME.ACCENT))
-            p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-            p.drawText(QRectF(self.PAD_L, 2, w - self.PAD_L - self.PAD_R, 20),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       self._title)
+        self._paint_title(p)
 
         if not self._values or not self._edges or len(self._edges) < 2:
-            p.setPen(QColor(THEME.TEXT_MUTED))
-            p.setFont(QFont("Consolas", 10))
-            p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, "No data")
+            self._paint_placeholder(p, "No data")
             p.end()
-            self._cache_pm = pm
-            self._cached_sx_state = None
             return
 
         px, py, pw, ph = self._plot_rect()
         if pw < 10 or ph < 10:
             p.end()
-            self._cache_pm = pm
-            self._cached_sx_state = None
             return
 
-        x_lo = self._x_lo
-        x_hi = self._x_hi if self._x_hi > self._x_lo else self._x_lo + 1
-        use_log_x = self._log_x and x_lo > 0 and x_hi > x_lo
-        use_log_y = self._log_y
-        log_x_lo = math.log10(x_lo) if use_log_x else x_lo
-        log_x_hi = math.log10(x_hi) if use_log_x else x_hi
-
-        def to_sx(v):
-            if use_log_x:
-                if v <= 0:
-                    return px - 1
-                lv = math.log10(v)
-                return px + (lv - log_x_lo) / (log_x_hi - log_x_lo) * pw
-            return px + (v - x_lo) / (x_hi - x_lo) * pw
-
-        vis_vals = [
-            v for i, v in enumerate(self._values)
-            if i + 1 < len(self._edges)
-            and self._edges[i + 1] > x_lo
-            and self._edges[i] < x_hi
-        ]
+        x_lo, x_hi, use_log_x = self._x_view()
+        to_sx = self._x_map()[0]
+        vis_vals = self._visible_values(self._values, self._edges)
         vis_max = max(vis_vals, default=0.0)
+        n_yticks = self.N_YTICKS
 
-        if use_log_y:
+        if self._log_y:
             vis_pos = [v for v in vis_vals if v > 0]
             y_hi_log = math.log10(vis_max * 1.5) if vis_max > 0 else 0.0
             y_lo_log = (math.log10(min(vis_pos)) if vis_pos else y_hi_log - 4)
@@ -633,88 +471,30 @@ class Hist1DWidget(QWidget):
                     return py + ph + 1
                 lv = math.log10(v)
                 return py + ph * (1.0 - (lv - y_lo_log) / (y_hi_log - y_lo_log))
+            y_labels = [f"{10 ** (y_hi_log - (y_hi_log - y_lo_log) * i / n_yticks):.3g}"
+                        for i in range(n_yticks + 1)]
         else:
             y_hi_lin = vis_max * 1.1 if vis_max > 0 else 1.0
             def to_sy(v): return py + ph * (1.0 - v / y_hi_lin)
+            y_labels = self._lin_y_labels(y_hi_lin)
 
-        # grid
-        p.setPen(QPen(QColor(THEME.BUTTON), 1, Qt.PenStyle.DotLine))
-        n_yticks = 5
-        for i in range(n_yticks + 1):
-            sy = py + ph * i / n_yticks
-            p.drawLine(QPointF(px, sy), QPointF(px + pw, sy))
-
-        # bars
-        bar_color = QColor(self.BAR_COLOR)
-        p.setPen(Qt.PenStyle.NoPen)
-        for i, v in enumerate(self._values):
-            if i + 1 >= len(self._edges):
-                break
-            b_lo, b_hi = self._edges[i], self._edges[i + 1]
-            if b_hi <= x_lo or b_lo >= x_hi:
-                continue
-            sx1 = max(to_sx(b_lo), px)
-            sx2 = min(to_sx(b_hi), px + pw)
-            bar_top = to_sy(v)
-            bar_h = (py + ph) - bar_top
-            if bar_h > 0 and sx2 > sx1:
-                p.fillRect(QRectF(sx1, bar_top, sx2 - sx1 - 0.5, bar_h), bar_color)
-
-        # axes
-        p.setPen(QPen(QColor(THEME.BORDER), 1))
-        p.drawLine(QPointF(px, py), QPointF(px, py + ph))
-        p.drawLine(QPointF(px, py + ph), QPointF(px + pw, py + ph))
-
-        # y labels
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.setFont(QFont("Consolas", 8))
-        if use_log_y:
-            for i in range(n_yticks + 1):
-                lv = y_hi_log - (y_hi_log - y_lo_log) * i / n_yticks
-                val = 10 ** lv
-                sy = py + ph * i / n_yticks
-                p.drawText(QRectF(0, sy - 8, self.PAD_L - 4, 16),
-                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                           f"{val:.3g}")
-        else:
-            for i in range(n_yticks + 1):
-                val = y_hi_lin * (n_yticks - i) / n_yticks
-                sy = py + ph * i / n_yticks
-                p.drawText(QRectF(0, sy - 8, self.PAD_L - 4, 16),
-                           Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                           f"{val:.0f}")
-
-        # x labels
+        # log x: ticks at nice exponents
+        x_ticks = None
         if use_log_x:
-            for xt in _nice_ticks(log_x_lo, log_x_hi, max(pw // 60, 2)):
-                sx = px + (xt - log_x_lo) / (log_x_hi - log_x_lo) * pw
-                p.drawText(QRectF(sx - 28, py + ph + 2, 56, 16),
-                           Qt.AlignmentFlag.AlignCenter, f"10^{xt:.4g}")
-        else:
-            for xt in _nice_ticks(x_lo, x_hi, max(pw // 60, 2)):
-                sx = to_sx(xt)
-                p.drawText(QRectF(sx - 28, py + ph + 2, 56, 16),
-                           Qt.AlignmentFlag.AlignCenter, f"{xt:.4g}")
+            u_lo, u_hi = math.log10(x_lo), math.log10(x_hi)
+            x_ticks = [(px + (xt - u_lo) / (u_hi - u_lo) * pw, f"10^{xt:.4g}")
+                       for xt in nice_ticks(u_lo, u_hi, max(pw // 60, 2))]
+
+        self._paint_grid(p)
+        self._paint_bars(p, self._values, self._edges, QColor(self.BAR_COLOR), to_sy)
+        self._paint_axes(p, y_labels, x_ticks)
 
         # Crystal Ball fit curve + annotation
         if self._cb_fit_curve is not None:
             xs, ys = self._cb_fit_curve
-            if use_log_y:
-                vis_max_fit = max((v for v in ys if v > 0), default=1.0)
-                y_hi_fit = math.log10(vis_max_fit * 1.5) if vis_max_fit > 0 else 0.0
-                y_lo_fit = y_lo_log
-                def to_sy_fit(v):
-                    if v <= 0: return py + ph + 1
-                    lv = math.log10(v)
-                    return py + ph * (1.0 - (lv - y_lo_fit) / (y_hi_fit - y_lo_fit))
-            else:
-                to_sy_fit = to_sy
-            fit_pen = QPen(QColor("#ff7b00"), 1.5)
-            p.setPen(fit_pen)
-            pts = []
-            for xv, yv in zip(xs, ys):
-                if x_lo <= xv <= x_hi:
-                    pts.append(QPointF(to_sx(xv), to_sy_fit(yv)))
+            p.setPen(QPen(QColor("#ff7b00"), 1.5))
+            pts = [QPointF(to_sx(xv), to_sy(yv))
+                   for xv, yv in zip(xs, ys) if x_lo <= xv <= x_hi]
             for i in range(1, len(pts)):
                 p.drawLine(pts[i - 1], pts[i])
 
@@ -732,9 +512,7 @@ class Hist1DWidget(QWidget):
                        label2)
 
         p.end()
-        self._cache_pm = pm
-        self._cached_sx_state = (px, py, pw, ph, x_lo, x_hi,
-                                  use_log_x, log_x_lo, log_x_hi)
+        self._plotted = True
 
     def paintEvent(self, event):
         if self._cache_pm is None or self._cache_pm.size() != self.size():
@@ -744,31 +522,12 @@ class Hist1DWidget(QWidget):
         p = QPainter(self)
         p.drawPixmap(0, 0, self._cache_pm)
         # drag-select overlay — not cached, drawn on top each frame
-        if self._drag_start is not None and self._drag_cur is not None:
-            state = self._cached_sx_state
-            if state is not None:
-                px, py, pw, ph, x_lo, x_hi, use_log_x, log_x_lo, log_x_hi = state
-                def sx_of(v):
-                    if use_log_x:
-                        if v <= 0:
-                            return px - 1
-                        lv = math.log10(v)
-                        return px + (lv - log_x_lo) / (log_x_hi - log_x_lo) * pw
-                    return px + (v - x_lo) / (x_hi - x_lo) * pw
-                d_lo = min(self._drag_start, self._drag_cur)
-                d_hi = max(self._drag_start, self._drag_cur)
-                sx1 = max(sx_of(d_lo), px)
-                sx2 = min(sx_of(d_hi), px + pw)
-                if sx2 > sx1:
-                    p.fillRect(QRectF(sx1, py, sx2 - sx1, ph), QColor(255, 255, 100, 50))
-                    p.setPen(QPen(QColor(255, 255, 100, 180), 1))
-                    p.drawRect(QRectF(sx1, py, sx2 - sx1, ph))
+        if self._plotted:
+            self._paint_drag(p)
         p.end()
 
 
-# ===========================================================================
-#  2-D histogram widget (for hit_pos, energy_vs_theta)
-# ===========================================================================
+# ---- 2-D histogram widget (hit_pos, h2_energy_theta, h2_moller_pos) ----
 
 class Hist2DWidget(QWidget):
     """Simple 2-D heatmap (painter-based, no external libs)."""
@@ -776,12 +535,9 @@ class Hist2DWidget(QWidget):
     PAD_L, PAD_R, PAD_T, PAD_B = 55, 80, 28, 36
     CB_W = 18   # colorbar width
 
-    def __init__(self, title: str = "", x_label: str = "x", y_label: str = "y",
-                 parent=None):
+    def __init__(self, title: str = "", parent=None):
         super().__init__(parent)
         self._title = title
-        self._x_label = x_label
-        self._y_label = y_label
         self._values: Optional[List[List[float]]] = None  # [ix][iy]
         self._x_edges: List[float] = []
         self._y_edges: List[float] = []
@@ -789,15 +545,7 @@ class Hist2DWidget(QWidget):
         self._log_z = False
         self.setMinimumSize(200, 200)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        _lbss = ("QPushButton{background:#21262d;color:#8b949e;border:1px solid #30363d;"
-                 "border-radius:3px;font:8pt Consolas;padding:0 3px;}"
-                 "QPushButton:checked{background:#1f6feb;color:#fff;border-color:#388bfd;}"
-                 "QPushButton:hover{border-color:#58a6ff;color:#c9d1d9;}")
-        self._btn_log_z = QPushButton("logZ", self)
-        self._btn_log_z.setCheckable(True)
-        self._btn_log_z.setFixedSize(36, 18)
-        self._btn_log_z.setStyleSheet(_lbss)
-        self._btn_log_z.clicked.connect(self._toggle_log_z)
+        self._btn_log_z = _log_toggle(self, "logZ", self._toggle_log_z)
         self._cache_pm: Optional[QPixmap] = None
 
     def resizeEvent(self, event):
@@ -814,18 +562,9 @@ class Hist2DWidget(QWidget):
         self._cache_pm = None
         self.update()
 
-    def clear(self):
-        self._values = None
-        self._x_edges = []
-        self._y_edges = []
-        self._cache_pm = None
-        self.update()
-
     def contextMenuEvent(self, event):
         menu = QMenu(self)
-        menu.setStyleSheet(themed(
-            "QMenu{background:#161b22;color:#c9d1d9;border:1px solid #30363d;}"
-            "QMenu::item:selected{background:#1f6feb;}"))
+        menu.setStyleSheet(themed(MENU_QSS))
         pal_menu = menu.addMenu("Palette")
         for i, name in enumerate(PALETTE_NAMES):
             act = pal_menu.addAction(name)
@@ -907,8 +646,8 @@ class Hist2DWidget(QWidget):
         palette = PALETTES.get(PALETTE_NAMES[self._palette_idx],
                                PALETTES[PALETTE_NAMES[0]])
 
-        # --- numpy fast path: render heatmap + colorbar as QImage in one shot ---
-        drawn = False
+        # Heatmap and colour bar as QImages; on failure the plot area stays
+        # empty and only the axes are drawn.
         try:
             import numpy as _np
             nx, ny = len(xe) - 1, len(ye) - 1
@@ -937,69 +676,24 @@ class Hist2DWidget(QWidget):
             t_img   = t_bins[xi[_np.newaxis, :], yi[:, _np.newaxis]]  # (ph, pw)
             msk_img =  mask[xi[_np.newaxis, :], yi[:, _np.newaxis]]
 
-            stops_t = _np.array([s[0]    for s in palette], dtype=_np.float64)
-            stops_r = _np.array([s[1][0] for s in palette], dtype=_np.float64)
-            stops_g = _np.array([s[1][1] for s in palette], dtype=_np.float64)
-            stops_b = _np.array([s[1][2] for s in palette], dtype=_np.float64)
-
-            tf   = t_img.ravel()
-            r_ch = _np.interp(tf, stops_t, stops_r).astype(_np.uint8)
-            g_ch = _np.interp(tf, stops_t, stops_g).astype(_np.uint8)
-            b_ch = _np.interp(tf, stops_t, stops_b).astype(_np.uint8)
-            a_ch = _np.where(msk_img.ravel(),
-                             _np.uint32(255), _np.uint32(0)).astype(_np.uint32)
-            argb = (a_ch << 24 | r_ch.astype(_np.uint32) << 16 |
-                    g_ch.astype(_np.uint32) << 8 | b_ch.astype(_np.uint32))
+            rgb = cmap_rgb_array(t_img, palette).astype(_np.uint32)
+            argb = (_np.where(msk_img, _np.uint32(0xFF000000), _np.uint32(0))
+                    | rgb[..., 0] << 16 | rgb[..., 1] << 8 | rgb[..., 2])
             img = QImage(argb.tobytes(), pw, ph, pw * 4,
                          QImage.Format.Format_ARGB32)
             p.drawImage(px, py, img)
 
             # colorbar as 1×ph QImage scaled to CB_W wide
-            cb_h = ph
-            t_cb = 1.0 - _np.arange(cb_h, dtype=_np.float64) / max(cb_h - 1, 1)
-            r_cb = _np.interp(t_cb, stops_t, stops_r).astype(_np.uint8)
-            g_cb = _np.interp(t_cb, stops_t, stops_g).astype(_np.uint8)
-            b_cb = _np.interp(t_cb, stops_t, stops_b).astype(_np.uint8)
-            a_cb = _np.full(cb_h, _np.uint32(0xFF000000), dtype=_np.uint32)
-            argb_cb = (a_cb | r_cb.astype(_np.uint32) << 16 |
-                       g_cb.astype(_np.uint32) << 8 | b_cb.astype(_np.uint32))
-            cb_img = QImage(argb_cb.tobytes(), 1, cb_h, 4,
+            t_cb = 1.0 - _np.arange(ph, dtype=_np.float64) / max(ph - 1, 1)
+            rgb_cb = cmap_rgb_array(t_cb, palette).astype(_np.uint32)
+            argb_cb = (_np.uint32(0xFF000000) | rgb_cb[:, 0] << 16
+                       | rgb_cb[:, 1] << 8 | rgb_cb[:, 2])
+            cb_img = QImage(argb_cb.tobytes(), 1, ph, 4,
                             QImage.Format.Format_ARGB32)
-            p.drawImage(QRectF(cb_x, py, self.CB_W, cb_h), cb_img,
-                        QRectF(0, 0, 1, cb_h))
-            drawn = True
+            p.drawImage(QRectF(cb_x, py, self.CB_W, ph), cb_img,
+                        QRectF(0, 0, 1, ph))
         except Exception:
             pass
-
-        if not drawn:
-            # fallback: original loop-based drawing
-            p.setPen(Qt.PenStyle.NoPen)
-            nx = len(xe) - 1
-            ny = len(ye) - 1
-            for ix in range(nx):
-                bx0 = max(to_sx(xe[ix]), px)
-                bx1 = min(to_sx(xe[ix + 1]), px + pw)
-                if bx1 <= bx0:
-                    continue
-                col_vals = vals[ix] if ix < len(vals) else []
-                for iy in range(ny):
-                    v = col_vals[iy] if iy < len(col_vals) else 0.0
-                    if not math.isfinite(v) or v <= 0:
-                        continue
-                    by1 = max(to_sy(ye[iy + 1]), py)
-                    by0 = min(to_sy(ye[iy]), py + ph)
-                    if by0 <= by1:
-                        continue
-                    t = ((math.log10(v) - log_vmin) / (log_vmax - log_vmin)
-                         if use_log_z else v / vmax)
-                    t = max(0.0, min(1.0, t))
-                    c = cmap_qcolor(t, palette)
-                    p.fillRect(QRectF(bx0, by1, bx1 - bx0, by0 - by1), c)
-            cb_h = ph
-            for i in range(cb_h):
-                c = cmap_qcolor(1.0 - i / cb_h, palette)
-                p.setPen(QPen(c, 1))
-                p.drawLine(cb_x, py + i, cb_x + self.CB_W, py + i)
 
         # axes + tick labels + colorbar border (always)
         p.setPen(QPen(QColor(THEME.BORDER), 1))
@@ -1008,11 +702,11 @@ class Hist2DWidget(QWidget):
         p.drawRect(QRectF(cb_x, py, self.CB_W, ph))
         p.setPen(QColor(THEME.TEXT_DIM))
         p.setFont(QFont("Consolas", 8))
-        for xt in _nice_ticks(x_lo, x_hi, max(pw // 60, 2)):
+        for xt in nice_ticks(x_lo, x_hi, max(pw // 60, 2)):
             sx = to_sx(xt)
             p.drawText(QRectF(sx - 28, py + ph + 2, 56, 16),
                        Qt.AlignmentFlag.AlignCenter, f"{xt:.4g}")
-        for yt in _nice_ticks(y_lo, y_hi, max(ph // 40, 2)):
+        for yt in nice_ticks(y_lo, y_hi, max(ph // 40, 2)):
             sy = to_sy(yt)
             p.drawText(QRectF(0, sy - 8, self.PAD_L - 4, 16),
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
@@ -1040,17 +734,16 @@ class Hist2DWidget(QWidget):
         p.end()
 
 
-# ===========================================================================
-#  HyCal replay map widget — shows per-module event counts
-# ===========================================================================
+# ---- HyCal replay map widget ----
 
 class HyCalReplayMapWidget(HyCalMapWidget):
-    """HyCal map showing per-module event counts from quick_check module_energy."""
+    """HyCal map of a per-module quantity from quick_check module_energy
+    (hit counts or mean energies)."""
 
     def __init__(self, parent=None):
         super().__init__(parent, shrink=0.92, margin_top=8,
-                         enable_zoom_pan=True, include_lms=False)
-        self._selected: Optional[str] = None
+                         enable_zoom_pan=True, include_lms=False,
+                         toggle_select=True)
 
     def set_module_counts(self, counts: Dict[str, float]):
         if not counts:
@@ -1068,7 +761,7 @@ class HyCalReplayMapWidget(HyCalMapWidget):
         base.update(counts)
         self._values = base
         self._vmin = 0.0
-        self._vmax = max(counts.values()) if counts else 1.0
+        self._vmax = max(counts.values())
         self.update()
 
     def _fmt_value(self, v: float) -> str:
@@ -1087,31 +780,8 @@ class HyCalReplayMapWidget(HyCalMapWidget):
             p.drawText(QRectF(0, 0, w, h),
                        Qt.AlignmentFlag.AlignCenter, "Load a ROOT file to view")
 
-    def _paint_overlays(self, p, w, h):
-        if self._selected and self._selected in self._rects:
-            p.setPen(QPen(QColor(THEME.SELECT_BORDER), 2.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._selected])
-        super()._paint_overlays(p, w, h)
 
-    def _handle_click(self, pos):
-        if self._cb_rect and self._cb_rect.contains(pos):
-            self.paletteClicked.emit()
-            return
-        hit = self._hit(pos)
-        if hit is not None:
-            self._selected = None if hit == self._selected else hit
-            self.update()
-            self.moduleClicked.emit(self._selected if self._selected else "")
-        elif self._selected is not None:
-            self._selected = None
-            self.update()
-            self.moduleClicked.emit("")
-
-
-# ===========================================================================
-#  Control Panel (left side)
-# ===========================================================================
+# ---- Control Panel (left side) ----
 
 _BTN_PRIMARY = themed(
     "QPushButton{background:#1f6feb;color:white;border:1px solid #388bfd;"
@@ -1152,11 +822,6 @@ _COMBO_SS = themed(
     "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
     "border:1px solid #30363d;selection-background-color:#1f6feb;}")
 
-_GRPBOX_SS = themed(
-    "QGroupBox{color:#58a6ff;font:bold 11pt Consolas;"
-    "border:1px solid #30363d;border-radius:4px;margin-top:8px;padding-top:6px;}"
-    "QGroupBox::title{subcontrol-origin:margin;left:8px;padding:0 4px;}")
-
 _CHK_SS = themed(
     "QCheckBox{color:#c9d1d9;font-family:Consolas;font-size:11pt;spacing:6px;}"
     "QCheckBox::indicator{width:15px;height:15px;"
@@ -1167,12 +832,72 @@ _LBL_SS  = themed("QLabel{color:#c9d1d9;font-family:Consolas;font-size:11pt;}")
 _LBL_MUT = themed("QLabel{color:#8b949e;font-family:Consolas;font-size:10pt;}")
 
 
-def _section_label(text: str) -> QLabel:
-    lbl = QLabel(text)
-    lbl.setStyleSheet(themed(
-        "QLabel{color:#8b949e;font:bold 10pt Consolas;"
-        "border-bottom:1px solid #30363d;padding-bottom:2px;}"))
-    return lbl
+def _le(w: QLineEdit) -> QLineEdit:
+    w.setFont(QFont("Consolas", 10))
+    w.setStyleSheet(_LINEEDIT_SS)
+    return w
+
+
+def _sp(w: QSpinBox) -> QSpinBox:
+    w.setFont(QFont("Consolas", 10))
+    w.setStyleSheet(_SPINBOX_SS)
+    return w
+
+
+def _form_dialog(parent: QWidget, title: str, min_width: int = 480
+                 ) -> Tuple[QDialog, QFormLayout]:
+    """Settings dialog with a right-aligned form layout."""
+    dlg = QDialog(parent)
+    dlg.setWindowTitle(title)
+    dlg.setMinimumWidth(min_width)
+    dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
+    form = QFormLayout(dlg)
+    form.setSpacing(8)
+    form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+    return dlg, form
+
+
+def _ok_cancel_row(dlg: QDialog, form: QFormLayout, on_accept,
+                   ok_text: str = "OK") -> None:
+    btns = QHBoxLayout()
+    ok_btn = QPushButton(ok_text)
+    ok_btn.setStyleSheet(_BTN_PRIMARY)
+    ok_btn.clicked.connect(on_accept)
+    ca_btn = QPushButton("Cancel")
+    ca_btn.setStyleSheet(_BTN_NORMAL)
+    ca_btn.clicked.connect(dlg.reject)
+    btns.addStretch()
+    btns.addWidget(ok_btn)
+    btns.addWidget(ca_btn)
+    form.addRow(btns)
+
+
+def _browse_row(dlg: QDialog, text: str, title: str,
+                file_filter: Optional[str] = None) -> Tuple[QLineEdit, QWidget]:
+    """Line edit plus a Browse… button picking a directory, or a file
+    matching ``file_filter`` when one is given."""
+    edit = _le(QLineEdit(text))
+    btn = QPushButton("Browse…")
+    btn.setFixedWidth(90)
+    btn.setStyleSheet(_BTN_NORMAL)
+
+    def browse():
+        if file_filter is None:
+            path = QFileDialog.getExistingDirectory(dlg, title, edit.text())
+        else:
+            path = QFileDialog.getOpenFileName(dlg, title, edit.text(),
+                                               file_filter)[0]
+        if path:
+            edit.setText(path)
+
+    btn.clicked.connect(browse)
+    row = QWidget()
+    lay = QHBoxLayout(row)
+    lay.setContentsMargins(0, 0, 0, 0)
+    lay.setSpacing(4)
+    lay.addWidget(edit)
+    lay.addWidget(btn)
+    return edit, row
 
 
 class ControlPanel(QWidget):
@@ -1197,9 +922,7 @@ class ControlPanel(QWidget):
         self._qcheck_out: str = ""            # final ROOT file path
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+    # -- UI construction --
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -1301,9 +1024,9 @@ class ControlPanel(QWidget):
 
         # SCP params
         self._run_edit = QLineEdit()
-        self._host_edit = QLineEdit(_REMOTE_HOST)
-        self._remote_base_edit = QLineEdit(_REMOTE_DATA_BASE)
-        self._local_base_edit = QLineEdit(_LOCAL_DATA_BASE)
+        self._host_edit = QLineEdit(REMOTE_HOST)
+        self._remote_base_edit = QLineEdit(REMOTE_DATA_BASE)
+        self._local_base_edit = QLineEdit(LOCAL_DATA_BASE)
         self._f_start = QSpinBox(); self._f_start.setRange(0, 9999); self._f_start.setValue(0)
         self._f_end   = QSpinBox(); self._f_end.setRange(0, 9999);   self._f_end.setValue(99)
         for w in (self._run_edit, self._host_edit, self._remote_base_edit,
@@ -1372,28 +1095,11 @@ class ControlPanel(QWidget):
             "border:1px solid #30363d;font-family:Monospace;font-size:10pt;}"))
         root.addWidget(self._console, stretch=1)
 
-    # ------------------------------------------------------------------
-    # Settings dialogs
-    # ------------------------------------------------------------------
+    # -- Settings dialogs --
 
     def _on_do_all_clicked(self):
         """Show a quick-config popup, then launch the full pipeline."""
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Do It All — Quick Setup")
-        dlg.setMinimumWidth(480)
-        dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
-        form = QFormLayout(dlg)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        def _le(w):
-            w.setFont(QFont("Consolas", 10))
-            w.setStyleSheet(_LINEEDIT_SS)
-            return w
-        def _sp(w):
-            w.setFont(QFont("Consolas", 10))
-            w.setStyleSheet(_SPINBOX_SS)
-            return w
+        dlg, form = _form_dialog(self, "Do It All — Quick Setup")
 
         run_e = _le(QLineEdit(self._run_edit.text()))
         run_e.setPlaceholderText("e.g. 024388")
@@ -1402,25 +1108,10 @@ class ControlPanel(QWidget):
         thr_sp.setRange(1, 256)
         thr_sp.setValue(25)
 
-        # Filter cut JSON — line edit + Browse button
-        cut_e = _le(QLineEdit(self._filter_cut_edit.text()))
+        cut_e, cut_row = _browse_row(dlg, self._filter_cut_edit.text(),
+                                     "Select cut JSON",
+                                     "JSON files (*.json);;All files (*)")
         cut_e.setPlaceholderText("(optional) path/to/cut.json")
-        cut_row = QWidget()
-        cr = QHBoxLayout(cut_row)
-        cr.setContentsMargins(0, 0, 0, 0)
-        cr.setSpacing(4)
-        cr.addWidget(cut_e)
-        cut_brw = QPushButton("Browse…")
-        cut_brw.setFixedWidth(90)
-        cut_brw.setStyleSheet(_BTN_NORMAL)
-        def browse_cut():
-            p, _ = QFileDialog.getOpenFileName(
-                dlg, "Select cut JSON", cut_e.text(),
-                "JSON files (*.json);;All files (*)")
-            if p:
-                cut_e.setText(p)
-        cut_brw.clicked.connect(browse_cut)
-        cr.addWidget(cut_brw)
 
         zsup_e = _le(QLineEdit(self._zerosup_edit.text()))
         zsup_e.setPlaceholderText("e.g. 5")
@@ -1446,16 +1137,6 @@ class ControlPanel(QWidget):
         form.addRow("Filter cut JSON (-c):", cut_row)
         form.addRow("GEM zero-sup (-z):", zsup_e)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("Start Pipeline")
-        ok_btn.setStyleSheet(_BTN_PRIMARY)
-        ca_btn = QPushButton("Cancel")
-        ca_btn.setStyleSheet(_BTN_NORMAL)
-        btns.addStretch()
-        btns.addWidget(ok_btn)
-        btns.addWidget(ca_btn)
-        form.addRow(btns)
-
         def accept():
             rn = run_e.text().strip()
             if not rn:
@@ -1469,60 +1150,36 @@ class ControlPanel(QWidget):
             self._zerosup_edit.setText(zsup_e.text())
             dlg.accept()
 
-        ok_btn.clicked.connect(accept)
-        ca_btn.clicked.connect(dlg.reject)
+        _ok_cancel_row(dlg, form, accept, "Start Pipeline")
 
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._start_pipeline(["scp", "replay", "hadd", "filter", "qcheck"])
 
     def _open_scp_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("SCP Settings")
-        dlg.setMinimumWidth(480)
-        dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
-        form = QFormLayout(dlg)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-
-        def _le(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_LINEEDIT_SS); return w
-        def _sp(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_SPINBOX_SS); return w
-        def _lbl(t): l = QLabel(t); l.setStyleSheet(_LBL_MUT); return l
+        dlg, form = _form_dialog(self, "SCP Settings")
 
         run_e   = _le(QLineEdit(self._run_edit.text()))
         run_e.setPlaceholderText("e.g. 024100")
         host_e  = _le(QLineEdit(self._host_edit.text()))
         rbas_e  = _le(QLineEdit(self._remote_base_edit.text()))
-        lbas_e  = _le(QLineEdit(self._local_base_edit.text()))
+        lbas_e, lbas_row = _browse_row(dlg, self._local_base_edit.text(),
+                                       "Local Base Directory")
 
         fs_sp   = _sp(QSpinBox()); fs_sp.setRange(0, 9999); fs_sp.setValue(self._f_start.value())
         fe_sp   = _sp(QSpinBox()); fe_sp.setRange(0, 9999); fe_sp.setValue(self._f_end.value())
         frange_row = QHBoxLayout()
         frange_row.addWidget(fs_sp); frange_row.addWidget(QLabel("—")); frange_row.addWidget(fe_sp); frange_row.addStretch()
 
-        disk_lbl = _lbl("(not checked)")
-
-        def browse_local():
-            d = QFileDialog.getExistingDirectory(dlg, "Local Base Directory", lbas_e.text())
-            if d: lbas_e.setText(d)
-        lbas_row = QWidget(); lr = QHBoxLayout(lbas_row); lr.setContentsMargins(0,0,0,0); lr.setSpacing(4)
-        lr.addWidget(lbas_e); brw = QPushButton("Browse…"); brw.setFixedWidth(90); brw.setStyleSheet(_BTN_NORMAL); brw.clicked.connect(browse_local); lr.addWidget(brw)
+        disk_lbl = QLabel("(not checked)")
+        disk_lbl.setStyleSheet(_LBL_MUT)
 
         def check_disk():
-            rn = run_e.text().strip()
-            if not rn: disk_lbl.setText("<span style='color:#f85149'>Enter run number</span>"); return
-            h = host_e.text().strip() or _REMOTE_HOST
-            rb = rbas_e.text().strip() or _REMOTE_DATA_BASE
-            lb = lbas_e.text().strip() or _LOCAL_DATA_BASE
-            rdir = f"{rb}/prad_{int(rn):06d}"
-            lrun_dir = os.path.join(lb, f"prad_{int(rn):06d}")
+            dirs = _run_dirs(run_e.text(), host_e.text(), rbas_e.text(), lbas_e.text())
+            if dirs is None:
+                disk_lbl.setText("<span style='color:#f85149'>Enter run number</span>")
+                return
             disk_lbl.setText("Checking…")
-            try:
-                needed, free = _check_disk_space(h, rdir, lb, fs_sp.value(), fe_sp.value(), lrun_dir)
-                ok = free >= needed
-                c = "#3fb950" if ok else "#f85149"
-                disk_lbl.setText(f"<span style='color:{c}'>need {_fmt_bytes(needed)}, free {_fmt_bytes(free)}{'  ✓' if ok else '  ✗'}</span>")
-            except Exception as exc:
-                disk_lbl.setText(f"<span style='color:#f0883e'>{exc}</span>")
+            disk_lbl.setText(_disk_check_html(dirs, fs_sp.value(), fe_sp.value()))
 
         form.addRow("Run number:", run_e)
         form.addRow("Remote host:", host_e)
@@ -1533,12 +1190,6 @@ class ControlPanel(QWidget):
         chk_row = QHBoxLayout(); chk_row.addWidget(chk_btn); chk_row.addWidget(disk_lbl); chk_row.addStretch()
         form.addRow("", chk_row)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("OK"); ok_btn.setStyleSheet(_BTN_PRIMARY)
-        ca_btn = QPushButton("Cancel"); ca_btn.setStyleSheet(_BTN_NORMAL)
-        btns.addStretch(); btns.addWidget(ok_btn); btns.addWidget(ca_btn)
-        form.addRow(btns)
-
         def accept():
             self._run_edit.setText(run_e.text())
             self._host_edit.setText(host_e.text())
@@ -1548,34 +1199,14 @@ class ControlPanel(QWidget):
             self._f_end.setValue(fe_sp.value())
             dlg.accept()
 
-        ok_btn.clicked.connect(accept)
-        ca_btn.clicked.connect(dlg.reject)
+        _ok_cancel_row(dlg, form, accept)
         dlg.exec()
 
     def _open_replay_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Replay Settings")
-        dlg.setMinimumWidth(520)
-        dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
-        form = QFormLayout(dlg)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        dlg, form = _form_dialog(self, "Replay Settings", 520)
 
-        def _le(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_LINEEDIT_SS); return w
-        def _sp(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_SPINBOX_SS); return w
-
-        def dir_row_dlg(text, title):
-            e = _le(QLineEdit(text))
-            row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(4)
-            b = QPushButton("Browse…"); b.setFixedWidth(90); b.setStyleSheet(_BTN_NORMAL)
-            def browse():
-                d = QFileDialog.getExistingDirectory(dlg, title, e.text())
-                if d: e.setText(d)
-            b.clicked.connect(browse); rl.addWidget(e); rl.addWidget(b)
-            return e, row
-
-        evio_e, evio_row   = dir_row_dlg(self._evio_edit.text(), "EVIO Directory")
-        out_e,  out_row    = dir_row_dlg(self._outdir_edit.text(), "Replay Output Directory")
+        evio_e, evio_row   = _browse_row(dlg, self._evio_edit.text(), "EVIO Directory")
+        out_e,  out_row    = _browse_row(dlg, self._outdir_edit.text(), "Replay Output Directory")
         thr_sp = _sp(QSpinBox()); thr_sp.setRange(1, 256); thr_sp.setValue(self._threads_spin.value())
         nev_e  = _le(QLineEdit(self._max_events_rep.text())); nev_e.setToolTip("-1 = no limit")
         nf_sp  = _sp(QSpinBox()); nf_sp.setRange(-1, 9999); nf_sp.setValue(self._max_files_spin.value()); nf_sp.setSpecialValueText("all")
@@ -1596,12 +1227,6 @@ class ControlPanel(QWidget):
         form.addRow("Zero-sup thresh (-z):", zsup_e)
         form.addRow("", p1_chk)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("OK"); ok_btn.setStyleSheet(_BTN_PRIMARY)
-        ca_btn = QPushButton("Cancel"); ca_btn.setStyleSheet(_BTN_NORMAL)
-        btns.addStretch(); btns.addWidget(ok_btn); btns.addWidget(ca_btn)
-        form.addRow(btns)
-
         def accept():
             self._evio_edit.setText(evio_e.text())
             self._outdir_edit.setText(out_e.text())
@@ -1615,32 +1240,15 @@ class ControlPanel(QWidget):
             self._prad1_chk.setChecked(p1_chk.isChecked())
             dlg.accept()
 
-        ok_btn.clicked.connect(accept)
-        ca_btn.clicked.connect(dlg.reject)
+        _ok_cancel_row(dlg, form, accept)
         dlg.exec()
 
     def _open_filter_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Replay Filter Settings")
-        dlg.setMinimumWidth(480)
-        dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
-        form = QFormLayout(dlg)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        dlg, form = _form_dialog(self, "Replay Filter Settings")
 
-        def _le(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_LINEEDIT_SS); return w
-
-        def dir_row_dlg(text, title):
-            e = _le(QLineEdit(text))
-            row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(4)
-            b = QPushButton("Browse…"); b.setFixedWidth(90); b.setStyleSheet(_BTN_NORMAL)
-            def browse():
-                d = QFileDialog.getOpenFileName(dlg, title, e.text(), "ROOT files (*.root);;All files (*)")
-                if d[0]: e.setText(d[0])
-            b.clicked.connect(browse); rl.addWidget(e); rl.addWidget(b)
-            return e, row
-
-        inp_e, inp_row = dir_row_dlg(self._filter_input_edit.text(), "Filter Input ROOT File")
+        inp_e, inp_row = _browse_row(dlg, self._filter_input_edit.text(),
+                                     "Filter Input ROOT File",
+                                     "ROOT files (*.root);;All files (*)")
         out_e = _le(QLineEdit(self._filter_output_edit.text())); out_e.setPlaceholderText("(auto: prad_XXXXXX_filter.root)")
         nev_e = _le(QLineEdit(self._max_events_flt.text())); nev_e.setToolTip("-1 = no limit")
 
@@ -1648,44 +1256,19 @@ class ControlPanel(QWidget):
         form.addRow("Output ROOT (-o):", out_e)
         form.addRow("Max events (-n):", nev_e)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("OK"); ok_btn.setStyleSheet(_BTN_PRIMARY)
-        ca_btn = QPushButton("Cancel"); ca_btn.setStyleSheet(_BTN_NORMAL)
-        btns.addStretch(); btns.addWidget(ok_btn); btns.addWidget(ca_btn)
-        form.addRow(btns)
-
         def accept():
             self._filter_input_edit.setText(inp_e.text())
             self._filter_output_edit.setText(out_e.text())
             self._max_events_flt.setText(nev_e.text())
             dlg.accept()
 
-        ok_btn.clicked.connect(accept)
-        ca_btn.clicked.connect(dlg.reject)
+        _ok_cancel_row(dlg, form, accept)
         dlg.exec()
 
     def _open_qcheck_dialog(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Quick Check Settings")
-        dlg.setMinimumWidth(480)
-        dlg.setStyleSheet(themed("QDialog{background:#0d1117;}"))
-        form = QFormLayout(dlg)
-        form.setSpacing(8)
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        dlg, form = _form_dialog(self, "Quick Check Settings")
 
-        def _le(w): w.setFont(QFont("Consolas", 10)); w.setStyleSheet(_LINEEDIT_SS); return w
-
-        def dir_row_dlg(text, title):
-            e = _le(QLineEdit(text))
-            row = QWidget(); rl = QHBoxLayout(row); rl.setContentsMargins(0,0,0,0); rl.setSpacing(4)
-            b = QPushButton("Browse…"); b.setFixedWidth(90); b.setStyleSheet(_BTN_NORMAL)
-            def browse():
-                d = QFileDialog.getExistingDirectory(dlg, title, e.text())
-                if d: e.setText(d)
-            b.clicked.connect(browse); rl.addWidget(e); rl.addWidget(b)
-            return e, row
-
-        inp_e, inp_row = dir_row_dlg(self._qc_input_edit.text(), "Quick Check Input")
+        inp_e, inp_row = _browse_row(dlg, self._qc_input_edit.text(), "Quick Check Input")
         out_e = _le(QLineEdit(self._qc_output_edit.text())); out_e.setPlaceholderText("(auto)")
         nev_e = _le(QLineEdit(self._max_events_qc.text())); nev_e.setToolTip("-1 = no limit")
 
@@ -1693,20 +1276,13 @@ class ControlPanel(QWidget):
         form.addRow("Output ROOT (-o):", out_e)
         form.addRow("Max events (-n):", nev_e)
 
-        btns = QHBoxLayout()
-        ok_btn = QPushButton("OK"); ok_btn.setStyleSheet(_BTN_PRIMARY)
-        ca_btn = QPushButton("Cancel"); ca_btn.setStyleSheet(_BTN_NORMAL)
-        btns.addStretch(); btns.addWidget(ok_btn); btns.addWidget(ca_btn)
-        form.addRow(btns)
-
         def accept():
             self._qc_input_edit.setText(inp_e.text())
             self._qc_output_edit.setText(out_e.text())
             self._max_events_qc.setText(nev_e.text())
             dlg.accept()
 
-        ok_btn.clicked.connect(accept)
-        ca_btn.clicked.connect(dlg.reject)
+        _ok_cancel_row(dlg, form, accept)
         dlg.exec()
 
     def _browse_root_file(self):
@@ -1716,42 +1292,24 @@ class ControlPanel(QWidget):
             self._log(f"<span style='color:#8b949e'>Opening {path}</span>")
             self.rootFileReady.emit(path)
 
-    # ------------------------------------------------------------------
-    # Disk space check
-    # ------------------------------------------------------------------
+    # -- Disk space check --
+
+    def _scp_dirs(self):
+        """_run_dirs() of the panel's SCP fields."""
+        return _run_dirs(self._run_edit.text(), self._host_edit.text(),
+                         self._remote_base_edit.text(),
+                         self._local_base_edit.text())
 
     def _on_check_disk(self):
-        run_num = self._run_edit.text().strip()
-        if not run_num:
+        dirs = self._scp_dirs()
+        if dirs is None:
             self._log("<span style='color:#f85149'>Enter a run number first.</span>")
             return
-        host = self._host_edit.text().strip() or _REMOTE_HOST
-        remote_base = self._remote_base_edit.text().strip() or _REMOTE_DATA_BASE
-        local_base = self._local_base_edit.text().strip() or _LOCAL_DATA_BASE
-        f_start = self._f_start.value()
-        f_end = self._f_end.value()
-        remote_run_dir = f"{remote_base}/prad_{int(run_num):06d}"
-        local_run_dir = os.path.join(local_base, f"prad_{int(run_num):06d}")
         self._disk_lbl.setText("Checking…")
-        try:
-            needed, free = _check_disk_space(host, remote_run_dir, local_base,
-                                              f_start, f_end, local_run_dir)
-            ok = free >= needed
-            color = "#3fb950" if ok else "#f85149"
-            self._disk_lbl.setText(
-                f"<span style='color:{color}'>"
-                f"need {_fmt_bytes(needed)}, free {_fmt_bytes(free)}"
-                f"{'  ✓' if ok else '  ✗ (insufficient)'}</span>")
-        except RuntimeError as exc:
-            self._disk_lbl.setText(
-                f"<span style='color:#f85149'>SSH error: {exc}</span>")
-        except Exception as exc:
-            self._disk_lbl.setText(
-                f"<span style='color:#f85149'>Error: {exc}</span>")
+        self._disk_lbl.setText(
+            _disk_check_html(dirs, self._f_start.value(), self._f_end.value()))
 
-    # ------------------------------------------------------------------
-    # Pipeline logic
-    # ------------------------------------------------------------------
+    # -- Pipeline logic --
 
     def _start_pipeline(self, steps: List[str]):
         if self._process is not None and \
@@ -1785,31 +1343,18 @@ class ControlPanel(QWidget):
     # -- SCP step --
 
     def _run_scp(self):
-        run_num = self._run_edit.text().strip()
-        if not run_num:
+        dirs = self._scp_dirs()
+        if dirs is None:
             self._log("<span style='color:#f85149'>No run number specified.</span>")
             self._set_running(False)
             return
-        host = self._host_edit.text().strip() or _REMOTE_HOST
-        remote_base = self._remote_base_edit.text().strip() or _REMOTE_DATA_BASE
-        local_base = self._local_base_edit.text().strip() or _LOCAL_DATA_BASE
+        run_tag, host, remote_run_dir, local_base, local_run_dir = dirs
         f_start = self._f_start.value()
         f_end = self._f_end.value()
-        run_id = int(run_num)
-        run_tag = f"prad_{run_id:06d}"
-        remote_run_dir = f"{remote_base}/{run_tag}"
-        local_run_dir  = os.path.join(local_base, run_tag)
 
         # -- pre-check: find files in range that already exist locally --
-        existing = []
-        if os.path.isdir(local_run_dir):
-            import glob as _glob
-            for path in sorted(_glob.glob(f"{local_run_dir}/{run_tag}.evio.*")):
-                m = re.search(r'\.evio\.(\d+)$', os.path.basename(path))
-                if m:
-                    n = int(m.group(1))
-                    if f_start <= n <= f_end:
-                        existing.append(os.path.basename(path))
+        existing = local_evio_in_range(local_run_dir, f_start, f_end,
+                                       f"{run_tag}.evio.*")
         if existing:
             self._log(
                 f"<span style='color:#d29922'>{len(existing)} file(s) already present "
@@ -1819,18 +1364,11 @@ class ControlPanel(QWidget):
         self._log("<span style='color:#8b949e'>Checking disk space…</span>")
         self._status_lbl.setText("Checking disk space…")
         try:
-            needed, free = _check_disk_space(host, remote_run_dir, local_base,
-                                              f_start, f_end, local_run_dir)
-            ok = free >= needed
-            color = "#3fb950" if ok else "#f85149"
-            self._log(
-                f"<span style='color:{color}'>Disk: need {_fmt_bytes(needed)}, "
-                f"free {_fmt_bytes(free)}{'  ✓' if ok else '  ✗ (insufficient)'}</span>")
-            self._disk_lbl.setText(
-                f"<span style='color:{color}'>"
-                f"need {_fmt_bytes(needed)}, free {_fmt_bytes(free)}"
-                f"{'  ✓' if ok else '  ✗ (insufficient)'}</span>")
-            if not ok:
+            needed, free = check_disk_space(host, remote_run_dir, local_base,
+                                            f_start, f_end, local_run_dir)
+            self._log(_disk_summary_html(needed, free, "Disk: "))
+            self._disk_lbl.setText(_disk_summary_html(needed, free))
+            if free < needed:
                 self._log("<span style='color:#f85149'>Insufficient disk space — stopping.</span>")
                 self._pending_steps.clear()
                 self._set_running(False)
@@ -1842,35 +1380,12 @@ class ControlPanel(QWidget):
 
         self._evio_dir = local_run_dir
 
-        # bash script: list remote files, skip existing, scp missing ones
-        bash_cmd = (
-            f"mkdir -p {local_run_dir}\n"
-            f"echo 'Local directory: {local_run_dir}'\n"
-            f"echo 'Listing remote files...'\n"
-            f"ALL_FILES=$(ssh {host} 'ls {remote_run_dir}/' 2>/dev/null | sort)\n"
-            f"COPIED=0\n"
-            f"ALREADY=0\n"
-            f"while IFS= read -r f; do\n"
-            f"    NUM=$(echo \"$f\" | grep -oP '\\.evio\\.\\K[0-9]+')\n"
-            f"    [ -z \"$NUM\" ] && continue\n"
-            f"    N=$((10#$NUM))\n"
-            f"    if [ \"$N\" -lt {f_start} ] || [ \"$N\" -gt {f_end} ]; then continue; fi\n"
-            f"    if [ -f \"{local_run_dir}/$f\" ]; then\n"
-            f"        echo \"  Already exists: $f (skipping)\"\n"
-            f"        ALREADY=$((ALREADY+1))\n"
-            f"    else\n"
-            f"        echo \"  Copying $f\"\n"
-            f"        scp {host}:{remote_run_dir}/$f {local_run_dir}/\n"
-            f"        COPIED=$((COPIED+1))\n"
-            f"    fi\n"
-            f"done <<< \"$ALL_FILES\"\n"
-            f"echo \"Done. Copied $COPIED file(s), $ALREADY already present.\"\n"
-        )
         self._log(
-            f"<span style='color:#8b949e'>Run {run_num}, files {f_start}–{f_end}"
-            f" → {local_run_dir}</span>")
+            f"<span style='color:#8b949e'>Run {self._run_edit.text().strip()}, "
+            f"files {f_start}–{f_end} → {local_run_dir}</span>")
         self._status_lbl.setText("Getting data…")
-        self._launch_process_bash(bash_cmd)
+        self._launch_process(["bash", "-c", scp_bash(
+            host, remote_run_dir, local_run_dir, f_start, f_end)])
 
     # -- Replay step --
 
@@ -1882,48 +1397,26 @@ class ControlPanel(QWidget):
             return
         out_dir = self._outdir_edit.text().strip()
         if not out_dir:
-            run_num = self._run_edit.text().strip()
-            if run_num:
-                out_dir = os.path.join(_RECON_BASE, f"prad_{int(run_num):06d}")
-            else:
-                out_dir = os.path.join(_RECON_BASE, os.path.basename(evio_path.rstrip("/")) + "_recon")
+            out_dir = os.path.join(
+                _RECON_BASE, _run_tag(self._run_edit.text())
+                or os.path.basename(evio_path.rstrip("/")) + "_recon")
         os.makedirs(out_dir, exist_ok=True)
         self._recon_dir = out_dir
 
         cmd = [_REPLAY_RECON_CMD, evio_path]
         cmd += ["-o", out_dir]
         cmd += ["-j", str(self._threads_spin.value())]
-
-        n_ev = self._max_events_rep.text().strip()
-        if n_ev and n_ev != "-1":
-            cmd += ["-n", n_ev]
-
+        _opt(cmd, "-n", self._max_events_rep.text(), skip="-1")
         n_f = self._max_files_spin.value()
         if n_f > 0:
             cmd += ["-f", str(n_f)]
-
-        daq_cfg = self._daq_config_edit.text().strip()
-        if daq_cfg:
-            cmd += ["-c", daq_cfg]
-
-        hycal_map = self._hycal_map_edit.text().strip()
-        if hycal_map:
-            cmd += ["-d", hycal_map]
-
-        gem_ped = self._gem_ped_edit.text().strip()
-        if gem_ped:
-            cmd += ["-g", gem_ped]
-
-        zsup = self._zerosup_edit.text().strip()
-        if zsup:
-            cmd += ["-z", zsup]
-
+        _opt(cmd, "-c", self._daq_config_edit.text())
+        _opt(cmd, "-d", self._hycal_map_edit.text())
+        _opt(cmd, "-g", self._gem_ped_edit.text())
+        _opt(cmd, "-z", self._zerosup_edit.text())
         if self._prad1_chk.isChecked():
             cmd.append("-p")
-
-        self._log(f"<span style='color:#8b949e'>$ {' '.join(cmd)}</span>")
-        self._status_lbl.setText("Running replay recon…")
-        self._launch_process(cmd)
+        self._run_cmd(cmd, "Running replay recon…")
 
     # -- hadd merge step --
 
@@ -1947,24 +1440,13 @@ class ControlPanel(QWidget):
             self._run_next_step()
             return
 
-        # Determine merged output filename
-        run_num = self._run_edit.text().strip()
-        if run_num:
-            out_name = f"prad_{int(run_num):06d}_recon.root"
-        else:
-            # Derive from first file (e.g. prad_024436_recon_0000.root → prad_024436_recon.root)
-            first = os.path.basename(root_files[0])
-            m = re.match(r'(prad_\d+_recon).*\.root', first)
-            out_name = (m.group(1) + ".root") if m else "merged_recon.root"
-
+        out_name = self._out_name(root_files[0], "recon", "merged_recon.root")
         hadd_dir = os.path.dirname(recon_dir.rstrip("/")) or _RECON_BASE
         self._hadd_out = os.path.join(hadd_dir, out_name)
         self._hadd_inputs = list(root_files)
 
         cmd = ["hadd", "-f", self._hadd_out] + root_files
-        self._log(f"<span style='color:#8b949e'>$ {' '.join(cmd)}</span>")
-        self._status_lbl.setText("Merging ROOT files (hadd)\u2026")
-        self._launch_process(cmd)
+        self._run_cmd(cmd, "Merging ROOT files (hadd)…")
 
     # -- Replay filter step --
 
@@ -1977,15 +1459,9 @@ class ControlPanel(QWidget):
 
         flt_out = self._filter_output_edit.text().strip()
         if not flt_out:
-            run_num = self._run_edit.text().strip()
-            if run_num:
-                out_name = f"prad_{int(run_num):06d}_filter.root"
-            else:
-                base = os.path.basename(flt_input)
-                m = re.match(r'(prad_\d+).*\.root', base)
-                out_name = (m.group(1) + "_filter.root") if m else "filter_out.root"
-            base_dir = os.path.dirname(flt_input)
-            flt_out = os.path.join(base_dir, out_name)
+            flt_out = os.path.join(
+                os.path.dirname(flt_input),
+                self._out_name(flt_input, "filter", "filter_out.root"))
         self._filter_out = flt_out
         # JSON report path: same dir, replace .root → .report.json
         self._filter_report = re.sub(r'\.root$', '.report.json', flt_out,
@@ -1993,16 +1469,9 @@ class ControlPanel(QWidget):
 
         cmd = [_REPLAY_FILTER_CMD, flt_input, "-o", flt_out,
                "-j", self._filter_report]
-        cut_cfg = self._filter_cut_edit.text().strip()
-        if cut_cfg:
-            cmd += ["-c", cut_cfg]
-        n_ev = self._max_events_flt.text().strip()
-        if n_ev and n_ev != "-1":
-            cmd += ["-n", n_ev]
-
-        self._log(f"<span style='color:#8b949e'>$ {' '.join(cmd)}</span>")
-        self._status_lbl.setText("Running replay filter…")
-        self._launch_process(cmd)
+        _opt(cmd, "-c", self._filter_cut_edit.text())
+        _opt(cmd, "-n", self._max_events_flt.text(), skip="-1")
+        self._run_cmd(cmd, "Running replay filter…")
 
     # -- Quick check step --
 
@@ -2015,11 +1484,8 @@ class ControlPanel(QWidget):
 
         qc_out = self._qc_output_edit.text().strip()
         if not qc_out:
-            run_num = self._run_edit.text().strip()
-            if run_num:
-                out_name = f"prad_{int(run_num):06d}_quick.root"
-            else:
-                out_name = "quick_check_out.root"
+            tag = _run_tag(self._run_edit.text())
+            out_name = f"{tag}_quick.root" if tag else "quick_check_out.root"
             base_dir = (os.path.dirname(qc_input)
                         if not os.path.isdir(qc_input) else qc_input)
             qc_out = os.path.join(base_dir, out_name)
@@ -2027,18 +1493,19 @@ class ControlPanel(QWidget):
 
         cmd = [_QUICK_CHECK_CMD, qc_input]
         cmd += ["-o", qc_out]
+        _opt(cmd, "-n", self._max_events_qc.text(), skip="-1")
+        self._run_cmd(cmd, "Running quick check…")
 
-        n_ev = self._max_events_qc.text().strip()
-        if n_ev and n_ev != "-1":
-            cmd += ["-n", n_ev]
+    def _out_name(self, src: str, suffix: str, fallback: str) -> str:
+        """prad_NNNNNN_<suffix>.root for the run field, else for the run in
+        the name of ``src``, else ``fallback``."""
+        tag = _run_tag(self._run_edit.text())
+        if tag is None:
+            m = re.match(r'(prad_\d+).*\.root', os.path.basename(src))
+            tag = m.group(1) if m else None
+        return f"{tag}_{suffix}.root" if tag else fallback
 
-        self._log(f"<span style='color:#8b949e'>$ {' '.join(cmd)}</span>")
-        self._status_lbl.setText("Running quick check…")
-        self._launch_process(cmd)
-
-    # ------------------------------------------------------------------
-    # QProcess management
-    # ------------------------------------------------------------------
+    # -- QProcess management --
 
     def _launch_process(self, cmd: List[str]):
         proc = QProcess(self)
@@ -2050,27 +1517,24 @@ class ControlPanel(QWidget):
         self._process = proc
         proc.start(cmd[0], cmd[1:])
 
-    def _launch_process_bash(self, bash_script: str):
-        proc = QProcess(self)
-        proc.readyReadStandardOutput.connect(self._on_stdout)
-        proc.readyReadStandardError.connect(self._on_stderr)
-        proc.finished.connect(self._on_finished)
-        proc.errorOccurred.connect(self._on_process_error)
-        proc.setProcessEnvironment(QProcessEnvironment.systemEnvironment())
-        self._process = proc
-        proc.start("bash", ["-c", bash_script])
+    def _run_cmd(self, cmd: List[str], status: str):
+        """Log ``cmd``, show ``status`` and launch it."""
+        self._log(f"<span style='color:#8b949e'>$ {' '.join(cmd)}</span>")
+        self._status_lbl.setText(status)
+        self._launch_process(cmd)
 
     def _on_stdout(self):
         if self._process is None:
             return
         data = self._process.readAllStandardOutput().data().decode(errors="replace")
-        self._log(data.replace("\n", "<br>"))
+        self._log(html.escape(data, quote=False).replace("\n", "<br>"))
 
     def _on_stderr(self):
         if self._process is None:
             return
         data = self._process.readAllStandardError().data().decode(errors="replace")
-        self._log(f"<span style='color:#f0883e'>{data.replace(chr(10), '<br>')}</span>")
+        data = html.escape(data, quote=False).replace("\n", "<br>")
+        self._log(f"<span style='color:#f0883e'>{data}</span>")
 
     def _on_process_error(self, error):
         labels = {
@@ -2126,11 +1590,13 @@ class ControlPanel(QWidget):
         else:
             self._pending_steps.clear()
             self._set_running(False)
-            # If quick_check produced output even on non-zero exit, try loading
+            # A failed step still loads any quick_check output that exists.
             if self._qcheck_out and os.path.isfile(self._qcheck_out):
                 self.rootFileReady.emit(self._qcheck_out)
 
-        # Emit when quick_check succeeded
+        # After any successful step, load the quick_check output once its
+        # path is set and the file exists (possibly an earlier run's file
+        # while quick_check is still running).
         if exit_code == 0 and self._qcheck_out and os.path.isfile(self._qcheck_out):
             self.rootFileReady.emit(self._qcheck_out)
 
@@ -2147,9 +1613,7 @@ class ControlPanel(QWidget):
         if not running:
             self._status_lbl.setText("Ready")
 
-    # ------------------------------------------------------------------
-    # Console helpers
-    # ------------------------------------------------------------------
+    # -- Console helpers --
 
     def _log(self, html: str):
         self._console.moveCursor(self._console.textCursor().MoveOperation.End)
@@ -2158,67 +1622,22 @@ class ControlPanel(QWidget):
         self._console.moveCursor(self._console.textCursor().MoveOperation.End)
 
 
-def _check_disk_space(remote_host, remote_run_dir, local_base, f_start, f_end,
-                      local_run_dir=None):
-    result = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=10",
-         remote_host, f"ls -l {remote_run_dir}/ 2>/dev/null"],
-        capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode == 255:
-        raise RuntimeError(result.stderr.strip() or "SSH connection failed")
+# ---- Filter Report Widget ----
 
-    needed = 0
-    counted = 0
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 9:
-            continue
-        m = re.search(r'\.evio\.(\d+)$', parts[-1])
-        if not m:
-            continue
-        n = int(m.group(1))
-        if f_start <= n <= f_end:
-            fname = parts[-1]
-            if local_run_dir and os.path.isfile(os.path.join(local_run_dir, fname)):
-                continue  # already downloaded, skip
-            try:
-                needed += int(parts[4])
-                counted += 1
-            except (ValueError, IndexError):
-                pass
+def _mpl_theme_rc() -> dict:
+    """matplotlib rcParams for the active THEME."""
+    return {"axes.facecolor": THEME.CANVAS, "axes.edgecolor": THEME.BORDER,
+            "axes.labelcolor": THEME.TEXT, "text.color": THEME.TEXT,
+            "xtick.color": THEME.TEXT, "ytick.color": THEME.TEXT,
+            "legend.facecolor": THEME.PANEL, "legend.edgecolor": THEME.BORDER,
+            "legend.labelcolor": THEME.TEXT}
 
-    if counted == 0:
-        # estimate based only on files not yet present locally
-        if local_run_dir and os.path.isdir(local_run_dir):
-            import glob as _glob
-            existing_nums = set()
-            for p in _glob.glob(os.path.join(local_run_dir, "*.evio.*")):
-                mm = re.search(r'\.evio\.(\d+)$', os.path.basename(p))
-                if mm:
-                    existing_nums.add(int(mm.group(1)))
-            missing = sum(1 for n in range(f_start, f_end + 1)
-                          if n not in existing_nums)
-        else:
-            missing = f_end - f_start + 1
-        needed = missing * _EVIO_BYTES_PER_FILE_EST
-
-    check_path = local_base
-    while check_path and not os.path.exists(check_path):
-        check_path = os.path.dirname(check_path)
-    free = shutil.disk_usage(check_path or "/").free
-    return needed, free
-
-
-# ===========================================================================
-#  Filter Report Widget
-# ===========================================================================
 
 class FilterReportWidget(QWidget):
     """Embedded replay-filter JSON report chart.
 
-    Shows three rows (cut status / livetime+rate / EPICS) using the same
-    plotting helpers as replay_report_viewer.py.  Requires matplotlib and
+    Shows three rows (cut status / livetime+rate / EPICS) drawn by
+    replay_report_viewer.plot_report.  Requires matplotlib and
     replay_report_viewer to be importable; shows a placeholder otherwise.
     """
 
@@ -2269,8 +1688,7 @@ class FilterReportWidget(QWidget):
         v.addLayout(top)
 
         # ── matplotlib canvas ─────────────────────────────────────────────
-        self._fig = MplFigure(constrained_layout=True)
-        self._fig.patch.set_facecolor("#0d1117")
+        self._fig = MplFigure(constrained_layout=True, facecolor=THEME.CANVAS)
         self._canvas = FigureCanvasQTAgg(self._fig)
         self._canvas.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -2281,7 +1699,6 @@ class FilterReportWidget(QWidget):
 
         self._selected_epics: set = set()
 
-    # ------------------------------------------------------------------
     def load_report(self, path: str) -> None:
         """Load a *.report.json written by prad2ana_replay_filter."""
         if not self._available:
@@ -2293,96 +1710,29 @@ class FilterReportWidget(QWidget):
                 f"<span style='color:#f85149'>Load error: {exc}</span>")
             return
 
-        # Rebuild EPICS channel menu
-        self._menu_epics.clear()
-        for s in self._report.channels.values():
-            if not s.is_epics:
-                continue
-            act = QAction(s.label, self)
-            act.setCheckable(True)
-            act.setChecked(True)
-            act.setData(s.name)
-            act.toggled.connect(lambda _c: self._on_epics_toggled())
-            self._menu_epics.addAction(act)
-        self._selected_epics = {
-            s.name for s in self._report.channels.values() if s.is_epics
-        }
+        self._selected_epics = _rrv_fill_epics_menu(
+            self._menu_epics, self._report, self, self._on_epics_toggled)
 
         self._lbl_title.setText(_rrv_title_for(self._report))
         self._replot()
 
     def _on_epics_toggled(self) -> None:
-        self._selected_epics = {
-            a.data() for a in self._menu_epics.actions() if a.isChecked()
-        }
+        self._selected_epics = _rrv_checked_epics(self._menu_epics)
         self._replot()
 
     def _replot(self) -> None:
         self._fig.clear()
+        self._fig.patch.set_facecolor(THEME.CANVAS)
         r = self._report
-        if r is None:
-            self._canvas.draw_idle()
-            return
-
-        x_kind = self._cmb_x.currentData() or "time"
-        x, xlabel = _rrv_get_x(r, x_kind)
-        segs = _rrv_reject_segments(r, x)
-
-        axes = self._fig.subplots(
-            3, 1, sharex=True,
-            gridspec_kw={"height_ratios": [1.4, 1.4, 1.7]})
-
-        # Apply dark theme to every axis
-        _DARK_BG   = "#0d1117"
-        _DARK_FG   = "#c9d1d9"
-        _DARK_EDGE = "#30363d"
-        for ax in axes:
-            ax.set_facecolor(_DARK_BG)
-            ax.tick_params(colors=_DARK_FG)
-            for spine in ax.spines.values():
-                spine.set_edgecolor(_DARK_EDGE)
-
-        _rrv_draw_status(axes[0], r, x)
-        _rrv_shade_rejected(axes[0], segs)
-
-        ax_rt = _rrv_draw_lt_rate(axes[1], r, x)
-        ax_rt.set_facecolor(_DARK_BG)
-        ax_rt.tick_params(colors=_DARK_FG)
-        for spine in ax_rt.spines.values():
-            spine.set_edgecolor(_DARK_EDGE)
-        _rrv_shade_rejected(axes[1], segs)
-        _rrv_shade_rejected(ax_rt,   segs)
-
-        ax_ep = axes[2]
-        sel = [r.channels[n] for n in self._selected_epics if n in r.channels]
-        sel.sort(key=lambda s: s.label)
-        if sel:
-            for s in sel:
-                xx, yy = _rrv_finite_xy(x, s.values)
-                ax_ep.plot(xx, yy, lw=1.0, label=s.label)
-            ax_ep.set_ylabel("EPICS", rotation=0, ha="right",
-                              va="center", labelpad=8, color=_DARK_FG)
-            ax_ep.legend(loc="upper right", fontsize=8,
-                         ncol=min(len(sel), 4),
-                         facecolor="#161b22", edgecolor=_DARK_EDGE,
-                         labelcolor=_DARK_FG)
-            ax_ep.grid(axis="x", which="major", alpha=0.25)
-        else:
-            ax_ep.text(0.5, 0.5, "No EPICS channels selected — pick from menu.",
-                       transform=ax_ep.transAxes,
-                       ha="center", va="center", color="#8b949e")
-            ax_ep.set_yticks([])
-        _rrv_shade_rejected(ax_ep, segs)
-
-        axes[-1].set_xlabel(xlabel, color=_DARK_FG)
-        self._fig.align_ylabels(axes)
-        self._fig.suptitle(_rrv_title_for(r), fontsize=11, color=_DARK_FG)
+        if r is not None:
+            sel = _rrv_selected_series(r, self._selected_epics)
+            with rc_context(_mpl_theme_rc()):
+                _rrv_plot_report(self._fig, r, self._cmb_x.currentData() or "time",
+                                 sel, note_color=THEME.TEXT_DIM)
         self._canvas.draw_idle()
 
 
-# ===========================================================================
-#  Results Panel (right side)
-# ===========================================================================
+# ---- Results Panel (right side) ----
 
 class ResultsPanel(QWidget):
     """Tabbed display of quick_check ROOT file contents."""
@@ -2402,8 +1752,6 @@ class ResultsPanel(QWidget):
                 self._map_widget.set_palette("viridis")
             except Exception:
                 pass
-
-    # ------------------------------------------------------------------
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -2470,7 +1818,7 @@ class ResultsPanel(QWidget):
         self._tabs.addTab(map_container, "HyCal Map")
 
         # Tab 1: Hit Position 2D
-        self._hit_pos_widget = Hist2DWidget("Hit Position", "x (mm)", "y (mm)")
+        self._hit_pos_widget = Hist2DWidget("Hit Position")
         self._tabs.addTab(self._hit_pos_widget, "Hit Position")
 
         # Tab 2: Energy Spectra
@@ -2492,7 +1840,7 @@ class ResultsPanel(QWidget):
         self._tabs.addTab(energy_tab, "Energy Spectra")
 
         # Tab 3: Energy vs Theta 2D
-        self._ev_theta_widget = Hist2DWidget("Energy vs θ", "θ (deg)", "E (GeV)")
+        self._ev_theta_widget = Hist2DWidget("Energy vs θ")
         self._tabs.addTab(self._ev_theta_widget, "Energy vs Theta")
 
         # Tab 4: Moller Analysis
@@ -2519,7 +1867,7 @@ class ResultsPanel(QWidget):
         mg.addLayout(mol_top, stretch=1)
         mg.addLayout(mol_bot, stretch=1)
         # 2-arm Moller position 2D
-        self._moller_2arm = Hist2DWidget("2-arm Moller position", "x1 (mm)", "x2 (mm)")
+        self._moller_2arm = Hist2DWidget("2-arm Moller position")
         mg.addWidget(self._moller_2arm, stretch=2)
         self._tabs.addTab(moller_tab, "Moller")
 
@@ -2550,9 +1898,7 @@ class ResultsPanel(QWidget):
         self._loading_lbl.setStyleSheet(_LBL_MUT)
         root.addWidget(self._loading_lbl)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # -- Public API --
 
     def load_file(self, path: str):
         if not HAS_UPROOT:
@@ -2574,7 +1920,6 @@ class ResultsPanel(QWidget):
     def load_filter_report(self, path: str):
         """Load a replay-filter JSON report and switch to the Filter Report tab."""
         self._filter_report_widget.load_report(path)
-        # Switch to the Filter Report tab automatically
         idx = self._tabs.indexOf(self._filter_report_widget)
         if idx >= 0:
             self._tabs.setCurrentIndex(idx)
@@ -2593,59 +1938,15 @@ class ResultsPanel(QWidget):
             f"Loaded: {len(data)} datasets")
         self._populate(data)
 
-    # ------------------------------------------------------------------
-    # Populate widgets from loaded data
-    # ------------------------------------------------------------------
+    # -- Populate widgets from loaded data --
 
     def _populate(self, data: dict):
-        # HyCal map
         self._refresh_map()
-
-        # Hit position 2D
-        if "hit_pos" in data:
-            vals, xe, ye = data["hit_pos"]
-            self._hit_pos_widget.set_data(vals, xe, ye)
-
-        # Energy spectra
-        mapping = {
-            "one_cluster_energy": self._h_1cl,
-            "two_cluster_energy": self._h_2cl,
-            "clusters_energy":    self._h_all,
-            "total_energy":       self._h_tot,
-        }
-        for key, widget in mapping.items():
-            if key in data:
-                vals, edges = data[key]
-                widget.set_data(vals, edges)
-
-        # Energy vs theta
-        if "energy_plots/h2_energy_theta" in data:
-            vals, xe, ye = data["energy_plots/h2_energy_theta"]
-            self._ev_theta_widget.set_data(vals, xe, ye)
-
-        # Moller 1D (actual histogram names have h_ prefix)
-        for key, widget in (
-            ("moller/h_moller_z",        self._h_moller_z),
-            ("moller/h_moller_phi_diff", self._h_moller_phi),
-            ("moller/h_moller_x",        self._h_moller_x),
-            ("moller/h_moller_y",        self._h_moller_y),
-        ):
-            if key in data:
-                v, e = data[key]
-                widget.set_data(v, e)
-        if "moller/h2_moller_pos" in data:
-            vals, xe, ye = data["moller/h2_moller_pos"]
-            self._moller_2arm.set_data(vals, xe, ye)
-
-        # Physics yields
-        for key, widget in (
-            ("physics_yields/ep_yield",    self._h_ep),
-            ("physics_yields/ee_yield",    self._h_ee),
-            ("physics_yields/yield_ratio", self._h_ratio),
-        ):
-            if key in data:
-                v, e = data[key]
-                widget.set_data(v, e)
+        for key, attr in _HIST_PLOTS:
+            widget = getattr(self, attr)
+            # skip a histogram whose dimension does not fit the widget
+            if len(data.get(key, ())) == (3 if isinstance(widget, Hist2DWidget) else 2):
+                widget.set_data(*data[key])
 
     def _refresh_map(self):
         if not hasattr(self, "_data"):
@@ -2658,30 +1959,31 @@ class ResultsPanel(QWidget):
             self._map_widget.set_module_counts(data.get("module_counts", {}))
 
 
-# ===========================================================================
-#  Main Window
-# ===========================================================================
+# ---- Main Window ----
+
+_MAIN_QSS = (
+    "QMainWindow{background:#0d1117;}"
+    "QWidget{background:#0d1117;color:#c9d1d9;}"
+    "QSplitter::handle{background:#21262d;}"
+    "QLabel{color:#c9d1d9;}")
+
+_MENUBAR_QSS = (
+    "QMenuBar{background:#161b22;color:#c9d1d9;"
+    "font-family:Consolas;font-size:10pt;}"
+    "QMenuBar::item:selected{background:#21262d;}"
+    "QMenu{background:#161b22;color:#c9d1d9;border:1px solid #30363d;}"
+    "QMenu::item:selected{background:#1f6feb;}")
+
 
 class MainWindow(QMainWindow):
     def __init__(self, initial_root: str = ""):
         super().__init__()
         self.setWindowTitle("PRad-2 Replay Viewer")
         self.resize(1600, 900)
-        self.setStyleSheet(themed(
-            "QMainWindow{background:#0d1117;}"
-            "QWidget{background:#0d1117;color:#c9d1d9;}"
-            "QSplitter::handle{background:#21262d;}"
-            "QLabel{color:#c9d1d9;}"))
+        self._apply_main_qss()
 
         # menu bar
         mb = self.menuBar()
-        mb.setStyleSheet(themed(
-            "QMenuBar{background:#161b22;color:#c9d1d9;"
-            "font-family:Consolas;font-size:10pt;}"
-            "QMenuBar::item:selected{background:#21262d;}"
-            "QMenu{background:#161b22;color:#c9d1d9;border:1px solid #30363d;}"
-            "QMenu::item:selected{background:#1f6feb;}"))
-
         file_menu = mb.addMenu("File")
         open_act = file_menu.addAction("Open ROOT file…")
         open_act.triggered.connect(self._open_root)
@@ -2722,20 +2024,17 @@ class MainWindow(QMainWindow):
         if path:
             self._results.load_file(path)
 
+    def _apply_main_qss(self):
+        self.setStyleSheet(themed(_MAIN_QSS))
+        self.menuBar().setStyleSheet(themed(_MENUBAR_QSS))
+
     def _change_theme(self, name: str):
         set_theme(name)
         apply_theme_palette(QApplication.instance())
-        # Re-apply stylesheet
-        self.setStyleSheet(themed(
-            "QMainWindow{background:#0d1117;}"
-            "QWidget{background:#0d1117;color:#c9d1d9;}"
-            "QSplitter::handle{background:#21262d;}"
-            "QLabel{color:#c9d1d9;}"))
+        self._apply_main_qss()
 
 
-# ===========================================================================
-#  Entry point
-# ===========================================================================
+# ---- Entry point ----
 
 def main():
     app = QApplication(sys.argv)

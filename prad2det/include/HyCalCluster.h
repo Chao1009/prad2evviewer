@@ -74,8 +74,7 @@ struct ClusterConfig {
     //     to seed additional clusters at different timings within the same
     //     event.
     // When `seed_time_window <= 0` (default), the time field is ignored and
-    // the legacy single-pulse-per-module behaviour applies — callers that
-    // only ever push one hit per module see no change.
+    // every connected pulse joins the island.
     float seed_time_window   = -1.f;      // ns, ≤ 0 disables timing gating
 };
 
@@ -129,9 +128,6 @@ struct ClusterHit {
 //   Cf  = 0.5  for photon-induced showers
 //   PWO4:    X0 = 8.6 mm, Ec = 1.1  MeV
 //   PbGlass: X0 = 26.7 mm, Ec = 2.84 MeV
-//
-// (Same formula as the legacy analysis::PhysicsTools::GetShowerDepth, moved
-// here so prad2det owns it and the python binding can expose it.)
 float shower_depth(int center_id, float energy_mev);
 
 // --- cluster profile (energy sharing lookup) --------------------------------
@@ -311,7 +307,7 @@ private:
 };
 
 
-// --- split container (static, reused across calls) --------------------------
+// --- split container (per-call fraction scratch for split_hits) -------------
 static constexpr int SPLIT_MAX_HITS   = 100;
 static constexpr int SPLIT_MAX_MAXIMA = 10;
 
@@ -341,11 +337,9 @@ public:
     explicit HyCalCluster(const HyCalSystem &sys);
     ~HyCalCluster();
 
-    // non-copyable
     HyCalCluster(const HyCalCluster &) = delete;
     HyCalCluster &operator=(const HyCalCluster &) = delete;
 
-    // set configuration
     void SetConfig(const ClusterConfig &cfg)
     {
         config_ = cfg;
@@ -376,7 +370,6 @@ public:
     };
     void ReconstructMatched(std::vector<RecoResult> &out) const;
 
-    // access results
     const std::vector<ModuleCluster> &GetClusters() const { return clusters_; }
 
     // --- timing-coincidence study tool --------------------------------------
@@ -401,6 +394,11 @@ public:
     };
     void CollectNeighborTiming(std::vector<SeedNeighborTiming> &out,
                                double max_quantized_dist = 5.0) const;
+
+    // Fraction of the energy cE of a shower centred at (cx, cy) expected in
+    // module `module_index`, from the installed profile and the quantized
+    // distance used by the clustering.
+    float ProfileFractionAt(float cx, float cy, float cE, int module_index) const;
 
 private:
     // island algorithm steps
@@ -450,8 +448,6 @@ private:
                                       ModuleType type) const;
     ProfileValue get_pwo_profile_value_at(float cx, float cy, float cE,
                                           double mx, double my) const;
-    float get_profile_frac_at(float cx, float cy, float cE,
-                              const ModuleHit &hit) const;
 
     const HyCalSystem     &sys_;
     ClusterConfig          config_;

@@ -4,24 +4,33 @@
 using namespace fdec;
 
 //=============================================================================
-// FADC250 hardware-format word types (bits 31:27 = type tag)
+// FADC250 hardware-format words (JLab FADC250 firmware / rol1.c)
 //
-// From JLab FADC250 firmware / rol1.c:
-//   0x00 (0):  Block Header   — slot(5), module_id(4), block#(10), nevents(8)
-//   0x01 (1):  Block Trailer  — slot(5), nwords(22)
-//   0x02 (2):  Event Header   — slot(5), trigger#(22)
-//   0x03 (3):  Trigger Time   — time_low(24); continuation: time_high(24)
-//   0x04 (4):  Window Raw Data— channel(4), window_width(12)
-//              then (width+1)/2 continuation words, 2 ADC samples each
-//   0x1F (31): Filler         — skip
+// Defining words have bit 31 = 1 and the type in bits 30:27, so
+// (w >> 27) = 0x10 + type:
+//   0x10: Block Header    — slot 26:22
+//   0x11: Block Trailer
+//   0x12: Event Header    — trigger# 21:0
+//   0x13: Trigger Time    — time_low 23:0; continuation: time_high 23:0
+//   0x14: Window Raw Data — channel 26:23, window width 11:0,
+//         then (width+1)/2 sample words, 2 ADC samples each
+//   0x1E: Data Not Valid, 0x1F: Filler — skip
 //
-// Sample data words (continuation after type 0x04 header):
+// Continuation words have bit 31 = 0.  Sample words:
 //   Bits 28:16 = ADC sample i   (13 bits, 12-bit value + valid flag at bit 29)
 //   Bits 12:0  = ADC sample i+1 (13 bits, 12-bit value + valid flag at bit 13)
-//   Bit 31     = 1 for last sample word, 0 for more
 //=============================================================================
 
 namespace {
+
+enum : uint32_t {
+    T_BLOCK_HEADER  = 0x10,
+    T_BLOCK_TRAILER = 0x11,
+    T_EVENT_HEADER  = 0x12,
+    T_TRIGGER_TIME  = 0x13,
+    T_WINDOW_RAW    = 0x14,
+    T_FILLER        = 0x1F,
+};
 
 inline uint32_t type_tag(uint32_t w) { return (w >> 27) & 0x1F; }
 
@@ -49,7 +58,6 @@ int Fadc250RawDecoder::DecodeRoc(const uint32_t *data, size_t nwords, RocData &r
     if (!data || nwords == 0) return 0;
 
     int nslots = 0;
-    int cur_slot = -1;
     SlotData *sd = nullptr;
 
     for (size_t i = 0; i < nwords; ++i) {
@@ -58,17 +66,15 @@ int Fadc250RawDecoder::DecodeRoc(const uint32_t *data, size_t nwords, RocData &r
 
         switch (tt) {
 
-        case 0x00: { // Block Header
+        case T_BLOCK_HEADER: {
             uint32_t slot_id = bh_slot(w);
             if (slot_id >= MAX_SLOTS) {
                 std::cerr << "Fadc250RawDecoder: slot_id=" << slot_id
                           << " >= MAX_SLOTS\n";
-                cur_slot = -1;
                 sd = nullptr;
                 break;
             }
-            cur_slot = static_cast<int>(slot_id);
-            sd = &roc.slots[cur_slot];
+            sd = &roc.slots[slot_id];
             sd->present = true;
             sd->nchannels = 0;
             sd->channel_mask = 0;
@@ -76,19 +82,18 @@ int Fadc250RawDecoder::DecodeRoc(const uint32_t *data, size_t nwords, RocData &r
             break;
         }
 
-        case 0x01: { // Block Trailer
-            cur_slot = -1;
+        case T_BLOCK_TRAILER: {
             sd = nullptr;
             break;
         }
 
-        case 0x02: { // Event Header
+        case T_EVENT_HEADER: {
             if (!sd) break;
             sd->trigger = static_cast<int32_t>(eh_trigger(w));
             break;
         }
 
-        case 0x03: { // Trigger Time
+        case T_TRIGGER_TIME: {
             if (!sd) break;
             uint64_t time_low = tt_time(w);
             // Continuation word has bit 31 = 0 and carries high 24 bits
@@ -102,7 +107,7 @@ int Fadc250RawDecoder::DecodeRoc(const uint32_t *data, size_t nwords, RocData &r
             break;
         }
 
-        case 0x04: { // Window Raw Data header
+        case T_WINDOW_RAW: {
             if (!sd) break;
             uint32_t ch = wr_channel(w);
             uint32_t width = wr_width(w);
@@ -128,9 +133,7 @@ int Fadc250RawDecoder::DecodeRoc(const uint32_t *data, size_t nwords, RocData &r
             break;
         }
 
-        case 0x1F: // Filler — skip
-            break;
-
+        case T_FILLER:
         default:
             break;
         }

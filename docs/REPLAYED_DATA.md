@@ -357,9 +357,10 @@ The parallel vectors (`match_cl_idx`, `match_det_id`, `match_gem_x/y/z`) form a 
 Convenient `[match_num][2]` view for analyses that only care about clusters
 confirmed on at least two GEM planes. Pair selection uses the strategy
 configured in `database/reconstruction_config.json:matching.match_method`
-(parsed via `PipelineBuilder`): `1` uses legacy `PostMatch` (closest-to-HyCal
-per upstream/downstream pair), while other values use `PostMatch_upgrade`
-(upstream-downstream pair minimising inter-plane projected `deltaR`).
+(parsed via `PipelineBuilder`, both branches of `MatchingTools::PostMatch`):
+`1` keeps the closest-to-HyCal hit per upstream/downstream pair, while other
+values pick the upstream-downstream pair minimising inter-plane projected
+`deltaR`.
 
 | Branch | Type | Meaning |
 |---|---|---|

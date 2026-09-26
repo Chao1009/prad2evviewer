@@ -6,11 +6,9 @@
 // only by ROOT-aware consumers (analysis tools, the viewer's root data
 // source, sim2replay).  The library still has no link-time ROOT dependency.
 //
-// All four helpers are inline.  Writers are unconditional: every call sets
-// up the same branch list given the `with_peaks` flag.  Readers use
-// TTree::GetBranch to skip any branch that's missing on disk, so they
-// happily read older files that pre-date the firmware-peak / ssp_raw /
-// per-cluster-flag additions.
+// All helpers are inline.  Writers set up the branch list selected by
+// their flags.  Readers use TTree::GetBranch to skip any branch that's
+// missing on disk, so they read older files that pre-date later branches.
 //
 // Usage:
 //   #include "EventData_io.h"
@@ -18,10 +16,10 @@
 //   ...
 //   auto status = prad2::SetRawReadBranches(tree, ev);
 //   if (status.has_peaks) { ... }
-//=============================================================================
 //
 // Single source of truth for the replay tree schema.  Match this against
-// `analysis/REPLAYED_DATA.md` (or vice versa) when the layout changes.
+// `docs/REPLAYED_DATA.md` (or vice versa) when the layout changes.
+//=============================================================================
 
 #include "EventData.h"
 
@@ -35,8 +33,28 @@
 #include <TString.h>   // for Form()
 
 #include <cstring>
+#include <type_traits>
 
 namespace prad2 {
+
+// Binds branch addresses, skipping branches the tree does not have.
+// std::vector / std::string branches need a held pointer that outlives every
+// GetEntry: bind(name, obj, holder) points `holder` at `obj` and binds it.
+struct BranchBinder {
+    TTree *tree;
+
+    void operator()(const char *name, void *addr) const
+    {
+        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
+    }
+
+    template <class T>
+    void operator()(const char *name, T &obj, T *&holder) const
+    {
+        holder = &obj;
+        if (tree->GetBranch(name)) tree->SetBranchAddress(name, &holder);
+    }
+};
 
 // ── Reader status ────────────────────────────────────────────────────────
 struct RawReadStatus {
@@ -76,22 +94,43 @@ inline void BindReconMatchVectorBranches(TTree *tree,
                                          ReconEventData &ev,
                                          ReconMatchVectorBindings &b)
 {
-    b.match_cl_idx = &ev.match_cl_idx;
-    b.match_det_id = &ev.match_det_id;
-    b.match_gem_x  = &ev.match_gem_x;
-    b.match_gem_y  = &ev.match_gem_y;
-    b.match_gem_z  = &ev.match_gem_z;
-
-    if (tree->GetBranch("match_cl_idx")) tree->SetBranchAddress("match_cl_idx", &b.match_cl_idx);
-    if (tree->GetBranch("match_det_id")) tree->SetBranchAddress("match_det_id", &b.match_det_id);
-    if (tree->GetBranch("match_gem_x"))  tree->SetBranchAddress("match_gem_x",  &b.match_gem_x);
-    if (tree->GetBranch("match_gem_y"))  tree->SetBranchAddress("match_gem_y",  &b.match_gem_y);
-    if (tree->GetBranch("match_gem_z"))  tree->SetBranchAddress("match_gem_z",  &b.match_gem_z);
+    const BranchBinder bind{tree};
+    bind("match_cl_idx", ev.match_cl_idx, b.match_cl_idx);
+    bind("match_det_id", ev.match_det_id, b.match_det_id);
+    bind("match_gem_x",  ev.match_gem_x,  b.match_gem_x);
+    bind("match_gem_y",  ev.match_gem_y,  b.match_gem_y);
+    bind("match_gem_z",  ev.match_gem_z,  b.match_gem_z);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Raw "events" tree — write
-// ─────────────────────────────────────────────────────────────────────────
+// Same holder pattern for the raw bank-word vectors (ssp_raw, vtp_*, tdc_*).
+struct RawVectorBindings {
+    std::vector<uint32_t> *ssp_raw      = nullptr;
+    std::vector<uint32_t> *vtp_roc_tags = nullptr;
+    std::vector<uint32_t> *vtp_nwords   = nullptr;
+    std::vector<uint32_t> *vtp_words    = nullptr;
+    std::vector<uint32_t> *tdc_roc_tags = nullptr;
+    std::vector<uint32_t> *tdc_nwords   = nullptr;
+    std::vector<uint32_t> *tdc_words    = nullptr;
+};
+
+// Event is RawEventData or ReconEventData.  Recon trees carry no tdc_*
+// (RF is decoded into rf_*), so those holders stay null there.
+template <class Event>
+inline void BindRawVectorBranches(TTree *tree, Event &ev, RawVectorBindings &b)
+{
+    const BranchBinder bind{tree};
+    bind("ssp_raw",      ev.ssp_raw,      b.ssp_raw);
+    bind("vtp_roc_tags", ev.vtp_roc_tags, b.vtp_roc_tags);
+    bind("vtp_nwords",   ev.vtp_nwords,   b.vtp_nwords);
+    bind("vtp_words",    ev.vtp_words,    b.vtp_words);
+    if constexpr (std::is_same_v<Event, RawEventData>) {
+        bind("tdc_roc_tags", ev.tdc_roc_tags, b.tdc_roc_tags);
+        bind("tdc_nwords",   ev.tdc_nwords,   b.tdc_nwords);
+        bind("tdc_words",    ev.tdc_words,    b.tdc_words);
+    }
+}
+
+// ── Raw "events" tree — write ────────────────────────────────────────────
 inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, bool Ecalib = false, bool noWaveform = false)
 {
     if(!Ecalib) {
@@ -100,10 +139,7 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
     }
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
-    // Unified FADC250 channel array (HyCal + Veto + LMS).  Categorisation
-    // is via hycal.module_type per channel — HyCal consumers using
-    // hycal.module_by_id() naturally skip Veto/LMS entries because their
-    // module_id values (3001+ / 3100+) are not registered in HyCalSystem.
+    // Unified FADC250 channel array (HyCal + Veto + LMS); see RawEventData.
     tree->Branch("hycal.nch",         &ev.nch,         "hycal.nch/I");
     tree->Branch("hycal.module_id",   ev.module_id,    "hycal.module_id[hycal.nch]/s");
     tree->Branch("hycal.module_type", ev.module_type,  "hycal.module_type[hycal.nch]/b");
@@ -115,11 +151,8 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
     tree->Branch("hycal.gain_factor", ev.gain_factor,  "hycal.gain_factor[hycal.nch]/F");
 
     if (with_peaks) {
-        // ped_mean / ped_rms / ped_nused / ped_quality / ped_slope are
-        // products of the soft analyzer — only meaningful when the
-        // analyzer ran.  ped_quality is a Q_PED_* bitmask
-        // (NOT_CONVERGED / FLOOR_ACTIVE / TOO_FEW_SAMPLES /
-        // PULSE_IN_WINDOW / OVERFLOW / TRAILING_WINDOW; see Fadc250Data.h).
+        // ped_* / peak_* are soft-analyzer products — only meaningful when
+        // the analyzer ran.
         tree->Branch("hycal.ped_mean",      ev.ped_mean,       "hycal.ped_mean[hycal.nch]/F");
         tree->Branch("hycal.ped_rms",       ev.ped_rms,        "hycal.ped_rms[hycal.nch]/F");
         tree->Branch("hycal.ped_nused",     ev.ped_nused,      "hycal.ped_nused[hycal.nch]/b");
@@ -136,8 +169,6 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
                      Form("hycal.peak_quality[hycal.nch][%d]/b",  fdec::MAX_PEAKS));
 
         // Firmware-mode (FADC250 Modes 1/2/3) emulation peaks.
-        // daq_peak_quality is a Q_* bitmask (peak-at-boundary,
-        // NSB/NSA truncation, Va out-of-range).
         tree->Branch("hycal.daq_npeaks",        ev.daq_npeaks,    "hycal.daq_npeaks[hycal.nch]/b");
         tree->Branch("hycal.daq_peak_vp",       ev.daq_peak_vp,
                      Form("hycal.daq_peak_vp[hycal.nch][%d]/F",       fdec::MAX_PEAKS));
@@ -188,17 +219,13 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, 
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Raw "events" tree — read
+// ── Raw "events" tree — read ─────────────────────────────────────────────
 // Binds the addresses of every branch that exists on `tree`; reports back
 // which optional groups are present.
-// ─────────────────────────────────────────────────────────────────────────
 inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 {
     RawReadStatus s;
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
 
     bind("event_num",    &ev.event_num);
     bind("trigger_type", &ev.trigger_type);
@@ -216,8 +243,8 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
     if (s.has_peaks) {
         bind("hycal.ped_mean",      ev.ped_mean);
         bind("hycal.ped_rms",       ev.ped_rms);
-        // ped_nused / ped_quality / ped_slope are post-Mar-2026 additions —
-        // bind() silently no-ops on older files that pre-date them.
+        // ped_nused / ped_quality / ped_slope / peak_quality were added in
+        // Mar-2026; files replayed earlier lack them.
         bind("hycal.ped_nused",     ev.ped_nused);
         bind("hycal.ped_quality",   ev.ped_quality);
         bind("hycal.ped_slope",     ev.ped_slope);
@@ -225,8 +252,6 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
         bind("hycal.peak_height",   ev.peak_height);
         bind("hycal.peak_time",     ev.peak_time);
         bind("hycal.peak_integral", ev.peak_integral);
-        // peak_quality is a post-Mar-2026 addition — bind() no-ops on
-        // older files that pre-date it.
         bind("hycal.peak_quality",  ev.peak_quality);
     }
 
@@ -256,21 +281,12 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
         bind("gem.ts_adc",  ev.gem_ts_adc);
     }
 
-    // ssp_raw is std::vector<uint32_t>: ROOT needs a stable
-    // `vector<uint32_t>**` address.  Consumers that need it must bind it
-    // themselves with their own held pointer:
-    //   auto *p = &ev.ssp_raw;
-    //   tree->SetBranchAddress("ssp_raw", &p);   // p must outlive GetEntry
+    // ssp_raw / vtp_* / tdc_* are std::vector branches, bound separately by
+    // BindRawVectorBranches.
     s.has_ssp_raw = (tree->GetBranch("ssp_raw") != nullptr);
-
-    // vtp_words / vtp_nwords / vtp_roc_tags — same vector-pointer pattern
-    // as ssp_raw.  Older replays without these branches still load
-    // (has_vtp_raw stays false).
     s.has_vtp_raw = (tree->GetBranch("vtp_words")    != nullptr)
                     && (tree->GetBranch("vtp_nwords")   != nullptr)
                     && (tree->GetBranch("vtp_roc_tags") != nullptr);
-
-    // tdc_* — same vector-pointer pattern again.
     s.has_tdc_raw = (tree->GetBranch("tdc_words")    != nullptr)
                     && (tree->GetBranch("tdc_nwords")   != nullptr)
                     && (tree->GetBranch("tdc_roc_tags") != nullptr);
@@ -278,9 +294,7 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
     return s;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Recon tree — write
-// ─────────────────────────────────────────────────────────────────────────
+// ── Recon tree — write ───────────────────────────────────────────────────
 inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode, bool with_gem_hits = false)
 {
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
@@ -390,9 +404,7 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     // Raw 0xE10C SSP trigger bank words.
     tree->Branch("ssp_raw", &ev.ssp_raw);
 
-    // Raw 0xE122 VTP bank words — same flat triple as the raw events
-    // tree, kept so PRAD_CLUSTER (TAG_EXP 0x1CC) / TRIGGER (0x1D)
-    // payloads can be re-decoded against reconstructed quantities.
+    // Raw 0xE122 VTP bank words — same flat triple as the raw events tree.
     tree->Branch("vtp_roc_tags", &ev.vtp_roc_tags);
     tree->Branch("vtp_nwords",   &ev.vtp_nwords);
     tree->Branch("vtp_words",    &ev.vtp_words);
@@ -415,15 +427,17 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("cl_dt_rf", ev.cl_dt_rf, "cl_dt_rf[n_clusters]/F");
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Recon tree — read
-// ─────────────────────────────────────────────────────────────────────────
+// ── Recon tree — read ────────────────────────────────────────────────────
 inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
 {
     ReconReadStatus s;
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
+
+    // Defaults first, so branches missing from older files read the writer's
+    // defaults (corrections 1, cl_dt_rf / GEM QA NaN, counts 0) instead of
+    // stale or zero values.
+    ev.clear();
+    ev.fill_gem_qa_nan();
 
     bind("event_num",    &ev.event_num);
     bind("trigger_type", &ev.trigger_type);
@@ -436,9 +450,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     bind("cl_y",       ev.cl_y);
     bind("cl_z",       ev.cl_z);
     bind("cl_energy",  ev.cl_energy);
-    std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
     bind("cl_linear_corr", ev.cl_linear_corr);
-    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
     bind("cl_bias_corr", ev.cl_bias_corr);
     bind("cl_nblocks", ev.cl_nblocks);
     bind("cl_npos",    ev.cl_npos);
@@ -449,9 +461,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     s.has_per_cl_match = (tree->GetBranch("matchFlag") != nullptr);
     if (s.has_per_cl_match) {
         bind("matchFlag", ev.matchFlag);
-        // match_* vectors use ROOT pointer-to-pointer binding.
-        // Call BindReconMatchVectorBranches(...) with a held
-        // ReconMatchVectorBindings instance at the call site.
+        // match_* vectors: BindReconMatchVectorBranches.
     }
 
     s.has_match_num = (tree->GetBranch("match_num") != nullptr);
@@ -483,11 +493,6 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     bind("gem_y_mTbin",  ev.gem_y_mTbin);
     s.has_gem_hits = (tree->GetBranch("n_gem_hits") != nullptr);
 
-    // GEM quality branches — present on -gem_hit recon files replayed after
-    // 2026-09.  NaN-fill before binding (same idea as cl_linear_corr above)
-    // so older files read NaN / n_gem_cl = 0 instead of stale or 0 values.
-    ev.fill_gem_qa_nan();
-    ev.n_gem_cl = 0;
     s.has_gem_qa = (tree->GetBranch("gem_xy_dt") != nullptr);
     s.has_gem_cl = (tree->GetBranch("n_gem_cl") != nullptr);
     bind("gem_x_time",       ev.gem_x_time);
@@ -532,17 +537,13 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
         bind("lms_peak_height",  ev.lms_peak_height);
     }
 
-    // ssp_raw — see note in SetRawReadBranches.
+    // ssp_raw / vtp_* vectors are bound by BindRawVectorBranches.
     s.has_ssp_raw = (tree->GetBranch("ssp_raw") != nullptr);
-
-    // vtp_* — same vector-pointer pattern as ssp_raw; consumers bind
-    // their own held pointers.  Present on recon files replayed after
-    // 2026-06; older files just leave has_vtp_raw false.
     s.has_vtp_raw = (tree->GetBranch("vtp_words")    != nullptr)
                     && (tree->GetBranch("vtp_nwords")   != nullptr)
                     && (tree->GetBranch("vtp_roc_tags") != nullptr);
 
-    // VTP PRAD_CLUSTER online trigger data — present on recon files replayed after 2026-06.
+    // VTP PRAD_CLUSTER online trigger data — recon files replayed after 2026-06.
     s.has_vtp_cl = (tree->GetBranch("vtp_cl_n") != nullptr);
     if (s.has_vtp_cl) {
         bind("vtp_cl_n",      &ev.vtp_cl_n);
@@ -552,7 +553,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
         bind("vtp_cl_blocks", ev.vtp_cl_blocks);
     }
 
-    // RF branches — present on recon files replayed after 2026-05.
+    // RF branches — recon files replayed after 2026-05.
     s.has_rf = (tree->GetBranch("rf_n_a") != nullptr);
     if (s.has_rf) {
         bind("rf_n_a",   &ev.rf_n_a);
@@ -565,14 +566,11 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     return s;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Scaler tree ("scalers") — write / read
-//
+// ── Scaler tree ("scalers") — write / read ───────────────────────────────
 // Branch names mirror the field names so analysis can reference them
 // directly.  Per-channel TRG/TDC arrays use a fixed [kDscChannels] length —
 // the underlying DSC2 always emits 16 channels regardless of how many are
 // hooked up — so no count branch is needed.
-// ─────────────────────────────────────────────────────────────────────────
 inline void SetScalerWriteBranches(TTree *tree, RawScalerData &sc)
 {
     tree->Branch("event_number", &sc.event_number, "event_number/I");
@@ -603,9 +601,7 @@ inline void SetScalerWriteBranches(TTree *tree, RawScalerData &sc)
 
 inline void SetScalerReadBranches(TTree *tree, RawScalerData &sc)
 {
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
     bind("event_number", &sc.event_number);
     bind("ti_ticks",     &sc.ti_ticks);
     bind("unix_time",    &sc.unix_time);
@@ -626,14 +622,9 @@ inline void SetScalerReadBranches(TTree *tree, RawScalerData &sc)
     bind("tdc_ungated",  sc.tdc_ungated);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// EPICS tree ("epics") — write / read
-//
-// `channel` and `value` are std::vector branches: ROOT's I/O writes them
-// fine but the reader needs a stable pointer-to-pointer address.  Callers
-// that bind for reading should use the vector members of the struct
-// directly — see the note inline in SetEpicsReadBranches.
-// ─────────────────────────────────────────────────────────────────────────
+// ── EPICS tree ("epics") — write / read ──────────────────────────────────
+// `channel` and `value` are std::vector branches: readers that need them
+// call BindEpicsVectorBranches after SetEpicsReadBranches.
 inline void SetEpicsWriteBranches(TTree *tree, RawEpicsData &ep)
 {
     tree->Branch("event_number_at_arrival", &ep.event_number_at_arrival,
@@ -647,23 +638,8 @@ inline void SetEpicsWriteBranches(TTree *tree, RawEpicsData &ep)
     tree->Branch("value",        &ep.value);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Fillers — copy decoded prad2dec records into the side-tree POD structs.
-//
-// These keep the Replay loops minimal: the per-event call chain becomes
-//   ch.Scan();
-//   if (Sync event)  { FillEpicsRow(ch.Epics(), ep_row);     epics->Fill(); }
-//   if (Physics)     {
-//       ch.DecodeEvent(...);                  // fills info, fadc, ssp, ...
-//       const auto &dsc = ch.Dsc();
-//       if (dsc.present) {
-//           FillScalerRow(dsc, ch.Sync(), info, daq_cfg.dsc_scaler, sc_row);
-//           scalers->Fill();
-//       }
-//       events->Fill();
-//   }
+// ── Fillers — copy decoded prad2dec records into the side-tree structs ──
 // All conversion / convention details (gated→live etc.) stay in prad2dec.
-// ─────────────────────────────────────────────────────────────────────────
 inline void FillScalerRow(const dsc::DscEventData &dsc,
                           const psync::SyncInfo &sync,
                           const fdec::EventInfo &info,
@@ -682,8 +658,7 @@ inline void FillScalerRow(const dsc::DscEventData &dsc,
     out.slot       = dsc.slot;
     out.gated      = dsc.gated;
     out.ungated    = dsc.ungated;
-    out.live_ratio = (dsc.ungated > 0)
-        ? static_cast<float>((double)dsc.gated / (double)dsc.ungated) : -1.f;
+    out.live_ratio = static_cast<float>(dsc.live_ratio());
     out.source     = (cfg.source == DSrc::Ref) ? 0
                    : (cfg.source == DSrc::Trg) ? 1 : 2;
     out.channel    = static_cast<uint8_t>(cfg.channel);
@@ -712,30 +687,33 @@ inline void FillEpicsRow(const epics::EpicsRecord &rec, RawEpicsData &out)
 
 inline void SetEpicsReadBranches(TTree *tree, RawEpicsData &ep)
 {
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
     bind("event_number_at_arrival", &ep.event_number_at_arrival);
     bind("ti_ticks_at_arrival",     &ep.ti_ticks_at_arrival);
     bind("unix_time",    &ep.unix_time);
     bind("sync_counter", &ep.sync_counter);
     bind("run_number",   &ep.run_number);
-    // Vector branches: ROOT requires `vector<T>**`.  Callers that need to
-    // read these must bind their own held pointer:
-    //   auto *cp = &ep.channel; auto *vp = &ep.value;
-    //   tree->SetBranchAddress("channel", &cp);
-    //   tree->SetBranchAddress("value",   &vp);
-    // (Pointers must outlive each GetEntry call.)
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Run-info tree ("runinfo") — write / read
-//
+// Same holder pattern for the EPICS vector branches.
+struct EpicsVectorBindings {
+    std::vector<std::string> *channel = nullptr;
+    std::vector<double>      *value   = nullptr;
+};
+
+inline void BindEpicsVectorBranches(TTree *tree, RawEpicsData &ep,
+                                    EpicsVectorBindings &b)
+{
+    const BranchBinder bind{tree};
+    bind("channel", ep.channel, b.channel);
+    bind("value",   ep.value,   b.value);
+}
+
+// ── Run-info tree ("runinfo") — write / read ─────────────────────────────
 // One row per CODA control event (PRESTART / GO / END); the PRESTART row
 // is the one carrying the long `daq_config` text.  The string branch is
-// stored directly (ROOT serializes std::string fine) — readers bind via
-// std::string* like the EPICS vector branches.
-// ─────────────────────────────────────────────────────────────────────────
+// stored directly (ROOT serializes std::string fine); readers that need it
+// bind a held pointer: BranchBinder{tree}("daq_config", ri.daq_config, sp).
 inline void SetRunInfoWriteBranches(TTree *tree, RawRunInfo &ri)
 {
     tree->Branch("run_number", &ri.run_number, "run_number/i");
@@ -747,17 +725,11 @@ inline void SetRunInfoWriteBranches(TTree *tree, RawRunInfo &ri)
 
 inline void SetRunInfoReadBranches(TTree *tree, RawRunInfo &ri)
 {
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
     bind("run_number", &ri.run_number);
     bind("unix_time",  &ri.unix_time);
     bind("run_type",   &ri.run_type);
     bind("event_tag",  &ri.event_tag);
-    // String branch: callers that need to read should bind their own
-    // held pointer, e.g.
-    //   auto *sp = &ri.daq_config;
-    //   tree->SetBranchAddress("daq_config", &sp);
 }
 
 inline void FillRunInfoRow(const psync::SyncInfo &sync,
@@ -772,14 +744,11 @@ inline void FillRunInfoRow(const psync::SyncInfo &sync,
     out.daq_config = daq_config_text;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// LMS gain-correction tree ("gain") — write / read
-//
+// ── LMS gain-correction tree ("gain") — write / read ─────────────────────
 // Only peak-level data is kept (no waveform samples): HyCal channels are
 // stored with the same hycal.* prefix used in the events tree so that
-// existing channel-lookup helpers work unchanged.  LMS PMT channels are
-// fixed-size [4] arrays (no lms_nch count branch needed).
-// ─────────────────────────────────────────────────────────────────────────
+// existing channel-lookup helpers work unchanged (LMS PMTs share the same
+// flat array, module_type MOD_LMS).
 inline void SetLMSWriteBranches(TTree *tree, LMSEventData &ev)
 {
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
@@ -788,7 +757,6 @@ inline void SetLMSWriteBranches(TTree *tree, LMSEventData &ev)
     tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
     tree->Branch("event_type",   &ev.event_type,   "event_type/I");
 
-    // HyCal channel peak data (no waveform samples stored in this tree).
     tree->Branch("hycal.nch",         &ev.nch,        "hycal.nch/I");
     tree->Branch("hycal.module_id",   ev.module_id,   "hycal.module_id[hycal.nch]/s");
     tree->Branch("hycal.module_type", ev.module_type, "hycal.module_type[hycal.nch]/b");
@@ -803,9 +771,7 @@ inline void SetLMSWriteBranches(TTree *tree, LMSEventData &ev)
 
 inline void SetLMSReadBranches(TTree *tree, LMSEventData &ev)
 {
-    auto bind = [&](const char *name, void *addr) {
-        if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
-    };
+    const BranchBinder bind{tree};
 
     bind("event_num",    &ev.event_num);
     bind("trigger_type", &ev.trigger_type);

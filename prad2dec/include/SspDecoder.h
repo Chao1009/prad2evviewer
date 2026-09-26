@@ -17,7 +17,7 @@ class SspDecoder
 public:
     // Decode one ROC's SSP raw data bank into evt.
     // crate_id: crate identifier (from parent ROC bank tag mapping).
-    // Returns number of APVs decoded, or -1 on error.
+    // Returns number of APVs decoded.
     static int DecodeRoc(const uint32_t *data, size_t nwords,
                          int crate_id, SspEventData &evt);
 };

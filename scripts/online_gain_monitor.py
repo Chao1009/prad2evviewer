@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import gc
-import json
 import math
 import os
 import re
@@ -52,18 +51,20 @@ from hycal_geoview import (
     THEME,
     apply_theme_palette,
     available_themes,
+    hole_ring,
     load_modules,
     set_theme,
     themed,
 )
+from evio_io import REMOTE_DATA_BASE, REMOTE_HOST
+from hycal_calib import read_lms_dat
+from prad2_env import database_dir
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DB_DIR = Path(os.environ.get("PRAD2_DATABASE_DIR", SCRIPT_DIR / ".." / "database")).resolve()
+DB_DIR = database_dir()
 MODULES_JSON = DB_DIR / "hycal_map.json"
 
-REMOTE_HOST = "clondaq2"
-REMOTE_BASE = "/data/stage2"
 STORAGE_BASE = "/data/gain_monitor"
 DEFAULT_INTERVAL_S = 30
 DEFAULT_BATCH_SIZE = 1000
@@ -113,10 +114,11 @@ CHANGE_STOPS = [
     (1.00, (220, 38, 38)),
 ]
 CHANGE_DEFAULT_RANGE = 0.10
+# Batch window of the change baselines and of the "first N -> 1" normalisation.
+BASELINE_BATCHES = 5
+GAIN_SUMMARY_GROUPS = ("under absorber", "open layer 1", "open layer 2")
 
 GAIN_CORR_FILE_RE = re.compile(r"^prad_(\d{6})_gain_corr(?:\.|。)root$")
-
-set_theme(DEFAULT_THEME)
 
 _CPU_LAYOUT: Optional[Tuple[Optional[int], List[int]]] = None
 
@@ -178,8 +180,6 @@ class GainData:
     unix_time: object
     gain_w: object
     gain_w_ref: object
-    gain_corr_w: object
-    fit_mean_w_lms: object
     ref_ratio: object
 
     @property
@@ -205,13 +205,17 @@ def run_tag(run_number: int) -> str:
     return f"prad_{run_number:06d}"
 
 
-def run_storage_paths(run_number: int, storage_base: str) -> Tuple[Path, Path, Path]:
+def run_storage_paths(run_number: int, storage_base: Path) -> Tuple[Path, Path, Path]:
     base = Path(storage_base).expanduser()
     tag = run_tag(run_number)
     evio_dir = base / "evio" / tag
     work_dir = base / "lms" / tag
     out_root = base / "gain" / tag / f"{tag}_gain_corr.root"
     return evio_dir, work_dir, out_root
+
+
+def count_evio_files(dirs: List[Path]) -> int:
+    return sum(1 for d in dirs for p in d.glob("*.evio.*") if p.is_file())
 
 
 def load_gain_root(path: Path, run_number: int) -> GainData:
@@ -253,74 +257,46 @@ def load_gain_root(path: Path, run_number: int) -> GainData:
             unix_time=unix_time,
             gain_w=gain_w,
             gain_w_ref=gain_w_ref,
-            gain_corr_w=gain_corr_w,
-            fit_mean_w_lms=t["fit_mean_W_lms"].array(library="np"),
             ref_ratio=t["refPMT_ratio"].array(library="np"),
         )
 
 
 def _parse_lms_dat(path: Path) -> Optional[np.ndarray]:
-    """Parse prad_XXXXXX_LMS.dat; return ref gain array [1156, 3].
-
-    The .dat file columns are:
-      0:Name  1:lms_peak  2:lms_sigma  3:lms_chi2/ndf  4:g1  5:g2  6:g3
-
-    For W module rows, columns 4-6 (g1/g2/g3) store the reference gain values
-    corresponding to Ref PMT 1/2/3, in the same units as gain_W in the ROOT file.
-    Dividing gain_W by these values gives a ratio ~1 for an unchanged gain.
+    """Reference gains [1156, 3] of W1..W1156 against Ref PMT 1/2/3, in the
+    units of gain_W (so gain_W / ref ~ 1 for an unchanged gain); NaN where
+    missing or <= 0, None if the file cannot be read.
     """
-    entries: Dict[str, List[float]] = {}
-    try:
-        with open(path) as f:
-            for line in f:
-                parts = line.split()
-                if len(parts) < 7 or parts[0] == "Name":
-                    continue
-                try:
-                    entries[parts[0]] = [float(parts[4]), float(parts[5]), float(parts[6])]
-                except (ValueError, IndexError):
-                    continue
-    except OSError:
+    parsed = read_lms_dat(path)
+    if parsed is None:
         return None
     result = np.full((1156, 3), np.nan, dtype=float)
     for i in range(1156):
-        vals = entries.get(f"W{i + 1}")
-        if vals is None:
+        rec = parsed[1].get(f"W{i + 1}")
+        if rec is None:
             continue
-        for j in range(3):
-            if vals[j] > 0.0:
-                result[i, j] = vals[j]
+        for j, g in enumerate(rec.gain_factors):
+            if g > 0.0:
+                result[i, j] = g
     return result
 
 
-def build_gain_summary_groups(path: Path) -> Dict[str, List[int]]:
+def build_gain_summary_groups(modules) -> Dict[str, List[int]]:
     """Return W-array indices for the absorber region and two open rings."""
-    with open(path) as stream:
-        entries = json.load(stream)
-    grouped = {"under absorber": [], "open layer 1": [], "open layer 2": []}
+    grouped = {label: [] for label in GAIN_SUMMARY_GROUPS}
     positioned = []
-    for entry in entries:
-        name = entry.get("n", "")
-        geo = entry.get("geo", {})
-        if not name.startswith("W") or "row" not in geo or "col" not in geo:
+    for m in modules:
+        if not m.name.startswith("W") or not m.row:
             continue
         try:
-            index = int(name[1:]) - 1
+            index = int(m.name[1:]) - 1
         except ValueError:
             continue
-        row, col = int(geo["row"]), int(geo["col"])
-        # The absorber covers rows/columns 15..18. Each open layer is the
-        # next Chebyshev ring around that square.
-        distance = max(max(15 - row, 0, row - 18), max(15 - col, 0, col - 18))
-        if distance == 0:
-            group = "under absorber"
-        elif distance == 1:
-            group = "open layer 1"
-        elif distance == 2:
-            group = "open layer 2"
-        else:
+        # The absorber covers the ring around the beam hole (1-based
+        # rows/columns 16..19). Each open layer is the next ring outward.
+        distance = hole_ring(m.row, m.col) - 1
+        if not 0 <= distance < len(GAIN_SUMMARY_GROUPS):
             continue
-        positioned.append((group, row, col, index))
+        positioned.append((GAIN_SUMMARY_GROUPS[distance], m.row, m.col, index))
     for group, _, _, index in sorted(positioned, key=lambda item: (item[0], item[1], item[2])):
         grouped[group].append(index)
     return grouped
@@ -379,23 +355,35 @@ def safe_divide(numerator, denominator, valid=None):
     )
 
 
+def masked_average(values, valid, axis):
+    """Mean of ``values`` over ``axis`` counting only ``valid`` entries; NaN where none."""
+    count = np.sum(valid, axis=axis)
+    return safe_divide(np.sum(np.where(valid, values, 0.0), axis=axis), count, count > 0)
+
+
 def masked_mean(samples: List[object], masks: List[List[bool]]):
     if not samples:
         return None
     arr = np.asarray(samples, dtype=float)
     mask = np.asarray(masks, dtype=bool)
     valid = mask[:, None, :] & np.isfinite(arr) & (arr > 0.0)
-    count = np.sum(valid, axis=0)
-    total = np.sum(np.where(valid, arr, 0.0), axis=0)
-    return safe_divide(total, count, count > 0)
+    return masked_average(arr, valid, 0)
 
 
-def ref_ratio_ok(value: float, center: float, bad_rel: float) -> bool:
-    return (
-        math.isfinite(value) and value > 0.0
-        and math.isfinite(center) and center > 0.0
-        and abs(value - center) / center <= bad_rel
-    )
+def _edge_batches(arrays, n: int, from_end: bool = False):
+    """The first (or last) ``n`` batches of per-run arrays given in run order,
+    concatenated along axis 0 in run order; None if there are none."""
+    out, remaining = [], n
+    for arr in (reversed(arrays) if from_end else arrays):
+        take = min(remaining, arr.shape[0])
+        if take > 0:
+            out.append(arr[-take:] if from_end else arr[:take])
+            remaining -= take
+        if remaining <= 0:
+            break
+    if from_end:
+        out.reverse()
+    return np.concatenate(out, axis=0) if out else None
 
 
 def nice_ticks(y_min: float, y_max: float, target: int = 5) -> Tuple[List[float], float, float, int]:
@@ -442,6 +430,21 @@ def tick_label(value: float, decimals: int) -> str:
     return f"{value:.{decimals}f}"
 
 
+def _x_span(xs: List[float], x_mode: str) -> Tuple[float, float]:
+    """Chart x range: batch/minute axes start at 0 or below; +-1 if degenerate."""
+    lo, hi = min(xs), max(xs)
+    if x_mode != "unix":
+        lo = min(0.0, lo)
+    return (lo - 1.0, hi + 1.0) if lo == hi else (lo, hi)
+
+
+def _pad_span(lo: float, hi: float, frac: float, degenerate_frac: float) -> Tuple[float, float]:
+    """Widen [lo, hi] by ``frac`` of its span, or by ``degenerate_frac`` of
+    |lo| (1.0 at zero) when lo == hi."""
+    d = (abs(lo) * degenerate_frac if lo else 1.0) if lo == hi else (hi - lo) * frac
+    return lo - d, hi + d
+
+
 def decimate_points(points, max_points: int):
     """Bound paint work while retaining the first and last samples."""
     if len(points) <= max_points:
@@ -456,12 +459,7 @@ def decimate_points(points, max_points: int):
 class GainMapWidget(HyCalMapWidget):
     def __init__(self, parent=None):
         super().__init__(parent, enable_zoom_pan=True, include_lms=False)
-        self._selected: Optional[str] = None
         self._change_mode = False
-
-    def set_selected(self, name: Optional[str]):
-        self._selected = name
-        self.update()
 
     def set_change_mode(self, enabled: bool):
         self._change_mode = enabled
@@ -469,9 +467,6 @@ class GainMapWidget(HyCalMapWidget):
 
     def palette_stops(self):
         return CHANGE_STOPS if self._change_mode else super().palette_stops()
-
-    def _colorbar_center_text(self) -> str:
-        return "down  stable  up" if self._change_mode else super()._colorbar_center_text()
 
     def _fmt_value(self, v: float) -> str:
         if not math.isfinite(v):
@@ -485,13 +480,6 @@ class GainMapWidget(HyCalMapWidget):
         if v is None or not math.isfinite(v):
             return name
         return f"{name}: {v:.6f}"
-
-    def _paint_overlays(self, p: QPainter, w: int, h: int):
-        super()._paint_overlays(p, w, h)
-        if self._selected and self._selected in self._rects:
-            p.setPen(QPen(QColor(THEME.SELECT_BORDER), 2.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._selected])
 
 
 class BatchChart(QWidget):
@@ -551,12 +539,7 @@ class BatchChart(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, message)
             return
 
-        x_min, x_max = min(finite_x), max(finite_x)
-        if self._x_mode != "unix":
-            x_min = min(0.0, x_min)
-        if x_min == x_max:
-            x_min -= 1
-            x_max += 1
+        x_min, x_max = _x_span(finite_x, self._x_mode)
         x_tick_target = max(10, min(20, plot_w // 45)) if self._x_mode == "unix" else 24
         x_ticks, x_min, x_max, x_decimals = nice_ticks(x_min, x_max, x_tick_target)
         x_ticks = [t for t in x_ticks if x_min <= t <= x_max]
@@ -572,15 +555,7 @@ class BatchChart(QWidget):
             y_ticks_all, _, _, y_decimals = nice_ticks(y_min, y_max, 24)
             y_ticks = [t for t in y_ticks_all if y_min <= t <= y_max]
         else:
-            y_min, y_max = data_y_min, data_y_max
-            if y_min == y_max:
-                d = abs(y_min) * 0.05 if y_min != 0 else 1.0
-                y_min -= d
-                y_max += d
-            else:
-                d = (y_max - y_min) * 0.12
-                y_min -= d
-                y_max += d
+            y_min, y_max = _pad_span(data_y_min, data_y_max, 0.12, 0.05)
             y_ticks, y_min, y_max, y_decimals = nice_ticks(y_min, y_max, 24)
 
         def sx(x):
@@ -735,12 +710,7 @@ class RefRatioChart(QWidget):
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No ref ratio data")
             return
 
-        x_min, x_max = min(finite_x), max(finite_x)
-        if self._x_mode != "unix":
-            x_min = min(0.0, x_min)
-        if x_min == x_max:
-            x_min -= 1.0
-            x_max += 1.0
+        x_min, x_max = _x_span(finite_x, self._x_mode)
         pad_l, pad_r, pad_t, pad_b = 68, 10, 28, 24
         gap = 28
         plot_w = max(1, w - pad_l - pad_r)
@@ -761,14 +731,7 @@ class RefRatioChart(QWidget):
             if math.isfinite(center) and center > 0.0:
                 y_min = min(y_min, center)
                 y_max = max(y_max, center)
-            if y_min == y_max:
-                d = abs(y_min) * 0.02 if y_min else 1.0
-                y_min -= d
-                y_max += d
-            else:
-                d = (y_max - y_min) * 0.15
-                y_min -= d
-                y_max += d
+            y_min, y_max = _pad_span(y_min, y_max, 0.15, 0.02)
             ticks, y_min, y_max, decimals = nice_ticks(y_min, y_max, 20)
             y_ranges.append((y_min, y_max))
             y_ticks_by_panel.append(ticks)
@@ -852,10 +815,9 @@ class OnlineGainMonitor(QMainWindow):
     def __init__(self):
         super().__init__()
         self._modules = load_modules(MODULES_JSON)
-        self._gain_summary_groups = build_gain_summary_groups(MODULES_JSON)
+        self._gain_summary_groups = build_gain_summary_groups(self._modules)
         self._selected_module = "W1"
         self._x_axis_mode = "batch"
-        self._data: Optional[GainData] = None
         self._runs_data: Dict[int, GainData] = {}
         self._known_runs: set[int] = set()
         self._opened_output_folder: Optional[Path] = None
@@ -880,18 +842,9 @@ class OnlineGainMonitor(QMainWindow):
         self._root_load_context = None
         self._view_context = None
         self._process_output_remainders: Dict[Tuple[int, bool], str] = {}
-        self._download_process = QProcess(self)
-        self._download_process.readyReadStandardOutput.connect(self._on_stdout)
-        self._download_process.readyReadStandardError.connect(self._on_stderr)
-        self._download_process.finished.connect(self._on_download_finished)
-        self._replay_process = QProcess(self)
-        self._replay_process.readyReadStandardOutput.connect(self._on_stdout)
-        self._replay_process.readyReadStandardError.connect(self._on_stderr)
-        self._replay_process.finished.connect(self._on_replay_finished)
-        self._reanalyze_process = QProcess(self)
-        self._reanalyze_process.readyReadStandardOutput.connect(self._on_stdout)
-        self._reanalyze_process.readyReadStandardError.connect(self._on_stderr)
-        self._reanalyze_process.finished.connect(self._on_reanalyze_finished)
+        self._download_process = self._new_process(self._on_download_finished)
+        self._replay_process = self._new_process(self._on_replay_finished)
+        self._reanalyze_process = self._new_process(self._on_reanalyze_finished)
 
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -1089,7 +1042,7 @@ class OnlineGainMonitor(QMainWindow):
         self._ref.currentIndexChanged.connect(self._refresh_views)
         top2.addWidget(self._ref)
 
-        self._norm_first5 = QCheckBox("first 5 -> 1")
+        self._norm_first5 = QCheckBox(f"first {BASELINE_BATCHES} -> 1")
         self._norm_first5.setFont(QFont("Consolas", 10))
         self._norm_first5.setStyleSheet(themed(
             f"QCheckBox{{color:{THEME.TEXT_DIM};spacing:4px;}}"
@@ -1121,7 +1074,7 @@ class OnlineGainMonitor(QMainWindow):
         dirs.setContentsMargins(0, 0, 0, 0)
         dirs.setSpacing(5)
         self._host = self._path_edit(REMOTE_HOST)
-        self._remote_base = self._path_edit(REMOTE_BASE)
+        self._remote_base = self._path_edit(REMOTE_DATA_BASE)
         self._storage_base = self._path_edit(STORAGE_BASE)
         self._work_dir = self._path_edit("")
         self._out_root = self._path_edit("")
@@ -1184,9 +1137,7 @@ class OnlineGainMonitor(QMainWindow):
         self._gain_summary.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._gain_summary.setFixedHeight(82)
         self._gain_summary.setFont(QFont("Consolas", 9))
-        self._gain_summary.setPlainText(
-            "under absorber: n/a\nopen layer 1: n/a\nopen layer 2: n/a"
-        )
+        self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in GAIN_SUMMARY_GROUPS))
         self._gain_summary.setStyleSheet(themed(
             f"QTextEdit{{background:{THEME.PANEL};color:{THEME.TEXT};"
             f"border:1px solid {THEME.BORDER};padding:3px 5px;}}"
@@ -1201,7 +1152,6 @@ class OnlineGainMonitor(QMainWindow):
         axis_lay.addWidget(self._label("X axis"))
         self._x_axis_group = QButtonGroup(self)
         self._x_axis_group.setExclusive(True)
-        self._x_axis_buttons: Dict[str, QPushButton] = {}
         for mode, text in (("batch", "Batch ID"), ("unix", "Date/Time"), ("minutes", "Minutes")):
             btn = QPushButton(text)
             btn.setCheckable(True)
@@ -1216,7 +1166,6 @@ class OnlineGainMonitor(QMainWindow):
             ))
             btn.clicked.connect(lambda checked, m=mode: checked and self._set_x_axis_mode(m))
             self._x_axis_group.addButton(btn)
-            self._x_axis_buttons[mode] = btn
             axis_lay.addWidget(btn)
         right_lay.addWidget(axis_bar)
         right_lay.addWidget(self._chart, stretch=3)
@@ -1311,6 +1260,9 @@ class OnlineGainMonitor(QMainWindow):
             for w in self.findChildren(cls):
                 w.setStyleSheet(ss)
 
+    def _storage_base_path(self) -> Path:
+        return Path(self._storage_base.text().strip() or STORAGE_BASE).expanduser()
+
     def _browse_base(self):
         d = QFileDialog.getExistingDirectory(self, "Select storage base directory")
         if d:
@@ -1323,7 +1275,7 @@ class OnlineGainMonitor(QMainWindow):
             self._update_paths_from_run()
 
     def _open_output_folder(self):
-        start = str(self._opened_output_folder or Path(self._storage_base.text().strip() or STORAGE_BASE))
+        start = str(self._opened_output_folder or self._storage_base_path())
         d = QFileDialog.getExistingDirectory(self, "Select gain_corr output folder", start)
         if not d:
             return
@@ -1349,24 +1301,24 @@ class OnlineGainMonitor(QMainWindow):
             self._append(f"Ref gain loaded: {int(np.sum(np.isfinite(self._ref_file_gain_array[:, 0])))} valid W modules", "ok")
         self._ref_gain_cache.clear()
         self._view_context = None
-        if hasattr(self, "_runs_data") and self._runs_data:
+        if self._runs_data:
             self._refresh_views()
 
     def _on_ref_run_changed(self):
         self._ref_gain_cache.clear()
         self._view_context = None
-        if hasattr(self, "_runs_data") and self._runs_data:
+        if self._runs_data:
             self._refresh_views()
 
     def _get_ref_run_gain(self) -> Optional[np.ndarray]:
-        """Return ref gain array [1156, 3], or None (use embedded gain_W_ref).
+        """Return ref gain array [1156, 3], or None (use embedded gain_W_ref:
+        ref run "auto", or no usable reference found).
 
         Priority:
           1. Explicitly selected .dat file via Ref File button
           2. prad_XXXXXX_LMS.dat in DB_DIR/gain_factor/ref_gain/ for ref run spinbox
           3. Average gain_W from gain_corr.root in storage
         """
-        # Priority 1: directly selected ref gain file
         if self._ref_gain_file is not None:
             return self._ref_file_gain_array
 
@@ -1376,7 +1328,6 @@ class OnlineGainMonitor(QMainWindow):
         if ref_run_num in self._ref_gain_cache:
             return self._ref_gain_cache[ref_run_num]
 
-        # 1. Try .dat file
         dat_path = DB_DIR / "gain_factor" / "ref_gain" / f"prad_{ref_run_num:06d}_LMS.dat"
         if dat_path.exists():
             result = _parse_lms_dat(dat_path)
@@ -1386,9 +1337,7 @@ class OnlineGainMonitor(QMainWindow):
                 return result
             self._append(f"Failed to parse ref gain file: {dat_path.name}", "warn")
 
-        # 2. Fall back to gain_corr.root
-        storage = self._storage_base.text().strip() or STORAGE_BASE
-        _, _, path = run_storage_paths(ref_run_num, storage)
+        _, _, path = run_storage_paths(ref_run_num, self._storage_base_path())
         if not path.exists():
             self._append(f"Ref run {ref_run_num:06d}: no .dat or gain_corr.root found", "warn")
             self._ref_gain_cache[ref_run_num] = None
@@ -1400,13 +1349,19 @@ class OnlineGainMonitor(QMainWindow):
             self._ref_gain_cache[ref_run_num] = None
             return None
         arr = np.asarray(ref_data.gain_w, dtype=float)
-        valid = np.isfinite(arr) & (arr > 0.0)
-        count = np.sum(valid, axis=0)
-        total = np.sum(np.where(valid, arr, 0.0), axis=0)
-        result = safe_divide(total, count, count > 0)
+        result = masked_average(arr, np.isfinite(arr) & (arr > 0.0), 0)
         self._ref_gain_cache[ref_run_num] = result
         self._append(f"Loaded ref gain from run {ref_run_num:06d}: {path.name}", "ok")
         return result
+
+    def _ref_tool_arg(self) -> str:
+        """Reference option for prad2ana_online_gain_monitor_base: the Ref File
+        (-R) over the ref run (-r), or none."""
+        if self._ref_gain_file is not None:
+            return f" -R {shlex.quote(str(self._ref_gain_file))}"
+        if self._ref_run.value() >= 0:
+            return f" -r {self._ref_run.value()}"
+        return ""
 
     def _runs_shown_changed(self):
         if self._opened_output_folder is not None:
@@ -1500,8 +1455,7 @@ class OnlineGainMonitor(QMainWindow):
         run = self._parse_run()
         if run is None:
             return
-        storage = self._storage_base.text().strip() or STORAGE_BASE
-        _, work_dir, out_root = run_storage_paths(run, storage)
+        _, work_dir, out_root = run_storage_paths(run, self._storage_base_path())
         self._work_dir.setText(str(work_dir))
         self._out_root.setText(str(out_root))
 
@@ -1524,12 +1478,7 @@ class OnlineGainMonitor(QMainWindow):
         self._timer.stop()
         self._batch_reanalyze_timer.stop()
         self._reanalyze_pending = False
-        if self._download_process.state() != QProcess.ProcessState.NotRunning:
-            self._download_process.kill()
-        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
-            self._replay_process.kill()
-        if self._reanalyze_process.state() != QProcess.ProcessState.NotRunning:
-            self._reanalyze_process.kill()
+        self._kill_processes()
         self._replay_queue.clear()
         self._queued_snapshots.clear()
         self._active_replay_snapshots.clear()
@@ -1550,8 +1499,8 @@ class OnlineGainMonitor(QMainWindow):
         self._update_paths_from_run()
 
         host = self._host.text().strip() or REMOTE_HOST
-        remote_base = self._remote_base.text().strip() or REMOTE_BASE
-        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+        remote_base = self._remote_base.text().strip() or REMOTE_DATA_BASE
+        storage_base = str(self._storage_base_path())
 
         seed_run = max(min(seed_runs), self._scan_floor_run or min(seed_runs))
         explicit_runs = " ".join(str(r) for r in seed_runs)
@@ -1670,7 +1619,32 @@ exit 0
 """
         self._status.setText("Scanning...")
         self._append(f"$ auto-scan from run {seed_run:06d}", "cmd")
-        start_bash_process(self._download_process, bash, getattr(self, "_download_cpu_list", ""))
+        start_bash_process(self._download_process, bash, self._download_cpu_list)
+
+    def _new_process(self, finished_slot) -> QProcess:
+        proc = QProcess(self)
+        proc.readyReadStandardOutput.connect(self._on_stdout)
+        proc.readyReadStandardError.connect(self._on_stderr)
+        proc.finished.connect(finished_slot)
+        return proc
+
+    def _kill_processes(self, wait_ms: int = 0):
+        for proc in (self._download_process, self._replay_process, self._reanalyze_process):
+            if proc.state() != QProcess.ProcessState.NotRunning:
+                proc.kill()
+                if wait_ms:
+                    proc.waitForFinished(wait_ms)
+
+    def _replay_busy(self) -> bool:
+        return (
+            self._replay_process.state() != QProcess.ProcessState.NotRunning
+            or self._reanalyze_process.state() != QProcess.ProcessState.NotRunning
+        )
+
+    def _drain_finished(self, proc: QProcess, label: str, code: int):
+        self._consume_process_output(proc, is_stderr=False, final=True)
+        self._consume_process_output(proc, is_stderr=True, final=True)
+        self._append(f"[{label} finished: exit {code}]", "ok" if code == 0 else "error")
 
     def _on_stdout(self):
         proc = self.sender()
@@ -1730,10 +1704,7 @@ exit 0
                 self._last_pending_evio_count = int(m_pending.group(1))
 
     def _on_download_finished(self, code, status):
-        self._consume_process_output(self._download_process, is_stderr=False, final=True)
-        self._consume_process_output(self._download_process, is_stderr=True, final=True)
-        color = "ok" if code == 0 else "error"
-        self._append(f"[download scan finished: exit {code}]", color)
+        self._drain_finished(self._download_process, "download scan", code)
         self._start_next_replay()
         if self._stop_btn.isEnabled():
             interval_ms = self._interval.value() * 1000
@@ -1763,10 +1734,7 @@ exit 0
                 self._timer.start(interval_ms)
 
     def _on_replay_finished(self, code, status):
-        self._consume_process_output(self._replay_process, is_stderr=False, final=True)
-        self._consume_process_output(self._replay_process, is_stderr=True, final=True)
-        color = "ok" if code == 0 else "error"
-        self._append(f"[replay finished: exit {code}]", color)
+        self._drain_finished(self._replay_process, "replay", code)
         for snapshot in self._active_replay_snapshots:
             self._queued_snapshots.discard(snapshot)
         self._active_replay_snapshots.clear()
@@ -1804,8 +1772,7 @@ exit 0
             )
 
     def _enqueue_existing_replay_snapshots(self):
-        storage_base = Path(self._storage_base.text().strip() or STORAGE_BASE).expanduser()
-        queue_root = storage_base / "replay_queue"
+        queue_root = self._storage_base_path() / "replay_queue"
         if not queue_root.exists():
             return
         added = 0
@@ -1820,9 +1787,7 @@ exit 0
             for snapshot in sorted(p for p in run_dir.iterdir() if p.is_dir()):
                 if self._enqueue_replay_snapshot(run, snapshot):
                     added += 1
-                    recovered_files += sum(
-                        1 for path in snapshot.glob("*.evio.*") if path.is_file()
-                    )
+                    recovered_files += count_evio_files([snapshot])
         self._last_pending_evio_count = max(
             self._last_pending_evio_count, recovered_files,
         )
@@ -1837,10 +1802,7 @@ exit 0
 
     def _reanalyze_lms(self):
         self._batch_reanalyze_timer.stop()
-        if (
-            self._replay_process.state() != QProcess.ProcessState.NotRunning
-            or self._reanalyze_process.state() != QProcess.ProcessState.NotRunning
-        ):
+        if self._replay_busy():
             self._reanalyze_pending = True
             self._status.setText("Re-analysis queued")
             return
@@ -1849,7 +1811,7 @@ exit 0
         runs = sorted(self._visible_runs_data())
         if not runs:
             runs = sorted(set(self._parse_runs()))
-        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+        storage_base = self._storage_base_path()
         jobs: List[Tuple[int, Path, Path]] = []
         for run in runs:
             _, work_dir, out_root = run_storage_paths(run, storage_base)
@@ -1862,11 +1824,7 @@ exit 0
             return
 
         tool = find_update_tool()
-        ref_arg = ""
-        if self._ref_gain_file is not None:
-            ref_arg = f" -R {shlex.quote(str(self._ref_gain_file))}"
-        elif self._ref_run.value() >= 0:
-            ref_arg = f" -r {self._ref_run.value()}"
+        ref_arg = self._ref_tool_arg()
 
         commands = []
         for run, work_dir, out_root in jobs:
@@ -1886,16 +1844,13 @@ exit 0
             f"$ {tool} -a  # re-analyze {len(jobs)} run(s), batch size {self._batch.value()}",
             "cmd",
         )
-        replay_cpus = getattr(self, "_replay_worker_cpus", [])
+        replay_cpus = self._replay_worker_cpus
         cpu_list = _format_cpu_list(replay_cpus[:1]) if replay_cpus else ""
         start_bash_process(self._reanalyze_process, bash, cpu_list)
 
     def _on_reanalyze_finished(self, code, status):
-        self._consume_process_output(self._reanalyze_process, is_stderr=False, final=True)
-        self._consume_process_output(self._reanalyze_process, is_stderr=True, final=True)
+        self._drain_finished(self._reanalyze_process, "re-analysis", code)
         self._reanalyze_btn.setEnabled(True)
-        color = "ok" if code == 0 else "error"
-        self._append(f"[re-analysis finished: exit {code}]", color)
         self._status.setText("Re-analysis finished" if code == 0 else "Re-analysis failed")
         self._load_root()
         if self._reanalyze_pending:
@@ -1904,10 +1859,7 @@ exit 0
             self._start_next_replay()
 
     def _start_next_replay(self):
-        if (
-            self._replay_process.state() != QProcess.ProcessState.NotRunning
-            or self._reanalyze_process.state() != QProcess.ProcessState.NotRunning
-        ):
+        if self._replay_busy():
             return
         while self._replay_queue:
             run, snapshot = self._replay_queue.pop(0)
@@ -1927,18 +1879,13 @@ exit 0
                 kept_queue.append((qrun, qsnap))
         self._replay_queue = kept_queue
         self._active_replay_snapshots = snapshots
-        self._active_replay_file_count = sum(
-            1
-            for snapshot_dir in snapshots
-            for path in snapshot_dir.glob("*.evio.*")
-            if path.is_file()
-        )
+        self._active_replay_file_count = count_evio_files(snapshots)
 
-        storage_base = self._storage_base.text().strip() or STORAGE_BASE
+        storage_base = self._storage_base_path()
         _, work_dir, out_root = run_storage_paths(run, storage_base)
         tool = find_update_tool()
         requested_threads = self._threads.value()
-        replay_cpus = getattr(self, "_replay_worker_cpus", [])
+        replay_cpus = self._replay_worker_cpus
         replay_cpu_capacity = len(replay_cpus) if replay_cpus else max(1, (os.cpu_count() or 2) - 2)
         replay_threads = min(
             requested_threads,
@@ -1956,19 +1903,14 @@ exit 0
                 "normal",
             )
 
-        ref_arg = ""
-        if self._ref_gain_file is not None:
-            ref_arg = f" -R {shlex.quote(str(self._ref_gain_file))}"
-        elif self._ref_run.value() >= 0:
-            ref_arg = f" -r {self._ref_run.value()}"
-
+        ref_arg = self._ref_tool_arg()
         snapshot_args = " ".join(shlex.quote(str(p)) for p in snapshots)
         bash = f"""
 set -u
 RUN={run}
 RUN_TAG=$(printf 'prad_%06d' "$RUN")
 SNAP_DIRS=({snapshot_args})
-STORAGE_BASE={shlex.quote(storage_base)}
+STORAGE_BASE={shlex.quote(str(storage_base))}
 WORK_DIR={shlex.quote(str(work_dir))}
 OUT_ROOT={shlex.quote(str(out_root))}
 TOOL={shlex.quote(tool)}
@@ -2070,7 +2012,6 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 for run, sig in self._root_signatures.items()
                 if run in retained_set
             }
-            self._data = self._runs_data[max(self._runs_data)] if self._runs_data else None
         gc.collect(0)
 
     def _request_root_load(self, files: List[Tuple[int, Path]], label: str,
@@ -2115,7 +2056,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
 
         self._status.setText(f"Loading {len(changed)} updated ROOT file(s)...")
         thread = QThread(self)
-        background_cpus = getattr(self, "_replay_cpus", [])
+        background_cpus = self._replay_cpus
         worker = GainRootLoader(
             changed,
             background_cpus[-1:] if background_cpus else [],
@@ -2157,7 +2098,6 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         for run in failed_runs:
             if run in self._runs_data and run in self._root_signatures:
                 self._root_signatures.pop(run, None)
-        self._data = self._runs_data[max(self._runs_data)]
         nbatches = sum(data.nbatches for data in self._runs_data.values())
         self._valid_runs_count.setText(f"{len(self._runs_data)} loaded")
         miss = f" | missing {missing} run(s)" if missing else ""
@@ -2181,12 +2121,12 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if self._opened_output_folder is not None:
             self._load_output_folder(self._opened_output_folder)
             return
-        storage = self._storage_base.text().strip() or STORAGE_BASE
+        storage = self._storage_base_path()
         files_by_run: Dict[int, Path] = {}
 
         # Discover actual output files first. Run-number gaps must not consume
         # the "runs shown" limit.
-        gain_dir = Path(storage).expanduser() / "gain"
+        gain_dir = storage / "gain"
         for path in gain_dir.glob("prad_*/prad_*_gain_corr.root"):
             if not path.is_file():
                 continue
@@ -2263,21 +2203,6 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
     def _ref_ratio_bad_rel(self) -> float:
         return float(self._ref_ratio_tol.value()) / 100.0
 
-    def _quantity_array(self, data: GainData):
-        if self._quantity.currentIndex() == 0:
-            ref_gain = self._get_ref_run_gain()
-            if ref_gain is not None:
-                gain_w = np.asarray(data.gain_w, dtype=float)
-                valid = np.isfinite(gain_w) & np.isfinite(ref_gain) & (ref_gain > 0.0)
-                return safe_divide(gain_w, ref_gain, valid)
-            valid = (
-                np.isfinite(data.gain_w)
-                & np.isfinite(data.gain_w_ref)
-                & (data.gain_w_ref > 0.0)
-            )
-            return safe_divide(data.gain_w, data.gain_w_ref, valid)
-        return data.gain_w
-
     def _quantity_key(self) -> str:
         idx = self._quantity.currentIndex()
         if idx < 0 or idx >= len(QUANTITIES):
@@ -2306,8 +2231,6 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         }
 
     def _change_map_range(self) -> float:
-        if not hasattr(self, "_change_range"):
-            return CHANGE_DEFAULT_RANGE
         return max(0.001, float(self._change_range.value()) / 100.0)
 
     def _visible_runs_data(self) -> Dict[int, GainData]:
@@ -2316,39 +2239,21 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         limit = (
             len(self._runs_data)
             if self._opened_output_folder is not None
-            else self._runs_shown.value() if hasattr(self, "_runs_shown") else DEFAULT_RUNS_SHOWN
+            else self._runs_shown.value()
         )
         runs = [run for run in sorted(self._runs_data) if self._runs_data[run].nbatches > 0][-limit:]
         return {run: self._runs_data[run] for run in runs}
 
     def _visible_quantity_arrays(self, runs_data: Dict[int, GainData]):
-        arrays = {
-            run: np.asarray(self._quantity_array(data), dtype=float)
-            for run, data in runs_data.items()
-        }
-        if not arrays or not self._norm_first5.isChecked():
+        arrays = self._visible_base_gain_arrays(runs_data)
+        if not self._norm_first5.isChecked():
             return arrays
 
-        first_batches = []
-        remaining = 5
-        for run in sorted(runs_data):
-            arr = arrays[run]
-            if arr.size == 0:
-                continue
-            take = min(remaining, arr.shape[0])
-            if take > 0:
-                first_batches.append(arr[:take])
-                remaining -= take
-            if remaining <= 0:
-                break
-        if not first_batches:
+        base_samples = _edge_batches([arrays[run] for run in sorted(runs_data)], BASELINE_BATCHES)
+        if base_samples is None:
             return arrays
-
-        base_samples = np.concatenate(first_batches, axis=0)
         valid = np.isfinite(base_samples) & (base_samples > 0.0)
-        count = np.sum(valid, axis=0)
-        total = np.sum(np.where(valid, base_samples, 0.0), axis=0)
-        baseline = safe_divide(total, count, count > 0)
+        baseline = masked_average(base_samples, valid, 0)
         baseline = np.where(np.isfinite(baseline) & (baseline > 0.0), baseline, np.nan)
         for run in arrays:
             arrays[run] = safe_divide(arrays[run], baseline)
@@ -2360,53 +2265,26 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             for run, data in runs_data.items()
         }
 
+    @staticmethod
+    def _run_masks(masks_by_run, run: int, n: int):
+        """Ref-ratio masks [n, 3] of ``run``; all False if missing or mis-shaped."""
+        masks = np.asarray(masks_by_run.get(run, []), dtype=bool)
+        return masks if masks.shape == (n, 3) else np.zeros((n, 3), dtype=bool)
+
     def _flatten_batches(self, runs_data: Dict[int, GainData], arrays_by_run, masks_by_run):
         batches = []
         for run, data in sorted(runs_data.items()):
             arr = arrays_by_run[run]
-            masks = masks_by_run.get(run, [])
+            masks = self._run_masks(masks_by_run, run, data.nbatches)
             for b in range(data.nbatches):
-                mask = masks[b] if b < len(masks) else [False, False, False]
-                batches.append((run, b, arr[b], mask))
+                batches.append((run, b, arr[b], masks[b]))
         return batches
-
-    def _change_array(self, runs_data: Dict[int, GainData], masks_by_run):
-        arrays_by_run = self._visible_base_gain_arrays(runs_data)
-        batches = self._flatten_batches(runs_data, arrays_by_run, masks_by_run)
-        if len(batches) < 2:
-            return None
-
-        quantity = self._quantity_key()
-        if quantity == "gain_change":
-            return self._short_change_array_from_batches(batches)
-        if quantity in {"gain_run_change", "gain_all_run_change"}:
-            return self._latest_run_average_change(
-                runs_data,
-                arrays_by_run,
-                masks_by_run,
-                use_all_previous=quantity == "gain_all_run_change",
-            )
-
-        n = min(5, len(batches))
-        early = batches[:n]
-        late = batches[-n:]
-        early_mean = masked_mean([b[2] for b in early], [b[3] for b in early])
-        late_mean = masked_mean([b[2] for b in late], [b[3] for b in late])
-        if early_mean is None or late_mean is None:
-            return None
-        valid = np.isfinite(early_mean) & np.isfinite(late_mean) & (early_mean > 0.0)
-        return safe_divide(late_mean - early_mean, early_mean, valid)
 
     def _run_mean_arrays(self, runs_data: Dict[int, GainData], arrays_by_run, masks_by_run):
         means = {}
         for run in sorted(runs_data):
             arr = arrays_by_run[run]
-            masks = masks_by_run.get(run, [])
-            means[run] = masked_mean(
-                [arr[b] for b in range(arr.shape[0])],
-                [masks[b] if b < len(masks) else [False, False, False]
-                 for b in range(arr.shape[0])],
-            )
+            means[run] = masked_mean(list(arr), self._run_masks(masks_by_run, run, arr.shape[0]))
         return means
 
     def _previous_run_baseline(self, runs: List[int], run_means, run_index: int,
@@ -2421,32 +2299,14 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if not use_all_previous:
             return previous[-1]
         arr = np.asarray(previous, dtype=float)
-        valid = np.isfinite(arr)
-        count = np.sum(valid, axis=0)
-        total = np.sum(np.where(valid, arr, 0.0), axis=0)
-        return safe_divide(total, count, count > 0)
-
-    def _latest_run_average_change(self, runs_data: Dict[int, GainData], arrays_by_run,
-                                   masks_by_run, use_all_previous: bool):
-        runs = sorted(runs_data)
-        if len(runs) < 2:
-            return None
-        run_means = self._run_mean_arrays(runs_data, arrays_by_run, masks_by_run)
-        current = run_means.get(runs[-1])
-        baseline = self._previous_run_baseline(
-            runs, run_means, len(runs) - 1, use_all_previous,
-        )
-        if current is None or baseline is None:
-            return None
-        valid = np.isfinite(current) & np.isfinite(baseline) & (baseline > 0.0)
-        return safe_divide(current - baseline, baseline, valid)
+        return masked_average(arr, np.isfinite(arr), 0)
 
     def _short_change_array_from_batches(self, batches):
         if len(batches) < 2:
             return None
         current = batches[-1][2]
         current_mask = batches[-1][3]
-        prev = batches[max(0, len(batches) - 6):-1]
+        prev = batches[max(0, len(batches) - BASELINE_BATCHES - 1):-1]
         baseline = masked_mean([b[2] for b in prev], [b[3] for b in prev])
         if baseline is None:
             return None
@@ -2488,9 +2348,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 if baseline is None:
                     continue
                 arr = base_by_run[run]
-                masks = np.asarray(masks_by_run.get(run, []), dtype=bool)
-                if masks.shape != (arr.shape[0], 3):
-                    continue
+                masks = self._run_masks(masks_by_run, run, arr.shape[0])
                 valid = (
                     masks[:, None, :] & np.isfinite(arr)
                     & np.isfinite(baseline)[None, :, :]
@@ -2501,15 +2359,12 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 )
             return results
 
-        early_n = min(5, len(batches))
-        early_baseline = masked_mean(
-            [b[2] for b in batches[:early_n]],
-            [b[3] for b in batches[:early_n]],
-        )
+        early = batches[:BASELINE_BATCHES]
+        early_baseline = masked_mean([b[2] for b in early], [b[3] for b in early])
         ordered_runs = sorted(runs_data)
         values = np.concatenate([base_by_run[run] for run in ordered_runs], axis=0)
         ref_masks = np.concatenate(
-            [np.asarray(masks_by_run.get(run, []), dtype=bool) for run in ordered_runs],
+            [self._run_masks(masks_by_run, run, base_by_run[run].shape[0]) for run in ordered_runs],
             axis=0,
         )
         if quantity == "gain_change":
@@ -2524,7 +2379,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 axis=0,
             )
             ends = np.arange(values.shape[0])
-            starts = np.maximum(0, ends - 5)
+            starts = np.maximum(0, ends - BASELINE_BATCHES)
             window_count = counts[ends] - counts[starts]
             baseline = safe_divide(
                 sums[ends] - sums[starts], window_count, window_count > 0,
@@ -2548,11 +2403,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         runs_data = self._visible_runs_data()
         ratios = [np.asarray(data.ref_ratio, dtype=float) for data in runs_data.values()]
         stacked = np.concatenate(ratios, axis=0) if ratios else np.empty((0, 3))
-        valid = np.isfinite(stacked) & (stacked > 0.0)
-        counts = np.sum(valid, axis=0)
-        centers_array = safe_divide(
-            np.sum(np.where(valid, stacked, 0.0), axis=0), counts, counts > 0,
-        )
+        centers_array = masked_average(stacked, np.isfinite(stacked) & (stacked > 0.0), 0)
         centers = centers_array.tolist()
         bad_rel = self._ref_ratio_bad_rel()
         masks = {}
@@ -2585,31 +2436,15 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             arr = arrays_by_run[latest_run]
             return arr[-1] if arr.shape[0] else None
 
-        samples = []
         if quantity == "gain_long_change":
-            remaining = 5
-            for run in reversed(sorted(runs_data)):
-                arr = arrays_by_run[run]
-                take = min(remaining, arr.shape[0])
-                if take:
-                    samples.append(arr[-take:])
-                    remaining -= take
-                if remaining <= 0:
-                    break
+            stacked = _edge_batches(
+                [arrays_by_run[run] for run in sorted(runs_data)], BASELINE_BATCHES, from_end=True,
+            )
+            if stacked is None:
+                return None
         else:
-            samples.append(arrays_by_run[latest_run])
-        if not samples:
-            return None
-        stacked = np.concatenate(list(reversed(samples)), axis=0)
-        valid = np.isfinite(stacked)
-        count = np.sum(valid, axis=0)
-        total = np.sum(np.where(valid, stacked, 0.0), axis=0)
-        return np.divide(
-            total,
-            count,
-            out=np.full_like(total, np.nan, dtype=float),
-            where=count > 0,
-        )
+            stacked = arrays_by_run[latest_run]
+        return masked_average(stacked, np.isfinite(stacked), 0)
 
     def _selected_values_for_batch(self) -> Dict[str, float]:
         runs_data, _, _, arrays_by_run = self._get_view_context()
@@ -2626,17 +2461,14 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             valid = np.isfinite(latest)
             if not self._is_change_quantity():
                 valid &= (latest > 0.0) & (latest != 1.0)
-            count = np.sum(valid, axis=1)
-            selected = safe_divide(
-                np.sum(np.where(valid, latest, 0.0), axis=1), count, count > 0,
-            )
+            selected = masked_average(latest, valid, 1)
         return {f"W{i + 1}": float(value) for i, value in enumerate(selected)}
 
     def _run_average_value(self, arr, masks) -> float:
         ref_idx = self._ref.currentIndex()
         values = np.asarray(arr, dtype=float)
         batch_masks = np.asarray(masks, dtype=bool)
-        if values.size == 0 or batch_masks.shape != (values.shape[0], 3):
+        if values.size == 0:
             return math.nan
         if ref_idx < 3:
             sample = values[:, :, ref_idx]
@@ -2648,10 +2480,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         valid = np.isfinite(values) & batch_masks[:, None, :]
         if not self._is_change_quantity():
             valid &= (values > 0.0) & (values != 1.0)
-        count = np.sum(valid, axis=2)
-        per_module = safe_divide(
-            np.sum(np.where(valid, values, 0.0), axis=2), count, count > 0,
-        )
+        per_module = masked_average(values, valid, 2)
         finite = np.isfinite(per_module)
         return float(np.mean(per_module[finite])) if np.any(finite) else math.nan
 
@@ -2663,15 +2492,15 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         return f"{value:.4f}"
 
     def _refresh_run_average_monitor(self):
-        if not hasattr(self, "_run_avg_label"):
-            return
         runs_data, _, masks_by_run, arrays_by_run = self._get_view_context()
         if not runs_data:
             self._run_avg_label.setText("Run avg: n/a")
             return
         runs = sorted(runs_data)
         run_avgs = {
-            run: self._run_average_value(arrays_by_run[run], masks_by_run.get(run, []))
+            run: self._run_average_value(
+                arrays_by_run[run], self._run_masks(masks_by_run, run, arrays_by_run[run].shape[0]),
+            )
             for run in runs
         }
         all_vals = [v for v in run_avgs.values() if math.isfinite(v)]
@@ -2687,65 +2516,32 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         )
 
     def _refresh_gain_summary(self):
-        if not hasattr(self, "_gain_summary"):
-            return
         runs_data, _, masks_by_run, _ = self._get_view_context()
-        labels = ("under absorber", "open layer 1", "open layer 2")
-        if not runs_data:
-            self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in labels))
+        runs = sorted(runs_data)
+        values = _edge_batches(
+            [self._base_gain_array(runs_data[run]) for run in runs], BASELINE_BATCHES, from_end=True,
+        )
+        if values is None:
+            self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in GAIN_SUMMARY_GROUPS))
             return
-
-        remaining = 5
-        samples = []
-        sample_masks = []
-        ref_gain = self._get_ref_run_gain()
-        for run in reversed(sorted(runs_data)):
-            data = runs_data[run]
-            take = min(remaining, data.nbatches)
-            if take <= 0:
-                continue
-            gain = np.asarray(data.gain_w[-take:], dtype=float)
-            if ref_gain is not None:
-                valid = np.isfinite(gain) & np.isfinite(ref_gain)[None, :, :] & (ref_gain[None, :, :] > 0.0)
-                ratio = safe_divide(gain, ref_gain[None, :, :], valid)
-            else:
-                embedded_ref = np.asarray(data.gain_w_ref[-take:], dtype=float)
-                valid = np.isfinite(gain) & np.isfinite(embedded_ref) & (embedded_ref > 0.0)
-                ratio = safe_divide(gain, embedded_ref, valid)
-            masks = np.asarray(masks_by_run.get(run, []), dtype=bool)
-            if masks.shape != (data.nbatches, 3):
-                masks = np.zeros((data.nbatches, 3), dtype=bool)
-            samples.append(ratio)
-            sample_masks.append(masks[-take:])
-            remaining -= take
-            if remaining == 0:
-                break
-
-        if not samples:
-            self._gain_summary.setPlainText("\n".join(f"{label}: n/a" for label in labels))
-            return
-        values = np.concatenate(list(reversed(samples)), axis=0)
-        masks = np.concatenate(list(reversed(sample_masks)), axis=0)
+        masks = _edge_batches(
+            [self._run_masks(masks_by_run, run, runs_data[run].nbatches) for run in runs],
+            BASELINE_BATCHES, from_end=True,
+        )
         ref_index = self._ref.currentIndex()
         if ref_index < 3:
             selected = values[:, :, ref_index]
             valid = np.isfinite(selected) & (selected > 0.0) & masks[:, ref_index, None]
-            count = np.sum(valid, axis=0)
-            module_means = safe_divide(
-                np.sum(np.where(valid, selected, 0.0), axis=0), count, count > 0,
-            )
+            module_means = masked_average(selected, valid, 0)
         else:
             valid = (
                 np.isfinite(values) & (values > 0.0) & (values != 1.0)
                 & masks[:, None, :]
             )
-            count = np.sum(valid, axis=(0, 2))
-            module_means = safe_divide(
-                np.sum(np.where(valid, values, 0.0), axis=(0, 2)), count, count > 0,
-            )
+            module_means = masked_average(values, valid, (0, 2))
 
         lines = []
-        for label in labels:
+        for label in GAIN_SUMMARY_GROUPS:
             group_values = [
                 float(module_means[index])
                 for index in self._gain_summary_groups[label]
@@ -2812,11 +2608,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         if change is None:
             return
 
-        valid = np.isfinite(change)
-        count = np.sum(valid, axis=1)
-        module_change = safe_divide(
-            np.sum(np.where(valid, change, 0.0), axis=1), count, count > 0,
-        )
+        module_change = masked_average(change, np.isfinite(change), 1)
         dropped = [
             (f"W{i + 1}", float(value))
             for i, value in enumerate(module_change)
@@ -2863,6 +2655,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         offset = 0.0
         for run, data in sorted(runs_data.items()):
             arr = arrays_by_run[run]
+            masks = self._run_masks(masks_by_run, run, data.nbatches)
             start = offset
             run_x: List[float] = []
             for b in range(data.nbatches):
@@ -2879,7 +2672,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 x.append(x_value)
                 if math.isfinite(x_value):
                     run_x.append(x_value)
-                mask = masks_by_run.get(run, [])[b] if b < len(masks_by_run.get(run, [])) else [False, False, False]
+                mask = masks[b]
                 for j in range(3):
                     ref_ratio_values[j].append(float(data.ref_ratio[b, j]))
                     ref_ratio_ok[j].append(mask[j])
@@ -2902,7 +2695,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             series.append(("Avg", avg_values, REF_COLORS[3], True))
         qlabel = QUANTITIES[self._quantity.currentIndex()][1]
         if self._norm_first5.isChecked() and not self._is_change_quantity():
-            qlabel += " (first 5 avg = 1)"
+            qlabel += f" (first {BASELINE_BATCHES} avg = 1)"
         span = self._change_map_range()
         default_y = (-span, span) if self._is_change_quantity() else (1.0 - span, 1.0 + span)
         if x_mode == "unix":
@@ -2930,15 +2723,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
         self._maintenance_timer.stop()
         self._log_flush_timer.stop()
         self._flush_log()
-        if self._download_process.state() != QProcess.ProcessState.NotRunning:
-            self._download_process.kill()
-            self._download_process.waitForFinished(2000)
-        if self._replay_process.state() != QProcess.ProcessState.NotRunning:
-            self._replay_process.kill()
-            self._replay_process.waitForFinished(2000)
-        if self._reanalyze_process.state() != QProcess.ProcessState.NotRunning:
-            self._reanalyze_process.kill()
-            self._reanalyze_process.waitForFinished(2000)
+        self._kill_processes(wait_ms=2000)
         if self._root_load_thread is not None:
             self._root_load_thread.requestInterruption()
             self._root_load_thread.quit()

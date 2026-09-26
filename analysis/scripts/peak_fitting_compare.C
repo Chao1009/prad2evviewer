@@ -192,8 +192,6 @@ std::array<double, 3> fitCrystalBall(TH1F *h, float expectPeak,
 }
 
 void peak_fitting_compare() {
-    // Implement the peak fitting comparison logic here.
-
     // a plot to draw the comparison between Gaussian and Crystal Ball curves
     // a gaus curve and several crystal ball curves with same amplitude and sigma 
     // but with different parameters of alpha and n

@@ -7,9 +7,9 @@ Interactive viewer for the V1190 TDC banks (0xE107) produced by the tagger
 crate (ROC 0x008E).  Two data sources:
 
   1. An evio file (``*.evio``, ``*.evio.*``) — decoded in-process via the
-     ``prad2py`` pybind11 module.  Build with ``-DBUILD_PYTHON=ON`` and add
-     ``build/python`` to ``PYTHONPATH`` (or just run the viewer from the
-     repo root — it auto-discovers ``build/python/`` next to the script).
+     ``prad2py`` pybind11 module.  Build with ``-DBUILD_PYTHON=ON``; the
+     checkout's ``build/python/`` is found automatically (an installed
+     tree relies on ``PYTHONPATH``).
   2. Live ET stream — subscribe to a running ``prad2_server`` WebSocket.
 
 Displays:
@@ -31,6 +31,9 @@ Usage
     # Live (online ET via prad2_server)
     python scripts/tagger_viewer.py --live ws://clondaq6:5051
 
+Other options: -n/--max-events N, -D/--daq-config PATH, --roc TAG,
+--no-smoke-test, --theme dark|light (see --help).
+
 Only PyQt6 and numpy are required.  Plots are drawn with QPainter, so
 matplotlib / pyqtgraph are NOT needed.
 """
@@ -48,13 +51,16 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from PyQt6.QtCore import (
-    QObject, Qt, QRectF, QThread, QTimer, QUrl, pyqtSignal,
+    QObject, Qt, QRectF, QTimer, QUrl, pyqtSignal,
 )
 from PyQt6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen
 
+from evio_io import open_evio
 from hycal_geoview import (
     apply_theme_palette, set_theme, available_themes, THEME,
+    start_worker_thread,
 )
+from prad2_env import PRAD2PY_HINT, find_database_file, import_prad2py
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -82,9 +88,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtWebSockets import QWebSocket
 
 
-# ---------------------------------------------------------------------------
 # Hit dtypes (shared by the live stream and the evio loader)
-# ---------------------------------------------------------------------------
 
 # 16-byte packed record, matches both the prad2py numpy output and the
 # per-hit payload carried by prad2_server's TDC WebSocket frames.
@@ -115,9 +119,7 @@ RECORD_DTYPE = np.dtype(
 )
 
 
-# ---------------------------------------------------------------------------
 # Live stream frame parser (prad2_server tagger broadcast)
-# ---------------------------------------------------------------------------
 
 # Header is little-endian:
 #   char magic[4] ("TGR1")
@@ -177,30 +179,10 @@ def raw_to_record(raw: np.ndarray) -> np.ndarray:
     return hits
 
 
-# ---------------------------------------------------------------------------
 # In-process evio loader via prad2py
-# ---------------------------------------------------------------------------
 
-_SCRIPT_DIR = Path(__file__).resolve().parent
-# Common locations for the freshly built prad2py extension. If the user has
-# not set PYTHONPATH we still try a couple of obvious candidates so the
-# viewer "just works" after ``cmake --build``.
-for _cand in (
-    _SCRIPT_DIR.parent / "build" / "python",
-    _SCRIPT_DIR.parent / "build-release" / "python",
-    _SCRIPT_DIR.parent / "build" / "Release" / "python",
-):
-    if _cand.is_dir() and str(_cand) not in sys.path:
-        sys.path.insert(0, str(_cand))
-
-try:
-    import prad2py  # type: ignore
-    HAVE_PRAD2PY = True
-    PRAD2PY_ERROR = ""
-except Exception as _exc:  # noqa: BLE001
-    prad2py = None  # type: ignore
-    HAVE_PRAD2PY = False
-    PRAD2PY_ERROR = f"{type(_exc).__name__}: {_exc}"
+prad2py, PRAD2PY_ERROR = import_prad2py()
+HAVE_PRAD2PY = prad2py is not None
 
 
 def load_hits_from_evio(
@@ -225,19 +207,10 @@ def load_hits_from_evio(
     if not HAVE_PRAD2PY:
         raise RuntimeError(
             "prad2py module not available "
-            f"({PRAD2PY_ERROR or 'not importable'}).\n"
-            "Build it with:\n"
-            "    cmake -DBUILD_PYTHON=ON -S . -B build && cmake --build build\n"
-            "and add build/python/ to PYTHONPATH."
+            f"({PRAD2PY_ERROR or 'not importable'}).\n" + PRAD2PY_HINT
         )
     dec = prad2py.dec
-
-    cfg = dec.load_daq_config(daq_config)
-    ch  = dec.EvChannel()
-    ch.set_config(cfg)
-    st = ch.open_auto(path)
-    if st != dec.Status.success:
-        raise RuntimeError(f"cannot open {path}: {st}")
+    ch, _ = open_evio(path, daq_config)
 
     # Accumulate per-event batches as (event_num, trigger_bits, hits_array).
     # We convert the collected lists into one structured numpy array at the
@@ -296,8 +269,6 @@ def load_hits_from_evio(
     if not hits_chunks:
         return np.zeros(0, dtype=RECORD_DTYPE)
 
-    # Concatenate into parallel flat arrays, then assemble the structured
-    # record dtype expected by the rest of the viewer.
     ev_nums = np.concatenate(ev_nums_chunks)
     trigs   = np.concatenate(trig_chunks)
     hits    = np.concatenate(hits_chunks)
@@ -323,83 +294,89 @@ def round_up_channels(max_ch: int) -> int:
     return 128
 
 
-# ---------------------------------------------------------------------------
 # Channel-name map (database/tagger_map.json)
-# ---------------------------------------------------------------------------
 
 def load_channel_map(path: Optional[Path] = None) -> Dict[Tuple[int, int], str]:
     """Load slot+channel -> name mapping. Silently returns {} on any failure
     (missing file, bad JSON, etc.) — names are purely decorative."""
-    import json
-
-    if path is None:
-        candidates = [
-            _SCRIPT_DIR.parent / "database" / "tagger_map.json",
-            Path.cwd() / "database" / "tagger_map.json",
-        ]
-    else:
-        candidates = [Path(path)]
-
-    for p in candidates:
-        if not p.is_file():
-            continue
-        try:
-            with p.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            out: Dict[Tuple[int, int], str] = {}
-            for e in data.get("channels", []):
-                slot = int(e["slot"])
-                channel = int(e["channel"])
-                out[(slot, channel)] = str(e["name"])
-            return out
-        except Exception:
-            continue
-    return {}
+    p = (Path(path) if path is not None
+         else find_database_file("tagger_map.json", use_env=False))
+    if p is None or not p.is_file():
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = _json.load(f)
+        out: Dict[Tuple[int, int], str] = {}
+        for e in data.get("channels", []):
+            out[(int(e["slot"]), int(e["channel"]))] = str(e["name"])
+        return out
+    except Exception:
+        return {}
 
 
-# ---------------------------------------------------------------------------
 # Plot widgets
-# ---------------------------------------------------------------------------
 
 
-class BarChart(QWidget):
+class _TaggerPlot(QWidget):
+    """QPainter plot with a title above a plot rectangle inset by
+    ``MARGINS`` (left, top, right, bottom) pixels."""
+
+    MARGINS = (0, 0, 0, 0)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._title = ""
+
+    def setTitle(self, title: str):
+        self._title = title
+        self.update()
+
+    def _plotRect(self) -> QRectF:
+        left, top, right, bottom = self.MARGINS
+        return QRectF(left, top, self.width() - left - right,
+                      self.height() - top - bottom)
+
+    def _begin_paint(self, frame: bool = True) -> Tuple[QPainter, QRectF]:
+        """(painter, plot rect) with the canvas cleared and the plot frame
+        (when ``frame``) and the title drawn, pen left at THEME.TEXT."""
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.fillRect(self.rect(), QColor(THEME.CANVAS))
+        r = self._plotRect()
+        p.setPen(QPen(QColor(THEME.TEXT)))
+        if frame:
+            p.drawRect(r)
+        if self._title:
+            p.setFont(QFont("Monospace", 10, QFont.Weight.Bold))
+            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+        return p, r
+
+
+class BarChart(_TaggerPlot):
     """
     Horizontal index → count bar chart painted with QPainter.
     Emits ``barClicked(index)`` when a bar is clicked.
     """
+
+    MARGINS = (50, 18, 10, 30)
 
     barClicked = pyqtSignal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._counts: np.ndarray = np.zeros(0, dtype=np.int64)
-        self._labels: Dict[int, str] = {}
         self._highlight: Optional[int] = None
-        self._title = ""
         self.setMinimumHeight(180)
         self.setMouseTracking(True)
 
-    # --- data ------------------------------------------------------------
-
-    def setData(self, counts: np.ndarray, labels: Optional[Dict[int, str]] = None):
+    def setData(self, counts: np.ndarray):
         self._counts = np.asarray(counts, dtype=np.int64)
-        self._labels = labels or {}
         self._highlight = None
-        self.update()
-
-    def setTitle(self, title: str):
-        self._title = title
         self.update()
 
     def setHighlight(self, idx: Optional[int]):
         self._highlight = idx
         self.update()
-
-    # --- geometry --------------------------------------------------------
-
-    def _plotRect(self) -> QRectF:
-        m = 30.0
-        return QRectF(m + 20, 18, self.width() - m - 30, self.height() - m - 18)
 
     def _indexAtX(self, x: float) -> Optional[int]:
         r = self._plotRect()
@@ -414,8 +391,6 @@ class BarChart(QWidget):
             return idx
         return None
 
-    # --- events ----------------------------------------------------------
-
     def mousePressEvent(self, ev):
         if ev.button() == Qt.MouseButton.LeftButton:
             idx = self._indexAtX(ev.position().x())
@@ -423,18 +398,7 @@ class BarChart(QWidget):
                 self.barClicked.emit(idx)
 
     def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.fillRect(self.rect(), QColor(THEME.CANVAS))
-
-        r = self._plotRect()
-        p.setPen(QPen(QColor(THEME.TEXT)))
-        p.drawRect(r)
-
-        if self._title:
-            f = QFont("Monospace", 10, QFont.Weight.Bold)
-            p.setFont(f)
-            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+        p, r = self._begin_paint()
 
         n = self._counts.size
         if n <= 0:
@@ -446,7 +410,6 @@ class BarChart(QWidget):
         cmax = max(cmax, 1)
         bar_w = r.width() / n
 
-        # bars
         for i, c in enumerate(self._counts):
             h = (c / cmax) * r.height()
             x0 = r.left() + i * bar_w
@@ -475,18 +438,18 @@ class BarChart(QWidget):
         for i in range(0, n, step):
             x = r.left() + (i + 0.5) * bar_w
             p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
-            label = self._labels.get(i, str(i))
-            p.drawText(int(x - 14), int(r.bottom() + 14), label)
+            p.drawText(int(x - 14), int(r.bottom() + 14), str(i))
 
 
-class Histogram(QWidget):
+class Histogram(_TaggerPlot):
     """1-D histogram painted with QPainter."""
+
+    MARGINS = (65, 20, 10, 40)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._counts: np.ndarray = np.zeros(0, dtype=np.int64)
         self._edges: np.ndarray = np.zeros(0)
-        self._title = ""
         self._xlabel = ""
         self.setMinimumHeight(260)
 
@@ -495,31 +458,12 @@ class Histogram(QWidget):
         self._edges = np.asarray(edges, dtype=np.float64)
         self.update()
 
-    def setTitle(self, title: str):
-        self._title = title
-        self.update()
-
     def setXLabel(self, label: str):
         self._xlabel = label
         self.update()
 
-    def _plotRect(self) -> QRectF:
-        m = 40.0
-        return QRectF(m + 25, 20, self.width() - m - 35, self.height() - m - 20)
-
     def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.fillRect(self.rect(), QColor(THEME.CANVAS))
-
-        r = self._plotRect()
-        p.setPen(QColor(THEME.TEXT))
-        p.drawRect(r)
-
-        if self._title:
-            f = QFont("Monospace", 10, QFont.Weight.Bold)
-            p.setFont(f)
-            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+        p, r = self._begin_paint()
 
         n = self._counts.size
         if n <= 0 or self._counts.sum() == 0:
@@ -571,15 +515,16 @@ class Histogram(QWidget):
             )
 
 
-class Heatmap2D(QWidget):
+class Heatmap2D(_TaggerPlot):
     """2-D histogram rendered via a scaled QImage (numpy-built RGB buffer)."""
+
+    MARGINS = (75, 25, 15, 50)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._counts: np.ndarray = np.zeros((0, 0), dtype=np.int64)
         self._xedges: np.ndarray = np.zeros(0)
         self._yedges: np.ndarray = np.zeros(0)
-        self._title = ""
         self._xlabel = "X"
         self._ylabel = "Y"
         self._image: Optional[QImage] = None
@@ -591,10 +536,6 @@ class Heatmap2D(QWidget):
         self._xedges = np.asarray(xedges, dtype=np.float64)
         self._yedges = np.asarray(yedges, dtype=np.float64)
         self._rebuild_image()
-        self.update()
-
-    def setTitle(self, title: str):
-        self._title = title
         self.update()
 
     def setLabels(self, xlabel: str, ylabel: str):
@@ -641,22 +582,8 @@ class Heatmap2D(QWidget):
             rgb.data, nxbins, nybins, 3 * nxbins, QImage.Format.Format_RGB888
         )
 
-    def _plotRect(self) -> QRectF:
-        m = 50.0
-        return QRectF(m + 25, 25, self.width() - m - 40, self.height() - m - 25)
-
     def paintEvent(self, _ev):
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.fillRect(self.rect(), QColor(THEME.CANVAS))
-
-        r = self._plotRect()
-        p.setPen(QPen(QColor(THEME.TEXT)))
-
-        if self._title:
-            f = QFont("Monospace", 10, QFont.Weight.Bold)
-            p.setFont(f)
-            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+        p, r = self._begin_paint(frame=False)
 
         if self._image is None:
             p.drawRect(r)
@@ -691,20 +618,13 @@ class Heatmap2D(QWidget):
             p.drawText(int(r.left() - 50), int(r.top() - 8), self._ylabel)
 
 
-# ---------------------------------------------------------------------------
 # Offline file loader (runs in a QThread so the UI stays responsive)
-# ---------------------------------------------------------------------------
 
 
 class LoadWorker(QObject):
-    """Drives ``load_hits_from_evio`` on a worker thread.
-
-    The loop inside ``load_hits_from_evio`` is Python, which calls the
-    ``prad2py`` per-event fast path.  That gives us two nice properties
-    versus the previous monolithic C++ helper: (a) real progress updates
-    every N events, and (b) the user can cancel the load by pressing
-    the progress dialog's Cancel button.
-    """
+    """Drives ``load_hits_from_evio`` on a worker thread, emitting
+    ``progressed`` every N events; ``request_cancel()`` stops the loop at
+    its next progress check."""
 
     finished   = pyqtSignal(object)         # numpy ndarray
     failed     = pyqtSignal(str)
@@ -745,9 +665,7 @@ class LoadWorker(QObject):
         self.finished.emit(hits)
 
 
-# ---------------------------------------------------------------------------
 # Live WebSocket stream (prad2_server)
-# ---------------------------------------------------------------------------
 
 
 class LiveStream(QObject):
@@ -760,7 +678,9 @@ class LiveStream(QObject):
 
     hitsReceived = pyqtSignal(np.ndarray)   # RECORD_DTYPE rows (one batch)
     stateChanged = pyqtSignal(str)          # free-form label for the status bar
-    statsUpdate  = pyqtSignal(dict)         # {rate_hz, total_hits, dropped, flags}
+    statsUpdate  = pyqtSignal(dict)         # {rate_hz, dropped, flags}
+    subscribed   = pyqtSignal()             # server acknowledged tagger_subscribe
+    failed       = pyqtSignal(str)          # raw socket error string
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -776,27 +696,28 @@ class LiveStream(QObject):
             pass
 
         self._paused = False
-        self._total_hits = 0
-        self._last_dropped = 0
-        self._last_flags = 0
-        self._stats_t = _time.monotonic()
-        self._stats_hits = 0
+        self._reset_stats()
 
         self._stats_timer = QTimer(self)
         self._stats_timer.setInterval(500)
         self._stats_timer.timeout.connect(self._emit_stats)
 
-    # --- public ---------------------------------------------------------
-
-    def open(self, url: str):
-        self.stateChanged.emit(f"connecting to {url} …")
+    def _reset_stats(self):
         self._total_hits = 0
         self._last_dropped = 0
         self._last_flags = 0
         self._stats_t = _time.monotonic()
         self._stats_hits = 0
+
+    def open(self, url: str):
+        self.stateChanged.emit(f"connecting to {url} …")
+        self._reset_stats()
         self._ws.open(QUrl(url))
         self._stats_timer.start()
+
+    def is_active(self) -> bool:
+        """True between open() and close() or the socket disconnecting."""
+        return self._stats_timer.isActive()
 
     def close(self):
         self._stats_timer.stop()
@@ -811,11 +732,6 @@ class LiveStream(QObject):
 
     def set_paused(self, paused: bool):
         self._paused = bool(paused)
-
-    def is_paused(self) -> bool:
-        return self._paused
-
-    # --- QWebSocket callbacks -------------------------------------------
 
     def _on_open(self):
         self.stateChanged.emit("connected, subscribing…")
@@ -834,6 +750,7 @@ class LiveStream(QObject):
         if t == "tagger_subscribed":
             n = d.get("subscribers", "?")
             self.stateChanged.emit(f"subscribed ({n} client(s))")
+            self.subscribed.emit()
 
     def _on_binary(self, data):
         if self._paused:
@@ -852,6 +769,7 @@ class LiveStream(QObject):
 
     def _on_error(self, _err):
         self.stateChanged.emit(f"error: {self._ws.errorString()}")
+        self.failed.emit(self._ws.errorString())
 
     def _emit_stats(self):
         now = _time.monotonic()
@@ -860,16 +778,13 @@ class LiveStream(QObject):
         self._stats_t = now
         self._stats_hits = self._total_hits
         self.statsUpdate.emit({
-            "rate_hz":    rate,
-            "total_hits": self._total_hits,
-            "dropped":    self._last_dropped,
-            "flags":      self._last_flags,
+            "rate_hz": rate,
+            "dropped": self._last_dropped,
+            "flags":   self._last_flags,
         })
 
 
-# ---------------------------------------------------------------------------
 # Event-wise correlation helpers
-# ---------------------------------------------------------------------------
 
 
 def _first_hits_for(hits: np.ndarray, slot: int, channel: int,
@@ -903,15 +818,19 @@ def _match_pair(hits: np.ndarray,
     hb = _first_hits_for(hits, b[0], b[1], edge_sel)
     if ha.size == 0 or hb.size == 0:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
-    common, ia, ib = np.intersect1d(
+    _, ia, ib = np.intersect1d(
         ha["event_num"], hb["event_num"], return_indices=True, assume_unique=True
     )
     return ha["tdc"][ia].astype(np.int64), hb["tdc"][ib].astype(np.int64)
 
 
-# ---------------------------------------------------------------------------
-# Resizable error dialog (replaces QMessageBox.critical for long messages)
-# ---------------------------------------------------------------------------
+def _int_range(v: np.ndarray) -> Tuple[int, int]:
+    """Integer (min, max) of ``v``, with max raised to min + 1 when equal."""
+    lo, hi = int(v.min()), int(v.max())
+    return lo, max(hi, lo + 1)
+
+
+# Resizable error dialog
 
 
 def show_error_dialog(parent, title: str, heading: str, details: str,
@@ -954,9 +873,7 @@ def show_error_dialog(parent, title: str, heading: str, details: str,
     dlg.exec()
 
 
-# ---------------------------------------------------------------------------
 # Application-wide Qt stylesheet
-# ---------------------------------------------------------------------------
 
 
 def _app_stylesheet() -> str:
@@ -1066,9 +983,7 @@ def _app_stylesheet() -> str:
     )
 
 
-# ---------------------------------------------------------------------------
 # Main window
-# ---------------------------------------------------------------------------
 
 
 class TdcViewer(QMainWindow):
@@ -1093,13 +1008,10 @@ class TdcViewer(QMainWindow):
             hits if hits is not None else np.zeros(0, dtype=RECORD_DTYPE)
         )
         self._path = path
-        self._slot_ch_counts: Dict[Tuple[int, int], int] = {}
         self._current: Optional[Tuple[int, int]] = None
         # Channel A / B for event-wise correlations (Δt, A vs B).
         self._channel_a: Optional[Tuple[int, int]] = None
         self._channel_b: Optional[Tuple[int, int]] = None
-        # slot,channel -> human-readable name (from database/tagger_map.json).
-        # Empty dict if file is missing — everything still works, just without names.
         self._ch_names: Dict[Tuple[int, int], str] = load_channel_map()
         self._load_max_events = max_events
         self._load_daq_config = daq_config
@@ -1110,12 +1022,7 @@ class TdcViewer(QMainWindow):
         self._stream.hitsReceived.connect(self._on_live_hits)
         self._stream.stateChanged.connect(self._on_live_state)
         self._stream.statsUpdate.connect(self._on_live_stats)
-        # Batches accumulated between GUI ticks — flushed by _live_timer.
-        self._live_batches: list = []
-        self._live_total = 0
-        self._live_rate_hz = 0.0
-        self._live_dropped = 0
-        self._live_flags = 0
+        self._reset_live_state()
         # Rolling memory cap; drop the oldest half when exceeded.
         self._max_live_hits = 10_000_000
         self._last_live_url = "ws://localhost:5051"
@@ -1188,26 +1095,23 @@ class TdcViewer(QMainWindow):
         # Pair selector row (applies to Δt and A-vs-B tabs).
         pair_row = QHBoxLayout()
         pair_row.setSpacing(6)
-        pair_row.addWidget(QLabel("A:"))
-        self.lbl_a = QLabel("—")
-        self.lbl_a.setFrameShape(QFrame.Shape.StyledPanel)
-        self.lbl_a.setMinimumWidth(110)
-        pair_row.addWidget(self.lbl_a)
-        btn_a = QPushButton("Set A ←")
-        btn_a.setToolTip("Use the currently-selected tree channel as channel A")
-        btn_a.clicked.connect(self._set_a_from_tree)
-        pair_row.addWidget(btn_a)
 
+        def pair_selector(which: str) -> QLabel:
+            pair_row.addWidget(QLabel(f"{which}:"))
+            lbl = QLabel("—")
+            lbl.setFrameShape(QFrame.Shape.StyledPanel)
+            lbl.setMinimumWidth(110)
+            pair_row.addWidget(lbl)
+            btn = QPushButton(f"Set {which} ←")
+            btn.setToolTip(
+                f"Use the currently-selected tree channel as channel {which}")
+            btn.clicked.connect(lambda _checked=False: self._set_from_tree(which))
+            pair_row.addWidget(btn)
+            return lbl
+
+        self.lbl_a = pair_selector("A")
         pair_row.addSpacing(12)
-        pair_row.addWidget(QLabel("B:"))
-        self.lbl_b = QLabel("—")
-        self.lbl_b.setFrameShape(QFrame.Shape.StyledPanel)
-        self.lbl_b.setMinimumWidth(110)
-        pair_row.addWidget(self.lbl_b)
-        btn_b = QPushButton("Set B ←")
-        btn_b.setToolTip("Use the currently-selected tree channel as channel B")
-        btn_b.clicked.connect(self._set_b_from_tree)
-        pair_row.addWidget(btn_b)
+        self.lbl_b = pair_selector("B")
 
         pair_row.addSpacing(6)
         btn_swap = QPushButton("Swap")
@@ -1285,9 +1189,8 @@ class TdcViewer(QMainWindow):
         if self._live_timer.isActive():
             self._disconnect_live()
 
-        # A second load while one is already in-flight: cancel the first by
-        # dropping our references (we can't stop the C++ call, but we'll
-        # ignore its result when it eventually finishes).
+        # A second load while one is in flight cancels the first; its result
+        # is ignored when it finishes.
         self._cancel_load()
 
         self.statusBar().showMessage(f"Loading {path}…")
@@ -1298,9 +1201,8 @@ class TdcViewer(QMainWindow):
         self.centralWidget().setEnabled(False)
         self.menuBar().setEnabled(False)
 
-        # Determinate progress dialog — live updates from the worker.
-        # ``max`` starts at the user's --max-events cap (or a round 1M
-        # fallback); the worker raises it on the fly if we run past it.
+        # ``max`` starts at the --max-events cap, or a 1 M placeholder when
+        # unlimited.
         pmax = int(self._load_max_events) if self._load_max_events > 0 else 1_000_000
         dlg = QProgressDialog(
             f"Decoding {os.path.basename(path)} …", "Cancel",
@@ -1316,10 +1218,7 @@ class TdcViewer(QMainWindow):
             path, self._load_max_events,
             self._load_daq_config, self._load_roc_filter,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
 
-        # Live progress → dialog value + label text.
         # When the user passed an explicit cap, the dialog max is the real
         # limit — don't grow it. In unlimited mode (cap==0, dialog seeded
         # with a 1 M placeholder), grow proactively at 80 % so the bar
@@ -1336,27 +1235,18 @@ class TdcViewer(QMainWindow):
                 f"Events: {events:,}   Hits: {hits:,}"
             )
 
-        thread.started.connect(worker.run)
         worker.progressed.connect(_on_progress)
-        worker.finished.connect(
-            lambda hits: self._on_load_finished(path, hits))
-        worker.failed.connect(
-            lambda msg: self._on_load_failed(path, msg))
-        # Cancel button → ask the worker to stop at the next progress tick.
-        dlg.canceled.connect(worker.request_cancel)
-        # Tear down the thread whichever way the worker exits.
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(dlg.close)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
 
         self._load_dialog = dlg
-        self._load_thread = thread
         self._load_worker = worker
         self._load_token = path            # cancel-check: must match on finish
-
-        thread.start()
+        # The dialog's Cancel button stops the worker at its next progress tick.
+        self._load_thread = start_worker_thread(
+            self, worker,
+            lambda hits: self._on_load_finished(path, hits),
+            lambda msg: self._on_load_failed(path, msg),
+            dialog=dlg, on_thread_finished=dlg.close,
+        )
 
     # --- load callbacks / cancellation -----------------------------------
 
@@ -1416,25 +1306,19 @@ class TdcViewer(QMainWindow):
         tree selection and A/B pair survive across rebuilds.
         """
         hits = self._hits
-        # File label: file name in file/binary mode, "(live)" + rate in live mode.
-        if self._stream._stats_timer.isActive():
-            self.file_label.setText(
-                f"(live) {self._last_live_url} — {hits.size:,} hits"
-            )
-        elif self._path:
+        # In live mode _update_live_status() rewrites this label.
+        if self._path:
             self.file_label.setText(
                 f"{os.path.basename(self._path)} — {hits.size:,} hits"
             )
         else:
             self.file_label.setText(f"(in-memory) — {hits.size:,} hits")
 
-        # Snapshot current selections so we can restore them below.
         saved_current = self._current
         saved_a = self._channel_a
         saved_b = self._channel_b
 
         self.tree.clear()
-        self._slot_ch_counts.clear()
 
         if reset_selection:
             self._current = None
@@ -1456,7 +1340,6 @@ class TdcViewer(QMainWindow):
 
             chs, counts = np.unique(sub["channel"], return_counts=True)
             for ch, c in zip(chs, counts):
-                self._slot_ch_counts[(int(slot), int(ch))] = int(c)
                 name = self._name_for(int(slot), int(ch))
                 ch_item = QTreeWidgetItem([
                     f"  ch {int(ch):3d}", f"{int(c):,}", name,
@@ -1478,38 +1361,40 @@ class TdcViewer(QMainWindow):
             best_slot = int(
                 max(slots, key=lambda s: int(np.count_nonzero(hits["slot"] == s)))
             )
-            for i in range(self.tree.topLevelItemCount()):
-                it = self.tree.topLevelItem(i)
-                data = it.data(0, Qt.ItemDataRole.UserRole)
-                if data and data[0] == "slot" and data[1] == best_slot:
-                    self.tree.setCurrentItem(it)
-                    break
+            slot_it, _ = self._find_tree_items(best_slot)
+            if slot_it is not None:
+                self.tree.setCurrentItem(slot_it)
 
         self._refresh()
+
+    def _find_tree_items(self, slot: int, ch: Optional[int] = None):
+        """(slot item, channel item) for slot/ch, either None when missing.
+        The slot item is expanded when a channel is looked up."""
+        role = Qt.ItemDataRole.UserRole
+        for i in range(self.tree.topLevelItemCount()):
+            it = self.tree.topLevelItem(i)
+            data = it.data(0, role)
+            if not data or data[0] != "slot" or data[1] != slot:
+                continue
+            if ch is None:
+                return it, None
+            it.setExpanded(True)
+            for j in range(it.childCount()):
+                cdata = it.child(j).data(0, role)
+                if cdata and cdata[0] == "channel" and cdata[2] == ch:
+                    return it, it.child(j)
+            return it, None
+        return None, None
 
     def _select_current_in_tree(self):
         """Best-effort: find a tree item matching self._current and select it."""
         if self._current is None:
             return
-        slot, ch = self._current
-        for i in range(self.tree.topLevelItemCount()):
-            it = self.tree.topLevelItem(i)
-            data = it.data(0, Qt.ItemDataRole.UserRole)
-            if not data or data[0] != "slot" or data[1] != slot:
-                continue
-            if ch is None:
-                self.tree.setCurrentItem(it)
-                return
-            it.setExpanded(True)
-            for j in range(it.childCount()):
-                child = it.child(j)
-                cdata = child.data(0, Qt.ItemDataRole.UserRole)
-                if cdata and cdata[0] == "channel" and cdata[2] == ch:
-                    self.tree.setCurrentItem(child)
-                    return
-            # Slot exists but channel gone — settle for the slot.
-            self.tree.setCurrentItem(it)
-            return
+        slot_it, ch_it = self._find_tree_items(*self._current)
+        # Slot exists but channel gone — settle for the slot.
+        target = ch_it if ch_it is not None else slot_it
+        if target is not None:
+            self.tree.setCurrentItem(target)
 
     # --- live streaming -------------------------------------------------
 
@@ -1526,20 +1411,25 @@ class TdcViewer(QMainWindow):
         """Called by --live CLI flag after the event loop starts."""
         self._open_live(self._last_live_url)
 
+    def _reset_live_state(self):
+        # Batches accumulated between GUI ticks — flushed by _live_timer.
+        self._live_batches: list = []
+        self._live_rate_hz = 0.0
+        self._live_dropped = 0
+        self._live_flags = 0
+
     def _open_live(self, url: str):
         self._last_live_url = url
         # Any in-memory file data is replaced by the live stream.
         self._path = ""
         self._hits = np.zeros(0, dtype=RECORD_DTYPE)
-        self._live_batches.clear()
-        self._live_total = 0
-        self._live_dropped = 0
-        self._live_flags = 0
+        self._reset_live_state()
         self._rebuild_index(reset_selection=True)
         self.btn_pause.setEnabled(True)
         self.btn_pause.setChecked(False)
         self._stream.set_paused(False)
         self._stream.open(self._last_live_url)
+        self._update_live_status()
         self._live_timer.start()
 
     def _disconnect_live(self):
@@ -1556,8 +1446,8 @@ class TdcViewer(QMainWindow):
         # Drop everything — applies in both live and file modes.
         self._live_batches.clear()
         self._hits = np.zeros(0, dtype=RECORD_DTYPE)
-        self._live_total = 0
         self._rebuild_index(reset_selection=False)
+        self._update_live_status()
 
     def _on_live_hits(self, batch: np.ndarray):
         # Called from the Qt event loop on every binary frame. Just queue —
@@ -1569,7 +1459,6 @@ class TdcViewer(QMainWindow):
 
     def _on_live_stats(self, s: dict):
         self._live_rate_hz = float(s.get("rate_hz", 0.0))
-        self._live_total   = int(s.get("total_hits", 0))
         self._live_dropped = int(s.get("dropped", 0))
         self._live_flags   = int(s.get("flags", 0))
 
@@ -1587,16 +1476,14 @@ class TdcViewer(QMainWindow):
         else:
             self._hits = np.concatenate([self._hits, new_hits])
 
-        # Rolling memory cap — drop the oldest half when we blow past the cap.
         if self._hits.size > self._max_live_hits:
             self._hits = self._hits[self._hits.size // 2:].copy()
 
-        # Rebuild tree (preserving user's selection), then repaint.
         self._rebuild_index(reset_selection=False)
         self._update_live_status()
 
     def _update_live_status(self):
-        if not self._stream._stats_timer.isActive():
+        if not self._stream.is_active():
             return
         extra = ""
         if self._live_flags & 1:
@@ -1606,7 +1493,6 @@ class TdcViewer(QMainWindow):
             f"hits={self._hits.size:,}  "
             f"rate={self._live_rate_hz:,.0f}/s{extra}"
         )
-        # Also refresh the file-label summary line.
         self.file_label.setText(
             f"(live) {self._last_live_url} — {self._hits.size:,} hits  "
             f"({self._live_rate_hz:,.0f}/s)"
@@ -1637,19 +1523,13 @@ class TdcViewer(QMainWindow):
             return
         slot, _ = self._current
         self._current = (slot, int(idx))
-        # Select the matching tree item (if it exists).
-        for i in range(self.tree.topLevelItemCount()):
-            it = self.tree.topLevelItem(i)
-            data = it.data(0, Qt.ItemDataRole.UserRole)
-            if data and data[0] == "slot" and data[1] == slot:
-                it.setExpanded(True)
-                for j in range(it.childCount()):
-                    child = it.child(j)
-                    cdata = child.data(0, Qt.ItemDataRole.UserRole)
-                    if cdata and cdata[0] == "channel" and cdata[2] == idx:
-                        self.tree.setCurrentItem(child)
-                        return
-                break
+        _, ch_it = self._find_tree_items(slot, idx)
+        if ch_it is not None:
+            self.tree.setCurrentItem(ch_it)
+            return
+        # No such channel: drop the stale tree selection so that clicking
+        # the previously selected channel's bar re-selects it.
+        self.tree.clearSelection()
         self._refresh()
 
     # --- channel naming -------------------------------------------------
@@ -1680,29 +1560,20 @@ class TdcViewer(QMainWindow):
             return None
         return (data[1], data[2])
 
-    def _set_a_from_tree(self):
+    def _set_from_tree(self, which: str):
+        """Make the selected tree channel channel ``which`` ("A" or "B")."""
         sel = self._tree_channel_selection()
         if sel is None:
             QMessageBox.information(
                 self, "Pick a channel",
                 "Select a CHANNEL node in the tree (expand a slot first), "
-                "then click Set A."
+                f"then click Set {which}."
             )
             return
-        self._channel_a = sel
-        self._update_ab_labels()
-        self._refresh()
-
-    def _set_b_from_tree(self):
-        sel = self._tree_channel_selection()
-        if sel is None:
-            QMessageBox.information(
-                self, "Pick a channel",
-                "Select a CHANNEL node in the tree (expand a slot first), "
-                "then click Set B."
-            )
-            return
-        self._channel_b = sel
+        if which == "A":
+            self._channel_a = sel
+        else:
+            self._channel_b = sel
         self._update_ab_labels()
         self._refresh()
 
@@ -1791,10 +1662,7 @@ class TdcViewer(QMainWindow):
             return
 
         tdc_vals = sub["tdc"].astype(np.int64)
-        tmin = int(tdc_vals.min())
-        tmax = int(tdc_vals.max())
-        if tmax <= tmin:
-            tmax = tmin + 1
+        tmin, tmax = _int_range(tdc_vals)
         nbins = self.bins_spin.value()
         counts, edges = np.histogram(tdc_vals, bins=nbins, range=(tmin, tmax + 1))
         self.tdc_hist.setData(counts, edges)
@@ -1817,40 +1685,39 @@ class TdcViewer(QMainWindow):
             f"min={tmin}  max={tmax}  mean={tdc_vals.mean():.2f}"
         )
 
-    def _refresh_diff(self):
-        """Event-wise Δt = tdc(A) − tdc(B) histogram."""
+    def _matched_ab(self, widget, empty: tuple, prefix: str):
+        """(a, b, tdc_a, tdc_b) for the event-matched A/B pair, or None
+        after clearing ``widget`` with ``empty`` and titling it
+        "``prefix`` — <reason>"."""
         a, b = self._channel_a, self._channel_b
         if self._hits.size == 0 or a is None or b is None:
-            self.diff_hist.setData(np.zeros(0), np.zeros(0))
-            self.diff_hist.setTitle(
-                "Δt = A − B — set both channel A and channel B"
-            )
-            return
-        if a == b:
-            self.diff_hist.setData(np.zeros(0), np.zeros(0))
-            self.diff_hist.setTitle("Δt = A − B — A and B must differ")
-            return
+            reason = "set both channel A and channel B"
+        elif a == b:
+            reason = "A and B must differ"
+        else:
+            t_a, t_b = _match_pair(self._hits, a, b, self._current_edge_mask())
+            if t_a.size:
+                return a, b, t_a, t_b
+            reason = (f"0 matched events "
+                      f"(A={self._fmt_pair(a)}, B={self._fmt_pair(b)})")
+        widget.setData(*empty)
+        widget.setTitle(f"{prefix} — {reason}")
+        return None
 
-        edge_sel = self._current_edge_mask()
-        t_a, t_b = _match_pair(self._hits, a, b, edge_sel)
-        n = t_a.size
-        if n == 0:
-            self.diff_hist.setData(np.zeros(0), np.zeros(0))
-            self.diff_hist.setTitle(
-                f"Δt = A − B — 0 matched events "
-                f"(A={self._fmt_pair(a)}, B={self._fmt_pair(b)})"
-            )
+    def _refresh_diff(self):
+        """Event-wise Δt = tdc(A) − tdc(B) histogram."""
+        m = self._matched_ab(self.diff_hist, (np.zeros(0), np.zeros(0)),
+                             "Δt = A − B")
+        if m is None:
             return
+        a, b, t_a, t_b = m
+        n = t_a.size
 
         dt = t_a - t_b
-        dmin = int(dt.min())
-        dmax = int(dt.max())
-        if dmax <= dmin:
-            dmax = dmin + 1
+        dmin, dmax = _int_range(dt)
         nbins = self.bins_spin.value()
         counts, edges = np.histogram(dt, bins=nbins, range=(dmin, dmax + 1))
         self.diff_hist.setData(counts, edges)
-        self.diff_hist.setXLabel("tdc(A) − tdc(B)")
         self.diff_hist.setTitle(
             f"Δt = A − B  (A={self._fmt_pair(a)},  B={self._fmt_pair(b)}) "
             f"— {n:,} events, mean={dt.mean():.1f}, rms={dt.std():.1f}"
@@ -1862,36 +1729,19 @@ class TdcViewer(QMainWindow):
 
     def _refresh_scatter(self):
         """Event-wise 2-D histogram of tdc(A) vs tdc(B)."""
-        a, b = self._channel_a, self._channel_b
-        if self._hits.size == 0 or a is None or b is None:
-            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
-            self.scatter_map.setTitle(
-                "tdc(A) vs tdc(B) — set both channel A and channel B"
-            )
+        m = self._matched_ab(
+            self.scatter_map, (np.zeros((0, 0)), np.zeros(0), np.zeros(0)),
+            "tdc(A) vs tdc(B)")
+        if m is None:
             return
-        if a == b:
-            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
-            self.scatter_map.setTitle("tdc(A) vs tdc(B) — A and B must differ")
-            return
-
-        edge_sel = self._current_edge_mask()
-        t_a, t_b = _match_pair(self._hits, a, b, edge_sel)
+        a, b, t_a, t_b = m
         n = t_a.size
-        if n == 0:
-            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
-            self.scatter_map.setTitle(
-                f"tdc(A) vs tdc(B) — 0 matched events "
-                f"(A={self._fmt_pair(a)}, B={self._fmt_pair(b)})"
-            )
-            return
 
         # 2-D gets coarser binning than the 1-D plots — each cell needs a
         # reasonable event count or the map looks like shot noise.
         nbins = max(10, self.bins_spin.value() // 4)
-        amin, amax = int(t_a.min()), int(t_a.max())
-        bmin, bmax = int(t_b.min()), int(t_b.max())
-        if amax <= amin: amax = amin + 1
-        if bmax <= bmin: bmax = bmin + 1
+        amin, amax = _int_range(t_a)
+        bmin, bmax = _int_range(t_b)
         counts, xedges, yedges = np.histogram2d(
             t_a, t_b, bins=nbins, range=[[amin, amax + 1], [bmin, bmax + 1]]
         )
@@ -1919,17 +1769,13 @@ class TdcViewer(QMainWindow):
                 self._disconnect_live()
         except Exception:
             pass
-        # Invalidate any in-flight file load — the worker thread may still
-        # be inside load_tdc_hits and can't be interrupted, but this makes
-        # its eventual completion signal a no-op instead of touching a
-        # destroyed viewer.
+        # Cancel any in-flight file load so its eventual completion signal
+        # is a no-op instead of touching a destroyed viewer.
         self._cancel_load()
         super().closeEvent(ev)
 
 
-# ---------------------------------------------------------------------------
 # Entry point
-# ---------------------------------------------------------------------------
 
 
 def _parse_roc(value: str) -> int:
@@ -1992,12 +1838,10 @@ def smoke_test_live(url: str, timeout_ms: int = 5000) -> Optional[str]:
     otherwise.  Uses a local QEventLoop so it's safe to call after
     QApplication() is constructed but before the main window is shown.
     """
-    # Lazy import because we want this function to be importable even if the
-    # caller wants to skip it.
     from PyQt6.QtCore import QEventLoop
 
     loop = QEventLoop()
-    ws = QWebSocket()
+    stream = LiveStream()
     state = {"error": "timeout (no tagger_subscribed ack)"}
 
     def finish(err: Optional[str]):
@@ -2005,41 +1849,15 @@ def smoke_test_live(url: str, timeout_ms: int = 5000) -> Optional[str]:
         if loop.isRunning():
             loop.quit()
 
-    def on_connected():
-        try:
-            ws.sendTextMessage(_json.dumps({"type": "tagger_subscribe"}))
-        except Exception as exc:
-            finish(f"send failed: {exc}")
-
-    def on_text(msg: str):
-        try:
-            d = _json.loads(msg)
-        except Exception:
-            return
-        if d.get("type") == "tagger_subscribed":
-            finish(None)
-
-    def on_error(_err):
-        finish(f"{ws.errorString()}")
-
-    ws.connected.connect(on_connected)
-    ws.textMessageReceived.connect(on_text)
-    try:
-        ws.errorOccurred.connect(on_error)
-    except AttributeError:
-        pass
-
+    stream.subscribed.connect(lambda: finish(None))
+    stream.failed.connect(finish)
     QTimer.singleShot(timeout_ms, lambda: finish(state["error"]))
-    ws.open(QUrl(url))
+    stream.open(url)
     loop.exec()
 
-    # Clean up: unsubscribe and close so the server doesn't see a dangling
+    # Unsubscribe and close so the server doesn't see a dangling
     # subscriber hanging around until we reconnect for real.
-    try:
-        ws.sendTextMessage(_json.dumps({"type": "tagger_unsubscribe"}))
-    except Exception:
-        pass
-    ws.close()
+    stream.close()
     return state["error"]
 
 

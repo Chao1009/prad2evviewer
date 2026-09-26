@@ -13,10 +13,17 @@ Features:
     data (no EVIO I/O).
 
 Usage:
-    python gem/gem_event_viewer.py [file.evio.00000]
+    python gem/gem_event_viewer.py [file.evio.00000] [-D daq_config.json]
+        [-G gem_map.json] [-P gem_ped.txt] [--theme THEME]
 
 If an EVIO path is given on the command line the viewer starts scanning
 it immediately; otherwise use File → Open EVIO.
+
+Export mode (render PNGs and exit, no GUI):
+    python gem/gem_event_viewer.py file.evio --event N | --events SPEC
+    python gem/gem_event_viewer.py --layout [--show-every K]
+    python gem/gem_event_viewer.py --json FILE|DIR|GLOB ...
+  with -o OUT, --det N, --width W, --height H, --verbose.
 """
 
 from __future__ import annotations
@@ -30,30 +37,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-# ---------------------------------------------------------------------------
-# prad2py auto-discovery — walk up from this script to find build/python/.
-# ---------------------------------------------------------------------------
-
 _SCRIPT_DIR = Path(__file__).resolve().parent
-_probe = _SCRIPT_DIR
-for _ in range(5):
-    _probe = _probe.parent
-    for _sub in ("build/python", "build-release/python", "build/Release/python"):
-        _cand = _probe / _sub
-        if _cand.is_dir() and str(_cand) not in sys.path:
-            sys.path.insert(0, str(_cand))
+# Shared helpers live in scripts/, gem/'s sibling in the source and install
+# trees.  A missing import here means the install is broken.
+_SCRIPTS_DIR = _SCRIPT_DIR.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from prad2_env import find_database_file, import_prad2py  # noqa: E402
 
-try:
-    import prad2py
-    from prad2py import dec, det
-    HAVE_PRAD2PY = True
-    PRAD2PY_ERROR = ""
-except Exception as _exc:  # noqa: BLE001
-    prad2py = None  # type: ignore
-    dec = None  # type: ignore
-    det = None  # type: ignore
-    HAVE_PRAD2PY = False
-    PRAD2PY_ERROR = f"{type(_exc).__name__}: {_exc}"
+prad2py, PRAD2PY_ERROR = import_prad2py()
+HAVE_PRAD2PY = prad2py is not None
+det = prad2py.det if prad2py else None
 
 
 from PyQt6.QtCore import (  # noqa: E402
@@ -115,20 +109,15 @@ except Exception as _sib_exc:  # noqa: BLE001
                         f"sibling import: {type(_sib_exc).__name__}: {_sib_exc}"
     HAVE_PRAD2PY = False
 
-# Shared theme utilities live under scripts/hycal_geoview.py (sibling dir
-# of gem/ in both source and install trees).  A missing import here means
-# the install is broken — we don't try to soften that with fallbacks.
-_SCRIPTS_DIR = _SCRIPT_DIR.parent / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+from evio_io import EvioCursor, iter_physics_records, open_evio  # noqa: E402
 from hycal_geoview import (  # noqa: E402
-    THEME, apply_theme_palette, available_themes, set_theme, themed,
+    THEME, add_config_rows, apply_theme_palette, available_themes,
+    editors_to_config, set_editor_value, set_theme, setup_tuning_dock,
+    start_worker_thread, themed,
 )
 
 
-# ---------------------------------------------------------------------------
-# Event index
-# ---------------------------------------------------------------------------
+# ---- Event index ----
 
 
 @dataclass
@@ -147,13 +136,42 @@ class EventMeta:
     trigger_bits: int
 
 
-def _open_channel(ch, path: str) -> bool:
-    """Open ``path`` via EvChannel::OpenAuto (RA → sequential fallback).
-    Returns True iff random-access mode was selected.  Raises on failure.
+def _build_event_index(path: str, daq_config_path: str, progress=None,
+                       cancel=None) -> Tuple[List[EventMeta], int]:
+    """EventMeta for every Physics sub-event in ``path``, plus the number
+    of records in the file (records walked, in sequential mode).
+
+    ``progress(n_events, n_records)`` is called every
+    ``ScanWorker.PROGRESS_EVERY`` events; ``cancel()`` stops the walk.
+    Raises RuntimeError if the file cannot be opened.
     """
-    if ch.open_auto(path) != dec.Status.success:
-        raise RuntimeError(f"cannot open {path}")
-    return bool(ch.is_random_access())
+    ch, is_ra = open_evio(path, daq_config_path)
+    events: List[EventMeta] = []
+    n_walked = 0
+
+    def _on_record(idx: int):
+        nonlocal n_walked
+        n_walked = idx + 1
+
+    try:
+        n_evio = ch.get_random_access_event_count() if is_ra else 0
+        for rec in iter_physics_records(ch, is_ra, cancel, _on_record):
+            for i in range(ch.get_n_events()):
+                ch.select_event(i)
+                info = ch.info()
+                events.append(EventMeta(
+                    record_idx=rec,
+                    subevt_idx=i,
+                    event_number=int(info.event_number),
+                    trigger_number=int(info.trigger_number),
+                    trigger_bits=int(info.trigger_bits),
+                ))
+                if progress is not None and \
+                        len(events) % ScanWorker.PROGRESS_EVERY == 0:
+                    progress(len(events), rec + 1)
+    finally:
+        ch.close()
+    return events, (n_evio if is_ra else n_walked)
 
 
 class ScanWorker(QObject):
@@ -180,106 +198,26 @@ class ScanWorker(QObject):
         self._cancel = True
 
     def run(self):
-        try:
-            cfg = dec.load_daq_config(self._daq)
-            ch = dec.EvChannel()
-            ch.set_config(cfg)
-            is_ra = _open_channel(ch, self._path)
-        except Exception as exc:  # noqa: BLE001
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
-            return
-
-        events: List[EventMeta] = []
         start = time.monotonic()
         try:
-            if is_ra:
-                n_evio = ch.get_random_access_event_count()
-                for evio_idx in range(n_evio):
-                    if self._cancel:
-                        break
-                    if ch.read_event_by_index(evio_idx) != dec.Status.success:
-                        continue
-                    if not ch.scan():
-                        continue
-                    if ch.get_event_type() != dec.EventType.Physics:
-                        continue
-                    n_sub = ch.get_n_events()
-                    for i in range(n_sub):
-                        ch.select_event(i)
-                        info = ch.info()
-                        events.append(EventMeta(
-                            record_idx=evio_idx,
-                            subevt_idx=i,
-                            event_number=int(info.event_number),
-                            trigger_number=int(info.trigger_number),
-                            trigger_bits=int(info.trigger_bits),
-                        ))
-                        if len(events) % self.PROGRESS_EVERY == 0:
-                            self.progress.emit(len(events), evio_idx + 1)
-            else:
-                record_idx = 0
-                while ch.read() == dec.Status.success:
-                    if self._cancel:
-                        break
-                    if not ch.scan():
-                        record_idx += 1
-                        continue
-                    if ch.get_event_type() != dec.EventType.Physics:
-                        record_idx += 1
-                        continue
-                    n_sub = ch.get_n_events()
-                    for i in range(n_sub):
-                        ch.select_event(i)
-                        info = ch.info()
-                        events.append(EventMeta(
-                            record_idx=record_idx,
-                            subevt_idx=i,
-                            event_number=int(info.event_number),
-                            trigger_number=int(info.trigger_number),
-                            trigger_bits=int(info.trigger_bits),
-                        ))
-                        if len(events) % self.PROGRESS_EVERY == 0:
-                            self.progress.emit(len(events), record_idx + 1)
-                    record_idx += 1
+            events, n_rec = _build_event_index(
+                self._path, self._daq, self.progress.emit,
+                lambda: self._cancel)
         except Exception as exc:  # noqa: BLE001
-            ch.close()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
-        ch.close()
-        elapsed = time.monotonic() - start
-        self.progress.emit(len(events),
-                           n_evio if is_ra else record_idx)
-        self.finished.emit(events, elapsed)
+        self.progress.emit(len(events), n_rec)
+        self.finished.emit(events, time.monotonic() - start)
 
 
-# ---------------------------------------------------------------------------
-# Pedestal generation — delegates to det.GemPedestal (same implementation
-# gem_dump -m ped uses).
-# ---------------------------------------------------------------------------
-
-# APV full-readout guard — accumulate only events where at least one APV
-# sent all 128 strips (i.e. firmware-level ZS was off).
-_APV_STRIP_SIZE = 128
-_MAX_APVS_PER_MPD = 16
-
-
-def _event_has_full_readout(ssp_evt) -> bool:
-    for m in range(ssp_evt.nmpds):
-        mpd = ssp_evt.mpd(m)
-        if not mpd.present:
-            continue
-        for a in range(_MAX_APVS_PER_MPD):
-            apv = mpd.apv(a)
-            if apv.present and apv.nstrips == _APV_STRIP_SIZE:
-                return True
-    return False
+# ---- Pedestal generation (det.GemPedestal, shared with gem_dump -m ped) ----
 
 
 class PedestalWorker(QObject):
-    """Builds per-strip pedestals by reading up to ``max_events`` events
-    from ``path`` (random-access).  Skips online-ZS APVs — only full-
-    readout data (nstrips == 128) contributes to the common-mode stats.
-    Writes a gem_ped.json to ``output_path``.
+    """Builds per-strip pedestals from up to ``max_events`` events of
+    ``path`` that carry full-readout APVs (online-ZS APVs are skipped).
+    Writes the APV-block pedestal text file (det.GemPedestal.write) to
+    ``output_path``.
     """
 
     PROGRESS_EVERY = 50
@@ -302,9 +240,7 @@ class PedestalWorker(QObject):
 
     def run(self):
         try:
-            cfg = dec.load_daq_config(self._daq)
-            ch = dec.EvChannel(); ch.set_config(cfg)
-            is_ra = _open_channel(ch, self._path)
+            ch, is_ra = open_evio(self._path, self._daq)
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
@@ -313,46 +249,23 @@ class PedestalWorker(QObject):
         n_used = 0
         target = self._max
 
-        def _fold_current_record():
-            """Fold physics sub-events with full-readout data into ``ped``."""
-            nonlocal n_used
-            if ch.get_event_type() != dec.EventType.Physics:
-                return
-            for i in range(ch.get_n_events()):
-                if n_used >= target:
-                    break
-                ch.select_event(i)
-                ssp = ch.gem()
-                if not _event_has_full_readout(ssp):
-                    continue
-                ped.accumulate(ssp)
-                n_used += 1
-                if n_used % self.PROGRESS_EVERY == 0:
-                    self.progress.emit(n_used, target)
-
         try:
-            if is_ra:
-                n_evio = ch.get_random_access_event_count()
-                for evio_idx in range(n_evio):
-                    if self._cancel or n_used >= target:
+            for _ in iter_physics_records(
+                    ch, is_ra, lambda: self._cancel or n_used >= target):
+                for i in range(ch.get_n_events()):
+                    if n_used >= target:
                         break
-                    if ch.read_event_by_index(evio_idx) != dec.Status.success:
+                    ch.select_event(i)
+                    if ped.accumulate(ch.gem()) == 0:
                         continue
-                    if not ch.scan():
-                        continue
-                    _fold_current_record()
-            else:
-                while not self._cancel and n_used < target:
-                    if ch.read() != dec.Status.success:
-                        break
-                    if not ch.scan():
-                        continue
-                    _fold_current_record()
+                    n_used += 1
+                    if n_used % self.PROGRESS_EVERY == 0:
+                        self.progress.emit(n_used, target)
         except Exception as exc:  # noqa: BLE001
-            ch.close()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
-        ch.close()
+        finally:
+            ch.close()
         self.progress.emit(n_used, target)
 
         if n_used == 0:
@@ -365,9 +278,7 @@ class PedestalWorker(QObject):
         self.finished.emit(self._out, napvs, n_used)
 
 
-# ---------------------------------------------------------------------------
-# Stepper — reads one event by index from the EVIO file
-# ---------------------------------------------------------------------------
+# ---- Stepper — reads one event by index from the EVIO file ----
 
 
 class Stepper:
@@ -386,29 +297,22 @@ class Stepper:
     def __init__(self, path: str, daq_config_path: str):
         self._path = path
         self._daq = daq_config_path
-        self._ch: Optional[object] = None
-        self._is_ra = False
-        self._position = -1            # sequential-mode read cursor
+        self._cur: Optional[EvioCursor] = None
         self._cache: Dict[int, object] = {}  # event_idx -> SspEventData
         self._cache_order: List[int] = []
 
     # --- lifecycle -------------------------------------------------------
 
     def open(self):
-        cfg = dec.load_daq_config(self._daq)
-        self._ch = dec.EvChannel()
-        self._ch.set_config(cfg)
-        self._is_ra = _open_channel(self._ch, self._path)
-        self._position = -1
+        self._cur = EvioCursor(self._path, self._daq)
 
     def close(self):
-        if self._ch is not None:
-            self._ch.close()
-            self._ch = None
-        self._position = -1
+        if self._cur is not None:
+            self._cur.close()
+            self._cur = None
 
     def is_random_access(self) -> bool:
-        return self._is_ra
+        return self._cur is not None and self._cur.is_ra
 
     # --- fetch -----------------------------------------------------------
 
@@ -420,30 +324,15 @@ class Stepper:
             self._cache_order.append(event_idx)
             return self._cache[event_idx]
 
-        if self._ch is None:
+        if self._cur is None:
             self.open()
+        self._cur.seek(evmeta.record_idx)
+        ch = self._cur.ch
+        if not ch.scan():
+            raise RuntimeError(f"scan failed on record {evmeta.record_idx}")
 
-        target = evmeta.record_idx
-        if self._is_ra:
-            if self._ch.read_event_by_index(target) != dec.Status.success:
-                raise RuntimeError(
-                    f"read_event_by_index({target}) failed")
-        else:
-            # Sequential mode: re-open if we need to go backward, then
-            # walk forward to the target record.
-            if self._position > target:
-                self.close()
-                self.open()
-            while self._position < target:
-                if self._ch.read() != dec.Status.success:
-                    raise RuntimeError(
-                        f"EOF before reaching record {target}")
-                self._position += 1
-        if not self._ch.scan():
-            raise RuntimeError(f"scan failed on record {target}")
-
-        self._ch.select_event(evmeta.subevt_idx)
-        ssp = self._ch.gem()
+        ch.select_event(evmeta.subevt_idx)
+        ssp = ch.gem()
 
         # LRU cache insert (keep CACHE_SIZE most recent SSP payloads).
         self._cache[event_idx] = ssp
@@ -455,9 +344,23 @@ class Stepper:
         return ssp
 
 
-# ---------------------------------------------------------------------------
-# GEM event canvas — native QPainter, no matplotlib
-# ---------------------------------------------------------------------------
+# ---- GEM event canvas — native QPainter, no matplotlib ----
+
+
+def _render_png(path: str, width: int, height: int, draw_fn,
+                *args, **kwargs) -> bool:
+    """Draw ``draw_fn(painter, rect, *args, **kwargs)`` into a fresh
+    ``width`` x ``height`` image and save it as PNG.  Always dark on
+    white for printed output, regardless of the GUI theme."""
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    p = QPainter(image)
+    try:
+        draw_fn(p, QRectF(image.rect()), *args,
+                bg=QColor("white"), fg=QColor("#222"), **kwargs)
+    finally:
+        p.end()
+    return image.save(path, "PNG")
 
 
 class GemEventCanvas(QWidget):
@@ -476,10 +379,6 @@ class GemEventCanvas(QWidget):
     def set_event(self, detectors, det_list, det_hits, hole,
                   *, title=None, det_filter=-1):
         self._payload = (detectors, det_list, det_hits, hole, title, det_filter)
-        self.update()
-
-    def clear(self):
-        self._payload = None
         self.update()
 
     def paintEvent(self, event):
@@ -503,27 +402,16 @@ class GemEventCanvas(QWidget):
                           bg=self._bg, fg=self._fg)
 
     def save_png(self, path: str, *, width: int = 2400, height: int = 900) -> bool:
-        """Render current state into a fresh QImage and save as PNG."""
+        """Render the current event into a PNG file."""
         if self._payload is None:
             return False
-        image = QImage(width, height, QImage.Format.Format_ARGB32)
-        image.fill(QColor("white"))
-        p = QPainter(image)
-        try:
-            # Force light-on-white for printed output regardless of theme.
-            detectors, det_list, det_hits, hole, title, det_filter = self._payload
-            draw_event_panels(p, QRectF(image.rect()),
-                              detectors, det_list, det_hits, hole,
-                              title=title, det_filter=det_filter,
-                              bg=QColor("white"), fg=QColor("#222"))
-        finally:
-            p.end()
-        return image.save(path, "PNG")
+        detectors, det_list, det_hits, hole, title, det_filter = self._payload
+        return _render_png(path, width, height, draw_event_panels,
+                           detectors, det_list, det_hits, hole,
+                           title=title, det_filter=det_filter)
 
 
-# ---------------------------------------------------------------------------
-# Raw APV view
-# ---------------------------------------------------------------------------
+# ---- Raw APV view ----
 
 
 class ApvPanel(QWidget):
@@ -543,9 +431,8 @@ class ApvPanel(QWidget):
         super().__init__(parent)
         self.setMinimumSize(self.MIN_W, self.MIN_H)
         # Horizontal stretch to fill the grid cell (capped by RawApvTab
-        # to ≤ viewport/COLS); height is explicitly locked via
-        # setFixedHeight in _apply_panel_max_width so it stays constant
-        # across filter toggles regardless of what the layout thinks.
+        # to ≤ viewport/COLS); height is locked via setFixedHeight so it
+        # stays constant across filter toggles regardless of the layout.
         self.setSizePolicy(QSizePolicy.Policy.Expanding,
                            QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self.HINT_H)
@@ -584,41 +471,17 @@ class ApvPanel(QWidget):
         self._cm_trace  = cm_trace
         self._signal_flag = signal_flag
 
-        if y_fixed is not None:
-            self._y_lo, self._y_hi = y_fixed
-        elif frame is None or frame.size == 0:
-            self._y_lo, self._y_hi = 0.0, 1.0
-        else:
-            # Auto-range considers only the enabled time samples so that
-            # masking doesn't leave empty headroom/footroom.
-            if all(sample_mask):
-                view = frame
-            else:
-                view = frame[:, [i for i, on in enumerate(sample_mask) if on]]
-            lo = float(np.min(view)) if view.size else 0.0
-            hi = float(np.max(view)) if view.size else 1.0
-            if hi - lo < 8.0:
-                mid = 0.5 * (lo + hi)
-                lo, hi = mid - 4.0, mid + 4.0
-            pad = 0.08 * (hi - lo)
-            self._y_lo = lo - pad
-            self._y_hi = hi + pad
-        self.update()
-
-    def clear(self):
-        self._frame = None
-        self._hits  = None
-        self._title = ""
-        self._badge = ""
-        self._thr_trace = None
-        self._cm_trace  = None
+        self._y_lo, self._y_hi = (
+            y_fixed if y_fixed is not None
+            else self.compute_fixed_range({0: frame}, sample_mask))
         self.update()
 
     @staticmethod
     def compute_fixed_range(frames: Dict[int, np.ndarray],
                             sample_mask: Tuple[bool, ...]) -> Tuple[float, float]:
-        """Span over every enabled (strip, ts) value in ``frames`` so all
-        panels can share one Y scale."""
+        """Padded span over every enabled (strip, ts) value in ``frames``
+        (one frame for a panel's own auto-scale, all of them for a shared
+        Y scale)."""
         lo, hi = float("inf"), float("-inf")
         use_idx = [i for i, on in enumerate(sample_mask) if on]
         if not use_idx:
@@ -651,9 +514,7 @@ class ApvPanel(QWidget):
 
         # Canvas: slightly softer than THEME.BG so panels read as
         # inset plot tiles rather than sitting flush with the window.
-        # Theme picks via BG_SUBTLE (dark/light-aware); fallback
-        # keeps the original #161b22 if the theme doesn't define it.
-        bg = QColor(getattr(THEME, "BG_SUBTLE", "#161b22"))
+        bg = QColor(THEME.BG_SUBTLE)
         fg = QColor(getattr(THEME, "TEXT", "#c9d1d9"))
         dim = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))
         p.fillRect(0, 0, w, h, bg)
@@ -797,28 +658,25 @@ class ApvPanel(QWidget):
 # detector sections read as different rows even when their headers scroll
 # off-screen.  Alpha is intentionally low (~0.13) — the tint should be
 # noticeable in the gaps between panels without competing with trace data.
-GEM_SECTION_TINTS: Dict[int, str] = {
-    0: "rgba(0, 180, 216, 0.13)",   # cyan
-    1: "rgba(81, 207, 102, 0.13)",  # green
-    2: "rgba(255, 146, 43, 0.13)",  # orange
-    3: "rgba(204, 93, 232, 0.13)",  # purple
-}
+GEM_SECTION_TINTS: List[str] = [
+    "rgba(0, 180, 216, 0.13)",   # cyan
+    "rgba(81, 207, 102, 0.13)",  # green
+    "rgba(255, 146, 43, 0.13)",  # orange
+    "rgba(204, 93, 232, 0.13)",  # purple
+]
 
 
 def _gem_section_tint(det_id: int) -> str:
-    if det_id in GEM_SECTION_TINTS:
-        return GEM_SECTION_TINTS[det_id]
-    palette = list(GEM_SECTION_TINTS.values())
-    return palette[det_id % len(palette)]
+    return GEM_SECTION_TINTS[det_id % len(GEM_SECTION_TINTS)]
 
 
 class RawApvTab(QWidget):
-    """Sub-tabbed APV viewer — one tab per (crate, mpd), grid of ApvPanel
-    per tab.  Data cache is a dict ``{apv_idx: ApvFrame}`` filled once per
-    event; tab switches just repaint."""
+    """Sub-tabbed APV viewer — an "All" overview tab plus one tab per GEM
+    detector, each a grid of ApvPanel.  Per-event data is cached in dicts
+    keyed by GemSystem APV index, filled once per event; tab switches just
+    repaint."""
 
     COLS = 4
-    SIGNAL_Y_PAD = 4
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -859,8 +717,9 @@ class RawApvTab(QWidget):
         self.cm_overlay_cb = QCheckBox("CM overlay")
         self.cm_overlay_cb.setChecked(False)
         self.cm_overlay_cb.setToolTip(
-            "Overlay the firmware-reported online_cm[6] values as short "
-            "grey ticks — cross-check against software common-mode.")
+            "Overlay the firmware-reported online_cm[6] values as dashed "
+            "lines colour-matched to each time sample — cross-check "
+            "against software common-mode.")
         self.cm_overlay_cb.toggled.connect(self._on_control_changed)
         bar.addWidget(self.cm_overlay_cb)
 
@@ -881,7 +740,7 @@ class RawApvTab(QWidget):
         bar.addStretch(1)
         lay.addLayout(bar)
 
-        # -- sub-tabs per (crate, mpd) ---------------------------------
+        # -- sub-tabs per detector -------------------------------------
         self._tabs = QTabWidget()
         lay.addWidget(self._tabs, stretch=1)
 
@@ -911,9 +770,6 @@ class RawApvTab(QWidget):
         # _refresh_all_panels.
         self._all_panels:    Dict[str, Dict[int, ApvPanel]] = {}
         self._all_grids:     Dict[str, QGridLayout] = {}
-        self._all_sections:  Dict[str, QFrame] = {}
-        self._all_sorted_idx: Dict[str, List[int]] = {}
-        self._all_tab_idx: Optional[int] = None
 
     def reset_all(self):
         self._apv_meta.clear()
@@ -930,10 +786,12 @@ class RawApvTab(QWidget):
         self._tab_index_of.clear()
         self._all_panels.clear()
         self._all_grids.clear()
-        self._all_sections.clear()
-        self._all_sorted_idx.clear()
-        self._all_tab_idx = None
-        self._tabs.clear()
+        # QTabWidget.clear() keeps the pages alive; delete them (and their
+        # ApvPanels) so a rebuild does not leave the old set behind.
+        while self._tabs.count():
+            page = self._tabs.widget(0)
+            self._tabs.removeTab(0)
+            page.deleteLater()
         self._status.setText("")
 
     def set_apv_metadata(self, apv_meta: List[Dict]):
@@ -943,9 +801,6 @@ class RawApvTab(QWidget):
         self.reset_all()
         self._apv_meta = {int(m["apv_index"]): m for m in apv_meta}
 
-        # Group by det_name; panels within a detector sort by
-        # (plane, crate, mpd, adc_ch) so hardware-adjacent APVs land next
-        # to each other while X/Y planes stay grouped.
         for idx, m in self._apv_meta.items():
             self._grouped.setdefault(m["det_name"], []).append(idx)
 
@@ -957,29 +812,7 @@ class RawApvTab(QWidget):
             page.setWidgetResizable(True)
             content = QWidget()
             grid = QGridLayout(content)
-            grid.setHorizontalSpacing(4)
-            grid.setVerticalSpacing(4)
-            panels: Dict[int, ApvPanel] = {}
-            sorted_apvs = sorted(
-                self._grouped[det_name],
-                key=lambda i: (self._apv_meta[i]["plane_type"],
-                               self._apv_meta[i]["crate_id"],
-                               self._apv_meta[i]["mpd_id"],
-                               self._apv_meta[i]["adc_ch"]))
-            for n, idx in enumerate(sorted_apvs):
-                r, c = divmod(n, self.COLS)
-                panel = ApvPanel()
-                m = self._apv_meta[idx]
-                panel.setToolTip(
-                    f"crate {m['crate_id']} mpd {m['mpd_id']} adc {m['adc_ch']}  "
-                    f"{m['det_name']} {m['plane_type']} pos={m['det_pos']}  "
-                    f"(GemSystem idx {idx})")
-                grid.addWidget(panel, r, c)
-                panels[idx] = panel
-            # Equal stretch across the COLS data columns; each panel caps
-            # at viewport/COLS via the maxWidth set in resizeEvent below.
-            for c in range(self.COLS):
-                grid.setColumnStretch(c, 1)
+            panels, sorted_apvs = self._fill_apv_grid(grid, det_name)
             grid.setRowStretch(grid.rowCount(), 1)
             page.setWidget(content)
             self._panels[det_name] = panels
@@ -988,6 +821,37 @@ class RawApvTab(QWidget):
             tab_i = self._tabs.addTab(page, det_name)
             self._tab_index_of[det_name] = tab_i
         self._apply_panel_max_width()
+
+    def _fill_apv_grid(self, grid: QGridLayout, det_name: str
+                       ) -> Tuple[Dict[int, ApvPanel], List[int]]:
+        """Add an ApvPanel per APV of ``det_name`` to ``grid``, sorted by
+        (plane, crate, mpd, adc_ch) so hardware-adjacent APVs land next to
+        each other while X/Y planes stay grouped.  Returns the panels by
+        APV index and the sorted APV indices."""
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        panels: Dict[int, ApvPanel] = {}
+        sorted_apvs = sorted(
+            self._grouped[det_name],
+            key=lambda i: (self._apv_meta[i]["plane_type"],
+                           self._apv_meta[i]["crate_id"],
+                           self._apv_meta[i]["mpd_id"],
+                           self._apv_meta[i]["adc_ch"]))
+        for n, idx in enumerate(sorted_apvs):
+            r, c = divmod(n, self.COLS)
+            panel = ApvPanel()
+            m = self._apv_meta[idx]
+            panel.setToolTip(
+                f"crate {m['crate_id']} mpd {m['mpd_id']} adc {m['adc_ch']}  "
+                f"{m['det_name']} {m['plane_type']} pos={m['det_pos']}  "
+                f"(GemSystem idx {idx})")
+            grid.addWidget(panel, r, c)
+            panels[idx] = panel
+        # Equal stretch across the COLS data columns; each panel caps
+        # at viewport/COLS via the maxWidth set in resizeEvent below.
+        for c in range(self.COLS):
+            grid.setColumnStretch(c, 1)
+        return panels, sorted_apvs
 
     def _build_all_tab(self):
         """Construct the "All" overview sub-tab — vertical stack of GEM
@@ -1043,30 +907,9 @@ class RawApvTab(QWidget):
             sec_lay.addWidget(header)
 
             grid = QGridLayout()
-            grid.setHorizontalSpacing(4)
-            grid.setVerticalSpacing(4)
             grid.setContentsMargins(0, 0, 0, 0)
             sec_lay.addLayout(grid)
-
-            panels: Dict[int, ApvPanel] = {}
-            sorted_apvs = sorted(
-                self._grouped[det_name],
-                key=lambda i: (self._apv_meta[i]["plane_type"],
-                               self._apv_meta[i]["crate_id"],
-                               self._apv_meta[i]["mpd_id"],
-                               self._apv_meta[i]["adc_ch"]))
-            for n, idx in enumerate(sorted_apvs):
-                r, c = divmod(n, self.COLS)
-                panel = ApvPanel()
-                m = self._apv_meta[idx]
-                panel.setToolTip(
-                    f"crate {m['crate_id']} mpd {m['mpd_id']} adc {m['adc_ch']}  "
-                    f"{m['det_name']} {m['plane_type']} pos={m['det_pos']}  "
-                    f"(GemSystem idx {idx})")
-                grid.addWidget(panel, r, c)
-                panels[idx] = panel
-            for c in range(self.COLS):
-                grid.setColumnStretch(c, 1)
+            panels, _ = self._fill_apv_grid(grid, det_name)
 
             # Keep the section visible even when every panel is hidden by
             # Signal Only — the tint + header alone signal "GEM N is
@@ -1076,12 +919,10 @@ class RawApvTab(QWidget):
             outer.addWidget(section)
             self._all_panels[det_name]    = panels
             self._all_grids[det_name]     = grid
-            self._all_sections[det_name]  = section
-            self._all_sorted_idx[det_name] = sorted_apvs
 
         outer.addStretch(1)
         page.setWidget(content)
-        self._all_tab_idx = self._tabs.insertTab(0, page, "All")
+        self._tabs.insertTab(0, page, "All")
         self._tabs.setCurrentIndex(0)
 
     def resizeEvent(self, ev):
@@ -1118,7 +959,7 @@ class RawApvTab(QWidget):
         zero_sup_threshold`` values, drawn as a dashed grey curve when
         the user enables the Threshold toggle.
         ``cm_traces``   — per-APV (6,) int16 array of firmware online_cm
-        values, drawn as grey ticks when CM overlay is enabled."""
+        values, drawn as dashed lines when CM overlay is enabled."""
         self._processed = processed
         self._raw       = raw
         self._hits      = hits
@@ -1198,7 +1039,7 @@ class RawApvTab(QWidget):
 
         source = self._processed if processed_view else self._raw
 
-        # If "Fixed Y" is on, compute a single (lo, hi) across every
+        # If "Shared Y" is on, compute a single (lo, hi) across every
         # visible APV in the active view and share it.
         shared_range: Optional[Tuple[float, float]] = None
         if fixed_y:
@@ -1233,11 +1074,11 @@ class RawApvTab(QWidget):
                     tab_i, dim_col if v == 0 else active_col)
 
         # "All" tab — parallel panels for the overview view.  Same data
-        # source, separate widgets (Qt parenting is single-owner).  These
-        # don't add to the status count to avoid double-reporting.
+        # source and panel order, separate widgets (Qt parenting is
+        # single-owner).  These don't add to the status count to avoid
+        # double-reporting.
         for det_name, panels in self._all_panels.items():
-            sorted_ids = self._all_sorted_idx.get(det_name,
-                                                  list(panels.keys()))
+            sorted_ids = self._sorted_idx.get(det_name, list(panels.keys()))
             self._refresh_section(
                 panels, sorted_ids, self._all_grids.get(det_name),
                 source=source, sample_mask=sample_mask,
@@ -1248,9 +1089,7 @@ class RawApvTab(QWidget):
         self._status.setText(f"{shown}/{total} APVs  [{mode}]")
 
 
-# ---------------------------------------------------------------------------
-# Advanced tuning dock
-# ---------------------------------------------------------------------------
+# ---- Advanced tuning dock ----
 
 
 class AdvancedDock(QDockWidget):
@@ -1263,18 +1102,13 @@ class AdvancedDock(QDockWidget):
 
     def __init__(self, parent=None):
         super().__init__("Advanced tuning", parent)
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea
-                             | Qt.DockWidgetArea.RightDockWidgetArea)
-        self.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
+        layout = setup_tuning_dock(self)
+        # Library defaults until a GemSystem supplies its configs; the GUI
+        # still starts without prad2py and reports that itself.
+        cfg = det.ClusterConfig() if det is not None else None
 
-        root = QWidget()
-        self.setWidget(root)
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(6, 6, 6, 6)
+        def emit(*_):
+            self.changed.emit()
 
         # --- Thresholds (live during reconstruction) ----------------
         tg = QGroupBox("Thresholds")
@@ -1283,66 +1117,50 @@ class AdvancedDock(QDockWidget):
         tf.addRow("ZS σ", self._slider_row(self.zs_slider, self.zs_spin))
         self.cm_slider, self.cm_spin = self._mkfloat_slider(5.0, 50.0, 20.0, 0.5)
         tf.addRow("CM thr", self._slider_row(self.cm_slider, self.cm_spin))
-        self.mch_spin = self._mkspin(1, 10, 1)
-        tf.addRow("min cluster hits", self.mch_spin)
+        # ClusterConfig field name -> editor
+        self.cluster_editors = add_config_rows(tf, cfg, [
+            ("min_cluster_hits", 1, 10, None, "", "min cluster hits"),
+        ], emit)
         layout.addWidget(tg)
 
         # --- Clustering ----------------------------------------------
         cg = QGroupBox("Clustering")
         cf = QFormLayout(cg)
-        self.max_cluster_hits = self._mkspin(1, 100, 20)
-        self.consecutive_thres = self._mkspin(0, 10, 1)
-        self.split_thres = self._mkdspin(0.0, 100.0, 6.0, 0.1)
-        self.cross_talk_width = self._mkspin(1, 64, 16)
-        cf.addRow("max_cluster_hits", self.max_cluster_hits)
-        cf.addRow("consecutive_thres", self.consecutive_thres)
-        cf.addRow("split_thres (ADC)", self.split_thres)
-        cf.addRow("cross_talk_width", self.cross_talk_width)
+        self.cluster_editors.update(add_config_rows(cf, cfg, [
+            ("max_cluster_hits", 1, 100, None, ""),
+            ("consecutive_thres", 0, 10, None, ""),
+            ("split_thres", 0.0, 100.0, 0.1, "", "split_thres (ADC)"),
+            ("cross_talk_width", 0.0, 64.0, 0.1, "", "cross_talk_width (mm)"),
+        ], emit))
         layout.addWidget(cg)
 
         # --- XY matching ---------------------------------------------
         xg = QGroupBox("XY matching")
         xf = QFormLayout(xg)
-        self.match_mode = QComboBox()
-        self.match_mode.addItems(["0 — sorted pairing", "1 — cartesian + cuts"])
-        self.match_mode.setCurrentIndex(1)
-        self.match_adc_asym = self._mkdspin(0.0, 1.0, 0.8, 0.05)
-        self.match_time_diff = self._mkdspin(0.0, 200.0, 50.0, 1.0)
-        self.ts_period = self._mkdspin(1.0, 100.0, 25.0, 0.5)
-        xf.addRow("match_mode", self.match_mode)
-        xf.addRow("match_adc_asymmetry", self.match_adc_asym)
-        xf.addRow("match_time_diff (ns)", self.match_time_diff)
-        xf.addRow("ts_period (ns)", self.ts_period)
+        match_mode = QComboBox()
+        match_mode.addItems(["0 — sorted pairing", "1 — cartesian + cuts"])
+        set_editor_value(match_mode, cfg.match_mode if cfg is not None else 1)
+        match_mode.currentIndexChanged.connect(emit)
+        xf.addRow("match_mode", match_mode)
+        self.cluster_editors["match_mode"] = match_mode
+        self.cluster_editors.update(add_config_rows(xf, cfg, [
+            ("match_adc_asymmetry", 0.0, 1.0, 0.05, ""),
+            ("match_time_diff", 0.0, 200.0, 1.0, "", "match_time_diff (ns)"),
+            ("ts_period", 1.0, 100.0, 0.5, "", "ts_period (ns)"),
+        ], emit))
         layout.addWidget(xg)
 
         layout.addStretch(1)
 
         # Reset button — emits resetRequested; the main window is
         # responsible for reverting widget values to the initial config
-        # (which may have been loaded from gem_map.json + peds).
+        # (gem_map.json thresholds, reconstruction_config.json clustering).
         self._reset_btn = QPushButton("Reset to defaults")
         self._reset_btn.clicked.connect(lambda: self.resetRequested.emit())
         layout.addWidget(self._reset_btn)
 
-        # Wire every editor → changed
-        for w in (self.zs_spin, self.cm_spin, self.mch_spin,
-                  self.max_cluster_hits, self.consecutive_thres,
-                  self.cross_talk_width):
-            w.valueChanged.connect(lambda *_: self.changed.emit())
-        for w in (self.split_thres, self.match_adc_asym,
-                  self.match_time_diff, self.ts_period):
-            w.valueChanged.connect(lambda *_: self.changed.emit())
-        self.match_mode.currentIndexChanged.connect(lambda *_: self.changed.emit())
-
-    @staticmethod
-    def _mkspin(lo: int, hi: int, val: int) -> QSpinBox:
-        sb = QSpinBox(); sb.setRange(lo, hi); sb.setValue(val); return sb
-
-    @staticmethod
-    def _mkdspin(lo: float, hi: float, val: float, step: float) -> QDoubleSpinBox:
-        sb = QDoubleSpinBox(); sb.setRange(lo, hi)
-        sb.setSingleStep(step); sb.setDecimals(3); sb.setValue(val)
-        return sb
+        self.zs_spin.valueChanged.connect(emit)
+        self.cm_spin.valueChanged.connect(emit)
 
     @staticmethod
     def _mkfloat_slider(lo: float, hi: float, val: float, step: float
@@ -1382,76 +1200,79 @@ class AdvancedDock(QDockWidget):
         h.addWidget(spin)
         return w
 
+    def load_values(self, zs: float, cm: float, cluster: Dict[str, object]):
+        """Show ZS / CM thresholds and ClusterConfig field values (by field
+        name) without emitting ``changed``.  Only the dock's own signals
+        are blocked, so each slider still follows its spin box."""
+        blocked = self.blockSignals(True)
+        try:
+            self.zs_spin.setValue(float(zs))
+            self.cm_spin.setValue(float(cm))
+            for name, ed in self.cluster_editors.items():
+                set_editor_value(ed, cluster[name])
+        finally:
+            self.blockSignals(blocked)
+
     def apply_to_system(self, gsys: "det.GemSystem"):
         """Push live threshold values into a GemSystem."""
         gsys.zero_sup_threshold = float(self.zs_spin.value())
         gsys.common_mode_threshold = float(self.cm_spin.value())
 
-    def apply_to(self, cluster: "det.GemCluster"):
-        """Write current dock values into a GemCluster's ClusterConfig."""
-        cfg = cluster.get_config()
-        cfg.min_cluster_hits = int(self.mch_spin.value())
-        cfg.max_cluster_hits = int(self.max_cluster_hits.value())
-        cfg.consecutive_thres = int(self.consecutive_thres.value())
-        cfg.split_thres = float(self.split_thres.value())
-        cfg.cross_talk_width = int(self.cross_talk_width.value())
-        cfg.match_mode = int(self.match_mode.currentIndex())
-        cfg.match_adc_asymmetry = float(self.match_adc_asym.value())
-        cfg.match_time_diff = float(self.match_time_diff.value())
-        cfg.ts_period = float(self.ts_period.value())
-        cluster.set_config(cfg)
+    def apply_to_recon(self, gsys: "det.GemSystem"):
+        """Write the clustering / XY-match values into every per-detector
+        ClusterConfig of a GemSystem; reconstruct() clusters with those,
+        not with the GemCluster's own config."""
+        cfgs = list(gsys.get_recon_configs())
+        for cfg in cfgs:
+            editors_to_config(self.cluster_editors, cfg)
+        gsys.set_recon_configs(cfgs)
 
 
-# ---------------------------------------------------------------------------
-# Config discovery helpers
-# ---------------------------------------------------------------------------
-
-
-def _find_first(candidates: List[Path]) -> Optional[Path]:
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
-
-
-def _search_candidates(filename: str) -> List[Path]:
-    """Ordered list of locations to try for a config JSON.
-
-    Priority:
-      1. ``$PRAD2_DATABASE_DIR/<filename>`` — set by prad2_setup.sh / prad2_setup.csh,
-         always canonical for an installed environment.
-      2. ``<script-dir>/../database/<filename>`` — works when the script
-         is run from its source checkout (``<repo>/gem/``) or from the
-         installed layout (``<prefix>/share/prad2evviewer/gem/``).
-      3. ``<cwd>/database/<filename>`` / ``<cwd>/<filename>`` —
-         dev-friendly fallback when running from the repo root.
-    """
-    cands: List[Path] = []
-    env = os.environ.get("PRAD2_DATABASE_DIR")
-    if env:
-        cands.append(Path(env) / filename)
-    cands.append(_SCRIPT_DIR.parent / "database" / filename)
-    cands.append(Path.cwd() / "database" / filename)
-    cands.append(Path.cwd() / filename)
-    return cands
+# ---- Config discovery helpers ----
 
 
 def default_daq_config() -> Optional[Path]:
-    return _find_first(_search_candidates("daq_config.json"))
+    return find_database_file("daq_config.json")
 
 
 def default_gem_map() -> Optional[Path]:
-    return _find_first(_search_candidates("gem_map.json"))
+    return find_database_file("gem_map.json")
 
 
-# NOTE: no default_gem_ped() auto-discovery.  Pedestals are per-run
-# calibration products and a wrong file is worse than none — we require
-# the caller to pick the ped file explicitly via --gem-ped / the File menu.
+def _build_gem_pipeline(daq_config: str, gem_map: str,
+                        gem_ped: Optional[str] = None,
+                        evio: Optional[str] = None):
+    """Detector pipeline wired exactly as the server and replay wire it:
+    reconstruction_config strip cuts and per-detector cluster configs,
+    runinfo common-mode ranges, and the runinfo pedestal file unless
+    *gem_ped* is given.  The runinfo entry follows the run number sniffed
+    from *evio* (latest entry when unknown).
+
+    The daq_config directory serves as the database directory.  Paths are
+    made absolute first because the builder resolves relative ones against
+    that directory, not the CWD.
+    """
+    daq_config = os.path.abspath(daq_config)
+    b = det.PipelineBuilder()
+    b.set_database_dir(os.path.dirname(daq_config))
+    b.set_daq_config(daq_config)
+    b.set_gem_map(os.path.abspath(gem_map))
+    if gem_ped:
+        b.set_gem_pedestal(os.path.abspath(gem_ped))
+    if evio:
+        b.set_run_number_from_evio(evio)
+    return b.build()
 
 
-# ---------------------------------------------------------------------------
-# Main window
-# ---------------------------------------------------------------------------
+def _gem_geometry(gem_map: str, gsys):
+    """(detectors, apv_map, hole, raw) for *gem_map*.  *gsys* is an
+    initialized GemSystem that supplies the active extent and hole offset."""
+    layers, apvs, hole, raw = load_gem_map(gem_map)
+    return (build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys),
+            build_apv_map(apvs), hole, raw)
+
+
+# ---- Main window ----
 
 
 class GemEventViewer(QMainWindow):
@@ -1469,30 +1290,32 @@ class GemEventViewer(QMainWindow):
 
         self._daq_config_path = str(daq_config_path or default_daq_config() or "")
         self._gem_map_path    = str(gem_map_path or default_gem_map() or "")
-        # Pedestals: no auto-discovery — loaded only if the user passes
-        # --gem-ped or picks one via File → Choose gem_ped.json.
+        # Pedestal override (--gem-ped / File → Choose GEM pedestal file);
+        # empty means the runinfo per-run file.  _ped_in_use is the file
+        # actually loaded ("" when none).
         self._gem_ped_path    = str(gem_ped_path or "")
+        self._ped_in_use      = ""
 
-        # Latched after a full-readout event is seen without a ped file;
-        # used to show a persistent banner in the status bar and to avoid
-        # re-showing the warning dialog on every event.
+        # Latched once the full-readout/no-pedestal warning dialog has been
+        # shown, so it is not re-shown on every event.
         self._ped_warning_shown = False
 
-        # Geometry (loaded once per gem_map change)
+        # Geometry (reloaded with the pipeline)
         self._detectors: Dict[int, dict] = {}
         self._hole: Optional[dict] = None
         self._gem_raw: dict = {}
         self._apv_map: dict = {}
 
-        # GEM reconstruction objects (live)
+        # GEM reconstruction objects (live); _gsys belongs to _pipeline.
+        self._pipeline = None
         self._gsys: Optional[det.GemSystem] = None
         self._gcl: Optional[det.GemCluster] = None
 
-        # Gem-map defaults, captured after Init() so "Reset defaults" can
-        # restore whatever the JSON specified rather than wholly-untuned.
+        # Dock values as configured, captured after each pipeline build so
+        # "Reset defaults" restores them rather than wholly-untuned ones.
         self._default_zs = 5.0
         self._default_cm = 20.0
-        self._default_cluster_cfg = None
+        self._default_cluster: Optional[Dict[str, object]] = None
 
         # EVIO file state
         self._evio_path = ""
@@ -1506,9 +1329,7 @@ class GemEventViewer(QMainWindow):
         self._scan_worker: Optional[ScanWorker] = None
         self._progress: Optional[QProgressDialog] = None
 
-        # Debounce timer must be created BEFORE _build_ui: widgets in the
-        # tuning dock emit valueChanged while populating their defaults,
-        # which routes through _on_threshold_change → _redraw_timer.start().
+        # Coalesces tuning-dock changes into one reconstruction pass.
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setSingleShot(True)
         self._redraw_timer.timeout.connect(self._re_reconstruct_current)
@@ -1519,9 +1340,7 @@ class GemEventViewer(QMainWindow):
         if initial_evio:
             QTimer.singleShot(50, lambda: self._open_evio(initial_evio))
 
-    # -----------------------------------------------------------------
-    # UI construction
-    # -----------------------------------------------------------------
+    # ---- UI construction ----
 
     def _build_ui(self):
         central = QWidget()
@@ -1606,7 +1425,6 @@ class GemEventViewer(QMainWindow):
         self.adv_dock.changed.connect(self._on_threshold_change)
         self.adv_dock.resetRequested.connect(self._reset_defaults)
 
-        # --- Menu bar ---
         self._build_menu()
 
     def _build_menu(self):
@@ -1622,7 +1440,7 @@ class GemEventViewer(QMainWindow):
         act_map.triggered.connect(self._pick_gem_map)
         m_file.addAction(act_map)
 
-        act_ped = QAction("Choose gem_&ped.json…", self)
+        act_ped = QAction("Choose gem_&ped file…", self)
         act_ped.triggered.connect(self._pick_gem_ped)
         m_file.addAction(act_ped)
 
@@ -1637,11 +1455,12 @@ class GemEventViewer(QMainWindow):
         self.act_adv.triggered.connect(self._toggle_advanced)
         m_view.addAction(self.act_adv)
 
-    # -----------------------------------------------------------------
-    # Geometry + GemSystem init
-    # -----------------------------------------------------------------
+    # ---- Geometry + GemSystem init ----
 
-    def _load_geometry_and_gemsys(self):
+    def _load_geometry_and_gemsys(self, keep_dock: bool = False):
+        """(Re)build the pipeline and geometry.  With *keep_dock* the
+        Advanced dock keeps the user's values (they are re-applied on the
+        next draw) instead of being reset to the configured defaults."""
         if not HAVE_PRAD2PY:
             self._fatal_prad2py_missing()
             return
@@ -1651,60 +1470,44 @@ class GemEventViewer(QMainWindow):
                 "Could not locate gem_map.json — use File → Choose gem_map.json to set it.")
             return
 
-        # Initialize the C++ GemSystem first so build_strip_layout can pull
-        # the active extent and hole offset from it (single source of truth
-        # shared with the on-line server) instead of re-deriving them from
-        # the JSON.
         try:
-            self._gsys = det.GemSystem()
-            self._gsys.init(self._gem_map_path)
-            if self._gem_ped_path and os.path.isfile(self._gem_ped_path):
-                self._gsys.load_pedestals(self._gem_ped_path)
+            ped = (self._gem_ped_path
+                   if os.path.isfile(self._gem_ped_path) else None)
+            self._pipeline = _build_gem_pipeline(
+                self._daq_config_path, self._gem_map_path, ped,
+                self._evio_path or None)
+            self._gsys = self._pipeline.gem
             self._gcl = det.GemCluster()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "GemSystem init failed", str(exc))
-            self._gsys = self._gcl = None
+            self._pipeline = self._gsys = self._gcl = None
             return
+        self._ped_in_use = self._pipeline.gem_pedestal_path
 
         try:
-            layers, apvs, hole, raw = load_gem_map(self._gem_map_path)
-            self._detectors = build_strip_layout(
-                layers, apvs, hole, raw, gem_sys=self._gsys)
-            self._apv_map = build_apv_map(apvs)
-            self._hole = hole
-            self._gem_raw = raw
+            (self._detectors, self._apv_map, self._hole,
+             self._gem_raw) = _gem_geometry(self._gem_map_path, self._gsys)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "Bad gem_map.json", str(exc))
             return
 
-        # Capture gem-map defaults so the "Reset defaults" button can
-        # restore the original configuration — GemSystem thresholds come
-        # from the JSON map, GemCluster config is the library default.
+        # Keep the configured values for "Reset defaults" and show them:
+        # thresholds from gem_map.json, clustering from
+        # reconstruction_config.json.  Field values are copied because
+        # get_recon_configs() returns views that set_recon_configs()
+        # invalidates.
+        had_dock = self._default_cluster is not None
         self._default_zs = float(self._gsys.zero_sup_threshold)
         self._default_cm = float(self._gsys.common_mode_threshold)
-        self._default_cluster_cfg = det.GemCluster().get_config()
+        cfg = self._gsys.get_recon_configs()[0]
+        self._default_cluster = {n: getattr(cfg, n)
+                                 for n in self.adv_dock.cluster_editors}
+        if not (keep_dock and had_dock):
+            self.adv_dock.load_values(self._default_zs, self._default_cm,
+                                      self._default_cluster)
 
-        # Pull current system defaults into the dock widgets.
-        self.adv_dock.zs_spin.blockSignals(True)
-        self.adv_dock.cm_spin.blockSignals(True)
-        self.adv_dock.zs_spin.setValue(self._default_zs)
-        self.adv_dock.cm_spin.setValue(self._default_cm)
-        self.adv_dock.zs_spin.blockSignals(False)
-        self.adv_dock.cm_spin.blockSignals(False)
-
-        cfg = self._gcl.get_config()
-        self.adv_dock.max_cluster_hits.setValue(int(cfg.max_cluster_hits))
-        self.adv_dock.consecutive_thres.setValue(int(cfg.consecutive_thres))
-        self.adv_dock.split_thres.setValue(float(cfg.split_thres))
-        self.adv_dock.cross_talk_width.setValue(int(cfg.cross_talk_width))
-        self.adv_dock.match_mode.setCurrentIndex(int(cfg.match_mode))
-        self.adv_dock.match_adc_asym.setValue(float(cfg.match_adc_asymmetry))
-        self.adv_dock.match_time_diff.setValue(float(cfg.match_time_diff))
-        self.adv_dock.ts_period.setValue(float(cfg.ts_period))
-        self.adv_dock.mch_spin.setValue(int(cfg.min_cluster_hits))
-
-        ped_status = ("ped: " + os.path.basename(self._gem_ped_path)
-                      if self._gem_ped_path and os.path.isfile(self._gem_ped_path)
+        have_ped = bool(self._ped_in_use and os.path.isfile(self._ped_in_use))
+        ped_status = ("ped: " + os.path.basename(self._ped_in_use) if have_ped
                       else "no pedestals loaded (required for full-readout data)")
         self._set_status(
             f"GEM system ready — {self._gsys.get_n_detectors()} detectors, "
@@ -1712,8 +1515,7 @@ class GemEventViewer(QMainWindow):
 
         # Ped-loaded state changed — reset the "already warned" latch so the
         # next full-readout event can warn again if still missing peds.
-        self._ped_warning_shown = bool(
-            self._gem_ped_path and os.path.isfile(self._gem_ped_path))
+        self._ped_warning_shown = have_ped
 
         # Feed the Raw APV tab its static per-APV metadata.  Skip APVs
         # without a DAQ assignment (crate/mpd/adc all -1) — those are
@@ -1740,9 +1542,7 @@ class GemEventViewer(QMainWindow):
             })
         self.raw_apv_tab.set_apv_metadata(apv_meta)
 
-    # -----------------------------------------------------------------
-    # File picker / pre-scan
-    # -----------------------------------------------------------------
+    # ---- File picker / pre-scan ----
 
     def _pick_evio(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -1763,8 +1563,8 @@ class GemEventViewer(QMainWindow):
 
     def _pick_gem_ped(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Choose gem_ped.json", self._gem_ped_path or "",
-            "JSON (*.json);;All files (*)")
+            self, "Choose GEM pedestal file", self._gem_ped_path or "",
+            "Pedestal text (*.txt *.dat);;All files (*)")
         if path:
             self._gem_ped_path = path
             self._load_geometry_and_gemsys()
@@ -1783,14 +1583,16 @@ class GemEventViewer(QMainWindow):
             QMessageBox.warning(self, "File not found", path)
             return
 
-        # Tear down previous run if any.
         self._close_current_run()
 
         self._evio_path = path
+        # Rebuild so the runinfo pedestal / common-mode files follow the run.
+        self._load_geometry_and_gemsys(keep_dock=True)
+        if self._gsys is None:
+            return
         self.file_label.setText(f"Scanning: {os.path.basename(path)}")
         self._set_status("Pre-scanning EVIO file for event index…")
 
-        # Progress dialog
         self._progress = QProgressDialog(
             f"Scanning {os.path.basename(path)}…", "Cancel", 0, 0, self)
         self._progress.setWindowTitle("Building event index")
@@ -1801,7 +1603,6 @@ class GemEventViewer(QMainWindow):
         self._progress.canceled.connect(self._cancel_scan)
         self._progress.show()
 
-        # Worker + thread
         self._scan_thread = QThread(self)
         self._scan_worker = ScanWorker(path, self._daq_config_path)
         self._scan_worker.moveToThread(self._scan_thread)
@@ -1880,9 +1681,7 @@ class GemEventViewer(QMainWindow):
         self.slider.setEnabled(False); self.goto_spin.setEnabled(False)
         self.btn_prev.setEnabled(False); self.btn_next.setEnabled(False)
 
-    # -----------------------------------------------------------------
-    # Event navigation
-    # -----------------------------------------------------------------
+    # ---- Event navigation ----
 
     def _step(self, delta: int):
         if not self._events:
@@ -1897,7 +1696,7 @@ class GemEventViewer(QMainWindow):
         if not self._events:
             return
         want = int(self.goto_spin.value())
-        # binary-ish search — events are sorted by event_number
+        # linear scan, stops once past ``want`` (events sorted by event_number)
         best = 0; best_d = abs(self._events[0].event_number - want)
         for i, e in enumerate(self._events):
             d = abs(e.event_number - want)
@@ -1941,8 +1740,9 @@ class GemEventViewer(QMainWindow):
         """Generate peds from the currently-loaded EVIO file and apply them."""
         if not self._evio_path:
             return
-        # Temp JSON in the system temp dir; kept alive until window closes.
-        fd, tmp_path = tempfile.mkstemp(prefix="gem_ped_", suffix=".json")
+        # Temp pedestal file in the system temp dir; kept alive until the
+        # window closes.
+        fd, tmp_path = tempfile.mkstemp(prefix="gem_ped_", suffix=".txt")
         os.close(fd)
         self._auto_ped_tmp = tmp_path
 
@@ -1957,8 +1757,6 @@ class GemEventViewer(QMainWindow):
 
         worker = PedestalWorker(self._evio_path, self._daq_config_path,
                                 tmp_path, max_events=1000)
-        thread = QThread(self)
-        worker.moveToThread(thread)
 
         def _on_progress(done: int, target: int):
             dlg.setMaximum(target)
@@ -1969,7 +1767,8 @@ class GemEventViewer(QMainWindow):
         def _on_finished(out_path: str, napvs: int, n_used: int):
             dlg.close()
             try:
-                self._gsys.load_pedestals(out_path)
+                self._gsys.load_pedestals(out_path,
+                                          self._pipeline.gem_crate_remap)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.critical(
                     self, "Pedestal load failed",
@@ -1977,6 +1776,7 @@ class GemEventViewer(QMainWindow):
                     f"{type(exc).__name__}: {exc}")
                 return
             self._gem_ped_path = out_path
+            self._ped_in_use = out_path
             self._ped_badge.hide()
             self._set_status(
                 f"Auto-pedestals applied: {napvs} APVs from {n_used:,} "
@@ -1987,19 +1787,10 @@ class GemEventViewer(QMainWindow):
             dlg.close()
             QMessageBox.critical(self, "Pedestal generation failed", msg)
 
-        thread.started.connect(worker.run)
         worker.progress.connect(_on_progress)
-        worker.finished.connect(_on_finished)
-        worker.failed.connect(_on_failed)
-        dlg.canceled.connect(worker.request_cancel)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-
         self._auto_ped_worker = worker
-        self._auto_ped_thread = thread
-        thread.start()
+        self._auto_ped_thread = start_worker_thread(
+            self, worker, _on_finished, _on_failed, dialog=dlg)
 
     def _check_pedestal_requirement(self, ssp) -> None:
         """If this event is full-readout (firmware did not run online ZS)
@@ -2011,33 +1802,12 @@ class GemEventViewer(QMainWindow):
         every event looks empty.  Better to say so explicitly than leave
         the user staring at a silent canvas.
         """
-        have_ped = bool(self._gem_ped_path and os.path.isfile(self._gem_ped_path))
-        if have_ped:
-            self._ped_badge.hide()
-            return
-        # Scan APVs for any in full-readout mode.  The authoritative signal
-        # is nstrips == 128 (firmware sent every channel); has_online_cm
-        # alone is unreliable — the MPD can emit CM debug headers while
-        # still sending all 128 strips raw.
-        APV_STRIP_SIZE = 128
-        full_readout = False
-        for m in range(ssp.nmpds):
-            mpd = ssp.mpd(m)
-            if not mpd.present:
-                continue
-            for a in range(16):  # ssp::MAX_APVS_PER_MPD
-                apv = mpd.apv(a)
-                if apv.present and apv.nstrips == APV_STRIP_SIZE:
-                    full_readout = True
-                    break
-            if full_readout:
-                break
-        if not full_readout:
-            # Data is online-ZS; peds not needed.
+        have_ped = bool(self._ped_in_use and os.path.isfile(self._ped_in_use))
+        if have_ped or not ssp.has_full_readout():
+            # Pedestals loaded, or online-ZS data that needs none.
             self._ped_badge.hide()
             return
 
-        # Full-readout + no pedestal = every event will look empty.
         self._ped_badge.setText("⚠ NO PEDESTAL FILE — full-readout data will reconstruct empty")
         self._ped_badge.show()
         if not self._ped_warning_shown:
@@ -2056,9 +1826,7 @@ class GemEventViewer(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self._start_auto_pedestals()
 
-    # -----------------------------------------------------------------
-    # Reconstruction + drawing
-    # -----------------------------------------------------------------
+    # ---- Reconstruction + drawing ----
 
     def _on_threshold_change(self):
         # Debounce: coalesce multiple rapid changes (e.g. slider drag) into
@@ -2066,27 +1834,10 @@ class GemEventViewer(QMainWindow):
         self._redraw_timer.start(self.REDRAW_DEBOUNCE_MS)
 
     def _reset_defaults(self):
-        if self._gsys is None or self._gcl is None:
+        if self._gsys is None or self._default_cluster is None:
             return
-        cfg = self._default_cluster_cfg
-        if cfg is None:
-            cfg = det.GemCluster().get_config()
-        self._gcl.set_config(cfg)
-
-        d = self.adv_dock
-        d.zs_spin.blockSignals(True); d.zs_spin.setValue(self._default_zs); d.zs_spin.blockSignals(False)
-        d.cm_spin.blockSignals(True); d.cm_spin.setValue(self._default_cm); d.cm_spin.blockSignals(False)
-        d.mch_spin.blockSignals(True); d.mch_spin.setValue(int(cfg.min_cluster_hits)); d.mch_spin.blockSignals(False)
-
-        d.max_cluster_hits.blockSignals(True); d.max_cluster_hits.setValue(int(cfg.max_cluster_hits)); d.max_cluster_hits.blockSignals(False)
-        d.consecutive_thres.blockSignals(True); d.consecutive_thres.setValue(int(cfg.consecutive_thres)); d.consecutive_thres.blockSignals(False)
-        d.split_thres.blockSignals(True); d.split_thres.setValue(float(cfg.split_thres)); d.split_thres.blockSignals(False)
-        d.cross_talk_width.blockSignals(True); d.cross_talk_width.setValue(int(cfg.cross_talk_width)); d.cross_talk_width.blockSignals(False)
-        d.match_mode.blockSignals(True); d.match_mode.setCurrentIndex(int(cfg.match_mode)); d.match_mode.blockSignals(False)
-        d.match_adc_asym.blockSignals(True); d.match_adc_asym.setValue(float(cfg.match_adc_asymmetry)); d.match_adc_asym.blockSignals(False)
-        d.match_time_diff.blockSignals(True); d.match_time_diff.setValue(float(cfg.match_time_diff)); d.match_time_diff.blockSignals(False)
-        d.ts_period.blockSignals(True); d.ts_period.setValue(float(cfg.ts_period)); d.ts_period.blockSignals(False)
-
+        self.adv_dock.load_values(self._default_zs, self._default_cm,
+                                  self._default_cluster)
         self._re_reconstruct_current()
 
     def _refill_raw_apv_cache(self):
@@ -2098,9 +1849,7 @@ class GemEventViewer(QMainWindow):
             return
 
         # Walk the SSP structure once → (crate, mpd, adc) → raw (128, 6)
-        # ndarray.  find_apv() is currently unusable due to a pybind11
-        # keep_alive issue with its manual py::cast path; MPD iteration
-        # returns references through the standard cast path and works.
+        # ndarray.
         MAX_APVS_PER_MPD = 16
         raw_by_addr: Dict[Tuple[int, int, int], np.ndarray] = {}
         cm_by_addr:  Dict[Tuple[int, int, int], np.ndarray] = {}
@@ -2118,12 +1867,9 @@ class GemEventViewer(QMainWindow):
                        int(apv.addr.adc_ch))
                 # Copy so the array outlives the SSP object if cached.
                 raw_by_addr[key] = np.asarray(apv.strips).copy()
-                if getattr(apv, "has_online_cm", False):
+                if apv.has_online_cm:
                     cm_by_addr[key] = np.asarray(apv.online_cm).copy()
-                # nstrips == 128 → firmware shipped all 128 channels (no
-                # online ZS).  Software has to do the suppression —
-                # highlight so the user can tell apart from hardware-ZS'd.
-                if apv.nstrips == 128:
+                if apv.full_readout:
                     full_readout_addrs.add(key)
 
         zs_sigma = float(self._gsys.zero_sup_threshold)
@@ -2139,14 +1885,8 @@ class GemEventViewer(QMainWindow):
                 hits[i]      = self._gsys.get_apv_hit_mask(i)
             except Exception:
                 continue
-            # Threshold curve: noise × ZS σ.  get_apv_ped_noise is a
-            # bulk binding; fall back to a Python-side loop if absent
-            # (older prad2py without the helper).
-            try:
-                noise = self._gsys.get_apv_ped_noise(i)
-                thresholds[i] = noise * zs_sigma
-            except Exception:
-                pass
+            # Threshold curve: noise × ZS σ.
+            thresholds[i] = self._gsys.get_apv_ped_noise(i) * zs_sigma
             cfg = self._gsys.get_apv_config(i)
             key = (int(cfg.crate_id), int(cfg.mpd_id), int(cfg.adc_ch))
             if key in raw_by_addr:
@@ -2168,11 +1908,10 @@ class GemEventViewer(QMainWindow):
         if self._last_ssp is None:
             return
 
-        # Push dock values into the GemSystem / GemCluster.
+        # Push dock values into the GemSystem and its cluster configs.
         self.adv_dock.apply_to_system(self._gsys)
-        self.adv_dock.apply_to(self._gcl)
+        self.adv_dock.apply_to_recon(self._gsys)
 
-        # Run reconstruction on cached SSP.
         t0 = time.monotonic()
         self._gsys.clear()
         self._gsys.process_event(self._last_ssp)
@@ -2203,9 +1942,7 @@ class GemEventViewer(QMainWindow):
             f"bits=0x{evmeta.trigger_bits:X}  "
             f"2D hits: {n_2d}   reco: {elapsed_ms:.1f} ms")
 
-    # -----------------------------------------------------------------
-    # Misc
-    # -----------------------------------------------------------------
+    # ---- Misc ----
 
     def _toggle_advanced(self, checked: bool):
         self.adv_dock.setVisible(checked)
@@ -2257,9 +1994,7 @@ class GemEventViewer(QMainWindow):
         super().closeEvent(ev)
 
 
-# ---------------------------------------------------------------------------
-# Batch mode — render events / layout to PNG without a GUI
-# ---------------------------------------------------------------------------
+# ---- Batch mode — render events / layout to PNG without a GUI ----
 
 
 def _parse_event_spec(spec: str) -> List[int]:
@@ -2280,70 +2015,6 @@ def _parse_event_spec(spec: str) -> List[int]:
     return sorted(set(out))
 
 
-def _scan_events_sync(path: str, daq_cfg: str) -> List[EventMeta]:
-    """Non-Qt version of ScanWorker.run(): walk the file, return EventMeta list."""
-    cfg = dec.load_daq_config(daq_cfg)
-    ch = dec.EvChannel()
-    ch.set_config(cfg)
-    is_ra = _open_channel(ch, path)
-    events: List[EventMeta] = []
-    try:
-        if is_ra:
-            n_evio = ch.get_random_access_event_count()
-            for evio_idx in range(n_evio):
-                if ch.read_event_by_index(evio_idx) != dec.Status.success:
-                    continue
-                if not ch.scan():
-                    continue
-                if ch.get_event_type() != dec.EventType.Physics:
-                    continue
-                for i in range(ch.get_n_events()):
-                    ch.select_event(i)
-                    info = ch.info()
-                    events.append(EventMeta(
-                        record_idx=evio_idx, subevt_idx=i,
-                        event_number=int(info.event_number),
-                        trigger_number=int(info.trigger_number),
-                        trigger_bits=int(info.trigger_bits),
-                    ))
-        else:
-            record_idx = 0
-            while ch.read() == dec.Status.success:
-                if not ch.scan():
-                    record_idx += 1; continue
-                if ch.get_event_type() != dec.EventType.Physics:
-                    record_idx += 1; continue
-                for i in range(ch.get_n_events()):
-                    ch.select_event(i)
-                    info = ch.info()
-                    events.append(EventMeta(
-                        record_idx=record_idx, subevt_idx=i,
-                        event_number=int(info.event_number),
-                        trigger_number=int(info.trigger_number),
-                        trigger_bits=int(info.trigger_bits),
-                    ))
-                record_idx += 1
-    finally:
-        ch.close()
-    return events
-
-
-def _batch_render(detectors, det_list, det_hits, hole,
-                  title: Optional[str], out_path: str,
-                  width: int, height: int) -> bool:
-    image = QImage(width, height, QImage.Format.Format_ARGB32)
-    image.fill(QColor("white"))
-    p = QPainter(image)
-    try:
-        draw_event_panels(p, QRectF(image.rect()),
-                          detectors, det_list, det_hits, hole,
-                          title=title,
-                          bg=QColor("white"), fg=QColor("#222"))
-    finally:
-        p.end()
-    return image.save(out_path, "PNG")
-
-
 def _load_json_event(path: str) -> dict:
     import json as _json
     raw = open(path, "rb").read()
@@ -2357,7 +2028,7 @@ def _load_json_event(path: str) -> dict:
 
 
 def _print_event_summary(det_list, det_hits):
-    """Match gem_cluster_view's stdout layout for --verbose mode."""
+    """Per-detector hit / cluster table printed in --verbose mode."""
     for dd in det_list:
         did = dd["id"]
         hits = det_hits.get(did, {"x": [], "y": []})
@@ -2381,15 +2052,17 @@ def _print_event_summary(det_list, det_hits):
                           f"{'y' if cl.get('cross_talk') else '':>5}  {srange}")
 
 
-def _default_output_path(event_number: int, out: Optional[str],
-                         single: bool) -> str:
-    if out is None:
-        return f"gem_event_{event_number:06d}.png"
-    if single:
+def _output_path(name: str, out: Optional[str], n_items: int,
+                 fallback: str) -> str:
+    """PNG path for one of ``n_items`` rendered items: ``fallback`` without
+    ``-o``, ``out`` itself for a single item unless it ends in a path
+    separator, otherwise ``name`` inside the directory ``out``."""
+    if not out:
+        return fallback
+    if n_items == 1 and not out.endswith(("/", "\\")):
         return out
-    # out is a directory
     os.makedirs(out, exist_ok=True)
-    return os.path.join(out, f"gem_event_{event_number:06d}.png")
+    return os.path.join(out, name)
 
 
 def _resolve_path(user_value, finder):
@@ -2405,28 +2078,18 @@ def _resolve_path(user_value, finder):
 def _run_batch_layout(args) -> int:
     gem_map = _resolve_path(args.gem_map, default_gem_map)
     if not gem_map or not os.path.isfile(gem_map):
-        print(f"error: gem_map.json not found (pass -G <path>)", file=sys.stderr)
+        print("error: gem_map.json not found (pass -G <path>)", file=sys.stderr)
         return 2
-    layers, apvs, hole, raw = load_gem_map(gem_map)
-    # Use the C++ GemSystem to get x_size and the hole offset (single
-    # source of truth shared with the on-line server).
+    # Geometry only: a bare GemSystem supplies x_size and the hole offset.
     gsys = det.GemSystem()
     gsys.init(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
+    detectors, _, hole, _ = _gem_geometry(gem_map, gsys)
     det_layout = detectors[min(detectors.keys())]
 
     out = args.output or "gem_layout.png"
-    image = QImage(args.width, args.height, QImage.Format.Format_ARGB32)
-    image.fill(QColor("white"))
-    p = QPainter(image)
-    try:
-        draw_layout(p, QRectF(image.rect()), det_layout, hole,
-                    show_every=args.show_every,
-                    title=f"PRad-II GEM Strip Layout ({det_layout['name']})",
-                    bg=QColor("white"), fg=QColor("#222"))
-    finally:
-        p.end()
-    if not image.save(out, "PNG"):
+    if not _render_png(out, args.width, args.height, draw_layout,
+                       det_layout, hole, show_every=args.show_every,
+                       title=f"PRad-II GEM Strip Layout ({det_layout['name']})"):
         print(f"error: failed to save {out}", file=sys.stderr)
         return 1
     print(f"wrote {out}")
@@ -2443,6 +2106,10 @@ def _run_batch_evio(args) -> int:
         print("error: daq_config.json not found (pass -D)", file=sys.stderr); return 2
     if not gem_map or not os.path.isfile(gem_map):
         print("error: gem_map.json not found (pass -G)", file=sys.stderr); return 2
+    if args.gem_ped and not os.path.isfile(args.gem_ped):
+        print(f"error: pedestal file not found: {args.gem_ped}",
+              file=sys.stderr)
+        return 2
 
     indices: List[int] = []
     if args.event is not None:
@@ -2452,20 +2119,13 @@ def _run_batch_evio(args) -> int:
     if not indices:
         print("error: provide --event N or --events SPEC", file=sys.stderr); return 2
 
-    # Initialize the C++ GemSystem first so build_strip_layout can use its
-    # active-extent / hole-offset accessors as the single source of truth.
-    gsys = det.GemSystem()
-    gsys.init(gem_map)
-    if args.gem_ped and os.path.isfile(args.gem_ped):
-        gsys.load_pedestals(args.gem_ped)
+    pipe = _build_gem_pipeline(daq_cfg, gem_map, args.gem_ped, args.evio)
+    gsys = pipe.gem
     gcl = det.GemCluster()
-
-    layers, apvs, hole, raw = load_gem_map(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
-    apv_map = build_apv_map(apvs)
+    detectors, apv_map, hole, raw = _gem_geometry(gem_map, gsys)
 
     print(f"Scanning {args.evio} …")
-    events = _scan_events_sync(args.evio, daq_cfg)
+    events, _ = _build_event_index(args.evio, daq_cfg)
     if not events:
         print("error: no physics events found", file=sys.stderr); return 1
     print(f"  {len(events):,} physics events")
@@ -2473,8 +2133,6 @@ def _run_batch_evio(args) -> int:
     stepper = Stepper(args.evio, daq_cfg)
     stepper.open()
     try:
-        single = len(indices) == 1 and args.output and \
-                 not args.output.endswith(("/", "\\"))
         rendered = 0
         for idx in indices:
             if not (0 <= idx < len(events)):
@@ -2499,10 +2157,11 @@ def _run_batch_evio(args) -> int:
             title = (f"GEM Event #{evmeta.event_number}  "
                      f"trig #{evmeta.trigger_number}  "
                      f"bits 0x{evmeta.trigger_bits:X}")
-            out_path = _default_output_path(evmeta.event_number,
-                                            args.output, single)
-            ok = _batch_render(detectors, det_list, det_hits, hole,
-                               title, out_path, args.width, args.height)
+            name = f"gem_event_{evmeta.event_number:06d}.png"
+            out_path = _output_path(name, args.output, len(indices), name)
+            ok = _render_png(out_path, args.width, args.height,
+                             draw_event_panels, detectors, det_list,
+                             det_hits, hole, title=title)
             if ok:
                 print(f"  wrote {out_path}")
                 rendered += 1
@@ -2534,16 +2193,10 @@ def _run_batch_json(args) -> int:
     if not files:
         print("error: no JSON files found", file=sys.stderr); return 2
 
-    # Use the C++ GemSystem for the active extent (same as the live server)
-    # — JSON-only mode still benefits from a consistent x_size.
     gsys = det.GemSystem()
     gsys.init(gem_map)
-    layers, apvs, hole, raw = load_gem_map(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
-    apv_map = build_apv_map(apvs)
+    detectors, apv_map, hole, raw = _gem_geometry(gem_map, gsys)
 
-    single = len(files) == 1 and args.output and \
-             not args.output.endswith(("/", "\\"))
     rendered = 0
     for i, fpath in enumerate(files):
         try:
@@ -2564,17 +2217,12 @@ def _run_batch_json(args) -> int:
         ev_num = int(event.get("event_number", i))
         title = f"GEM Cluster View — Event #{ev_num}"
 
-        if single:
-            out_path = args.output
-        elif args.output:
-            os.makedirs(args.output, exist_ok=True)
-            out_path = os.path.join(args.output,
-                                    os.path.splitext(os.path.basename(fpath))[0] + ".png")
-        else:
-            out_path = os.path.splitext(fpath)[0] + ".png"
-
-        ok = _batch_render(detectors, det_list, det_hits, hole,
-                           title, out_path, args.width, args.height)
+        stem = os.path.splitext(fpath)[0]
+        out_path = _output_path(os.path.basename(stem) + ".png", args.output,
+                                len(files), stem + ".png")
+        ok = _render_png(out_path, args.width, args.height,
+                         draw_event_panels, detectors, det_list, det_hits,
+                         hole, title=title)
         print(f"  [{i+1}/{len(files)}] {os.path.basename(fpath)} -> "
               f"{out_path}" + (" (failed)" if not ok else ""))
         if ok:
@@ -2585,9 +2233,7 @@ def _run_batch_json(args) -> int:
     return 0 if rendered > 0 else 1
 
 
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
+# ---- CLI entry point ----
 
 
 def main():
@@ -2595,14 +2241,17 @@ def main():
         description="PyQt6 GEM event viewer.  Launches an interactive GUI by "
                     "default; export-mode flags (--layout / --event / --events "
                     "/ --json) render PNGs and exit without showing a window.")
-    parser.add_argument("evio", nargs="?", help="EVIO file to open on start.")
+    parser.add_argument("inputs", nargs="*", metavar="FILE",
+                        help="EVIO file to open on start, or with --json the "
+                             "JSON files / directories / globs to render.")
     parser.add_argument("-D", "--daq-config", default=None,
                         help="Override daq_config.json path.")
     parser.add_argument("-G", "--gem-map", default=None,
                         help="Override gem_map.json path.")
     parser.add_argument("-P", "--gem-ped", default=None,
-                        help="Pedestal file (required for full-readout data; "
-                             "ignored for online-ZS production data).")
+                        help="Pedestal file override (default: runinfo "
+                             "per-run file; matters only for full-readout "
+                             "data).")
     parser.add_argument("--theme", choices=available_themes(), default="dark",
                         help="Colour theme (GUI only, default: dark).")
 
@@ -2614,9 +2263,9 @@ def main():
     exp.add_argument("--events", default=None,
                      help="Event spec for multi-event export: 'N', 'N-M', or "
                           "comma-separated mix (e.g. '10-20,30,45-50').")
-    exp.add_argument("--json", nargs="+", default=None,
+    exp.add_argument("--json", nargs="*", default=None,
                      help="Render from gem_dump JSON files / directory / glob "
-                          "instead of EVIO.")
+                          "(here or as FILE args) instead of EVIO.")
     exp.add_argument("-o", "--output", default=None,
                      help="Output PNG (single) or directory (multi).")
     exp.add_argument("--det", type=int, default=-1,
@@ -2629,7 +2278,14 @@ def main():
                      help="Strip decimation for --layout (default: 8).")
     exp.add_argument("--verbose", action="store_true",
                      help="Print per-event cluster summary to stdout.")
-    args = parser.parse_args()
+    # Intermixed so the bin/gem_cluster_view alias (`--json "$@"`) accepts
+    # flags and file paths in any order.
+    args = parser.parse_intermixed_args()
+    if args.json is not None:
+        args.json += args.inputs
+    elif len(args.inputs) > 1:
+        parser.error("only one EVIO file can be opened")
+    args.evio = args.inputs[0] if args.inputs else None
 
     batch = args.layout or args.event is not None or \
             args.events is not None or args.json is not None

@@ -2,15 +2,15 @@
 // replay_recon — convert multiple EVIO files to reconstructed ROOT trees (multi-threaded)
 //
 // Usage: prad2ana_replay_recon <evio(or _raw.root)_file_or_dir> [more files/dirs...]
-//                     -o output_dir [-f max_files] [-n max_events] [-prad1] [-j num_threads]
-//                     [-c daq_config.json] [-d daq_map.json]
+//                     -o output_dir [-f max_files] [-prad1] [-j num_threads]
+//                     [-r recon_config.json] [-c daq_config.json] [-d daq_map.json]
 //                     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files]
 //                     [-x17] [-x17_full] [-random] [-gem_hit]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
-//   -n  max events per file (default: all)
 //   -prad1  read PRad-1 data and do not include GEM
 //   -j  number of threads (default: 4)
+//   -r  reconstruction config JSON
 //   -c  DAQ configuration file
 //   -d  HyCal map file (default: <db>/hycal_map.json)
 //   -g  GEM pedestal file
@@ -25,135 +25,28 @@
 #include "Replay.h"
 #include "ConfigSetup.h"
 #include "InstallPaths.h"
+#include "GainCorrCompute.h"
+#include "ToolUtils.h"
 
 #include <iostream>
 #include <string>
-#include <cstdlib>
 #include <cstdio>
 #include <getopt.h>
 #include <filesystem>
 #include <algorithm>
+#include <iterator>
 #include <vector>
 #include <map>
-#include <thread>
 #include <atomic>
 #include <mutex>
-#include <limits>
-#include <cmath>
-
-#include <TFileMerger.h>
-#include <TClass.h>
-#include <TROOT.h>
-#include <TH1F.h>
-#include "gain_factor.h"
-
-#include <cerrno>
-#include <cstring>
-#include <sys/wait.h>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
-
-// Auto-run replay_gainCorr if no gain-correction file exists for this run.
-// Returns true when the file is ready; prints a warning and returns false on
-// failure (the replay continues with identity gain correction).
-static bool ensureGainCorr(int run_num,
-                            const std::string &db_dir,
-                            const std::vector<std::string> &evio_files,
-                            int num_files,
-                            const std::string &daq_config,
-                            const std::string &daq_map,
-                            int num_threads)
-{
-    std::string gain_corr_dir = db_dir + "/gain_factor/gain_correction";
-    if (!prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty())
-        return true;   // already exists
-
-    std::cout << "[gain_corr] No gain-correction file for run " << run_num
-              << "; launching prad2ana_replay_gainCorr...\n";
-
-    // Locate the binary beside this executable.
-    std::string gainCorr_exe = prad2::module_dir() + "/prad2ana_replay_gainCorr";
-
-    // Temporary directory for intermediate *_lms.root files.
-    // replay_gainCorr deletes them (no -s flag); we clean up the dir itself.
-    char tmpl[] = "./prad2_lms_XXXXXX";
-    char *tmp = mkdtemp(tmpl);
-    if (!tmp) {
-        std::cerr << "[gain_corr] mkdtemp failed: " << std::strerror(errno) << "\n";
-        return false;
-    }
-    std::string tmp_dir(tmp);
-
-    // Build argv for execvp — no shell, so no command-injection risk.
-    std::vector<std::string> arg_strs;
-    arg_strs.push_back(gainCorr_exe);
-    for (int i = 0; i < num_files; ++i)
-        arg_strs.push_back(evio_files[i]);
-    arg_strs.push_back("-o"); arg_strs.push_back(tmp_dir);
-    arg_strs.push_back("-j"); arg_strs.push_back(std::to_string(num_threads));
-    if (!daq_config.empty()) { arg_strs.push_back("-c"); arg_strs.push_back(daq_config); }
-    if (!daq_map.empty())    { arg_strs.push_back("-d"); arg_strs.push_back(daq_map); }
-
-    std::vector<char *> argv_vec;
-    for (auto &s : arg_strs) argv_vec.push_back(const_cast<char *>(s.c_str()));
-    argv_vec.push_back(nullptr);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        execvp(gainCorr_exe.c_str(), argv_vec.data());
-        std::cerr << "[gain_corr] execvp failed: " << std::strerror(errno) << "\n";
-        _exit(1);
-    }
-    if (pid < 0) {
-        std::cerr << "[gain_corr] fork failed: " << std::strerror(errno) << "\n";
-        std::filesystem::remove_all(tmp_dir);
-        return false;
-    }
-
-    int wstatus = 0;
-    waitpid(pid, &wstatus, 0);
-    std::filesystem::remove_all(tmp_dir);
-
-    if (!WIFEXITED(wstatus) || WEXITSTATUS(wstatus) != 0) {
-        std::cerr << "[gain_corr] replay_gainCorr exited with code "
-                  << WEXITSTATUS(wstatus) << "\n";
-        return false;
-    }
-    if (prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty()) {
-        std::cerr << "[gain_corr] Output not found in " << gain_corr_dir << "\n";
-        return false;
-    }
-    std::cout << "[gain_corr] Gain-correction file ready.\n";
-    return true;
-}
 
 static bool isRawReplayFile(const std::string &path)
 {
     const auto name = std::filesystem::path(path).filename().string();
     return name.find("_raw") != std::string::npos
            && name.find(".root") != std::string::npos;
-}
-
-static std::vector<std::string> collectInputFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (std::filesystem::is_directory(path)) {
-        for (auto &entry : std::filesystem::directory_iterator(path)) {
-            if (entry.is_regular_file()
-                && (entry.path().filename().string().find(".evio") != std::string::npos
-                    || isRawReplayFile(entry.path().string())))
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
 }
 
 static std::string makeOutputFile(const std::string &input_path)
@@ -176,83 +69,9 @@ static std::string makeOutputFile(const std::string &input_path)
     return out;
 }
 
-static int runHadd(const std::string &output, const std::vector<std::string> &inputs)
-{
-    std::vector<std::string> args{"hadd", "-f", output};
-    args.insert(args.end(), inputs.begin(), inputs.end());
-
-    std::vector<char *> argv;
-    argv.reserve(args.size() + 1);
-    for (auto &s : args)
-        argv.push_back(s.data());
-    argv.push_back(nullptr);
-
-    pid_t pid = fork();
-    if (pid == 0) {
-        execvp(argv[0], argv.data());
-        std::cerr << "hadd execvp failed: " << std::strerror(errno) << "\n";
-        _exit(127);
-    }
-    int status = 0;
-    if (pid < 0 || waitpid(pid, &status, 0) < 0) {
-        std::cerr << "hadd failed: " << std::strerror(errno) << "\n";
-        return 1;
-    }
-    return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-}
-
-static bool parseIntOption(const char *text, int &value)
-{
-    if (!text || *text == '\0') return false;
-    char *end = nullptr;
-    errno = 0;
-    const long parsed = std::strtol(text, &end, 10);
-    if (errno == ERANGE || *end != '\0'
-            || parsed < std::numeric_limits<int>::min()
-            || parsed > std::numeric_limits<int>::max())
-        return false;
-    value = static_cast<int>(parsed);
-    return true;
-}
-
-static bool parseFloatOption(const char *text, float &value)
-{
-    if (!text || *text == '\0') return false;
-    char *end = nullptr;
-    errno = 0;
-    const float parsed = std::strtof(text, &end);
-    if (errno == ERANGE || *end != '\0' || !std::isfinite(parsed)) return false;
-    value = parsed;
-    return true;
-}
-
-static int invalidOptionValue(const char *flag, const char *value)
-{
-    std::cerr << "Invalid value for " << flag << ": "
-              << (value ? value : "(missing)") << "\n";
-    return 2;
-}
-
-static int invalidOption(char *argv[], int optind, int optopt)
-{
-    if (optopt != 0)
-        std::cerr << "Invalid option or missing argument: -"
-                  << static_cast<char>(optopt) << "\n";
-    else
-        std::cerr << "Invalid option: "
-                  << (optind > 0 ? argv[optind - 1] : "(unknown)") << "\n";
-    return 2;
-}
-
 int main(int argc, char *argv[])
 {
-    // Initialize ROOT for multi-threading
-    ROOT::EnableThreadSafety();
-
-    // Force ROOT dictionary initialization in main thread
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
+    analysis::InitRootThreading();
 
     std::string recon_config,daq_config, daq_map, gem_ped_file, output_dir;
     float zerosup_override = 5.f;
@@ -265,10 +84,7 @@ int main(int argc, char *argv[])
     bool random = false;
     bool gem_hit = false;
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string db_dir = prad2::database_dir();
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     static const option long_options[] = {
@@ -287,26 +103,26 @@ int main(int argc, char *argv[])
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f':
-                if (!parseIntOption(optarg, max_files))
-                    return invalidOptionValue("-f", optarg);
+                if (!ParseIntOption(optarg, max_files))
+                    return InvalidOptionValue("-f", optarg);
                 break;
             case 'r': recon_config = optarg; break;
             case 'c': daq_config = optarg; break;
             case 'd': daq_map = optarg; break;
             case 'j':
-                if (!parseIntOption(optarg, num_threads) || num_threads <= 0)
-                    return invalidOptionValue("-j", optarg);
+                if (!ParseIntOption(optarg, num_threads) || num_threads <= 0)
+                    return InvalidOptionValue("-j", optarg);
                 break;
             case 'g': gem_ped_file = optarg; break;
             case 'z':
-                if (!parseFloatOption(optarg, zerosup_override)
+                if (!ParseFloatOption(optarg, zerosup_override)
                         || zerosup_override < 0.f)
-                    return invalidOptionValue("-z", optarg);
+                    return InvalidOptionValue("-z", optarg);
                 break;
             case 'm':
-                if (!parseIntOption(optarg, merge_batch_size)
+                if (!ParseIntOption(optarg, merge_batch_size)
                         || merge_batch_size < 0)
-                    return invalidOptionValue("-m", optarg);
+                    return InvalidOptionValue("-m", optarg);
                 break;
             case 1000: x17 = true; break;
             case 1001: prad1 = true; break;
@@ -315,7 +131,7 @@ int main(int argc, char *argv[])
             case 1004: gem_hit = true; break; // -gem_hit
             case '?':
             default:
-                return invalidOption(argv, optind, optopt);
+                return InvalidOption(argv, optind, optopt);
         }
     }
 
@@ -329,11 +145,8 @@ int main(int argc, char *argv[])
     }
 
     // Collect EVIO and replay_raw ROOT inputs from files, directories, or a mix.
-    std::vector<std::string> input_files;
-    for (int i = optind; i < argc; ++i) {
-        auto files = collectInputFiles(argv[i]);
-        input_files.insert(input_files.end(), files.begin(), files.end());
-    }
+    std::vector<std::string> input_files = CollectInputs(argc, argv, optind,
+        [](const std::string &name) { return IsEvioName(name) || isRawReplayFile(name); });
 
     if (input_files.empty() || output_dir.empty()) {
         std::cerr << "Usage: prad2ana_replay_recon <evio_or_raw_file_or_dir> [more files/dirs...] -o output_dir\n"
@@ -388,76 +201,30 @@ int main(int argc, char *argv[])
     
     if(daq_map.empty()) daq_map = db_dir + "/hycal_map.json";
 
+    const std::vector<std::string> inputs(input_files.begin(), input_files.begin() + num_files);
+
     // Only direct EVIO input can be passed to replay_gainCorr.  replay_raw
     // input is assumed to have been produced after that step.
-    {
-        std::map<int, std::vector<std::string>> run_files_map;
-        for (int i = 0; i < num_files; ++i)
-            if (!isRawReplayFile(input_files[i]))
-                run_files_map[get_run_int(input_files[i])].push_back(input_files[i]);
-
-        std::cout << "Detected " << run_files_map.size() << " run(s):";
-        for (auto &[rn, rf] : run_files_map)
-            std::cout << " run" << rn << " (" << rf.size() << " file(s))";
-        std::cout << "\n";
-
-        for (auto &[rn, rf] : run_files_map)
-            ensureGainCorr(rn, db_dir, rf, static_cast<int>(rf.size()),
-                           daq_config, daq_map, num_threads);
-    }
+    std::vector<std::string> evio_inputs;
+    std::copy_if(inputs.begin(), inputs.end(), std::back_inserter(evio_inputs),
+                 [](const std::string &f) { return !isRawReplayFile(f); });
+    EnsureGainCorr(evio_inputs, db_dir, daq_config, daq_map, num_threads);
 
     int run_num = get_run_int(input_files[0]);
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
-    // shared work queue: atomic index into file list
-    std::atomic<int> next_file{0};
-    std::mutex io_mtx;
-    std::atomic<int> errors{0};
-    std::vector<std::string> output_files(num_files);
-    std::vector<char> output_ok(num_files, 0);
-
-    auto worker = [&]() {
-        // each thread gets its own Replay instance (own EvChannel, own buffers)
-        analysis::Replay replay;
-        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadHyCalMap(daq_map);
-        std::cerr << "Using HyCal map: " << daq_map << "\n";
-
-        while (true) {
-            int idx = next_file.fetch_add(1);
-            if (idx >= num_files) break;
-
-            const auto &input = input_files[idx];
-            std::string out = output_dir + "/" + makeOutputFile(input);
-            const bool is_raw = isRawReplayFile(input);
-            bool ok = is_raw
-                ? replay.ProcessRaw2Recon(input, out, gRunConfig, db_dir, recon_config,
+    const auto output_for = [&](const std::string &in) { return output_dir + "/" + makeOutputFile(in); };
+    std::vector<char> output_ok;
+    std::cerr << "Using HyCal map: " << daq_map << "\n";
+    std::atomic<int> errors{RunReplayPool(inputs, num_threads, daq_config, daq_map, output_for,
+        [&](Replay &replay, const std::string &in, const std::string &out) {
+            return isRawReplayFile(in)
+                ? replay.ProcessRaw2Recon(in, out, gRunConfig, db_dir, recon_config,
                                           daq_config, gem_ped_file, x17, x17_blind, random, gem_hit)
-                : replay.ProcessWithRecon(input, out, gRunConfig, db_dir, recon_config,
+                : replay.ProcessWithRecon(in, out, gRunConfig, db_dir, recon_config,
                                           daq_config, gem_ped_file, zerosup_override,
                                           prad1, x17, x17_blind, random, gem_hit);
-            output_files[idx] = out;
-            if (ok)
-                output_ok[idx] = 1;
-
-            std::lock_guard<std::mutex> lk(io_mtx);
-            if (ok) {
-                std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                          << input << " -> " << out << "\n";
-            } else {
-                std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
-                          << input << "\n";
-                errors++;
-            }
-        }
-    };
-
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-    for (int i = 0; i < num_threads; ++i)
-        threads.emplace_back(worker);
-    for (auto &t : threads)
-        t.join();
+        }, &output_ok)};
 
     std::cout << "Done: " << num_files << " files"
               << (errors > 0 ? ", " + std::to_string(errors.load()) + " errors" : "")
@@ -469,7 +236,7 @@ int main(int argc, char *argv[])
     std::map<int, std::vector<std::string>> outputs_by_run;
     for (int i = 0; i < num_files; ++i)
         if (output_ok[i])
-            outputs_by_run[get_run_int(input_files[i])].push_back(output_files[i]);
+            outputs_by_run[get_run_int(input_files[i])].push_back(output_for(input_files[i]));
 
     struct MergeJob { std::string output; std::vector<std::string> inputs; };
     std::vector<MergeJob> merge_jobs;
@@ -494,46 +261,36 @@ int main(int argc, char *argv[])
                   << " batch(es) with " << num_merge_threads
                   << " hadd process(es)\n";
 
-        std::atomic<std::size_t> next_merge{0};
-        std::vector<std::thread> merge_threads;
-        merge_threads.reserve(num_merge_threads);
-        for (std::size_t i = 0; i < num_merge_threads; ++i) {
-            merge_threads.emplace_back([&]() {
-                while (true) {
-                    std::size_t idx = next_merge.fetch_add(1);
-                    if (idx >= merge_jobs.size())
-                        break;
+        std::mutex io_mtx;
+        ParallelFor(merge_jobs.size(), num_threads, [&](std::size_t idx, int) {
+            const auto &job = merge_jobs[idx];
+            {
+                std::lock_guard<std::mutex> lk(io_mtx);
+                std::cout << "Merging " << job.inputs.size() << " ROOT files -> " << job.output << "\n";
+            }
 
-                    const auto &job = merge_jobs[idx];
-                    {
-                        std::lock_guard<std::mutex> lk(io_mtx);
-                        std::cout << "Merging " << job.inputs.size() << " ROOT files -> " << job.output << "\n";
-                    }
+            std::vector<std::string> args{"hadd", "-f", job.output};
+            args.insert(args.end(), job.inputs.begin(), job.inputs.end());
+            const int rc = RunCommand(args);
+            if (rc != 0) {
+                std::lock_guard<std::mutex> lk(io_mtx);
+                std::cerr << "  hadd failed with code " << rc << " for " << job.output << "\n";
+                errors++;
+                return;
+            }
 
-                    int rc = runHadd(job.output, job.inputs);
-                    if (rc != 0) {
-                        std::lock_guard<std::mutex> lk(io_mtx);
-                        std::cerr << "  hadd failed with code " << rc << " for " << job.output << "\n";
-                        errors++;
-                        continue;
-                    }
-
-                    for (const auto &remove_files : job.inputs) {
-                        std::error_code ec;
-                        if (!std::filesystem::remove(remove_files, ec) || ec) {
-                            std::lock_guard<std::mutex> lk(io_mtx);
-                            std::cerr << "  failed to remove merged input " << remove_files;
-                            if (ec)
-                                std::cerr << ": " << ec.message();
-                            std::cerr << "\n";
-                            errors++;
-                        }
-                    }
+            for (const auto &remove_files : job.inputs) {
+                std::error_code ec;
+                if (!std::filesystem::remove(remove_files, ec) || ec) {
+                    std::lock_guard<std::mutex> lk(io_mtx);
+                    std::cerr << "  failed to remove merged input " << remove_files;
+                    if (ec)
+                        std::cerr << ": " << ec.message();
+                    std::cerr << "\n";
+                    errors++;
                 }
-            });
-        }
-        for (auto &t : merge_threads)
-            t.join();
+            }
+        });
     }
 
     return errors > 0 ? 1 : 0;

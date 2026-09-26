@@ -12,12 +12,14 @@ Usage
 -----
     python hycal_pedestal_monitor.py            # view existing data
     python hycal_pedestal_monitor.py --sim       # test with simulated data
+
+Options: --modules-db FILE and --daq-map FILE (default
+database/hycal_map.json), --theme THEME.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import random
 import re
 import subprocess
@@ -35,25 +37,19 @@ from PyQt6.QtCore import Qt, QRectF, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
 
 from hycal_geoview import (
-    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
-    apply_theme_palette, set_theme, available_themes, THEME,
+    Module, load_modules, load_daq_map, place_aux_row, HyCalMapWidget,
+    AUX_TYPES, NUM_CRATES, CRATE_NAMES, CHANNELS_PER_SLOT,
+    apply_theme_palette, make_info_label, set_theme, available_themes, THEME,
 )
 
 
-# ===========================================================================
-#  Paths & constants
-# ===========================================================================
+# ---- Paths & constants -----------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_map.json"
-DAQ_MAP_JSON = DB_DIR / "hycal_map.json"
 PEDESTALS_DIR = SCRIPT_DIR / ".." / "pedestals"
 ORIGINAL_PED_DIR = Path("/usr/clas12/release/2.0.0/parms/fadc250/peds")
-
-NUM_CRATES = 7
-CRATE_NAMES = [f"adchycal{i}" for i in range(1, NUM_CRATES + 1)]
-CHANNELS_PER_SLOT = 16
 
 # Display ranges for the maps  (adjust as needed)
 DISPLAY_PED_MIN = 50.0
@@ -72,54 +68,13 @@ THRESH_HIGH_RMS = 1.5       # rms above this -> HIGH RMS
 THRESH_DRIFT = 3.0          # |current - configured| above this -> DRIFT
 
 # LMS / V module positions below HyCal  (name -> centre-x)
-_BOTTOM_Y = -640.0
-_BOTTOM_SZ = 50.0
-_LMS_V_XPOS = {
+_AUX_ROW_X = {
     "LMS1": -170.0, "LMS2": -115.0, "LMS3": -60.0,
     "V1": 5.0, "V2": 60.0, "V3": 115.0, "V4": 170.0,
 }
 
 
-# ===========================================================================
-#  Data loading helpers
-# ===========================================================================
-
-def prepare_modules(modules: List[Module]) -> List[Module]:
-    """Reposition LMS1-3 below HyCal and add V1-V4."""
-    result: List[Module] = []
-    for m in modules:
-        if m.name in _LMS_V_XPOS:
-            result.append(Module(m.name, m.mod_type,
-                                 _LMS_V_XPOS[m.name], _BOTTOM_Y,
-                                 _BOTTOM_SZ, _BOTTOM_SZ))
-        else:
-            result.append(m)
-    for name in ("V1", "V2", "V3", "V4"):
-        result.append(Module(name, "Veto",
-                             _LMS_V_XPOS[name], _BOTTOM_Y,
-                             _BOTTOM_SZ, _BOTTOM_SZ))
-    return result
-
-
-def load_daq_map(path: Path) -> Dict[Tuple[int, int, int], str]:
-    """(crate_index, slot, channel) -> module_name from hycal_map.json.
-
-    Records without a ``daq`` block (boosters, PRad-1 V1-V4) are skipped.
-    """
-    with open(path) as f:
-        data = json.load(f)
-    out: Dict[Tuple[int, int, int], str] = {}
-    for e in data:
-        d = e.get("daq")
-        if not d:
-            continue
-        out[(d["crate"], d["slot"], d["channel"])] = e["n"]
-    return out
-
-
-# ===========================================================================
-#  Pedestal .cnf parser  (means only -- RMS is NOT in saved files)
-# ===========================================================================
+# ---- Pedestal .cnf parser (means only) -------------------------------------
 
 def parse_pedestal_file(filepath: Path) -> Dict[int, List[float]]:
     """Return  slot_number -> [16 pedestal means]."""
@@ -181,9 +136,7 @@ def read_all_pedestals(
     return result
 
 
-# ===========================================================================
-#  Parse faV3peds stdout for per-channel RMS
-# ===========================================================================
+# ---- Parse faV3peds stdout for per-channel RMS -----------------------------
 
 _PED_RE = re.compile(
     r"faV3MeasureChannelPedestal:\s*slot\s*(\d+),\s*chan\s*(\d+)\s*=>\s*"
@@ -208,9 +161,7 @@ def parse_measurement_stdout(
     return result
 
 
-# ===========================================================================
-#  Irregular channel detection
-# ===========================================================================
+# ---- Irregular channel detection -------------------------------------------
 
 def find_irregular_channels(
     measured: Dict[str, dict],
@@ -249,9 +200,7 @@ def find_irregular_channels(
     return issues
 
 
-# ===========================================================================
-#  Colour helpers
-# ===========================================================================
+# ---- Time helpers ----------------------------------------------------------
 
 def _time_ago(epoch: float) -> str:
     """Format seconds-since-epoch as a human-readable 'X ago' string."""
@@ -284,12 +233,7 @@ def _ped_mtime(ped_dir: Path, suffix: str) -> Optional[float]:
     return newest
 
 
-# ===========================================================================
-#  HyCal map widget
-# ===========================================================================
-
-_LABEL_NAMES = {"LMS1", "LMS2", "LMS3", "V1", "V2", "V3", "V4"}
-
+# ---- HyCal map widget ------------------------------------------------------
 
 class PedestalMapWidget(HyCalMapWidget):
     """HyCal map with a centred title and labelled LMS/V modules."""
@@ -297,7 +241,8 @@ class PedestalMapWidget(HyCalMapWidget):
     CB_MAX_WIDTH = 300
 
     def __init__(self, parent=None):
-        super().__init__(parent, include_lms=True, margin_top=30)
+        super().__init__(parent, include_lms=True, margin_top=30,
+                         label_types=AUX_TYPES)
         self._title = ""
 
     def set_data(self, modules: List[Module], values: Dict[str, float],
@@ -312,9 +257,6 @@ class PedestalMapWidget(HyCalMapWidget):
     def _fmt_value(self, v: float) -> str:
         return f"{v:.1f}"
 
-    def _colorbar_center_text(self) -> str:
-        return PALETTE_NAMES[self._palette_idx]   # no [log] flag
-
     def _paint_before_modules(self, p, w: int, h: int):
         if self._title:
             p.setPen(QColor(THEME.TEXT))
@@ -323,33 +265,15 @@ class PedestalMapWidget(HyCalMapWidget):
                        Qt.AlignmentFlag.AlignCenter, self._title)
 
     def _paint_empty(self, p, w: int, h: int):
-        # title-only state (pre-data load)
-        if self._title:
-            p.setPen(QColor(THEME.TEXT))
-            p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-            p.drawText(QRectF(0, 4, w, 24),
-                       Qt.AlignmentFlag.AlignCenter, self._title)
+        self._paint_before_modules(p, w, h)
         if not self._values:
             p.setPen(QColor(THEME.TEXT_MUTED))
             p.setFont(QFont("Monospace", 12))
             p.drawText(QRectF(0, 0, w, h),
                        Qt.AlignmentFlag.AlignCenter, "No data")
 
-    def _paint_overlays(self, p, w: int, h: int):
-        # LMS / V labels
-        p.setPen(QColor(THEME.TEXT))
-        p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
-        for name in _LABEL_NAMES:
-            r = self._rects.get(name)
-            if r is not None:
-                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
-        # hover highlight (from base)
-        super()._paint_overlays(p, w, h)
 
-
-# ===========================================================================
-#  Measurement thread
-# ===========================================================================
+# ---- Measurement thread ----------------------------------------------------
 
 class MeasureThread(QThread):
     progress = pyqtSignal(int, str)
@@ -373,9 +297,7 @@ class MeasureThread(QThread):
                 self.crate_error.emit(i, f"{cname}: {e}")
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ---- Main window -----------------------------------------------------------
 
 class PedestalMonitorWindow(QMainWindow):
 
@@ -386,8 +308,6 @@ class PedestalMonitorWindow(QMainWindow):
         self._modules = modules
         self._daq_map = daq_map
         self._sim = sim
-        self._palette_idx_left = 0
-        self._palette_idx_right = 0
         self._right_mode = "delta"   # "delta" or "rms"
 
         self._configured: Dict[str, float] = {}
@@ -437,8 +357,8 @@ class PedestalMonitorWindow(QMainWindow):
         self._map_right = PedestalMapWidget()
         self._map_left.moduleHovered.connect(self._on_hover)
         self._map_right.moduleHovered.connect(self._on_hover)
-        self._map_left.paletteClicked.connect(self._cycle_palette_left)
-        self._map_right.paletteClicked.connect(self._cycle_palette_right)
+        self._map_left.paletteClicked.connect(self._map_left.cycle_palette)
+        self._map_right.paletteClicked.connect(self._map_right.cycle_palette)
         ml.addWidget(self._map_left)
         ml.addWidget(self._map_right)
         root.addWidget(maps, stretch=1)
@@ -476,13 +396,7 @@ class PedestalMonitorWindow(QMainWindow):
         root.addLayout(rng)
 
         # -- info bar --
-        self._info = QLabel("Hover over a module for details")
-        self._info.setFont(QFont("Monospace", 11))
-        self._info.setStyleSheet(
-            f"QLabel{{background:{THEME.PANEL};color:{THEME.TEXT};"
-            f"padding:4px 8px;border:1px solid {THEME.BORDER};"
-            f"border-radius:8px;}}")
-        self._info.setFixedHeight(28)
+        self._info = make_info_label("Hover over a module for details")
         root.addWidget(self._info)
 
         # -- status bar (prominent, for measurement progress) --
@@ -504,10 +418,6 @@ class PedestalMonitorWindow(QMainWindow):
         root.addWidget(self._report)
 
     def _set_status_style(self, mode: str):
-        # Status rows use a translucent variant of the semantic colour as
-        # background to stay within the active theme. Qt's QSS supports
-        # rgba(...) directly, but keeping the fill solid via a near-black
-        # tint is simpler and theme-neutral: reuse PANEL as the base.
         if mode == "measuring":
             bg, fg = THEME.PANEL, THEME.WARN
             border = f"2px solid {THEME.WARN}"
@@ -554,16 +464,6 @@ class PedestalMonitorWindow(QMainWindow):
         e.returnPressed.connect(self._apply_ranges)
         return e
 
-    # ---- palette cycling (independent per map) ----
-
-    def _cycle_palette_left(self):
-        self._palette_idx_left = (self._palette_idx_left + 1) % len(PALETTES)
-        self._map_left.set_palette(self._palette_idx_left)
-
-    def _cycle_palette_right(self):
-        self._palette_idx_right = (self._palette_idx_right + 1) % len(PALETTES)
-        self._map_right.set_palette(self._palette_idx_right)
-
     # ---- right panel mode toggle ----
 
     def _toggle_right_mode(self):
@@ -604,34 +504,33 @@ class PedestalMonitorWindow(QMainWindow):
         if self._sim:
             self._load_sim_data()
             return
-        if ORIGINAL_PED_DIR.exists():
-            self._configured = read_all_pedestals(
-                ORIGINAL_PED_DIR, "_ped.cnf", self._daq_map)
-        else:
-            self._configured = {}
-        if PEDESTALS_DIR.exists():
-            self._latest = read_all_pedestals(
-                PEDESTALS_DIR, "_latest.cnf", self._daq_map)
-        else:
-            self._latest = {}
-
-        # If configured files are newer than latest, latest is stale
-        mt_conf = _ped_mtime(ORIGINAL_PED_DIR, "_ped.cnf")
-        mt_latest = _ped_mtime(PEDESTALS_DIR, "_latest.cnf")
-        if mt_conf and mt_latest and mt_conf > mt_latest:
-            self._latest.clear()
+        self._configured = read_all_pedestals(
+            ORIGINAL_PED_DIR, "_ped.cnf", self._daq_map)
+        mt_latest = self._read_latest()
 
         n_o, n_l = len(self._configured), len(self._latest)
         age = ""
         if mt_latest is not None and self._latest:
             age = f"    (measured {_time_ago(mt_latest)})"
         elif mt_latest is not None and not self._latest:
-            age = f"    (latest stale -- configured files are newer)"
+            age = "    (latest stale -- configured files are newer)"
         self._status_lbl.setText(
             f"Loaded {n_o} configured, {n_l} latest channels{age}")
         self._set_status_style("idle")
         self._update_maps()
         self._update_report()
+
+    def _read_latest(self) -> Optional[float]:
+        """Load the *_latest.cnf pedestals into ``self._latest``; return
+        their newest mtime."""
+        self._latest = read_all_pedestals(
+            PEDESTALS_DIR, "_latest.cnf", self._daq_map)
+        mt_conf = _ped_mtime(ORIGINAL_PED_DIR, "_ped.cnf")
+        mt_latest = _ped_mtime(PEDESTALS_DIR, "_latest.cnf")
+        # If configured files are newer than latest, latest is stale
+        if mt_conf and mt_latest and mt_conf > mt_latest:
+            self._latest.clear()
+        return mt_latest
 
     def _load_sim_data(self):
         rng = random.Random(42)
@@ -681,7 +580,6 @@ class PedestalMonitorWindow(QMainWindow):
         self._map_left.set_data(
             self._modules, cur, f"{label} Pedestal Mean",
             DISPLAY_PED_MIN, DISPLAY_PED_MAX)
-        self._map_left.set_palette(self._palette_idx_left)
 
         self._update_right_map()
 
@@ -713,7 +611,6 @@ class PedestalMonitorWindow(QMainWindow):
                     self._modules, {},
                     "Mean Difference (no comparison data)",
                     DISPLAY_DELTA_MIN, DISPLAY_DELTA_MAX)
-        self._map_right.set_palette(self._palette_idx_right)
 
     def _update_report(self):
         lines: List[str] = []
@@ -834,9 +731,7 @@ class PedestalMonitorWindow(QMainWindow):
         self._reload_btn.setEnabled(True)
         self._measure_btn.setText("Measure Pedestals")
 
-        if PEDESTALS_DIR.exists():
-            self._latest = read_all_pedestals(
-                PEDESTALS_DIR, "_latest.cnf", self._daq_map)
+        self._read_latest()
 
         n = len(self._measured)
         self._status_lbl.setText(
@@ -847,23 +742,21 @@ class PedestalMonitorWindow(QMainWindow):
         self._update_report()
 
 
-# ===========================================================================
-#  Main
-# ===========================================================================
+# ---- Main ------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="HyCal Pedestal Monitor")
     ap.add_argument("--sim", action="store_true",
                     help="Use simulated data for testing")
     ap.add_argument("--modules-db", type=Path, default=MODULES_JSON)
-    ap.add_argument("--daq-map", type=Path, default=DAQ_MAP_JSON)
+    ap.add_argument("--daq-map", type=Path, default=MODULES_JSON)
     ap.add_argument("--theme", choices=available_themes(), default="dark",
                     help="Colour theme (default: dark)")
     args = ap.parse_args()
 
     set_theme(args.theme)
 
-    modules = prepare_modules(load_modules(args.modules_db))
+    modules = place_aux_row(load_modules(args.modules_db), _AUX_ROW_X)
     daq_map = load_daq_map(args.daq_map)
 
     app = QApplication(sys.argv)

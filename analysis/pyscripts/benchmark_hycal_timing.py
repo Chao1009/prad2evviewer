@@ -33,13 +33,13 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-import time
+from dataclasses import dataclass, field
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 import _common as C
-from prad2py import dec, det  # noqa: E402
+from prad2py import det
 
 try:
     from scipy.optimize import curve_fit
@@ -234,6 +234,45 @@ def fit_peak(values, e_lo, e_hi, bin_width):
         return nan, nan, nan, int(y.sum()), edges, counts
 
 
+def sigma_over_e(s, m):
+    """s / m, NaN unless m is a positive number."""
+    return s / m if (m and m > 0 and not math.isnan(m)) else float('nan')
+
+
+@dataclass
+class PathResult:
+    """One clustering path: its clusterer, selected events and fit results."""
+    key:   str                  # TSV row name
+    label: str                  # calibrated-plot panel title
+    color: str
+    cl:    object               # det.HyCalCluster
+    energies: list = field(default_factory=list)
+    # (seed_id, x, y, row, col, seed_E, cluster_E) — only with --calibrate
+    events:   list = field(default_factory=list)
+    # fit_peak() on the single-cluster spectrum
+    mu:     float = float('nan')
+    sig:    float = float('nan')
+    A:      float = float('nan')
+    nf:     int   = 0
+    counts: object = None
+    # --calibrate: inner-ring sample before / after the per-module gains
+    n_modules:   int   = 0
+    n_inner:     int   = 0
+    mu_pre:      float = float('nan')
+    sig_pre:     float = float('nan')
+    counts_pre:  object = None
+    mu_post:     float = float('nan')
+    sig_post:    float = float('nan')
+    counts_post: object = None
+    mu_cb:       float = float('nan')
+    sig_cb:      float = float('nan')
+    alpha_cb:    float = float('nan')
+    n_cb:        float = float('nan')
+    A_cb:        float = float('nan')
+    sigE_g:      float = float('nan')
+    sigE_cb:     float = float('nan')
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -288,17 +327,7 @@ def main(argv=None):
                          "argmax for low-statistics modules.")
     args = ap.parse_args(argv)
 
-    p = C.setup_pipeline(
-        evio_path     = args.evio_path,
-        max_events    = args.max_events,
-        run_num       = args.run_num,
-        gem_ped_file  = args.gem_ped_file,
-        gem_cm_file   = args.gem_cm_file,
-        hc_calib_file = args.hc_calib_file,
-        daq_config    = args.daq_config,
-        gem_map_file  = args.gem_map_file,
-        hc_map_file   = args.hc_map_file,
-    )
+    p = C.setup_pipeline_from_args(args)
     pre_lo, pre_hi = args.pre_window
     W = args.window
     print(f"[setup] pre-window  : [{pre_lo}, {pre_hi}] ns", flush=True)
@@ -318,149 +347,59 @@ def main(argv=None):
         cl = det.HyCalCluster(p.hycal)
         cl.set_config(cfg)
         return cl
-    cl_legacy = _make_cluster(-1.0)
-    cl_new    = _make_cluster(W)
+    legacy = PathResult('legacy', 'legacy', '#888', _make_cluster(-1.0))
+    gated  = PathResult('new', f'new (W={W:g} ns)', '#1f77b4', _make_cluster(W))
+    paths  = (legacy, gated)
 
-    # Bulk: single-cluster energies for the bulk Gaussian fit.
-    # Per-event: (seed_id, x, y, row, col, seed_E, cluster_E) — populated
-    # only when --calibrate is set, so the memory cost is opt-in.
-    energies_legacy, energies_new = [], []
-    events_legacy,   events_new   = [], []
-    n_legacy = n_new = n_phys = n_kept = n_read = n_files_open = 0
+    stats = C.LoopStats()
+    def _progress(st):
+        rate = st.n_phys / max(st.elapsed, 1e-3)
+        print(f"[progress] {st.n_phys} physics  legacy={len(legacy.energies)} "
+              f"new={len(gated.energies)}  ({rate:.1f} ev/s)", flush=True)
+    for fadc_evt, _ in C.iter_physics_events(
+            p, stats, with_ssp=False, max_events=args.max_events,
+            accept=lambda b: b == C.PHYSICS_TRIGGER_BITS, progress=_progress):
+        legacy.cl.clear()
+        gated.cl.clear()
 
-    ch = dec.EvChannel()
-    ch.set_config(p.cfg)
+        # One waveform pass; both clusterers consume the same peaks.
+        for mod, peaks in C.iter_hycal_peaks(p, fadc_evt, (pre_lo, pre_hi)):
+            C.add_hycal_peaks(gated.cl, mod, peaks, True)
+            C.add_hycal_peaks(legacy.cl, mod, peaks, False)
 
-    t0 = time.monotonic()
-    try:
-        for fpath in p.evio_files:
-            if ch.open_auto(fpath) != dec.Status.success:
-                print(f"[WARN] skip (cannot open): {fpath}", flush=True)
+        for r in paths:
+            r.cl.form_clusters()
+            # reconstruct_matched gives us seed energy + center
+            # module without a second lookup; needed only by the
+            # --calibrate branch but cheap enough to use always.
+            big = [m for m in r.cl.reconstruct_matched()
+                   if m.hit.energy > args.signal_min]
+            if len(big) != 1:
                 continue
-            n_files_open += 1
-            print(f"[file {n_files_open}/{len(p.evio_files)}] {fpath}",
-                  flush=True)
-
-            done = False
-            while ch.read() == dec.Status.success:
-                n_read += 1
-                if not ch.scan():
-                    continue
-                if ch.get_event_type() != dec.EventType.Physics:
-                    continue
-
-                for i in range(ch.get_n_events()):
-                    decoded = ch.decode_event(i, with_ssp=False)
-                    if not decoded["ok"]:
-                        continue
-                    n_phys += 1
-                    fadc_evt = decoded["event"]
-                    if fadc_evt.info.trigger_bits != C.PHYSICS_TRIGGER_BITS:
-                        if args.max_events > 0 and n_phys >= args.max_events:
-                            done = True; break
-                        continue
-                    n_kept += 1
-
-                    cl_legacy.clear()
-                    cl_new.clear()
-
-                    # One waveform pass; both clusterers consume the same peaks.
-                    for ri in range(fadc_evt.nrocs):
-                        roc = fadc_evt.roc(ri)
-                        if not roc.present:
-                            continue
-                        crate = p.crate_map.get(roc.tag)
-                        if crate is None:
-                            continue
-                        for s in roc.present_slots():
-                            slot = roc.slot(s)
-                            for c in slot.present_channels():
-                                mod = p.hycal.module_by_daq(crate, s, c)
-                                if mod is None or not mod.is_hycal():
-                                    continue
-                                cd = slot.channel(c)
-                                if cd.nsamples <= 0:
-                                    continue
-                                _, _, peaks = p.wave_ana.analyze(cd.samples)
-
-                                best_int  = -1.0
-                                best_pk   = None
-                                for pk in peaks:
-                                    if pk.time <= pre_lo or pk.time >= pre_hi:
-                                        continue
-                                    cl_new.add_hit(mod.index,
-                                                   mod.energize(pk.integral),
-                                                   float(pk.time))
-                                    if pk.integral > best_int:
-                                        best_int = pk.integral
-                                        best_pk  = pk
-                                if best_pk is not None:
-                                    cl_legacy.add_hit(mod.index,
-                                                      mod.energize(best_pk.integral),
-                                                      float(best_pk.time))
-
-                    cl_legacy.form_clusters()
-                    cl_new.form_clusters()
-                    # reconstruct_matched gives us seed energy + center
-                    # module without a second lookup; needed only by the
-                    # --calibrate branch but cheap enough to use always.
-                    rec_l = cl_legacy.reconstruct_matched()
-                    rec_n = cl_new.reconstruct_matched()
-                    big_l = [r for r in rec_l if r.hit.energy > args.signal_min]
-                    big_n = [r for r in rec_n if r.hit.energy > args.signal_min]
-                    if len(big_l) == 1:
-                        r = big_l[0]
-                        n_legacy += 1
-                        energies_legacy.append(r.hit.energy)
-                        if args.calibrate:
-                            sm = p.hycal.module_by_id(r.hit.center_id)
-                            events_legacy.append((r.hit.center_id, sm.x, sm.y,
-                                                  sm.row, sm.column,
-                                                  r.cluster.center.energy,
-                                                  r.hit.energy))
-                    if len(big_n) == 1:
-                        r = big_n[0]
-                        n_new += 1
-                        energies_new.append(r.hit.energy)
-                        if args.calibrate:
-                            sm = p.hycal.module_by_id(r.hit.center_id)
-                            events_new.append((r.hit.center_id, sm.x, sm.y,
-                                               sm.row, sm.column,
-                                               r.cluster.center.energy,
-                                               r.hit.energy))
-
-                    if args.max_events > 0 and n_phys >= args.max_events:
-                        done = True; break
-
-                if done:
-                    break
-                if n_phys > 0 and n_phys % 5000 == 0:
-                    elapsed = time.monotonic() - t0
-                    rate = n_phys / max(elapsed, 1e-3)
-                    print(f"[progress] {n_phys} physics  legacy={n_legacy} "
-                          f"new={n_new}  ({rate:.1f} ev/s)", flush=True)
-
-            ch.close()
-            if done:
-                break
-    finally:
-        elapsed = time.monotonic() - t0
+            m = big[0]
+            r.energies.append(m.hit.energy)
+            if args.calibrate:
+                sm = p.hycal.module_by_id(m.hit.center_id)
+                r.events.append((m.hit.center_id, sm.x, sm.y, sm.row, sm.column,
+                                 m.cluster.center.energy, m.hit.energy))
+    elapsed = stats.elapsed
+    n_legacy, n_new = len(legacy.energies), len(gated.energies)
 
     # ---- summary + Gaussian fits ------------------------------------------
     e_lo, e_hi = args.e_range
-    mu_l, sig_l, A_l, nf_l, edges, counts_l = fit_peak(
-        energies_legacy, e_lo, e_hi, args.bin_width)
-    mu_n, sig_n, A_n, nf_n, _,     counts_n = fit_peak(
-        energies_new,    e_lo, e_hi, args.bin_width)
+    for r in paths:
+        r.mu, r.sig, r.A, r.nf, edges, r.counts = fit_peak(
+            r.energies, e_lo, e_hi, args.bin_width)
     centres = 0.5 * (edges[:-1] + edges[1:])
 
-    rate = n_phys / max(elapsed, 1e-3)
+    rate = stats.n_phys / max(elapsed, 1e-3)
     print()
     print("=" * 72)
     print("benchmark_hycal_timing — legacy vs. seed-time-gated clustering")
     print("=" * 72)
-    print(f"  files {n_files_open}/{len(p.evio_files)},  "
-          f"records {n_read},  physics {n_phys},  triggered {n_kept}")
+    print(f"  files {stats.n_files_open}/{len(p.evio_files)},  "
+          f"records {stats.n_read},  physics {stats.n_phys},  "
+          f"triggered {stats.n_kept}")
     print(f"  elapsed {elapsed:.1f} s  ({rate:.1f} ev/s)")
     print(f"  selection: single cluster E > {args.signal_min:.0f} MeV")
     print()
@@ -468,14 +407,13 @@ def main(argv=None):
     print(f"  events kept  | {n_legacy:>13d} | {n_new:>13d}    "
           f"({(n_new-n_legacy)/max(n_legacy,1)*100:+.1f} % vs. legacy)")
     if HAVE_SCIPY:
-        print(f"  Gauss μ (MeV)| {mu_l:>13.1f} | {mu_n:>13.1f}")
-        print(f"  Gauss σ (MeV)| {sig_l:>13.1f} | {sig_n:>13.1f}")
-        print(f"  N in fit win | {nf_l:>13d} | {nf_n:>13d}")
+        print(f"  Gauss μ (MeV)| {legacy.mu:>13.1f} | {gated.mu:>13.1f}")
+        print(f"  Gauss σ (MeV)| {legacy.sig:>13.1f} | {gated.sig:>13.1f}")
+        print(f"  N in fit win | {legacy.nf:>13d} | {gated.nf:>13d}")
     else:
         print("  (scipy not available — fit skipped)")
 
     # ---- Optional: per-seed-module calibration on the inner ring ----------
-    cal = None
     if args.calibrate:
         print()
         print(f"  --calibrate mode  : target μ = {args.target_peak:.1f} MeV, "
@@ -488,68 +426,43 @@ def main(argv=None):
             print(f"                      exclude rows {excl[0]}..{excl[1]} "
                   f"AND cols {excl[2]}..{excl[3]}")
         print(f"                      per-module reference: {args.cal_method}")
-        gains_l, raw_l, corr_l, nmod_l = fit_per_module_gains(
-            events_legacy,
-            target_peak=args.target_peak, inner_r=args.inner_radius,
-            min_seed_E=args.min_seed_energy, min_per_mod=args.min_per_module,
-            exclude_rowcol=excl, method=args.cal_method,
-            bin_width=args.bin_width)
-        gains_n, raw_n, corr_n, nmod_n = fit_per_module_gains(
-            events_new,
-            target_peak=args.target_peak, inner_r=args.inner_radius,
-            min_seed_E=args.min_seed_energy, min_per_mod=args.min_per_module,
-            exclude_rowcol=excl, method=args.cal_method,
-            bin_width=args.bin_width)
 
         # Fit window wider than the post-cal peak so a poorly-calibrated
         # pre-cal histogram still falls inside.
         cal_lo, cal_hi = args.target_peak - 800, args.target_peak + 800
         bw = args.bin_width
-        mu_l_pre,  sig_l_pre,  _, _, _,         counts_l_pre  = fit_peak(raw_l,  cal_lo, cal_hi, bw)
-        mu_n_pre,  sig_n_pre,  _, _, _,         counts_n_pre  = fit_peak(raw_n,  cal_lo, cal_hi, bw)
-        mu_l_post, sig_l_post, _, _, edges_cal, counts_l_post = fit_peak(corr_l, cal_lo, cal_hi, bw)
-        mu_n_post, sig_n_post, _, _, _,         counts_n_post = fit_peak(corr_n, cal_lo, cal_hi, bw)
+        for r in paths:
+            _, raw, corr, r.n_modules = fit_per_module_gains(
+                r.events,
+                target_peak=args.target_peak, inner_r=args.inner_radius,
+                min_seed_E=args.min_seed_energy, min_per_mod=args.min_per_module,
+                exclude_rowcol=excl, method=args.cal_method,
+                bin_width=args.bin_width)
+            r.n_inner = len(raw)
+            r.mu_pre,  r.sig_pre,  _, _, _,         r.counts_pre  = fit_peak(raw,  cal_lo, cal_hi, bw)
+            r.mu_post, r.sig_post, _, _, edges_cal, r.counts_post = fit_peak(corr, cal_lo, cal_hi, bw)
+            r.mu_cb, r.sig_cb, r.alpha_cb, r.n_cb, r.A_cb, *_ = fit_peak_cb(
+                corr, cal_lo, cal_hi, bw, mu0_hint=r.mu_post)
+            r.sigE_g  = sigma_over_e(r.sig_post, r.mu_post)
+            r.sigE_cb = sigma_over_e(r.sig_cb, r.mu_cb)
         cal_centres = 0.5 * (edges_cal[:-1] + edges_cal[1:])
 
-        cb_l = fit_peak_cb(corr_l, cal_lo, cal_hi, bw, mu0_hint=mu_l_post)
-        cb_n = fit_peak_cb(corr_n, cal_lo, cal_hi, bw, mu0_hint=mu_n_post)
-        mu_cb_l, sig_cb_l, alpha_l, n_l, A_cb_l, *_ = cb_l
-        mu_cb_n, sig_cb_n, alpha_n, n_n, A_cb_n, *_ = cb_n
-
-        def _ratio(s, m):
-            return s / m if (m and m > 0 and not math.isnan(m)) else float('nan')
-
-        cal = dict(
-            n_modules_l=nmod_l, n_modules_n=nmod_n,
-            n_events_l=len(raw_l), n_events_n=len(raw_n),
-            mu_l_pre=mu_l_pre, sig_l_pre=sig_l_pre,
-            mu_n_pre=mu_n_pre, sig_n_pre=sig_n_pre,
-            mu_l_post=mu_l_post, sig_l_post=sig_l_post,
-            mu_n_post=mu_n_post, sig_n_post=sig_n_post,
-            mu_cb_l=mu_cb_l, sig_cb_l=sig_cb_l, alpha_l=alpha_l, n_l=n_l, A_cb_l=A_cb_l,
-            mu_cb_n=mu_cb_n, sig_cb_n=sig_cb_n, alpha_n=alpha_n, n_n=n_n, A_cb_n=A_cb_n,
-            edges=edges_cal, centres=cal_centres,
-            counts_l_pre=counts_l_pre, counts_n_pre=counts_n_pre,
-            counts_l_post=counts_l_post, counts_n_post=counts_n_post,
-        )
-
-        sigE_l_g, sigE_n_g  = _ratio(sig_l_post, mu_l_post), _ratio(sig_n_post, mu_n_post)
-        sigE_l_cb, sigE_n_cb = _ratio(sig_cb_l, mu_cb_l),    _ratio(sig_cb_n, mu_cb_n)
         print()
         print(f"                  | legacy        | gated (W={W:g} ns)")
-        print(f"  inner events    | {len(raw_l):>13d} | {len(raw_n):>13d}")
-        print(f"  modules used    | {nmod_l:>13d} | {nmod_n:>13d}")
-        print(f"  μ before  (MeV) | {mu_l_pre:>13.1f} | {mu_n_pre:>13.1f}")
-        print(f"  σ before  (MeV) | {sig_l_pre:>13.1f} | {sig_n_pre:>13.1f}")
-        print(f"  μ  after  (MeV) | {mu_l_post:>13.1f} | {mu_n_post:>13.1f}  "
+        print(f"  inner events    | {legacy.n_inner:>13d} | {gated.n_inner:>13d}")
+        print(f"  modules used    | {legacy.n_modules:>13d} | {gated.n_modules:>13d}")
+        print(f"  μ before  (MeV) | {legacy.mu_pre:>13.1f} | {gated.mu_pre:>13.1f}")
+        print(f"  σ before  (MeV) | {legacy.sig_pre:>13.1f} | {gated.sig_pre:>13.1f}")
+        print(f"  μ  after  (MeV) | {legacy.mu_post:>13.1f} | {gated.mu_post:>13.1f}  "
               f"(target {args.target_peak:.1f})")
-        print(f"  σ  Gaussian     | {sig_l_post:>13.1f} | {sig_n_post:>13.1f}")
-        print(f"  σ_E / E (G)     | {sigE_l_g*100:>12.2f}% | {sigE_n_g*100:>12.2f}%")
-        print(f"  μ  Crystal Ball | {mu_cb_l:>13.1f} | {mu_cb_n:>13.1f}")
-        print(f"  σ  Crystal Ball | {sig_cb_l:>13.1f} | {sig_cb_n:>13.1f}  "
-              f"(α_l={alpha_l:.2f} n_l={n_l:.1f}  α_n={alpha_n:.2f} n_n={n_n:.1f})")
-        print(f"  σ_E / E (CB)    | {sigE_l_cb*100:>12.2f}% | {sigE_n_cb*100:>12.2f}%  "
-              f"(Δ = {(sigE_n_cb - sigE_l_cb)*100:+.2f} pp)")
+        print(f"  σ  Gaussian     | {legacy.sig_post:>13.1f} | {gated.sig_post:>13.1f}")
+        print(f"  σ_E / E (G)     | {legacy.sigE_g*100:>12.2f}% | {gated.sigE_g*100:>12.2f}%")
+        print(f"  μ  Crystal Ball | {legacy.mu_cb:>13.1f} | {gated.mu_cb:>13.1f}")
+        print(f"  σ  Crystal Ball | {legacy.sig_cb:>13.1f} | {gated.sig_cb:>13.1f}  "
+              f"(α_l={legacy.alpha_cb:.2f} n_l={legacy.n_cb:.1f}  "
+              f"α_n={gated.alpha_cb:.2f} n_n={gated.n_cb:.1f})")
+        print(f"  σ_E / E (CB)    | {legacy.sigE_cb*100:>12.2f}% | {gated.sigE_cb*100:>12.2f}%  "
+              f"(Δ = {(gated.sigE_cb - legacy.sigE_cb)*100:+.2f} pp)")
 
     # ---- TSV output --------------------------------------------------------
     tsv_path = args.out_path if args.out_path.endswith('.tsv') \
@@ -559,17 +472,17 @@ def main(argv=None):
         f.write(f"# evio_path={args.evio_path} max_events={args.max_events}\n")
         f.write(f"# pre_window=[{pre_lo},{pre_hi}] ns  seed_time_window={W} ns\n")
         f.write(f"# selection: single cluster E > {args.signal_min} MeV\n")
-        f.write(f"# n_phys={n_phys} n_kept={n_kept} elapsed_s={elapsed:.1f}\n")
+        f.write(f"# n_phys={stats.n_phys} n_kept={stats.n_kept} elapsed_s={elapsed:.1f}\n")
         f.write("\n")
         f.write("path\tn_events\tgauss_mu_MeV\tgauss_sigma_MeV\tn_in_fit\n")
-        f.write(f"legacy\t{n_legacy}\t{mu_l:.2f}\t{sig_l:.2f}\t{nf_l}\n")
-        f.write(f"new\t{n_new}\t{mu_n:.2f}\t{sig_n:.2f}\t{nf_n}\n")
+        for r in paths:
+            f.write(f"{r.key}\t{len(r.energies)}\t{r.mu:.2f}\t{r.sig:.2f}\t{r.nf}\n")
         f.write("\n")
         f.write("# energy histogram bin centres (MeV) and counts\n")
         f.write("e_centre\tcount_legacy\tcount_new\n")
-        for c, l, n in zip(centres, counts_l, counts_n):
+        for c, l, n in zip(centres, legacy.counts, gated.counts):
             f.write(f"{c:.1f}\t{l}\t{n}\n")
-        if cal is not None:
+        if args.calibrate:
             f.write("\n")
             f.write(f"# --calibrate inner ring (r<{args.inner_radius:.0f} mm,"
                     f" seed E≥{args.min_seed_energy:.0f} MeV,"
@@ -579,30 +492,17 @@ def main(argv=None):
                     "\tmu_post_MeV\tsigma_post_MeV\tsigma_over_E_post"
                     "\tmu_cb_MeV\tsigma_cb_MeV\talpha_cb\tn_cb"
                     "\tsigma_over_E_cb\n")
-            for path, nmod, ne, mu_pre, sig_pre, mu_post, sig_post, \
-                mu_cb, sig_cb, a_cb, n_cb in [
-                ("legacy", cal['n_modules_l'], cal['n_events_l'],
-                 cal['mu_l_pre'], cal['sig_l_pre'],
-                 cal['mu_l_post'], cal['sig_l_post'],
-                 cal['mu_cb_l'], cal['sig_cb_l'], cal['alpha_l'], cal['n_l']),
-                ("new", cal['n_modules_n'], cal['n_events_n'],
-                 cal['mu_n_pre'], cal['sig_n_pre'],
-                 cal['mu_n_post'], cal['sig_n_post'],
-                 cal['mu_cb_n'], cal['sig_cb_n'], cal['alpha_n'], cal['n_n']),
-            ]:
-                ratio    = sig_post / mu_post if mu_post > 0 else float('nan')
-                ratio_cb = (sig_cb / mu_cb if (mu_cb and mu_cb > 0
-                                               and not math.isnan(mu_cb))
-                            else float('nan'))
-                f.write(f"{path}\t{nmod}\t{ne}\t{mu_pre:.2f}\t{sig_pre:.2f}"
-                        f"\t{mu_post:.2f}\t{sig_post:.2f}\t{ratio:.4f}"
-                        f"\t{mu_cb:.2f}\t{sig_cb:.2f}\t{a_cb:.3f}\t{n_cb:.3f}"
-                        f"\t{ratio_cb:.4f}\n")
+            for r in paths:
+                f.write(f"{r.key}\t{r.n_modules}\t{r.n_inner}"
+                        f"\t{r.mu_pre:.2f}\t{r.sig_pre:.2f}"
+                        f"\t{r.mu_post:.2f}\t{r.sig_post:.2f}\t{r.sigE_g:.4f}"
+                        f"\t{r.mu_cb:.2f}\t{r.sig_cb:.2f}\t{r.alpha_cb:.3f}\t{r.n_cb:.3f}"
+                        f"\t{r.sigE_cb:.4f}\n")
             f.write("\n# inner-ring histogram bin centres + counts (pre/post recal)\n")
             f.write("e_centre\tlegacy_pre\tlegacy_post\tnew_pre\tnew_post\n")
-            for c, lp, lq, np_, nq in zip(cal['centres'],
-                                          cal['counts_l_pre'], cal['counts_l_post'],
-                                          cal['counts_n_pre'], cal['counts_n_post']):
+            for c, lp, lq, np_, nq in zip(cal_centres,
+                                          legacy.counts_pre, legacy.counts_post,
+                                          gated.counts_pre, gated.counts_post):
                 f.write(f"{c:.1f}\t{lp}\t{lq}\t{np_}\t{nq}\n")
     print(f"\n  wrote: {tsv_path}")
 
@@ -610,21 +510,17 @@ def main(argv=None):
     png_path = args.out_path if args.out_path.endswith('.png') \
                else args.out_path + ".png"
     fig, ax = plt.subplots(figsize=(9, 6))
-    ax.step(centres, counts_l, where='mid', color='#888',
+    ax.step(centres, legacy.counts, where='mid', color=legacy.color,
             lw=1.5, label=f'legacy   N={n_legacy}')
-    ax.step(centres, counts_n, where='mid', color='#1f77b4',
+    ax.step(centres, gated.counts, where='mid', color=gated.color,
             lw=1.5, label=f'new W={W:g} ns   N={n_new}')
 
-    if HAVE_SCIPY and not math.isnan(mu_l):
-        x_fit = np.linspace(mu_l - 4 * sig_l, mu_l + 4 * sig_l, 200)
-        ax.plot(x_fit, gauss(x_fit, A_l, mu_l, sig_l),
-                color='#888', ls='--', lw=1.0,
-                label=f'   μ={mu_l:.0f} σ={sig_l:.0f} MeV')
-    if HAVE_SCIPY and not math.isnan(mu_n):
-        x_fit = np.linspace(mu_n - 4 * sig_n, mu_n + 4 * sig_n, 200)
-        ax.plot(x_fit, gauss(x_fit, A_n, mu_n, sig_n),
-                color='#1f77b4', ls='--', lw=1.0,
-                label=f'   μ={mu_n:.0f} σ={sig_n:.0f} MeV')
+    for r in paths:
+        if HAVE_SCIPY and not math.isnan(r.mu):
+            x_fit = np.linspace(r.mu - 4 * r.sig, r.mu + 4 * r.sig, 200)
+            ax.plot(x_fit, gauss(x_fit, r.A, r.mu, r.sig),
+                    color=r.color, ls='--', lw=1.0,
+                    label=f'   μ={r.mu:.0f} σ={r.sig:.0f} MeV')
 
     ax.axvline(args.signal_min, color='#d62728', lw=0.8, ls=':',
                label=f'cut E > {args.signal_min:.0f} MeV')
@@ -632,7 +528,7 @@ def main(argv=None):
     ax.set_ylabel('events / bin')
     ax.set_title(f"Single-cluster energy: legacy vs seed-time-gated\n"
                  f"run window [{pre_lo:.0f}, {pre_hi:.0f}] ns, "
-                 f"{n_phys} physics events, {n_kept} triggered")
+                 f"{stats.n_phys} physics events, {stats.n_kept} triggered")
     ax.grid(alpha=0.3)
     ax.legend(loc='upper right', fontsize=9)
     ax.set_xlim(e_lo, e_hi)
@@ -642,43 +538,28 @@ def main(argv=None):
     print(f"  wrote: {png_path}")
 
     # ---- Optional: calibration before/after plot --------------------------
-    if cal is not None:
+    if args.calibrate:
         cal_png = png_path[:-4] + "_calibrated.png"
         fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
 
-        for ax, label, c_pre, c_post, mu_pre, sig_pre, mu_post, sig_post, \
-            mu_cb, sig_cb, alpha_cb, n_cb, A_cb, base_col in [
-            (axes[0], 'legacy',
-             cal['counts_l_pre'], cal['counts_l_post'],
-             cal['mu_l_pre'], cal['sig_l_pre'],
-             cal['mu_l_post'], cal['sig_l_post'],
-             cal['mu_cb_l'], cal['sig_cb_l'], cal['alpha_l'],
-             cal['n_l'], cal['A_cb_l'], '#888'),
-            (axes[1], f'new (W={W:g} ns)',
-             cal['counts_n_pre'], cal['counts_n_post'],
-             cal['mu_n_pre'], cal['sig_n_pre'],
-             cal['mu_n_post'], cal['sig_n_post'],
-             cal['mu_cb_n'], cal['sig_cb_n'], cal['alpha_n'],
-             cal['n_n'], cal['A_cb_n'], '#1f77b4'),
-        ]:
-            ax.step(cal['centres'], c_pre, where='mid', color=base_col,
+        for ax, r in zip(axes, paths):
+            ax.step(cal_centres, r.counts_pre, where='mid', color=r.color,
                     alpha=0.45, lw=1.3,
-                    label=f'pre   μ={mu_pre:.0f}  σ_G={sig_pre:.0f} MeV')
-            ax.step(cal['centres'], c_post, where='mid', color=base_col,
+                    label=f'pre   μ={r.mu_pre:.0f}  σ_G={r.sig_pre:.0f} MeV')
+            ax.step(cal_centres, r.counts_post, where='mid', color=r.color,
                     lw=1.8,
-                    label=f'post  μ={mu_post:.0f}  σ_G={sig_post:.0f} MeV')
-            # Crystal-ball curve overlay
-            if not math.isnan(mu_cb) and A_cb > 0:
-                xfine = np.linspace(mu_cb - 6 * sig_cb, mu_cb + 4 * sig_cb,
+                    label=f'post  μ={r.mu_post:.0f}  σ_G={r.sig_post:.0f} MeV')
+            if not math.isnan(r.mu_cb) and r.A_cb > 0:
+                xfine = np.linspace(r.mu_cb - 6 * r.sig_cb, r.mu_cb + 4 * r.sig_cb,
                                     400)
-                yfine = crystal_ball(xfine, A_cb, mu_cb, sig_cb,
-                                     alpha_cb, n_cb)
+                yfine = crystal_ball(xfine, r.A_cb, r.mu_cb, r.sig_cb,
+                                     r.alpha_cb, r.n_cb)
                 ax.plot(xfine, yfine, color='#d62728', lw=1.4,
-                        label=f'CB    μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  '
-                              f'(α={alpha_cb:.2f} n={n_cb:.1f})')
+                        label=f'CB    μ={r.mu_cb:.0f}  σ={r.sig_cb:.0f} MeV  '
+                              f'(α={r.alpha_cb:.2f} n={r.n_cb:.1f})')
             ax.axvline(args.target_peak, color='#444', ls=':', lw=0.8)
             ax.set_xlabel('cluster energy (MeV)')
-            ax.set_title(label)
+            ax.set_title(r.label)
             ax.grid(alpha=0.3)
             ax.legend(loc='upper right', fontsize=8.5)
         axes[0].set_ylabel('events / bin')
@@ -686,20 +567,15 @@ def main(argv=None):
                     f"{args.exclude_rowcol[1]}]×cols "
                     f"[{args.exclude_rowcol[2]},{args.exclude_rowcol[3]}]"
                     if args.exclude_rowcol else "")
-        sigEcb_l = (cal['sig_cb_l']/cal['mu_cb_l']*100
-                    if cal['mu_cb_l'] and not math.isnan(cal['mu_cb_l'])
-                    else float('nan'))
-        sigEcb_n = (cal['sig_cb_n']/cal['mu_cb_n']*100
-                    if cal['mu_cb_n'] and not math.isnan(cal['mu_cb_n'])
-                    else float('nan'))
         fig.suptitle(
             f"Inner-ring per-module gain refinement "
             f"(r < {args.inner_radius:.0f} mm,  "
             f"seed E ≥ {args.min_seed_energy:.0f} MeV,  "
             f"≥ {args.min_per_module} ev/mod{excl_str})\n"
-            f"σ_E/E (Gauss):  legacy = {cal['sig_l_post']/cal['mu_l_post']*100:.2f} %   "
-            f"new = {cal['sig_n_post']/cal['mu_n_post']*100:.2f} %     "
-            f"(CB):  legacy = {sigEcb_l:.2f} %   new = {sigEcb_n:.2f} %",
+            f"σ_E/E (Gauss):  legacy = {legacy.sigE_g*100:.2f} %   "
+            f"new = {gated.sigE_g*100:.2f} %     "
+            f"(CB):  legacy = {legacy.sigE_cb*100:.2f} %   "
+            f"new = {gated.sigE_cb*100:.2f} %",
             fontsize=10.5)
         fig.tight_layout()
         fig.savefig(cal_png, dpi=130)

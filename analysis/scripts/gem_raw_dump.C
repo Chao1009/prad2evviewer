@@ -12,7 +12,7 @@
 //
 // The GEM data lives in the SSP/MPD-style banks named in
 // daq_config.json under "bank_tags.ssp_raw" — typically 0xE10C and
-// 0x0DE9.  We use cfg.is_ssp_bank(tag) so the script picks up whatever
+// 0x0DE9.  We iterate cfg.ssp_bank_tags so the script picks up whatever
 // the config says, and stays correct after future reconfigurations.
 //
 // Usage
@@ -28,23 +28,18 @@
 #include "EvChannel.h"
 #include "DaqConfig.h"
 #include "EvStruct.h"
+#include "InstallPaths.h"
 #include "load_daq_config.h"
-
-#include <TString.h>
-#include <TSystem.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <iostream>
 #include <string>
 
 using namespace evc;
 
-//-----------------------------------------------------------------------------
 // One ROC's GEM bank: print header line + a row of hex words.
-//-----------------------------------------------------------------------------
 static void dump_bank(const EvChannel &ch, const EvNode &node,
                       int n_words_show)
 {
@@ -69,15 +64,9 @@ static void dump_bank(const EvChannel &ch, const EvNode &node,
     std::printf("\n");
 }
 
-//-----------------------------------------------------------------------------
-// Entry point — runnable via `.x gem_raw_dump.C+(...)` after rootlogon.
-//
-// The full version takes 4 explicit args (no defaults).  Cling's
-// default-arg synthesis SEGVs when an interpreter call leaves trailing
-// `const char* = ...` defaults to be filled in alongside int/long
-// defaults, so we expose convenience overloads for the common arg
-// counts and let them delegate to the full version.
-//-----------------------------------------------------------------------------
+// Entry point.  The full version takes 4 explicit args (no defaults);
+// convenience overloads delegate to it because cling's default-arg
+// synthesis SEGVs on trailing `const char*` defaults mixed with int/long.
 int gem_raw_dump(const char *evio_path,
                  long        max_events,
                  int         n_words_show,
@@ -98,13 +87,8 @@ int gem_raw_dump(const char *evio_path,
     //---- load DAQ config ----------------------------------------------------
     // PRAD2_DATABASE_DIR is set by rootlogon.C; honour an explicit override
     // if the caller wants to point at a different config (e.g. legacy run).
-    // Default is an empty string rather than nullptr — cling SEGVs when
-    // marshalling mixed-type defaults if any of them is `nullptr`.
     std::string cfg_path = (daq_config && *daq_config) ? daq_config : "";
-    if (cfg_path.empty()) {
-        const char *db = std::getenv("PRAD2_DATABASE_DIR");
-        cfg_path = std::string(db ? db : "database") + "/daq_config.json";
-    }
+    if (cfg_path.empty()) cfg_path = prad2::database_dir() + "/daq_config.json";
     DaqConfig cfg;
     if (!load_daq_config(cfg_path, cfg)) {
         std::cerr << "ERROR: cannot load DAQ config from " << cfg_path << "\n";

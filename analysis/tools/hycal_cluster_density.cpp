@@ -5,6 +5,7 @@
 #include "EventData_io.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -12,58 +13,26 @@
 #include <TH1F.h>
 #include <TH2F.h>
 #include <TF1.h>
-#include <TF2.h>
 #include <TGraphErrors.h>
-#include <TKey.h>
-#include <TLatex.h>
-#include <TString.h>
-#include <TSystem.h>
 #include <TChain.h>
 #include <TCanvas.h>
 #include <TLegend.h>
-#include <TROOT.h>
-#include <TLorentzVector.h>
 
 #include <iostream>
-#include <array>
 #include <string>
 #include <vector>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <algorithm>
-#include <atomic>
 #include <cstdio>
-#include <future>
-#include <map>
 #include <memory>
 #include <mutex>
-#include <limits>
-#include <thread>
 #include <getopt.h>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
 namespace fs = std::filesystem;
 
-// Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
-
-static std::vector<std::string> collectRootFiles(const std::string &path);
-
-static std::string shell_quote(const std::string &value)
-{
-    std::string quoted = "'";
-    for (char ch : value) {
-        if (ch == '\'') quoted += "'\\''";
-        else quoted += ch;
-    }
-    return quoted + "'";
-}
 
 static std::string outputFileName(const std::string &output_name, bool corr = false)
 {
@@ -72,32 +41,6 @@ static std::string outputFileName(const std::string &output_name, bool corr = fa
         + output_path.filename().string()
         + (corr ? ".corr" : "") + ".root";
     return (output_path.parent_path() / file_name).string();
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            std::string name = entry.path().filename().string();
-            if (entry.is_regular_file() &&
-                name.find("_recon") != std::string::npos &&
-                name.size() >= 5 && name.compare(name.size() - 5, 5, ".root") == 0)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-
-bool inHyCal(float xmm, float ymm) {
-    const float module = 20.75; // mm
-    return (fabs(xmm) > module * 3.0 || fabs(ymm) > module * 3.0)
-        && (fabs(xmm) < module * 15. && fabs(ymm) < module * 15.);
 }
 
 static std::unique_ptr<TGraphErrors> extractMainPeakCenters(
@@ -135,14 +78,9 @@ static std::unique_ptr<TGraphErrors> extractMainPeakCenters(
     return centers;
 }
 
-// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
+    std::string db_dir = prad2::database_dir();
 
     // ── Argument parsing ─────────────────────────────────────────────────────
     std::string output_name;
@@ -169,20 +107,8 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Collect all input files
-    std::vector<std::string> root_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        if (num_files > 0) {
-            int remaining = num_files - static_cast<int>(root_files.size());
-            if (remaining <= 0) break;
-            int take = std::min(remaining, static_cast<int>(f.size()));
-            root_files.insert(root_files.end(), f.begin(), f.begin() + take);
-            if (static_cast<int>(root_files.size()) >= num_files) break;
-        } else {
-            root_files.insert(root_files.end(), f.begin(), f.end());
-        }
-    }
+    std::vector<std::string> root_files =
+        CollectInputs(argc, argv, optind, IsReconRootName, num_files);
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_cluster_density <input_recon.root|dir> [more...] "
@@ -195,92 +121,25 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    // ROOT TTree branch addresses are not safe to share across worker threads.
-    // Match hycal_shower_profile: run one isolated worker process per input
-    // file, then merge the worker histograms in this parent process.
+    // ROOT TTree branch addresses are not safe to share across worker threads:
+    // run one isolated worker process per input file, merge histograms here.
     if (!corr && !worker_mode && root_files.size() > 1) {
-        num_threads = std::max(1, std::min(num_threads,
-                                           static_cast<int>(root_files.size())));
-        const std::string executable = shell_quote(argv[0]);
         std::vector<std::string> worker_outputs(root_files.size());
-        std::atomic<size_t> next_file{0};
-        std::mutex worker_mutex;
-        std::vector<std::future<void>> workers;
-
-        auto run_worker = [&]() {
-            while (true) {
-                const size_t file_index = next_file.fetch_add(1);
-                if (file_index >= root_files.size()) return;
-
-                const std::string worker_prefix =
-                    output_name + ".worker_" + std::to_string(file_index);
-                worker_outputs[file_index] = outputFileName(worker_prefix);
-                std::string command = executable + " -w -o "
-                    + shell_quote(worker_prefix);
-                if (max_events > 0)
-                    command += " -n " + std::to_string(max_events);
-                command += " -j 1 " + shell_quote(root_files[file_index]);
-
-                const int status = std::system(command.c_str());
-                std::lock_guard<std::mutex> lock(worker_mutex);
-                if (status != 0)
-                    std::cerr << "Worker failed for " << root_files[file_index]
-                              << " (status " << status << ")\n";
-            }
-        };
-        for (int i = 0; i < num_threads; ++i)
-            workers.push_back(std::async(std::launch::async, run_worker));
-        for (auto &worker : workers) worker.get();
-
-        const std::string merged_output = outputFileName(output_name, corr);
-        TFile *merged = TFile::Open(merged_output.c_str(), "RECREATE");
-        if (!merged || merged->IsZombie()) {
-            std::cerr << "Cannot create merged output " << merged_output << "\n";
+        std::mutex io_mutex;
+        ParallelFor(root_files.size(), num_threads, [&](size_t i, int) {
+            const std::string worker_prefix = output_name + ".worker_" + std::to_string(i);
+            worker_outputs[i] = outputFileName(worker_prefix);
+            std::vector<std::string> args{argv[0], "-w", "-o", worker_prefix};
+            if (max_events > 0) args.insert(args.end(), {"-n", std::to_string(max_events)});
+            args.insert(args.end(), {"-j", "1", root_files[i]});
+            const int rc = RunCommand(args);
+            std::lock_guard<std::mutex> lock(io_mutex);
+            if (rc != 0)
+                std::cerr << "Worker failed for " << root_files[i]
+                          << " (exit code " << rc << ")\n";
+        });
+        if (!MergeTopLevelHistograms(worker_outputs, outputFileName(output_name, corr)))
             return 1;
-        }
-
-        std::map<std::string, std::unique_ptr<TH1>> merged_histograms;
-        for (const auto &worker_output : worker_outputs) {
-            TFile *input = TFile::Open(worker_output.c_str(), "READ");
-            if (!input || input->IsZombie()) {
-                if (input) delete input;
-                continue;
-            }
-            TIter keys(input->GetListOfKeys());
-            while (auto *key = dynamic_cast<TKey *>(keys())) {
-                TObject *object = key->ReadObj();
-                auto *hist = dynamic_cast<TH1 *>(object);
-                if (!hist) {
-                    delete object;
-                    continue;
-                }
-
-                const std::string name = hist->GetName();
-                auto it = merged_histograms.find(name);
-                if (it == merged_histograms.end()) {
-                    std::unique_ptr<TH1> copy(
-                        dynamic_cast<TH1 *>(hist->Clone(name.c_str())));
-                    if (copy) {
-                        copy->SetDirectory(nullptr);
-                        merged_histograms.emplace(name, std::move(copy));
-                    }
-                } else {
-                    it->second->Add(hist);
-                }
-                delete object;
-            }
-            input->Close();
-            delete input;
-        }
-
-        merged->cd();
-        for (auto &[name, hist] : merged_histograms) {
-            hist->SetDirectory(merged);
-            hist->Write(name.c_str(), TObject::kOverwrite);
-            hist->SetDirectory(nullptr);
-        }
-        merged->Close();
-        delete merged;
         for (const auto &worker_output : worker_outputs)
             std::remove(worker_output.c_str());
         return 0;
@@ -347,7 +206,6 @@ int main(int argc, char *argv[])
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
-    // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
 
@@ -395,37 +253,27 @@ int main(int argc, char *argv[])
         hc_hit.z = ev.cl_z[0];
         hc_hit.energy = ev.cl_energy[0];
 
+        // [0][0]: the matched hit of the downstream GEM pair (GEM1/GEM2)
         g_hit.x = ev.mHit_gx[0][0];
         g_hit.y = ev.mHit_gy[0][0];
         g_hit.z = ev.mHit_gz[0][0];
-
-        float scale = hc_hit.z / g_hit.z;
-        g_hit.x *= scale;
-        g_hit.y *= scale;
-        g_hit.z *= scale;
+        GetProjection(g_hit, hc_hit.z);
 
         ApplyToHyCal(g_hit, gRunConfig);
         ApplyToHyCal(hc_hit, gRunConfig);
 
         const auto &mod = hycal.module_by_id(ev.cl_center[0]);
-        if (!inHyCal(hc_hit.x, hc_hit.y)) continue;
+        if (!InHyCalRing(hc_hit.x, hc_hit.y, 3.0, 15.)) continue;
+        if (!mod) continue;
 
         if (corr) {
-            float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
-            float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
-            if (xd_hycal < -0.5f) xd_hycal += 1.0f;
-            if (xd_hycal >  0.5f) xd_hycal -= 1.0f;
-            if (yd_hycal < -0.5f) yd_hycal += 1.0f;
-            if (yd_hycal >  0.5f) yd_hycal -= 1.0f;
-
+            const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
             float corr_x = fit_func_x->Eval(xd_hycal);
             float corr_y = fit_func_y->Eval(yd_hycal);
             hc_hit.x -= corr_x;
             hc_hit.y -= corr_y;
         }
 
-        // only look at one module first, W566
-        //if (ev.cl_center[0] != 1567) continue;
         float dx = hc_hit.x - g_hit.x;
         float dy = hc_hit.y - g_hit.y;
 
@@ -433,19 +281,8 @@ int main(int argc, char *argv[])
         h1_residual_dy->Fill(dy);
         h2_residual_dx_dy->Fill(dx, dy);
         
-        float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
-        float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
-        if (xd_hycal < -0.5) xd_hycal += 1.0;
-        if (xd_hycal >  0.5) xd_hycal -= 1.0;
-        if (yd_hycal < -0.5) yd_hycal += 1.0;
-        if (yd_hycal >  0.5) yd_hycal -= 1.0;
-
-        float xd_gem = (g_hit.x - mod->x) / mod->size_x;
-        float yd_gem = (g_hit.y - mod->y) / mod->size_y;
-        if (xd_gem < -0.5) xd_gem += 1.0;
-        if (xd_gem >  0.5) xd_gem -= 1.0;
-        if (yd_gem < -0.5) yd_gem += 1.0;
-        if (yd_gem >  0.5) yd_gem -= 1.0;
+        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
+        const auto [xd_gem, yd_gem] = mod->cell_offset(g_hit.x, g_hit.y, true);
 
         h2_hit_hycal->Fill(xd_hycal, yd_hycal);
         h2_hit_gem->Fill(xd_gem, yd_gem);

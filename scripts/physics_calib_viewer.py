@@ -9,10 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import os
 import re
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -22,7 +20,7 @@ from PyQt6.QtCore import Qt, QPointF, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPen, QPolygonF
 from PyQt6.QtWidgets import (
 	QApplication, QButtonGroup, QComboBox, QFileDialog, QGroupBox,
-	QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+	QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
 	QRadioButton, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 
@@ -46,12 +44,11 @@ except ImportError:
 	HAS_SCIPY = False
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-	sys.path.insert(0, str(SCRIPT_DIR))
 
 from hycal_geoview import (  # noqa: E402
-	HyCalMapWidget, ColorRangeControl, Module, THEME, apply_theme_palette,
-	available_themes, load_modules, set_theme,
+	HyCalMapWidget, ColorRangeControl, THEME, apply_theme_palette,
+	atomic_json_write, atomic_json_write_many, available_themes, edge_depth,
+	load_modules, set_theme,
 )
 
 DB_PATH = SCRIPT_DIR.parent / "database" / "hycal_map.json"
@@ -92,6 +89,11 @@ class Iteration:
 	def result_path(self) -> Path:
 		return self.directory / f"calib_result_iter{self.number}.json"
 
+	def set_factors(self, factors: List[dict]) -> None:
+		self.factors = factors
+		self.factor_by_id = {module_id: entry for entry in factors
+							 if (module_id := module_id_from_name(entry.get("name", ""))) is not None}
+
 def module_id_from_name(name: str) -> Optional[int]:
 	match = re.fullmatch(r"W(\d+)", name)
 	return 1000 + int(match.group(1)) if match else None
@@ -124,12 +126,7 @@ def scan_iterations(base: Path) -> Dict[str, Dict[int, Iteration]]:
 			number = int(match.group(1))
 			item = Iteration(run_dir.name, number, run_dir)
 			item.root_path = run_dir / f"calib_result_iter{number}.root"
-			item.factors = _read_json(item.factor_path, [])
-			item.factor_by_id = {
-				module_id_from_name(entry.get("name", "")): entry
-				for entry in item.factors
-				if module_id_from_name(entry.get("name", "")) is not None
-			}
+			item.set_factors(_read_json(item.factor_path, []))
 			item.result_rows = _read_json(result_path, [])
 			for raw in item.result_rows:
 				try:
@@ -179,10 +176,8 @@ def load_root_data(item: Iteration, hist_mode: str) -> None:
 				if data is not None and np.any(data[0] > 0):
 					item.histograms[module_name(module_id)] = data
 			for key in ("h2_energy_theta_merged", "hit_pos_merged",
-						"h_E_1cl_merged", "h_center_energy_fraction",
-						"h_center_energy", "h_fit_peak_energy",
-						"h_fit_peak_ratio", "h_fit_peak_chi2ndf",
-						"h_fit_peak_sigma"):
+						"h_E_1cl_merged", "h_fit_peak_ratio",
+						"h_fit_peak_chi2ndf", "h_fit_peak_sigma"):
 				data = load_histogram(root, key)
 				if data is not None:
 					item.histograms[key] = data
@@ -192,6 +187,24 @@ def load_root_data(item: Iteration, hist_mode: str) -> None:
 
 def gaussian(x, amplitude, mean, sigma):
 	return amplitude * np.exp(-0.5 * ((x - mean) / sigma) ** 2)
+
+
+def _padded_xlim(counts, edges, spans=(), fallback_full=False):
+	"""Padded x-limits covering the non-empty bins and ``spans``, or None."""
+	spans = list(spans)
+	nonzero = np.flatnonzero(counts > 0)
+	if nonzero.size:
+		spans.insert(0, (float(edges[nonzero[0]]), float(edges[nonzero[-1] + 1])))
+	if not spans and fallback_full:
+		spans.append((float(edges[0]), float(edges[-1])))
+	if not spans:
+		return None
+	xmin = min(span[0] for span in spans)
+	xmax = max(span[1] for span in spans)
+	if xmax <= xmin:
+		return None
+	pad = max((xmax - xmin) * 0.06, float(edges[1] - edges[0]))
+	return xmin - pad, xmax + pad
 
 
 def fit_histogram(counts, edges, xmin=None, xmax=None, expected=0.0):
@@ -255,44 +268,6 @@ def is_fit_good(peak: float, sigma: float, chi2: float) -> bool:
 	return 0.5 * expected_sigma < sigma < 1.5 * expected_sigma and chi2 < 2.5
 
 
-def atomic_json_write(path: Path, value) -> None:
-	path.parent.mkdir(parents=True, exist_ok=True)
-	fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-	try:
-		with os.fdopen(fd, "w") as stream:
-			json.dump(value, stream, indent=2)
-			stream.write("\n")
-		os.replace(temp_name, path)
-	except Exception:
-		try:
-			os.unlink(temp_name)
-		except OSError:
-			pass
-		raise
-
-
-def atomic_json_write_many(items: List[Tuple[Path, object]]) -> None:
-	"""Prepare several JSON files before replacing any destination."""
-	temporary: List[Tuple[str, Path]] = []
-	try:
-		for path, value in items:
-			path.parent.mkdir(parents=True, exist_ok=True)
-			fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-			with os.fdopen(fd, "w") as stream:
-				json.dump(value, stream, indent=2)
-				stream.write("\n")
-			temporary.append((temp_name, path))
-		for temp_name, path in temporary:
-			os.replace(temp_name, path)
-	except Exception:
-		for temp_name, _ in temporary:
-			try:
-				os.unlink(temp_name)
-			except OSError:
-				pass
-		raise
-
-
 class PhysicsMap(HyCalMapWidget):
 	selectionChanged = pyqtSignal(set)
 
@@ -341,24 +316,18 @@ class PhysicsMap(HyCalMapWidget):
 	def _paint_overlays(self, painter, width, height):
 		super()._paint_overlays(painter, width, height)
 		painter.setBrush(Qt.BrushStyle.NoBrush)
-		for name, color, size in ((self.marked, THEME.DANGER, 1.8),
-								  (self.selected, THEME.ACCENT, 2.2)):
-			painter.setPen(QPen(QColor(color), size))
-			for module_name in name:
-				rect = self._rects.get(module_name)
-				if rect is None:
-					continue
-				painter.drawEllipse(rect.center(), min(rect.width(), rect.height()) * 0.3,
-									min(rect.width(), rect.height()) * 0.3)
-		painter.setBrush(Qt.BrushStyle.NoBrush)
-		painter.setPen(QPen(QColor(THEME.WARN), 2.2, Qt.PenStyle.DashLine))
-		for module_name in self.preview:
-			rect = self._rects.get(module_name)
-			if rect is not None:
-				painter.drawEllipse(rect.center(), min(rect.width(), rect.height()) * 0.42,
-									min(rect.width(), rect.height()) * 0.42)
-		# Unified "Refit outer" marker: a small filled triangle at the
-		# module's top-right corner, distinct from the circle markers above.
+		solid, dash = Qt.PenStyle.SolidLine, Qt.PenStyle.DashLine
+		for names, color, pen_width, style, scale in (
+				(self.marked, THEME.DANGER, 1.8, solid, 0.3),
+				(self.selected, THEME.ACCENT, 2.2, solid, 0.3),
+				(self.preview, THEME.WARN, 2.2, dash, 0.42)):
+			painter.setPen(QPen(QColor(color), pen_width, style))
+			for name in names:
+				rect = self._rects.get(name)
+				if rect is not None:
+					radius = min(rect.width(), rect.height()) * scale
+					painter.drawEllipse(rect.center(), radius, radius)
+		# "Refit outer" marker: a triangle, distinct from the circle markers above.
 		painter.setPen(QPen(QColor(THEME.ACCENT_STRONG), 1.0))
 		painter.setBrush(QColor(THEME.ACCENT_STRONG))
 		for module_name in self.refit:
@@ -474,7 +443,6 @@ class Viewer(QMainWindow):
 
 	def __init__(self, initial_dir=None, hist_mode="5by5"):
 		super().__init__()
-		self.base = None
 		self.scan = {}
 		self.current: Optional[Iteration] = None
 		self.hist_mode = hist_mode
@@ -482,26 +450,19 @@ class Viewer(QMainWindow):
 		self.worker = None
 		self.span = None
 		self.modules = []
-		self.geometry = {}
 		self._manual_overlays = {}
 		self._rebin = 1
-		self._rebinned_modules = set()
 		self._module_rebin = {}
+		self._fit_value = None
 		self._build_ui()
 		self.setWindowTitle(f"Physics Calibration Viewer ({hist_mode})")
 		self.resize(1500, 940)
 		self._style()
 		if DB_PATH.is_file():
 			self.modules = load_modules(DB_PATH)
-			self._load_geometry()
 			self.map.set_modules(self.modules)
 		if initial_dir:
 			self.load_directory(Path(initial_dir))
-
-	def _load_geometry(self):
-		data = _read_json(DB_PATH, [])
-		self.geometry = {e.get("n"): e.get("geo", {}) for e in data
-						 if e.get("n") and e.get("geo")}
 
 	def _style(self):
 		t = THEME
@@ -596,7 +557,7 @@ class Viewer(QMainWindow):
 		apply_button.clicked.connect(self._apply_selected)
 		batch.addWidget(apply_button)
 		restore_button = QPushButton("Restore selected old_factor")
-		restore_button.clicked.connect(self._restore_selected)
+		restore_button.clicked.connect(lambda: self._restore_old_factors(self.map.selected))
 		batch.addWidget(restore_button)
 		batch.addWidget(QLabel("Outer layers:"))
 		self.layers = QSpinBox()
@@ -608,7 +569,7 @@ class Viewer(QMainWindow):
 		self.outer_shape.setToolTip("Select square row/column rings or circular radial rings")
 		batch.addWidget(self.outer_shape)
 		outer_restore = QPushButton("Restore outer W")
-		outer_restore.clicked.connect(self._restore_outer)
+		outer_restore.clicked.connect(lambda: self._restore_old_factors(self._outer_module_names()))
 		batch.addWidget(outer_restore)
 		self.outer_rebin_spin = QSpinBox()
 		self.outer_rebin_spin.setRange(1, 100)
@@ -716,7 +677,6 @@ class Viewer(QMainWindow):
 			self.load_directory(Path(selected))
 
 	def load_directory(self, path):
-		self.base = path
 		self.scan = scan_iterations(path)
 		self.dir_label.setText(str(path))
 		self.run_box.blockSignals(True)
@@ -724,7 +684,6 @@ class Viewer(QMainWindow):
 		self.run_box.addItems(sorted(self.scan))
 		self.run_box.blockSignals(False)
 		if self.run_box.count():
-			# Default to the highest run number.
 			self.run_box.setCurrentIndex(self.run_box.count() - 1)
 			self._run_changed(self.run_box.currentText())
 
@@ -735,7 +694,6 @@ class Viewer(QMainWindow):
 			self.iter_box.addItems(str(number) for number in sorted(self.scan[run]))
 		self.iter_box.blockSignals(False)
 		if self.iter_box.count():
-			# Default to the highest iteration number.
 			self.iter_box.setCurrentIndex(self.iter_box.count() - 1)
 			self._iter_changed(self.iter_box.currentText())
 
@@ -743,14 +701,9 @@ class Viewer(QMainWindow):
 		if not text or self.run_box.currentText() not in self.scan:
 			return
 		self.current = self.scan[self.run_box.currentText()][int(text)]
-		self._manual_overlays = {}
-		self._rebin = 1
-		self._rebinned_modules = set()
-		self._module_rebin = {}
-		self.rebin_spin.setValue(1)
+		self._reset_module_state()
 		self.map.clear_selection()
 		self.map.set_preview_modules(set())
-		self.map.set_refit_modules(set())
 		self.map.marked = set()
 		self._refresh_map(auto_range=True)
 		self._draw_global()
@@ -759,14 +712,17 @@ class Viewer(QMainWindow):
 	def _hist_mode_changed(self, mode):
 		self.hist_mode = mode
 		if self.current:
-			self._manual_overlays = {}
-			self._rebin = 1
-			self._rebinned_modules = set()
-			self._module_rebin = {}
-			self.rebin_spin.setValue(1)
-			self.map.set_refit_modules(set())
+			self._reset_module_state()
 			self.current.histograms.clear()
 			self._start_root_load()
+
+	def _reset_module_state(self):
+		self._manual_overlays = {}
+		self._rebin = 1
+		self._module_rebin = {}
+		self._fit_value = None
+		self.rebin_spin.setValue(1)
+		self.map.set_refit_modules(set())
 
 	def _start_root_load(self):
 		if self.current is None:
@@ -814,7 +770,6 @@ class Viewer(QMainWindow):
 			elif mode == "ratio":
 				values[name] = result.ratio
 		self.map.set_values(values)
-		self.map.set_map_label(mode) if hasattr(self.map, "set_map_label") else None
 		if auto_range:
 			self.range_control.notify_values_changed(values)
 			if mode in ("Has data", "fit_good"):
@@ -882,17 +837,18 @@ class Viewer(QMainWindow):
 			self.canvas.ax.axvline(
 				result.expected_peak, color=THEME.SUCCESS, linewidth=2.0,
 				linestyle=":", label=f"Expected peak = {result.expected_peak:.2f}")
+		# The producer stores no fitted amplitude; scale its curve to the histogram maximum.
+		curves = []
 		if result and result.peak > 0 and result.sigma > 0:
-			x = np.linspace(result.peak - 4 * result.sigma,
-							result.peak + 4 * result.sigma, 500)
-			amp = float(counts.max())
-			self.canvas.ax.plot(x, amp * np.exp(-0.5 * ((x - result.peak) / result.sigma) ** 2),
-								"--", color=THEME.TEXT_DIM, label="producer fit")
+			curves.append((result.peak, result.sigma, float(counts.max()),
+						   {"linestyle": "--", "color": THEME.TEXT_DIM, "label": "producer fit"}))
 		if overlay:
-			peak, sigma, amp = overlay
-			x = np.linspace(peak - 4 * sigma, peak + 4 * sigma, 500)
-			self.canvas.ax.plot(x, amp * np.exp(-0.5 * ((x - peak) / sigma) ** 2),
-								color=THEME.WARN, linewidth=2, label="manual fit")
+			curves.append((*overlay, {"color": THEME.WARN, "linewidth": 2, "label": "manual fit"}))
+		spans = []
+		for peak, sigma, amp, style in curves:
+			spans.append((peak - 4 * sigma, peak + 4 * sigma))
+			x = np.linspace(*spans[-1], 500)
+			self.canvas.ax.plot(x, gaussian(x, amp, peak, sigma), **style)
 		if fit_peak is not None and fit_peak > 0:
 			self.canvas.ax.axvline(
 				fit_peak, color=THEME.WARN, linewidth=1.8,
@@ -901,24 +857,9 @@ class Viewer(QMainWindow):
 			self.canvas.ax.legend(
 				loc="upper left", facecolor=THEME.PANEL,
 				labelcolor=THEME.TEXT, framealpha=0.9)
-		x_candidates = []
-		nonzero = np.flatnonzero(counts > 0)
-		if nonzero.size:
-			x_candidates.append((float(edges[nonzero[0]]),
-								  float(edges[nonzero[-1] + 1])))
-		if result and result.peak > 0 and result.sigma > 0:
-			x_candidates.append((result.peak - 4.0 * result.sigma,
-								 result.peak + 4.0 * result.sigma))
-		if overlay:
-			x_candidates.append((overlay[0] - 4.0 * overlay[1],
-								 overlay[0] + 4.0 * overlay[1]))
-		if not x_candidates:
-			x_candidates.append((float(edges[0]), float(edges[-1])))
-		xmin = min(pair[0] for pair in x_candidates)
-		xmax = max(pair[1] for pair in x_candidates)
-		if xmax > xmin:
-			pad = max((xmax - xmin) * 0.06, float(edges[1] - edges[0]))
-			self.canvas.ax.set_xlim(xmin - pad, xmax + pad)
+		xlim = _padded_xlim(counts, edges, spans, fallback_full=True)
+		if xlim:
+			self.canvas.ax.set_xlim(*xlim)
 		self.canvas.style(f"{name} energy histogram ({self.hist_mode})", "Energy (MeV)", "Counts")
 		self.canvas.draw_idle()
 		if self.span:
@@ -948,7 +889,7 @@ class Viewer(QMainWindow):
 				data[0], data[1], xmin, xmax, result.expected_peak)
 			ratio = damped_ratio(result.expected_peak, peak)
 			new_factor = result.old_factor * ratio
-			self._fit_value = (peak, sigma, chi2, amplitude, ratio, new_factor)
+			self._fit_value = (self.current_module, (peak, sigma, chi2, ratio, new_factor))
 			self._manual_overlays[self.current_module] = (peak, sigma, amplitude)
 			self.fit_status.setText(
 				f"manual peak={peak:.3f}, sigma={sigma:.3f}, chi2/ndf={chi2:.5f}; "
@@ -958,58 +899,61 @@ class Viewer(QMainWindow):
 			self.fit_status.setText(f"Fit failed: {exc}")
 
 	def _apply_fit(self):
-		if not hasattr(self, "_fit_value") or not self.current or not self.current_module:
+		if self._fit_value is None or not self.current or not self.current_module:
 			return
-		module_id = module_id_from_name(self.current_module)
-		result = self.current.results.get(module_id)
-		if result is None:
-			return
-		peak, sigma, chi2, _amplitude, ratio, new_factor = self._fit_value
-		result_rows = [dict(row) for row in self.current.result_rows]
-		result_row = next((row for row in result_rows
-						  if int(row.get("module_id", -1)) == module_id), None)
-		if result_row is None:
-			self.fit_status.setText("Result JSON has no entry for this module")
-			return
-		result_row.update({
-			"peak": peak,
-			"sigma": sigma,
-			"chi2/ndf": chi2,
-			"ratio": ratio,
-			"new_factor": new_factor,
-			"fit_good": is_fit_good(peak, sigma, chi2),
-		})
-		factors = [dict(entry) for entry in self.current.factors]
-		updated = False
-		for entry in factors:
-			if entry.get("name") == module_name(module_id):
-				entry["factor"] = new_factor
-				updated = True
-				break
-		if not updated:
-			self.fit_status.setText("Factor JSON has no entry for this module")
+		fit_module, fit = self._fit_value
+		if fit_module != self.current_module:
+			self.fit_status.setText(f"The last fit was for {fit_module}; run the fit for this module first")
 			return
 		try:
-			atomic_json_write_many([
-				(self.current.factor_path, factors),
-				(self.current.result_path, result_rows),
-			])
+			committed = self._commit_fits({module_id_from_name(fit_module): fit})
 		except OSError as exc:
 			self.fit_status.setText(f"Save failed; memory unchanged: {exc}")
 			return
-		self.current.factors = factors
-		self.current.factor_by_id = {module_id_from_name(e.get("name", "")): e
-									 for e in factors if module_id_from_name(e.get("name", ""))}
-		self.current.result_rows = result_rows
-		self.current.results[module_id] = Result(
-			module_id, peak, result.expected_peak, sigma, chi2, ratio,
-			result.old_factor, new_factor,
-			is_fit_good(peak, sigma, chi2),
-			result.is_dead, result.is_dead_neighbor)
+		if not committed:
+			self.fit_status.setText("Result or factor JSON has no entry for this module")
+			return
 		self.map.marked.add(self.current_module)
 		self._refresh_map()
 		self.fit_status.setText("Applied: result and factor JSON saved")
 		self._show_module(self.current_module)
+
+	def _commit_fits(self, fitted):
+		"""Save ``{module_id: (peak, sigma, chi2, ratio, new_factor)}`` to the
+		result and factor JSON, then to memory, and return the new Results.
+		Modules without a result row, factor entry or Result are skipped; an
+		OSError from the write leaves memory unchanged."""
+		item = self.current
+		rows = [dict(row) for row in item.result_rows]
+		row_by_id = {int(row.get("module_id", -1)): row for row in rows}
+		factors = [dict(entry) for entry in item.factors]
+		factor_by_name = {entry.get("name"): entry for entry in factors}
+		committed = {}
+		for module_id, (peak, sigma, chi2, ratio, new_factor) in fitted.items():
+			row = row_by_id.get(module_id)
+			entry = factor_by_name.get(module_name(module_id))
+			old = item.results.get(module_id)
+			if row is None or entry is None or old is None:
+				continue
+			good = is_fit_good(peak, sigma, chi2)
+			row.update({
+				"peak": peak,
+				"sigma": sigma,
+				"chi2/ndf": chi2,
+				"ratio": ratio,
+				"new_factor": new_factor,
+				"fit_good": good,
+			})
+			entry["factor"] = new_factor
+			committed[module_id] = Result(
+				module_id, peak, old.expected_peak, sigma, chi2, ratio,
+				old.old_factor, new_factor, good, old.is_dead, old.is_dead_neighbor)
+		if committed:
+			atomic_json_write_many([(item.factor_path, factors), (item.result_path, rows)])
+			item.set_factors(factors)
+			item.result_rows = rows
+			item.results.update(committed)
+		return committed
 
 	def _selection_changed(self, selected):
 		self.selection_label.setText(f"{len(selected)} selected")
@@ -1025,10 +969,7 @@ class Viewer(QMainWindow):
 			return counts, edges
 		usable = (len(counts) // factor) * factor
 		rebinned = counts[:usable].reshape(-1, factor).sum(axis=1)
-		new_edges = edges[:usable + 1:factor]
-		if len(new_edges) != len(rebinned) + 1:
-			new_edges = np.r_[new_edges, edges[usable]]
-		return rebinned, new_edges
+		return rebinned, edges[:usable + 1:factor]
 
 	def _display_histogram(self, name):
 		data = self.current.histograms.get(name) if self.current else None
@@ -1039,32 +980,22 @@ class Viewer(QMainWindow):
 		return self._rebin_histogram(counts, edges, factor)
 
 	def _outer_module_names(self):
-		w_modules = [(m, self.geometry.get(m.name, {})) for m in self.modules
-					 if m.name.startswith("W") and self.geometry.get(m.name)]
+		w_modules = [m for m in self.modules if m.name.startswith("W") and m.row]
 		if not w_modules:
 			return set()
 		layers = self.layers.value()
 		if self.outer_shape.currentText() == "Square":
-			rows = [int(g["row"]) for _, g in w_modules if "row" in g]
-			cols = [int(g["col"]) for _, g in w_modules if "col" in g]
-			if not rows or not cols:
-				return set()
-			max_row, max_col = max(rows), max(cols)
-			return {m.name for m, geo in w_modules
-					if "row" in geo and "col" in geo and
-					min(int(geo["row"]) - 1, max_row - int(geo["row"]),
-						int(geo["col"]) - 1, max_col - int(geo["col"])) + 1 <= layers}
-		xs = np.asarray([float(m.x) for m, _ in w_modules])
-		ys = np.asarray([float(m.y) for m, _ in w_modules])
+			return {m.name for m in w_modules if edge_depth(m.row, m.col) <= layers}
+		xs = np.asarray([float(m.x) for m in w_modules])
+		ys = np.asarray([float(m.y) for m in w_modules])
 		cx, cy = float((xs.min() + xs.max()) / 2.0), float((ys.min() + ys.max()) / 2.0)
-		pitch = float(np.median([max(m.sx, m.sy) for m, _ in w_modules]))
+		pitch = float(np.median([max(m.sx, m.sy) for m in w_modules]))
 		distances = np.hypot(xs - cx, ys - cy)
 		max_radius = float(distances.max())
 		# One radial shell is approximately one crystal pitch wide.  The small
 		# tolerance keeps corner modules in the requested outer shell.
 		cut = max_radius - layers * pitch * 1.15
-		return {m.name for m, distance in zip((m for m, _ in w_modules), distances)
-				if distance >= cut}
+		return {m.name for m, distance in zip(w_modules, distances) if distance >= cut}
 
 	def _apply_factor_map(self, names, factor_by_name):
 		if not self.current or not names:
@@ -1083,10 +1014,7 @@ class Viewer(QMainWindow):
 		except OSError as exc:
 			self.statusBar().showMessage(f"Save failed: {exc}", 6000)
 			return
-		self.current.factors = factors
-		self.current.factor_by_id = {module_id_from_name(e.get("name", "")): e
-									 for e in factors if module_id_from_name(e.get("name", ""))}
-		self.map.marked.update(changed)
+		self.current.set_factors(factors)
 		self._finish_multi_selection(changed)
 		self.statusBar().showMessage(f"Saved {len(changed)} factor(s)", 4000)
 
@@ -1100,40 +1028,27 @@ class Viewer(QMainWindow):
 			return
 		self._apply_factor_map(self.map.selected, {name: factor for name in self.map.selected})
 
-	def _restore_selected(self):
+	def _restore_old_factors(self, names):
+		"""Write back the producer old_factor of ``names``; returns what was restored."""
 		if not self.current:
-			return
-		values = {}
-		for name in self.map.selected:
-			result = self.current.results.get(module_id_from_name(name))
-			if result and result.old_factor > 0:
-				values[name] = result.old_factor
-		self._apply_factor_map(values.keys(), values)
-
-	def _restore_current_module(self):
-		if not self.current or not self.current_module:
-			self.statusBar().showMessage("Select a module first", 4000)
-			return
-		module_id = module_id_from_name(self.current_module)
-		result = self.current.results.get(module_id)
-		if result is None or result.old_factor <= 0:
-			self.statusBar().showMessage(
-				f"{self.current_module} has no valid old_factor in result JSON", 4000)
-			return
-		self._apply_factor_map(
-			{self.current_module}, {self.current_module: result.old_factor})
-		self._show_module(self.current_module)
-
-	def _restore_outer(self):
-		if not self.current:
-			return
-		names = self._outer_module_names()
+			return {}
 		values = {}
 		for name in names:
 			result = self.current.results.get(module_id_from_name(name))
 			if result and result.old_factor > 0:
 				values[name] = result.old_factor
 		self._apply_factor_map(values.keys(), values)
+		return values
+
+	def _restore_current_module(self):
+		if not self.current or not self.current_module:
+			self.statusBar().showMessage("Select a module first", 4000)
+			return
+		if not self._restore_old_factors({self.current_module}):
+			self.statusBar().showMessage(
+				f"{self.current_module} has no valid old_factor in result JSON", 4000)
+			return
+		self._show_module(self.current_module)
 
 	def _preview_outer(self):
 		if not self.current:
@@ -1152,11 +1067,9 @@ class Viewer(QMainWindow):
 			return
 		self._rebin = self.outer_rebin_spin.value()
 		outer_names = self._outer_module_names()
-		self._rebinned_modules = {
-			name for name in outer_names if name in self.current.histograms
-		}
-		for name in self._rebinned_modules:
-			self._module_rebin[name] = self._rebin
+		for name in outer_names:
+			if name in self.current.histograms:
+				self._module_rebin[name] = self._rebin
 		if self.current_module in outer_names:
 			self._draw_module(self.current_module)
 		self.statusBar().showMessage(
@@ -1166,11 +1079,6 @@ class Viewer(QMainWindow):
 		if not self.current:
 			return
 		outer_names = self._outer_module_names()
-		result_rows = [dict(row) for row in self.current.result_rows]
-		result_row_by_id = {int(row.get("module_id", -1)): row for row in result_rows}
-		factors = [dict(entry) for entry in self.current.factors]
-		factor_by_name = {entry.get("name"): entry for entry in factors}
-
 		fitted = {}
 		skipped = 0
 		for name in outer_names:
@@ -1190,54 +1098,21 @@ class Viewer(QMainWindow):
 			new_factor = result.old_factor * ratio
 			fitted[module_id] = (peak, sigma, chi2, ratio, new_factor)
 
-		if not fitted:
-			self.statusBar().showMessage("No outer module could be refit", 4000)
-			return
-
-		for module_id, (peak, sigma, chi2, ratio, new_factor) in fitted.items():
-			row = result_row_by_id.get(module_id)
-			if row is None:
-				continue
-			row.update({
-				"peak": peak,
-				"sigma": sigma,
-				"chi2/ndf": chi2,
-				"ratio": ratio,
-				"new_factor": new_factor,
-				"fit_good": is_fit_good(peak, sigma, chi2),
-			})
-			entry = factor_by_name.get(module_name(module_id))
-			if entry is not None:
-				entry["factor"] = new_factor
-
 		try:
-			atomic_json_write_many([
-				(self.current.factor_path, factors),
-				(self.current.result_path, result_rows),
-			])
+			committed = self._commit_fits(fitted)
 		except OSError as exc:
 			self.statusBar().showMessage(f"Save failed; memory unchanged: {exc}", 6000)
 			return
-
-		self.current.factors = factors
-		self.current.factor_by_id = {module_id_from_name(e.get("name", "")): e
-									 for e in factors if module_id_from_name(e.get("name", ""))}
-		self.current.result_rows = result_rows
-		for module_id, (peak, sigma, chi2, ratio, new_factor) in fitted.items():
-			result = self.current.results.get(module_id)
-			if result is None:
-				continue
-			self.current.results[module_id] = Result(
-				module_id, peak, result.expected_peak, sigma, chi2, ratio,
-				result.old_factor, new_factor,
-				is_fit_good(peak, sigma, chi2),
-				result.is_dead, result.is_dead_neighbor)
-		self.map.set_refit_modules(module_name(mid) for mid in fitted)
+		if not committed:
+			self.statusBar().showMessage("No outer module could be refit", 4000)
+			return
+		skipped += len(fitted) - len(committed)
+		self.map.set_refit_modules(module_name(mid) for mid in committed)
 		self._refresh_map()
-		if self.current_module and module_id_from_name(self.current_module) in fitted:
+		if self.current_module and module_id_from_name(self.current_module) in committed:
 			self._show_module(self.current_module)
 		self.statusBar().showMessage(
-			f"Refit {len(fitted)} outer module(s); {skipped} skipped", 5000)
+			f"Refit {len(committed)} outer module(s); {skipped} skipped", 5000)
 
 	def _draw_global(self):
 		if not self.current:
@@ -1260,13 +1135,9 @@ class Viewer(QMainWindow):
 				centers = 0.5 * (edges[:-1] + edges[1:])
 				self.stats_canvas.ax.bar(centers, counts, width=np.diff(edges),
 										 color=THEME.ACCENT)
-				nonzero = np.flatnonzero(counts > 0)
-				if nonzero.size:
-					xmin = float(edges[nonzero[0]])
-					xmax = float(edges[nonzero[-1] + 1])
-					pad = max((xmax - xmin) * 0.06,
-							  float(edges[1] - edges[0]))
-					self.stats_canvas.ax.set_xlim(xmin - pad, xmax + pad)
+				xlim = _padded_xlim(counts, edges)
+				if xlim:
+					self.stats_canvas.ax.set_xlim(*xlim)
 			else:
 				xedges, yedges = edges
 				positive = counts[counts > 0]

@@ -7,7 +7,8 @@
 //=============================================================================
 
 #include <cstdint>
-#include <cstring>
+#include <cstdio>
+#include <string>
 
 namespace fdec
 {
@@ -64,11 +65,15 @@ struct RocData {
     }
 };
 
+// --- TI timestamp clock: 250 MHz, 4 ns per tick (EventInfo::timestamp) ------
+constexpr double TI_TICK_NS  = 4.0;
+constexpr double TI_TICK_SEC = TI_TICK_NS * 1e-9;
+
 // --- event-level information (extracted from TI bank + trigger bank) ---------
 struct EventInfo {
     uint8_t  type;              // evc::EventType cast to uint8_t
 
-    // --- two independent trigger fields (see database/trigger_bit.json) ------
+    // --- two independent trigger fields (see database/trigger_bits.json) -----
     //
     // trigger_type: WHICH trigger caused this event (single, from TI event header)
     //   TI d[0] bits 31:24 = TS trigger table output (tiLoadTriggerTable(3))
@@ -124,12 +129,45 @@ struct EventData {
             if (rocs[i].tag == tag) return &rocs[i];
         return nullptr;
     }
-
-    // convenience: iterate active slots in a ROC
-    // usage: for (int s = 0; s < MAX_SLOTS; ++s) if (roc.slots[s].present) { ... }
 };
 
-// --- analysis helpers (to be filled later) ----------------------------------
+// Call fn(slot, ch, const ChannelData &) for every channel of the ROC that
+// carries samples: present slots, channel_mask bits below max_ch, nsamples > 0.
+template <class F>
+inline void ForEachChannel(const RocData &roc, F &&fn, int max_ch = MAX_CHANNELS)
+{
+    for (int s = 0; s < MAX_SLOTS; ++s) {
+        const SlotData &slot = roc.slots[s];
+        if (!slot.present) continue;
+        for (int c = 0; c < max_ch; ++c) {
+            if (!(slot.channel_mask & (1ull << c))) continue;
+            const ChannelData &cd = slot.channels[c];
+            if (cd.nsamples <= 0) continue;
+            fn(s, c, cd);
+        }
+    }
+}
+
+// Channel id "<roc_tag>_<slot>_<channel>" (decimal), as used by the viewer
+// API and the pulse-template JSON.
+inline std::string ChannelKey(uint32_t roc_tag, int slot, int ch)
+{
+    return std::to_string(roc_tag) + "_" + std::to_string(slot) + "_"
+         + std::to_string(ch);
+}
+
+// Parse a ChannelKey string.  False unless all three fields are present and
+// roc_tag >= 0, slot < MAX_SLOTS and ch < MAX_CHANNELS (both >= 0).
+inline bool ParseChannelKey(const std::string &key, int &roc_tag, int &slot, int &ch)
+{
+    int r = 0, s = 0, c = 0;
+    if (std::sscanf(key.c_str(), "%d_%d_%d", &r, &s, &c) != 3) return false;
+    if (r < 0 || s < 0 || s >= MAX_SLOTS || c < 0 || c >= MAX_CHANNELS) return false;
+    roc_tag = r; slot = s; ch = c;
+    return true;
+}
+
+// --- soft-analyzer (WaveAnalyzer) results -----------------------------------
 // Soft-analyzer peak.  left / right are INCLUSIVE integration bounds —
 // `integral` sums buf[left..right] inclusive.  pos is the raw-sample
 // maximum near the smoothed peak (post-correction).  quality is a
@@ -245,21 +283,19 @@ struct DaqPeak {
 };
 
 struct DaqWaveResult {
-    float    vnoise;             // mean of first 4 pedestal-subtracted samples
+    float    vnoise;             // mean of first NPED pedestal-subtracted samples
     int      npeaks;
     DaqPeak  peaks[MAX_PEAKS];   // MAX_PEAKS=8 ≥ MAX_PULSES=4
     void clear() { vnoise = 0; npeaks = 0; }
 };
 
-// ----------------------------------------------------------------------------
-// NNLS pile-up deconvolution: per-channel pulse template + per-event output.
-// ----------------------------------------------------------------------------
+// --- pile-up deconvolution: pulse template + per-event output ---------------
 //
 // The soft analyzer's local-maxima search reports peaks but cannot cleanly
 // separate amplitudes when pulses overlap (the integral of one peak bleeds
 // into the rising edge of the next).  WaveAnalyzer::Deconvolve() solves
-// that by fitting a non-negative linear combination of per-peak template
-// instances to the pedsub waveform — see
+// that with a Levenberg-Marquardt fit of one template instance per peak
+// to the pedsub waveform — see
 // docs/technical_notes/waveform_analysis/wave_analysis.md and
 // fdec::WaveConfig::NnlsDeconvConfig in WaveAnalyzer.h.
 
@@ -269,35 +305,15 @@ struct DaqWaveResult {
 //
 //   T(t; τ_r, τ_f) = (1 − exp(−t/τ_r)) · exp(−t/τ_f)   for t ≥ 0
 //
-// is_global: kept for backwards compatibility.  Set to true on every
-// PulseTemplateStore-loaded template since the templates are category
-// aggregates rather than per-channel fits.  Templates constructed
-// directly in Python (via dec.PulseTemplate(tr, tf)) default to false.
-//
-// Precomputed grid: when filled by PulseTemplateStore::LoadFromFile() the
-// `grid[]` array holds T evaluated at i · grid_clk_ns (i = 0..GRID_N-1).
-// WaveAnalyzer::Deconvolve linearly interpolates this grid to skip the
-// per-sample exp() calls in its hot loop — a ~10× speed-up.
-//
-// The grid is fixed at 8× oversample relative to the data clock (so
-// grid_clk_ns = 0.5 ns at clk_mhz = 250).  Linear-interp error is ~0.1 %
-// worst-case across the rapidly-rising leading edge; finer doesn't
-// meaningfully help and coarser hurts accuracy without saving memory
-// (the array would be the same size anyway), so the factor is hardwired
-// rather than configurable.
-//
-// Templates constructed in Python (via dec.PulseTemplate(tr, tf)) leave
-// the grid empty (grid_clk_ns == 0) and the analyzer falls back to
-// evaluating the analytic form on the fly.
+// is_global selects the success state (Q_DECONV_FALLBACK_GLOBAL when true,
+// Q_DECONV_APPLIED when false).  True on every PulseTemplateStore-loaded
+// template since those are category aggregates rather than per-channel
+// fits; templates constructed directly in Python (via
+// dec.PulseTemplate(tr, tf)) default to false.
 struct PulseTemplate {
-    static constexpr int GRID_OVERSAMPLE = 8;
-    static constexpr int GRID_N          = MAX_SAMPLES * GRID_OVERSAMPLE;
-
     float   tau_r_ns;
     float   tau_f_ns;
     bool    is_global;
-    float   grid_clk_ns;                   // 0 ⇒ grid not filled
-    float   grid[GRID_N];                  // unit-amplitude T at i·grid_clk_ns
 };
 
 // Per-event deconv output, parallel to WaveResult.peaks[0..n-1].
@@ -323,9 +339,8 @@ struct PulseTemplate {
 //                               active set went indefinite; caller should
 //                               treat this as a deconv failure and fall
 //                               back to WaveAnalyzer's local-maxima values
-//   Q_DECONV_APPLIED           non-aggregate template, LM converged
-//                               (currently unused — every store-loaded
-//                                template is a per-type aggregate)
+//   Q_DECONV_APPLIED           non-aggregate template (is_global false,
+//                               e.g. built directly in Python), LM converged
 //   Q_DECONV_FALLBACK_GLOBAL   per-type aggregate template, LM converged
 //
 // On any non-converged outcome the amplitude/height/integral arrays are

@@ -2,8 +2,8 @@
 // replay_filter.cpp — slow-control filter for replayed ROOT files
 //
 // Reads one or more replayed ROOT files (raw or recon), applies user-defined
-// cuts on the slow streams (DSC2 livetime + EPICS values), and writes a
-// single output ROOT file containing:
+// cuts on the slow streams (DSC2 livetime + EPICS values), and writes an
+// output ROOT file containing:
 //   * the events / recon tree with only the physics events bracketed by
 //     two adjacent "good" slow-event checkpoints,
 //   * the scalers and epics trees concatenated from every input file (no
@@ -57,6 +57,8 @@
 //     reproduces that side's post-cut charge directly.
 // With split on, one file <stem>_<label>.root + matching report is written per
 // target state actually seen (one or two), instead of the single default output.
+// With several inputs, -o is a directory: one filtered file per (input, side),
+// prad_<run>_epics.root with the run's slow trees, and one run-level report.
 // JSON report: see the write phase in the source for the full layout (a
 // "split" block is added per side when run-splitting is active).
 //=============================================================================
@@ -64,6 +66,8 @@
 #include "EventData.h"
 #include "EventData_io.h"
 #include "ConfigSetup.h"     // analysis::get_run_int
+#include "SlowControl.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -71,12 +75,10 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -87,11 +89,9 @@
 #include <memory>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <getopt.h>
-#include <TROOT.h>
 
 using json = nlohmann::json;
 
@@ -119,15 +119,12 @@ struct ChannelCut {
     // the stats only if ALL listed gating channels passed).  All listed
     // channels must also be configured.  One level of gating is
     // supported (the gating channels themselves use ungated stats).
-    // EPICS-on-EPICS only for now.
+    // EPICS-on-EPICS only.
     std::vector<std::string> gated_by;
 
-    // Robust statistics (filled in phase 2 if has_rel_rms).
-    // `center` is the median; `sigma` = 1.4826 · MAD (consistent estimator
-    // for a normal distribution, so `rel_rms: N` keeps its intuitive
-    // "N standard deviations" meaning).  `n_used` is the input point count
-    // (MAD doesn't iterate-and-drop); `n_clipped` is points outside
-    // [center − N·sigma, center + N·sigma], reported for traceability.
+    // Robust statistics (filled in phase 2 if has_rel_rms).  `n_used` is the
+    // input point count (MAD doesn't iterate-and-drop); `n_clipped` is points
+    // outside [center − N·sigma, center + N·sigma], reported for traceability.
     bool   stats_valid = false;
     double robust_center = 0;   // median
     double robust_sigma  = 0;   // 1.4826 * MAD
@@ -155,18 +152,8 @@ struct ChargeCfg {
     std::string beam_current_channel;   // EPICS channel name to read
 };
 
-// Run-splitting by a slow-control PV level (e.g. target cell pressure full vs
-// empty).  When enabled the filter classifies every checkpoint by its
-// forward-filled `channel` reading — PV >= `full` is full-target, PV <= `empty`
-// is empty-target, anything in between (the ramp) or with no reading yet is
-// dropped — and writes one output file per state that actually occurs, each
-// still subject to every other configured cut and with its own charge integral.
-//
-// Classification is per-checkpoint and stateless: the in-between dead zone is
-// itself the guard band (ramp events land in neither file), any number of
-// full<->empty transitions are handled, and a run that only ever shows one
-// state yields only that file.  `guard_checkpoints` optionally drops an extra
-// ± N checkpoints adjacent to each state edge, for margin beyond the dead zone.
+// Run-splitting by a slow-control PV level (the "split" block, see the file
+// header): each checkpoint is classified by its forward-filled `channel` reading.
 struct SplitCfg {
     bool        enabled  = false;
     std::string channel;                       // EPICS channel to watch
@@ -302,7 +289,6 @@ bool load_cuts(const std::string &path, CutConfig &cfg)
 }
 
 // ── Robust statistics: median + MAD ──────────────────────────────────────
-//
 // Uses median absolute deviation (Hampel 1974).  More robust to heavy
 // outliers than iterative sigma clipping: a single bad reading shifts the
 // median negligibly and inflates MAD only via its own contribution.  The
@@ -356,187 +342,13 @@ RobustStats robust_mad(const std::vector<double> &xs, double n_sigma_for_clip_co
     return r;
 }
 
-// ── In-memory slow-event rows ────────────────────────────────────────────
-
-struct ScalerRow {
-    int32_t  event_number   = 0;
-    int64_t  ti_ticks       = 0;
-    int64_t  unix_time      = 0;     // 0 if no SYNC seen yet
-    uint32_t sync_counter   = 0;
-    uint32_t run_number     = 0;
-    uint32_t ref_gated      = 0;
-    uint32_t ref_ungated    = 0;
-    uint32_t trg_gated[16]   = {};
-    uint32_t trg_ungated[16] = {};
-    uint32_t tdc_gated[16]   = {};
-    uint32_t tdc_ungated[16] = {};
-};
-
-struct EpicsArrival {
-    int32_t                         event_number = 0;   // event_number_at_arrival
-    int64_t                         ti_ticks     = 0;   // ti_ticks_at_arrival,
-                                                        // 0 ⇒ not populated
-                                                        // (legacy file or no
-                                                        // physics seen yet)
-    int64_t                         unix_time    = 0;
-    uint32_t                        sync_counter = 0;
-    uint32_t                        run_number   = 0;
-    std::map<std::string, double>   updates;            // sparse
-};
-
-// Extract the (gated, ungated) pair the cut targets.  These are cumulative
-// counters: the DSC2 increments them since run-start without resetting at
-// each readout, so a single row gives the run-average live fraction, not
-// the live fraction over the most recent slice.
-inline std::pair<uint32_t, uint32_t>
-select_scaler_pair(const ScalerRow &r, const LivetimeCut &cfg)
-{
-    if (cfg.source == "ref") return {r.ref_gated, r.ref_ungated};
-    int c = std::clamp(cfg.channel, 0, 15);
-    if (cfg.source == "trg") return {r.trg_gated[c], r.trg_ungated[c]};
-    if (cfg.source == "tdc") return {r.tdc_gated[c], r.tdc_ungated[c]};
-    return {0, 0};
-}
-
-// Per-row delta-livetime in percent, indexed by load-order position.
-// Walks the rows in event-number order and divides the *change* in gated
-// over the change in ungated since the previous reading — i.e. the live
-// fraction over the slice between adjacent scaler readouts.  This is what
-// quality cuts need: the run-cumulative ratio dilutes a recent dropout
-// behind several minutes of good livetime.
-//
-// The implicit predecessor at run-start is (0, 0), so the first row's
-// "delta" equals the cumulative readout over (run_start, first_readout].
-// If the counter ever moves backward (DSC2 reset / wrap), the previous
-// is rebased to (0, 0) at that row and the delta is taken from there.
-// Slots where ungated did not advance return -1 (cannot compute).
-std::vector<double>
-compute_delta_live_pct(const std::vector<ScalerRow> &scalers,
-                       const std::vector<size_t>    &sc_order,
-                       const LivetimeCut            &cfg)
-{
-    std::vector<double> out(scalers.size(), -1.0);
-    uint32_t prev_g = 0, prev_u = 0;
-    for (size_t k = 0; k < sc_order.size(); ++k) {
-        const size_t orig = sc_order[k];
-        const auto [g, u] = select_scaler_pair(scalers[orig], cfg);
-        // Counter went backward — treat as a reset and rebase the baseline.
-        if (g < prev_g || u < prev_u) { prev_g = 0; prev_u = 0; }
-        const uint32_t dg = g - prev_g;
-        const uint32_t du = u - prev_u;
-        if (du > 0 && dg <= du)
-            out[orig] = static_cast<double>(dg) / static_cast<double>(du) * 100.0;
-        prev_g = g;
-        prev_u = u;
-    }
-    return out;
-}
-
 // ── Tree readers ─────────────────────────────────────────────────────────
-
-// load_*() preserves the input-file order; sorting is done downstream via an
-// index permutation so phase-5 re-reads (which iterate in input order) can
-// look up each row's verdict by its load-order index.
-bool load_scalers(const std::vector<std::string> &files, std::vector<ScalerRow> &out)
-{
-    prad2::RawScalerData sc;
-    for (const auto &path : files) {
-        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-        if (!f || f->IsZombie()) {
-            std::cerr << "replay_filter: cannot open " << path << "\n";
-            return false;
-        }
-        TTree *t = dynamic_cast<TTree *>(f->Get("scalers"));
-        if (!t) continue;
-        prad2::SetScalerReadBranches(t, sc);
-        Long64_t n = t->GetEntries();
-        out.reserve(out.size() + n);
-        for (Long64_t i = 0; i < n; ++i) {
-            t->GetEntry(i);
-            ScalerRow r;
-            r.event_number = sc.event_number;
-            r.ti_ticks     = sc.ti_ticks;
-            r.unix_time    = sc.unix_time;
-            r.sync_counter = sc.sync_counter;
-            r.run_number   = sc.run_number;
-            r.ref_gated    = sc.ref_gated;
-            r.ref_ungated  = sc.ref_ungated;
-            std::memcpy(r.trg_gated,   sc.trg_gated,   16 * sizeof(uint32_t));
-            std::memcpy(r.trg_ungated, sc.trg_ungated, 16 * sizeof(uint32_t));
-            std::memcpy(r.tdc_gated,   sc.tdc_gated,   16 * sizeof(uint32_t));
-            std::memcpy(r.tdc_ungated, sc.tdc_ungated, 16 * sizeof(uint32_t));
-            out.push_back(r);
-        }
-    }
-    return true;
-}
-
-bool load_epics(const std::vector<std::string> &files, std::vector<EpicsArrival> &out)
-{
-    for (const auto &path : files) {
-        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-        if (!f || f->IsZombie()) {
-            std::cerr << "replay_filter: cannot open " << path << "\n";
-            return false;
-        }
-        TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
-        if (!t) continue;
-
-        prad2::RawEpicsData ep;
-        std::vector<std::string> *cp = &ep.channel;
-        std::vector<double>      *vp = &ep.value;
-        t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
-        // ti_ticks_at_arrival was added after the first replays were taken;
-        // tolerate its absence so legacy ROOT files still load (we will
-        // fall back to the events-tree lookup for those rows).
-        const bool has_ticks_at_arrival =
-            (t->GetBranch("ti_ticks_at_arrival") != nullptr);
-        if (has_ticks_at_arrival)
-            t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
-        t->SetBranchAddress("unix_time",    &ep.unix_time);
-        t->SetBranchAddress("sync_counter", &ep.sync_counter);
-        t->SetBranchAddress("run_number",   &ep.run_number);
-        t->SetBranchAddress("channel", &cp);
-        t->SetBranchAddress("value",   &vp);
-
-        Long64_t n = t->GetEntries();
-        out.reserve(out.size() + n);
-        for (Long64_t i = 0; i < n; ++i) {
-            ep.ti_ticks_at_arrival = 0;
-            t->GetEntry(i);
-            EpicsArrival a;
-            a.event_number = ep.event_number_at_arrival;
-            a.ti_ticks     = has_ticks_at_arrival
-                              ? static_cast<int64_t>(ep.ti_ticks_at_arrival)
-                              : 0;
-            a.unix_time    = ep.unix_time;
-            a.sync_counter = ep.sync_counter;
-            a.run_number   = ep.run_number;
-            size_t k_max = std::min(ep.channel.size(), ep.value.size());
-            for (size_t k = 0; k < k_max; ++k)
-                a.updates[ep.channel[k]] = ep.value[k];
-            out.push_back(std::move(a));
-        }
-    }
-    return true;
-}
-
-// Index permutation that orders the input vector by event_number.
-template <class T>
-std::vector<size_t> sort_index_by_event(const std::vector<T> &v)
-{
-    std::vector<size_t> idx(v.size());
-    for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
-    std::sort(idx.begin(), idx.end(),
-              [&](size_t a, size_t b) { return v[a].event_number < v[b].event_number; });
-    return idx;
-}
 
 // Pre-scan the events/recon tree across all input files and build a
 // lookup event_num → ti_ticks (the 48-bit TI timestamp).  Only `event_num`
 // and `timestamp` branches are activated, so this is fast even on
-// millions-of-event runs.  Used to pin each report point to the TI tick
-// of the physics event it is associated with.
+// millions-of-event runs.  Used for the time anchor and as the TI-tick
+// fallback for EPICS rows from replays without ti_ticks_at_arrival.
 bool build_evn_to_ticks(const std::vector<std::string> &files,
                         const std::string              &tree_name,
                         std::map<int32_t, int64_t>     &out)
@@ -552,9 +364,8 @@ bool build_evn_to_ticks(const std::vector<std::string> &files,
         TTree *t = dynamic_cast<TTree *>(f->Get(tree_name.c_str()));
         if (!t) continue;
 
-        // Activate just the two branches we need.
         t->SetBranchStatus("*", 0);
-        if (auto *b = t->GetBranch("event_num")) {
+        if (t->GetBranch("event_num")) {
             t->SetBranchStatus("event_num", 1);
             t->SetBranchAddress("event_num", &event_num);
         } else {
@@ -562,7 +373,7 @@ bool build_evn_to_ticks(const std::vector<std::string> &files,
                       << "' has no event_num branch in " << path << "\n";
             return false;
         }
-        if (auto *b = t->GetBranch("timestamp")) {
+        if (t->GetBranch("timestamp")) {
             t->SetBranchStatus("timestamp", 1);
             t->SetBranchAddress("timestamp", &timestamp);
         } else {
@@ -603,12 +414,11 @@ bool eval_channel_cut(const ChannelCut &c, double value)
 //     readout included the scaler bank).  EPICS rows: event_number_at_-
 //     arrival (the most recent physics event seen at the time of the
 //     EPICS event).  Both are integer keys into the events/recon tree.
-//   * `associated_timestamp` (relative seconds) — the TI 48-bit tick of
-//     the physics event with event_num == associated_evn, in seconds
-//     since the earliest looked-up TI tick.  Looked up once per unique
-//     event_number from the events/recon tree, so it is the *exact* time
-//     of the physics event the slow row is tied to (no forward-fill /
-//     SYNC-interval lag).  null when no physics event matches (e.g.
+//   * `associated_timestamp` (relative seconds) — the TI 48-bit tick carried
+//     by the slow row (scalers: the SYNC event's own timestamp; EPICS:
+//     ti_ticks_at_arrival, or the events-tree tick of associated_evn for
+//     replays without that branch), in seconds since the earliest TI tick
+//     seen in the run.  null when no tick is known (e.g.
 //     event_number_at_arrival = -1 — EPICS arrived before any physics).
 //   * `unix_time` (absolute Unix seconds) — from the 0xE112 HEAD bank.
 //     Native for EPICS rows.  Explicitly null for scaler rows: the
@@ -630,34 +440,6 @@ struct ReportPoint {
                                   // phase 5, stays 0 when split is off.
 };
 
-inline void reset_recon_optional(prad2::ReconEventData &ev)
-{
-    // Keep optional blocks safe when an input file omits some branches.
-    ev.matchNum = 0;
-    std::fill(std::begin(ev.matchFlag), std::end(ev.matchFlag), 0);
-    ev.clear_match_lists();
-
-    ev.veto_nch = 0;
-    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
-
-    ev.lms_nch = 0;
-    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
-
-    ev.vtp_cl_n = 0;
-    ev.rf_n_a = 0;
-    ev.rf_n_b = 0;
-
-    ev.ssp_raw.clear();
-    ev.vtp_roc_tags.clear();
-    ev.vtp_nwords.clear();
-    ev.vtp_words.clear();
-
-    std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
-    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
-    std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
-              std::numeric_limits<float>::quiet_NaN());
-}
-
 // ── Main pipeline ────────────────────────────────────────────────────────
 
 bool detect_event_tree(const std::string &path, std::string &name)
@@ -667,14 +449,6 @@ bool detect_event_tree(const std::string &path, std::string &name)
     if (f->Get("events")) { name = "events"; return true; }
     if (f->Get("recon"))  { name = "recon";  return true; }
     return false;
-}
-
-Long64_t tree_entries(const std::string &path, const char *tree_name)
-{
-    std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-    if (!f || f->IsZombie()) return 0;
-    TTree *t = dynamic_cast<TTree *>(f->Get(tree_name));
-    return t ? t->GetEntries() : 0;
 }
 
 std::string insert_before_root(const std::string &path, const std::string &suffix)
@@ -760,10 +534,12 @@ int run(const std::vector<std::string> &input_files,
     if (!load_cuts(cuts_path, cuts)) return 1;
 
     // ---------- Phase 1: load slow streams into memory ----------
-    std::vector<ScalerRow>    scalers;
-    std::vector<EpicsArrival> epics_rows;
-    if (!load_scalers(input_files, scalers))   return 1;
-    if (!load_epics  (input_files, epics_rows)) return 1;
+    // Rows stay in input-file order: the phase-7 re-reads iterate the files
+    // in that order and look up each row's verdict by its load-order index.
+    std::vector<analysis::ScalerRow> scalers;
+    std::vector<analysis::EpicsRow>  epics_rows;
+    if (!analysis::LoadScalerRows(input_files, scalers, "replay_filter"))   return 1;
+    if (!analysis::LoadEpicsRows (input_files, epics_rows, "replay_filter")) return 1;
     std::cerr << "replay_filter: loaded " << scalers.size() << " scaler + "
               << epics_rows.size() << " epics rows from "
               << input_files.size() << " file(s)\n";
@@ -788,8 +564,8 @@ int run(const std::vector<std::string> &input_files,
         info.path = path;
         info.scaler_offset = scaler_offset;
         info.epics_offset = epics_offset;
-        info.scaler_entries = tree_entries(path, "scalers");
-        info.epics_entries = tree_entries(path, "epics");
+        info.scaler_entries = analysis::TreeEntries(path, "scalers");
+        info.epics_entries = analysis::TreeEntries(path, "epics");
         scaler_offset += static_cast<size_t>(info.scaler_entries);
         epics_offset += static_cast<size_t>(info.epics_entries);
         file_info.push_back(std::move(info));
@@ -797,18 +573,18 @@ int run(const std::vector<std::string> &input_files,
 
     // Sort scalers once and precompute delta livetime per row.  Cuts evaluate
     // and report against the slice-local live fraction (Δgated / Δungated),
-    // not the run-cumulative ratio cached on each row.
-    auto sc_order = sort_index_by_event(scalers);
+    // not the run-cumulative ratio cached on each row, which would dilute a
+    // recent dropout behind minutes of good livetime.
+    auto sc_order = analysis::SortByEvent(scalers);
     std::vector<double> delta_live_pct;
     if (cuts.livetime.enabled)
-        delta_live_pct = compute_delta_live_pct(scalers, sc_order, cuts.livetime);
+        delta_live_pct = analysis::DeltaLivetime(scalers, sc_order, cuts.livetime.source,
+                                                 cuts.livetime.channel, 100.0);
 
     // ---------- Phase 2: robust stats for rel_rms cuts ----------
-    // Ungated channels first (stats from all values), then gated channels
-    // (stats restricted to rows where the named gating channel's cut
-    // passed).  Gating is one-level: the gating channel itself uses its
-    // own ungated stats — gating chains are intentionally not supported
-    // to keep the JSON unambiguous.
+    // Ungated channels first, then gated ones (see ChannelCut::gated_by);
+    // gating chains are intentionally not supported to keep the JSON
+    // unambiguous.
     auto fill_stats = [&](ChannelCut &c, const std::vector<double> &xs) {
         auto rs = robust_mad(xs, c.rel_rms_n);
         c.stats_valid   = (rs.n_used > 1) && rs.sigma > 0;
@@ -821,7 +597,15 @@ int run(const std::vector<std::string> &input_files,
 
     // Walk EPICS rows in event-number order so forward-fill of the gating
     // channel reflects the actual time sequence.
-    auto ep_order_for_stats = sort_index_by_event(epics_rows);
+    const auto ep_order = analysis::SortByEvent(epics_rows);
+    auto values_of = [&](const std::string &channel) {
+        std::vector<double> xs;
+        for (size_t oi : ep_order) {
+            auto it = epics_rows[oi].updates.find(channel);
+            if (it != epics_rows[oi].updates.end()) xs.push_back(it->second);
+        }
+        return xs;
+    };
 
     // 1. livetime (independent of EPICS).
     if (cuts.livetime.enabled && cuts.livetime.cut.has_rel_rms) {
@@ -838,12 +622,7 @@ int run(const std::vector<std::string> &input_files,
     for (auto &kv : cuts.epics) {
         if (!kv.second.has_rel_rms) continue;
         if (!kv.second.gated_by.empty()) continue;
-        std::vector<double> xs;
-        for (size_t oi : ep_order_for_stats) {
-            auto it = epics_rows[oi].updates.find(kv.first);
-            if (it != epics_rows[oi].updates.end()) xs.push_back(it->second);
-        }
-        fill_stats(kv.second, xs);
+        fill_stats(kv.second, values_of(kv.first));
     }
 
     // 3. gated EPICS channels (stats from rows where every gate's cut passed).
@@ -874,18 +653,13 @@ int run(const std::vector<std::string> &input_files,
             gates.push_back(&it->second);
         }
         if (!gates_ok) {
-            std::vector<double> xs;
-            for (size_t oi : ep_order_for_stats) {
-                auto it = epics_rows[oi].updates.find(kv.first);
-                if (it != epics_rows[oi].updates.end()) xs.push_back(it->second);
-            }
-            fill_stats(kv.second, xs);
+            fill_stats(kv.second, values_of(kv.first));
             continue;
         }
 
         std::vector<double> xs;
         std::map<std::string, double> cur_eps;        // forward-fill across rows
-        for (size_t oi : ep_order_for_stats) {
+        for (size_t oi : ep_order) {
             const auto &row = epics_rows[oi];
             for (const auto &up : row.updates) cur_eps[up.first] = up.second;
 
@@ -908,13 +682,12 @@ int run(const std::vector<std::string> &input_files,
     }
 
     // ---------- Phase 3: anchor for relative associated_timestamp ----------
-    // Slow rows now carry their own TI tick: scalers via `ti_ticks` (from the
-    // carrying SYNC event's info.timestamp) and EPICS via `ti_ticks` (the new
-    // ti_ticks_at_arrival branch, captured at decode time so it is independent
-    // of whether the anchor event was written to the events tree).  We still
-    // detect and pre-scan the events tree below — needed for phase 5's
-    // physics-filter loop, and as a back-compat fallback for EPICS rows from
-    // legacy replays that lack the new branch.
+    // Slow rows carry their own TI tick (scalers: the SYNC event's
+    // info.timestamp; EPICS: ti_ticks_at_arrival, captured at decode time so
+    // it is independent of whether the anchor event was written to the events
+    // tree).  The events tree is still detected (phase 7 copies it) and
+    // pre-scanned: its ticks feed the anchor and are the fallback for EPICS
+    // rows from replays without that branch.
     std::string ev_tree_name;
     if (!detect_event_tree(input_files.front(), ev_tree_name)) {
         std::cerr << "replay_filter: no events/recon tree in "
@@ -936,14 +709,11 @@ int run(const std::vector<std::string> &input_files,
     for (const auto &kv : evn_to_ticks) consider_tick(kv.second);
     for (const auto &s  : scalers)      consider_tick(s.ti_ticks);
     for (const auto &e  : epics_rows)   consider_tick(e.ti_ticks);
-    constexpr double TI_TICK_SEC = 4.0e-9;
 
     // ---------- Phase 4: walk merged timeline, mark good/bad ----------
-    // Iterate via index permutations so the parallel verdict vectors stay
-    // aligned with the load-order vectors (used in phase 6).  sc_order was
-    // built earlier so the delta-livetime precompute could share it.
-    auto ep_order = sort_index_by_event(epics_rows);
-
+    // Iterate via the sc_order / ep_order permutations so the parallel
+    // verdict vectors stay aligned with the load-order vectors (used in
+    // phase 7).
     std::vector<bool> scaler_verdict(scalers.size(),  false);
     std::vector<bool> epics_verdict (epics_rows.size(), false);
 
@@ -986,13 +756,11 @@ int run(const std::vector<std::string> &input_files,
             const auto &s = scalers[orig];
             cp_evn   = s.event_number;
             cp_ticks = s.ti_ticks;   // SYNC event's own info.timestamp
-            // Slice-local live fraction (Δgated / Δungated) — see
-            // compute_delta_live_pct for why the cumulative row value is
-            // not used.  The first row's predecessor is (0, 0).
+            // Slice-local live fraction (Δgated / Δungated), see
+            // DeltaLivetime.  The first row's predecessor is (0, 0).
             cur_lt = cuts.livetime.enabled ? delta_live_pct[orig] : -1.0;
-            // Scaler's cached unix_time is intentionally ignored — it lags
-            // by up to a SYNC interval and confuses alignment.  Charts that
-            // need absolute time should use the EPICS unix_time pins.
+            // Scaler's cached unix_time is intentionally ignored (see
+            // ReportPoint::unix_time).
             cp_unix = last_unix;
         } else {
             orig = ep_order[i_ep++];
@@ -1003,24 +771,18 @@ int run(const std::vector<std::string> &input_files,
             if (e.unix_time > 0) last_unix = e.unix_time;
             cp_unix    = last_unix;
             emit_unix  = (e.unix_time > 0);
-            // Legacy fallback: if the EPICS row was written before the
-            // ti_ticks_at_arrival branch existed, recover the timestamp
-            // by joining on event_number_at_arrival.  Misses when the
-            // anchor event itself was filtered out at replay time —
-            // exactly the failure mode the new branch closes.
+            // Replays without ti_ticks_at_arrival: join on
+            // event_number_at_arrival.  Misses when the anchor event itself
+            // was filtered out at replay time.
             if (cp_ticks <= 0 && cp_evn >= 0) {
                 auto it = evn_to_ticks.find(cp_evn);
                 if (it != evn_to_ticks.end()) cp_ticks = it->second;
             }
         }
 
-        // associated_timestamp: TI tick on this row, expressed as seconds
-        // since the run's earliest seen tick.  null when the row carries
-        // no tick (e.g. an EPICS event arriving before the first physics
-        // event seen on the channel).
         bool   pt_has_t = (cp_ticks > 0) && anchor_set;
         double pt_t     = pt_has_t
-                          ? (cp_ticks - ti_anchor) * TI_TICK_SEC : 0.0;
+                          ? (cp_ticks - ti_anchor) * fdec::TI_TICK_SEC : 0.0;
         bool   pt_has_unix = emit_unix;
         int64_t pt_unix    = emit_unix ? (int64_t)last_unix : 0;
 
@@ -1086,14 +848,8 @@ int run(const std::vector<std::string> &input_files,
     }
 
     // ---------- Phase 5: classify each checkpoint by PV level ----------
-    // When `split` is enabled every checkpoint is labelled by its forward-
-    // filled split PV: full (side 0, PV >= full_thresh), empty (side 1,
-    // PV <= empty_thresh), or dropped (-1) for the in-between ramp.  The dead
-    // zone between the thresholds is itself the guard band; `guard_checkpoints`
-    // optionally drops an extra ± margin at each state edge.  Classification is
-    // stateless, so any number of full<->empty transitions are handled and a
-    // run showing only one state yields only that file.  side 0 ↔ label_full,
-    // side 1 ↔ label_empty.  With split off, side[] is 0 everywhere so the
+    // side 0 = full (label_full), 1 = empty (label_empty), -1 = dropped
+    // (ramp / guard margin).  With split off, side[] is 0 everywhere so the
     // keep/charge/output code below is one path that runs for the present
     // side(s).  `split_active` mirrors cuts.split.enabled but degrades to false
     // if the channel never reports / never reaches either level.
@@ -1107,7 +863,7 @@ int run(const std::vector<std::string> &input_files,
 
     if (split_active) {
         const auto &S = cuts.split;
-        // After phase 3's forward-fill the only NaNs are the head before the
+        // After phase 4's forward-fill the only NaNs are the head before the
         // channel's first report; back-fill that head with the first reading
         // (the run's starting state) so a pure run keeps its leading events.
         double first_val = std::numeric_limits<double>::quiet_NaN();
@@ -1157,7 +913,7 @@ int run(const std::vector<std::string> &input_files,
                         {"from",      prev_state == 0 ? "full" : "empty"},
                         {"to",        sd == 0 ? "full" : "empty"},
                         {"timestamp", has_t
-                            ? json((cp.ti_ticks - ti_anchor) * TI_TICK_SEC)
+                            ? json((cp.ti_ticks - ti_anchor) * fdec::TI_TICK_SEC)
                             : json(nullptr)},
                     });
                 }
@@ -1193,27 +949,18 @@ int run(const std::vector<std::string> &input_files,
         }
     }
 
-    // ---------- Phase 5: build per-side keep-intervals (lo, hi] + charge ----------
+    // ---------- Phase 6: build per-side keep-intervals (lo, hi] + charge ----------
     // A pair (cp_{i-1}, cp_i) belongs to a side only when both endpoints carry
     // the same non-guard label; pairs that straddle the transition or touch
     // the guard contribute to neither output (those events are dropped).  The
-    // charge integration is the same arithmetic as before, bucketed per side:
-    //   * gated (live_charge[s]) — both endpoints overall_pass.  Canonical
-    //     post-cut number; matches the events written to that side's file.
-    //   * ungated (ungated_*[s]) — every valid-data pair on side s regardless
-    //     of the cut verdict, so users see how much charge the cuts dropped.
+    // charge integration is bucketed per side:
+    //   * gated — both endpoints overall_pass.  Canonical post-cut number;
+    //     matches the events written to that side's file.
+    //   * ungated — every valid-data pair on side s regardless of the cut
+    //     verdict, so users see how much charge the cuts dropped.
     std::vector<std::pair<int32_t, int32_t>> keep[2];
     std::vector<std::pair<int32_t, int32_t>> span[2];   // ungated per-side ranges
-    double live_charge[2]              = {0, 0};
-    double live_charge_secs[2]         = {0, 0};
-    double real_secs[2]                = {0, 0};
-    double ungated_live_charge[2]      = {0, 0};
-    double ungated_live_charge_secs[2] = {0, 0};
-    double ungated_real_secs[2]        = {0, 0};
-    int    n_charge_pairs[2]           = {0, 0};
-    int    n_charge_skipped[2]         = {0, 0};
-    int    n_ungated_charge_pairs[2]   = {0, 0};
-    int    n_ungated_charge_skipped[2] = {0, 0};
+    analysis::ChargeSums charge[2];
     for (size_t i = 1; i < timeline.size(); ++i) {
         const auto &a = timeline[i - 1];
         const auto &b = timeline[i];
@@ -1225,28 +972,8 @@ int run(const std::vector<std::string> &input_files,
         if (good_pair)
             keep[ps].emplace_back(a.event_number, b.event_number);
         if (!cuts.charge.enabled) continue;
-        const bool data_ok = !(a.ti_ticks <= 0 || b.ti_ticks <= 0 || b.ti_ticks <= a.ti_ticks
-            || !std::isfinite(b.live_fraction) || b.live_fraction < 0
-            || !std::isfinite(a.beam_current)  || !std::isfinite(b.beam_current));
-        if (!data_ok) {
-            if (good_pair) ++n_charge_skipped[ps];
-            ++n_ungated_charge_skipped[ps];
-            continue;
-        }
-        const double dt = (b.ti_ticks - a.ti_ticks) * TI_TICK_SEC;
-        const double I  = 0.5 * (a.beam_current + b.beam_current);
-        const double dQ = b.live_fraction * dt * I;
-        const double dL = b.live_fraction * dt;
-        ungated_live_charge[ps]      += dQ;
-        ungated_live_charge_secs[ps] += dL;
-        ungated_real_secs[ps]        += dt;
-        ++n_ungated_charge_pairs[ps];
-        if (good_pair) {
-            live_charge[ps]      += dQ;
-            live_charge_secs[ps] += dL;
-            real_secs[ps]        += dt;
-            ++n_charge_pairs[ps];
-        }
+        charge[ps].AddPair(a.ti_ticks, b.ti_ticks, b.live_fraction,
+                           a.beam_current, b.beam_current, good_pair);
     }
     auto in_intervals = [](const std::vector<std::pair<int32_t, int32_t>> &iv,
                            int32_t evn) -> bool {
@@ -1261,14 +988,13 @@ int run(const std::vector<std::string> &input_files,
     auto is_kept = [&](int s, int32_t evn) { return in_intervals(keep[s], evn); };
     auto in_span = [&](int s, int32_t evn) { return in_intervals(span[s], evn); };
 
-    // ---------- Phase 6: write the output(s) — one ROOT file + report per side ----------
-    // ev_tree_name was detected in phase 3 above.  `write_side` does the whole
-    // job for one side; with split off it runs once (side 0 → output_path),
-    // with split on it runs once per present target state with the file/report
-    // stems suffixed by that state's label.  A row's `good` flag in a side's
-    // slow trees is its overall verdict AND-ed with "belongs to this side", so
-    // running live_charge on a
-    // side file reproduces that side's post-cut charge directly.
+    // ---------- Phase 7: write the output(s) — ROOT file(s) + JSON report ----------
+    // One input: one ROOT file + report per present side (split off: side 0 →
+    // output_path).  Several inputs: one ROOT file per (input, present side),
+    // the run's unfiltered slow trees and one run-level report.  A row's
+    // `good` flag in a side's slow trees is its overall verdict AND-ed with
+    // "belongs to this side", so running live_charge on a side file
+    // reproduces that side's post-cut charge directly.
     const bool is_recon = (ev_tree_name == "recon");
 
     // Checkpoints per state (n_cp_side[0]=full, [1]=empty) and dropped
@@ -1277,206 +1003,389 @@ int run(const std::vector<std::string> &input_files,
     int n_cp_side[2] = {0, 0}, n_cp_guard = 0;
     for (int sd : side) { if (sd < 0) ++n_cp_guard; else ++n_cp_side[sd]; }
 
+    auto side_label = [&](int s) -> const std::string & {
+        return s == 0 ? cuts.split.label_full : cuts.split.label_empty;
+    };
+
+    // Concatenate the scalers / epics / runinfo trees of the given inputs into
+    // out.  scalers and epics get a `good` branch (the checkpoint's phase-4
+    // verdict, restricted to side s when restrict_side) so downstream tools
+    // can colour the traces by pass/fail without recomputing.
+    auto write_slow_trees = [&](TFile &out, const std::vector<size_t> &file_indices,
+                                int s, bool restrict_side) {
+        {
+            prad2::RawScalerData sc;
+            bool good = false;
+            out.cd();
+            TTree *out_sc = new TTree("scalers", "PRad2 DSC2 scaler readouts (concatenated)");
+            prad2::SetScalerWriteBranches(out_sc, sc);
+            out_sc->Branch("good", &good, "good/O");
+            for (size_t fi : file_indices) {
+                std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
+                TTree *t = f ? dynamic_cast<TTree *>(f->Get("scalers")) : nullptr;
+                if (!t) continue;
+                prad2::SetScalerReadBranches(t, sc);
+                size_t seq = file_info[fi].scaler_offset;
+                Long64_t n = t->GetEntries();
+                for (Long64_t i = 0; i < n; ++i, ++seq) {
+                    t->GetEntry(i);
+                    good = (seq < scaler_verdict.size()) ? scaler_verdict[seq] : false;
+                    if (good && restrict_side)
+                        good = (seq < scaler_side.size() && scaler_side[seq] == s);
+                    out.cd();
+                    out_sc->Fill();
+                }
+            }
+            out.cd();
+            out_sc->Write();
+        }
+        // Rows of inputs without ti_ticks_at_arrival get it from the
+        // events-tree lookup, so the output is always self-contained.
+        {
+            prad2::RawEpicsData ep;
+            prad2::EpicsVectorBindings ep_vecs;
+            bool good = false;
+            out.cd();
+            TTree *out_ep = new TTree("epics", "PRad2 EPICS slow control (concatenated)");
+            prad2::SetEpicsWriteBranches(out_ep, ep);
+            out_ep->Branch("good", &good, "good/O");
+            for (size_t fi : file_indices) {
+                std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
+                TTree *t = f ? dynamic_cast<TTree *>(f->Get("epics")) : nullptr;
+                if (!t) continue;
+                prad2::SetEpicsReadBranches(t, ep);
+                prad2::BindEpicsVectorBranches(t, ep, ep_vecs);
+                size_t seq = file_info[fi].epics_offset;
+                Long64_t n = t->GetEntries();
+                for (Long64_t i = 0; i < n; ++i, ++seq) {
+                    ep.ti_ticks_at_arrival = 0;
+                    t->GetEntry(i);
+                    if (ep.ti_ticks_at_arrival <= 0 && ep.event_number_at_arrival >= 0) {
+                        auto eit = evn_to_ticks.find(ep.event_number_at_arrival);
+                        if (eit != evn_to_ticks.end()) ep.ti_ticks_at_arrival = eit->second;
+                    }
+                    good = (seq < epics_verdict.size()) ? epics_verdict[seq] : false;
+                    if (good && restrict_side)
+                        good = (seq < epics_side.size() && epics_side[seq] == s);
+                    out.cd();
+                    out_ep->Fill();
+                }
+            }
+            out.cd();
+            out_ep->Write();
+        }
+        // runinfo (one row per CODA control event, including the DAQ-config
+        // text on PRESTART) is run-scoped metadata and is not filtered.
+        {
+            prad2::RawRunInfo ri;
+            std::string *sp = &ri.daq_config;
+            out.cd();
+            TTree *out_ri = new TTree("runinfo", "PRad2 control events / DAQ config (concatenated)");
+            prad2::SetRunInfoWriteBranches(out_ri, ri);
+            for (size_t fi : file_indices) {
+                std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
+                TTree *t = f ? dynamic_cast<TTree *>(f->Get("runinfo")) : nullptr;
+                if (!t) continue;
+                prad2::SetRunInfoReadBranches(t, ri);
+                t->SetBranchAddress("daq_config", &sp);
+                Long64_t n = t->GetEntries();
+                for (Long64_t i = 0; i < n; ++i) {
+                    ri.daq_config.clear();
+                    t->GetEntry(i);
+                    out.cd();
+                    out_ri->Fill();
+                }
+            }
+            out.cd();
+            out_ri->Write();
+        }
+    };
+
+    // Write the events of input fi kept on side s, plus that input's slow
+    // trees, to the new file outp.  The Set*WriteBranches helpers keep the
+    // schema of a replay.  ok is false when outp cannot be created.
+    struct WriteStats { int64_t n_in = 0, n_out = 0; bool ok = false; };
+    auto write_file_side = [&](size_t fi, int s, const std::string &outp) -> WriteStats {
+        WriteStats stats;
+        std::unique_ptr<TFile> out(TFile::Open(outp.c_str(), "RECREATE"));
+        if (!out || out->IsZombie()) {
+            std::cerr << "replay_filter: cannot create " << outp << "\n";
+            return stats;
+        }
+        std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
+        TTree *t = f ? dynamic_cast<TTree *>(f->Get(ev_tree_name.c_str())) : nullptr;
+
+        // Copy the entries of t kept on side s to out_ev, whose branches point
+        // into ev; reset(ev) runs before every read.
+        auto copy_kept = [&](TTree *out_ev, auto &ev, auto reset) {
+            if (t) {
+                Long64_t n = t->GetEntries();
+                if (!split_active) stats.n_in += n;   // split off: every event counts
+                for (Long64_t i = 0; i < n; ++i) {
+                    reset(ev);
+                    t->GetEntry(i);
+                    if (split_active && in_span(s, ev.event_num)) ++stats.n_in;
+                    if (is_kept(s, ev.event_num)) {
+                        out->cd();
+                        out_ev->Fill();
+                        ++stats.n_out;
+                    }
+                }
+            }
+            out->cd();
+            out_ev->Write();
+            out_ev->ResetBranchAddresses();
+        };
+
+        if (!is_recon) {
+            auto ev = std::make_unique<prad2::RawEventData>();
+            prad2::RawReadStatus status;
+            prad2::RawVectorBindings vb;
+            if (t) {
+                status = prad2::SetRawReadBranches(t, *ev);
+                prad2::BindRawVectorBranches(t, *ev, vb);
+            }
+            out->cd();
+            TTree *out_ev = new TTree("events", "PRad2 filtered replay (raw)");
+            prad2::SetRawWriteBranches(out_ev, *ev, status.has_peaks);
+            copy_kept(out_ev, *ev, [](prad2::RawEventData &e) { e.clear_banks(); });
+        } else {
+            auto ev = std::make_unique<prad2::ReconEventData>();
+            prad2::ReconMatchVectorBindings match_bind;
+            prad2::RawVectorBindings vb;
+            if (t) {
+                prad2::SetReconReadBranches(t, *ev);
+                prad2::BindReconMatchVectorBranches(t, *ev, match_bind);
+                prad2::BindRawVectorBranches(t, *ev, vb);
+            }
+            out->cd();
+            TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
+            prad2::SetReconWriteBranches(out_ev, *ev, false); // not x17_mode
+            copy_kept(out_ev, *ev, [](prad2::ReconEventData &e) { e.clear(); });
+        }
+        write_slow_trees(*out, {fi}, s, split_active);
+        out->Close();
+        stats.ok = true;
+        return stats;
+    };
+
+    // JSON report of side s, or of the whole run for s < 0 (every checkpoint,
+    // per-channel counts and keep intervals of all sides, charge summed).
+    auto build_report = [&](int s, int64_t n_in, int64_t n_out) -> json {
+        const bool this_side_only = split_active && s >= 0;
+        auto to_json_or_null = [](bool valid, double v) -> json {
+            return valid ? json(v) : json(nullptr);
+        };
+        auto stats_for = [&](const ChannelCut &c) -> json {
+            json j = {
+                {"abs_min", c.abs.has_min ? json(c.abs.min_val) : json(nullptr)},
+                {"abs_max", c.abs.has_max ? json(c.abs.max_val) : json(nullptr)},
+            };
+            if (c.has_rel_rms) {
+                j["rel_rms"]       = c.rel_rms_n;
+                j["robust_center"] = to_json_or_null(c.stats_valid, c.robust_center);
+                j["robust_sigma"]  = to_json_or_null(c.stats_valid, c.robust_sigma);
+                j["mad"]           = to_json_or_null(c.stats_valid, c.mad);
+                // n_used is the count *after* gating (if any) — useful for
+                // sanity-checking that the gating restriction left enough data
+                // to compute meaningful stats.
+                j["n_used"]        = c.n_used;
+                j["n_clipped"]     = c.n_clipped;
+                // Always an array — even single-gate cases — so downstream
+                // tools can iterate without checking type.
+                if (!c.gated_by.empty()) j["gated_by"] = c.gated_by;
+            }
+            return j;
+        };
+
+        json report;
+        report["run_number"]    = run_number;
+        report["input_files"]   = input_files;
+        report["cuts"]          = cuts.raw;
+        report["robust_method"] = "mad";   // 1.4826 * MAD as σ̂
+
+        json stats = json::object();
+        if (cuts.livetime.enabled) {
+            json ls = stats_for(cuts.livetime.cut);
+            ls["source"]  = cuts.livetime.source;
+            ls["channel"] = cuts.livetime.channel;
+            stats["livetime"] = std::move(ls);
+        }
+        for (const auto &kv : cuts.epics)
+            stats["epics:" + kv.first] = stats_for(kv.second);
+        report["stats"] = std::move(stats);
+
+        int n_pass_cp = 0, n_fail_cp = 0;
+        for (size_t k = 0; k < timeline.size(); ++k)
+            if (!this_side_only || side[k] == s)
+                (timeline[k].overall_pass ? n_pass_cp : n_fail_cp)++;
+        const int n_slow = n_pass_cp + n_fail_cp;
+
+        json keep_intervals = json::array();
+        for (int ks = 0; ks < 2; ++ks)
+            if (s < 0 || ks == s)
+                for (const auto &p : keep[ks]) keep_intervals.push_back({p.first, p.second});
+
+        // Per-channel breakdown — number of slow-event checkpoints where this
+        // channel's cut accepted vs rejected the value.  Helps the user see
+        // immediately which cut is doing the rejecting (e.g. "beam current
+        // killed 80% of points, livetime barely matters").
+        std::map<std::string, std::pair<int, int>> per_channel;   // ch → {pass, fail}
+        for (const auto &p : report_points) {
+            if (this_side_only && p.side != s) continue;
+            auto &c = per_channel[p.channel];
+            if (p.pass) ++c.first; else ++c.second;
+        }
+        json per_channel_json = json::object();
+        for (const auto &kv : per_channel) {
+            int pass = kv.second.first, fail = kv.second.second;
+            int tot  = pass + fail;
+            per_channel_json[kv.first] = {
+                {"n_pass",    pass},
+                {"n_fail",    fail},
+                {"pass_rate", tot > 0 ? double(pass) / double(tot) : 0.0},
+            };
+        }
+
+        report["summary"] = {
+            {"n_slow_events",      n_slow},
+            {"n_slow_pass",        n_pass_cp},
+            {"n_slow_reject",      n_fail_cp},
+            {"slow_pass_rate",     n_slow > 0 ? double(n_pass_cp) / double(n_slow) : 0.0},
+            {"n_physics_in",       n_in},
+            {"n_physics_pass",     n_out},
+            {"n_physics_reject",   n_in - n_out},
+            {"physics_pass_rate",  n_in > 0 ? double(n_out) / double(n_in) : 0.0},
+            // Keep-interval count (each is a (lo, hi] range of accepted events).
+            {"n_keep_intervals",   (int)keep_intervals.size()},
+            {"per_channel",        per_channel_json},
+        };
+        report["keep_intervals"] = std::move(keep_intervals);
+
+        // Split metadata: the level thresholds, how many checkpoints fell in
+        // each state vs the dropped ramp, and every full<->empty transition
+        // seen, so neither side's report needs the other's.
+        if (split_active) {
+            json split = {
+                {"enabled",               true},
+                {"channel",               cuts.split.channel},
+                {"full_threshold",        cuts.split.full_thresh},
+                {"empty_threshold",       cuts.split.empty_thresh},
+                {"guard_checkpoints",     cuts.split.guard_checkpoints},
+                {"n_checkpoints_full",    n_cp_side[0]},
+                {"n_checkpoints_empty",   n_cp_side[1]},
+                {"n_checkpoints_dropped", n_cp_guard},
+                {"n_state_transitions",   n_state_transitions},
+                {"transitions",           transitions},
+                {"pure_run",              n_state_transitions == 0},
+            };
+            if (s >= 0) {
+                split["side"]               = s;
+                split["state"]              = s == 0 ? "full" : "empty";
+                split["label"]              = side_label(s);
+                split["n_checkpoints_this"] = n_cp_side[s];
+            } else {
+                split["labels"] = json::array({cuts.split.label_full, cuts.split.label_empty});
+            }
+            report["split"] = std::move(split);
+        }
+
+        // Live-charge integration over kept intervals.  Units: assume the
+        // configured EPICS beam-current channel publishes in nA (true for
+        // hallb_IPM2C21A_CUR and the other Hall B IPM scalers), so
+        // value = Σ live_fraction · Δt · I  ⇒  nA · s = nC.  Also emit the
+        // accumulated live time so the average current is recoverable.
+        // value_nC / live_seconds / real_seconds are the gated sums and
+        // ungated_* the same over every valid-data pair (see phase 6).
+        if (cuts.charge.enabled) {
+            analysis::ChargeSums c = charge[s < 0 ? 0 : s];
+            if (s < 0) c += charge[1];
+            report["live_charge"] = {
+                {"value_nC",                   c.value_nC},
+                {"unit",                       "nC"},
+                {"beam_current_channel",       cuts.charge.beam_current_channel},
+                {"beam_current_unit",          "nA"},
+                {"live_seconds",               c.live_seconds},
+                {"real_seconds",               c.real_seconds},
+                {"ungated_value_nC",           c.ungated_value_nC},
+                {"ungated_live_seconds",       c.ungated_live_seconds},
+                {"ungated_real_seconds",       c.ungated_real_seconds},
+                {"n_pairs_integrated",         c.n_pairs_integrated},
+                {"n_pairs_skipped",            c.n_pairs_skipped},
+                {"n_ungated_pairs_integrated", c.n_ungated_pairs_integrated},
+                {"n_ungated_pairs_skipped",    c.n_ungated_pairs_skipped},
+            };
+        }
+
+        json pts = json::array();
+        pts.get_ptr<json::array_t *>()->reserve(report_points.size());
+        for (const auto &p : report_points) {
+            pts.push_back({
+                {"channel",              p.channel},
+                {"status",               p.pass ? "pass" : "fail"},
+                {"associated_evn",       p.event_number},
+                {"associated_timestamp", p.has_assoc_t ? json(p.assoc_t_rel) : json(nullptr)},
+                {"unix_time",            p.has_unix_time ? json(p.unix_time) : json(nullptr)},
+                {"value",                std::isnan(p.value) ? json(nullptr) : json(p.value)},
+            });
+        }
+        report["points"] = std::move(pts);
+        return report;
+    };
+
+    auto write_report = [](const json &report, const std::string &path) {
+        std::ofstream of(path);
+        if (!of) {
+            std::cerr << "replay_filter: cannot write " << path << "\n";
+            return false;
+        }
+        of << report.dump(2) << "\n";
+        return true;
+    };
+
     auto fmt_pct = [](double r) {
         std::ostringstream o;
         o << std::fixed << std::setprecision(2) << (r * 100.0) << "%";
         return o.str();
     };
 
+    auto print_summary = [&](const json &report) {
+        const json &sm = report.at("summary");
+        std::cerr << "  slow events  : " << sm.at("n_slow_events").get<int>()
+                  << "  pass=" << sm.at("n_slow_pass").get<int>()
+                  << "  reject=" << sm.at("n_slow_reject").get<int>()
+                  << "  rate=" << fmt_pct(sm.at("slow_pass_rate").get<double>())
+                  << "\n";
+        std::cerr << "  keep intervals: " << sm.at("n_keep_intervals").get<int>() << "\n";
+        std::cerr << "  physics      : in=" << sm.at("n_physics_in").get<int64_t>()
+                  << "  pass="  << sm.at("n_physics_pass").get<int64_t>()
+                  << "  reject=" << sm.at("n_physics_reject").get<int64_t>()
+                  << "  rate=" << fmt_pct(sm.at("physics_pass_rate").get<double>())
+                  << "\n";
+        if (report.contains("live_charge")) {
+            const json &lc = report.at("live_charge");
+            std::cerr << "  live charge  : " << std::fixed << std::setprecision(3)
+                      << lc.at("value_nC").get<double>() << " nC over "
+                      << lc.at("live_seconds").get<double>()
+                      << " s live" << std::defaultfloat << "\n";
+        }
+        const json &per_channel = sm.at("per_channel");
+        if (!per_channel.empty()) {
+            std::cerr << "  per-channel reject:\n";
+            for (auto it = per_channel.begin(); it != per_channel.end(); ++it) {
+                const int pass = it->at("n_pass").get<int>();
+                const int fail = it->at("n_fail").get<int>();
+                std::cerr << "    " << it.key() << ": " << fail << " / " << (pass + fail)
+                          << " (" << fmt_pct(double(fail) / std::max(1, pass + fail))
+                          << ")\n";
+            }
+        }
+    };
+
     if (input_files.size() > 1) {
         std::filesystem::create_directories(output_path);
-        std::vector<size_t> all_file_indices(input_files.size());
-        for (size_t i = 0; i < all_file_indices.size(); ++i) all_file_indices[i] = i;
 
-        auto write_slow_trees = [&](TFile &out, const std::vector<size_t> &file_indices,
-                                    int s, bool restrict_side) -> int {
-            {
-                prad2::RawScalerData sc;
-                bool good = false;
-                out.cd();
-                TTree *out_sc = new TTree("scalers", "PRad2 DSC2 scaler readouts (concatenated)");
-                prad2::SetScalerWriteBranches(out_sc, sc);
-                out_sc->Branch("good", &good, "good/O");
-                for (size_t fi : file_indices) {
-                    std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                    TTree *t = f ? dynamic_cast<TTree *>(f->Get("scalers")) : nullptr;
-                    if (!t) continue;
-                    prad2::SetScalerReadBranches(t, sc);
-                    size_t seq = file_info[fi].scaler_offset;
-                    Long64_t n = t->GetEntries();
-                    for (Long64_t i = 0; i < n; ++i, ++seq) {
-                        t->GetEntry(i);
-                        good = (seq < scaler_verdict.size()) ? scaler_verdict[seq] : false;
-                        if (good && restrict_side)
-                            good = (seq < scaler_side.size() && scaler_side[seq] == s);
-                        out.cd();
-                        out_sc->Fill();
-                    }
-                }
-                out.cd();
-                out_sc->Write();
-            }
-            {
-                prad2::RawEpicsData ep;
-                std::vector<std::string> *cp = &ep.channel;
-                std::vector<double> *vp = &ep.value;
-                bool good = false;
-                out.cd();
-                TTree *out_ep = new TTree("epics", "PRad2 EPICS slow control (concatenated)");
-                prad2::SetEpicsWriteBranches(out_ep, ep);
-                out_ep->Branch("good", &good, "good/O");
-                for (size_t fi : file_indices) {
-                    std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                    TTree *t = f ? dynamic_cast<TTree *>(f->Get("epics")) : nullptr;
-                    if (!t) continue;
-                    t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
-                    const bool has_ticks_in = (t->GetBranch("ti_ticks_at_arrival") != nullptr);
-                    if (has_ticks_in)
-                        t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
-                    t->SetBranchAddress("unix_time",    &ep.unix_time);
-                    t->SetBranchAddress("sync_counter", &ep.sync_counter);
-                    t->SetBranchAddress("run_number",   &ep.run_number);
-                    t->SetBranchAddress("channel", &cp);
-                    t->SetBranchAddress("value",   &vp);
-                    size_t seq = file_info[fi].epics_offset;
-                    Long64_t n = t->GetEntries();
-                    for (Long64_t i = 0; i < n; ++i, ++seq) {
-                        ep.ti_ticks_at_arrival = 0;
-                        t->GetEntry(i);
-                        if (ep.ti_ticks_at_arrival <= 0 && ep.event_number_at_arrival >= 0) {
-                            auto eit = evn_to_ticks.find(ep.event_number_at_arrival);
-                            if (eit != evn_to_ticks.end()) ep.ti_ticks_at_arrival = eit->second;
-                        }
-                        good = (seq < epics_verdict.size()) ? epics_verdict[seq] : false;
-                        if (good && restrict_side)
-                            good = (seq < epics_side.size() && epics_side[seq] == s);
-                        out.cd();
-                        out_ep->Fill();
-                    }
-                }
-                out.cd();
-                out_ep->Write();
-            }
-            {
-                prad2::RawRunInfo ri;
-                std::string *sp = &ri.daq_config;
-                out.cd();
-                TTree *out_ri = new TTree("runinfo", "PRad2 control events / DAQ config (concatenated)");
-                prad2::SetRunInfoWriteBranches(out_ri, ri);
-                for (size_t fi : file_indices) {
-                    std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                    TTree *t = f ? dynamic_cast<TTree *>(f->Get("runinfo")) : nullptr;
-                    if (!t) continue;
-                    prad2::SetRunInfoReadBranches(t, ri);
-                    t->SetBranchAddress("daq_config", &sp);
-                    Long64_t n = t->GetEntries();
-                    for (Long64_t i = 0; i < n; ++i) {
-                        ri.daq_config.clear();
-                        t->GetEntry(i);
-                        out.cd();
-                        out_ri->Fill();
-                    }
-                }
-                out.cd();
-                out_ri->Write();
-            }
-            return 0;
-        };
-
-        struct WriteStats { int64_t n_in = 0, n_out = 0; };
-        auto write_file_side = [&](size_t fi, int s, const std::string &outp) -> WriteStats {
-            WriteStats stats;
-            std::unique_ptr<TFile> out(TFile::Open(outp.c_str(), "RECREATE"));
-            if (!out || out->IsZombie()) {
-                std::cerr << "replay_filter: cannot create " << outp << "\n";
-                return stats;
-            }
-
-            if (!is_recon) {
-                auto ev_ptr = std::make_unique<prad2::RawEventData>();
-                auto &ev = *ev_ptr;
-                prad2::RawReadStatus first_status;
-                {
-                    std::unique_ptr<TFile> f0(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                    TTree *t0 = f0 ? dynamic_cast<TTree *>(f0->Get("events")) : nullptr;
-                    first_status = prad2::SetRawReadBranches(t0, ev);
-                }
-                out->cd();
-                TTree *out_ev = new TTree("events", "PRad2 filtered replay (raw)");
-                prad2::SetRawWriteBranches(out_ev, ev, first_status.has_peaks);
-                std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                TTree *t = f ? dynamic_cast<TTree *>(f->Get("events")) : nullptr;
-                if (t) {
-                    prad2::SetRawReadBranches(t, ev);
-                    std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
-                    if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
-                    std::vector<uint32_t> *p_vtp_roc = &ev.vtp_roc_tags, *p_vtp_nw = &ev.vtp_nwords, *p_vtp_w = &ev.vtp_words;
-                    if (t->GetBranch("vtp_roc_tags")) t->SetBranchAddress("vtp_roc_tags", &p_vtp_roc);
-                    if (t->GetBranch("vtp_nwords"))   t->SetBranchAddress("vtp_nwords",   &p_vtp_nw);
-                    if (t->GetBranch("vtp_words"))    t->SetBranchAddress("vtp_words",    &p_vtp_w);
-                    std::vector<uint32_t> *p_tdc_roc = &ev.tdc_roc_tags, *p_tdc_nw = &ev.tdc_nwords, *p_tdc_w = &ev.tdc_words;
-                    if (t->GetBranch("tdc_roc_tags")) t->SetBranchAddress("tdc_roc_tags", &p_tdc_roc);
-                    if (t->GetBranch("tdc_nwords"))   t->SetBranchAddress("tdc_nwords",   &p_tdc_nw);
-                    if (t->GetBranch("tdc_words"))    t->SetBranchAddress("tdc_words",    &p_tdc_w);
-                    Long64_t n = t->GetEntries();
-                    if (!split_active) stats.n_in += n;
-                    for (Long64_t i = 0; i < n; ++i) {
-                        ev.ssp_raw.clear(); ev.vtp_roc_tags.clear(); ev.vtp_nwords.clear(); ev.vtp_words.clear();
-                        ev.tdc_roc_tags.clear(); ev.tdc_nwords.clear(); ev.tdc_words.clear();
-                        t->GetEntry(i);
-                        if (split_active && in_span(s, ev.event_num)) ++stats.n_in;
-                        if (is_kept(s, ev.event_num)) {
-                            out->cd();
-                            out_ev->Fill();
-                            ++stats.n_out;
-                        }
-                    }
-                }
-                out->cd();
-                out_ev->Write();
-                out_ev->ResetBranchAddresses();
-            } else {
-                auto ev_ptr = std::make_unique<prad2::ReconEventData>();
-                auto &ev = *ev_ptr;
-                out->cd();
-                TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
-                prad2::SetReconWriteBranches(out_ev, ev, false); // not x17_mode
-                std::unique_ptr<TFile> f(TFile::Open(file_info[fi].path.c_str(), "READ"));
-                TTree *t = f ? dynamic_cast<TTree *>(f->Get("recon")) : nullptr;
-                if (t) {
-                    prad2::SetReconReadBranches(t, ev);
-                    prad2::ReconMatchVectorBindings match_bind;
-                    prad2::BindReconMatchVectorBranches(t, ev, match_bind);
-                    std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
-                    if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
-                    std::vector<uint32_t> *p_vtp_roc = &ev.vtp_roc_tags, *p_vtp_nw = &ev.vtp_nwords, *p_vtp_w = &ev.vtp_words;
-                    if (t->GetBranch("vtp_roc_tags")) t->SetBranchAddress("vtp_roc_tags", &p_vtp_roc);
-                    if (t->GetBranch("vtp_nwords"))   t->SetBranchAddress("vtp_nwords",   &p_vtp_nw);
-                    if (t->GetBranch("vtp_words"))    t->SetBranchAddress("vtp_words",    &p_vtp_w);
-                    Long64_t n = t->GetEntries();
-                    if (!split_active) stats.n_in += n;
-                    for (Long64_t i = 0; i < n; ++i) {
-                        reset_recon_optional(ev);
-                        t->GetEntry(i);
-                        if (split_active && in_span(s, ev.event_num)) ++stats.n_in;
-                        if (is_kept(s, ev.event_num)) {
-                            out->cd();
-                            out_ev->Fill();
-                            ++stats.n_out;
-                        }
-                    }
-                }
-                out->cd();
-                out_ev->Write();
-                out_ev->ResetBranchAddresses();
-            }
-            std::vector<size_t> one{fi};
-            write_slow_trees(*out, one, s, split_active);
-            out->Close();
-            return stats;
-        };
-
-        std::vector<std::pair<size_t, int>> jobs;
+        std::vector<std::pair<size_t, int>> jobs;   // (input file, side)
         for (size_t fi = 0; fi < input_files.size(); ++fi) {
             if (!split_active) jobs.emplace_back(fi, 0);
             else {
@@ -1486,30 +1395,24 @@ int run(const std::vector<std::string> &input_files,
         }
 
         std::vector<std::string> output_files(jobs.size());
-        std::vector<WriteStats> job_stats(jobs.size());
-        std::atomic<size_t> next_job{0};
+        std::vector<WriteStats>  job_stats(jobs.size());
         std::mutex log_mtx;
-        const size_t workers = std::min<size_t>(std::max(1, num_threads), jobs.size());
-        std::vector<std::thread> threads;
-        threads.reserve(workers);
-        for (size_t w = 0; w < workers; ++w) {
-            threads.emplace_back([&]() {
-                while (true) {
-                    size_t ji = next_job.fetch_add(1);
-                    if (ji >= jobs.size()) break;
-                    const auto [fi, s] = jobs[ji];
-                    const std::string label = split_active
-                        ? (s == 0 ? cuts.split.label_full : cuts.split.label_empty)
-                        : std::string();
-                    std::string outp = filtered_output_path(output_path, file_info[fi].path, label);
-                    job_stats[ji] = write_file_side(fi, s, outp);
-                    output_files[ji] = outp;
-                    std::lock_guard<std::mutex> lk(log_mtx);
-                    std::cerr << "replay_filter: output ROOT     " << outp << "\n";
-                }
-            });
+        analysis::ParallelFor(jobs.size(), num_threads, [&](size_t ji, int) {
+            const auto [fi, s] = jobs[ji];
+            output_files[ji] = filtered_output_path(output_path, file_info[fi].path,
+                                                    split_active ? side_label(s) : "");
+            job_stats[ji] = write_file_side(fi, s, output_files[ji]);
+            if (!job_stats[ji].ok) return;
+            std::lock_guard<std::mutex> lk(log_mtx);
+            std::cerr << "replay_filter: output ROOT     " << output_files[ji] << "\n";
+        });
+
+        int64_t n_in_total = 0, n_pass_phys = 0;
+        for (const auto &st : job_stats) {
+            if (!st.ok) return 1;
+            n_in_total  += st.n_in;
+            n_pass_phys += st.n_out;
         }
-        for (auto &t : threads) t.join();
 
         const std::string slow_out = run_epics_path(output_path, run_number);
         {
@@ -1518,598 +1421,35 @@ int run(const std::vector<std::string> &input_files,
                 std::cerr << "replay_filter: cannot create " << slow_out << "\n";
                 return 1;
             }
-            write_slow_trees(*out, all_file_indices, 0, false);
+            std::vector<size_t> all_files(input_files.size());
+            for (size_t i = 0; i < all_files.size(); ++i) all_files[i] = i;
+            write_slow_trees(*out, all_files, 0, false);
             out->Close();
         }
         std::cerr << "replay_filter: run slow ROOT  " << slow_out << "\n";
 
-        int64_t n_in_total = 0, n_pass_phys = 0;
-        for (const auto &st : job_stats) {
-            n_in_total += st.n_in;
-            n_pass_phys += st.n_out;
-        }
-
-        auto to_json_or_null = [](bool valid, double v) -> json {
-            return valid ? json(v) : json(nullptr);
-        };
-        auto stats_for = [&](const ChannelCut &c) -> json {
-            json s = {
-                {"abs_min", c.abs.has_min ? json(c.abs.min_val) : json(nullptr)},
-                {"abs_max", c.abs.has_max ? json(c.abs.max_val) : json(nullptr)},
-            };
-            if (c.has_rel_rms) {
-                s["rel_rms"]       = c.rel_rms_n;
-                s["robust_center"] = to_json_or_null(c.stats_valid, c.robust_center);
-                s["robust_sigma"]  = to_json_or_null(c.stats_valid, c.robust_sigma);
-                s["mad"]           = to_json_or_null(c.stats_valid, c.mad);
-                s["n_used"]        = c.n_used;
-                s["n_clipped"]     = c.n_clipped;
-                if (!c.gated_by.empty()) s["gated_by"] = c.gated_by;
-            }
-            return s;
-        };
-
-        json report;
-        report["run_number"] = run_number;
-        report["input_files"] = input_files;
-        report["output_files"] = output_files;
+        json report = build_report(-1, n_in_total, n_pass_phys);
+        report["output_files"]     = output_files;
         report["slow_output_file"] = slow_out;
-        report["cuts"] = cuts.raw;
-        report["robust_method"] = "mad";
-
-        json stats = json::object();
-        if (cuts.livetime.enabled) {
-            json ls = stats_for(cuts.livetime.cut);
-            ls["source"] = cuts.livetime.source;
-            ls["channel"] = cuts.livetime.channel;
-            stats["livetime"] = std::move(ls);
-        }
-        for (const auto &kv : cuts.epics)
-            stats["epics:" + kv.first] = stats_for(kv.second);
-        report["stats"] = std::move(stats);
-
-        int n_pass_cp = 0, n_fail_cp = 0;
-        for (const auto &cp : timeline)
-            (cp.overall_pass ? n_pass_cp : n_fail_cp)++;
-        std::map<std::string, std::pair<int, int>> per_channel;
-        for (const auto &p : report_points) {
-            auto &c = per_channel[p.channel];
-            if (p.pass) ++c.first; else ++c.second;
-        }
-        json per_channel_json = json::object();
-        for (const auto &kv : per_channel) {
-            int pass = kv.second.first, fail = kv.second.second, tot = pass + fail;
-            per_channel_json[kv.first] = {
-                {"n_pass", pass},
-                {"n_fail", fail},
-                {"pass_rate", tot > 0 ? double(pass) / double(tot) : 0.0},
-            };
-        }
-        json keep_intervals = json::array();
-        for (int s = 0; s <= (split_active ? 1 : 0); ++s)
-            for (const auto &p : keep[s])
-                keep_intervals.push_back({p.first, p.second});
-
-        report["summary"] = {
-            {"n_slow_events", (int)timeline.size()},
-            {"n_slow_pass", n_pass_cp},
-            {"n_slow_reject", n_fail_cp},
-            {"slow_pass_rate", timeline.empty() ? 0.0 : double(n_pass_cp) / double(timeline.size())},
-            {"n_physics_in", n_in_total},
-            {"n_physics_pass", n_pass_phys},
-            {"n_physics_reject", n_in_total - n_pass_phys},
-            {"physics_pass_rate", n_in_total > 0 ? double(n_pass_phys) / double(n_in_total) : 0.0},
-            {"n_keep_intervals", (int)keep_intervals.size()},
-            {"per_channel", per_channel_json},
-        };
-        report["keep_intervals"] = std::move(keep_intervals);
-        if (split_active) {
-            report["split"] = {
-                {"enabled", true},
-                {"channel", cuts.split.channel},
-                {"full_threshold", cuts.split.full_thresh},
-                {"empty_threshold", cuts.split.empty_thresh},
-                {"guard_checkpoints", cuts.split.guard_checkpoints},
-                {"labels", {cuts.split.label_full, cuts.split.label_empty}},
-                {"n_checkpoints_full", n_cp_side[0]},
-                {"n_checkpoints_empty", n_cp_side[1]},
-                {"n_checkpoints_dropped", n_cp_guard},
-                {"n_state_transitions", n_state_transitions},
-                {"transitions", transitions},
-                {"pure_run", n_state_transitions == 0},
-            };
-        }
-        if (cuts.charge.enabled) {
-            report["live_charge"] = {
-                {"value_nC", live_charge[0] + live_charge[1]},
-                {"unit", "nC"},
-                {"beam_current_channel", cuts.charge.beam_current_channel},
-                {"beam_current_unit", "nA"},
-                {"live_seconds", live_charge_secs[0] + live_charge_secs[1]},
-                {"real_seconds", real_secs[0] + real_secs[1]},
-                {"ungated_value_nC", ungated_live_charge[0] + ungated_live_charge[1]},
-                {"ungated_live_seconds", ungated_live_charge_secs[0] + ungated_live_charge_secs[1]},
-                {"ungated_real_seconds", ungated_real_secs[0] + ungated_real_secs[1]},
-                {"n_pairs_integrated", n_charge_pairs[0] + n_charge_pairs[1]},
-                {"n_pairs_skipped", n_charge_skipped[0] + n_charge_skipped[1]},
-                {"n_ungated_pairs_integrated", n_ungated_charge_pairs[0] + n_ungated_charge_pairs[1]},
-                {"n_ungated_pairs_skipped", n_ungated_charge_skipped[0] + n_ungated_charge_skipped[1]},
-            };
-        }
-        json pts = json::array();
-        pts.get_ptr<json::array_t *>()->reserve(report_points.size());
-        for (const auto &p : report_points) {
-            pts.push_back({
-                {"channel", p.channel},
-                {"status", p.pass ? "pass" : "fail"},
-                {"associated_evn", p.event_number},
-                {"associated_timestamp", p.has_assoc_t ? json(p.assoc_t_rel) : json(nullptr)},
-                {"unix_time", p.has_unix_time ? json(p.unix_time) : json(nullptr)},
-                {"value", std::isnan(p.value) ? json(nullptr) : json(p.value)},
-            });
-        }
-        report["points"] = std::move(pts);
-
-        std::ofstream of(report_path);
-        if (!of) {
-            std::cerr << "replay_filter: cannot write " << report_path << "\n";
-            return 1;
-        }
-        of << report.dump(2) << "\n";
+        if (!write_report(report, report_path)) return 1;
         std::cerr << "replay_filter: report written to " << report_path << "\n";
-        std::cerr << "  physics      : in=" << n_in_total
-                  << "  pass=" << n_pass_phys
-                  << "  reject=" << (n_in_total - n_pass_phys)
-                  << "  rate=" << fmt_pct(n_in_total > 0 ? double(n_pass_phys) / n_in_total : 0)
-                  << "\n";
+        print_summary(report);
         return 0;
     }
 
-    auto write_side = [&](int s, const std::string &outp,
-                          const std::string &repp) -> int {
-    std::unique_ptr<TFile> out(TFile::Open(outp.c_str(), "RECREATE"));
-    if (!out || out->IsZombie()) {
-        std::cerr << "replay_filter: cannot create " << outp << "\n";
-        return 1;
-    }
-
-    int64_t n_in = 0, n_out = 0;
-
-    // Filter the events/recon tree.  We use the existing
-    // SetRaw{Read,Write}Branches helpers so the output schema matches.
-    if (!is_recon) {
-        auto ev_ptr = std::make_unique<prad2::RawEventData>();
-        auto &ev = *ev_ptr;
-        prad2::RawReadStatus   first_status;
-        {
-            std::unique_ptr<TFile> f0(TFile::Open(input_files.front().c_str(), "READ"));
-            TTree *t0 = dynamic_cast<TTree *>(f0->Get("events"));
-            first_status = prad2::SetRawReadBranches(t0, ev);
-        }
-        out->cd();
-        TTree *out_ev = new TTree("events", "PRad2 filtered replay (raw)");
-        prad2::SetRawWriteBranches(out_ev, ev, first_status.has_peaks);
-
-        for (const auto &path : input_files) {
-            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-            TTree *t = dynamic_cast<TTree *>(f->Get("events"));
-            if (!t) continue;
-            prad2::SetRawReadBranches(t, ev);
-            std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
-            if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
-            // Vector branches need pointer-to-pointer rebinding — same
-            // dance as ssp_raw above.  Older replays without these
-            // branches just leave the pointers untouched.
-            std::vector<uint32_t> *p_vtp_roc = &ev.vtp_roc_tags;
-            std::vector<uint32_t> *p_vtp_nw  = &ev.vtp_nwords;
-            std::vector<uint32_t> *p_vtp_w   = &ev.vtp_words;
-            if (t->GetBranch("vtp_roc_tags")) t->SetBranchAddress("vtp_roc_tags", &p_vtp_roc);
-            if (t->GetBranch("vtp_nwords"))   t->SetBranchAddress("vtp_nwords",   &p_vtp_nw);
-            if (t->GetBranch("vtp_words"))    t->SetBranchAddress("vtp_words",    &p_vtp_w);
-            std::vector<uint32_t> *p_tdc_roc = &ev.tdc_roc_tags;
-            std::vector<uint32_t> *p_tdc_nw  = &ev.tdc_nwords;
-            std::vector<uint32_t> *p_tdc_w   = &ev.tdc_words;
-            if (t->GetBranch("tdc_roc_tags")) t->SetBranchAddress("tdc_roc_tags", &p_tdc_roc);
-            if (t->GetBranch("tdc_nwords"))   t->SetBranchAddress("tdc_nwords",   &p_tdc_nw);
-            if (t->GetBranch("tdc_words"))    t->SetBranchAddress("tdc_words",    &p_tdc_w);
-            Long64_t n = t->GetEntries();
-            if (!split_active) n_in += n;       // split off: every event counts
-            for (Long64_t i = 0; i < n; ++i) {
-                ev.ssp_raw.clear();
-                ev.vtp_roc_tags.clear();
-                ev.vtp_nwords.clear();
-                ev.vtp_words.clear();
-                ev.tdc_roc_tags.clear();
-                ev.tdc_nwords.clear();
-                ev.tdc_words.clear();
-                t->GetEntry(i);
-                if (split_active && in_span(s, ev.event_num)) ++n_in;
-                if (is_kept(s, ev.event_num)) {
-                    out->cd();
-                    out_ev->Fill();
-                    ++n_out;
-                }
-            }
-        }
-        out->cd();
-        out_ev->Write();
-        out_ev->ResetBranchAddresses();
-    } else {
-        auto ev_ptr = std::make_unique<prad2::ReconEventData>();
-        auto &ev = *ev_ptr;
-        out->cd();
-        TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
-        prad2::SetReconWriteBranches(out_ev, ev, false); // not x17_mode
-
-        for (const auto &path : input_files) {
-            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-            TTree *t = dynamic_cast<TTree *>(f->Get("recon"));
-            if (!t) continue;
-            prad2::SetReconReadBranches(t, ev);
-            prad2::ReconMatchVectorBindings match_bind;
-            prad2::BindReconMatchVectorBranches(t, ev, match_bind);
-            std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
-            if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
-            // vtp_* vector branches — same pointer-to-pointer dance as
-            // ssp_raw; recon files older than 2026-06 don't have them
-            // and the cleared vectors just pass through empty.
-            std::vector<uint32_t> *p_vtp_roc = &ev.vtp_roc_tags;
-            std::vector<uint32_t> *p_vtp_nw  = &ev.vtp_nwords;
-            std::vector<uint32_t> *p_vtp_w   = &ev.vtp_words;
-            if (t->GetBranch("vtp_roc_tags")) t->SetBranchAddress("vtp_roc_tags", &p_vtp_roc);
-            if (t->GetBranch("vtp_nwords"))   t->SetBranchAddress("vtp_nwords",   &p_vtp_nw);
-            if (t->GetBranch("vtp_words"))    t->SetBranchAddress("vtp_words",    &p_vtp_w);
-            Long64_t n = t->GetEntries();
-            if (!split_active) n_in += n;       // split off: every event counts
-            for (Long64_t i = 0; i < n; ++i) {
-                reset_recon_optional(ev);
-                t->GetEntry(i);
-                if (split_active && in_span(s, ev.event_num)) ++n_in;
-                if (is_kept(s, ev.event_num)) {
-                    out->cd();
-                    out_ev->Fill();
-                    ++n_out;
-                }
-            }
-        }
-        out->cd();
-        out_ev->Write();
-        out_ev->ResetBranchAddresses();
-    }
-
-    // Concatenate scalers tree from every input.  Adds a `good` boolean
-    // (per-checkpoint overall verdict from phase 3) so downstream tools can
-    // colour the run's livetime trace by pass/fail without recomputing.
-    {
-        prad2::RawScalerData sc;
-        bool                 good = false;
-        out->cd();
-        TTree *out_sc = new TTree("scalers", "PRad2 DSC2 scaler readouts (concatenated)");
-        prad2::SetScalerWriteBranches(out_sc, sc);
-        out_sc->Branch("good", &good, "good/O");
-
-        size_t seq = 0;
-        for (const auto &path : input_files) {
-            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-            TTree *t = dynamic_cast<TTree *>(f->Get("scalers"));
-            if (!t) continue;
-            prad2::SetScalerReadBranches(t, sc);
-            Long64_t n = t->GetEntries();
-            for (Long64_t i = 0; i < n; ++i) {
-                t->GetEntry(i);
-                good = (seq < scaler_verdict.size()) ? scaler_verdict[seq] : false;
-                if (good && split_active)
-                    good = (seq < scaler_side.size() && scaler_side[seq] == s);
-                ++seq;
-                out->cd();
-                out_sc->Fill();
-            }
-        }
-        out->cd();
-        out_sc->Write();
-    }
-
-    // Concatenate epics tree from every input, tagged the same way.
-    // We also resolve ti_ticks_at_arrival here: bind it from the input
-    // when present, otherwise fill it from the events-tree lookup so the
-    // output is always self-contained — downstream consumers (live-charge
-    // recomputation, etc.) read the row's tick directly without needing
-    // to know whether the upstream replay carried the new branch.
-    {
-        prad2::RawEpicsData ep;
-        std::vector<std::string> *cp = &ep.channel;
-        std::vector<double>      *vp = &ep.value;
-        bool good = false;
-        out->cd();
-        TTree *out_ep = new TTree("epics", "PRad2 EPICS slow control (concatenated)");
-        prad2::SetEpicsWriteBranches(out_ep, ep);
-        out_ep->Branch("good", &good, "good/O");
-
-        size_t seq = 0;
-        for (const auto &path : input_files) {
-            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-            TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
-            if (!t) continue;
-            t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
-            const bool has_ticks_in =
-                (t->GetBranch("ti_ticks_at_arrival") != nullptr);
-            if (has_ticks_in)
-                t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
-            t->SetBranchAddress("unix_time",    &ep.unix_time);
-            t->SetBranchAddress("sync_counter", &ep.sync_counter);
-            t->SetBranchAddress("run_number",   &ep.run_number);
-            t->SetBranchAddress("channel", &cp);
-            t->SetBranchAddress("value",   &vp);
-            Long64_t n = t->GetEntries();
-            for (Long64_t i = 0; i < n; ++i) {
-                ep.ti_ticks_at_arrival = 0;
-                t->GetEntry(i);
-                if (ep.ti_ticks_at_arrival <= 0
-                    && ep.event_number_at_arrival >= 0) {
-                    auto eit = evn_to_ticks.find(ep.event_number_at_arrival);
-                    if (eit != evn_to_ticks.end())
-                        ep.ti_ticks_at_arrival = eit->second;
-                }
-                good = (seq < epics_verdict.size()) ? epics_verdict[seq] : false;
-                if (good && split_active)
-                    good = (seq < epics_side.size() && epics_side[seq] == s);
-                ++seq;
-                out->cd();
-                out_ep->Fill();
-            }
-        }
-        out->cd();
-        out_ep->Write();
-    }
-
-    // Pass through the runinfo tree (1 row per CODA control event,
-    // including the long DAQ-config text on PRESTART).  No filtering
-    // applied — the whole point of this tree is run-scoped metadata.
-    {
-        prad2::RawRunInfo ri;
-        std::string      *sp = &ri.daq_config;
-        out->cd();
-        TTree *out_ri = new TTree("runinfo",
-                                  "PRad2 control events / DAQ config (concatenated)");
-        prad2::SetRunInfoWriteBranches(out_ri, ri);
-        for (const auto &path : input_files) {
-            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-            TTree *t = dynamic_cast<TTree *>(f->Get("runinfo"));
-            if (!t) continue;
-            prad2::SetRunInfoReadBranches(t, ri);
-            t->SetBranchAddress("daq_config", &sp);
-            Long64_t n = t->GetEntries();
-            for (Long64_t i = 0; i < n; ++i) {
-                ri.daq_config.clear();
-                t->GetEntry(i);
-                out->cd();
-                out_ri->Fill();
-            }
-        }
-        out->cd();
-        out_ri->Write();
-    }
-
-    out->Close();
-
-    // ---------- Phase 6: write the JSON report ----------
-    auto to_json_or_null = [](bool valid, double v) -> json {
-        return valid ? json(v) : json(nullptr);
+    // Side s of the single input: ROOT file outp + report repp.
+    auto write_side = [&](int s, const std::string &outp, const std::string &repp) -> int {
+        const WriteStats st = write_file_side(0, s, outp);
+        if (!st.ok) return 1;
+        json report = build_report(s, st.n_in, st.n_out);
+        report["output_file"] = outp;
+        if (!write_report(report, repp)) return 1;
+        const std::string tag = split_active ? "[" + side_label(s) + "] " : "";
+        std::cerr << "replay_filter: " << tag << "report written to " << repp << "\n";
+        std::cerr << "replay_filter: " << tag << "output ROOT     " << outp << "\n";
+        print_summary(report);
+        return 0;
     };
-    auto stats_for = [&](const ChannelCut &c) -> json {
-        json s = {
-            {"abs_min", c.abs.has_min ? json(c.abs.min_val) : json(nullptr)},
-            {"abs_max", c.abs.has_max ? json(c.abs.max_val) : json(nullptr)},
-        };
-        if (c.has_rel_rms) {
-            s["rel_rms"]       = c.rel_rms_n;
-            s["robust_center"] = to_json_or_null(c.stats_valid, c.robust_center);
-            s["robust_sigma"]  = to_json_or_null(c.stats_valid, c.robust_sigma);
-            s["mad"]           = to_json_or_null(c.stats_valid, c.mad);
-            // n_used is the count *after* gating (if any) — useful for
-            // sanity-checking that the gating restriction left enough data
-            // to compute meaningful stats.
-            s["n_used"]        = c.n_used;
-            s["n_clipped"]     = c.n_clipped;
-            if (!c.gated_by.empty()) {
-                // Always emit as array — even single-gate cases — so
-                // downstream tools can iterate without checking type.
-                s["gated_by"] = c.gated_by;
-            }
-        }
-        return s;
-    };
-
-    json report;
-    report["run_number"]   = run_number;
-    report["input_files"]  = input_files;
-    report["output_file"]  = outp;
-    report["cuts"]         = cuts.raw;
-    report["robust_method"] = "mad";   // 1.4826 * MAD as σ̂
-
-    json stats = json::object();
-    if (cuts.livetime.enabled) {
-        json ls = stats_for(cuts.livetime.cut);
-        ls["source"]  = cuts.livetime.source;
-        ls["channel"] = cuts.livetime.channel;
-        stats["livetime"] = std::move(ls);
-    }
-    for (const auto &kv : cuts.epics)
-        stats["epics:" + kv.first] = stats_for(kv.second);
-    report["stats"] = std::move(stats);
-
-    // Slow-event counts — restricted to this side's checkpoints when splitting,
-    // so each side report describes only its own slice of the run.
-    int n_pass_cp = 0, n_fail_cp = 0, n_slow_side = 0;
-    for (size_t k = 0; k < timeline.size(); ++k) {
-        if (split_active && side[k] != s) continue;
-        ++n_slow_side;
-        (timeline[k].overall_pass ? n_pass_cp : n_fail_cp)++;
-    }
-    json keep_intervals = json::array();
-    for (const auto &p : keep[s]) keep_intervals.push_back({p.first, p.second});
-
-    // Per-channel breakdown — number of slow-event checkpoints where this
-    // channel's cut accepted vs rejected the value.  Helps the user see
-    // immediately which cut is doing the rejecting (e.g. "beam current
-    // killed 80% of points, livetime barely matters").
-    std::map<std::string, std::pair<int, int>> per_channel;   // ch → {pass, fail}
-    for (const auto &p : report_points) {
-        if (split_active && p.side != s) continue;    // this side's points only
-        auto &c = per_channel[p.channel];
-        if (p.pass) ++c.first; else ++c.second;
-    }
-    json per_channel_json = json::object();
-    for (const auto &kv : per_channel) {
-        int pass = kv.second.first, fail = kv.second.second;
-        int tot  = pass + fail;
-        per_channel_json[kv.first] = {
-            {"n_pass",    pass},
-            {"n_fail",    fail},
-            {"pass_rate", tot > 0 ? double(pass) / double(tot) : 0.0},
-        };
-    }
-
-    const int64_t n_in_total  = n_in;
-    const int64_t n_pass_phys = n_out;
-    const int64_t n_rej_phys  = n_in_total - n_pass_phys;
-    const int     n_slow      = n_slow_side;
-
-    report["summary"] = {
-        // Slow-event checkpoint counts.
-        {"n_slow_events",      n_slow},
-        {"n_slow_pass",        n_pass_cp},
-        {"n_slow_reject",      n_fail_cp},
-        {"slow_pass_rate",     n_slow > 0 ? double(n_pass_cp) / double(n_slow) : 0.0},
-        // Physics-event counts.
-        {"n_physics_in",       n_in_total},
-        {"n_physics_pass",     n_pass_phys},
-        {"n_physics_reject",   n_rej_phys},
-        {"physics_pass_rate",  n_in_total > 0
-                                ? double(n_pass_phys) / double(n_in_total) : 0.0},
-        // Keep-interval count (each is a (lo, hi] range of accepted events).
-        {"n_keep_intervals",   (int)keep[s].size()},
-        // Per-cut breakdown — which channel rejected how often.
-        {"per_channel",        per_channel_json},
-    };
-    report["keep_intervals"] = std::move(keep_intervals);
-
-    // Split metadata — present only when run-splitting is active.  Each side
-    // file is self-describing: it records the level thresholds, how many
-    // checkpoints fell in each state vs the dropped ramp, and every
-    // full<->empty transition seen, so neither side needs the other's report.
-    if (split_active) {
-        report["split"] = {
-            {"enabled",               true},
-            {"channel",               cuts.split.channel},
-            {"side",                  s},
-            {"state",                 s == 0 ? "full" : "empty"},
-            {"label",                 s == 0 ? cuts.split.label_full
-                                             : cuts.split.label_empty},
-            {"full_threshold",        cuts.split.full_thresh},
-            {"empty_threshold",       cuts.split.empty_thresh},
-            {"guard_checkpoints",     cuts.split.guard_checkpoints},
-            {"n_checkpoints_this",    n_cp_side[s]},
-            {"n_checkpoints_full",    n_cp_side[0]},
-            {"n_checkpoints_empty",   n_cp_side[1]},
-            {"n_checkpoints_dropped", n_cp_guard},
-            {"n_state_transitions",   n_state_transitions},
-            {"transitions",           transitions},
-            {"pure_run",              n_state_transitions == 0},
-        };
-    }
-
-    // Live-charge integration over kept intervals.  Units: assume the
-    // configured EPICS beam-current channel publishes in nA (true for
-    // hallb_IPM2C21A_CUR and the other Hall B IPM scalers), so
-    // value = Σ live_fraction · Δt · I  ⇒  nA · s = nC.  Also emit the
-    // accumulated live time so the average current is recoverable.
-    //
-    // value_nC / live_seconds / real_seconds are the gated (post-cut)
-    // numbers — only adjacent pairs where every cut passed on both
-    // endpoints contribute, matching the keep-interval physics events
-    // written to the output ROOT file.  ungated_* are the same
-    // quantities accumulated over every valid-data pair (no cut
-    // applied), reported so users can see how much charge the cuts
-    // threw away.  When the cuts reject nothing, ungated_* equals the
-    // gated values.
-    if (cuts.charge.enabled) {
-        report["live_charge"] = {
-            {"value_nC",                   live_charge[s]},
-            {"unit",                       "nC"},
-            {"beam_current_channel",       cuts.charge.beam_current_channel},
-            {"beam_current_unit",          "nA"},
-            {"live_seconds",               live_charge_secs[s]},
-            {"real_seconds",               real_secs[s]},
-            {"ungated_value_nC",           ungated_live_charge[s]},
-            {"ungated_live_seconds",       ungated_live_charge_secs[s]},
-            {"ungated_real_seconds",       ungated_real_secs[s]},
-            {"n_pairs_integrated",         n_charge_pairs[s]},
-            {"n_pairs_skipped",            n_charge_skipped[s]},
-            {"n_ungated_pairs_integrated", n_ungated_charge_pairs[s]},
-            {"n_ungated_pairs_skipped",    n_ungated_charge_skipped[s]},
-        };
-    }
-
-    json pts = json::array();
-    pts.get_ptr<json::array_t *>()->reserve(report_points.size());
-    for (const auto &p : report_points) {
-        json e = {
-            {"channel",              p.channel},
-            {"status",               p.pass ? "pass" : "fail"},
-            {"associated_evn",       p.event_number},
-            // TI ticks of the associated physics event, in seconds since the
-            // run's earliest event.  Null when no physics event matches
-            // (associated_evn=-1, or input has no events tree).
-            {"associated_timestamp", p.has_assoc_t ? json(p.assoc_t_rel) : json(nullptr)},
-            // Native EPICS unix_time on EPICS rows; null on scaler rows.
-            {"unix_time",            p.has_unix_time ? json(p.unix_time) : json(nullptr)},
-            {"value",                std::isnan(p.value) ? json(nullptr) : json(p.value)},
-        };
-        pts.push_back(std::move(e));
-    }
-    report["points"] = std::move(pts);
-
-    std::ofstream of(repp);
-    if (!of) {
-        std::cerr << "replay_filter: cannot write " << repp << "\n";
-        return 1;
-    }
-    of << report.dump(2) << "\n";
-
-    const std::string tag = split_active
-        ? "[" + (s == 0 ? cuts.split.label_full : cuts.split.label_empty) + "] " : "";
-    std::cerr << "replay_filter: " << tag << "report written to " << repp << "\n";
-    std::cerr << "replay_filter: " << tag << "output ROOT     " << outp << "\n";
-    std::cerr << "  slow events  : " << n_slow
-              << "  pass=" << n_pass_cp << "  reject=" << n_fail_cp
-              << "  rate=" << fmt_pct(n_slow > 0 ? double(n_pass_cp) / n_slow : 0)
-              << "\n";
-    std::cerr << "  keep intervals: " << keep[s].size() << "\n";
-    std::cerr << "  physics      : in=" << n_in_total
-              << "  pass="  << n_pass_phys
-              << "  reject=" << n_rej_phys
-              << "  rate=" << fmt_pct(n_in_total > 0
-                                       ? double(n_pass_phys) / n_in_total : 0)
-              << "\n";
-    if (cuts.charge.enabled)
-        std::cerr << "  live charge  : " << std::fixed << std::setprecision(3)
-                  << live_charge[s] << " nC over " << live_charge_secs[s]
-                  << " s live" << std::defaultfloat << "\n";
-    if (!per_channel.empty()) {
-        std::cerr << "  per-channel reject:\n";
-        for (const auto &kv : per_channel) {
-            std::cerr << "    " << kv.first << ": "
-                      << kv.second.second << " / "
-                      << (kv.second.first + kv.second.second)
-                      << " ("
-                      << fmt_pct(double(kv.second.second) /
-                                 std::max(1, kv.second.first + kv.second.second))
-                      << ")\n";
-        }
-    }
-    return 0;
-    };   // end write_side
 
     // ---------- Dispatch: single output, or one file per present target state ----------
     // with_label suffixes the file/report stems with a side label.  Handles the
@@ -2132,11 +1472,8 @@ int run(const std::vector<std::string> &input_files,
     if (!split_active)        // split off or degraded → the single default output
         return write_side(0, output_path, report_path);
 
-    // Level split: write one labelled file per target state that actually
-    // occurred (n_cp_side[s] > 0).  A pure run thus yields a single labelled
-    // file (e.g. <stem>_full.root); a run with a transition yields both.
-    const char *names[2]       = {"full", "empty"};
-    const std::string labels[2] = {cuts.split.label_full, cuts.split.label_empty};
+    // Level split: one labelled file per target state that actually occurred.
+    const char *names[2] = {"full", "empty"};
     std::cerr << "replay_filter: split on '" << cuts.split.channel
               << "' by level (full >= " << cuts.split.full_thresh
               << ", empty <= " << cuts.split.empty_thresh << "): "
@@ -2150,8 +1487,8 @@ int run(const std::vector<std::string> &input_files,
                       << "-target checkpoints — skipping " << names[s] << " file\n";
             continue;
         }
-        rc = write_side(s, with_label(output_path, labels[s]),
-                           with_label(report_path, labels[s]));
+        rc = write_side(s, with_label(output_path, side_label(s)),
+                           with_label(report_path, side_label(s)));
     }
     return rc;
 }
@@ -2161,7 +1498,7 @@ void usage(const char *prog)
     std::cerr <<
         "Usage: " << prog << " <input.root> [more.root ...]\n"
         "       -o <output.root|output_dir>  -c <cuts.json> [-j <report.json>]\n"
-        "       [-r <run_num>] [-t threads]\n"
+        "       [-r <run_num>] [-t threads] [-h]\n"
         "\n"
         "Filters replayed ROOT files by slow-control cuts (DSC2 livetime\n"
         "+ EPICS).  Writes a single ROOT file with the kept physics events\n"
@@ -2205,7 +1542,7 @@ int main(int argc, char *argv[])
     int run_override = -1;
     int num_threads = 1;
 
-    ROOT::EnableThreadSafety();
+    analysis::InitRootThreading();
 
     int opt;
     while ((opt = getopt(argc, argv, "o:c:j:r:t:h")) != -1) {

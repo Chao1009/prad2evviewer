@@ -14,7 +14,7 @@ class Fadc250Decoder
 public:
     // Decode one ROC's composite payload into roc.
     // Format "c,i,l,N(c,Ns)" — packed native-endian.
-    // Returns number of slots decoded, or -1 on error.
+    // Returns number of slots decoded.
     static int DecodeRoc(const uint8_t *data, size_t nbytes, RocData &roc);
 };
 

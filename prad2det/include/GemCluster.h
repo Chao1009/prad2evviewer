@@ -44,8 +44,13 @@ bool IsUnimodalPulse(const std::vector<float> &ts_adc);
 class GemCluster
 {
 public:
-    GemCluster();
-    ~GemCluster();
+    // Starts from ClusterConfig{} plus the mpd_gem_view_ssp cross-talk
+    // distances (mm); SetConfig (as GemSystem::Reconstruct does) replaces all.
+    GemCluster()
+    {
+        cfg_.charac_dists = {6.4f, 17.6f, 24.4f, 24.8f, 25.2f, 25.6f,
+                             26.0f, 26.4f, 26.8f, 33.6f, 44.8f};
+    }
 
     void SetConfig(const ClusterConfig &cfg) { cfg_ = cfg; }
     const ClusterConfig &GetConfig() const   { return cfg_; }
@@ -55,14 +60,13 @@ public:
     void FormClusters(std::vector<StripHit> &hits,
                       std::vector<StripCluster> &clusters) const;
 
-    // Match X and Y clusters to form 2D hits via Cartesian product.
+    // Match X and Y clusters to form 2D hits (per ClusterConfig::match_mode).
     void CartesianReconstruct(const std::vector<StripCluster> &x_clusters,
                               const std::vector<StripCluster> &y_clusters,
                               std::vector<GEMHit> &hits,
                               int det_id) const;
 
 private:
-    // Group consecutive hits into preliminary clusters
     void groupHits(std::vector<StripHit> &hits,
                    std::vector<StripCluster> &clusters) const;
 
@@ -81,7 +85,6 @@ private:
     // Mark cross-talk clusters by characteristic distance
     void setCrossTalk(std::vector<StripCluster> &clusters) const;
 
-    // Filter out bad clusters
     void filterClusters(std::vector<StripCluster> &clusters) const;
 
     ClusterConfig cfg_;

@@ -7,11 +7,11 @@
 #include "TdcDecoder.h"
 #include "Dsc2Decoder.h"
 #include "evio.h"
+#include <algorithm>
 #include <cstring>
 #include <iostream>
 #include <iomanip>
 #include <mutex>
-#include <set>
 
 using namespace evc;
 
@@ -38,14 +38,19 @@ static inline status evio_status(int code)
 // --- open / close / read ----------------------------------------------------
 EvChannel::EvChannel(size_t buflen) : fHandle(-1) { buffer.resize(buflen); }
 
+int EvChannel::openHandle(const std::string &path, const char *mode)
+{
+    if (fHandle > 0) Close();   // before the lock: Close() takes the mutex too
+    ra_count = 0;
+    ra_pos   = 0;
+    std::string p = path, m = mode;   // evOpen takes non-const char *
+    std::lock_guard<std::mutex> lk(g_evio_open_mutex);
+    return evOpen(p.data(), m.data(), &fHandle);
+}
+
 status EvChannel::OpenSequential(const std::string &path)
 {
-    if (fHandle > 0) Close();
-    char *cp = strdup(path.c_str()), *cm = strdup("r");
-    int st;
-    { std::lock_guard<std::mutex> lk(g_evio_open_mutex); st = evOpen(cp, cm, &fHandle); }
-    free(cp); free(cm);
-    return evio_status(st);
+    return evio_status(openHandle(path, "r"));
 }
 
 void EvChannel::Close()
@@ -74,13 +79,7 @@ status EvChannel::Read()
 // --- random-access open (evio "ra" mode) ------------------------------------
 status EvChannel::OpenRandomAccess(const std::string &path)
 {
-    if (fHandle > 0) Close();
-    ra_count = 0;
-    ra_pos   = 0;
-    char *cp = strdup(path.c_str()), *cm = strdup("ra");
-    int st;
-    { std::lock_guard<std::mutex> lk(g_evio_open_mutex); st = evOpen(cp, cm, &fHandle); }
-    free(cp); free(cm);
+    int st = openHandle(path, "ra");
     if (st != S_SUCCESS) return evio_status(st);
 
     // Retrieve the event count from the random-access table.  The table
@@ -129,16 +128,14 @@ status EvChannel::OpenAuto(const std::string &path)
 {
     status s = OpenRandomAccess(path);
     if (s == status::success) return s;
-    // RA failed (e.g. file missing the optional block-index arrays).  Clean
-    // up any half-open handle before trying the sequential mode.
-    if (fHandle > 0) Close();
+    // RA failed (e.g. file missing the optional block-index arrays).
     return OpenSequential(path);
 }
 
 // === SetConfig ==============================================================
 // Back-fill data_banks from legacy tag fields for anything the JSON didn't
 // declare, then precompute per-product tag lists consulted by the lazy
-// accessors.  Keeps existing configs (no bank_structure section) working.
+// accessors.
 void EvChannel::SetConfig(const DaqConfig &cfg_in)
 {
     config = cfg_in;
@@ -180,16 +177,14 @@ bool EvChannel::Scan()
 
     scanBank(0, 0, -1);
 
-    // Classify event type using DaqConfig
     evtype = classify_event(evh.tag, config);
 
     // Determine number of events in this buffer.
     if (config.is_control(evh.tag)) {
         nevents = 0;
     } else if (config.is_physics(evh.tag)) {
-        // CODA built-trigger (0xFF50-0xFF8F): num = event count in block.
         // Single-event mode (0xFE etc.): num = session ID, always 1 event.
-        if (evh.tag >= 0xFF50 && evh.tag <= 0xFF8F)
+        if (DaqConfig::is_built_physics_event(evh.tag))
             nevents = std::max<int>(evh.num, 1);
         else
             nevents = 1;
@@ -228,6 +223,22 @@ void EvChannel::SelectEvent(int i) const
     }
 }
 
+// --- scan a SEGMENT or TAGSEGMENT (1-word header) ----------------------------
+template <class Hdr>
+size_t EvChannel::scanSegment(size_t off, int depth, int parent)
+{
+    Hdr h(&buffer[off]);
+    size_t total = 1 + h.length;
+
+    int idx = static_cast<int>(nodes.size());
+    nodes.push_back({h.tag, h.type, 0, depth, parent,
+                     off + 1, h.length, 0, 0});
+
+    if (IsContainer(h.type))
+        scanChildren(off + 1, h.length, h.type, depth + 1, idx);
+    return total;
+}
+
 // --- scan a BANK (2-word header) --------------------------------------------
 size_t EvChannel::scanBank(size_t off, int depth, int parent)
 {
@@ -246,7 +257,7 @@ size_t EvChannel::scanBank(size_t off, int depth, int parent)
         size_t first_child = nodes.size();
 
         if (dwords >= 1) {
-            size_t consumed = scanTagSegment(doff, depth + 1, idx);
+            size_t consumed = scanSegment<TagSegmentHeader>(doff, depth + 1, idx);
             if (consumed < dwords)
                 scanBank(doff + consumed, depth + 1, idx);
         }
@@ -254,36 +265,6 @@ size_t EvChannel::scanBank(size_t off, int depth, int parent)
         nodes[idx].child_first = first_child;
         nodes[idx].child_count = nodes.size() - first_child;
     }
-    return total;
-}
-
-// --- scan a SEGMENT (1-word header) -----------------------------------------
-size_t EvChannel::scanSegment(size_t off, int depth, int parent)
-{
-    SegmentHeader h(&buffer[off]);
-    size_t total = 1 + h.length;
-
-    int idx = static_cast<int>(nodes.size());
-    nodes.push_back({h.tag, h.type, 0, depth, parent,
-                     off + 1, h.length, 0, 0});
-
-    if (IsContainer(h.type))
-        scanChildren(off + 1, h.length, h.type, depth + 1, idx);
-    return total;
-}
-
-// --- scan a TAGSEGMENT (1-word header) --------------------------------------
-size_t EvChannel::scanTagSegment(size_t off, int depth, int parent)
-{
-    TagSegmentHeader h(&buffer[off]);
-    size_t total = 1 + h.length;
-
-    int idx = static_cast<int>(nodes.size());
-    nodes.push_back({h.tag, h.type, 0, depth, parent,
-                     off + 1, h.length, 0, 0});
-
-    if (IsContainer(h.type))
-        scanChildren(off + 1, h.length, h.type, depth + 1, idx);
     return total;
 }
 
@@ -299,9 +280,9 @@ void EvChannel::scanChildren(size_t off, size_t nwords, uint32_t ptype, int dept
         case DATA_BANK: case DATA_BANK2:
             consumed = scanBank(off + pos, depth, pidx); break;
         case DATA_SEGMENT: case DATA_SEGMENT2:
-            consumed = scanSegment(off + pos, depth, pidx); break;
+            consumed = scanSegment<SegmentHeader>(off + pos, depth, pidx); break;
         case DATA_TAGSEGMENT:
-            consumed = scanTagSegment(off + pos, depth, pidx); break;
+            consumed = scanSegment<TagSegmentHeader>(off + pos, depth, pidx); break;
         default: return;
         }
         if (consumed == 0) break;
@@ -318,16 +299,14 @@ void EvChannel::scanChildren(size_t off, size_t nwords, uint32_t ptype, int dept
 std::vector<const EvNode*> EvChannel::FindByTag(uint32_t tag) const
 {
     std::vector<const EvNode*> result;
-    for (auto &n : nodes)
-        if (n.tag == tag) result.push_back(&n);
+    for (int ni : NodesForTag(tag)) result.push_back(&nodes[ni]);
     return result;
 }
 
 const EvNode *EvChannel::FindFirstByTag(uint32_t tag) const
 {
-    for (auto &n : nodes)
-        if (n.tag == tag) return &n;
-    return nullptr;
+    const auto &idx = NodesForTag(tag);
+    return idx.empty() ? nullptr : &nodes[idx.front()];
 }
 
 const std::vector<int> &EvChannel::NodesForTag(uint32_t tag) const
@@ -338,9 +317,19 @@ const std::vector<int> &EvChannel::NodesForTag(uint32_t tag) const
 }
 
 // === Lazy data-product accessors ============================================
-// Each one decodes on first call (for the currently-selected sub-event) and
-// returns a cached reference thereafter.  clearCache() invalidates the flags
-// on Read()/Scan()/SelectEvent() transitions.
+
+namespace {
+template <class T, class Decode>
+const T &lazy_get(std::unique_ptr<T> &cache, bool &ready, Decode &&decode)
+{
+    if (!cache) cache = std::make_unique<T>();
+    if (!ready) {
+        decode(*cache);
+        ready = true;
+    }
+    return *cache;
+}
+} // namespace
 
 const fdec::EventInfo &EvChannel::Info() const
 {
@@ -354,43 +343,25 @@ const fdec::EventInfo &EvChannel::Info() const
 
 const fdec::EventData &EvChannel::Fadc() const
 {
-    if (!cache_fadc) cache_fadc = std::make_unique<fdec::EventData>();
-    if (!fadc_ready) {
-        decodeFadcInto(*cache_fadc);   // also refills cache_fadc->info
-        fadc_ready = true;
+    return lazy_get(cache_fadc, fadc_ready, [this](fdec::EventData &e) {
+        decodeFadcInto(e);   // also refills cache_fadc->info
         info_ready = true;
-    }
-    return *cache_fadc;
+    });
 }
 
 const ssp::SspEventData &EvChannel::Gem() const
 {
-    if (!cache_gem) cache_gem = std::make_unique<ssp::SspEventData>();
-    if (!gem_ready) {
-        decodeGemInto(*cache_gem);
-        gem_ready = true;
-    }
-    return *cache_gem;
+    return lazy_get(cache_gem, gem_ready, [this](ssp::SspEventData &e) { decodeGemInto(e); });
 }
 
 const tdc::TdcEventData &EvChannel::Tdc() const
 {
-    if (!cache_tdc) cache_tdc = std::make_unique<tdc::TdcEventData>();
-    if (!tdc_ready) {
-        decodeTdcInto(*cache_tdc);
-        tdc_ready = true;
-    }
-    return *cache_tdc;
+    return lazy_get(cache_tdc, tdc_ready, [this](tdc::TdcEventData &e) { decodeTdcInto(e); });
 }
 
 const vtp::VtpEventData &EvChannel::Vtp() const
 {
-    if (!cache_vtp) cache_vtp = std::make_unique<vtp::VtpEventData>();
-    if (!vtp_ready) {
-        decodeVtpInto(*cache_vtp);
-        vtp_ready = true;
-    }
-    return *cache_vtp;
+    return lazy_get(cache_vtp, vtp_ready, [this](vtp::VtpEventData &e) { decodeVtpInto(e); });
 }
 
 const psync::SyncInfo &EvChannel::Sync() const
@@ -407,22 +378,12 @@ const psync::SyncInfo &EvChannel::Sync() const
 
 const dsc::DscEventData &EvChannel::Dsc() const
 {
-    if (!cache_dsc) cache_dsc = std::make_unique<dsc::DscEventData>();
-    if (!dsc_ready) {
-        decodeDscInto(*cache_dsc);
-        dsc_ready = true;
-    }
-    return *cache_dsc;
+    return lazy_get(cache_dsc, dsc_ready, [this](dsc::DscEventData &e) { decodeDscInto(e); });
 }
 
 const epics::EpicsRecord &EvChannel::Epics() const
 {
-    if (!cache_epics) cache_epics = std::make_unique<epics::EpicsRecord>();
-    if (!epics_ready) {
-        decodeEpicsInto(*cache_epics);
-        epics_ready = true;
-    }
-    return *cache_epics;
+    return lazy_get(cache_epics, epics_ready, [this](epics::EpicsRecord &e) { decodeEpicsInto(e); });
 }
 
 const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) const
@@ -435,9 +396,14 @@ const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) c
     return reinterpret_cast<const uint8_t*>(&buffer[inner.data_begin]);
 }
 
-// =============================================================================
-// Depth-2 data bank decoders
-// =============================================================================
+std::string EvChannel::GetString(const EvNode &n) const
+{
+    if (n.data_words == 0 || n.data_begin + n.data_words > buffer.size()) return {};
+    const char *s = reinterpret_cast<const char*>(&buffer[n.data_begin]);
+    return std::string(s, std::find(s, s + GetDataBytes(n), '\0'));
+}
+
+// === Depth-2 data bank decoders =============================================
 
 // --- 0xC000: CODA trigger bank [event_number, event_tag, reserved] ----------
 void EvChannel::decodeTriggerInfo(const EvNode &node, fdec::EventInfo &info) const
@@ -463,8 +429,7 @@ void EvChannel::decodeTriggerInfo(const EvNode &node, fdec::EventInfo &info) con
 //   d[5]: 32-bit FP trigger inputs (if tiSetFPInputReadout enabled)
 //   d[6]: additional TI flags
 //
-void EvChannel::decodeTIBank(const EvNode &node, fdec::EventInfo &info,
-                             bool is_master) const
+void EvChannel::decodeTIBank(const EvNode &node, fdec::EventInfo &info) const
 {
     const uint32_t *d = GetData(node);
     size_t nw = node.data_words;
@@ -488,18 +453,6 @@ void EvChannel::decodeTIBank(const EvNode &node, fdec::EventInfo &info,
             time_high >>= config.ti_time_high_shift;
         info.timestamp = (time_high << 32) | time_low;
     }
-
-    // d[5] (TI master only): 32-bit FP trigger input snapshot.
-    // Multiple bits can fire simultaneously — tells you which detector
-    // signals were active at trigger time. Independent of trigger_type.
-    // See database/trigger_bit.json "trigger_bits" section.
-    if (is_master && config.ti_trigger_type_word >= 0 &&
-        static_cast<size_t>(config.ti_trigger_type_word) < nw)
-    {
-        info.trigger_bits = (d[config.ti_trigger_type_word]
-                             >> config.ti_trigger_type_shift)
-                            & config.ti_trigger_type_mask;
-    }
 }
 
 // --- 0xE10F: Run info bank [hdr, run#, evt_count, unix_time, ...] -----------
@@ -518,8 +471,8 @@ void EvChannel::decodeRunInfo(const EvNode &node, fdec::EventInfo &info) const
 // =============================================================================
 // Per-product dispatchers — shared by the lazy cache accessors and the legacy
 // DecodeEvent compat wrapper.  Each walks tag_index for the tags belonging to
-// its product, then invokes the registered decoder (looked up by module name
-// from DaqConfig::data_banks).
+// its product (DaqConfig::data_banks); the FADC dispatcher also picks the
+// decoder by each bank's module name.
 //
 // CODA2 single-event structure (see docs/rols/banktags.md):
 //
@@ -544,7 +497,6 @@ void EvChannel::decodeRunInfo(const EvNode &node, fdec::EventInfo &info) const
 
 void EvChannel::decodeInfoInto(fdec::EventInfo &info) const
 {
-    info = fdec::EventInfo{};
     info.clear();
     if (nodes.empty()) return;
 
@@ -557,57 +509,41 @@ void EvChannel::decodeInfoInto(fdec::EventInfo &info) const
         info.trigger_type = static_cast<uint8_t>(evh.tag - config.physics_base);
 
     // 0xC000 trigger bank → event number.
-    {
-        auto tb = tag_index.find(config.trigger_bank_tag);
-        if (tb != tag_index.end() && !tb->second.empty())
-            decodeTriggerInfo(nodes[tb->second[0]], info);
-    }
+    if (const EvNode *tb = FindFirstByTag(config.trigger_bank_tag))
+        decodeTriggerInfo(*tb, info);
 
-    // 0xE10A TI banks — the first supplies trigger#/timestamp; any bank with
-    // enough words also yields FP trigger_bits (TI master's 7-word variant).
-    {
-        auto ti = tag_index.find(config.ti_bank_tag);
-        if (ti != tag_index.end()) {
-            bool have_info = false;
-            for (int ni : ti->second) {
-                auto &n = nodes[ni];
-                if (n.type != DATA_UINT32) continue;
-                if (!have_info) { decodeTIBank(n, info, false); have_info = true; }
-                if (info.trigger_bits == 0 && config.ti_trigger_type_word >= 0 &&
-                    static_cast<size_t>(config.ti_trigger_type_word) < n.data_words)
-                {
-                    const uint32_t *d = GetData(n);
-                    info.trigger_bits = (d[config.ti_trigger_type_word]
-                                         >> config.ti_trigger_type_shift)
-                                        & config.ti_trigger_type_mask;
-                }
-            }
+    // 0xE10A TI banks — the first supplies trigger#/timestamp; the first
+    // non-zero FP trigger-input snapshot (TI master's 7-word variant; bits
+    // named in database/trigger_bits.json) supplies trigger_bits.
+    bool have_info = false;
+    for (int ni : NodesForTag(config.ti_bank_tag)) {
+        auto &n = nodes[ni];
+        if (n.type != DATA_UINT32) continue;
+        if (!have_info) { decodeTIBank(n, info); have_info = true; }
+        if (info.trigger_bits == 0 && config.ti_trigger_type_word >= 0 &&
+            static_cast<size_t>(config.ti_trigger_type_word) < n.data_words)
+        {
+            const uint32_t *d = GetData(n);
+            info.trigger_bits = (d[config.ti_trigger_type_word]
+                                 >> config.ti_trigger_type_shift)
+                                & config.ti_trigger_type_mask;
         }
     }
 
     // 0xE10F run info lives inside the TI master crate (0x27).
-    {
-        auto tm = tag_index.find(config.ti_master_tag);
-        if (tm != tag_index.end()) {
-            for (int ni : tm->second) {
-                auto &n = nodes[ni];
-                if (n.depth != 1) continue;
-                for (size_t ci = 0; ci < n.child_count; ++ci) {
-                    auto &child = nodes[n.child_first + ci];
-                    if (child.tag == config.run_info_tag && child.type == DATA_UINT32)
-                        decodeRunInfo(child, info);
-                }
-                break;
-            }
+    for (int ni : NodesForTag(config.ti_master_tag)) {
+        auto &n = nodes[ni];
+        if (n.depth != 1) continue;
+        for (size_t ci = 0; ci < n.child_count; ++ci) {
+            auto &child = nodes[n.child_first + ci];
+            if (child.tag == config.run_info_tag && child.type == DATA_UINT32)
+                decodeRunInfo(child, info);
         }
+        break;
     }
 
-    // Track the latest physics event_number AND TI timestamp so slow
-    // events (DSC2 SYNCs, EPICS) can stamp themselves with both — the
-    // event_number for offline join-by-key, the timestamp so analysis
-    // can place the slow row on the run timeline without depending on
-    // the events tree containing that physics event (a downstream
-    // trigger/error filter may have dropped it before write).
+    // Track the latest physics event_number and TI timestamp so slow
+    // events (DSC2 SYNCs, EPICS) can stamp themselves with both.
     if (evtype == EventType::Physics && info.event_number != 0) {
         last_physics_event_number_ = info.event_number;
         last_physics_timestamp_    = info.timestamp;
@@ -621,51 +557,34 @@ void EvChannel::decodeFadcInto(fdec::EventData &evt) const
 
     int roc_idx = 0;
     for (uint32_t tag : fadc_tags) {
-        auto it = tag_index.find(tag);
-        if (it == tag_index.end()) continue;
         auto *bank_info = config.find_data_bank(tag);
         if (!bank_info) continue;
         const std::string &mod = bank_info->module;
 
-        for (int ni : it->second) {
+        for (int ni : NodesForTag(tag)) {
             if (roc_idx >= fdec::MAX_ROCS) break;
             auto &n = nodes[ni];
             if (n.data_words == 0) continue;
             if (n.parent >= 0 && nodes[n.parent].type == DATA_COMPOSITE) continue;
             uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+            fdec::RocData &rd = evt.rocs[roc_idx];
 
             if (mod == "fadc250_composite" && n.type == DATA_COMPOSITE) {
                 size_t nbytes;
                 auto *payload = GetCompositePayload(n, nbytes);
                 if (!payload) continue;
-                fdec::RocData &rd = evt.rocs[roc_idx];
-                rd.present = true;
-                rd.tag = roc_tag;
                 fdec::Fadc250Decoder::DecodeRoc(payload, nbytes, rd);
-                evt.roc_index[roc_idx] = roc_idx;
-                roc_idx++;
             }
-            else if (mod == "fadc250_raw" && n.type == DATA_UINT32) {
-                if (n.data_begin + n.data_words > buffer.size()) continue;
-                fdec::RocData &rd = evt.rocs[roc_idx];
-                rd.present = true;
-                rd.tag = roc_tag;
+            else if (n.type != DATA_UINT32 || n.data_begin + n.data_words > buffer.size()) {
+                continue;
+            }
+            else if (mod == "fadc250_raw") {
                 fdec::Fadc250RawDecoder::DecodeRoc(GetData(n), n.data_words, rd);
-                evt.roc_index[roc_idx] = roc_idx;
-                roc_idx++;
             }
-            else if (mod == "adc1881m" && config.adc_format == "adc1881m"
-                     && n.type == DATA_UINT32)
-            {
-                if (n.data_begin + n.data_words > buffer.size()) continue;
-                int crate_id = -1;
-                for (auto &re : config.roc_tags)
-                    if (re.tag == roc_tag) { crate_id = re.crate; break; }
-                fdec::RocData &rd = evt.rocs[roc_idx];
-                rd.present = true;
-                rd.tag = roc_tag;
+            else if (mod == "adc1881m" && config.adc_format == "adc1881m") {
                 fdec::Adc1881mDecoder::DecodeRoc(GetData(n), n.data_words, rd);
 
+                int crate_id = config.crate_of(roc_tag);
                 if (!config.pedestals.empty() && crate_id >= 0) {
                     for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
                         auto &slot = rd.slots[s];
@@ -689,9 +608,15 @@ void EvChannel::decodeFadcInto(fdec::EventData &evt) const
                         }
                     }
                 }
-                evt.roc_index[roc_idx] = roc_idx;
-                roc_idx++;
             }
+            else {
+                continue;
+            }
+
+            rd.present = true;
+            rd.tag = roc_tag;
+            evt.roc_index[roc_idx] = roc_idx;
+            roc_idx++;
         }
     }
     evt.nrocs = roc_idx;
@@ -701,59 +626,35 @@ int EvChannel::decodeGemInto(ssp::SspEventData &ssp_evt) const
 {
     ssp_evt.clear();
     int total_apvs = 0;
-    for (uint32_t tag : gem_tags) {
-        auto it = tag_index.find(tag);
-        if (it == tag_index.end()) continue;
-        for (int ni : it->second) {
-            auto &n = nodes[ni];
-            if (n.type != DATA_UINT32 || n.data_words == 0) continue;
-            if (n.parent >= 0 && nodes[n.parent].type == DATA_COMPOSITE) continue;
-            uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
-            int crate_id = -1;
-            for (auto &re : config.roc_tags)
-                if (re.tag == roc_tag) { crate_id = re.crate; break; }
+    for (uint32_t tag : gem_tags)
+        ForEachLeafBank(tag, [&](const EvNode &n, uint32_t roc_tag) {
+            int crate_id = config.crate_of(roc_tag);
             // SspDecoder::DecodeRoc is safe for short banks (returns 0 APVs),
             // so the 3-word stub 0xE10C in the TI master crate is a no-op.
             int napvs = ssp::SspDecoder::DecodeRoc(GetData(n), n.data_words,
                                                     crate_id, ssp_evt);
             if (napvs > 0) total_apvs += napvs;
-        }
-    }
+        });
     return total_apvs;
 }
 
 void EvChannel::decodeTdcInto(tdc::TdcEventData &tdc_evt) const
 {
     tdc_evt.clear();
-    for (uint32_t tag : tdc_tags) {
-        if (tag == 0) continue;
-        auto it = tag_index.find(tag);
-        if (it == tag_index.end()) continue;
-        for (int ni : it->second) {
-            auto &n = nodes[ni];
-            if (n.type != DATA_UINT32 || n.data_words == 0) continue;
-            if (n.parent >= 0 && nodes[n.parent].type == DATA_COMPOSITE) continue;
-            uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+    for (uint32_t tag : tdc_tags)
+        ForEachLeafBank(tag, [&](const EvNode &n, uint32_t roc_tag) {
             tdc::TdcDecoder::DecodeRoc(GetData(n), n.data_words, roc_tag, tdc_evt);
-        }
-    }
+        });
 }
 
 void EvChannel::decodeVtpInto(vtp::VtpEventData &vtp_evt) const
 {
     vtp_evt.clear();
-    for (uint32_t tag : vtp_tags) {
-        auto it = tag_index.find(tag);
-        if (it == tag_index.end()) continue;
-        for (int ni : it->second) {
-            auto &n = nodes[ni];
-            if (n.type != DATA_UINT32 || n.data_words == 0) continue;
-            if (n.parent >= 0 && nodes[n.parent].type == DATA_COMPOSITE) continue;
-            uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+    for (uint32_t tag : vtp_tags)
+        ForEachLeafBank(tag, [&](const EvNode &n, uint32_t roc_tag) {
             // VtpDecoder::DecodeRoc is tolerant of short stub banks.
             vtp::VtpDecoder::DecodeRoc(GetData(n), n.data_words, roc_tag, vtp_evt);
-        }
-    }
+        });
 }
 
 // Reads the 0xE112 HEAD bank (SYNC/EPICS events) or, failing that, the first
@@ -771,26 +672,21 @@ bool EvChannel::decodeSyncInto(psync::SyncInfo &out) const
     // SYNC / EPICS path: 0xE112 HEAD bank somewhere in the tree.  Updates the
     // fields the HEAD bank actually carries; leaves run_type alone so a
     // prior PRESTART's run_type stays visible across intervening SYNCs.
-    {
-        auto it = tag_index.find(config.sync_head_tag);
-        if (it != tag_index.end()) {
-            for (int ni : it->second) {
-                const auto &n = nodes[ni];
-                if (n.type != DATA_UINT32 || n.data_words == 0) continue;
-                const uint32_t *d = GetData(n);
-                size_t nw = n.data_words;
-                out.run_number   = read_word(d, nw, config.sync_head_run_number_word);
-                out.sync_counter = read_word(d, nw, config.sync_head_counter_word);
-                out.unix_time    = read_word(d, nw, config.sync_head_unix_time_word);
-                out.event_tag    = read_word(d, nw, config.sync_head_event_tag_word);
-                // Fall back to the wrapping event bank's tag if the declared
-                // event_tag word is blank, so callers can always distinguish
-                // PRESTART vs EPICS vs SYNC by event_tag alone.
-                if (out.event_tag == 0)
-                    out.event_tag = BankHeader(&buffer[0]).tag;
-                return true;
-            }
-        }
+    for (int ni : NodesForTag(config.sync_head_tag)) {
+        const auto &n = nodes[ni];
+        if (n.type != DATA_UINT32 || n.data_words == 0) continue;
+        const uint32_t *d = GetData(n);
+        size_t nw = n.data_words;
+        out.run_number   = read_word(d, nw, config.sync_head_run_number_word);
+        out.sync_counter = read_word(d, nw, config.sync_head_counter_word);
+        out.unix_time    = read_word(d, nw, config.sync_head_unix_time_word);
+        out.event_tag    = read_word(d, nw, config.sync_head_event_tag_word);
+        // Fall back to the wrapping event bank's tag if the declared
+        // event_tag word is blank, so callers can always distinguish
+        // PRESTART vs EPICS vs SYNC by event_tag alone.
+        if (out.event_tag == 0)
+            out.event_tag = BankHeader(&buffer[0]).tag;
+        return true;
     }
 
     // Control-event path: PRESTART/GO/END carry a 3-word UINT32 payload as
@@ -826,11 +722,9 @@ void EvChannel::decodeDscInto(dsc::DscEventData &out) const
 {
     out.clear();
     const auto &cfg = config.dsc_scaler;
-    if (!cfg.enabled() || cfg.bank_tag < 0) return;
+    if (!cfg.enabled()) return;
 
-    auto it = tag_index.find(static_cast<uint32_t>(cfg.bank_tag));
-    if (it == tag_index.end()) return;
-    for (int ni : it->second) {
+    for (int ni : NodesForTag(static_cast<uint32_t>(cfg.bank_tag))) {
         const auto &n = nodes[ni];
         if (n.data_words == 0) continue;
         // First bank that matches the configured slot wins.  DecodeBank
@@ -856,23 +750,13 @@ void EvChannel::decodeEpicsInto(epics::EpicsRecord &out) const
     out.sync_counter = si.sync_counter;
     out.run_number   = si.run_number;
 
-    // last_physics_{event_number,timestamp}_ are updated by decodeInfoInto()
-    // whenever a physics event is decoded.  Stamping both here lets the
-    // EPICS row carry its own anchor on the run timeline, so analysis
-    // does not have to look the timestamp back up via the events tree
-    // (which may not include the anchored physics event if the replay
-    // filtered it out before writing).
+    // Anchor on the most recent physics event (see decodeInfoInto()).
     out.event_number_at_arrival = last_physics_event_number_;
     out.timestamp_at_arrival    = last_physics_timestamp_;
     out.present = true;
 }
 
-// =============================================================================
-// Legacy compat wrapper — writes directly into caller-owned structs, bypassing
-// the lazy cache.  Semantics identical to the pre-refactor DecodeEvent so
-// existing consumers compile and behave unchanged.  New code should prefer
-// SelectEvent() + Info()/Fadc()/Gem()/Tdc()/Vtp().
-// =============================================================================
+// === Legacy DecodeEvent (bypasses the lazy cache) ===========================
 
 bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
                             ssp::SspEventData *ssp_evt,
@@ -895,9 +779,8 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
     if (vtp_evt) decodeVtpInto(*vtp_evt);
     if (tdc_evt) decodeTdcInto(*tdc_evt);
 
-    // Same return convention as the original DecodeEvent: true iff any
-    // detector data was decoded (FADC waveforms or GEM strips).  evt.info
-    // is always populated regardless.
+    // True iff any detector data was decoded (FADC waveforms or GEM strips);
+    // evt.info is always populated regardless.
     return evt.nrocs > 0 || ssp_decoded;
 }
 
@@ -905,42 +788,23 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
 
 std::string EvChannel::ExtractEpicsText() const
 {
-    // look for the EPICS bank by configured tag
-    auto epics_nodes = FindByTag(config.epics_bank_tag);
+    const EvNode *bank = FindFirstByTag(config.epics_bank_tag);
 
-    // fallback: if no bank with epics_bank_tag, try string-type banks
-    // at depth 1 (direct children of the event)
-    if (epics_nodes.empty()) {
+    // fallback: if no bank with epics_bank_tag, take the first string-type
+    // bank at depth 1 (direct children of the event)
+    if (!bank) {
         for (auto &n : nodes) {
-            if (n.depth == 1 &&
-                (n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) &&
-                n.data_words > 0)
-            {
-                epics_nodes.push_back(&n);
+            if (n.depth == 1 && IsString(n.type) && n.data_words > 0) {
+                bank = &n;
+                break;
             }
         }
     }
 
-    if (epics_nodes.empty()) return {};
-
-    // extract text from the first matching node
-    const EvNode &n = *epics_nodes[0];
-    const char *raw = reinterpret_cast<const char*>(&buffer[n.data_begin]);
-    size_t max_len = n.data_words * sizeof(uint32_t);
-
-    // find actual string length (may be null-padded)
-    size_t len = 0;
-    while (len < max_len && raw[len] != '\0') ++len;
-
-    return std::string(raw, len);
+    return bank ? GetString(*bank) : std::string();
 }
 
-// === DAQ config text extraction =============================================
-//
-// PRESTART events carry a 0xE10E STRING bank with the full concatenated DAQ
-// configuration file the run was started with (TI / DSC / FADC / TDC / SSP /
-// VTP / TS settings, pedestals & gains, trigger masks).  We pull the text by
-// configured tag and strip null padding, mirroring ExtractEpicsText().
+// === DAQ config text extraction (PRESTART 0xE10E) ===========================
 
 std::string EvChannel::ExtractDaqConfigText() const
 {
@@ -952,19 +816,13 @@ std::string EvChannel::ExtractDaqConfigText() const
     // change relabels the type).
     const EvNode *picked = nullptr;
     for (const EvNode *n : cfg_nodes) {
-        if (n->type == DATA_CHARSTAR8 || n->type == DATA_CHAR8) {
+        if (IsString(n->type)) {
             picked = n;
             break;
         }
     }
     if (!picked) picked = cfg_nodes.front();
-    if (picked->data_words == 0) return {};
-
-    const char *raw = reinterpret_cast<const char*>(&buffer[picked->data_begin]);
-    size_t max_len = picked->data_words * sizeof(uint32_t);
-    size_t len = 0;
-    while (len < max_len && raw[len] != '\0') ++len;
-    return std::string(raw, len);
+    return GetString(*picked);
 }
 
 // === PrintTree ==============================================================
@@ -991,14 +849,9 @@ void EvChannel::PrintTree(std::ostream &os) const
             if (n.data_words > nshow) os << " ...";
         }
 
-        if ((n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) && n.data_words > 0) {
-            const char *s = reinterpret_cast<const char*>(&buffer[n.data_begin]);
-            size_t maxlen = n.data_words * 4;
+        if (IsString(n.type) && n.data_words > 0) {
             os << " \"";
-            for (size_t i = 0; i < maxlen && s[i]; ++i) {
-                if (s[i] >= 32 && s[i] < 127) os << s[i];
-                else os << '.';
-            }
+            for (char c : GetString(n)) os << ((c >= 32 && c < 127) ? c : '.');
             os << "\"";
         }
         os << "\n";

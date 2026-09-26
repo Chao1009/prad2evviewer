@@ -44,7 +44,6 @@
 //=============================================================================
 
 #include <cstdint>
-#include <cstring>
 
 namespace dsc
 {
@@ -79,5 +78,19 @@ struct DscEventData {
         return ungated > 0 ? (double)gated / (double)ungated : -1.0;
     }
 };
+
+// Live fraction over the window since the previous cumulative readout
+// (prev_gated, prev_ungated).  A counter that moved backward (DSC2 reset or
+// wrap) rebases the previous readout to (0, 0).  Returns -1 when ungated did
+// not advance or gated advanced more than ungated.
+inline double delta_live_ratio(uint32_t gated, uint32_t ungated,
+                               uint32_t prev_gated, uint32_t prev_ungated)
+{
+    if (gated < prev_gated || ungated < prev_ungated)
+        prev_gated = prev_ungated = 0;
+    const uint32_t dg = gated - prev_gated;
+    const uint32_t du = ungated - prev_ungated;
+    return (du > 0 && dg <= du) ? (double)dg / (double)du : -1.0;
+}
 
 } // namespace dsc

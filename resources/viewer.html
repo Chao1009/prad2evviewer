@@ -4,19 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PRad-II HyCal</title>
-<script>
-/* Apply saved theme before first paint to avoid a theme-switch flash. */
-(function(){
-    var valid = ['dark', 'light', 'classic'];
-    try {
-        var saved = localStorage.getItem('prad2.theme');
-        document.documentElement.dataset.theme =
-            valid.indexOf(saved) >= 0 ? saved : 'classic';
-    } catch(e) { document.documentElement.dataset.theme = 'classic'; }
-})();
-</script>
 <!-- CSS must load BEFORE theme.js so that getComputedStyle() in
-     theme.js sees the --theme-* custom properties. -->
+     theme.js sees the --theme-* custom properties.  theme.js applies the
+     saved theme synchronously here, before first paint. -->
 <link rel="stylesheet" href="viewer.css">
 <script src="plotly-cartesian-2.35.0.min.js"></script>
 <script src="theme.js"></script>
@@ -348,15 +338,11 @@
         <div class="dq-cell" id="dq-cell-waveform">
             <div id="waveform-div" style="width:100%;height:100%"></div>
             <div class="hist-controls hist-controls-split">
-                <!-- Left: dynamic readouts that come and go with the toggles.
-                     Pinned to the left edge so the right-hand controls don't
-                     shift when modes turn on/off. -->
                 <div class="hc-left">
                     <span id="wf-stack-count" style="display:none;color:var(--dim);font-size:11px"></span>
                     <button id="btn-wf-stack-reset" class="copy-btn" style="display:none" title="Clear stacked waveforms">reset</button>
                     <span id="wf-daq-info" style="display:none;color:var(--dim);font-size:11px"></span>
                 </div>
-                <!-- Right: fixed-position checkboxes + copy button. -->
                 <div class="hc-right">
                     <label class="toggle-btn" title="Overlay waveforms across events"><input type="checkbox" id="wf-stack"> Stack</label>
                     <label class="toggle-btn" title="FADC250 firmware Mode 1/2/3 emulation: TET / NSB / NSA / Vp / T annotated"><input type="checkbox" id="wf-daq"> DAQ</label>
@@ -486,9 +472,7 @@
 
     <!-- GEM panel -->
     <div class="gem-outer" id="gem-outer" style="display:none">
-        <div class="gem-toolbar">
-            <span id="gem-stats" style="color:var(--dim);font-size:11px"></span>
-        </div>
+        <div class="gem-toolbar"></div>
         <div class="gem-columns">
             <div class="gem-col-left">
                 <div class="gem-col-title">Cluster Occupancy (rate)</div>

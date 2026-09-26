@@ -1,11 +1,10 @@
-// energy_corr.cpp : to correct the reconstructed energy non-uniformity depending on
+// hycal_energy_bowl_shape.cpp : to correct the reconstructed energy non-uniformity depending on
 // the position of the cluster within the calorimeter modules.
 //
 // Measure the reconstructed-energy response at different positions within each
-// module and compare its fitted peak with the expected energy. Each module is divided into a grid,
-// First try to a grid of 5 by 5, the map is below, could be saved into a 2D array of 1D hist
-// with one reconstructed-energy histogram for each cell in the 5x5 grid.
-// The histograms use h1_energy_grid[module][column][row]. Columns increase
+// module and compare its fitted peak with the expected energy. Each module is divided into
+// a 5x5 grid with one reconstructed-energy histogram per cell (map below).
+// The histograms use h1_energy_grid_allModule[module][column][row]. Columns increase
 // with the local HyCal X coordinate, and rows increase with local HyCal Y.
 // column   0   1   2   3   4
 // row     +---+---+---+---+---+     beam top (+Y) ^
@@ -18,33 +17,21 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
+#include "HyCalEnergyBias.h"
 #include "MatchingTools.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
 #include <TH1.h>
 #include <TH1F.h>
 #include <TH2F.h>
-#include <TF1.h>
-#include <TF2.h>
-#include <TGraphErrors.h>
-#include <TKey.h>
-#include <TLatex.h>
 #include <TString.h>
-#include <TSystem.h>
-#include <TStyle.h>
 #include <TCanvas.h>
-#include <TLegend.h>
-#include <TPad.h>
-#include <TROOT.h>
-#include <TClass.h>
-#include <TLorentzVector.h>
-
-#include <nlohmann/json.hpp>
 
 #include <iostream>
 #include <array>
@@ -54,39 +41,18 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
-#include <future>
-#include <map>
 #include <memory>
 #include <mutex>
-#include <limits>
-#include <thread>
 #include <getopt.h>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
-namespace fs = std::filesystem;
 
-// Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
 
-//anagles bin edges
-const int Nbins = 33;
-const Double_t binEdge[Nbins+1] = {
-    0.500, 0.550, 0.600, 0.650, 0.700, 0.750, 0.775, 0.800, 0.825, 0.850,
-    0.875, 0.900, 0.940, 0.975, 1.014, 1.057, 1.105, 1.157, 1.211, 1.270,
-    1.338, 1.417, 1.514, 1.634, 1.787, 2.000, 2.213, 2.492, 2.792, 3.092,
-    3.392, 3.692, 3.992, 4.292
-};
 const int energy_bins = 350; const double energy_min = 500., energy_max = 4000.;
-const int grids = 5;
+const int grids = fdec::HyCalEnergyBias::GRID_SIZE;
 
 // Modules map that want to draw
 // W456 W457 W458 W459 W460 W461 W462 W463
@@ -122,7 +88,6 @@ const int module_count = module_numbers.size();
 struct HistResult {
     std::unique_ptr<TH2F> h2_hit_module_hycal;
     std::unique_ptr<TH2F> h2_hit_module_gem;
-    std::unique_ptr<TH1F> h1_energy_grid[module_count][grids][grids];
     std::unique_ptr<TH1F> h1_energy_grid_allModule[1156][grids][grids];
     long long events_processed = 0;
 };
@@ -138,79 +103,19 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                             const std::string &db_dir, long long max_events,
                             HistResult *result, SharedFillLocks *fill_locks);
 
-static std::vector<std::string> collectRootFiles(const std::string &path);
-
-static std::string shell_quote(const std::string &value)
-{
-    std::string quoted = "'";
-    for (char ch : value) {
-        if (ch == '\'') quoted += "'\\''";
-        else quoted += ch;
-    }
-    return quoted + "'";
-}
-
-static std::string outputFileName(const std::string &output_name, bool corr = false)
-{
-    const fs::path output_path(output_name);
-    const std::string file_name = output_path.filename().string()
-        + (corr ? ".corr" : "") + ".root";
-    return (output_path.parent_path() / file_name).string();
-}
-
-static std::string outputJsonFileName(const std::string &output_name, bool corr = false)
-{
-    const fs::path output_path(output_name);
-    const std::string file_name = output_path.filename().string()
-        + (corr ? ".corr" : "") + ".json";
-    return (output_path.parent_path() / file_name).string();
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            std::string name = entry.path().filename().string();
-            if (entry.is_regular_file() &&
-                name.find("_recon") != std::string::npos &&
-                name.size() >= 5 && name.compare(name.size() - 5, 5, ".root") == 0)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-
-bool inHyCal(float xmm, float ymm) {
-    const float module = 20.75; // mm
-    return (fabs(xmm) > module * 2.0 || fabs(ymm) > module * 2.0)
-        && (fabs(xmm) < module * 16. && fabs(ymm) < module * 16.);
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
+    std::string db_dir = prad2::database_dir();
 
     // ── Argument parsing ─────────────────────────────────────────────────────
     std::string output_name;
     int  max_events  = -1;
     int  num_threads = 4;
     int  num_files   = -1;
-    bool worker_mode = false;
-    bool corr = false;
 
+    // getopt_long_only reports an unknown word option such as '-xyz' as one
+    // unrecognized option instead of splitting it into short options.
     static option long_options[] = {
-        {"corr", no_argument, nullptr, 'c'},
         {nullptr, 0, nullptr, 0}
     };
     int opt;
@@ -224,24 +129,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Collect all input files
-    std::vector<std::string> root_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        if (num_files > 0) {
-            int remaining = num_files - static_cast<int>(root_files.size());
-            if (remaining <= 0) break;
-            int take = std::min(remaining, static_cast<int>(f.size()));
-            root_files.insert(root_files.end(), f.begin(), f.begin() + take);
-            if (static_cast<int>(root_files.size()) >= num_files) break;
-        } else {
-            root_files.insert(root_files.end(), f.begin(), f.end());
-        }
-    }
+    std::vector<std::string> root_files =
+        CollectInputs(argc, argv, optind, IsReconRootName, num_files);
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
-        std::cerr << "Usage: hycal_Erecon_check <input_recon.root|dir> [more...] "
-                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads] [-corr]\n";
+        std::cerr << "Usage: hycal_energy_bowl_shape <input_recon.root|dir> [more...] "
+                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads]\n";
         return 1;
     }
 
@@ -249,65 +142,27 @@ int main(int argc, char *argv[])
         std::cerr << "No output prefix provided. Please pass -o <output_prefix>.\n";
         return 1;
     }
-    ROOT::EnableThreadSafety();
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TH1F");
-    TClass::GetClass("TH2F");
+    InitRootThreading();
 
     int run_num = get_run_int(root_files.front());
     gRunConfig = LoadRunConfig(db_dir + "/runinfo/general.json", run_num);
 
-    std::vector<long long> file_limits(root_files.size(), -1);
-    if (max_events >= 0) {
-        long long remaining = max_events;
-        for (size_t i = 0; i < root_files.size(); ++i) {
-            TFile input_file(root_files[i].c_str(), "READ");
-            auto *tree = input_file.IsOpen()
-                ? dynamic_cast<TTree *>(input_file.Get("recon")) : nullptr;
-            const long long entries = tree ? tree->GetEntries() : 0;
-            file_limits[i] = std::max(0LL, std::min(entries, remaining));
-            remaining -= file_limits[i];
-        }
-    }
+    const auto file_limits = DistributeEventBudget(root_files, "recon", max_events);
 
     auto merged = makeHistResult("");
     SharedFillLocks fill_locks;
-    const int threads_count = std::max(1, std::min(num_threads,
-        static_cast<int>(root_files.size())));
-    const int rounds = (static_cast<int>(root_files.size()) + threads_count - 1)
-        / threads_count;
-    std::mutex io_mutex;
-    std::cout << "Processing " << root_files.size() << " file(s) with "
-              << threads_count << " thread(s), " << rounds << " round(s)\n";
-
-    for (int round = 0; round < rounds; ++round) {
-        const int first = round * threads_count;
-        const int last = std::min(first + threads_count,
-                                  static_cast<int>(root_files.size()));
-        std::vector<std::thread> workers;
-        workers.reserve(last - first);
-
-        for (int file_index = first; file_index < last; ++file_index) {
-            workers.emplace_back([&, file_index, first]() {
-                const long long limit = max_events >= 0 ? file_limits[file_index] : -1;
-                const bool ok = processRootFile(root_files[file_index], gRunConfig,
-                                                db_dir, limit, merged.get(), &fill_locks);
-                std::lock_guard<std::mutex> lock(io_mutex);
-                std::cout << "[worker " << (file_index - first) << "] file "
-                          << file_index << " / " << (root_files.size() - 1)
-                          << ": " << root_files[file_index] << " -> "
-                          << (ok ? "OK" : "FAILED") << "\n";
-            });
-        }
-        for (auto &worker : workers) worker.join();
-    }
+    RunFilesInRounds(root_files, num_threads, [&](int idx, int) {
+        return processRootFile(root_files[idx], gRunConfig, db_dir, file_limits[idx],
+                               merged.get(), &fill_locks);
+    });
     merged->events_processed = fill_locks.events_processed.load();
 
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
-    analysis::PhysicsTools physics(hycal);
 
+    // Copies of the drawn modules' grids for energy_grids_W<N>/, so the
+    // display fits below attach their functions to the copies only.
+    std::unique_ptr<TH1F> energy_grids[module_count][grids][grids];
     std::array<std::unique_ptr<TH2F>, module_count> bowl_shapes;
     std::array<double, module_count> expected_energies{};
     for (int m = 0; m < module_count; ++m) {
@@ -329,14 +184,16 @@ int main(int argc, char *argv[])
 
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
-                auto fit = physics.fitPeak(
-                    merged->h1_energy_grid[m][i][j].get(),
-                    static_cast<float>(expected_energies[m]), true);
-                // If the fit failed, use the mean of the histogram as the energy.
-                // or the entries are too few to perform a reliable fit.
-                if (merged->h1_energy_grid[m][i][j]->GetEntries() < 200) fit[0] = 0;
-                const double energy = fit[0] != 0
-                    ? fit[0] : merged->h1_energy_grid[m][i][j]->GetMean();
+                auto &grid = energy_grids[m][i][j];
+                grid.reset(static_cast<TH1F *>(
+                    merged->h1_energy_grid_allModule[module_number - 1][i][j]->Clone(
+                        Form("h1_energy_grid_W%d_%d_%d", module_number, i, j))));
+                grid->SetTitle(Form("Energy Grid W%d;E_{recon} [MeV];Counts", module_number));
+                auto fit = analysis::PhysicsTools::fitPeak(
+                    grid.get(), static_cast<float>(expected_energies[m]), true);
+                // Use the histogram mean when the fit failed or there are too few entries.
+                if (grid->GetEntries() < 200) fit[0] = 0;
+                const double energy = fit[0] != 0 ? fit[0] : grid->GetMean();
                 bowl_shapes[m]->SetBinContent(
                     i + 1, j + 1, energy / expected_energies[m]);
             }
@@ -369,15 +226,17 @@ int main(int argc, char *argv[])
     for (int m = 0; m < 1156; ++m) {
         const auto *module = hycal.module_by_id(1001 + m);
         if (!module) continue;
-        if (std::fabs(module->x) < 20.75 * 2.0 && std::fabs(module->y) < 20.75 * 2.0) continue;
-        if (std::fabs(module->x) > 20.75 * 16.0 || std::fabs(module->y) > 20.75 * 16.0) continue;
+        if (!InHyCalRing(module->x, module->y, 2.0, 16.)) continue;
         ++analyzed_module_count;
-        const double angle = std::atan2(std::sqrt(module->x * module->x + module->y * module->y), gRunConfig.hycal_z);
-        const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(angle, gRunConfig.Ebeam, "ep");
+        const double angle = std::atan2(
+            std::sqrt(module->x * module->x + module->y * module->y),
+            gRunConfig.hycal_z);
+        const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
+            angle, gRunConfig.Ebeam, "ep");
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 200) continue;
-                auto fit = physics.fitPeak(
+                auto fit = analysis::PhysicsTools::fitPeak(
                     merged->h1_energy_grid_allModule[m][i][j].get(),
                     static_cast<float>(expected_energy), true);
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 400) fit[0] = 0;
@@ -400,7 +259,7 @@ int main(int argc, char *argv[])
     //         "y0": { "x0": bias, "x1": bias, "x2": bias, "x3": bias, "x4": bias}
     //     }
     // }
-    const std::string output_json_name = outputJsonFileName(output_name, corr);
+    const std::string output_json_name = output_name + ".json";
     std::ofstream json_output(output_json_name);
     if (!json_output) {
         std::cerr << "Cannot create output file " << output_json_name << "\n";
@@ -436,7 +295,7 @@ int main(int argc, char *argv[])
     bowl_modules.Modified();
     bowl_modules.Update();
 
-    const std::string output_file_name = outputFileName(output_name, corr);
+    const std::string output_file_name = output_name + ".root";
     TFile output_file(output_file_name.c_str(), "RECREATE");
     if (output_file.IsZombie()) {
         std::cerr << "Cannot create output file " << output_file_name << "\n";
@@ -451,7 +310,7 @@ int main(int argc, char *argv[])
         output_file.cd(directory.c_str());
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
-                merged->h1_energy_grid[m][i][j]->Write();
+                energy_grids[m][i][j]->Write();
             }
         }
     }
@@ -483,18 +342,6 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
         Form("h2_hit_module_gem%s", name_suffix.c_str()),
         "GEM Hit Distribution (Module);(X_{gem}-X_{cell center})/d_{cell size};(Y_{gem}-Y_{cell center})/d_{cell size}",
         100, -0.5, 0.5, 100, -0.5, 0.5);
-    for (int m = 0; m < module_count; ++m) {
-        for (int i = 0; i < grids; ++i) {
-            for (int j = 0; j < grids; ++j) {
-                result->h1_energy_grid[m][i][j] = std::make_unique<TH1F>(
-                    Form("h1_energy_grid_W%d_%d_%d%s",
-                         module_numbers[m], i, j, name_suffix.c_str()),
-                    Form("Energy Grid W%d;E_{recon} [MeV];Counts",
-                         module_numbers[m]),
-                    energy_bins, energy_min, energy_max);
-            }
-        }
-    }
     for (int m = 0; m < 1156; ++m) {
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
@@ -537,7 +384,6 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         tree->GetEntry(entry);
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
         if (event.n_clusters != 1) continue;
-        //if (event.matchNum != 1) continue;
         if (event.cl_nblocks[0] < 3) continue;
         if (fabs(event.cl_energy[0] - run_config.Ebeam) > 3.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.)) continue;
 
@@ -548,45 +394,28 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         hc_hit.z = event.cl_z[0];
         hc_hit.energy = event.cl_energy[0];
         if (event.matchNum == 1){
+            // [0][0]: the matched hit of the downstream GEM pair (GEM1/GEM2)
             gem_hit.x = event.mHit_gx[0][0];
             gem_hit.y = event.mHit_gy[0][0];
             gem_hit.z = event.mHit_gz[0][0];
         }
 
-        if (gem_hit.z != 0.f) {
-            const float scale = hc_hit.z / gem_hit.z;
-            gem_hit.x *= scale;
-            gem_hit.y *= scale;
-            gem_hit.z *= scale;
-        }
+        if (gem_hit.z != 0.f) GetProjection(gem_hit, hc_hit.z);
         ApplyToHyCal(gem_hit, run_config);
         ApplyToHyCal(hc_hit, run_config);
-        if (!inHyCal(hc_hit.x, hc_hit.y)) continue;
+        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 16.)) continue;
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
-        float xd_hycal = (hc_hit.x - mod->x) / mod->size_x;
-        float yd_hycal = (hc_hit.y - mod->y) / mod->size_y;
-
-        float xd_gem = (gem_hit.x - mod->x) / mod->size_x;
-        float yd_gem = (gem_hit.y - mod->y) / mod->size_y;
+        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
+        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
 
         // Fill the selected module's energy-grid histogram.
-        int col = static_cast<int>((xd_hycal + 0.5f) * grids);
-        int row = static_cast<int>((yd_hycal + 0.5f) * grids);
-        if (col < 0) col = 0;
-        if (col >= grids) col = grids - 1;
-        if (row < 0) row = 0;
-        if (row >= grids) row = grids - 1;
+        int col, row;
+        if (!fdec::HyCalEnergyBias::cell(*mod, hc_hit.x, hc_hit.y, col, row)) continue;
         const int all_module_index = mod->id - 1001;
         {
             std::lock_guard<std::mutex> lock(fill_locks->module[all_module_index]);
-            const auto module_it = std::find(
-                module_numbers.begin(), module_numbers.end(), mod->id - 1000);
-            if (module_it != module_numbers.end()) {
-                const int module_index = std::distance(module_numbers.begin(), module_it);
-                result->h1_energy_grid[module_index][col][row]->Fill(hc_hit.energy);
-            }
             result->h1_energy_grid_allModule[all_module_index][col][row]->Fill(hc_hit.energy);
         }
 

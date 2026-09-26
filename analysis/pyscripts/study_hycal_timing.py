@@ -46,10 +46,8 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-import time
 
 import _common as C
-from prad2py import dec, det  # noqa: E402  (after _common, intentionally)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,17 +72,7 @@ def main(argv: list[str] | None = None) -> int:
                          "Pass 0 to accept any trigger.")
     args = ap.parse_args(argv)
 
-    p = C.setup_pipeline(
-        evio_path     = args.evio_path,
-        max_events    = args.max_events,
-        run_num       = args.run_num,
-        gem_ped_file  = args.gem_ped_file,
-        gem_cm_file   = args.gem_cm_file,
-        hc_calib_file = args.hc_calib_file,
-        daq_config    = args.daq_config,
-        gem_map_file  = args.gem_map_file,
-        hc_map_file   = args.hc_map_file,
-    )
+    p = C.setup_pipeline_from_args(args)
     print(f"[setup] max_qdist  : {args.max_qdist} module units", flush=True)
     if args.pre_window is not None:
         print(f"[setup] pre_window : [{args.pre_window[0]}, {args.pre_window[1]}] ns",
@@ -107,130 +95,58 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_header:
         write_row(cols)
 
-    ch = dec.EvChannel()
-    ch.set_config(p.cfg)
-
-    t0 = time.monotonic()
-    n_read = n_phys = n_kept = 0
-    n_files_open = 0
     n_seeds = n_rows = 0
-    pre_lo = args.pre_window[0] if args.pre_window is not None else None
-    pre_hi = args.pre_window[1] if args.pre_window is not None else None
 
+    stats = C.LoopStats()
     try:
-        for fpath in p.evio_files:
-            if ch.open_auto(fpath) != dec.Status.success:
-                print(f"[WARN] skip (cannot open): {fpath}", flush=True)
+        for fadc_evt, _ in C.iter_physics_events(
+                p, stats, with_ssp=False, max_events=args.max_events,
+                accept=((lambda b: b == args.require_trigger)
+                        if args.require_trigger else None),
+                progress=lambda st: print(f"[progress] {st.n_phys} physics events  "
+                                          f"seeds={n_seeds}  rows={n_rows}",
+                                          flush=True)):
+            trigger_bits = int(fadc_evt.info.trigger_bits)
+            event_num = int(fadc_evt.info.event_number)
+
+            # Push every detected peak into the clusterer.  We do NOT
+            # call form_clusters() — collect_neighbor_timing() works
+            # directly on the accumulated hits and applies its own
+            # seed-finding logic without consuming pulses across seeds.
+            p.hc_clusterer.clear()
+            for mod, peaks in C.iter_hycal_peaks(p, fadc_evt, args.pre_window):
+                C.add_hycal_peaks(p.hc_clusterer, mod, peaks, True)
+
+            rows = p.hc_clusterer.collect_neighbor_timing(args.max_qdist)
+            if not rows:
                 continue
-            n_files_open += 1
-            print(f"[file {n_files_open}/{len(p.evio_files)}] {fpath}",
-                  flush=True)
 
-            done = False
-            while ch.read() == dec.Status.success:
-                n_read += 1
-                if not ch.scan():
-                    continue
-                if ch.get_event_type() != dec.EventType.Physics:
-                    continue
-
-                for i in range(ch.get_n_events()):
-                    decoded = ch.decode_event(i, with_ssp=False)
-                    if not decoded["ok"]:
-                        continue
-                    n_phys += 1
-                    fadc_evt = decoded["event"]
-
-                    trigger_bits = int(fadc_evt.info.trigger_bits)
-                    if args.require_trigger and trigger_bits != args.require_trigger:
-                        if args.max_events > 0 and n_phys >= args.max_events:
-                            done = True; break
-                        continue
-                    n_kept += 1
-                    event_num = int(fadc_evt.info.event_number)
-
-                    # Push every detected peak into the clusterer.  We do NOT
-                    # call form_clusters() — collect_neighbor_timing() works
-                    # directly on the accumulated hits and applies its own
-                    # seed-finding logic without consuming pulses across seeds.
-                    p.hc_clusterer.clear()
-                    for ri in range(fadc_evt.nrocs):
-                        roc = fadc_evt.roc(ri)
-                        if not roc.present:
-                            continue
-                        crate = p.crate_map.get(roc.tag)
-                        if crate is None:
-                            continue
-                        for s in roc.present_slots():
-                            slot = roc.slot(s)
-                            for c in slot.present_channels():
-                                mod = p.hycal.module_by_daq(crate, s, c)
-                                if mod is None or not mod.is_hycal():
-                                    continue
-                                cd = slot.channel(c)
-                                if cd.nsamples <= 0:
-                                    continue
-                                _, _, peaks = p.wave_ana.analyze(cd.samples)
-                                for pk in peaks:
-                                    if pre_lo is not None and pk.time <= pre_lo:
-                                        continue
-                                    if pre_hi is not None and pk.time >= pre_hi:
-                                        continue
-                                    p.hc_clusterer.add_hit(mod.index,
-                                                            mod.energize(pk.integral),
-                                                            float(pk.time))
-
-                    rows = p.hc_clusterer.collect_neighbor_timing(args.max_qdist)
-                    if not rows:
-                        if args.max_events > 0 and n_phys >= args.max_events:
-                            done = True; break
-                        continue
-
-                    # Track the seed-module set so we can count distinct seeds
-                    # — rows is one entry per (seed, neighbour), not per seed.
-                    seen_seeds = set()
-                    for r in rows:
-                        seed_mod = p.hycal.module(r.seed_module)
-                        nbr_mod  = p.hycal.module(r.neighbor_module)
-                        seen_seeds.add(r.seed_module)
-                        dist_q = math.sqrt(r.dx_q * r.dx_q + r.dy_q * r.dy_q)
-                        write_row([
-                            event_num, trigger_bits,
-                            r.seed_module, seed_mod.id,
-                            f"{r.seed_time:.3f}", f"{r.seed_energy:.4f}",
-                            r.neighbor_module, nbr_mod.id,
-                            f"{r.neighbor_time:.3f}", f"{r.neighbor_energy:.4f}",
-                            f"{r.dt:.3f}",
-                            f"{r.dx_q:.4f}", f"{r.dy_q:.4f}", f"{dist_q:.4f}",
-                        ])
-                        n_rows += 1
-                    n_seeds += len(seen_seeds)
-
-                    if args.max_events > 0 and n_phys >= args.max_events:
-                        done = True; break
-
-                if done:
-                    break
-                if n_phys > 0 and n_phys % 5000 == 0:
-                    print(f"[progress] {n_phys} physics events  "
-                          f"seeds={n_seeds}  rows={n_rows}", flush=True)
-
-            ch.close()
-            if done:
-                break
+            # Track the seed-module set so we can count distinct seeds
+            # — rows is one entry per (seed, neighbour), not per seed.
+            seen_seeds = set()
+            for r in rows:
+                seed_mod = p.hycal.module(r.seed_module)
+                nbr_mod  = p.hycal.module(r.neighbor_module)
+                seen_seeds.add(r.seed_module)
+                dist_q = math.sqrt(r.dx_q * r.dx_q + r.dy_q * r.dy_q)
+                write_row([
+                    event_num, trigger_bits,
+                    r.seed_module, seed_mod.id,
+                    f"{r.seed_time:.3f}", f"{r.seed_energy:.4f}",
+                    r.neighbor_module, nbr_mod.id,
+                    f"{r.neighbor_time:.3f}", f"{r.neighbor_energy:.4f}",
+                    f"{r.dt:.3f}",
+                    f"{r.dx_q:.4f}", f"{r.dy_q:.4f}", f"{dist_q:.4f}",
+                ])
+                n_rows += 1
+            n_seeds += len(seen_seeds)
     finally:
         fh.close()
 
-    elapsed = time.monotonic() - t0
-    print("--- summary ---", flush=True)
-    print(f"  EVIO files opened     : {n_files_open} / {len(p.evio_files)}")
-    print(f"  EVIO records          : {n_read}")
-    print(f"  physics events        : {n_phys}")
-    print(f"  trigger-passed events : {n_kept}")
-    print(f"  total seeds           : {n_seeds}")
-    print(f"  rows written          : {n_rows}")
-    print(f"  elapsed (s)           : {elapsed:.2f}")
-    print(f"  wrote                 : {args.out_path}")
+    C.print_summary(p, stats, "trigger-passed events", [
+        ("total seeds",  n_seeds),
+        ("rows written", n_rows),
+    ], args.out_path)
     return 0
 
 

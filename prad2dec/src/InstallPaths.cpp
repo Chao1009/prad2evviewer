@@ -1,13 +1,9 @@
 // InstallPaths.cpp — implementation of the run-time data-directory resolver.
 //
-// See InstallPaths.h for the lookup policy.  Platform-specific bits:
-//
-//   Linux  :  dladdr() on our own symbol → the owning .so/exe path.
-//             (readlink /proc/self/exe would give the Python interpreter
-//             when called from the prad2py module, which is wrong.)
-//   macOS  :  dladdr() again — identical story.
-//   Windows:  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS)
-//             + GetModuleFileNameW.
+// See InstallPaths.h for the lookup policy.  module_dir() uses dladdr() on
+// our own symbol on Linux/macOS and GetModuleHandleExW(..._FROM_ADDRESS) +
+// GetModuleFileNameW on Windows.  (Not /proc/self/exe: inside the prad2py
+// module that names the Python interpreter, not the .so.)
 //
 // Needs C++17 <filesystem>.  Link ${CMAKE_DL_LIBS} on Linux (empty on
 // glibc ≥ 2.34, -ldl on older systems) — handled by prad2dec's
@@ -18,6 +14,7 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <system_error>
 
 #if defined(_WIN32)
@@ -27,6 +24,11 @@
   #include <windows.h>
 #else
   #include <dlfcn.h>
+#endif
+
+// Set by the top-level CMake project; "." for a standalone prad2dec build.
+#ifndef DATABASE_DIR
+#define DATABASE_DIR "."
 #endif
 
 namespace fs = std::filesystem;
@@ -92,6 +94,37 @@ std::string resolve_data_dir(const char *env_name,
     }
 
     return compile_default ? std::string(compile_default) : std::string();
+}
+
+std::string database_dir()
+{
+    return resolve_data_dir("PRAD2_DATABASE_DIR",
+                            {"../share/prad2evviewer/database",
+                             "../../share/prad2evviewer/database"},
+                            DATABASE_DIR);
+}
+
+std::string find_database_file(const std::string &name)
+{
+    auto readable = [](const std::string &p) { return std::ifstream(p).good(); };
+    const std::string db = database_dir();
+    if (!db.empty() && readable(db + "/" + name)) return db + "/" + name;
+    for (const std::string &p : {name, "database/" + name, "../database/" + name})
+        if (readable(p)) return p;
+    return {};
+}
+
+bool is_absolute_path(const std::string &path)
+{
+    if (path.empty()) return false;
+    if (path[0] == '/' || path[0] == '\\') return true;
+    return path.size() >= 2 && path[1] == ':';   // Windows drive letter
+}
+
+std::string resolve_db_path(const std::string &path, const std::string &db_dir)
+{
+    if (path.empty() || db_dir.empty() || is_absolute_path(path)) return path;
+    return db_dir + "/" + path;
 }
 
 } // namespace prad2

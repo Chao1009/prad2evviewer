@@ -12,23 +12,13 @@
 #include "GemCluster.h"
 #include "MatchingTools.h"
 #include "ConfigSetup.h"
-#include "InstallPaths.h"
 #include "PipelineBuilder.h"
 #include "RfTime.h"
 #include "TdcDecoder.h"
 #include "VtpDecoder.h"
 #include "gain_factor.h"
 
-#include <nlohmann/json.hpp>
-#include <fstream>
 #include <iostream>
-#include <limits>
-
-using json = nlohmann::json;
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 namespace analysis {
 
@@ -38,7 +28,6 @@ namespace {
 // (EVIO) and ProcessRaw2Recon (raw ROOT) so both paths write identical
 // values; the branches themselves are only booked with -gem_hit.
 
-// Copy the per-hit quality fields of `h` into recon-tree slot `i`.
 void fillGemHitQA(EventVars_Recon &ev, int i, const gem::GEMHit &h)
 {
     ev.gem_x_time[i]     = h.x_time;
@@ -75,105 +64,293 @@ void appendGemClusters(EventVars_Recon &ev, int det, int plane,
     }
 }
 
+// Slow-control side trees written next to the event tree: one DSC2 scaler
+// row per SYNC physics event, one EPICS row per EPICS event and one row per
+// CODA control event.  The PRESTART row carries the long DAQ-config text
+// (0xE10E STRING bank); GO and END are recorded too so analysis can recover
+// the run start/end time even when no PRESTART is in the input.  The rows
+// are filled by prad2dec accessors; see EventData_io.h for the format and
+// the join-by-event_number scheme.  Create with make_unique: the trees keep
+// the addresses of the rows.
+struct SideTrees {
+    TTree *scalers = new TTree("scalers", "PRad2 DSC2 scaler readouts");
+    TTree *epics   = new TTree("epics",   "PRad2 EPICS slow control");
+    TTree *runinfo = new TTree("runinfo", "PRad2 control events / DAQ config");
+    prad2::RawScalerData sc_row;
+    prad2::RawEpicsData  ep_row;
+    prad2::RawRunInfo    ri_row;
+
+    SideTrees()
+    {
+        prad2::SetScalerWriteBranches (scalers, sc_row);
+        prad2::SetEpicsWriteBranches  (epics,   ep_row);
+        prad2::SetRunInfoWriteBranches(runinfo, ri_row);
+    }
+    SideTrees(const SideTrees &) = delete;
+    SideTrees &operator=(const SideTrees &) = delete;
+
+    // Record a control or EPICS event.  Returns false only for a physics
+    // event, which is left to the caller.
+    bool record(const evc::EvChannel &ch)
+    {
+        const auto et = ch.GetEventType();
+        if (et == evc::EventType::Prestart ||
+            et == evc::EventType::Go       ||
+            et == evc::EventType::End)
+        {
+            // Scan() refreshed ch.Sync() with this event's run number /
+            // unix_time / run_type; the config text only ships on PRESTART.
+            std::string cfg_text;
+            if (et == evc::EventType::Prestart)
+                cfg_text = ch.ExtractDaqConfigText();
+            prad2::FillRunInfoRow(ch.Sync(), cfg_text, ri_row);
+            runinfo->Fill();
+        } else if (et == evc::EventType::Epics) {
+            const auto &rec = ch.Epics();
+            if (rec.present) {
+                prad2::FillEpicsRow(rec, ep_row);
+                epics->Fill();
+            }
+        }
+        return et != evc::EventType::Physics;
+    }
+
+    // DSC2 lives at the CODA-event level (one bank per Read() covering all
+    // its sub-events), but the carrying sub-event has a unique event_number:
+    // call this for the first decoded sub-event, before any per-event cut,
+    // so the rows track SYNC arrivals 1:1.
+    void recordScalers(const evc::EvChannel &ch, const fdec::EventInfo &info,
+                       const evc::DaqConfig::DscScaler &cfg)
+    {
+        const auto &dsc = ch.Dsc();
+        if (!dsc.present) return;
+        prad2::FillScalerRow(dsc, ch.Sync(), info, cfg, sc_row);
+        scalers->Fill();
+    }
+
+    void write()
+    {
+        scalers->Write();
+        epics->Write();
+        runinfo->Write();
+    }
+};
+
+// Every leaf bank with one of `tags` in the current read group (the ones
+// ch.Vtp() / ch.Tdc() decode), kept verbatim as a flat triple (parent ROC
+// tag or 0, word count, concatenated words) so offline tools can re-decode
+// it without the EVIO file and without a ROOT dictionary for nested STL
+// collections.  VTP: up to ~9 banks (7 HyCal + 2 GEM VTPs; PRAD_CLUSTER
+// TAG_EXP 0x1CC, TRIGGER 0x1D, ...).  TDC: V1190/V1290 banks (0x40 "rf": the
+// divided CEBAF RF on slot 16, ch 0 + ch 8; see RawEventData.tdc_words and
+// TdcDecoder.h).
+struct BankSnapshot {
+    std::vector<uint32_t> roc_tags, nwords, words;
+};
+
+BankSnapshot snapshotBanks(const evc::EvChannel &ch, const std::vector<uint32_t> &tags)
+{
+    BankSnapshot snap;
+    for (uint32_t tag : tags) {
+        ch.ForEachLeafBank(tag, [&](const evc::EvNode &n, uint32_t roc_tag) {
+            const uint32_t *p = ch.GetData(n);
+            snap.roc_tags.push_back(roc_tag);
+            snap.nwords.push_back(static_cast<uint32_t>(n.data_words));
+            snap.words.insert(snap.words.end(), p, p + n.data_words);
+        });
+    }
+    return snap;
+}
+
+// Words of the first `tag` bank of the current read group (empty if none),
+// e.g. the one 0xE10C SSP trigger bank shared by all its sub-events.
+std::vector<uint32_t> snapshotFirstBank(const evc::EvChannel &ch, uint32_t tag)
+{
+    std::vector<uint32_t> words;
+    if (const auto *n = ch.FindFirstByTag(tag)) {
+        const uint32_t *p = ch.GetData(*n);
+        words.assign(p, p + n->data_words);
+    }
+    return words;
+}
+
+// Trigger selection of the recon replays.
+// TODO: use config-driven trigger filter (monitor_config.json "physics"
+// section accept_trigger_bits/reject_trigger_bits) instead of hardcoded bits.
+struct TriggerSel {
+    bool sum = false, lms = false, alpha = false, cl3 = false;
+    bool keep = false;
+};
+
+// Keeps sum (every event with `random`), LMS, alpha and 3-cluster triggers.
+// For X17 blind analysis an event with the 3-cluster bit is only kept when
+// its event number ends in 8 (lucky number decided by students); the
+// raw-sum events stay for calibration and monitoring.
+TriggerSel selectTrigger(uint32_t bits, int event_num, bool random, bool x17, bool x17_blind)
+{
+    TriggerSel t;
+    t.sum   = random || (bits & prad2::TBIT_sum) != 0;
+    t.lms   = (bits & prad2::TBIT_lms)   != 0;
+    t.alpha = (bits & prad2::TBIT_alpha) != 0;
+    t.cl3   = (bits & prad2::TBIT_3cl)   != 0;
+    t.keep  = (t.sum || t.lms || t.alpha || t.cl3)
+           && !(x17 && x17_blind && t.cl3 && event_num % 10 != 8);
+    return t;
+}
+
+// VTP PRAD_CLUSTER online trigger clusters; center is the HyCal module id.
+void fillVtpClusters(EventVars_Recon &ev, const vtp::VtpEventData &vtp_event)
+{
+    for (int i = 0; i < vtp_event.n_prad_clusters && ev.vtp_cl_n < vtp::MAX_PRAD_CLUSTERS; ++i) {
+        const auto &cl = vtp_event.prad_clusters[i];
+        ev.vtp_cl_time[ev.vtp_cl_n]   = cl.time;
+        ev.vtp_cl_energy[ev.vtp_cl_n] = cl.energy;
+        ev.vtp_cl_center[ev.vtp_cl_n] = cl.hycal_id();
+        ev.vtp_cl_blocks[ev.vtp_cl_n] = cl.nhits;
+        ++ev.vtp_cl_n;
+    }
+}
+
+// Decode the RF reference from a TDC bank snapshot into the rf_n_a/_b and
+// rf_ns_a/_b (leading-edge ns) branches; returns it for the per-cluster
+// cl_dt_rf.
+tdc::RfTimeData fillRf(EventVars_Recon &ev, const std::vector<uint32_t> &roc_tags,
+                       const std::vector<uint32_t> &nwords,
+                       const std::vector<uint32_t> &words)
+{
+    tdc::RfTimeData rf;
+    tdc::RfTimeDecoder::DecodeReplay(roc_tags, nwords, words, rf);
+    ev.rf_n_a = static_cast<uint8_t>(rf.n_a);
+    ev.rf_n_b = static_cast<uint8_t>(rf.n_b);
+    std::copy(rf.ns_a, rf.ns_a + rf.n_a, ev.rf_ns_a);
+    std::copy(rf.ns_b, rf.ns_b + rf.n_b, ev.rf_ns_b);
+    return rf;
+}
+
+// HyCal clusters (at most kMaxClusters): lab-frame position at shower depth
+// projected to hycal_z, and the RF time difference.
+void fillClusters(EventVars_Recon &ev, const std::vector<fdec::ClusterHit> &hits,
+                  const DetectorTransform &hycal_xform, float hycal_z,
+                  const tdc::RfTimeData &rf, const fdec::HyCalSystem &hycal,
+                  const prad2::HyCalRfOffsets &rf_offsets)
+{
+    ev.n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
+    for (int i = 0; i < ev.n_clusters; ++i) {
+        const auto &h = hits[i];
+        ev.cl_nblocks[i] = h.nblocks;
+        ev.cl_npos[i]    = h.npos;
+        ev.cl_time[i]    = h.time;
+        HCHit lab = ClusterToLab(hycal_xform, h);
+        GetProjection(lab, hycal_z);
+        ev.cl_x[i]           = lab.x;
+        ev.cl_y[i]           = lab.y;
+        ev.cl_z[i]           = lab.z;
+        ev.cl_energy[i]      = lab.energy;
+        ev.cl_linear_corr[i] = h.linear_corr;
+        ev.cl_bias_corr[i]   = h.bias_corr;
+        ev.cl_center[i]      = lab.center_id;
+        ev.cl_flag[i]        = lab.flag;
+
+        // Per-cluster RF Δt — fold (cl_time − nearest_a) onto
+        // (−T_RF/2, T_RF/2], then subtract per-module offset and
+        // re-fold.  NaN when rf has no ch-A hits this event
+        // (apply() preserves NaN through both steps).
+        const float dt0 = prad2::ClusterDeltaRf(h.time, rf);
+        const auto *mod = hycal.module_by_id(h.center_id);
+        ev.cl_dt_rf[i] = rf_offsets.apply(mod ? mod->index : -1, dt0);
+    }
+}
+
+// GEM 2D hits (at most kMaxGemHits): charge, size and timing QA, and the
+// lab-frame position.
+void fillGemHits(EventVars_Recon &ev, const std::vector<gem::GEMHit> &hits,
+                 const std::array<DetectorTransform, 4> &gem_xforms)
+{
+    ev.n_gem_hits = std::min((int)hits.size(), prad2::kMaxGemHits);
+    for (int i = 0; i < ev.n_gem_hits; ++i) {
+        const auto &h = hits[i];
+        ev.det_id[i]       = h.det_id;
+        ev.gem_x_charge[i] = h.x_charge;
+        ev.gem_y_charge[i] = h.y_charge;
+        ev.gem_x_peak[i]   = h.x_peak;
+        ev.gem_y_peak[i]   = h.y_peak;
+        ev.gem_x_size[i]   = h.x_size;
+        ev.gem_y_size[i]   = h.y_size;
+        ev.gem_x_mTbin[i]  = h.x_max_timebin;
+        ev.gem_y_mTbin[i]  = h.y_max_timebin;
+        fillGemHitQA(ev, i, h);
+        const GEMHit lab = GemHitToLab(gem_xforms, h);
+        ev.gem_x[i] = lab.x;
+        ev.gem_y[i] = lab.y;
+        ev.gem_z[i] = lab.z;
+    }
+}
+
+// hycal_map.json category -> on-disk module_type code.
+prad2::ModuleType toModuleType(fdec::ModuleType t)
+{
+    switch (t) {
+        case fdec::ModuleType::PbGlass: return prad2::MOD_PbGlass;
+        case fdec::ModuleType::PbWO4:   return prad2::MOD_PbWO4;
+        case fdec::ModuleType::Veto:    return prad2::MOD_VETO;
+        case fdec::ModuleType::LMS:     return prad2::MOD_LMS;
+        default:                        return prad2::MOD_UNKNOWN;
+    }
+}
+
 } // anonymous namespace
 
 void Replay::LoadHyCalMap(const std::string &json_path)
 {
-    std::ifstream f(json_path);
-    if (!f.is_open()) {
-        std::cerr << "Replay: cannot open HyCal map: " << json_path << "\n";
+    if (!hycal_map_.Init(json_path)) {
+        std::cerr << "Replay: cannot load HyCal map: " << json_path << "\n";
         return;
     }
-    auto j = json::parse(f, nullptr, false, true);
-    if (!j.is_array()) {
-        std::cerr << "Replay: " << json_path << " is not a JSON array\n";
-        return;
-    }
-
-    auto parse_t = [](const std::string &t) {
-        if (t == "PbGlass") return prad2::MOD_PbGlass;
-        if (t == "PbWO4")   return prad2::MOD_PbWO4;
-        if (t == "Veto")    return prad2::MOD_VETO;
-        if (t == "LMS")     return prad2::MOD_LMS;
-        return prad2::MOD_UNKNOWN;
-    };
-
-    daq_map_.clear();
-    module_types_.clear();
-    module_locations_.clear();
-    for (auto &entry : j) {
-        std::string name = entry.value("n", "");
-        if (name.empty()) continue;
-        module_types_[name] = parse_t(entry.value("t", ""));
-
-        if (entry.contains("daq")) {
-            const auto &d = entry["daq"];
-            int crate   = d.value("crate", -1);
-            int slot    = d.value("slot", -1);
-            int channel = d.value("channel", -1);
-            if (crate >= 0) {
-                daq_map_[std::to_string(crate) + "_" + std::to_string(slot) +
-                         "_" + std::to_string(channel)] = name;
-                const int id = moduleID(crate, slot, channel);
-                if (id >= 0)
-                    module_locations_[id] = {crate, slot, channel};
-            }
-        }
-    }
-    std::cerr << "Replay: loaded " << module_types_.size()
-              << " modules (" << daq_map_.size() << " with daq) from "
+    int n_daq = 0;
+    for (int i = 0; i < hycal_map_.module_count(); ++i)
+        if (hycal_map_.module(i).daq.crate >= 0) ++n_daq;
+    std::cerr << "Replay: loaded " << hycal_map_.module_count()
+              << " modules (" << n_daq << " with daq) from "
               << json_path << "\n";
 }
 
 std::string Replay::moduleName(int roc, int slot, int ch) const
 {
-    auto it = daq_map_.find(std::to_string(roc) + "_" + std::to_string(slot) +
-                            "_" + std::to_string(ch));
-    return (it != daq_map_.end()) ? it->second : "";
+    const auto *m = hycal_map_.module_by_daq(roc, slot, ch);
+    return m ? m->name : "";
 }
 
 prad2::ModuleType Replay::moduleType(int roc, int slot, int ch) const
 {
-    auto name = moduleName(roc, slot, ch);
-    if (name.empty()) return prad2::MOD_UNKNOWN;
-    auto it = module_types_.find(name);
-    return (it != module_types_.end()) ? it->second : prad2::MOD_UNKNOWN;
+    const auto *m = hycal_map_.module_by_daq(roc, slot, ch);
+    return m ? toModuleType(m->type) : prad2::MOD_UNKNOWN;
 }
 
 int Replay::moduleID(int roc, int slot, int ch) const
 {
-    auto name = moduleName(roc, slot, ch);
-    if (name.empty()) return -1;
-    auto t = moduleType(roc, slot, ch);
     // Globally-unique ID encoding — see RawEventData docs.  The numeric
     // ranges are deliberately disjoint so HyCalSystem::module_by_id(...)
     // returns nullptr for Veto/LMS, letting existing HyCal consumers
     // skip them via their existing nullptr / is_hycal() checks.
-    switch (t) {
-        case prad2::MOD_PbGlass:
-            // "G<n>" → n.  std::stoi tolerates trailing junk; in practice the
-            // map contains pure "G123" entries.
-            try { return std::stoi(name.substr(1)); } catch (...) { return -1; }
+    const auto *m = hycal_map_.module_by_daq(roc, slot, ch);
+    if (!m) return -1;
+    const std::string &name = m->name;
+    switch (m->type) {
+        case fdec::ModuleType::PbGlass:
+        case fdec::ModuleType::PbWO4:
+            return m->id;
 
-        case prad2::MOD_PbWO4:
-            try { return std::stoi(name.substr(1)) + 1000; } catch (...) { return -1; }
-
-        case prad2::MOD_VETO:
-            // "V1".."V4" → 3001..3004
+        case fdec::ModuleType::Veto:
             if (name.size() >= 2 && name[0] == 'V')
-                try { return 3000 + std::stoi(name.substr(1)); } catch (...) {}
+                try { return prad2::kVetoIdBase + std::stoi(name.substr(1)); } catch (...) {}
             return -1;
 
-        case prad2::MOD_LMS:
-            // "LMSPin"=3100, "LMS1".."LMS3"=3101..3103
-            if (name == "LMSPin") return 3100;
-            if (name.rfind("LMS", 0) == 0 && name.size() == 4) {
-                char d = name[3];
-                if (d >= '1' && d <= '9') return 3100 + (d - '0');
-            }
+        case fdec::ModuleType::LMS:
+            if (name == "LMSPin") return prad2::kLmsIdBase;
+            if (name.rfind("LMS", 0) == 0 && name.size() == 4 && name[3] >= '1' && name[3] <= '9')
+                return prad2::kLmsIdBase + (name[3] - '0');
             return -1;
 
-        case prad2::MOD_UNKNOWN:
         default:
             return -1;
     }
@@ -181,107 +358,15 @@ int Replay::moduleID(int roc, int slot, int ch) const
 
 std::tuple<int, int, int> Replay::moduleLocation(int module_id) const
 {
-    auto it = module_locations_.find(module_id);
-    return (it != module_locations_.end())
-        ? it->second : std::tuple{-1, -1, -1};
-}
-
-void Replay::clearEvent(EventVars &ev)
-{
-    ev.event_num = 0;
-    ev.trigger_type = 0;
-    ev.trigger_bits = 0;
-    ev.timestamp = 0;
-    ev.nch = 0;
-    ev.gem_nch = 0;
-    ev.ssp_raw.clear();
-    ev.vtp_roc_tags.clear();
-    ev.vtp_nwords.clear();
-    ev.vtp_words.clear();
-    ev.tdc_roc_tags.clear();
-    ev.tdc_nwords.clear();
-    ev.tdc_words.clear();
-    std::fill(std::begin(ev.npeaks), std::end(ev.npeaks), 0);
-    std::fill(&ev.peak_height[0][0],   &ev.peak_height[0][0]   + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.peak_time[0][0],     &ev.peak_time[0][0]     + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.peak_integral[0][0], &ev.peak_integral[0][0] + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-}
-
-void Replay::clearReconEvent(EventVars_Recon &ev)
-{
-    ev.event_num = 0;
-    ev.trigger_type = 0;
-    ev.trigger_bits = 0;
-    ev.timestamp = 0;
-    ev.total_energy = 0.f;
-    ev.n_clusters = 0;
-    ev.n_gem_hits = 0;
-    ev.n_gem_cl = 0;
-    ev.matchNum = 0;
-    std::fill(std::begin(ev.matchFlag), std::end(ev.matchFlag), 0);
-    ev.clear_match_lists();
-    ev.veto_nch = 0;
-    ev.lms_nch = 0;
-    ev.ssp_raw.clear();
-    ev.vtp_roc_tags.clear();
-    ev.vtp_nwords.clear();
-    ev.vtp_words.clear();
-    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
-    std::fill(&ev.veto_peak_time[0][0],     &ev.veto_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.veto_peak_height[0][0],   &ev.veto_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.veto_peak_integral[0][0], &ev.veto_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
-    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
-    std::fill(&ev.lms_peak_time[0][0],     &ev.lms_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.lms_peak_height[0][0],   &ev.lms_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.lms_peak_integral[0][0], &ev.lms_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
-
-    // VTP PRAD_CLUSTER online trigger data
-    ev.vtp_cl_n = 0;
-    std::fill(&ev.vtp_cl_time[0],   &ev.vtp_cl_time[0]   + vtp::MAX_PRAD_CLUSTERS, 0);
-    std::fill(&ev.vtp_cl_energy[0], &ev.vtp_cl_energy[0] + vtp::MAX_PRAD_CLUSTERS, 0);
-    std::fill(&ev.vtp_cl_center[0], &ev.vtp_cl_center[0] + vtp::MAX_PRAD_CLUSTERS, 0);
-    std::fill(&ev.vtp_cl_blocks[0], &ev.vtp_cl_blocks[0] + vtp::MAX_PRAD_CLUSTERS, 0);
-
-    // RF reference + per-cluster folded Δt.  Default cl_dt_rf to NaN so
-    // analysis can tell "event filtered before clustering" apart from
-    // "Δt = 0 ns" without inspecting a separate sentinel branch.
-    ev.rf_n_a = 0;
-    ev.rf_n_b = 0;
-    std::fill(std::begin(ev.rf_ns_a), std::end(ev.rf_ns_a), 0.f);
-    std::fill(std::begin(ev.rf_ns_b), std::end(ev.rf_ns_b), 0.f);
-    std::fill(std::begin(ev.cl_linear_corr), std::end(ev.cl_linear_corr), 1.f);
-    std::fill(std::begin(ev.cl_bias_corr), std::end(ev.cl_bias_corr), 1.f);
-    std::fill(std::begin(ev.cl_dt_rf), std::end(ev.cl_dt_rf),
-              std::numeric_limits<float>::quiet_NaN());
-}
-
-void Replay::clearLMSEvent(LMSEventVars &ev)
-{
-    ev.event_num    = 0;
-    ev.trigger_type = 0;
-    ev.trigger_bits = 0;
-    ev.timestamp    = 0;
-    ev.event_type   = 0;
-    ev.nch          = 0;
-    std::fill(std::begin(ev.npeaks), std::end(ev.npeaks), 0);
-    std::fill(&ev.peak_height[0][0],   &ev.peak_height[0][0]   + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.peak_time[0][0],     &ev.peak_time[0][0]     + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-    std::fill(&ev.peak_integral[0][0], &ev.peak_integral[0][0] + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
-}
-
-void Replay::setupLMSBranches(TTree *tree, LMSEventVars &ev)
-{
-    prad2::SetLMSWriteBranches(tree, ev);
-}
-
-void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks, bool Ecalib = false, bool noWaveform = false)
-{
-    prad2::SetRawWriteBranches(tree, ev, write_peaks, Ecalib, noWaveform);
-}
-
-void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode, bool gem_hits)
-{
-    prad2::SetReconWriteBranches(tree, ev, x17_mode, gem_hits);
+    using prad2::kVetoIdBase;
+    using prad2::kLmsIdBase;
+    const fdec::Module *m =
+          module_id <  kVetoIdBase ? hycal_map_.module_by_id(module_id)
+        : module_id <  kLmsIdBase  ? hycal_map_.module_by_name("V" + std::to_string(module_id - kVetoIdBase))
+        : module_id == kLmsIdBase  ? hycal_map_.module_by_name("LMSPin")
+        : hycal_map_.module_by_name("LMS" + std::to_string(module_id - kLmsIdBase));
+    if (!m || m->daq.crate < 0) return {-1, -1, -1};
+    return {m->daq.crate, m->daq.slot, m->daq.channel};
 }
 
 bool Replay::Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
@@ -289,20 +374,10 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                      int max_events, bool write_peaks , const std::string &daq_config_file,
                      const float zerosup_override,bool Ecalib, bool noWaveform)
 {   
-    // Detectors: PRad-II flows through PipelineBuilder so the wiring stays in
-    // one place (see prad2det/include/PipelineBuilder.h).  PRad-1 keeps its
-    // hand-wired path because the builder is PRad-II-shaped (no GEM, different
-    // hycal map, ADC1881M pedestals).
-    fdec::HyCalSystem                 hycal;
-    gem::GemSystem                    gem_sys;
-    fdec::ClusterConfig               cluster_cfg;
-    prad2::HyCalTimeCuts              hc_time_cuts;
-    prad2::HyCalRfOffsets             hc_rf_offsets;
-    std::unordered_map<int, int>      roc_to_crate;
-    
-    // PRad-II: hand off to the canonical PipelineBuilder.  daq_cfg_ moves
-    // through the builder (which then attaches map paths) and comes back
-    // populated with everything the per-event loop needs.
+    // Detectors flow through PipelineBuilder so the wiring stays in one place
+    // (see prad2det/include/PipelineBuilder.h).  daq_cfg_ moves through the
+    // builder (which then attaches map paths) and comes back populated with
+    // everything the per-event loop needs.
     std::string hycal_map_override = daq_cfg_.hycal_map_file;
     std::string gem_map_override   = daq_cfg_.gem_map_file;
 
@@ -318,19 +393,9 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
         .set_log_stream(&std::cerr)
         .build();
 
-    daq_cfg_         = std::move(pipeline.daq_cfg);
-    hycal            = std::move(pipeline.hycal);
-    gem_sys          = std::move(pipeline.gem);
-    cluster_cfg      = pipeline.hycal_cluster_cfg;
-    hc_time_cuts     = std::move(pipeline.hycal_time_cuts);
-    hc_rf_offsets    = std::move(pipeline.hycal_rf_offsets);
-
-    // ROC→crate map from the same daq_cfg the builder consumed.
-    for (const auto &re : daq_cfg_.roc_tags) {
-        if (re.crate < 0) continue;
-        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
-        roc_to_crate[re.tag] = re.crate;
-    }
+    daq_cfg_ = std::move(pipeline.daq_cfg);
+    auto &gem_sys = pipeline.gem;
+    const auto roc_to_crate = daq_cfg_.roc_crate_map(true);
 
     if (zerosup_override >= 0.f) {
         gem_sys.SetZeroSupThreshold(zerosup_override);
@@ -352,41 +417,16 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     }
 
     TTree *tree = new TTree("events", "PRad2 replay data");
-    //EventVars ev;
     auto ev = std::make_unique<EventVars>();
-    setupBranches(tree, *ev, write_peaks, Ecalib, noWaveform);
+    prad2::SetRawWriteBranches(tree, *ev, write_peaks, Ecalib, noWaveform);
 
-    // Side trees — one DSC2 row per SYNC physics event, one EPICS row per
-    // 0x001F event.  Both are populated from prad2dec accessors; this loop
-    // just copies the resulting POD into a TTree-friendly struct.  See
-    // EventData_io.h for the format and the join-by-event_number scheme.
-    TTree *scalers_tree = new TTree("scalers", "PRad2 DSC2 scaler readouts");
-    TTree *epics_tree   = new TTree("epics",   "PRad2 EPICS slow control");
-    // One row per CODA control event.  The PRESTART row is the one that
-    // carries the long DAQ-config text (0xE10E STRING bank); GO and END
-    // are recorded too so analysis can recover the run start/end time
-    // even when no PRESTART is in the input.
-    TTree *runinfo_tree = new TTree("runinfo", "PRad2 control events / DAQ config");
-    auto sc_row = std::make_unique<prad2::RawScalerData>();
-    auto ep_row = std::make_unique<prad2::RawEpicsData>();
-    auto ri_row = std::make_unique<prad2::RawRunInfo>();
-    prad2::SetScalerWriteBranches (scalers_tree, *sc_row);
-    prad2::SetEpicsWriteBranches  (epics_tree,   *ep_row);
-    prad2::SetRunInfoWriteBranches(runinfo_tree, *ri_row);
+    auto side = std::make_unique<SideTrees>();
 
     auto event = std::make_unique<fdec::EventData>();
     auto ssp_evt = std::make_unique<ssp::SspEventData>();
     fdec::WaveAnalyzer ana(daq_cfg_.wave_cfg);
-    // NNLS pile-up template store (loaded only if config asks for it;
-    // failure is non-fatal — the analyzer falls back to local-maxima
-    // peak heights).
     fdec::PulseTemplateStore template_store;
-    if (daq_cfg_.wave_cfg.nnls_deconv.enabled
-        && !daq_cfg_.wave_cfg.nnls_deconv.template_file.empty()) {
-        template_store.LoadFromFile(
-            db_dir + "/" + daq_cfg_.wave_cfg.nnls_deconv.template_file,
-            daq_cfg_.wave_cfg);
-    }
+    template_store.LoadFromConfig(daq_cfg_.wave_cfg, db_dir);
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
     // Firmware-mode emulator (FADC250 Modes 1/2/3).  Configured from the
@@ -403,98 +443,13 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
 
-        // Slow-control side trees — non-physics events fill them, then the
-        // loop continues without touching the events tree.  Heavy lifting
-        // (parsing, anchoring with last_physics_event_number, applying the
-        // DSC2 source/channel selection) lives in prad2dec; this is just a
-        // copy step.
-        const auto et = ch.GetEventType();
-        if (et == evc::EventType::Prestart ||
-            et == evc::EventType::Go       ||
-            et == evc::EventType::End)
-        {
-            // ch.Sync() is auto-updated by Scan() on every control event,
-            // so it carries this event's run_number / unix_time / run_type.
-            // The 0xE10E DAQ-config STRING bank only ships on PRESTART;
-            // ExtractDaqConfigText() returns "" for GO/END, which is fine.
-            std::string cfg_text;
-            if (et == evc::EventType::Prestart)
-                cfg_text = ch.ExtractDaqConfigText();
-            prad2::FillRunInfoRow(ch.Sync(), cfg_text, *ri_row);
-            runinfo_tree->Fill();
-            continue;
-        }
-        if (et == evc::EventType::Epics) {
-            const auto &rec = ch.Epics();
-            if (rec.present) {
-                prad2::FillEpicsRow(rec, *ep_row);
-                epics_tree->Fill();
-            }
-            continue;
-        }
-        if (et != evc::EventType::Physics) continue;
+        if (side->record(ch)) continue;
 
-        // Snapshot raw 0xE10C SSP trigger bank for this read group (one bank
-        // per CODA event, shared by all sub-events from this Read()).
-        std::vector<uint32_t> ssp_raw_snapshot;
-        if (auto *n_e10c = ch.FindFirstByTag(0xE10C)) {
-            const uint32_t *p = ch.GetData(*n_e10c);
-            ssp_raw_snapshot.assign(p, p + n_e10c->data_words);
-        }
-
-        // Snapshot every 0xE122 VTP bank for this read group.  Up to ~9
-        // banks per event (7 HyCal VTPs + 2 GEM VTPs in mixed-detector
-        // runs); kept verbatim along with the parent ROC tag so offline
-        // tools can re-decode PRAD_CLUSTER (TAG_EXP 0x1CC) / TRIGGER
-        // (0x1D) / etc. without needing the EVIO file.  Flat encoding (parallel
-        // vector<uint32_t>) avoids needing a custom ROOT dictionary for
-        // nested STL collections.
-        std::vector<uint32_t> vtp_roc_tags_snapshot;
-        std::vector<uint32_t> vtp_nwords_snapshot;
-        std::vector<uint32_t> vtp_words_snapshot;
-        {
-            const auto &all_nodes = ch.GetNodes();
-            for (auto *n_vtp : ch.FindByTag(0xE122)) {
-                if (n_vtp->data_words == 0) continue;
-                if (n_vtp->parent >= 0
-                    && all_nodes[n_vtp->parent].type == evc::DATA_COMPOSITE)
-                    continue;
-                uint32_t roc = (n_vtp->parent >= 0)
-                    ? all_nodes[n_vtp->parent].tag : 0;
-                const uint32_t *p = ch.GetData(*n_vtp);
-                vtp_roc_tags_snapshot.push_back(roc);
-                vtp_nwords_snapshot.push_back(
-                    static_cast<uint32_t>(n_vtp->data_words));
-                vtp_words_snapshot.insert(vtp_words_snapshot.end(),
-                                          p, p + n_vtp->data_words);
-            }
-        }
-
-        // Snapshot every 0xE107 V1190/V1290 TDC bank for this read group.
-        // PRad-II currently has one TDC ROC active (0x40 = "rf", carrying
-        // the divided CEBAF RF reference on slot 16, ch 0 + ch 8).  Same
-        // raw-words pattern as VTP; per-hit bit fields are documented in
-        // RawEventData.tdc_words and prad2dec/include/TdcDecoder.h.
-        std::vector<uint32_t> tdc_roc_tags_snapshot;
-        std::vector<uint32_t> tdc_nwords_snapshot;
-        std::vector<uint32_t> tdc_words_snapshot;
-        {
-            const auto &all_nodes = ch.GetNodes();
-            for (auto *n_tdc : ch.FindByTag(daq_cfg_.tdc_bank_tag)) {
-                if (n_tdc->data_words == 0) continue;
-                if (n_tdc->parent >= 0
-                    && all_nodes[n_tdc->parent].type == evc::DATA_COMPOSITE)
-                    continue;
-                uint32_t roc = (n_tdc->parent >= 0)
-                    ? all_nodes[n_tdc->parent].tag : 0;
-                const uint32_t *p = ch.GetData(*n_tdc);
-                tdc_roc_tags_snapshot.push_back(roc);
-                tdc_nwords_snapshot.push_back(
-                    static_cast<uint32_t>(n_tdc->data_words));
-                tdc_words_snapshot.insert(tdc_words_snapshot.end(),
-                                          p, p + n_tdc->data_words);
-            }
-        }
+        // Raw banks of this read group, shared by all its sub-events: the
+        // 0xE10C SSP trigger bank and every VTP and TDC bank.
+        const auto ssp_raw = snapshotFirstBank(ch, 0xE10C);
+        const auto vtp_banks = snapshotBanks(ch, ch.GetVtpTags());
+        const auto tdc_banks = snapshotBanks(ch, ch.GetTdcTags());
 
         for (int ie = 0; ie < ch.GetNEvents(); ++ie) {
             event->clear();
@@ -502,32 +457,20 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
             if (!ch.DecodeEvent(ie, *event, ssp_evt.get())) continue;
             if (max_events > 0 && total >= max_events) break;
 
-            // DSC2 lives at the CODA-event level (one bank per Read()
-            // covering all sub-events from that block), but the carrying
-            // sub-event has a unique event_number — write the scaler row
-            // before any per-sub-event filtering so the row count tracks
-            // SYNC arrivals 1:1 regardless of downstream cuts.
-            if (ie == 0) {
-                const auto &dsc = ch.Dsc();
-                if (dsc.present) {
-                    prad2::FillScalerRow(dsc, ch.Sync(), event->info,
-                                         daq_cfg_.dsc_scaler, *sc_row);
-                    scalers_tree->Fill();
-                }
-            }
+            if (ie == 0) side->recordScalers(ch, event->info, daq_cfg_.dsc_scaler);
 
-            clearEvent(*ev);
+            ev->clear();
             ev->event_num    = event->info.event_number;
             ev->trigger_type = event->info.trigger_type;
             ev->trigger_bits      = event->info.trigger_bits;
             ev->timestamp    = event->info.timestamp;
-            ev->ssp_raw      = ssp_raw_snapshot;
-            ev->vtp_roc_tags = vtp_roc_tags_snapshot;
-            ev->vtp_nwords   = vtp_nwords_snapshot;
-            ev->vtp_words    = vtp_words_snapshot;
-            ev->tdc_roc_tags = tdc_roc_tags_snapshot;
-            ev->tdc_nwords   = tdc_nwords_snapshot;
-            ev->tdc_words    = tdc_words_snapshot;
+            ev->ssp_raw      = ssp_raw;
+            ev->vtp_roc_tags = vtp_banks.roc_tags;
+            ev->vtp_nwords   = vtp_banks.nwords;
+            ev->vtp_words    = vtp_banks.words;
+            ev->tdc_roc_tags = tdc_banks.roc_tags;
+            ev->tdc_nwords   = tdc_banks.nwords;
+            ev->tdc_words    = tdc_banks.words;
 
             if (Ecalib) {
                 bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
@@ -547,72 +490,60 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                 if (!roc.present) continue;
                 auto cit = roc_to_crate.find(roc.tag);
                 int crate = (cit == roc_to_crate.end()) ? (int)roc.tag : cit->second;
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    if (!roc.slots[s].present) continue;
-                    for (int c = 0; c < 16; ++c) {
-                        if (!(roc.slots[s].channel_mask & (1ull << c))) continue;
-                        auto &cd = roc.slots[s].channels[c];
-                        if (cd.nsamples <= 0 || nch >= prad2::kMaxChannels) continue;
+                fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+                    if (nch >= prad2::kMaxChannels) return;
 
-                        int  mod_id   = moduleID(crate, s, c);
-                        auto mod_type = moduleType(crate, s, c);
-                        // Drop channels with no DAQ-map / module-info entry —
-                        // we have no way to interpret them downstream.
-                        if (mod_id < 0) continue;
+                    int  mod_id   = moduleID(crate, s, c);
+                    auto mod_type = moduleType(crate, s, c);
+                    // Drop channels with no DAQ-map / module-info entry —
+                    // we have no way to interpret them downstream.
+                    if (mod_id < 0) return;
 
-                        ev->module_id[nch]   = static_cast<uint16_t>(mod_id);
-                        ev->module_type[nch] = static_cast<uint8_t>(mod_type);
-                        ev->nsamples[nch]    = static_cast<uint8_t>(cd.nsamples);
-                        for (int i = 0; i < cd.nsamples && i < fdec::MAX_SAMPLES; ++i)
-                            ev->samples[nch][i] = cd.samples[i];
+                    ev->module_id[nch]   = static_cast<uint16_t>(mod_id);
+                    ev->module_type[nch] = static_cast<uint8_t>(mod_type);
+                    ev->nsamples[nch]    = static_cast<uint8_t>(cd.nsamples);
+                    for (int i = 0; i < cd.nsamples && i < fdec::MAX_SAMPLES; ++i)
+                        ev->samples[nch][i] = cd.samples[i];
 
-                        // Gain correction is HyCal-only (PbGlass / PbWO4) —
-                        // Veto / LMS get unity factor.  Average of the three
-                        // LMS channels from the time-series lookup.
-                        if (mod_type == prad2::MOD_PbWO4) {
-                            ev->gain_factor[nch] = (gain_corr.w[mod_id - 1000].corr[1] + gain_corr.w[mod_id - 1000].corr[2]) / 2.0f;
-                        } else if (mod_type == prad2::MOD_PbGlass) {
-                            ev->gain_factor[nch] = gain_corr.g[mod_id].avg;
-                        } else {
-                            ev->gain_factor[nch] = 1.0f;
+                    // Gain correction applies to HyCal modules only; Veto /
+                    // LMS get 1.
+                    ev->gain_factor[nch] = gain_corr.ModuleGain(mod_id);
+
+                    if (write_peaks) {
+                        // Soft analyzer drives both peaks AND the
+                        // pedestal estimate that the firmware analyzer
+                        // consumes — only run it when its output is
+                        // being written.
+                        ana.SetChannelKey(roc.tag, s, c);
+                        ana.Analyze(cd.samples, cd.nsamples, wres);
+                        ev->ped_mean[nch]    = wres.ped.mean;
+                        ev->ped_rms[nch]     = wres.ped.rms;
+                        ev->ped_nused[nch]   = wres.ped.nused;
+                        ev->ped_quality[nch] = wres.ped.quality;
+                        ev->ped_slope[nch]   = wres.ped.slope;
+                        ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
+                        for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
+                            ev->peak_height[nch][p]   = wres.peaks[p].height;
+                            ev->peak_time[nch][p]     = wres.peaks[p].time;
+                            ev->peak_integral[nch][p] = wres.peaks[p].integral;
+                            ev->peak_quality[nch][p]  = wres.peaks[p].quality;
                         }
-
-                        if (write_peaks) {
-                            // Soft analyzer drives both peaks AND the
-                            // pedestal estimate that the firmware analyzer
-                            // consumes — only run it when its output is
-                            // being written.
-                            ana.SetChannelKey(roc.tag, s, c);
-                            ana.Analyze(cd.samples, cd.nsamples, wres);
-                            ev->ped_mean[nch]    = wres.ped.mean;
-                            ev->ped_rms[nch]     = wres.ped.rms;
-                            ev->ped_nused[nch]   = wres.ped.nused;
-                            ev->ped_quality[nch] = wres.ped.quality;
-                            ev->ped_slope[nch]   = wres.ped.slope;
-                            ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
-                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
-                                ev->peak_height[nch][p]   = wres.peaks[p].height;
-                                ev->peak_time[nch][p]     = wres.peaks[p].time;
-                                ev->peak_integral[nch][p] = wres.peaks[p].integral;
-                                ev->peak_quality[nch][p]  = wres.peaks[p].quality;
-                            }
-                            fw_ana.Analyze(cd.samples, cd.nsamples, wres.ped.mean, dwres);
-                            ev->daq_npeaks[nch] = static_cast<uint8_t>(dwres.npeaks);
-                            for (int p = 0; p < dwres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                const auto &dp = dwres.peaks[p];
-                                ev->daq_peak_vp[nch][p]       = dp.vpeak;
-                                ev->daq_peak_integral[nch][p] = dp.integral;
-                                ev->daq_peak_time[nch][p]     = dp.time_ns;
-                                ev->daq_peak_cross[nch][p]    = dp.cross_sample;
-                                ev->daq_peak_pos[nch][p]      = dp.peak_sample;
-                                ev->daq_peak_coarse[nch][p]   = dp.coarse;
-                                ev->daq_peak_fine[nch][p]     = dp.fine;
-                                ev->daq_peak_quality[nch][p]  = dp.quality;
-                            }
+                        fw_ana.Analyze(cd.samples, cd.nsamples, wres.ped.mean, dwres);
+                        ev->daq_npeaks[nch] = static_cast<uint8_t>(dwres.npeaks);
+                        for (int p = 0; p < dwres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                            const auto &dp = dwres.peaks[p];
+                            ev->daq_peak_vp[nch][p]       = dp.vpeak;
+                            ev->daq_peak_integral[nch][p] = dp.integral;
+                            ev->daq_peak_time[nch][p]     = dp.time_ns;
+                            ev->daq_peak_cross[nch][p]    = dp.cross_sample;
+                            ev->daq_peak_pos[nch][p]      = dp.peak_sample;
+                            ev->daq_peak_coarse[nch][p]   = dp.coarse;
+                            ev->daq_peak_fine[nch][p]     = dp.fine;
+                            ev->daq_peak_quality[nch][p]  = dp.quality;
                         }
-                        nch++;
                     }
-                }
+                    nch++;
+                }, 16);
             }
             ev->nch = nch;
 
@@ -652,9 +583,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
     std::cerr << "\rReplay: " << total << " events written to " << output_root << "\n";
     outfile->cd();
     tree->Write();
-    scalers_tree->Write();
-    epics_tree->Write();
-    runinfo_tree->Write();
+    side->write();
     delete outfile;
     return true;
 }
@@ -682,7 +611,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     prad2::HyCalRfOffsets             hc_rf_offsets;
     DetectorTransform                 hycal_transform;
     std::array<DetectorTransform, 4>  gem_transforms;
-    std::unordered_map<int, int>      roc_to_crate;
+    std::unordered_map<uint32_t, int> roc_to_crate;
     int                               match_method = 1;
 
     if (prad1) {
@@ -696,19 +625,8 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
         if (nmatched >= 0)
             std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
 
-        // ROC→crate map from JSON (PRad-1 doesn't go through PipelineBuilder).
-        if (!daq_config_file.empty()) {
-            std::ifstream dcf(daq_config_file);
-            if (dcf.is_open()) {
-                auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
-                if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
-                    for (auto &entry : dcj["roc_tags"]) {
-                        int tag = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
-                        roc_to_crate[tag] = entry.at("crate").get<int>();
-                    }
-                }
-            }
-        }
+        // Every roc_tags entry of the loaded DAQ config (no data-ROC filter).
+        if (!daq_config_file.empty()) roc_to_crate = daq_cfg_.roc_crate_map();
 
         // PRad-1 transforms come from the externally-loaded gRunConfig (the
         // builder owns this for PRad-II).
@@ -726,9 +644,6 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
         // NaN since rf_n_a == 0 for every event).
         hc_rf_offsets = prad2::LoadHyCalRfOffsets("", hycal, 0.f);
     } else {
-        // PRad-II: hand off to the canonical PipelineBuilder.  daq_cfg_ moves
-        // through the builder (which then attaches map paths) and comes back
-        // populated with everything the per-event loop needs.
         std::string hycal_map_override = daq_cfg_.hycal_map_file;
         std::string gem_map_override   = daq_cfg_.gem_map_file;
 
@@ -753,13 +668,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
         hycal_transform  = pipeline.hycal_transform;
         gem_transforms   = pipeline.gem_transforms;
         match_method     = pipeline.match_method;
-
-        // ROC→crate map from the same daq_cfg the builder consumed.
-        for (const auto &re : daq_cfg_.roc_tags) {
-            if (re.crate < 0) continue;
-            if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
-            roc_to_crate[re.tag] = re.crate;
-        }
+        roc_to_crate     = daq_cfg_.roc_crate_map(true);
 
         if (zerosup_override >= 0.f) {
             gem_sys.SetZeroSupThreshold(zerosup_override);
@@ -769,10 +678,9 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
-    clusterer.SetProfile(cluster_cfg.profile);
     gem::GemCluster      gem_clusterer;
     MatchingTools        matching(match_method);
-    //open EVIO file and output ROOT file
+    matching.Configure(gRunConfig);
     evc::EvChannel ch;
     ch.SetConfig(daq_cfg_);
 
@@ -787,35 +695,17 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
         return false;
     }
 
-    // create TTree and branches for reconstructed data
     TTree *tree = new TTree("recon", "PRad2 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev, x17, gem_hit);
+    prad2::SetReconWriteBranches(tree, *ev, x17, gem_hit);
 
-    // Side trees — see Process() above for the design.  The recon path
-    // writes the same scalers / epics records so analysis joining keeps
-    // working regardless of which replay output the user opens.
-    TTree *scalers_tree = new TTree("scalers", "PRad2 DSC2 scaler readouts");
-    TTree *epics_tree   = new TTree("epics",   "PRad2 EPICS slow control");
-    TTree *runinfo_tree = new TTree("runinfo", "PRad2 control events / DAQ config");
-    auto sc_row = std::make_unique<prad2::RawScalerData>();
-    auto ep_row = std::make_unique<prad2::RawEpicsData>();
-    auto ri_row = std::make_unique<prad2::RawRunInfo>();
-    prad2::SetScalerWriteBranches (scalers_tree, *sc_row);
-    prad2::SetEpicsWriteBranches  (epics_tree,   *ep_row);
-    prad2::SetRunInfoWriteBranches(runinfo_tree, *ri_row);
+    auto side = std::make_unique<SideTrees>();
 
-    //initialize tools for event decoder and cluster reconstruction
     auto event = std::make_unique<fdec::EventData>();
     auto ssp_evt = std::make_unique<ssp::SspEventData>();
     fdec::WaveAnalyzer ana(daq_cfg_.wave_cfg);
     fdec::PulseTemplateStore template_store;
-    if (daq_cfg_.wave_cfg.nnls_deconv.enabled
-        && !daq_cfg_.wave_cfg.nnls_deconv.template_file.empty()) {
-        template_store.LoadFromFile(
-            db_dir + "/" + daq_cfg_.wave_cfg.nnls_deconv.template_file,
-            daq_cfg_.wave_cfg);
-    }
+    template_store.LoadFromConfig(daq_cfg_.wave_cfg, db_dir);
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
@@ -831,85 +721,13 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
 
-        // Slow-control side trees (see Process() for the rationale).
-        const auto et = ch.GetEventType();
-        if (et == evc::EventType::Prestart ||
-            et == evc::EventType::Go       ||
-            et == evc::EventType::End)
-        {
-            std::string cfg_text;
-            if (et == evc::EventType::Prestart)
-                cfg_text = ch.ExtractDaqConfigText();
-            prad2::FillRunInfoRow(ch.Sync(), cfg_text, *ri_row);
-            runinfo_tree->Fill();
-            continue;
-        }
-        if (et == evc::EventType::Epics) {
-            const auto &rec = ch.Epics();
-            if (rec.present) {
-                prad2::FillEpicsRow(rec, *ep_row);
-                epics_tree->Fill();
-            }
-            continue;
-        }
-        if (et != evc::EventType::Physics) continue;
+        if (side->record(ch)) continue;
 
-        // Snapshot raw 0xE10C SSP trigger bank for this read group.
-        std::vector<uint32_t> ssp_raw_snapshot;
-        if (auto *n_e10c = ch.FindFirstByTag(0xE10C)) {
-            const uint32_t *p = ch.GetData(*n_e10c);
-            ssp_raw_snapshot.assign(p, p + n_e10c->data_words);
-        }
-
-        // Snapshot every 0xE122 VTP bank for this read group — same flat
-        // triple as the raw-replay snapshot in Process(); lands on the
-        // recon tree so PRAD_CLUSTER (TAG_EXP 0x1CC) / TRIGGER (0x1D)
-        // payloads stay available next to reconstructed quantities.
-        std::vector<uint32_t> vtp_roc_tags_snapshot;
-        std::vector<uint32_t> vtp_nwords_snapshot;
-        std::vector<uint32_t> vtp_words_snapshot;
-        {
-            const auto &all_nodes = ch.GetNodes();
-            for (auto *n_vtp : ch.FindByTag(0xE122)) {
-                if (n_vtp->data_words == 0) continue;
-                if (n_vtp->parent >= 0
-                    && all_nodes[n_vtp->parent].type == evc::DATA_COMPOSITE)
-                    continue;
-                uint32_t roc = (n_vtp->parent >= 0)
-                    ? all_nodes[n_vtp->parent].tag : 0;
-                const uint32_t *p = ch.GetData(*n_vtp);
-                vtp_roc_tags_snapshot.push_back(roc);
-                vtp_nwords_snapshot.push_back(
-                    static_cast<uint32_t>(n_vtp->data_words));
-                vtp_words_snapshot.insert(vtp_words_snapshot.end(),
-                                          p, p + n_vtp->data_words);
-            }
-        }
-
-        // Snapshot every 0xE107 V1190/V1290 TDC bank for this read group
-        // so the recon path can compute per-cluster RF Δt without going
-        // back to the raw tree.  Mirrors the raw-replay snapshot in
-        // Process() — see the long comment there for the bit layout.
-        std::vector<uint32_t> tdc_roc_tags_snapshot;
-        std::vector<uint32_t> tdc_nwords_snapshot;
-        std::vector<uint32_t> tdc_words_snapshot;
-        {
-            const auto &all_nodes = ch.GetNodes();
-            for (auto *n_tdc : ch.FindByTag(daq_cfg_.tdc_bank_tag)) {
-                if (n_tdc->data_words == 0) continue;
-                if (n_tdc->parent >= 0
-                    && all_nodes[n_tdc->parent].type == evc::DATA_COMPOSITE)
-                    continue;
-                uint32_t roc = (n_tdc->parent >= 0)
-                    ? all_nodes[n_tdc->parent].tag : 0;
-                const uint32_t *p = ch.GetData(*n_tdc);
-                tdc_roc_tags_snapshot.push_back(roc);
-                tdc_nwords_snapshot.push_back(
-                    static_cast<uint32_t>(n_tdc->data_words));
-                tdc_words_snapshot.insert(tdc_words_snapshot.end(),
-                                          p, p + n_tdc->data_words);
-            }
-        }
+        // Raw banks of this read group (see Process()); the TDC banks give
+        // the per-cluster RF Δt.
+        const auto ssp_raw = snapshotFirstBank(ch, 0xE10C);
+        const auto vtp_banks = snapshotBanks(ch, ch.GetVtpTags());
+        const auto tdc_banks = snapshotBanks(ch, ch.GetTdcTags());
 
         for (int ie = 0; ie < ch.GetNEvents(); ++ie) {
             event->clear();
@@ -917,72 +735,27 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             clusterer.Clear();
             if (!ch.DecodeEvent(ie, *event, ssp_evt.get())) continue;
 
-            // DSC2 row: same logic as the raw-replay path.  See Process().
-            if (ie == 0) {
-                const auto &dsc = ch.Dsc();
-                if (dsc.present) {
-                    prad2::FillScalerRow(dsc, ch.Sync(), event->info,
-                                         daq_cfg_.dsc_scaler, *sc_row);
-                    scalers_tree->Fill();
-                }
-            }
+            if (ie == 0) side->recordScalers(ch, event->info, daq_cfg_.dsc_scaler);
 
-            clearReconEvent(*ev);
+            ev->clear();
             ev->event_num    = event->info.event_number;
             ev->trigger_type = event->info.trigger_type;
             ev->trigger_bits = event->info.trigger_bits;
             ev->timestamp    = event->info.timestamp;
-            ev->ssp_raw      = ssp_raw_snapshot;
-            ev->vtp_roc_tags = vtp_roc_tags_snapshot;
-            ev->vtp_nwords   = vtp_nwords_snapshot;
-            ev->vtp_words    = vtp_words_snapshot;
+            ev->ssp_raw      = ssp_raw;
+            ev->vtp_roc_tags = vtp_banks.roc_tags;
+            ev->vtp_nwords   = vtp_banks.nwords;
+            ev->vtp_words    = vtp_banks.words;
 
-            // VTP PRAD_CLUSTER online trigger data
-            const auto &vtp_event = ch.Vtp();
-            for (int i = 0; i < vtp_event.n_prad_clusters; ++i) {
-                auto vtp_prad_clusters = vtp_event.prad_clusters[i];
-                ev->vtp_cl_time[ev->vtp_cl_n] = vtp_prad_clusters.time;
-                ev->vtp_cl_energy[ev->vtp_cl_n] = vtp_prad_clusters.energy;
-                uint16_t i_module = vtp_prad_clusters.module();
-                if(vtp_prad_clusters.is_pbwo4()) i_module += 1000;
-                ev->vtp_cl_center[ev->vtp_cl_n] = i_module;
-                ev->vtp_cl_blocks[ev->vtp_cl_n] = vtp_prad_clusters.nhits;
-                ev->vtp_cl_n++;
-            }
+            fillVtpClusters(*ev, ch.Vtp());
 
-            // Decode RF reference once per event from the TDC bank
-            // snapshot.  Channel A/B leading-edge ns arrays land on the
-            // recon tree (rf_ns_a/_b); per-cluster cl_dt_rf is filled
-            // after FormClusters() below.
-            tdc::RfTimeData rf;
-            tdc::RfTimeDecoder::DecodeReplay(
-                tdc_roc_tags_snapshot, tdc_nwords_snapshot,
-                tdc_words_snapshot, rf);
-            ev->rf_n_a = static_cast<uint8_t>(rf.n_a);
-            ev->rf_n_b = static_cast<uint8_t>(rf.n_b);
-            std::copy(rf.ns_a, rf.ns_a + rf.n_a, ev->rf_ns_a);
-            std::copy(rf.ns_b, rf.ns_b + rf.n_b, ev->rf_ns_b);
+            const auto rf = fillRf(*ev, tdc_banks.roc_tags, tdc_banks.nwords, tdc_banks.words);
 
-            // Per-event gain correction (time-series lookup by event number).
             const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
 
-            // TODO: use config-driven trigger filter (monitor_config.json "physics" section
-            // accept_trigger_bits/reject_trigger_bits) instead of hardcoded bit check.
-            // Currently drops all non-SSP_RawSum events, including LMS.
-            bool is_1cluster = (ev->trigger_bits & prad2::TBIT_1cl)   != 0;
-            bool is_2cluster = (ev->trigger_bits & prad2::TBIT_2cl)   != 0;
-            bool is_3cluster = (ev->trigger_bits & prad2::TBIT_3cl)   != 0;
-            bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
-            bool is_lms = (ev->trigger_bits & prad2::TBIT_lms) != 0;
-            bool is_alpha = (ev->trigger_bits & prad2::TBIT_alpha) != 0;
-            if (random) is_sum = true;
-            if (!is_sum && !is_lms && !is_alpha && !is_3cluster) continue;
-
-            // For X17 blind analysis, keep all the raw-sum triggered events for calibration and monotoring,
-            // but only keep 3 cluster events with event_num end with 8 (lucky number decided by students)
-            if(x17 && x17_blind) {
-                if(is_3cluster && (ev->event_num % 10 != 8)) continue;
-            }
+            const auto trig = selectTrigger(ev->trigger_bits, ev->event_num,
+                                            random, x17, x17_blind);
+            if (!trig.keep) continue;
 
             // decode FADC250 and reconstruct HyCal data
             int veto_nch = 0;
@@ -994,115 +767,106 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                 auto cit = roc_to_crate.find(roc.tag);
                 if (cit == roc_to_crate.end()) continue;
                 int crate = cit->second;
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    if (!roc.slots[s].present) continue;
-                    for (int c = 0; c < 64; ++c) { //should be 16, a bigger number to adapt PRad1 data
-                        if (!(roc.slots[s].channel_mask & (1ull << c))) continue;
-                        auto &cd = roc.slots[s].channels[c];
-                        if (cd.nsamples <= 0) continue;
+                // All 64 channels per slot, not the FADC250's 16: PRad-1 ADC1881M.
+                fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+                    std::string mod_name = moduleName(crate, s, c);
+                    if(mod_name.empty()) return;
+                    const auto *mod = hycal.module_by_daq(crate, s, c);
 
-                        std::string mod_name = moduleName(crate, s, c);
-                        if(mod_name.empty()) continue;
-                        const auto *mod = hycal.module_by_daq(crate, s, c);
-
-                        if(is_lms || is_alpha) {
-                            if(mod_name[0] == 'L'){
-                                if(mod_name.length() != 4) continue;
-                                if(lms_nch >= 4) continue; // guard against overflow
-                                if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
-                                else ev->lms_id[lms_nch] = mod_name[3] - '0';
-                                ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres);
-                                ev->lms_npeaks[lms_nch] = wres.npeaks;
-                                if(wres.npeaks <= 0) continue;
-                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                    ev->lms_peak_height[lms_nch][p] = wres.peaks[p].height;
-                                    ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
-                                    ev->lms_peak_time[lms_nch][p] = wres.peaks[p].time;
-                                }
-                                lms_nch++;
+                    if(trig.lms || trig.alpha) {
+                        if(mod_name[0] == 'L'){
+                            if(mod_name.length() != 4) return;
+                            if(lms_nch >= 4) return; // guard against overflow
+                            if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
+                            else ev->lms_id[lms_nch] = mod_name[3] - '0';
+                            ana.SetChannelKey(roc.tag, s, c);
+                            ana.Analyze(cd.samples, cd.nsamples, wres);
+                            ev->lms_npeaks[lms_nch] = wres.npeaks;
+                            if(wres.npeaks <= 0) return;
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                ev->lms_peak_height[lms_nch][p] = wres.peaks[p].height;
+                                ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
+                                ev->lms_peak_time[lms_nch][p] = wres.peaks[p].time;
                             }
-                            else continue;
+                            lms_nch++;
                         }
+                        else return;
+                    }
 
-                        if((is_sum || is_3cluster) && !is_lms) {
-                            if(mod_name[0] == 'V'){
-                                if(mod_name.length() != 2) continue;
-                                if(veto_nch >= 4) continue; // guard against overflow
-                                // "V1".."V4" → 3001..3004
-                                ev->veto_id[veto_nch] = mod_name[1] - '0';
-                                ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres);
-                                ev->veto_npeaks[veto_nch] = wres.npeaks;
-                                if(wres.npeaks <= 0) continue;
-                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                    ev->veto_peak_height[veto_nch][p] = wres.peaks[p].height;
-                                    ev->veto_peak_integral[veto_nch][p] = wres.peaks[p].integral;
-                                    ev->veto_peak_time[veto_nch][p] = wres.peaks[p].time;
-                                }
-                                veto_nch++;
+                    if((trig.sum || trig.cl3) && !trig.lms) {
+                        if(mod_name[0] == 'V'){
+                            if(mod_name.length() != 2) return;
+                            if(veto_nch >= 4) return; // guard against overflow
+                            // "V1".."V4" → 1..4
+                            ev->veto_id[veto_nch] = mod_name[1] - '0';
+                            ana.SetChannelKey(roc.tag, s, c);
+                            ana.Analyze(cd.samples, cd.nsamples, wres);
+                            ev->veto_npeaks[veto_nch] = wres.npeaks;
+                            if(wres.npeaks <= 0) return;
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                ev->veto_peak_height[veto_nch][p] = wres.peaks[p].height;
+                                ev->veto_peak_integral[veto_nch][p] = wres.peaks[p].integral;
+                                ev->veto_peak_time[veto_nch][p] = wres.peaks[p].time;
                             }
-                            else{
-                                if (!mod || !mod->is_hycal()) continue;
-                                // Per-ID gain correction: average of three LMS channels.
-                                const float gain = (mod->id > 1000)
-                                    ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
-                                    : gain_corr.g[mod->id].avg;
+                            veto_nch++;
+                        }
+                        else{
+                            if (!mod || !mod->is_hycal()) return;
+                            const float gain = gain_corr.ModuleGain(mod->id);
 
-                                if (prad1 == true) {
-                                    float adc = cd.samples[0] * 0.543f * gain; //0.543 for prad1 run1308, correct to 1.1GeV
+                            if (prad1 == true) {
+                                float adc = cd.samples[0] * 0.543f * gain; //0.543 for prad1 run1308, correct to 1.1GeV
+                                float energy = static_cast<float>(mod->energize(adc));
+                                clusterer.AddHit(mod->index, energy, 0.f);
+                                ev->total_energy += energy;
+                                nch++;
+                                return;
+                            }
+
+                            ana.SetChannelKey(roc.tag, s, c);
+                            ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
+                            if (wres.npeaks <= 0) return;
+
+                            auto hc_win = hc_time_cuts.at(mod->index);
+                            if (random) {hc_win.lo = 0; hc_win.hi = 400;}
+                            if (cluster_cfg.seed_time_window > 0.f) {
+                                // Multi-pulse mode: push every peak inside the trigger
+                                // window into the clusterer; the seed-anchored timing
+                                // coincidence cut is applied inside HyCalCluster.
+                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                    const auto &pk = wres.peaks[p];
+                                    if (pk.time <= hc_win.lo) continue;
+                                    if (pk.time >= hc_win.hi) continue;
+                                    float adc = pk.integral * gain;
                                     float energy = static_cast<float>(mod->energize(adc));
-                                    clusterer.AddHit(mod->index, energy, 0.f);
-                                    ev->total_energy += energy;
-                                    nch++;
-                                    continue;
-                                }
-
-                                ana.SetChannelKey(roc.tag, s, c);
-                                ana.Analyze(cd.samples, cd.nsamples, wres, mod->time_offset);
-                                if (wres.npeaks <= 0) continue;
-
-                                auto hc_win = hc_time_cuts.at(mod->index);
-                                if (random) {hc_win.lo = 0; hc_win.hi = 400;}
-                                if (cluster_cfg.seed_time_window > 0.f) {
-                                    // Multi-pulse mode: push every peak inside the trigger
-                                    // window into the clusterer; the seed-anchored timing
-                                    // coincidence cut is applied inside HyCalCluster.
-                                    for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                        const auto &pk = wres.peaks[p];
-                                        if (pk.time <= hc_win.lo) continue;
-                                        if (pk.time >= hc_win.hi) continue;
-                                        float adc = pk.integral * gain;
-                                        float energy = static_cast<float>(mod->energize(adc));
-                                        clusterer.AddHit(mod->index, energy, pk.time);
-                                        ev->total_energy += energy;
-                                        nch++;
-                                    }
-                                } else {
-                                    // Legacy: pick the largest in-window peak as the single
-                                    // module hit, time field unused downstream.
-                                    int bestIdx = -1;
-                                    float bestHeight = -1.f;
-                                    for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                        const auto &pk = wres.peaks[p];
-                                        if (pk.time > hc_win.lo &&
-                                            pk.time < hc_win.hi &&
-                                            pk.height > bestHeight) {
-                                            bestHeight = pk.height;
-                                            bestIdx = p;
-                                        }
-                                    }
-                                    if (bestIdx < 0) continue;
-                                    float adc = wres.peaks[bestIdx].integral * gain;
-                                    float energy = static_cast<float>(mod->energize(adc));
-                                    clusterer.AddHit(mod->index, energy, wres.peaks[bestIdx].time);
+                                    clusterer.AddHit(mod->index, energy, pk.time);
                                     ev->total_energy += energy;
                                     nch++;
                                 }
+                            } else {
+                                // Legacy: pick the largest in-window peak as the single
+                                // module hit.
+                                int bestIdx = -1;
+                                float bestHeight = -1.f;
+                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                    const auto &pk = wres.peaks[p];
+                                    if (pk.time > hc_win.lo &&
+                                        pk.time < hc_win.hi &&
+                                        pk.height > bestHeight) {
+                                        bestHeight = pk.height;
+                                        bestIdx = p;
+                                    }
+                                }
+                                if (bestIdx < 0) return;
+                                float adc = wres.peaks[bestIdx].integral * gain;
+                                float energy = static_cast<float>(mod->energize(adc));
+                                clusterer.AddHit(mod->index, energy, wres.peaks[bestIdx].time);
+                                ev->total_energy += energy;
+                                nch++;
                             }
                         }
                     }
-                }
+                });
             }
             ev->veto_nch = veto_nch;
             ev->lms_nch = lms_nch;
@@ -1111,120 +875,22 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;
             clusterer.ReconstructHits(hits);
-            //HyCal event reconstrued, fill root tree and histograms
-            ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
-            for (int i = 0; i < ev->n_clusters; ++i) {
-                ev->cl_nblocks[i] = hits[i].nblocks;
-                ev->cl_npos[i]    = hits[i].npos;
-                ev->cl_time[i]    = hits[i].time;
-                //transform the cluster positions to the lab coordinate
-                HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
-                    hits[i].energy, static_cast<uint16_t>(hits[i].center_id), hits[i].flag};
-                analysis::ApplyToLab(hc_xform, local_hit);
-                GetProjection(local_hit, gRunConfig.hycal_z);
-                ev->cl_x[i] = local_hit.x;
-                ev->cl_y[i] = local_hit.y;
-                ev->cl_z[i] = local_hit.z;
-                ev->cl_energy[i] = local_hit.energy;
-                ev->cl_linear_corr[i] = hits[i].linear_corr;
-                ev->cl_bias_corr[i] = hits[i].bias_corr;
-                ev->cl_center[i] = local_hit.center_id;
-                ev->cl_flag[i] = local_hit.flag;
-
-                // Per-cluster RF Δt — fold (cl_time − nearest_a) onto
-                // (−T_RF/2, T_RF/2], then subtract per-module offset and
-                // re-fold.  NaN when rf has no ch-A hits this event
-                // (apply() preserves NaN through both steps).
-                const float dt0 = prad2::ClusterDeltaRf(hits[i].time, rf);
-                const auto *mod = hycal.module_by_id(hits[i].center_id);
-                const int mod_idx = mod ? mod->index : -1;
-                ev->cl_dt_rf[i] = hc_rf_offsets.apply(mod_idx, dt0);
-            }
+            fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets);
 
             //decode GEM data and reconstruct GEM hits
         if(!prad1 && gem_sys.GetNDetectors() > 0){
             gem_sys.Clear();
             gem_sys.ProcessEvent(*ssp_evt);
             gem_sys.Reconstruct(gem_clusterer);
-            auto &all_hits = gem_sys.GetAllHits();
-            ev->n_gem_hits = std::min((int)all_hits.size(), prad2::kMaxGemHits);
-            for (int i = 0; i < ev->n_gem_hits; i++) {
-                auto &h = all_hits[i];
-                ev->det_id[i] = h.det_id;
-                ev->gem_x_charge[i] = h.x_charge;
-                ev->gem_y_charge[i] = h.y_charge;
-                ev->gem_x_peak[i] = h.x_peak;
-                ev->gem_y_peak[i] = h.y_peak;
-                ev->gem_x_size[i] = h.x_size;
-                ev->gem_y_size[i] = h.y_size;
-                ev->gem_x_mTbin[i] = h.x_max_timebin;
-                ev->gem_y_mTbin[i] = h.y_max_timebin;
-                fillGemHitQA(*ev, i, h);
-                //transform the GEM hit positions to the lab coordinate
-                GEMHit local_hit = {h.x, h.y, 0.f, static_cast<uint8_t>(h.det_id)};
-                int d = local_hit.det_id;
-                if (d >= 0 && d < 4) {
-                    analysis::ApplyToLab(g_xform[d], local_hit);
-                }
-                ev->gem_x[i] = local_hit.x;
-                ev->gem_y[i] = local_hit.y;
-                ev->gem_z[i] = local_hit.z;
-            }
+            fillGemHits(*ev, gem_sys.GetAllHits(), g_xform);
             // per-cluster QA block: det 0 X, det 0 Y, det 1 X, ...
             for (int d = 0; d < gem_sys.GetNDetectors(); ++d)
                 for (int p = 0; p < 2; ++p)
                     appendGemClusters(*ev, d, p, gem_sys.GetPlaneClusters(d, p));
 
-            // Perform matching between HyCal clusters and GEM hits
-            //store all the hits on HyCal and GEMs in this event
-            std::vector<HCHit> hc_hits;
-            std::vector<GEMHit> gem_hits[4]; // separate vector for each GEM
-            for (int i = 0; i < ev->n_clusters; ++i)
-                hc_hits.push_back({ev->cl_x[i], ev->cl_y[i], ev->cl_z[i], ev->cl_energy[i], ev->cl_center[i], ev->cl_flag[i]});
-            for (int i = 0; i < ev->n_gem_hits; ++i)
-                gem_hits[ev->det_id[i]].push_back(GEMHit{ev->gem_x[i], ev->gem_y[i], ev->gem_z[i], ev->det_id[i]});
-            
-            // already transform to the coordinates
+            MatchReconEvent(*ev, matching);
 
-            matching.SetMatchRange(gRunConfig.matching_radius); // matching radius in mm, 15mm default
-            matching.SetSquareSelection(gRunConfig.matching_use_square); // square/circular cut
-            matching.SetEnergyDependent(gRunConfig.matching_energy_dependent); // energy-dependent matching
-            matching.SetMatchSigma(gRunConfig.matching_sigma); // sigma for energy-dependent matching, overrid the constant match range
-            std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
-            std::vector<MatchHit_perChamber> matched_hits_chamber = matching.MatchPerChamber(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]); 
-            
-            for(int i = 0; i < matched_hits_chamber.size(); i++){
-                auto &m = matched_hits_chamber[i];
-                int cl_idx = m.hycal_idx;
-                if( cl_idx != i) std::cerr << "Warning: cluster index mismatch in matched_hits_chamber: " << cl_idx << " vs " << i << "\n";
-                for(int j = 0; j < 4; j++){
-                    for (const auto &gh : m.gem_hits[j]) {
-                        ev->add_match(i, j, gh.x, gh.y, gh.z);
-                    }
-                }
-                ev->matchFlag[i] = m.mflag;
-            }
-
-            ev->matchNum = std::min((int)matched_hits.size(), prad2::kMaxClusters);
-            for (int i = 0; i < ev->matchNum; i++){
-                // save the matched GEM hit (must 2 matchings) info in mHit_ arrays for quick check
-                ev->mHit_E[i] = matched_hits[i].hycal_hit.energy;
-                ev->mHit_x[i] = matched_hits[i].hycal_hit.x;
-                ev->mHit_y[i] = matched_hits[i].hycal_hit.y;
-                ev->mHit_z[i] = matched_hits[i].hycal_hit.z;
-                // MatchHit::gem ordering: 
-                // (GEM1/GEM2, det_id 0/1) index 0 is the downstream GEM pair
-                // (GEM3/GEM4, det_id 2/3) index 1 is the upstream GEM pair
-                for(int j = 0; j < 2; j++) {
-                    ev->mHit_gx[i][j] =  matched_hits[i].gem[j].x;
-                    ev->mHit_gy[i][j] =  matched_hits[i].gem[j].y;
-                    ev->mHit_gz[i][j] =  matched_hits[i].gem[j].z;
-                    ev->mHit_gid[i][j] = matched_hits[i].gem[j].det_id; // placeholder for GEM hit ID if needed
-                }
-                ev->mHit_cl_index[i] = matched_hits[i].hycal_idx;
-            }
-
-        } //end of if(PRad1)
+        }
             tree->Fill();
             total++;
             if (total % 10000 == 0)
@@ -1234,9 +900,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     std::cerr << "\rReplay: " << total << " events reconstructed -> " << output_root << "\n";
     outfile->cd();
     tree->Write();
-    scalers_tree->Write();
-    epics_tree->Write();
-    runinfo_tree->Write();
+    side->write();
     delete outfile;
 
     return true;
@@ -1255,25 +919,8 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
     // - We also run the GemSystem reconstruction to get GEM hits, from strip-level data.
     // - We fill a different TTree with reconstructed quantities instead of raw data.
 
-    // Detectors: PRad-II flows through PipelineBuilder so the wiring stays in
-    // one place (see prad2det/include/PipelineBuilder.h).  PRad-1 keeps its
-    // hand-wired path because the builder is PRad-II-shaped (no GEM, different
-    // hycal map, ADC1881M pedestals).
-    fdec::HyCalSystem                 hycal;
-    gem::GemSystem                    gem_sys;
-    fdec::ClusterConfig               cluster_cfg;
-    prad2::HyCalTimeCuts              hc_time_cuts;
-    prad2::HyCalRfOffsets             hc_rf_offsets;
-    DetectorTransform                 hycal_transform;
-    std::array<DetectorTransform, 4>  gem_transforms;
-    std::unordered_map<int, int>      roc_to_crate;
-    int                               match_method = 1;
-
     int run_num = get_run_int(input_raw);
 
-    // PRad-II: hand off to the canonical PipelineBuilder.  daq_cfg_ moves
-    // through the builder (which then attaches map paths) and comes back
-    // populated with everything the per-event loop needs.
     std::string hycal_map_override = daq_cfg_.hycal_map_file;
     std::string gem_map_override   = daq_cfg_.gem_map_file;
 
@@ -1289,28 +936,20 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         .set_log_stream(&std::cerr)
         .build();
 
-    daq_cfg_         = std::move(pipeline.daq_cfg);
-    hycal            = std::move(pipeline.hycal);
-    gem_sys          = std::move(pipeline.gem);
-    cluster_cfg      = pipeline.hycal_cluster_cfg;
-    hc_time_cuts     = std::move(pipeline.hycal_time_cuts);
-    hc_rf_offsets    = std::move(pipeline.hycal_rf_offsets);
-    hycal_transform  = pipeline.hycal_transform;
-    gem_transforms   = pipeline.gem_transforms;
-    match_method     = pipeline.match_method;
-
-    // ROC→crate map from the same daq_cfg the builder consumed.
-    for (const auto &re : daq_cfg_.roc_tags) {
-        if (re.crate < 0) continue;
-        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
-        roc_to_crate[re.tag] = re.crate;
-    }
+    daq_cfg_ = std::move(pipeline.daq_cfg);
+    const auto &hycal         = pipeline.hycal;
+    const auto &gem_sys       = pipeline.gem;
+    const auto &cluster_cfg   = pipeline.hycal_cluster_cfg;
+    const auto &hc_time_cuts  = pipeline.hycal_time_cuts;
+    const auto &hc_rf_offsets = pipeline.hycal_rf_offsets;
+    const auto &hc_xform      = pipeline.hycal_transform;
+    const auto &g_xform       = pipeline.gem_transforms;
 
     fdec::HyCalCluster   clusterer(hycal);
     clusterer.SetConfig(cluster_cfg);
-    clusterer.SetProfile(pipeline.hycal_profile);
     gem::GemCluster      gem_clusterer;
-    MatchingTools        matching(match_method);
+    MatchingTools        matching(pipeline.match_method);
+    matching.Configure(gRunConfig);
 
     TFile *outfile = TFile::Open(output_root.c_str(), "RECREATE");
     if (!outfile || !outfile->IsOpen()) {
@@ -1318,7 +957,6 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         return false;
     }
 
-    // set up raw read branches for the input tree
     TFile *infile = TFile::Open(input_raw.c_str(), "READ");
     if (!infile || !infile->IsOpen()) {
         std::cerr << "Replay: cannot open " << input_raw << "\n";
@@ -1375,36 +1013,16 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
 
     auto in = std::make_unique<EventVars>();
     prad2::SetRawReadBranches(tree_in, *in);
-    std::vector<uint32_t> *ssp_raw = &in->ssp_raw;
-    std::vector<uint32_t> *vtp_roc_tags = &in->vtp_roc_tags;
-    std::vector<uint32_t> *vtp_nwords = &in->vtp_nwords;
-    std::vector<uint32_t> *vtp_words = &in->vtp_words;
-    std::vector<uint32_t> *tdc_roc_tags = &in->tdc_roc_tags;
-    std::vector<uint32_t> *tdc_nwords = &in->tdc_nwords;
-    std::vector<uint32_t> *tdc_words = &in->tdc_words;
-    if (tree_in->GetBranch("ssp_raw"))
-        tree_in->SetBranchAddress("ssp_raw", &ssp_raw);
-    if (tree_in->GetBranch("vtp_roc_tags"))
-        tree_in->SetBranchAddress("vtp_roc_tags", &vtp_roc_tags);
-    if (tree_in->GetBranch("vtp_nwords"))
-        tree_in->SetBranchAddress("vtp_nwords", &vtp_nwords);
-    if (tree_in->GetBranch("vtp_words"))
-        tree_in->SetBranchAddress("vtp_words", &vtp_words);
-    if (tree_in->GetBranch("tdc_roc_tags"))
-        tree_in->SetBranchAddress("tdc_roc_tags", &tdc_roc_tags);
-    if (tree_in->GetBranch("tdc_nwords"))
-        tree_in->SetBranchAddress("tdc_nwords", &tdc_nwords);
-    if (tree_in->GetBranch("tdc_words"))
-        tree_in->SetBranchAddress("tdc_words", &tdc_words);
+    prad2::RawVectorBindings raw_vecs;
+    prad2::BindRawVectorBranches(tree_in, *in, raw_vecs);
 
     // All newly-created trees must belong to the output file, not the input
     // file most recently opened above.
     outfile->cd();
 
-    // Create the reconstructed event tree.
     TTree *tree = new TTree("recon", "PRad2 replay reconstruction");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree, *ev, x17, gem_hit);
+    prad2::SetReconWriteBranches(tree, *ev, x17, gem_hit);
 
     // Side trees already exist in replay_raw output.  Copy them verbatim so
     // their event-number join semantics survive raw-to-recon conversion.
@@ -1422,39 +1040,22 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
     TTree *epics_tree   = copy_side_tree("epics");
     TTree *runinfo_tree = copy_side_tree("runinfo");
 
-    //initialize tools for cluster reconstruction
     fdec::WaveAnalyzer ana(daq_cfg_.wave_cfg);
     fdec::PulseTemplateStore template_store;
-    if (daq_cfg_.wave_cfg.nnls_deconv.enabled
-        && !daq_cfg_.wave_cfg.nnls_deconv.template_file.empty()) {
-        template_store.LoadFromFile(
-            db_dir + "/" + daq_cfg_.wave_cfg.nnls_deconv.template_file,
-            daq_cfg_.wave_cfg);
-    }
+    template_store.LoadFromConfig(daq_cfg_.wave_cfg, db_dir);
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
 
     auto gain_corr_ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 
-    // Per-detector lab transforms — set up by either branch of the detector
-    // wiring above (PipelineBuilder for PRad-II, BuildLabTransforms for PRad-1).
-    const auto &hc_xform = hycal_transform;
-    const auto &g_xform  = gem_transforms;
-
     int total = 0;
     long long nentries = tree_in->GetEntries();
     for (long long i = 0; i < nentries; ++i) {
-        in->ssp_raw.clear();
-        in->vtp_roc_tags.clear();
-        in->vtp_nwords.clear();
-        in->vtp_words.clear();
-        in->tdc_roc_tags.clear();
-        in->tdc_nwords.clear();
-        in->tdc_words.clear();
+        in->clear_banks();
         tree_in->GetEntry(i);
         if (i % 1000 == 0) std::cout << "Processed " << i << " / " << nentries << " entries.\r" << std::flush;
 
-        clearReconEvent(*ev);
+        ev->clear();
         ev->event_num    = in->event_num;
         ev->trigger_type = in->trigger_type;
         ev->trigger_bits = in->trigger_bits;
@@ -1467,78 +1068,27 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         clusterer.Clear();
 
         // Re-decode PRAD_CLUSTER records from the flat VTP bank snapshot.
-        // Each bank occupies the next vtp_nwords[i] words in vtp_words.
         vtp::VtpEventData vtp_event;
-        size_t vtp_offset = 0;
-        const size_t n_vtp_banks = std::min(
-            in->vtp_roc_tags.size(), in->vtp_nwords.size());
-        for (size_t bank_idx = 0; bank_idx < n_vtp_banks; ++bank_idx) {
-            const size_t bank_words = in->vtp_nwords[bank_idx];
-            if (bank_words > in->vtp_words.size() - vtp_offset) {
-                std::cerr << "Replay: malformed VTP snapshot in event "
-                          << ev->event_num << "\n";
-                break;
-            }
-            vtp::VtpDecoder::DecodeRoc(
-                in->vtp_words.data() + vtp_offset, bank_words,
-                in->vtp_roc_tags[bank_idx], vtp_event);
-            vtp_offset += bank_words;
-        }
-        for (int cluster_idx = 0;
-             cluster_idx < vtp_event.n_prad_clusters
-             && ev->vtp_cl_n < vtp::MAX_PRAD_CLUSTERS;
-             ++cluster_idx) {
-            const auto &cluster = vtp_event.prad_clusters[cluster_idx];
-            ev->vtp_cl_time[ev->vtp_cl_n] = cluster.time;
-            ev->vtp_cl_energy[ev->vtp_cl_n] = cluster.energy;
-            uint16_t module_id = cluster.module();
-            if (cluster.is_pbwo4()) module_id += 1000;
-            ev->vtp_cl_center[ev->vtp_cl_n] = module_id;
-            ev->vtp_cl_blocks[ev->vtp_cl_n] = cluster.nhits;
-            ++ev->vtp_cl_n;
-        }
+        if (!vtp::VtpDecoder::DecodeReplay(in->vtp_roc_tags, in->vtp_nwords,
+                                           in->vtp_words, vtp_event))
+            std::cerr << "Replay: malformed VTP snapshot in event "
+                      << ev->event_num << "\n";
+        fillVtpClusters(*ev, vtp_event);
 
-        // Decode RF reference once per event from the TDC bank
-        // snapshot.  Channel A/B leading-edge ns arrays land on the
-        // recon tree (rf_ns_a/_b); per-cluster cl_dt_rf is filled
-        // after FormClusters() below.
-        tdc::RfTimeData rf;
-        tdc::RfTimeDecoder::DecodeReplay(
-            in->tdc_roc_tags, in->tdc_nwords,
-            in->tdc_words, rf);
-        ev->rf_n_a = static_cast<uint8_t>(rf.n_a);
-        ev->rf_n_b = static_cast<uint8_t>(rf.n_b);
-        std::copy(rf.ns_a, rf.ns_a + rf.n_a, ev->rf_ns_a);
-        std::copy(rf.ns_b, rf.ns_b + rf.n_b, ev->rf_ns_b);
+        const auto rf = fillRf(*ev, in->tdc_roc_tags, in->tdc_nwords, in->tdc_words);
 
-        // Per-event gain correction (time-series lookup by event number).
         const auto &gain_corr = gain_corr_ts.GetCorr(static_cast<int>(ev->event_num));
 
-        // TODO: use config-driven trigger filter (monitor_config.json "physics" section
-        // accept_trigger_bits/reject_trigger_bits) instead of hardcoded bit check.
-        // Currently drops all non-SSP_RawSum events, including LMS.
-        bool is_1cluster = (ev->trigger_bits & prad2::TBIT_1cl)   != 0;
-        bool is_2cluster = (ev->trigger_bits & prad2::TBIT_2cl)   != 0;
-        bool is_3cluster = (ev->trigger_bits & prad2::TBIT_3cl)   != 0;
-        bool is_sum = (ev->trigger_bits & prad2::TBIT_sum) != 0;
-        bool is_lms = (ev->trigger_bits & prad2::TBIT_lms) != 0;
-        bool is_alpha = (ev->trigger_bits & prad2::TBIT_alpha) != 0;
-        if (random) is_sum = true;
-        if (!is_sum && !is_lms && !is_alpha && !is_3cluster) continue;
-
-        // For X17 blind analysis, keep all the raw-sum triggered events for calibration and monotoring,
-        // but only keep 3 cluster events with event_num end with 8 (lucky number decided by students)
-        if(x17 && x17_blind) {
-            if(is_3cluster && (ev->event_num % 10 != 8)) continue;
-        }
+        const auto trig = selectTrigger(ev->trigger_bits, ev->event_num,
+                                        random, x17, x17_blind);
+        if (!trig.keep) continue;
 
         int lms_nch = 0;
-        if (is_lms || is_alpha) {
+        if (trig.lms || trig.alpha) {
             for (int j = 0; j < in->nch; ++j) {
                 if (in->module_type[j] != prad2::MOD_LMS) continue;
-                // "LMSPin"=3100, "LMS1".."LMS3"=3101..3103
                 if(lms_nch >= 4) continue; // guard against overflow
-                ev->lms_id[lms_nch] = in->module_id[j] - 3100;
+                ev->lms_id[lms_nch] = in->module_id[j] - prad2::kLmsIdBase;
                 // if has waveform data, reanalyze the waveforms,
                 // or just use the existing peak information.
                 if (has_waveform)
@@ -1571,14 +1121,11 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
 
         int veto_nch = 0;
         int nch = 0;
-        if ((is_sum || is_3cluster) && !is_lms) {
+        if ((trig.sum || trig.cl3) && !trig.lms) {
             for (int j = 0; j < in->nch; ++j) {
                 if (in->module_type[j] == prad2::MOD_VETO) {
                     if(veto_nch >= 4) continue; // guard against overflow
-                    // "V1".."V4" → 3001..3004
-                    ev->veto_id[veto_nch] = in->module_id[j] - 3000;
-                    // if has waveform data, reanalyze the waveforms,
-                    // or just use the existing peak information.
+                    ev->veto_id[veto_nch] = in->module_id[j] - prad2::kVetoIdBase;
                     if (has_waveform)
                     {
                         int crate, slot, ch;
@@ -1610,17 +1157,11 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                     int crate, slot, ch;
                     std::tie(crate, slot, ch) = moduleLocation(in->module_id[j]);
 
-                    // timing offset for this module
                     float time_offset = mod->time_offset;
 
-                    // Per-ID gain correction: average of three LMS channels.
-                    float gain = (mod->id > 1000)
-                        ? (gain_corr.w[mod->id - 1000].corr[1] + gain_corr.w[mod->id - 1000].corr[2]) / 2.0f
-                        : gain_corr.g[mod->id].avg;
+                    float gain = gain_corr.ModuleGain(mod->id);
                     if (gain <= 0.f || gain == 1.0f) gain = in->gain_factor[j];
                     
-                    // if has waveform data, reanalyze the waveforms,
-                    // or just use the existing peak information.
                     if (has_waveform) {
                         ana.SetChannelKey(crate, slot, ch);
                         ana.Analyze(in->samples[j], in->nsamples[j], wres, time_offset);
@@ -1630,9 +1171,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                     auto hc_win = hc_time_cuts.at(mod->index);
                     if (random) { hc_win.lo = 0; hc_win.hi = 400; }
                     if (cluster_cfg.seed_time_window > 0.f) {
-                        // Multi-pulse mode: push every peak inside the trigger
-                        // window into the clusterer; the seed-anchored timing
-                        // coincidence cut is applied inside HyCalCluster.
+                        // Multi-pulse mode, as in ProcessWithRecon().
                         if (has_waveform)
                         {
                             for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
@@ -1661,7 +1200,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                         }
                     } else {
                         // Legacy: pick the largest in-window peak as the single
-                        // module hit, time field unused downstream.
+                        // module hit.
                         int bestIdx = -1;
                         float bestHeight = -1.f;
                         if (has_waveform)
@@ -1705,164 +1244,22 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         clusterer.FormClusters();
         std::vector<fdec::ClusterHit> hits;
         clusterer.ReconstructHits(hits);
-        //HyCal event reconstrued, fill root tree and histograms
-        ev->n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
-        for (int i = 0; i < ev->n_clusters; ++i) {
-            ev->cl_nblocks[i] = hits[i].nblocks;
-            ev->cl_npos[i]    = hits[i].npos;
-            ev->cl_time[i]    = hits[i].time;
-            //transform the cluster positions to the lab coordinate
-            HCHit local_hit = {hits[i].x, hits[i].y, fdec::shower_depth(hits[i].center_id, hits[i].energy),
-                hits[i].energy, static_cast<uint16_t>(hits[i].center_id), hits[i].flag};
-            analysis::ApplyToLab(hc_xform, local_hit);
-            GetProjection(local_hit, gRunConfig.hycal_z);
-            ev->cl_x[i] = local_hit.x;
-            ev->cl_y[i] = local_hit.y;
-            ev->cl_z[i] = local_hit.z;
-            ev->cl_energy[i] = local_hit.energy;
-            ev->cl_linear_corr[i] = hits[i].linear_corr;
-            ev->cl_bias_corr[i] = hits[i].bias_corr;
-            ev->cl_center[i] = local_hit.center_id;
-            ev->cl_flag[i] = local_hit.flag;
-
-            // Per-cluster RF Δt — fold (cl_time − nearest_a) onto
-            // (−T_RF/2, T_RF/2], then subtract per-module offset and
-            // re-fold.  NaN when rf has no ch-A hits this event
-            // (apply() preserves NaN through both steps).
-            const float dt0 = prad2::ClusterDeltaRf(hits[i].time, rf);
-            const auto *mod = hycal.module_by_id(hits[i].center_id);
-            const int mod_idx = mod ? mod->index : -1;
-            ev->cl_dt_rf[i] = hc_rf_offsets.apply(mod_idx, dt0);
-        }
+        fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets);
         // Reconstruct GEM hits from the strip-level data saved on the raw
         // replay tree.  This starts after pedestal/common-mode/ZS, so it
         // resumes at the same clustering and X/Y matching stage used by
         // ProcessWithRecon().
         if (gem_sys.GetNDetectors() > 0) {
-            std::vector<std::array<std::vector<gem::StripHit>, 2>> plane_hits(
-                gem_sys.GetNDetectors());
-            const int n_strips = std::min(in->gem_nch, prad2::kMaxGemStrips);
-            for (int strip_idx = 0; strip_idx < n_strips; ++strip_idx) {
-                const int det_id = in->gem_det[strip_idx];
-                const int plane = in->gem_plane[strip_idx];
-                if (det_id < 0 || det_id >= gem_sys.GetNDetectors()
-                    || plane < 0 || plane > 1)
-                    continue;
-
-                gem::StripHit hit;
-                hit.strip = in->gem_strip[strip_idx];
-                hit.charge = in->gem_charge[strip_idx];
-                hit.max_timebin = in->gem_max_tb[strip_idx];
-                hit.position = in->gem_pos[strip_idx];
-                hit.cross_talk = in->gem_xtalk[strip_idx] != 0;
-                hit.ts_adc.assign(in->gem_ts_adc[strip_idx],
-                                  in->gem_ts_adc[strip_idx] + ssp::SSP_TIME_SAMPLES);
-                plane_hits[det_id][plane].push_back(std::move(hit));
-            }
-
             std::vector<gem::GEMHit> all_gem_hits;
-            std::vector<std::array<std::vector<gem::StripCluster>, 2>> plane_clusters(
-                gem_sys.GetNDetectors());
-            const auto &gem_cfgs = gem_sys.GetReconConfigs();
-            for (int det_id = 0; det_id < gem_sys.GetNDetectors(); ++det_id) {
-                gem_clusterer.SetConfig(gem_cfgs[det_id]);
-                std::vector<gem::StripCluster> x_clusters;
-                std::vector<gem::StripCluster> y_clusters;
-                gem_clusterer.FormClusters(plane_hits[det_id][0], x_clusters);
-                gem_clusterer.FormClusters(plane_hits[det_id][1], y_clusters);
+            std::vector<std::array<std::vector<gem::StripCluster>, 2>> plane_clusters;
+            ReconstructGemStrips(*in, gem_sys, gem_clusterer, all_gem_hits, &plane_clusters);
+            fillGemHits(*ev, all_gem_hits, g_xform);
+            // per-cluster QA block, same order as ProcessWithRecon
+            for (int d = 0; d < gem_sys.GetNDetectors(); ++d)
+                for (int p = 0; p < 2; ++p)
+                    appendGemClusters(*ev, d, p, plane_clusters[d][p]);
 
-                std::vector<gem::GEMHit> det_hits;
-                gem_clusterer.CartesianReconstruct(
-                    x_clusters, y_clusters, det_hits, det_id);
-                all_gem_hits.insert(all_gem_hits.end(), det_hits.begin(), det_hits.end());
-
-                // keep the filtered clusters for the per-cluster QA block
-                plane_clusters[det_id][0] = std::move(x_clusters);
-                plane_clusters[det_id][1] = std::move(y_clusters);
-            }
-
-            ev->n_gem_hits = std::min(
-                static_cast<int>(all_gem_hits.size()), prad2::kMaxGemHits);
-            for (int hit_idx = 0; hit_idx < ev->n_gem_hits; ++hit_idx) {
-                const auto &hit = all_gem_hits[hit_idx];
-                ev->det_id[hit_idx] = hit.det_id;
-                ev->gem_x_charge[hit_idx] = hit.x_charge;
-                ev->gem_y_charge[hit_idx] = hit.y_charge;
-                ev->gem_x_peak[hit_idx] = hit.x_peak;
-                ev->gem_y_peak[hit_idx] = hit.y_peak;
-                ev->gem_x_size[hit_idx] = hit.x_size;
-                ev->gem_y_size[hit_idx] = hit.y_size;
-                ev->gem_x_mTbin[hit_idx] = hit.x_max_timebin;
-                ev->gem_y_mTbin[hit_idx] = hit.y_max_timebin;
-                fillGemHitQA(*ev, hit_idx, hit);
-
-                GEMHit local_hit = {
-                    hit.x, hit.y, 0.f, static_cast<uint8_t>(hit.det_id)};
-                if (local_hit.det_id >= 0 && local_hit.det_id < 4)
-                    analysis::ApplyToLab(g_xform[local_hit.det_id], local_hit);
-                ev->gem_x[hit_idx] = local_hit.x;
-                ev->gem_y[hit_idx] = local_hit.y;
-                ev->gem_z[hit_idx] = local_hit.z;
-            }
-            // per-cluster QA block: det 0 X, det 0 Y, det 1 X, ... (same
-            // order as ProcessWithRecon)
-            for (int det_id = 0; det_id < gem_sys.GetNDetectors(); ++det_id)
-                for (int plane = 0; plane < 2; ++plane)
-                    appendGemClusters(*ev, det_id, plane, plane_clusters[det_id][plane]);
-
-            std::vector<HCHit> hc_hits;
-            std::vector<GEMHit> gem_hits[4];
-            for (int cluster_idx = 0; cluster_idx < ev->n_clusters; ++cluster_idx) {
-                hc_hits.push_back({ev->cl_x[cluster_idx], ev->cl_y[cluster_idx],
-                                   ev->cl_z[cluster_idx], ev->cl_energy[cluster_idx],
-                                   ev->cl_center[cluster_idx], ev->cl_flag[cluster_idx]});
-            }
-            for (int hit_idx = 0; hit_idx < ev->n_gem_hits; ++hit_idx) {
-                const int det_id = ev->det_id[hit_idx];
-                if (det_id < 0 || det_id >= 4) continue;
-                gem_hits[det_id].push_back({
-                    ev->gem_x[hit_idx], ev->gem_y[hit_idx], ev->gem_z[hit_idx],
-                    static_cast<uint8_t>(det_id)});
-            }
-
-            matching.SetMatchRange(gRunConfig.matching_radius);
-            matching.SetSquareSelection(gRunConfig.matching_use_square);
-            matching.SetEnergyDependent(gRunConfig.matching_energy_dependent);
-            matching.SetMatchSigma(gRunConfig.matching_sigma);
-            const auto matched_hits = matching.Match(
-                hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
-            const auto matched_hits_chamber = matching.MatchPerChamber(
-                hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
-
-            for (const auto &match : matched_hits_chamber) {
-                const int cluster_idx = match.hycal_idx;
-                if (cluster_idx < 0 || cluster_idx >= ev->n_clusters) continue;
-                for (int det_id = 0; det_id < 4; ++det_id) {
-                    for (const auto &hit : match.gem_hits[det_id])
-                        ev->add_match(cluster_idx, det_id, hit.x, hit.y, hit.z);
-                }
-                ev->matchFlag[cluster_idx] = match.mflag;
-            }
-
-            ev->matchNum = std::min(
-                static_cast<int>(matched_hits.size()), prad2::kMaxClusters);
-            for (int match_idx = 0; match_idx < ev->matchNum; ++match_idx) {
-                const auto &match = matched_hits[match_idx];
-                ev->mHit_E[match_idx] = match.hycal_hit.energy;
-                ev->mHit_x[match_idx] = match.hycal_hit.x;
-                ev->mHit_y[match_idx] = match.hycal_hit.y;
-                ev->mHit_z[match_idx] = match.hycal_hit.z;
-                // MatchHit::gem ordering: 
-                // (GEM1/GEM2, det_id 0/1) index 0 is the downstream GEM pair
-                // (GEM3/GEM4, det_id 2/3) index 1 is the upstream GEM pair
-                for (int gem_idx = 0; gem_idx < 2; ++gem_idx) {
-                    ev->mHit_gx[match_idx][gem_idx] = match.gem[gem_idx].x;
-                    ev->mHit_gy[match_idx][gem_idx] = match.gem[gem_idx].y;
-                    ev->mHit_gz[match_idx][gem_idx] = match.gem[gem_idx].z;
-                    ev->mHit_gid[match_idx][gem_idx] = match.gem[gem_idx].det_id;
-                }
-                ev->mHit_cl_index[match_idx] = match.hycal_idx;
-            }
+            MatchReconEvent(*ev, matching);
         }
         tree->Fill();
         ++total;
@@ -1883,21 +1280,11 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
 bool Replay::Process_LMSgainFactor(const std::string &input_evio, const std::string &output_root,
                      const std::string &db_dir, const std::string &daq_config_file)
 {
-    // build ROC tag → crate index mapping from DAQ config JSON
-    std::unordered_map<int, int> roc_to_crate;
+    // ROC tag → crate over every roc_tags entry of the loaded DAQ config
+    std::unordered_map<uint32_t, int> roc_to_crate;
     if (!daq_config_file.empty()) {
         std::cout << "Loading DAQ config from " << daq_config_file << "\n";
-        std::ifstream dcf(daq_config_file);
-        if (dcf.is_open()) {
-            auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
-            if (dcj.contains("roc_tags") && dcj["roc_tags"].is_array()) {
-                for (auto &entry : dcj["roc_tags"]) {
-                    int tag   = std::stoi(entry.at("tag").get<std::string>(), nullptr, 16);
-                    int crate = entry.at("crate").get<int>();
-                    roc_to_crate[tag] = crate;
-                }
-            }
-        }
+        roc_to_crate = daq_cfg_.roc_crate_map();
     }
     else {
         std::cerr << "No DAQ config file provided, ROC tag to crate mapping will be unavailable.\n";
@@ -1920,33 +1307,14 @@ bool Replay::Process_LMSgainFactor(const std::string &input_evio, const std::str
     }
 
     TTree *tree = new TTree("lms_gain", "LMS gain factor calculation");
-    setupLMSBranches(tree, *ev);
+    prad2::SetLMSWriteBranches(tree, *ev);
 
-    // Side trees — see Process() above for the design.  The recon path
-    // writes the same scalers / epics records so analysis joining keeps
-    // working regardless of which replay output the user opens.
-    TTree *scalers_tree = new TTree("scalers", "PRad2 DSC2 scaler readouts");
-    TTree *epics_tree   = new TTree("epics",   "PRad2 EPICS slow control");
-    TTree *runinfo_tree = new TTree("runinfo", "PRad2 control events / DAQ config");
-    auto sc_row = std::make_unique<prad2::RawScalerData>();
-    auto ep_row = std::make_unique<prad2::RawEpicsData>();
-    auto ri_row = std::make_unique<prad2::RawRunInfo>();
-    prad2::SetScalerWriteBranches (scalers_tree, *sc_row);
-    prad2::SetEpicsWriteBranches  (epics_tree,   *ep_row);
-    prad2::SetRunInfoWriteBranches(runinfo_tree, *ri_row);
+    auto side = std::make_unique<SideTrees>();
 
     auto event = std::make_unique<fdec::EventData>();
     fdec::WaveAnalyzer ana(daq_cfg_.wave_cfg);
-    // NNLS pile-up template store (loaded only if config asks for it;
-    // failure is non-fatal — the analyzer falls back to local-maxima
-    // peak heights).
     fdec::PulseTemplateStore template_store;
-    if (daq_cfg_.wave_cfg.nnls_deconv.enabled
-        && !daq_cfg_.wave_cfg.nnls_deconv.template_file.empty()) {
-        template_store.LoadFromFile(
-            db_dir + "/" + daq_cfg_.wave_cfg.nnls_deconv.template_file,
-            daq_cfg_.wave_cfg);
-    }
+    template_store.LoadFromConfig(daq_cfg_.wave_cfg, db_dir);
     ana.SetTemplateStore(&template_store);
     fdec::WaveResult wres;
     
@@ -1957,44 +1325,15 @@ bool Replay::Process_LMSgainFactor(const std::string &input_evio, const std::str
     while (ch.Read() == evc::status::success) {
         if (!ch.Scan()) continue;
 
-        // Slow-control side trees (see Process() for the rationale).
-        const auto et = ch.GetEventType();
-        if (et == evc::EventType::Prestart ||
-            et == evc::EventType::Go       ||
-            et == evc::EventType::End)
-        {
-            std::string cfg_text;
-            if (et == evc::EventType::Prestart)
-                cfg_text = ch.ExtractDaqConfigText();
-            prad2::FillRunInfoRow(ch.Sync(), cfg_text, *ri_row);
-            runinfo_tree->Fill();
-            continue;
-        }
-        if (et == evc::EventType::Epics) {
-            const auto &rec = ch.Epics();
-            if (rec.present) {
-                prad2::FillEpicsRow(rec, *ep_row);
-                epics_tree->Fill();
-            }
-            continue;
-        }
-        if (et != evc::EventType::Physics) continue;
+        if (side->record(ch)) continue;
 
         for (int ie = 0; ie < ch.GetNEvents(); ++ie) {
             event->clear();
             if (!ch.DecodeEvent(ie, *event, nullptr)) continue;
 
-            // DSC2 row: same logic as the raw-replay path.  See Process().
-            if (ie == 0) {
-                const auto &dsc = ch.Dsc();
-                if (dsc.present) {
-                    prad2::FillScalerRow(dsc, ch.Sync(), event->info,
-                                         daq_cfg_.dsc_scaler, *sc_row);
-                    scalers_tree->Fill();
-                }
-            }
+            if (ie == 0) side->recordScalers(ch, event->info, daq_cfg_.dsc_scaler);
 
-            clearLMSEvent(*ev);
+            ev->clear();
             ev->event_num    = event->info.event_number;
             ev->trigger_type = event->info.trigger_type;
             ev->trigger_bits      = event->info.trigger_bits;
@@ -2004,51 +1343,35 @@ bool Replay::Process_LMSgainFactor(const std::string &input_evio, const std::str
             bool trig_alpha = (ev->trigger_bits & prad2::TBIT_alpha) != 0;
             if (!trig_lms && !trig_alpha) continue;
 
-            // Decode FADC250 data — single pass over all channels (HyCal +
-            // Veto + LMS).  Type dispatch comes from hycal_map.json's "t"
-            // field, not module-name prefix; module_type[nch] records the
-            // category.
             int nch = 0;
             for (int r = 0; r < event->nrocs; ++r) {
                 auto &roc = event->rocs[r];
                 if (!roc.present) continue;
                 auto cit = roc_to_crate.find(roc.tag);
                 int crate = (cit == roc_to_crate.end()) ? (int)roc.tag : cit->second;
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    if (!roc.slots[s].present) continue;
-                    for (int c = 0; c < 16; ++c) {
-                        if (!(roc.slots[s].channel_mask & (1ull << c))) continue;
-                        auto &cd = roc.slots[s].channels[c];
-                        if (cd.nsamples <= 0 || nch >= prad2::kMaxChannels) continue;
+                fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+                    if (nch >= prad2::kMaxChannels) return;
 
-                        int  mod_id   = moduleID(crate, s, c);
-                        auto mod_type = moduleType(crate, s, c);
-                        // Drop channels with no DAQ-map / module-info entry —
-                        // we have no way to interpret them downstream.
-                        if (mod_id < 0) continue;
+                    int  mod_id   = moduleID(crate, s, c);
+                    auto mod_type = moduleType(crate, s, c);
+                    if (mod_id < 0) return;
 
-                        ev->module_id[nch] = mod_id;
-                        ev->module_type[nch] = mod_type;
+                    ev->module_id[nch] = mod_id;
+                    ev->module_type[nch] = mod_type;
 
-                        // Soft analyzer drives both peaks AND the
-                        // pedestal estimate that the firmware analyzer
-                        // consumes — only run it when its output is
-                        // being written.
-                        ana.SetChannelKey(roc.tag, s, c);
-                        ana.Analyze(cd.samples, cd.nsamples, wres);
-                        ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
-                        for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
-                            ev->peak_height[nch][p]   = wres.peaks[p].height;
-                            ev->peak_time[nch][p]     = wres.peaks[p].time;
-                            ev->peak_integral[nch][p] = wres.peaks[p].integral;
-                        }
-                        nch++;
+                    ana.SetChannelKey(roc.tag, s, c);
+                    ana.Analyze(cd.samples, cd.nsamples, wres);
+                    ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
+                    for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
+                        ev->peak_height[nch][p]   = wres.peaks[p].height;
+                        ev->peak_time[nch][p]     = wres.peaks[p].time;
+                        ev->peak_integral[nch][p] = wres.peaks[p].integral;
                     }
-                }
+                    nch++;
+                }, 16);
             }
             ev->nch = nch;
 
-            //calculate gain correction factors for W modules and fill the gain tree
             //Because the LMS and alpha trigger_bits can not believe, 
             // we need to use "nch" to seperate the LMS and alpha events
             bool is_lms = (trig_lms && ev->nch > 1000);
@@ -2060,19 +1383,71 @@ bool Replay::Process_LMSgainFactor(const std::string &input_evio, const std::str
             if(is_lms || is_alpha) tree->Fill();
 
             total++;
-            //if (total % 10000 == 0)
-            //    std::cerr << "\rReplay: " << total << " events processed" << std::flush;
         }
     }
 
     std::cerr << "\rReplay: " << total << " events written to " << output_root << "\n";
     outfile->cd();
     tree->Write();
-    scalers_tree->Write();
-    epics_tree->Write();
-    runinfo_tree->Write();
+    side->write();
     delete outfile;
     return true;
+}
+
+void FillPeaksFromWaveforms(prad2::RawEventData &ev, const fdec::HyCalSystem &hycal,
+                            const fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
+{
+    for (int j = 0; j < ev.nch; ++j) {
+        const auto *mod = hycal.module_by_id(ev.module_id[j]);
+        if (!mod || !mod->is_pwo4()) continue;
+
+        ana.Analyze(ev.samples[j], ev.nsamples[j], wres);
+        ev.npeaks[j] = std::min(wres.npeaks, fdec::MAX_PEAKS);
+        for (int p = 0; p < ev.npeaks[j]; ++p) {
+            const auto &pk = wres.peaks[p];
+            ev.peak_height[j][p]   = pk.height;
+            ev.peak_time[j][p]     = pk.time;
+            ev.peak_integral[j][p] = pk.integral;
+        }
+    }
+}
+
+void ReconstructGemStrips(const prad2::RawEventData &ev, const gem::GemSystem &gem_sys,
+                          gem::GemCluster &clusterer, std::vector<gem::GEMHit> &hits,
+                          std::vector<std::array<std::vector<gem::StripCluster>, 2>>
+                              *plane_clusters)
+{
+    const int n_det = gem_sys.GetNDetectors();
+    std::vector<std::array<std::vector<gem::StripHit>, 2>> plane_hits(n_det);
+    const int n_strips = std::min(ev.gem_nch, prad2::kMaxGemStrips);
+    for (int i = 0; i < n_strips; ++i) {
+        const int det = ev.gem_det[i];
+        const int plane = ev.gem_plane[i];
+        if (det < 0 || det >= n_det || plane < 0 || plane > 1) continue;
+
+        gem::StripHit hit;
+        hit.strip       = ev.gem_strip[i];
+        hit.charge      = ev.gem_charge[i];
+        hit.max_timebin = ev.gem_max_tb[i];
+        hit.position    = ev.gem_pos[i];
+        hit.cross_talk  = ev.gem_xtalk[i] != 0;
+        hit.ts_adc.assign(ev.gem_ts_adc[i], ev.gem_ts_adc[i] + ssp::SSP_TIME_SAMPLES);
+        plane_hits[det][plane].push_back(std::move(hit));
+    }
+
+    hits.clear();
+    if (plane_clusters) plane_clusters->assign(n_det, {});
+    const auto &cfgs = gem_sys.GetReconConfigs();
+    std::array<std::vector<gem::StripCluster>, 2> clusters;
+    std::vector<gem::GEMHit> det_hits;
+    for (int det = 0; det < n_det; ++det) {
+        clusterer.SetConfig(cfgs[det]);
+        for (int p = 0; p < 2; ++p)
+            clusterer.FormClusters(plane_hits[det][p], clusters[p]);
+        clusterer.CartesianReconstruct(clusters[0], clusters[1], det_hits, det);
+        hits.insert(hits.end(), det_hits.begin(), det_hits.end());
+        if (plane_clusters) (*plane_clusters)[det] = std::move(clusters);
+    }
 }
 
 } // namespace analysis

@@ -3,9 +3,12 @@
 // HyCalDeadModules.h - apply per-run dead-module flags to HyCal.
 //
 // Dead modules are selected by LoadRunConfig from the independent
-// `hycal_dead_modules` table in runinfo/general.json. This helper marks each
-// listed module with kDeadModule and all of its side/corner neighbors with
-// kDeadNeighbor. Existing dead flags are cleared before applying the list.
+// `hycal_dead_modules` table in runinfo/general.json. This helper clears the
+// existing dead/leakage flags and virtual neighbors, marks every PbGlass
+// module and each listed module with kDeadModule and their side/corner
+// neighbors with kDeadNeighbor, and flags PbWO4 modules whose 5x5 window
+// reaches a dead PbWO4 module, the array edge, or the beam hole with
+// kLeakage, adding virtual neighbors for the missing cells.
 //=============================================================================
 
 #include "HyCalSystem.h"
@@ -44,7 +47,7 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
     constexpr int beam_hole_min = 16;
     constexpr int beam_hole_max = 17;
 
-    // Mark all the edge modules as having potential leakage
+    // Mark PbWO4 modules near the beam hole or the array edge as having potential leakage
     // Set all the LG modules as dead initially since we do not expect them to be active
     for (int i = 0; i < n_modules; ++i) {
         auto &mod = hycal.module(i);
@@ -97,16 +100,24 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
             }
         });
 
+        // PbWO4 modules within the dead module's 5x5 window leak into it and
+        // get it as a virtual neighbor.
         const auto &dead_module = hycal.module(dead_index);
         if (!dead_module.is_pwo4()) continue;
         for (int i = 0; i < n_modules; ++i) {
-            const auto &module = hycal.module(i);
+            auto &module = hycal.module(i);
             if (!module.is_pwo4()) continue;
 
             double dx, dy;
-            hycal.qdist(dead_module, module, dx, dy);
-            if (std::abs(dx) < 2.51 && std::abs(dy) < 2.51)
-                fdec::set_bit(hycal.module(i).flag, fdec::kLeakage);
+            hycal.qdist(module, dead_module, dx, dy);
+            if (fdec::qdist_in_5x5(dx, dy)) {
+                fdec::set_bit(module.flag, fdec::kLeakage);
+                if (i != dead_index)
+                    module.AddVirtNeighbor({dead_module.row, dead_module.column,
+                                            dead_module.index, dead_module.x,
+                                            dead_module.y, dx, dy,
+                                            fdec::ModuleType::PbWO4});
+            }
         }
     }
 
@@ -116,46 +127,17 @@ inline HyCalDeadModuleSummary ApplyHyCalDeadModules(
             !fdec::test_bit(owner.flag, fdec::kLeakage))
             continue;
 
-        // add virtual neighbors for dead modules within two layers
-        for (int dead_index : dead_indices) {
-            const auto &dead = hycal.module(dead_index);
-            if (!dead.is_pwo4() || dead_index == owner_index) continue;
-
-            double dx, dy;
-            hycal.qdist(owner, dead, dx, dy);
-            if (std::abs(dx) < 2.51 && std::abs(dy) < 2.51) {
-                owner.AddVirtNeighbor({dead.row, dead.column, dead.index,
-                                       dead.x, dead.y, dx, dy,
-                                       fdec::ModuleType::PbWO4});
-            }
-        }
-        // Add virtual neighbors within two layers outside the array boundary.
+        // Empty cells of the owner's 5x5 window: outside the array or in the
+        // physical 2x2 beam hole (rows/columns 16-17).
         for (int row = owner.row - 2; row <= owner.row + 2; ++row) {
             for (int column = owner.column - 2;
                  column <= owner.column + 2; ++column) {
                 const bool inside = row >= 0 && row < w_grid_size &&
                                     column >= 0 && column < w_grid_size;
-                const bool within_two_layers = row >= -2 && row <= 35 &&
-                                               column >= -2 && column <= 35;
-                if (inside || !within_two_layers) continue;
+                const bool in_beam_hole = row >= beam_hole_min && row <= beam_hole_max &&
+                                          column >= beam_hole_min && column <= beam_hole_max;
+                if (inside && !in_beam_hole) continue;
 
-                owner.AddVirtNeighbor({row, column, -1,
-                                       owner.x + (column - owner.column) * owner.size_x,
-                                       owner.y - (row - owner.row) * owner.size_y,
-                                       static_cast<double>(column - owner.column),
-                                       static_cast<double>(owner.row - row),
-                                       fdec::ModuleType::PbWO4});
-            }
-        }
-
-        // Add the physical 2x2 beam-hole cells (rows/columns 16-17) that lie
-        // inside this owner's 5x5 window.
-        for (int row = beam_hole_min; row <= beam_hole_max; ++row) {
-            for (int column = beam_hole_min;
-                 column <= beam_hole_max; ++column) {
-                if (std::abs(row - owner.row) > 2 ||
-                    std::abs(column - owner.column) > 2)
-                    continue;
                 owner.AddVirtNeighbor({row, column, -1,
                                        owner.x + (column - owner.column) * owner.size_x,
                                        owner.y - (row - owner.row) * owner.size_y,

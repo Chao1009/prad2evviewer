@@ -1,12 +1,5 @@
 // test/evio_dump.cpp
-// Diagnostic tool to inspect EVIO file structure.
-//
-// Modes:
-//   evio_dump <file>                          -- summary: count events by type/tag
-//   evio_dump <file> --tree [--num N]         -- print bank tree for first N events
-//   evio_dump <file> --tags                   -- list all unique bank tags with counts
-//   evio_dump <file> --epics                  -- dump EPICS text from all EPICS events
-//   evio_dump <file> --event N                -- detailed dump of event N (1-based)
+// Diagnostic tool to inspect EVIO file structure (modes and options: see usage()).
 
 #include "EvChannel.h"
 #include "EvStruct.h"
@@ -15,8 +8,6 @@
 #include "VtpData.h"
 #include "load_daq_config.h"
 #include "InstallPaths.h"
-#include <cmath>
-#include <fstream>
 #include <iostream>
 #include <iomanip>
 #include <string>
@@ -24,9 +15,7 @@
 #include <set>
 #include <vector>
 #include <algorithm>
-#include <tuple>
 #include <getopt.h>
-#include <bitset>
 #include <cstdlib>
 #include <ctime>
 
@@ -38,6 +27,23 @@ static std::string hex(uint32_t v)
     char buf[16];
     snprintf(buf, sizeof(buf), "0x%04X", v);
     return buf;
+}
+
+// " %08x" per word for the first `cap` words, then " ..." if truncated.
+static void print_words(const uint32_t *d, size_t n, size_t cap)
+{
+    for (size_t i = 0; i < std::min(n, cap); ++i)
+        std::cout << ' ' << std::hex << std::setw(8) << std::setfill('0')
+                  << d[i] << std::setfill(' ') << std::dec;
+    if (n > cap) std::cout << " ...";
+}
+
+static const char *event_type_name(EventType et)
+{
+    return et == EventType::Physics ? "Physics" :
+           et == EventType::Epics   ? "Epics"   :
+           et == EventType::Sync    ? "Sync"    :
+           et == EventType::Unknown ? "Unknown" : "Other";
 }
 
 static std::string tag_label(uint32_t tag)
@@ -69,7 +75,7 @@ static std::string tag_label(uint32_t tag)
     if (tag == 0xC1) return "SYNC(legacy)";
 
     // JLab single-event physics
-    if ((tag >= 0x00A0 && tag <= 0x00BF) || (tag >= 0xFF50 && tag <= 0xFF8F)) return "PHYSICS(built)";
+    if (tag >= 0x00A0 && tag <= 0x00BF) return "PHYSICS(built)";
 
     // JLab-specific banks
     if (tag == 0xC000) return "TRIGGER_BANK";
@@ -150,8 +156,8 @@ struct TrieNode {
     std::map<uint32_t, TrieNode> children;
 };
 
-// Informative names for bank tags known by JLab ROLs but not held in
-// DaqConfig (e.g. no decoder yet).  Reference: docs/rols/clonbanks_20260406.xml.
+// Names for JLab ROL bank tags that tag_description() cannot name from
+// DaqConfig.  Reference: docs/rols/clonbanks_20260406.xml.
 static const char *known_bank_name(uint32_t tag)
 {
     switch (tag) {
@@ -170,6 +176,18 @@ static const char *known_bank_name(uint32_t tag)
     case 0xE114: return "EPICS string data";
     default:     return nullptr;
     }
+}
+
+// Decoder module EvChannel dispatches `tag` to, or nullptr.  `cfg` must be
+// ch.GetConfig(), whose data_banks EvChannel::SetConfig back-fills; DSC2 and
+// the SYNC HEAD bank are decoded from their own config fields.
+static const char *bank_decoder(uint32_t tag, const DaqConfig &cfg)
+{
+    if (auto *db = cfg.find_data_bank(tag)) return db->module.c_str();
+    if (cfg.dsc_scaler.enabled() && tag == static_cast<uint32_t>(cfg.dsc_scaler.bank_tag))
+        return "dsc2";
+    if (tag == cfg.sync_head_tag) return "sync_head";
+    return nullptr;
 }
 
 // Depth-aware description of a bank tag (event / ROC / data-bank / composite-inner).
@@ -233,14 +251,9 @@ static std::string tag_description(uint32_t tag, int depth, const DaqConfig &cfg
 static void printTrie(const TrieNode &node, int indent_level, int parent_count,
                       int depth, const DaqConfig &cfg)
 {
-    // Sort children by tag (std::map already sorts, but sort a vector view for
-    // flexibility if we later want to sort by count).
-    std::vector<const TrieNode*> ordered;
-    ordered.reserve(node.children.size());
-    for (auto &kv : node.children) ordered.push_back(&kv.second);
-
     std::string indent(indent_level * 2, ' ');
-    for (auto *c : ordered) {
+    for (auto &kv : node.children) {
+        const TrieNode *c = &kv.second;
         std::cout << indent << hex(c->tag)
                   << "  " << std::setw(9) << std::left << TypeName(c->type)
                   << std::right;
@@ -322,14 +335,11 @@ static int doEpics(EvChannel &ch, int max_events)
 
         auto hdr = ch.GetEvHeader();
         // check for EPICS: common tags are 0x1F, but also scan for string banks
-        bool is_epics = (hdr.tag == 0x1F || hdr.tag == 0x1f);
+        bool is_epics = (hdr.tag == 0x1F);
 
         if (!is_epics) {
-            // also check if any child bank has string data
             for (auto &n : ch.GetNodes()) {
-                if (n.depth == 1 &&
-                    (n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) &&
-                    n.data_words > 4)
+                if (n.depth == 1 && IsString(n.type) && n.data_words > 4)
                 {
                     is_epics = true;
                     break;
@@ -345,7 +355,6 @@ static int doEpics(EvChannel &ch, int max_events)
                   << ", tag=" << hex(hdr.tag)
                   << ", num=" << hdr.num << ") ---\n";
 
-        // print tree structure
         ch.PrintTree(std::cout);
 
         // Dump every non-string leaf bank inside this SYNC event.  Layout is
@@ -356,7 +365,7 @@ static int doEpics(EvChannel &ch, int max_events)
         // value falls in the 2001-2100 unix-time range.
         std::cout << "\n  Non-string data banks (raw + per-word decode):\n";
         for (auto &n : ch.GetNodes()) {
-            if (n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) continue;
+            if (IsString(n.type)) continue;
             if (IsContainer(n.type)) continue;
             if (n.data_words == 0) continue;
 
@@ -367,11 +376,7 @@ static int doEpics(EvChannel &ch, int max_events)
 
             // raw hex dump (up to 12 words — enough for 5-word HEAD bank).
             std::cout << "      raw:";
-            size_t nshow = std::min<size_t>(n.data_words, 12);
-            for (size_t i = 0; i < nshow; ++i)
-                std::cout << " " << std::hex << std::setw(8) << std::setfill('0')
-                          << d[i] << std::setfill(' ') << std::dec;
-            if (n.data_words > nshow) std::cout << " ...";
+            print_words(d, n.data_words, 12);
             std::cout << "\n";
 
             // Plausible unix-time window: 2001-01-01 .. 2100-01-01.
@@ -398,11 +403,9 @@ static int doEpics(EvChannel &ch, int max_events)
 
         // extract and print all string data
         for (auto &n : ch.GetNodes()) {
-            if ((n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) && n.data_words > 0) {
-                const char *raw = reinterpret_cast<const char*>(ch.GetData(n));
-                size_t max_len = n.data_words * 4;
-                size_t len = 0;
-                while (len < max_len && raw[len] != '\0') ++len;
+            if (IsString(n.type) && n.data_words > 0) {
+                const std::string full = ch.GetString(n);
+                const size_t len = full.size();
 
                 std::cout << "\n  [String data from tag=" << hex(n.tag)
                           << ", " << len << " bytes]:\n";
@@ -411,8 +414,7 @@ static int doEpics(EvChannel &ch, int max_events)
                 // without flooding the terminal.  Full payload is at offset 0
                 // in the bank if callers want to re-dump it.
                 size_t show = std::min(len, size_t(800));
-                std::string text(raw, show);
-                std::cout << text;
+                std::cout << full.substr(0, show);
                 if (show < len) std::cout << "\n  ... (" << len - show << " more bytes)";
                 std::cout << "\n";
             }
@@ -691,9 +693,6 @@ static int doVtp(EvChannel &ch, int max_events)
 // `max_events=0` falls back to 5; passing -n N caps the printed events while
 // the summary still scans the whole file.
 
-static constexpr double TDC_LSB_NS  = tdc::TDC_LSB_NS; // 23.436 ps/tick, single source: TdcData.h
-static constexpr uint32_t RF_ROC_TAG = 0x0040;
-
 static int doRf(EvChannel &ch, int max_events)
 {
     if (max_events <= 0) max_events = 5;
@@ -718,7 +717,7 @@ static int doRf(EvChannel &ch, int max_events)
         std::map<std::pair<uint8_t,uint8_t>, std::vector<uint32_t>> per_chan;
         for (int i = 0; i < t.n_hits; ++i) {
             const auto &h = t.hits[i];
-            if (h.roc_tag != RF_ROC_TAG) continue;
+            if (h.roc_tag != tdc::RF_ROC_TAG) continue;
             per_chan[{h.slot, h.channel}].push_back(h.value);
         }
         if (per_chan.empty()) continue;
@@ -750,14 +749,14 @@ static int doRf(EvChannel &ch, int max_events)
                       << "  nhits=" << kv.second.size() << "  values:";
             for (uint32_t v : kv.second)
                 std::cout << "  " << v << "(" << std::fixed
-                          << std::setprecision(2) << v * TDC_LSB_NS << "ns)";
+                          << std::setprecision(2) << v * tdc::TDC_LSB_NS << "ns)";
             std::cout << "\n";
             if (kv.second.size() >= 2) {
                 std::cout << "    deltas:";
                 for (size_t i = 1; i < kv.second.size(); ++i) {
                     uint32_t d = kv.second[i] - kv.second[i-1];
                     std::cout << "  " << d << "(" << std::fixed
-                              << std::setprecision(2) << d * TDC_LSB_NS << "ns)";
+                              << std::setprecision(2) << d * tdc::TDC_LSB_NS << "ns)";
                 }
                 std::cout << "\n";
             }
@@ -785,7 +784,7 @@ static int doRf(EvChannel &ch, int max_events)
 
     std::cout << std::resetiosflags(std::ios::fixed)
               << "\n  Inter-hit interval per channel (LSB="
-              << TDC_LSB_NS << " ns):\n";
+              << tdc::TDC_LSB_NS << " ns):\n";
     std::cout << "    " << std::setw(5) << "ch"
               << std::setw(12) << "mean(ticks)" << std::setw(10) << "mean(ns)"
               << std::setw(12) << "min(ticks)"  << std::setw(12) << "max(ticks)"
@@ -793,7 +792,7 @@ static int doRf(EvChannel &ch, int max_events)
     for (auto &kv : diff_n) {
         if (kv.second == 0) continue;
         double mean_ticks = double(diff_sum[kv.first]) / kv.second;
-        double mean_ns    = mean_ticks * TDC_LSB_NS;
+        double mean_ns    = mean_ticks * tdc::TDC_LSB_NS;
         double freq_mhz   = mean_ns > 0 ? 1000.0 / mean_ns : 0.0;
         std::cout << "    " << std::setw(5) << int(kv.first)
                   << std::setw(12) << std::fixed << std::setprecision(2) << mean_ticks
@@ -826,7 +825,6 @@ static int doEvent(EvChannel &ch, int target)
                   << "  length=" << hdr.length << "w"
                   << " ===\n\n";
 
-        // full tree
         std::cout << "--- Bank Tree ---\n";
         ch.PrintTree(std::cout);
 
@@ -894,12 +892,7 @@ static int doEvent(EvChannel &ch, int target)
                       << " depth=" << n.depth
                       << " words=" << n.data_words << " |";
 
-            const uint32_t *d = ch.GetData(n);
-            int show = std::min<int>(n.data_words, 16);
-            for (int i = 0; i < show; ++i)
-                std::cout << " " << std::hex << std::setw(8) << std::setfill('0')
-                          << d[i] << std::setfill(' ') << std::dec;
-            if (n.data_words > 16) std::cout << " ...";
+            print_words(ch.GetData(n), n.data_words, 16);
             std::cout << "\n";
         }
 
@@ -916,15 +909,9 @@ static int doEvent(EvChannel &ch, int target)
 //   2. TI event_type (d[0] bits 31:24) = TS trigger decision
 //   3. FP trigger bits (TI master d[5]) = raw 32-bit front panel input snapshot
 //
-// FP bit assignments (from prad_v0.trg):
-//   Bits 8-15:  SSP PRAD TRGBIT 0-7  (P2 outputs)
-//   Bit 23:     v1495 OR from SD/FADC
-//   Bit 24:     v1495 LMS
-//   Bit 25:     v1495 alpha
-//   Bit 26:     v1495 Faraday
-//   Bit 27:     v1495 Master OR
-//
-// TS monitors mask: 0x0F00FF00 (bits 8-15 and 24-27)
+// FP bit assignments (fp_bits[] below) are from prad_v0.trg: bits 8-15 are
+// the SSP PRAD TRGBIT 0-7 (P2 outputs), bits 23-27 the v1495 outputs.  The TS
+// monitors TS_FP_MASK (bits 8-15 and 24-27).
 
 struct TrigDebugEntry {
     uint32_t event_tag;         // top-level bank tag
@@ -1031,16 +1018,13 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
                 }
             }
 
-            // --- count FADC composite banks ---
             for (auto &n : nodes) {
                 if (n.tag == cfg.fadc_composite_tag && n.type == DATA_COMPOSITE)
                     e.nrocs++;
             }
 
-            // --- verify tag = 0x80 + event_type ---
             e.tag_matches = (e.event_tag == (0x80u + e.ti_event_type));
 
-            // --- accumulate ---
             physics++;
             entries.push_back(e);
 
@@ -1079,7 +1063,6 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
                       << std::setfill(' ') << std::dec
                       << std::setw(6) << e.nrocs;
 
-            // list active FP bit names
             std::cout << "  ";
             bool first = true;
             for (int i = 0; i < N_FP_BITS; ++i) {
@@ -1150,7 +1133,6 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
               << std::hex << std::setw(8) << std::setfill('0') << TS_FP_MASK
               << std::setfill(' ') << std::dec << ") ---\n";
 
-    // header
     std::cout << std::setw(5) << "bit" << std::setw(12) << "hex"
               << "  " << std::setw(30) << std::left << "name" << std::right
               << std::setw(8) << "total";
@@ -1163,12 +1145,11 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
         int bit = fp_bits[i].bit;
         bool in_mask = (TS_FP_MASK & fp_bits[i].mask) != 0;
 
-        // count total across all tags
         int total = 0;
         for (auto &[tag, ts] : tag_stats)
             total += ts.fp_bit_counts[bit];
 
-        if (total == 0 && !in_mask) continue; // skip unused bits not in mask
+        if (total == 0 && !in_mask) continue;
 
         std::cout << std::setw(5) << bit
                   << "  0x" << std::hex << std::setw(8) << std::setfill('0')
@@ -1183,14 +1164,8 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
     }
     std::cout << "\n  * = in TS_FP_INPUT_MASK\n";
 
-    // === Check d[4] vs d[0] consistency ===
+    // === TI event-header nwords distribution ===
     std::cout << "\n--- TI Event Header vs d[4] ---\n";
-    int d4_match = 0, d4_mismatch = 0, d4_unavail = 0;
-    for (auto &e : entries) {
-        if (e.ti_nwords <= 3) { d4_unavail++; continue; }
-        // We don't have d[4] stored; but we can verify TI type from d[0]
-        // matches event_tag. Already done above.
-    }
     std::cout << "  (d[4] check requires direct bank access — use -m event -n N for individual inspection)\n";
     std::cout << "  TI event header nwords distribution:\n";
     std::map<uint32_t, int> nwords_dist;
@@ -1215,8 +1190,6 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
 // non-physics rows since they share the run.
 static int doTriggers(EvChannel &ch, bool verbose)
 {
-    static constexpr double TI_TICK_SEC = 4e-9;
-
     int record = 0, decoded = 0;
     // key: (event_type, trigger_bits) → count
     std::map<std::pair<EventType, uint32_t>, int> trig_counts;
@@ -1253,12 +1226,7 @@ static int doTriggers(EvChannel &ch, bool verbose)
             }
 
             if (verbose) {
-                const char *et_name =
-                    et == EventType::Physics ? "Physics" :
-                    et == EventType::Epics   ? "Epics"   :
-                    et == EventType::Sync    ? "Sync"    :
-                    et == EventType::Unknown ? "Unknown" : "Other";
-                std::cout << std::setw(10) << et_name
+                std::cout << std::setw(10) << event_type_name(et)
                           << std::setw(8) << info.event_number
                           << std::setw(10) << info.trigger_number
                           << "    0x" << std::hex << std::setw(8)
@@ -1271,7 +1239,7 @@ static int doTriggers(EvChannel &ch, bool verbose)
     }
 
     double duration_sec = (last_ts > first_ts)
-        ? static_cast<double>(last_ts - first_ts) * TI_TICK_SEC
+        ? static_cast<double>(last_ts - first_ts) * fdec::TI_TICK_SEC
         : 0.0;
 
     std::cout << "=== Trigger Bits Summary (" << decoded << " events";
@@ -1286,12 +1254,7 @@ static int doTriggers(EvChannel &ch, bool verbose)
               << std::setw(14) << "rate(Hz)" << std::right << "\n";
     std::cout << "  " << std::string(48, '-') << "\n";
     for (auto &[key, cnt] : trig_counts) {
-        const char *et_name =
-            key.first == EventType::Physics ? "Physics" :
-            key.first == EventType::Epics   ? "Epics"   :
-            key.first == EventType::Sync    ? "Sync"    :
-            key.first == EventType::Unknown ? "Unknown" : "Other";
-        std::cout << "  " << std::setw(10) << std::left << et_name << std::right
+        std::cout << "  " << std::setw(10) << std::left << event_type_name(key.first) << std::right
                   << "  0x" << std::hex << std::setw(8) << std::setfill('0')
                   << key.second << std::dec << std::setfill(' ') << "  "
                   << std::setw(10) << cnt;
@@ -1326,50 +1289,27 @@ struct BankStat {
     size_t min_words = SIZE_MAX, max_words = 0;
     std::set<uint32_t> parent_tags;
     std::set<int> depths;
+
+    void add(size_t words)
+    {
+        count++;
+        min_words = std::min(min_words, words);
+        max_words = std::max(max_words, words);
+    }
 };
 
-// Known data-bank tags (mirrors EvChannel.cpp table + infrastructure banks)
-struct BankTagInfo {
-    uint32_t    tag;
-    const char *name;
-    const char *status;   // "decoded", "skipped", "info"
-};
-static const BankTagInfo bank_tag_info[] = {
-    { 0xC000, "CODA trigger bank",    "decoded" },
-    { 0xE10A, "TI/TS",                "decoded" },
-    { 0xE101, "FADC250 composite",    "decoded" },
-    { 0xE109, "FADC250 raw",          "decoded" },
-    { 0xE120, "ADC1881M (Fastbus)",   "decoded" },
-    { 0xE10C, "SSP",                  "decoded" },
-    { 0x0DE9, "VTP/MPD (GEM)",        "decoded" },
-    { 0xE10F, "Run info",             "decoded" },
-    { 0xE10E, "DAQ config string",    "info"    },
-    { 0xE10B, "V1190/V1290 TDC",      "no decoder" },
-    { 0xE141, "FAV3 (FADC v3)",       "no decoder" },
-    { 0xE104, "VSCM",                 "no decoder" },
-    { 0xE105, "DCRB/DC/Vetroc",       "no decoder" },
-    { 0xE115, "DSC2 scaler",          "no decoder" },
-    { 0xE112, "HEAD bank",            "no decoder" },
-    { 0xE123, "SSP-RICH",             "no decoder" },
-    { 0xE125, "Per-slot data",        "no decoder" },
-    { 0xE131, "VFTDC",                "no decoder" },
-    { 0xE133, "Helicity Decoder",     "no decoder" },
-    { 0xE140, "Special (pid=0)",      "no decoder" },
-};
-
-static const BankTagInfo *findBankInfo(uint32_t tag)
+static void print_word_range(const BankStat &s)
 {
-    for (auto &b : bank_tag_info)
-        if (b.tag == tag) return &b;
-    return nullptr;
+    if (s.min_words == s.max_words)
+        std::cout << std::setw(14) << s.min_words;
+    else
+        std::cout << std::setw(6) << s.min_words << " - " << std::setw(6) << s.max_words;
 }
 
 static int doBankDebug(EvChannel &ch, bool verbose)
 {
     const auto &cfg = ch.GetConfig();
 
-    // --- per-depth, per-tag stats ---
-    // key: (depth << 16 | is_container << 15 | 0) for containers, (depth << 16 | tag) for leaf
     std::map<uint32_t, BankStat> depth0_tags;   // event-level tags
     std::map<uint32_t, BankStat> depth1_tags;   // ROC or flat data banks
     std::map<uint64_t, BankStat> depth2_tags;   // data banks keyed by (parent_tag << 32 | tag)
@@ -1387,11 +1327,8 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         if (nodes.empty()) continue;
         auto &ev = nodes[0];
 
-        // track event tag
         auto &es = depth0_tags[ev.tag];
-        es.count++;
-        es.min_words = std::min(es.min_words, ev.data_words);
-        es.max_words = std::max(es.max_words, ev.data_words);
+        es.add(ev.data_words);
         es.depths.insert(0);
 
         // classify event structure: built (all depth-1 children are containers)
@@ -1407,27 +1344,21 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         else if (!has_container && has_leaf) n_flat++;
         else if (has_container && has_leaf)  n_mixed++;
 
-        // walk depth-1 children
         for (size_t ci = 0; ci < ev.child_count; ++ci) {
             auto &d1 = nodes[ev.child_first + ci];
             bool is_cont = IsContainer(d1.type) || d1.type == DATA_BANK2;
 
             auto &d1s = depth1_tags[d1.tag];
-            d1s.count++;
-            d1s.min_words = std::min(d1s.min_words, d1.data_words);
-            d1s.max_words = std::max(d1s.max_words, d1.data_words);
+            d1s.add(d1.data_words);
             d1s.depths.insert(is_cont ? 1 : -1); // -1 = flat leaf at depth 1
             d1s.parent_tags.insert(ev.tag);
 
-            // if container, walk depth-2 children
             if (is_cont) {
                 for (size_t di = 0; di < d1.child_count; ++di) {
                     auto &d2 = nodes[d1.child_first + di];
                     uint64_t key = (uint64_t(d1.tag) << 32) | d2.tag;
                     auto &d2s = depth2_tags[key];
-                    d2s.count++;
-                    d2s.min_words = std::min(d2s.min_words, d2.data_words);
-                    d2s.max_words = std::max(d2s.max_words, d2.data_words);
+                    d2s.add(d2.data_words);
                     d2s.depths.insert(2);
                     d2s.parent_tags.insert(d1.tag);
                 }
@@ -1439,27 +1370,21 @@ static int doBankDebug(EvChannel &ch, bool verbose)
     std::cout << "=== Bank Structure Debug (" << nphysics << " physics events, "
               << nrecords << " records) ===\n\n";
 
-    // event structure classification
     std::cout << "--- Event Structure ---\n"
               << "  Built (ROC containers at depth 1): " << n_built << "\n"
               << "  Flat  (data banks at depth 1):     " << n_flat << "\n"
               << "  Mixed (both):                      " << n_mixed << "\n\n";
 
-    // depth 0: event tags
     std::cout << "--- Depth 0: Event Tags ---\n"
               << std::setw(10) << "tag" << std::setw(8) << "count"
               << std::setw(16) << "size (words)" << "  label\n"
               << std::string(52, '-') << "\n";
     for (auto &[tag, s] : depth0_tags) {
         std::cout << "  " << hex(tag) << std::setw(8) << s.count << "  ";
-        if (s.min_words == s.max_words)
-            std::cout << std::setw(14) << s.min_words;
-        else
-            std::cout << std::setw(6) << s.min_words << " - " << std::setw(6) << s.max_words;
+        print_word_range(s);
         std::cout << "  " << tag_label(tag) << "\n";
     }
 
-    // depth 1: ROC crates and flat data banks
     std::cout << "\n--- Depth 1: ROC Crates / Flat Data Banks ---\n"
               << std::setw(10) << "tag" << std::setw(8) << "count"
               << std::setw(16) << "size (words)" << std::setw(10) << "layout"
@@ -1470,42 +1395,18 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         bool as_flat = s.depths.count(-1) > 0;
 
         std::cout << "  " << hex(tag) << std::setw(8) << s.count << "  ";
-        if (s.min_words == s.max_words)
-            std::cout << std::setw(14) << s.min_words;
-        else
-            std::cout << std::setw(6) << s.min_words << " - " << std::setw(6) << s.max_words;
+        print_word_range(s);
 
-        // layout column
         if (as_container && as_flat)      std::cout << std::setw(10) << "BOTH";
         else if (as_container)            std::cout << std::setw(10) << "container";
         else                              std::cout << std::setw(10) << "flat";
 
-        // identity
-        std::cout << "  ";
-        if (tag == cfg.trigger_bank_tag)  std::cout << "TRIGGER BANK";
-        else if (tag == cfg.ti_master_tag) std::cout << "TI MASTER";
-        else {
-            // check roc_tags
-            bool found = false;
-            for (auto &re : cfg.roc_tags) {
-                if (re.tag == tag) {
-                    std::cout << re.name;
-                    if (!re.type.empty()) std::cout << " [" << re.type << "]";
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                // check known data bank tags (for flat events)
-                auto *bi = findBankInfo(tag);
-                if (bi) std::cout << bi->name << " (" << bi->status << ")";
-                else    std::cout << "*** UNKNOWN ***";
-            }
-        }
-        std::cout << "\n";
+        std::string id = tag_description(tag, 1, cfg);
+        if (id.empty() && !(id = tag_description(tag, 2, cfg)).empty())
+            id += bank_decoder(tag, cfg) ? " (decoded)" : " (no decoder)";
+        std::cout << "  " << (id.empty() ? "*** UNKNOWN ***" : id) << "\n";
     }
 
-    // depth 2: data banks inside ROC containers
     std::cout << "\n--- Depth 2: Data Banks Inside ROC Crates ---\n"
               << std::setw(10) << "parent" << std::setw(10) << "tag"
               << std::setw(8) << "count" << std::setw(16) << "size (words)"
@@ -1518,27 +1419,12 @@ static int doBankDebug(EvChannel &ch, bool verbose)
 
         std::cout << "  " << hex(parent) << "  " << hex(tag)
                   << std::setw(8) << s.count << "  ";
-        if (s.min_words == s.max_words)
-            std::cout << std::setw(14) << s.min_words;
-        else
-            std::cout << std::setw(6) << s.min_words << " - " << std::setw(6) << s.max_words;
+        print_word_range(s);
 
-        // dispatch status
         std::cout << "  ";
-        if (tag == cfg.ti_bank_tag)           std::cout << "-> decodeTIBank()";
-        else if (tag == cfg.run_info_tag)     std::cout << "-> decodeRunInfo()";
-        else if (tag == cfg.fadc_composite_tag) std::cout << "-> Fadc250Decoder";
-        else if (tag == cfg.fadc_raw_tag)     std::cout << "-> Fadc250RawDecoder";
-        else if (cfg.is_ssp_bank(tag))        std::cout << "-> SspDecoder";
-        else if (tag == 0xE122)               std::cout << "-> VtpDecoder";
-        else if (tag == cfg.tdc_bank_tag)     std::cout << "-> TdcDecoder";
-        else if (tag == cfg.adc1881m_bank_tag) std::cout << "-> Adc1881mDecoder";
-        else if (tag == cfg.daq_config_tag)   std::cout << "-> skip (config string)";
-        else {
-            auto *bi = findBankInfo(tag);
-            if (bi)  std::cout << bi->name << " (" << bi->status << ")";
-            else     std::cout << "*** UNKNOWN — not dispatched ***";
-        }
+        if (auto *m = bank_decoder(tag, cfg)) std::cout << "-> " << m;
+        else if (auto *k = known_bank_name(tag)) std::cout << k << " (no decoder)";
+        else std::cout << "*** UNKNOWN — not dispatched ***";
         // flag if parent is not a known ROC
         bool parent_known = (parent == cfg.ti_master_tag);
         for (auto &re : cfg.roc_tags)
@@ -1549,25 +1435,14 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         std::cout << "\n";
     }
 
-    // summary of dispatch coverage
     std::cout << "\n--- Dispatch Coverage ---\n";
     int total_d2 = 0, dispatched_d2 = 0, skipped_d2 = 0, unknown_d2 = 0;
     for (auto &[key, s] : depth2_tags) {
         uint32_t tag = static_cast<uint32_t>(key & 0xFFFFFFFF);
         total_d2 += s.count;
-        if (tag == cfg.ti_bank_tag || tag == cfg.run_info_tag ||
-            tag == cfg.fadc_composite_tag || tag == cfg.fadc_raw_tag ||
-            cfg.is_ssp_bank(tag) || tag == cfg.adc1881m_bank_tag ||
-            tag == cfg.tdc_bank_tag || tag == 0xE122)
-            dispatched_d2 += s.count;
-        else if (tag == cfg.daq_config_tag ||
-                 (findBankInfo(tag) && std::string(findBankInfo(tag)->status) == "info"))
-            skipped_d2 += s.count;
-        else {
-            auto *bi = findBankInfo(tag);
-            if (bi)  skipped_d2 += s.count;   // known but no decoder
-            else     unknown_d2 += s.count;
-        }
+        if (bank_decoder(tag, cfg))    dispatched_d2 += s.count;
+        else if (known_bank_name(tag)) skipped_d2 += s.count;
+        else                           unknown_d2 += s.count;
     }
     std::cout << "  Total depth-2 banks:  " << total_d2 << "\n"
               << "  Dispatched (decoded): " << dispatched_d2 << "\n"
@@ -1575,12 +1450,7 @@ static int doBankDebug(EvChannel &ch, bool verbose)
               << "  Unknown:              " << unknown_d2 << "\n";
 
     if (verbose) {
-        // per-event detail: print the first few events showing their structure
         std::cout << "\n--- First 5 Event Structures ---\n";
-        EvChannel ch2;
-        ch2.SetConfig(cfg);
-        // reopen not practical; this would need a separate pass.
-        // Instead, point user to -m tree mode.
         std::cout << "  (use -m tree -n 5 for per-event bank tree)\n";
     }
 
@@ -1598,7 +1468,7 @@ static void usage(const char *prog)
         << "  -m tree       Print bank tree\n"
         << "  -m tags       List all unique bank tags with stats\n"
         << "  -m epics      Dump all EPICS event text\n"
-        << "  -m vtp        Decode 0xE122 VTP banks (blocks / EC peaks / EC clusters)\n"
+        << "  -m vtp        Decode 0xE122 VTP banks (blocks / EC peaks / EC clusters / PRAD clusters)\n"
         << "  -m rf         Decode RF time TDC hits (ROC 0x40, bank 0xE107)\n"
         << "  -m event      Detailed dump of a single record\n"
         << "  -m triggers   List trigger bit counts (add -v for per-event detail)\n"
@@ -1606,8 +1476,10 @@ static void usage(const char *prog)
         << "  -m bank-debug Verify bank structure, depth layout, and dispatch coverage\n\n"
         << "Options:\n"
         << "  -D <file>     DAQ configuration (auto-searches daq_config.json if omitted)\n"
-        << "  -n <N>        Number of events (tree mode, default 5) or event number (event mode)\n"
-        << "  -v            Verbose output (triggers mode: print every event)\n";
+        << "  -n <N>        Number of events (tree/epics/vtp/rf modes, default 5; epics: 0 = all)\n"
+        << "                or 1-based record number (event mode)\n"
+        << "  -v            Verbose output (triggers/trig-debug modes: print every event)\n"
+        << "  -h            Show this help\n";
 }
 
 int main(int argc, char *argv[])
@@ -1630,26 +1502,8 @@ int main(int argc, char *argv[])
     if (optind >= argc) { usage(argv[0]); return 1; }
     std::string path = argv[optind];
 
-    // auto-search for daq_config.json if not specified.  Prefer the
-    // install-aware resolver (env var → exe-relative → compile default),
-    // then fall back to CWD-relative paths for dev-in-tree runs.
-    if (daq_config_file.empty()) {
-        std::string db_dir = prad2::resolve_data_dir(
-            "PRAD2_DATABASE_DIR",
-            {"../share/prad2evviewer/database"},
-            DATABASE_DIR);
-        if (!db_dir.empty()) {
-            std::string cand = db_dir + "/daq_config.json";
-            std::ifstream f(cand);
-            if (f.good()) daq_config_file = std::move(cand);
-        }
-    }
-    if (daq_config_file.empty()) {
-        for (auto p : {"daq_config.json", "database/daq_config.json", "../database/daq_config.json"}) {
-            std::ifstream f(p);
-            if (f.good()) { daq_config_file = p; break; }
-        }
-    }
+    if (daq_config_file.empty())
+        daq_config_file = prad2::find_database_file("daq_config.json");
 
     evc::DaqConfig daq_cfg;
     if (daq_config_file.empty() || !evc::load_daq_config(daq_config_file, daq_cfg)) {

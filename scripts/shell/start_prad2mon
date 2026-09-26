@@ -1,15 +1,15 @@
 #!/bin/tcsh -f
 # ───────────────────────────────────────────────────────────────────────
-# prad2_server_tmux_template — start / stop / restart prad2_server
+# start_prad2mon — start / stop / restart prad2_server
 # inside a detached tmux session with stdout/stderr tee'd to a console
 # log so crashes leave a trail.
 #
 # Template — NOT installed by `make install`.  Copy it to a convenient
-# location (e.g. ~/bin/prad2_server_tmux.csh), tweak the config block
+# location (e.g. ~/bin/start_prad2mon), tweak the config block
 # for your site, and `chmod +x` the copy.
 #
 # Usage:  start_prad2mon [start|stop|restart|status]
-#         (default: start — preserves bare-invocation behaviour)
+#         (default: start)
 #
 # Prerequisite: source prad2_setup.csh first so prad2_server is on PATH
 # and LD_LIBRARY_PATH picks up the installed shared libraries (evio, …).
@@ -46,8 +46,8 @@ endif
 # source $REMOTE_ENV (the user's wrapper that activates the venv and
 # sources prad2_setup.csh) before re-invoking ourselves on the remote.
 # Assumes $0 resolves on the target host too — true on JLab hall setups
-# where /home is NFS-mounted. Uses a prefix glob so both "clondaq6"
-# and "clondaq6.jlab.org" match.  ${argv:q} preserves the subcommand
+# where /home is NFS-mounted. Uses a prefix glob so both "clondaq2"
+# and "clondaq2.jlab.org" match.  ${argv:q} preserves the subcommand
 # across the hop so `start_prad2mon restart` works from any host.
 set THIS_HOST = `hostname`
 if ( "$THIS_HOST" !~ "${HOST_MACHINE}"* ) then
@@ -164,21 +164,6 @@ endif
 # ───────────────────────────────────────────────────────────────────────
 # Log rotation (optional — run via cron, or drop into /etc/logrotate.d/)
 #
-# Root-owned install (as /etc/logrotate.d/prad2_server):
-#
-#   /home/clasrun/prad2_daq/monitor/console.log {
-#       daily
-#       rotate 14
-#       missingok
-#       notifempty
-#       compress
-#       delaycompress
-#       copytruncate
-#       su clasrun clasrun
-#   }
-#
-# User-level (~/logrotate.prad2_server.conf, driven by a crontab entry):
-#
 #   /home/clasrun/prad2_daq/monitor/console.log {
 #       daily
 #       rotate 14
@@ -189,7 +174,9 @@ endif
 #       copytruncate
 #   }
 #
-# Crontab:
+# Root-owned install (as /etc/logrotate.d/prad2_server): add
+# `su clasrun clasrun` inside the block.  User-level
+# (~/logrotate.prad2_server.conf), driven by a crontab entry:
 #   5 0 * * * /usr/sbin/logrotate --state $HOME/.logrotate.state \
 #             $HOME/logrotate.prad2_server.conf
 #

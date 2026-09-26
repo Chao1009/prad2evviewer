@@ -4,9 +4,10 @@
 //   * Read `scalers` to extract one (event_number, ti_ticks, unix_time)
 //     pin per SYNC.  The min/max unix_time defines the run window.
 //   * Decode the daily VMDF v2 archive (default /data/prad2/hv_data) over
-//     that window via hv::HVDecoder, projecting to optional --channels.
-//   * For every HV / booster snapshot, interpolate the bracketing pins
-//     to get its (event_number_at_arrival, ti_ticks_at_arrival) — same
+//     that window via hv::HVDecoder, projecting to the optional -c channels.
+//   * For every HV / booster snapshot, map its wall-clock time onto TI ticks
+//     via the earliest SYNC pin and take the last `recon`/`events` entry at
+//     or before it as (event_number_at_arrival, ti_ticks_at_arrival) — same
 //     contract the existing `epics` tree uses.
 //   * Open the replay file in UPDATE mode and write five new trees:
 //
@@ -31,23 +32,20 @@
 //
 // CLI:
 //   prad2ana_replay_add_hv [-d <hv_dir>] [-c "ch1,ch2,..."] [-p <pad_s>]
-//                          [-f] file1.root [file2.root ...]
+//                          [-f] [-h] file1.root [file2.root ...]
 // Defaults:
 //   -d /data/prad2/hv_data   -p 30   (no -c → keep all channels)
 
 #include "HVDecoder.h"
 
 #include <TFile.h>
-#include <TKey.h>
 #include <TString.h>
 #include <TTree.h>
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <ctime>
 #include <getopt.h>
 #include <iostream>
@@ -68,10 +66,7 @@ const std::vector<const char *> kManagedTrees = {
     "hv", "hv_channels", "hv_booster", "hv_booster_channels", "hv_meta",
 };
 
-
-// ─────────────────────────────────────────────────────────────────────────
-// CLI
-// ─────────────────────────────────────────────────────────────────────────
+// ── CLI ──────────────────────────────────────────────────────────────────
 void usage(const char *prog)
 {
     std::fprintf(stderr,
@@ -114,11 +109,27 @@ std::string iso_utc(double unix_s)
     return buf;
 }
 
+std::string join(const std::vector<std::string> &items, const char *sep = ", ")
+{
+    std::string out;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i) out += sep;
+        out += items[i];
+    }
+    return out;
+}
 
-// ─────────────────────────────────────────────────────────────────────────
-// SYNC anchor + run window from the `scalers` tree.
-// ─────────────────────────────────────────────────────────────────────────
-//
+// Enables and binds one branch of a tree whose branches are otherwise
+// disabled; false when the tree has no such branch.
+bool enable_branch(TTree *t, const char *name, void *addr)
+{
+    if (!t->GetBranch(name)) return false;
+    t->SetBranchStatus(name, 1);
+    t->SetBranchAddress(name, addr);
+    return true;
+}
+
+// ── SYNC anchor + run window from the `scalers` tree ─────────────────────
 // We need two things from scalers:
 //
 //   * The run window — min/max of `unix_time` (excluding the 0 sentinel
@@ -131,10 +142,7 @@ std::string iso_utc(double unix_s)
 // The scalers tree records one row per (source, channel, slot) per
 // SYNC, so within one SYNC all rows share (event_number, ti_ticks,
 // unix_time).  We deduplicate to one entry per SYNC and pick the
-// earliest as the anchor.  Multiple SYNC pins are exposed (just the
-// (ti_ticks, unix_time_ms) pairs) so callers that want drift-aware
-// fits can still get them.
-//
+// earliest as the anchor.
 struct SyncRow {
     Int_t    event_number;
     Long64_t ti_ticks;
@@ -161,15 +169,9 @@ bool read_scaler_pins(const std::string &path,
     Long64_t ti_ticks     = 0;
     UInt_t   unix_time    = 0;
     t->SetBranchStatus("*", 0);
-    auto enable = [&](const char *name, void *addr) {
-        if (!t->GetBranch(name)) return false;
-        t->SetBranchStatus(name, 1);
-        t->SetBranchAddress(name, addr);
-        return true;
-    };
-    if (!enable("event_number", &event_number) ||
-        !enable("ti_ticks",     &ti_ticks)     ||
-        !enable("unix_time",    &unix_time))
+    if (!enable_branch(t, "event_number", &event_number) ||
+        !enable_branch(t, "ti_ticks",     &ti_ticks)     ||
+        !enable_branch(t, "unix_time",    &unix_time))
     {
         err = path + ": scalers tree missing event_number / ti_ticks / unix_time";
         return false;
@@ -203,11 +205,7 @@ bool read_scaler_pins(const std::string &path,
     return true;
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────
-// Read the events / recon tree's (event_num, timestamp) columns.
-// ─────────────────────────────────────────────────────────────────────────
-//
+// ── Read the events / recon tree's (event_num, timestamp) columns ────────
 // `timestamp` is the per-event 48-bit TI tick (4 ns/tick) — the canonical
 // "time within the run" that links physics events, scaler SYNC banks, and
 // EPICS arrival rows.  `event_num` is the integer event id used as the
@@ -216,7 +214,6 @@ bool read_scaler_pins(const std::string &path,
 //
 // We try `recon` first (the recon-tree convention), then `events` (raw
 // replay output).  Both carry the same branch names.
-//
 bool read_event_table(const std::string &path,
                       std::vector<int32_t> &event_num,
                       std::vector<int64_t> &ti_ticks,
@@ -245,13 +242,7 @@ bool read_event_table(const std::string &path,
     Int_t    en = 0;
     Long64_t ts = 0;
     t->SetBranchStatus("*", 0);
-    auto enable = [&](const char *name, void *addr) {
-        if (!t->GetBranch(name)) return false;
-        t->SetBranchStatus(name, 1);
-        t->SetBranchAddress(name, addr);
-        return true;
-    };
-    if (!enable("event_num", &en) || !enable("timestamp", &ts)) {
+    if (!enable_branch(t, "event_num", &en) || !enable_branch(t, "timestamp", &ts)) {
         err = path + ": " + tree_name + " missing event_num / timestamp";
         return false;
     }
@@ -288,16 +279,11 @@ bool read_event_table(const std::string &path,
     return true;
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────
-// V0Set / VSet / ISet matrix reconstruction.
-// ─────────────────────────────────────────────────────────────────────────
-//
+// ── V0Set / VSet / ISet matrix reconstruction ────────────────────────────
 // The segment carries CHTABLE / BOOSTER_TABLE event lists; for analysis
 // it's nicer to have the active setpoints aligned with each snapshot row.
 // "Most runs only have one CHTABLE event" so the resulting matrix is
 // almost a tiled row, and ROOT's compression collapses it.
-//
 std::vector<float> build_v0set_matrix(const hv::HVSegment &seg)
 {
     const int n_snap = seg.n_snapshots();
@@ -342,10 +328,25 @@ void build_booster_setpoint_matrices(const hv::HVSegment &seg,
     }
 }
 
+// Registry tree in the current directory: one entry per name, with its index
+// in <id_branch>/s and the name in name/C.
+void write_registry(const char *tree_name, const char *title, const char *id_branch,
+                    const std::vector<std::string> &names)
+{
+    UShort_t id = 0;
+    char     name_buf[64] = {0};
+    TTree *t = new TTree(tree_name, title);
+    t->Branch(id_branch, &id, (std::string(id_branch) + "/s").c_str());
+    t->Branch("name",    name_buf, "name/C");
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        id = static_cast<UShort_t>(i);
+        std::snprintf(name_buf, sizeof(name_buf), "%s", names[i].c_str());
+        t->Fill();
+    }
+    t->Write(tree_name, TObject::kOverwrite);
+}
 
-// ─────────────────────────────────────────────────────────────────────────
-// per-file driver
-// ─────────────────────────────────────────────────────────────────────────
+// ── per-file driver ──────────────────────────────────────────────────────
 struct Summary {
     int        n_channels       = 0;
     int        n_boosters       = 0;
@@ -356,13 +357,10 @@ struct Summary {
     int        n_sync_pins      = 0;
     int        n_events         = 0;
     std::string event_tree_name;
-    int64_t    anchor_ti_ticks  = 0;
-    int64_t    anchor_unix_ms   = 0;
     int32_t    ev_first         = -1;
     int32_t    ev_last          = -1;
     int        interval_ms      = 0;
     std::vector<std::string> source_archive;
-    std::vector<std::string> channels;
     std::vector<std::string> booster_names;
     std::vector<std::string> overwrote;
 };
@@ -393,8 +391,6 @@ bool process_file(const std::string &path,
     out_summary.run_t_start_unix = t_start;
     out_summary.run_t_end_unix   = t_end;
     out_summary.n_sync_pins      = int(pins.size());
-    out_summary.anchor_ti_ticks  = anchor_ti_ticks;
-    out_summary.anchor_unix_ms   = anchor_unix_ms;
 
     std::cout << "  run window  : " << iso_utc(t_start) << " → "
               << iso_utc(t_end) << "  (" << (t_end - t_start)
@@ -455,7 +451,7 @@ bool process_file(const std::string &path,
     std::vector<float> bvset_matrix, biset_matrix;
     build_booster_setpoint_matrices(seg, bvset_matrix, biset_matrix);
 
-    // ── 5. write trees in UPDATE mode ───────────────────────────────────
+    // ── 6. write trees in UPDATE mode ───────────────────────────────────
     std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "UPDATE"));
     if (!f || f->IsZombie()) {
         err = "cannot open " + path + " for UPDATE";
@@ -478,7 +474,6 @@ bool process_file(const std::string &path,
     out_summary.n_booster_snaps = n_bsnap;
     out_summary.interval_ms     = seg.interval_ms;
     out_summary.source_archive  = seg.source_files;
-    out_summary.channels        = seg.channels;
     out_summary.booster_names   = seg.booster_names;
 
     // ── hv tree ─────────────────────────────────────────────────────────
@@ -523,22 +518,8 @@ bool process_file(const std::string &path,
         t_hv->Write("hv", TObject::kOverwrite);
     }
 
-    // ── hv_channels tree ────────────────────────────────────────────────
-    {
-        UShort_t channel_id = 0;
-        char     name_buf[64] = {0};
-        TTree *t_ch = new TTree("hv_channels",
-            "HV channel registry (channel_id ↔ name)");
-        t_ch->Branch("channel_id", &channel_id, "channel_id/s");
-        t_ch->Branch("name",       name_buf,    "name/C");
-        for (int i = 0; i < n_ch; ++i) {
-            channel_id = static_cast<UShort_t>(i);
-            std::snprintf(name_buf, sizeof(name_buf), "%s",
-                          seg.channels[i].c_str());
-            t_ch->Fill();
-        }
-        t_ch->Write("hv_channels", TObject::kOverwrite);
-    }
+    write_registry("hv_channels", "HV channel registry (channel_id ↔ name)",
+                   "channel_id", seg.channels);
 
     // ── booster trees (only when present) ───────────────────────────────
     if (n_bst > 0 && n_bsnap > 0) {
@@ -581,21 +562,9 @@ bool process_file(const std::string &path,
         t_b->Write("hv_booster", TObject::kOverwrite);
     }
 
-    if (n_bst > 0) {
-        UShort_t booster_id = 0;
-        char     name_buf[64] = {0};
-        TTree *t_bch = new TTree("hv_booster_channels",
-            "Booster registry (booster_id ↔ name)");
-        t_bch->Branch("booster_id", &booster_id, "booster_id/s");
-        t_bch->Branch("name",       name_buf,    "name/C");
-        for (int i = 0; i < n_bst; ++i) {
-            booster_id = static_cast<UShort_t>(i);
-            std::snprintf(name_buf, sizeof(name_buf), "%s",
-                          seg.booster_names[i].c_str());
-            t_bch->Fill();
-        }
-        t_bch->Write("hv_booster_channels", TObject::kOverwrite);
-    }
+    if (n_bst > 0)
+        write_registry("hv_booster_channels", "Booster registry (booster_id ↔ name)",
+                       "booster_id", seg.booster_names);
 
     // ── hv_meta tree ────────────────────────────────────────────────────
     {
@@ -619,10 +588,6 @@ bool process_file(const std::string &path,
     return true;
 }
 
-
-// ─────────────────────────────────────────────────────────────────────────
-// summary printer
-// ─────────────────────────────────────────────────────────────────────────
 void print_summary(const std::string &path, const Summary &s)
 {
     std::cout << "  → wrote HV trees to " << path << "\n";
@@ -635,12 +600,7 @@ void print_summary(const std::string &path, const Summary &s)
                   << " entries × vmon/imon/vset/iset[" << s.n_boosters
                   << "]\n";
         std::cout << "     hv_booster_channels : " << s.n_boosters
-                  << " entries (";
-        for (std::size_t i = 0; i < s.booster_names.size(); ++i) {
-            if (i) std::cout << ", ";
-            std::cout << s.booster_names[i];
-        }
-        std::cout << ")\n";
+                  << " entries (" << join(s.booster_names) << ")\n";
     }
     std::cout << "     hv_meta             : 1 entry (interval="
               << s.interval_ms << " ms)\n";
@@ -654,31 +614,14 @@ void print_summary(const std::string &path, const Summary &s)
                   << "`, anchored to " << s.n_sync_pins
                   << " SYNC pin" << (s.n_sync_pins == 1 ? "" : "s") << ")\n";
     }
-    std::cout << "     HV archive  : ";
-    if (s.source_archive.empty()) std::cout << "(none)";
-    else {
-        for (std::size_t i = 0; i < s.source_archive.size(); ++i) {
-            if (i) std::cout << ", ";
-            std::cout << s.source_archive[i];
-        }
-    }
-    std::cout << "\n";
-    if (!s.overwrote.empty()) {
-        std::cout << "     overwrote   : ";
-        for (std::size_t i = 0; i < s.overwrote.size(); ++i) {
-            if (i) std::cout << ", ";
-            std::cout << s.overwrote[i];
-        }
-        std::cout << " (old cycles purged)\n";
-    }
+    std::cout << "     HV archive  : "
+              << (s.source_archive.empty() ? "(none)" : join(s.source_archive)) << "\n";
+    if (!s.overwrote.empty())
+        std::cout << "     overwrote   : " << join(s.overwrote) << " (old cycles purged)\n";
 }
 
 } // anonymous namespace
 
-
-// ─────────────────────────────────────────────────────────────────────────
-// main
-// ─────────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
     std::string hv_dir = kDefaultHvDir;

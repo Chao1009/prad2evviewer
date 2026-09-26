@@ -11,11 +11,9 @@
 #include <limits>
 
 using namespace evc;
-using json = nlohmann::json;
 
 #ifdef WITH_ET
 
-// =========================================================================
 // Tagger live-stream frame format
 //
 // Header (little-endian, 24 bytes, matches the dtype expected by
@@ -36,7 +34,6 @@ using json = nlohmann::json;
 //   uint8_t  slot;
 //   uint8_t  channel_edge;    // bit 7 = edge, bits 6:0 = channel
 //   uint32_t tdc;             // raw V1190 TDC value (hardware-level name)
-// =========================================================================
 namespace {
 
 constexpr size_t TAGGER_HIT_SIZE    = 16;
@@ -74,8 +71,7 @@ void ViewerServer::etReaderThread()
     auto &ssp_evt = *ssp_ptr;
     auto tdc_ptr = std::make_unique<tdc::TdcEventData>();
     auto &tdc_evt = *tdc_ptr;
-    fdec::WaveAnalyzer ana(app_online_.daq_cfg.wave_cfg);
-    ana.SetTemplateStore(&app_online_.template_store);
+    auto ana = app_online_.makeAnalyzer();
     fdec::WaveResult wres;
     uint64_t last_ti_ts = 0;
     // Track run number observed in the physics stream — provides the
@@ -95,7 +91,6 @@ void ViewerServer::etReaderThread()
 
     auto tagger_flush = [&]() {
         if (tagger_batch_hits == 0) { tagger_batch_last_flush = std::chrono::steady_clock::now(); return; }
-        // Fill header in place.
         uint8_t *p = tagger_batch.data();
         std::memcpy(p + 0,  "TGR1", 4);
         uint32_t drops = static_cast<uint32_t>(tagger_dropped_frames_.load());
@@ -116,7 +111,6 @@ void ViewerServer::etReaderThread()
     };
 
     while (running_) {
-        // sleep until activated
         while (running_ && !et_active_) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -184,8 +178,7 @@ void ViewerServer::etReaderThread()
                 }
                 if (!ch.Scan()) continue;
 
-                // skip monitoring events (TI only, no waveforms) — same
-                // as file viewer path in evio_data_source.cpp
+                // skip monitoring events (TI only, no waveforms)
                 if (app_online_.daq_cfg.is_monitoring(ch.GetEvHeader().tag))
                     continue;
 
@@ -195,8 +188,7 @@ void ViewerServer::etReaderThread()
                         et == EventType::End      || et == EventType::Sync)
                     {
                         const auto &s = ch.Sync();
-                        if (app_online_.sync_unix == 0 && s.unix_time != 0)
-                            app_online_.recordSyncTime(s.unix_time, last_ti_ts);
+                        app_online_.recordSyncTime(s.unix_time, last_ti_ts);
                         // Arm the 45-min schedule the moment we see a run
                         // number — idempotent on the same run, restarts
                         // the timer when the number changes.  PRESTART /
@@ -217,34 +209,8 @@ void ViewerServer::etReaderThread()
                         // timer there would wipe the prior run's data
                         // before the run-change branch (per-event loop)
                         // has a chance to capture it.
-                        if (et == EventType::End) {
-                            // Fix A: only fast-clear on END when either a
-                            // capture is in-flight (dispatch returned true,
-                            // pending_capture_ now set) OR a report for
-                            // this run is already saved on disk.  When the
-                            // END dispatch fails for lack of a client AND
-                            // we have no prior save, fall back to a long
-                            // (5 min) autoclear delay so the run-change
-                            // branch has a chance to retry the capture
-                            // with pre-wipe data.  scheduleAutoClear is
-                            // last-call-wins, so a run-change firing
-                            // inside that window will re-anchor to 5 s.
-                            int autoclear_delay_ms = 5000;
-                            if (app_online_.auto_report_enabled &&
-                                s.run_number > 0)
-                            {
-                                if (!dispatchCapture(s.run_number, "end")
-                                    && !hasSavedReportForRun(s.run_number))
-                                {
-                                    autoclear_delay_ms = 300000;  // 5 min
-                                    std::cerr << "AutoReport: deferring autoclear 5 min for run "
-                                              << s.run_number
-                                              << " — END dispatch produced nothing,"
-                                              << " awaiting run-change retry\n";
-                                }
-                            }
-                            scheduleAutoClear(autoclear_delay_ms);
-                        }
+                        if (et == EventType::End)
+                            captureAndScheduleClear(s.run_number, "end");
                     }
                 }
 
@@ -276,8 +242,7 @@ void ViewerServer::etReaderThread()
                     if (!ch.DecodeEvent(i, event, &ssp_evt, nullptr, tagger_arg)) continue;
                     last_ti_ts = event.info.timestamp;
 
-                    app_online_.processGemEvent(ssp_evt);
-                    app_online_.processEvent(event, ana, wres);
+                    app_online_.processEvent(event, &ssp_evt, ana, wres);
 
                     // Run-change branch — the primary capture trigger
                     // when a 2-hour run finishes before the 45-min timer
@@ -294,30 +259,8 @@ void ViewerServer::etReaderThread()
                     if (event.info.run_number > 0 &&
                         event.info.run_number != last_seen_run_)
                     {
-                        if (last_seen_run_ > 0) {
-                            // Same Fix-A guard as the END branch — without
-                            // it, a run-change firing 30 s after a deferred
-                            // END would re-anchor scheduleAutoClear from
-                            // 5 min back to 5 s (last-call-wins), wiping
-                            // the data before a late-arriving client can
-                            // capture it.  Trade-off: 5 min of new-run
-                            // events keep flowing into the unwiped
-                            // histograms — acceptable given the
-                            // alternative is losing the prior run's
-                            // report outright.
-                            int autoclear_delay_ms = 5000;
-                            if (app_online_.auto_report_enabled) {
-                                if (!dispatchCapture(last_seen_run_, "run-change")
-                                    && !hasSavedReportForRun(last_seen_run_))
-                                {
-                                    autoclear_delay_ms = 300000;  // 5 min
-                                    std::cerr << "AutoReport: deferring autoclear 5 min for run "
-                                              << last_seen_run_
-                                              << " — run-change dispatch produced nothing\n";
-                                }
-                            }
-                            scheduleAutoClear(autoclear_delay_ms);
-                        }
+                        if (last_seen_run_ > 0)
+                            captureAndScheduleClear(last_seen_run_, "run-change");
                         armScheduleForRun(event.info.run_number);
                         last_seen_run_ = event.info.run_number;
                     }
@@ -359,8 +302,7 @@ void ViewerServer::etReaderThread()
                         tagger_flush();
                     }
 
-                    if (app_online_.lms_trigger.accept != 0 &&
-                        app_online_.lms_trigger(event.info.trigger_bits)) {
+                    if (app_online_.lms_trigger.matchesExplicit(event.info.trigger_bits)) {
                         auto now = std::chrono::steady_clock::now();
                         if (now - last_lms_notify >= lms_notify_interval) {
                             last_lms_notify = now;
@@ -381,7 +323,7 @@ void ViewerServer::etReaderThread()
                         // for older ring events doesn't need to re-process
                         // gem_sys (which would clobber the live state used
                         // by /api/gem/hits etc.).  gem_sys was just filled
-                        // by processGemEvent above for this event.  The
+                        // by processEvent above for this event.  The
                         // out-param flags whether any APV came in full-
                         // readout, so we can encode the snapshot variant
                         // below only when there's actually a monitoring
@@ -395,29 +337,14 @@ void ViewerServer::etReaderThread()
                         // bytes (vs deflating the same ~1.3 MB JSON for
                         // each viewer × 5 Hz refresh).  Skip below the
                         // gzip threshold — the disabled stub is tiny.
-                        std::string gemapvgz;
-                        if (gemapvjson.size() >= prad2::kGzipMinBytes) {
-                            try {
-                                gemapvgz = prad2::gzip_compress(gemapvjson);
-                            } catch (...) {
-                                gemapvgz.clear();   // serve plain on failure
-                            }
-                        }
-
-                        // Snapshot raw event data so /api/hist_config can
-                        // recompute clusters under a new window without
-                        // waiting for the next live event.
-                        auto ev_copy  = std::make_shared<fdec::EventData>(event);
-                        auto ssp_copy = std::make_shared<ssp::SspEventData>(ssp_evt);
+                        std::string gemapvgz = prad2::gzip_if_large(gemapvjson);
 
                         {
                             std::lock_guard<std::mutex> lk(ring_mtx_);
                             ring_.push_back({seq, std::move(evjson),
                                              std::move(cljson),
                                              std::move(gemapvjson),
-                                             std::move(gemapvgz),
-                                             std::move(ev_copy),
-                                             std::move(ssp_copy)});
+                                             std::move(gemapvgz)});
                             while ((int)ring_.size() > ring_size_)
                                 ring_.pop_front();
                         }
@@ -435,14 +362,7 @@ void ViewerServer::etReaderThread()
                         if (any_full_readout) {
                             std::string fulljson =
                                 app_online_.apiGemApv(ssp_evt, seq, true, nullptr).dump();
-                            std::string fullgz;
-                            if (fulljson.size() >= prad2::kGzipMinBytes) {
-                                try {
-                                    fullgz = prad2::gzip_compress(fulljson);
-                                } catch (...) {
-                                    fullgz.clear();
-                                }
-                            }
+                            std::string fullgz = prad2::gzip_if_large(fulljson);
                             {
                                 std::lock_guard<std::mutex> lk(latest_full_apv_mtx_);
                                 latest_full_apv_json_ = std::move(fulljson);
@@ -504,15 +424,9 @@ double runShellNumber(const std::string &cmd)
 
 } // namespace
 
-// Single monitor-status poller for livetime + beam energy + current.
-// Each metric ticks on its own configured poll_sec (so a 3 s livetime and a
-// 5 s beam reading don't interfere) but they share one thread, since the
-// shell-out cost is the work — the thread itself is essentially free.
-//
 // Polls only while ET is active.  On bad output the value goes back to <0
 // (frontend hides the cell) — readings are snapshots, not integrated, so
-// transient parse failures self-heal on the next poll.  An empty command
-// skips that metric entirely.
+// transient parse failures self-heal on the next poll.
 void ViewerServer::monitorStatusPollThread()
 {
     struct Metric {
@@ -524,16 +438,14 @@ void ViewerServer::monitorStatusPollThread()
         int consecutive_failures;
     };
     std::vector<Metric> metrics;
-    auto add = [&](const char *label, const std::string &cmd, int sec,
+    auto add = [&](const char *label, const AppState::ShellMetric &m,
                    std::atomic<double> *slot) {
-        if (cmd.empty()) return;
-        metrics.push_back({label, cmd, std::max(1, sec), slot, 0, 0});
+        if (m.command.empty()) return;
+        metrics.push_back({label, m.command, m.poll_sec, slot, 0, 0});
     };
-    add("Livetime", app_file_.livetime_cmd, app_file_.livetime_poll_sec, &livetime_);
-    add("BeamE",    app_file_.beam_energy_status.command,
-                    app_file_.beam_energy_status.poll_sec,  &beam_energy_);
-    add("BeamI",    app_file_.beam_current_status.command,
-                    app_file_.beam_current_status.poll_sec, &beam_current_);
+    add("Livetime", app_file_.livetime_status,     &livetime_);
+    add("BeamE",    app_file_.beam_energy_status,  &beam_energy_);
+    add("BeamI",    app_file_.beam_current_status, &beam_current_);
 
     constexpr int TICK_MS = 100;        // 0.1 s — schedule resolution
     int auto_wd_in_ds = 50;             // 5 s between auto-report watchdog ticks
@@ -544,14 +456,13 @@ void ViewerServer::monitorStatusPollThread()
 
         // Auto-report watchdog — re-dispatch a stale capture_request to
         // the next alive client.  Runs even if no shell metrics are
-        // configured (so the early `if (metrics.empty()) return` was
-        // dropped — both halves share this loop now).
+        // configured.
         if (--auto_wd_in_ds <= 0) {
             auto_wd_in_ds = 50;
             autoReportWatchdog();
         }
 
-        // Deferred autoclear — fires the PRESTART-scheduled hist+lms+epics
+        // Deferred autoclear — fires the END / run-change hist+lms+epics
         // wipe once its countdown elapses, paused while a capture is in
         // flight.  TICK_MS resolution is plenty for a 5 s delay.
         tickAutoClear();

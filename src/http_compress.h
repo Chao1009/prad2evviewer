@@ -1,6 +1,5 @@
 #pragma once
-// =========================================================================
-// http_compress.h — gzip helpers for the HTTP layer.
+// gzip helpers for the HTTP layer.
 //
 // The viewer's biggest endpoint (gem_apv, ~1.3 MB JSON per event) is
 // highly compressible — typical 5-10× shrink.  Browsers always advertise
@@ -9,10 +8,8 @@
 //
 // Header-only so callers don't pull in a translation unit just to gzip a
 // small string; zlib does the heavy lifting.
-// =========================================================================
 
 #include <cctype>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -26,9 +23,7 @@ namespace prad2 {
 inline bool client_accepts_gzip(const std::string &accept_encoding)
 {
     if (accept_encoding.empty()) return false;
-    // Normalize to lower-case and look for a "gzip" token.  Browsers send
-    // "gzip, deflate, br" or similar; the substring check is robust enough
-    // because no other coding name contains "gzip".
+    // A substring check is enough: no other coding name contains "gzip".
     for (size_t i = 0; i + 4 <= accept_encoding.size(); ++i) {
         char a = std::tolower(static_cast<unsigned char>(accept_encoding[i + 0]));
         char b = std::tolower(static_cast<unsigned char>(accept_encoding[i + 1]));
@@ -82,7 +77,16 @@ inline std::string gzip_compress(const std::string &input, int level = 1)
 
 // Skip the compression cost on very small bodies — the gzip header alone
 // is ~20 bytes, and HTTP framing latency dwarfs the wire savings below
-// ~1 KB.  Tunable per-call by callers that know better.
+// ~1 KB.
 inline constexpr size_t kGzipMinBytes = 1024;
+
+// gzip `body` when it is at least kGzipMinBytes.  Returns an empty string
+// when skipped or when zlib fails; the caller then serves the plain body.
+inline std::string gzip_if_large(const std::string &body)
+{
+    if (body.size() < kGzipMinBytes) return {};
+    try { return gzip_compress(body); }
+    catch (...) { return {}; }
+}
 
 } // namespace prad2

@@ -26,8 +26,7 @@
 #include <array>
 #include <unordered_map>
 
-// Forward-declare SSP data types (from prad2dec)
-namespace ssp { struct SspEventData; struct ApvData; }
+#include "SspData.h"
 
 namespace gem
 {
@@ -48,11 +47,8 @@ struct StripCluster {
     float   peak_charge  = 0.f; // highest strip charge in cluster
     float   total_charge = 0.f; // sum of all strip charges
     short   max_timebin  = -1;
-    // CRITICAL: must be value-initialized.  filterClusters() reads
-    // this field; an uninitialized value (random heap byte) was the
-    // root cause of the cross-call non-determinism that made GEM0
-    // efficiency ~half the expected rate when reconstruct_hycal was
-    // interleaved with reconstruct_gem.
+    // CRITICAL: must be value-initialized — filterClusters() reads this
+    // field, and a garbage value drops clusters non-deterministically.
     bool    cross_talk   = false;
     std::vector<StripHit> hits;
 
@@ -133,9 +129,10 @@ struct ApvConfig {
     std::string match;
 
     // Pedestals (per-strip)
-    ApvPedestal pedestal[128];
+    ApvPedestal pedestal[ssp::APV_STRIP_SIZE];
 
-    // Common mode range (for Danning algorithm)
+    // Common-mode range from LoadCommonModeRange; not used by the
+    // reconstruction (processApv uses the sorting estimator).
     float cm_range_min = 0.f;
     float cm_range_max = 5000.f;
 };
@@ -176,7 +173,7 @@ int MapStrip(int ch, int plane_index, int orient,
              int  pin_rotate    = 0,
              int  shared_pos    = -1,
              bool hybrid_board  = true,
-             int  apv_channels  = 128,
+             int  apv_channels  = ssp::APV_STRIP_SIZE,
              int  readout_center = 32);
 
 // Convenience: compute plane-wide strip numbers for every channel of an APV.
@@ -185,14 +182,16 @@ std::vector<int> MapApvStrips(int plane_index, int orient,
                               int  pin_rotate    = 0,
                               int  shared_pos    = -1,
                               bool hybrid_board  = true,
-                              int  apv_channels  = 128,
+                              int  apv_channels  = ssp::APV_STRIP_SIZE,
                               int  readout_center = 32);
 
 // --- reconstruction config (per-detector knobs for GemCluster) --------------
 //
 // Lives here (rather than in GemCluster.h) so GemSystem can store one entry
-// per detector by value.  Defaults reproduce the historical mpd_gem_view_ssp
-// reconstruction chain.
+// per detector by value.  Defaults follow the mpd_gem_view_ssp reconstruction
+// chain, except that charac_dists is empty (cross-talk flagging off); the
+// production distances come from reconstruction_config.json
+// (gem.default.charac_dists).
 struct ClusterConfig {
     int   min_cluster_hits  = 1;
     int   max_cluster_hits  = 20;
@@ -200,7 +199,7 @@ struct ClusterConfig {
     float split_thres       = 14.f; // charge valley depth for splitting
     float cross_talk_width  = 2.f;  // mm
     float cross_talk_peak_ratio_max = 0.40f; // weak/strong peak ratio upper bound
-    std::vector<float> charac_dists;// cross-talk characteristic distances
+    std::vector<float> charac_dists;// cross-talk characteristic distances (mm); empty = off
 
     // XY matching mode: 0 = ADC-sorted 1:1, 1 = full Cartesian with cuts
     int   match_mode          = 1;
@@ -227,7 +226,7 @@ struct ClusterConfig {
 
 // --- GemSystem class --------------------------------------------------------
 
-class GemCluster;   // forward declaration
+class GemCluster;
 
 class GemSystem
 {
@@ -258,8 +257,8 @@ public:
     // --- reconstruction config ---------------------------------------------
     // Set per-detector clustering / XY-matching parameters.  Application
     // layer (app_state_init.cpp / Replay) supplies one ClusterConfig per
-    // detector after parsing reconstruction_config.json.  cfgs.size() must
-    // equal GetNDetectors(); shorter/longer vectors are clamped + padded
+    // detector after parsing reconstruction_config.json.  cfgs.size() should
+    // equal GetNDetectors(); longer vectors are truncated, shorter ones padded
     // with library defaults.  Reconstruct() applies entry [d] before
     // clustering each detector.
     void SetReconConfigs(std::vector<ClusterConfig> cfgs);
@@ -301,12 +300,12 @@ public:
     // Per-APV zero-suppression results (valid after ProcessEvent)
     bool  IsChannelHit(int apv_idx, int ch) const { return apv_work_[apv_idx].hit_pos[ch]; }
     bool  HasApvZsHits(int apv_idx) const {
-        for (int ch = 0; ch < APV_STRIP_SIZE; ++ch)
+        for (int ch = 0; ch < ssp::APV_STRIP_SIZE; ++ch)
             if (apv_work_[apv_idx].hit_pos[ch]) return true;
         return false;
     }
     float GetProcessedAdc(int apv_idx, int ch, int ts) const {
-        return apv_work_[apv_idx].raw[ts * APV_STRIP_SIZE + ch];
+        return apv_work_[apv_idx].raw[ts * ssp::APV_STRIP_SIZE + ch];
     }
 
     // Configuration
@@ -327,34 +326,27 @@ public:
 private:
     // --- per-APV processing -------------------------------------------------
     void processApv(int apv_idx, const ssp::ApvData &data);
-    float commonModeSorting(float *buf, int size, int apv_idx);
-    float commonModeDanning(float *buf, int size, int apv_idx);
+    static float commonModeSorting(const float *buf, int size);
     void collectHits(int apv_idx);
 
     // --- strip mapping ------------------------------------------------------
     void buildStripMap(int apv_idx);
+    // {min, max} mapped strip over the APVs of detectors_[det] on `plane`
+    // (match APVs only if match_only); min > max when there are none.
+    std::pair<int, int> stripRange(int det, int plane, bool match_only) const;
 
     // --- detector hierarchy -------------------------------------------------
     std::vector<DetectorConfig> detectors_;
     std::vector<ApvConfig> apvs_;
-    std::unordered_map<uint64_t, int> apv_map_;  // packed(crate,mpd,adc) → apv index
-
-    static uint64_t packApvKey(int crate, int mpd, int adc)
-    {
-        return (static_cast<uint64_t>(static_cast<uint16_t>(crate)) << 32) |
-               (static_cast<uint64_t>(static_cast<uint16_t>(mpd))  << 16) |
-               static_cast<uint64_t>(static_cast<uint16_t>(adc));
-    }
+    std::unordered_map<uint64_t, int> apv_map_;  // prad2::pack_daq_key(crate,mpd,adc) → apv index
 
     // --- per-APV working data (pre-allocated) -------------------------------
-    static constexpr int APV_STRIP_SIZE   = 128;
-    static constexpr int SSP_TIME_SAMPLES = 6;
     static constexpr int NUM_HIGH_STRIPS  = 20;  // for sorting CM algorithm
 
     struct ApvWorkData {
-        float raw[APV_STRIP_SIZE * SSP_TIME_SAMPLES];
-        bool  hit_pos[APV_STRIP_SIZE];
-        int   strip_map[APV_STRIP_SIZE];    // APV channel → plane strip
+        float raw[ssp::APV_STRIP_SIZE * ssp::SSP_TIME_SAMPLES];
+        bool  hit_pos[ssp::APV_STRIP_SIZE];
+        int   strip_map[ssp::APV_STRIP_SIZE];    // APV channel → plane strip
     };
     std::vector<ApvWorkData> apv_work_;
 
@@ -371,12 +363,12 @@ private:
     std::vector<GEMHit> all_hits_;
 
     // --- global APV parameters -----------------------------------------------
-    int   apv_channels_     = 128;     // channels per APV chip
+    int   apv_channels_     = ssp::APV_STRIP_SIZE;  // channels per APV chip
     int   readout_center_   = 32;      // default readout mapping center
 
     // --- thresholds.  zerosup_thres_ runs on both paths (full readout
-    // and online-ZS, see processApv).  common_thres_ is only used by the
-    // Danning common-mode algorithm in the full-readout pipeline.
+    // and online-ZS, see processApv).  common_thres_ and crosstalk_thres_
+    // are stored but not used by the reconstruction.
     float common_thres_     = 20.f;
     float zerosup_thres_    = 5.f;
     float crosstalk_thres_  = 8.f;
@@ -389,8 +381,7 @@ private:
 
     // --- per-detector reconstruction config (clustering + XY matching) ----
     // Sized to detectors_.size() during Init().  Library-default ClusterConfig
-    // until SetReconConfigs() supplies parsed values.  Reconstruct() applies
-    // entry [d] to the supplied GemCluster before clustering each detector.
+    // until SetReconConfigs() supplies parsed values.
     std::vector<ClusterConfig> per_det_cfgs_;
 };
 

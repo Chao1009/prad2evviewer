@@ -13,18 +13,22 @@
 #include "DaqConfig.h"
 #include "ConfigSetup.h"
 #include "load_daq_config.h"
+#include "HyCalSystem.h"
 #include "HyCalCluster.h"
 
 #include <TFile.h>
 #include <TTree.h>
 
+#include <array>
 #include <memory>
 #include <string>
-#include <unordered_map>
+#include <tuple>
+#include <vector>
+
+namespace gem { class GemSystem; class GemCluster; struct GEMHit; struct StripCluster; }
 
 namespace analysis {
 
-// Aliases for the shared replay data structures
 using EventVars       = prad2::RawEventData;
 using EventVars_Recon = prad2::ReconEventData;
 using LMSEventVars    = prad2::LMSEventData;
@@ -37,33 +41,24 @@ public:
     // Load DAQ configuration (event tags, ADC format, etc.).
     void LoadDaqConfig(const std::string &json_path) { evc::load_daq_config(json_path, daq_cfg_); }
 
-    // Load the merged HyCal map.  Populates both the (crate,slot,ch)→name
-    // DAQ lookup used by moduleName() and the name→ModuleType lookup used
-    // by moduleType().  The "t" field in each record ("PbGlass" / "PbWO4" /
-    // "Veto" / "LMS") is the single source of truth for category dispatch;
-    // entries without a "daq" block contribute to module_types_ but not
-    // daq_map_.  Calling this is strongly recommended — without it every
-    // channel returns MOD_UNKNOWN and module_id encoding falls back to
-    // HyCal-only conventions.
+    // Load the merged HyCal map that the (crate, slot, ch) lookups below use.
+    // The "t" field of each record ("PbGlass" / "PbWO4" / "Veto" / "LMS") is
+    // the single source of truth for category dispatch; entries without a
+    // "daq" block are not reachable by DAQ address.  Without a map every
+    // channel is unknown (MOD_UNKNOWN, module_id -1) and gets dropped.
     void LoadHyCalMap(const std::string &json_path);
 
+    // Module name of the channel, "" if it is not in the map.
     std::string moduleName(int roc, int slot, int ch) const;
-    // Returns the prad2::ModuleType enum for the channel, or MOD_UNKNOWN
-    // if (a) no DAQ-map entry exists, or (b) hycal_map.json wasn't loaded
-    // / doesn't contain this module.
+    // prad2::ModuleType of the channel, MOD_UNKNOWN if it is not in the map.
     prad2::ModuleType moduleType(int roc, int slot, int ch) const;
-    // Returns the globally-unique module_id (see RawEventData docs):
-    //   PbGlass : 1..1156      (G-module ID)
-    //   PbWO4   : 1001..2152   (W-module ID + 1000)
-    //   VETO    : 3001..3004   (V1..V4)
-    //   LMS     : 3100..3103   (LMSPin=3100, LMS1..3=3101..3103)
-    // Returns -1 if the module name is unknown.
+    // Globally-unique module_id, see RawEventData in EventData.h; -1 if unknown.
     int moduleID(int roc, int slot, int ch) const;
     // Reverse lookup: returns the (crate, slot, ch) tuple for a given module_id, or {-1,-1,-1}.
     std::tuple<int, int, int> moduleLocation(int module_id) const;
 
     // Convert an EVIO file to a ROOT file with a TTree.
-    // max_events <= 0 means process all. peaks=true adds peak branches.
+    // max_events <= 0 means process all. write_peaks adds peak branches.
     bool Process(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                  const std::string &db_dir, const std::string &recon_config_file,
                  int max_events = -1, bool write_peaks = false, const std::string &daq_config_file = "",
@@ -85,23 +80,27 @@ public:
                                 const std::string &db_dir, const std::string &daq_config_file);
 
 private:
-    void setupBranches(TTree *tree, EventVars &ev, bool write_peaks, bool Ecalib, bool noWaveform);
-    void clearEvent(EventVars &ev);
-
-    void setupReconBranches(TTree *tree, EventVars_Recon &ev, bool x17_mode = false, bool gem_hits = false);
-    void clearReconEvent(EventVars_Recon &ev);
-
-    void setupLMSBranches(TTree *tree, LMSEventVars &ev);
-    void clearLMSEvent(LMSEventVars &ev);
-
-
-    using DaqMap = std::unordered_map<std::string, std::string>;  // "roc_slot_ch" -> name
-    DaqMap daq_map_;
-    // name → ModuleType, populated by LoadHyCalMap().  Empty if the
-    // modules JSON wasn't loaded; moduleType() then returns MOD_UNKNOWN.
-    std::unordered_map<std::string, prad2::ModuleType> module_types_;
-    std::unordered_map<int, std::tuple<int, int, int>> module_locations_;
+    // Module lookups of moduleName/Type/ID/Location, filled by LoadHyCalMap().
+    fdec::HyCalSystem hycal_map_;
     evc::DaqConfig daq_cfg_;
 };
+
+// ── Re-processing raw replay trees ──────────────────────────────────────────
+
+// Re-derive npeaks and peak_height/time/integral of every PbWO4 channel from
+// its stored samples, for raw trees written without the peak branches.  No
+// module time offset is applied.
+void FillPeaksFromWaveforms(prad2::RawEventData &ev, const fdec::HyCalSystem &hycal,
+                            const fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
+
+// Re-run GEM clustering and X/Y matching, with gem_sys's per-detector
+// configs, on the strip hits stored in a raw tree (pedestal, common mode and
+// zero suppression already applied).  hits receives the 2D hits of all
+// detectors in detector order; plane_clusters, when given, the kept clusters
+// as [det][0 = X, 1 = Y].  Strips of an unknown detector or plane are skipped.
+void ReconstructGemStrips(const prad2::RawEventData &ev, const gem::GemSystem &gem_sys,
+                          gem::GemCluster &clusterer, std::vector<gem::GEMHit> &hits,
+                          std::vector<std::array<std::vector<gem::StripCluster>, 2>>
+                              *plane_clusters = nullptr);
 
 } // namespace analysis

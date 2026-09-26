@@ -1,12 +1,11 @@
-// A tool to transform the Geant4 ouput into the replay_recon format,
-// include matching between HyCal clusters and GEM hits
-// can be used to compare with the replay reconstruction result and test your analysis
-// scrirt, 
+// Converts Geant4 ep and ee output into the replay_recon tree format, with smeared
+// HyCal virtual-plane hits as clusters and HyCal-GEM matching, to compare with
+// the replay reconstruction and test analysis scripts.
 // Usage:
 //   sim2replay <dir of input_ep.root> <dir of input_ee.root> <ep_luminosity(nb^-1)> <ee_luminosity(nb^-1)> [options]
 //   -o  output ROOT file (default: sim_recon.root)
 // Example:
-//   sim2replay ep.root ee.root 1e6 1e6 -o sim_recon.root -n 100000 
+//   sim2replay ep.root ee.root 1e6 1e6 -o sim_recon.root
 
 #include "MatchingTools.h"
 #include "PhysicsTools.h"
@@ -14,6 +13,7 @@
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -24,26 +24,18 @@
 #include <string>
 #include <vector>
 #include <cmath>
-#include <cstdlib>
-#include <filesystem>
 #include <algorithm>
 #include <unistd.h>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 using namespace analysis;
-namespace fs = std::filesystem;
 
-// --- geometry constants (can be made configurable) ---
+// --- geometry constants ---
 const float gem_z[4] = {5407.f + 39.71f/2, 5407.f - 39.71f/2,
                         5807.f + 39.71f/2, 5807.f - 39.71f/2};
 const float hycal_z = 6225.f;
 
-double beamE = 3500.0; // MeV, can be made configurable
+double beamE = 3500.0; // MeV
 
-// Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
 //event data structure for the input Geant4 simulation output
 struct SimEventData {
@@ -80,7 +72,6 @@ void setupSimBranches(TTree *tree, SimEventData &ev)
     tree->SetBranchAddress("GEM.Edep", ev.GEM_edep);
 }
 
-static std::vector<std::string> collectRootFiles(const std::string &path);
 float EResolution(float E);
 
 // Find the HyCal module ID (PrimEx ID) whose area contains (x, y).
@@ -118,11 +109,8 @@ int main (int argc, char *argv[])
     ee_lumi = std::stod(argv[optind + 3]);
 
     // collect input files (can be files, directories)
-    std::vector<std::string> ep_files, ee_files;
-    auto f = collectRootFiles(ep_file_dir);
-    ep_files.insert(ep_files.end(), f.begin(), f.end());
-    f = collectRootFiles(ee_file_dir);
-    ee_files.insert(ee_files.end(), f.begin(), f.end());
+    std::vector<std::string> ep_files = ExpandInputPath(ep_file_dir, IsRootName);
+    std::vector<std::string> ee_files = ExpandInputPath(ee_file_dir, IsRootName);
 
     if (ep_files.empty() || ee_files.empty()) {
         std::cerr << "No input files specified.\n";
@@ -136,15 +124,11 @@ int main (int argc, char *argv[])
     }
 
     // --- database path ---
-    std::string dbDir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string dbDir = prad2::database_dir();
 
     // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
-    PhysicsTools physics(hycal);
     MatchingTools matching;
 
     // --- setup TChain and branches ---
@@ -155,10 +139,6 @@ int main (int argc, char *argv[])
         std::cerr << "Added file: " << f << "\n";
     }
     TTree *tree_ee = chain_ee;
-    if (!tree_ee) {
-        std::cerr << "Cannot find TTree 'events' in input files\n";
-        return 1;
-    }
     setupSimBranches(tree_ee, *sim);
     TChain *chain_ep = new TChain("T");
     for (const auto &f : ep_files) {
@@ -166,10 +146,6 @@ int main (int argc, char *argv[])
         std::cerr << "Added file: " << f << "\n";
     }
     TTree *tree_ep = chain_ep;
-    if (!tree_ep) {
-        std::cerr << "Cannot find TTree 'events' in input files\n";
-        return 1;
-    }
     setupSimBranches(tree_ep, *sim);
 
     TFile *outfile = TFile::Open(outName.c_str(), "RECREATE");
@@ -208,14 +184,8 @@ int main (int argc, char *argv[])
             std::cerr << "Processing event " << i + 1 << "/" << N_ep + N_ee << "\r" << std::flush;
         }
 
-        // Here you can fill the ev structure with the HyCal virtual plane hit and GEM hit information
-        // For example, you can use the matching tools to match HyCal clusters and GEM hits
-        // and fill the ev.matchG_x, etc. arrays accordingly
-        // This part will depend on how you want to do the reconstruction and matching based on the input simulation data structure
-        // You can also use the physics tools to calculate expected energies, angles, etc. for the clusters and hits, and fill the ev structure with those values as well
-
         //first total energy cut
-        *ev = EventVars_Recon{}; // reset all fields for this event
+        ev->clear();
         float total_energy = 0.f;
         for(int j = 0; j < sim->VD_n; j++){
             if(sim->VD_E[j] < 1. / 300.f * beamE) continue; // add some energy threshold to reduce noise
@@ -265,13 +235,9 @@ int main (int argc, char *argv[])
         for (int i = 0; i < ev->n_gem_hits; ++i)
             gem_hits[ev->det_id[i]].push_back(GEMHit{ev->gem_x[i], ev->gem_y[i], gem_z[ev->det_id[i]], ev->det_id[i]});
 
-        //GetProjection(hc_hits, 6225.f);
-
         matching.SetMatchRange(10.f); // matching radius in mm, 15mm default
-        //matching.SetSquareSelection(true); // use square cut instead of circular cut
         std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
 
-        // save transformed HyCal positions for all clusters (regardless of match)
         ev->clear_match_lists();
         for (int i = 0; i < ev->n_clusters; ++i) {
             ev->matchFlag[i] = 0;
@@ -302,23 +268,6 @@ int main (int argc, char *argv[])
     }
     outfile->Write();
     delete outfile;
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            if (entry.is_regular_file() &&
-                entry.path().filename().string().find(".root") != std::string::npos)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
 }
 
 float EResolution(float E)

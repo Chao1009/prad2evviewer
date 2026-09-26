@@ -10,8 +10,8 @@
 #      word of $_ actually refers to a file called "prad2_setup.csh"
 #      before trusting it, so a wrapper that sources us doesn't
 #      accidentally give us its own path.
-#   3. Install-time prefix baked in by CMake — picked up from
-#      @CMAKE_INSTALL_PREFIX@, substituted at install time.
+#   3. Install prefix baked in by CMake — @CMAKE_INSTALL_PREFIX@,
+#      substituted by configure_file at configure time.
 #
 # Users normally don't have to think about this: direct sources hit (2),
 # wrapper-script sources fall through to (3), and anyone who moved the
@@ -20,10 +20,6 @@
 if ( ! $?PRAD2_DIR ) then
     set _src = ( $_ )
     set _setup_path = ""
-    # Try $_ only if the tail of its last word is literally
-    # "prad2_setup.csh".  This filters out the nested-source case where
-    # $_ holds the command that started the outer wrapper (e.g.
-    # "source site_env.csh").
     if ( $#_src > 1 ) then
         set _cand = "$_src[$#_src]"
         if ( "$_cand:t" == "prad2_setup.csh" ) then
@@ -38,9 +34,6 @@ if ( ! $?PRAD2_DIR ) then
         setenv PRAD2_DIR `cd "$_setup_dir/.." && pwd`
         unset _setup_dir
     else
-        # Fall back to the install-time prefix.  If the install tree has
-        # been moved since `make install`, the caller must `setenv
-        # PRAD2_DIR <new_prefix>` before sourcing this file.
         setenv PRAD2_DIR "@CMAKE_INSTALL_PREFIX@"
     endif
     unset _setup_path

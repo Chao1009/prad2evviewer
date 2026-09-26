@@ -1,4 +1,4 @@
-// calib_5by5.cpp: multi-threaded version
+// calib_5by5.cpp: multi-threaded HyCal calibration from 5x5 cluster energy sums
 // Files are processed in rounds; each round assigns one file per thread.
 // Each thread opens its own TFile, runs HyCal clustering, and fills per-module
 // energy histograms independently (reused across rounds).
@@ -14,31 +14,28 @@
 //   - iteration: calibration iteration (default: 1)
 //   - output_root_file: output ROOT file (default: auto from db_dir)
 //   - Ebeam: beam energy in MeV (default: 2100)
-//   - daq_config.json: DAQ config file (default: db_dir/daq_config.json)
-//   - seed_calib.json: iteration-1 input calibration (default: db_dir/calibration/calibration_factor_3p5_June7.json)
+//   - daq_config.json: accepted but not used
+//   - seed_calib.json: iteration-1 input calibration
+//                      (default: the run's calibration file in runinfo)
 //   - max_events: max total events to process (default: all)
 //   - num_threads: number of parallel threads (default: 4)
 //   - -f: use firmware peak analysis instead of DAQ-mode peaks (default: false)
 //=============================================================================
 
-#include "Replay.h"
+#include "ConfigSetup.h"
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
-#include "WaveAnalyzer.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
-#include "load_daq_config.h"
 #include "RunInfoConfig.h"
-#include "gain_factor.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
 #include <TLatex.h>
 #include <TCanvas.h>
-#include <TROOT.h>
-#include <TClass.h>
 
 #include <iostream>
 #include <fstream>
@@ -52,10 +49,6 @@
 #include <mutex>
 #include <memory>
 #include <algorithm>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 namespace fs = std::filesystem;
 
@@ -72,34 +65,9 @@ struct ThreadResult {
     long long                                events_processed = 0;
 };
 
-// ── File collection helper ───────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            if (entry.is_regular_file() &&
-                entry.path().filename().string().find("_raw.root") != std::string::npos)
-                files.push_back(entry.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-// ── Main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    // ROOT multi-thread safety (must be called before any ROOT object creation)
-    ROOT::EnableThreadSafety();
-    // Force dictionary loading in main thread
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
-    TClass::GetClass("TH1F");
-    TClass::GetClass("TH2F");
+    InitRootThreading();
 
     // ── Argument parsing ─────────────────────────────────────────────────────
     std::string output_root_file, daq_config_file, seed_calib_file;
@@ -110,11 +78,7 @@ int main(int argc, char *argv[])
     float hycal_z    = 6269.f;
     bool firmware_peaks = false;
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
+    std::string db_dir = prad2::database_dir();
 
     int opt;
     while ((opt = getopt(argc, argv, "i:o:E:D:n:j:c:f")) != -1) {
@@ -130,12 +94,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Collect all input files
-    std::vector<std::string> root_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        root_files.insert(root_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> root_files = CollectInputs(argc, argv, optind, IsRawRootName);
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: calib_5by5 <input_raw.root|dir> [more...] "
@@ -145,16 +104,7 @@ int main(int argc, char *argv[])
     }
 
     // ── Run number / output paths ─────────────────────────────────────────────
-    std::string run_str = "unknown";
-    {
-        std::string fname = fs::path(root_files[0]).filename().string();
-        auto ppos = fname.find("prad_");
-        if (ppos != std::string::npos) {
-            size_t s = ppos + 5, e = s;
-            while (e < fname.size() && std::isdigit((unsigned char)fname[e])) e++;
-            if (e > s) run_str = std::to_string(std::stoul(fname.substr(s, e - s)));
-        }
-    }
+    std::string run_str = get_run_str(root_files[0]);
     std::string run_out_dir = "Physics_calib/" + run_str;
     fs::create_directories(run_out_dir);
     std::cerr << "Output directory: " << run_out_dir << "\n";
@@ -163,7 +113,8 @@ int main(int argc, char *argv[])
     if (iteration == 1)
         input_calib_file = !seed_calib_file.empty()
             ? seed_calib_file
-            : db_dir + "/calibration/calibration_factor_3p5_June7.json";
+            : (fs::path(db_dir) / LoadRunConfig(db_dir + "/runinfo/general.json",
+                                                get_run_int(root_files[0])).energy_calib_file).string();
     else if (iteration > 1)
         input_calib_file = run_out_dir + Form("/calib_iter%d.json", iteration - 1);
     else {
@@ -178,9 +129,6 @@ int main(int argc, char *argv[])
     if (output_root_file.empty())
         output_root_file = run_out_dir + Form("/CalibResult_iter%d.root", iteration);
 
-    if (daq_config_file.empty())
-        daq_config_file = db_dir + "/daq_config.json";
-
     // ── Thread count ─────────────────────────────────────────────────────────
     int n_files    = static_cast<int>(root_files.size());
     num_threads    = std::max(1, std::min(num_threads, n_files));
@@ -194,7 +142,6 @@ int main(int argc, char *argv[])
 
     for (int tid = 0; tid < num_threads; ++tid) {
         auto res = std::make_unique<ThreadResult>();
-        // Each thread initializes its own HyCalSystem
         res->hycal.Init(db_dir + "/hycal_map.json");
         int nmatched = res->hycal.LoadCalibration(input_calib_file);
         std::cerr << "[thread " << tid << "] calibration: "
@@ -251,7 +198,6 @@ int main(int argc, char *argv[])
                 int fi = round * num_threads + t;
                 ThreadResult *res = results[t].get();
 
-                // Open a single file (no TChain)
                 TFile *rfile = TFile::Open(root_files[fi].c_str(), "READ");
                 if (!rfile || rfile->IsZombie()) {
                     std::lock_guard<std::mutex> lk(io_mtx);
@@ -277,7 +223,8 @@ int main(int argc, char *argv[])
                     nentries = std::min(nentries, cap);
                 }
 
-                EventVars ev;
+                auto ev_buf = std::make_unique<EventVars>();  // too large for a thread stack
+                EventVars &ev = *ev_buf;
                 prad2::SetRawReadBranches(tree, ev);
 
                 int run_num = get_run_int(root_files[fi]);
@@ -331,7 +278,7 @@ int main(int argc, char *argv[])
                                 }
                             }
                             if (bestIdx < 0) continue;
-                            adc      = ev.peak_integral[j][bestIdx] * ev.gain_factor[j]; // apply gain factor
+                            adc      = ev.peak_integral[j][bestIdx] * ev.gain_factor[j];
                             hit_time = ev.peak_time[j][bestIdx];
                             peak_n   = ev.npeaks[j];
                         }
@@ -355,10 +302,9 @@ int main(int argc, char *argv[])
                     if (hits.size() == 1 && hits[0].nblocks > 4) {
 
                         auto *mod = res->hycal.module_by_id(hits[0].center_id);
-                        if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
+                        if ( !mod || !mod->is_pwo4()) continue;
                         // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
-                        float xd = (hits[0].x - (float)mod->x) / (float)mod->size_x;
-                        float yd = (hits[0].y - (float)mod->y) / (float)mod->size_y;
+                        const auto [xd, yd] = mod->cell_offset<float>(hits[0].x, hits[0].y);
                         if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
 
                         std::sort(valid_peaks.begin(), valid_peaks.end(),
@@ -369,8 +315,8 @@ int main(int argc, char *argv[])
                         if (!valid_peaks.empty()) {
                             const auto *center_mod = res->hycal.module_by_id(valid_peaks[0].module_id);
                             if (center_mod) {
-                                // 5×5 energy sum: select modules whose center lies within
-                                // ±2 crystal pitches (20.77 mm) in both x and y from center
+                                // 5×5 energy sum: modules whose center lies within 2.5 crystal
+                                // pitches (20.78 mm) of the center module in both x and y
                                 constexpr float half_win = 2.5f * 20.78f;
                                 float E5x5 = 0.f;
                                 for (const auto &pk : valid_peaks) {
@@ -513,7 +459,7 @@ int main(int argc, char *argv[])
                  << ", chi2/ndf=" << chi2 << ")\n";
         }
 
-        if(physics.GetModuleEnergyHist(mod_id)->GetEntries() < 1.) continue; // skip modules with no entries
+        if(physics.GetModuleEnergyHist(mod_id)->GetEntries() < 1.) continue;
         if(peak <= 0) peak = physics.GetModuleEnergyHist(mod_id)->GetMean(); // fallback to mean if fit failed
         if(peak <= 0) continue; // still no valid peak after fallback — skip to avoid Inf factor
         

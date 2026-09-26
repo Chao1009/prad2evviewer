@@ -14,7 +14,6 @@
 //             [-f max_files] [-n max_events]
 //=============================================================================
 
-#include "Replay.h"
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
 #include "EventData.h"
@@ -22,27 +21,20 @@
 #include "ConfigSetup.h"
 #include "InstallPaths.h"
 #include "MatchingTools.h"
-#include "PipelineBuilder.h"
-#include "PulseTemplateStore.h"
-#include "gain_factor.h"
+#include "ToolUtils.h"
 
-#include <TClass.h>
 #include <TROOT.h>
 #include <TFile.h>
 #include <TTree.h>
-#include <TChain.h>
 #include <TH1F.h>
 #include <TH2F.h>
 #include <TString.h>
-#include <TSystem.h>
-#include <TLatex.h>
 #include <TCanvas.h>
 #include <TF1.h>
 #include <TGraph.h>
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -52,13 +44,7 @@
 #include <iostream>
 #include <mutex>
 #include <string>
-#include <thread>
-#include <unordered_map>
 #include <vector>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
 namespace fs = std::filesystem;
@@ -66,29 +52,21 @@ namespace fs = std::filesystem;
 using EventVars_Recon = prad2::ReconEventData;
 
 struct EventWithMoller {
-    int event_num = -1;
     MollerEvent HC_moller;                    // Møller event reconstructed from HyCal
     MollerEvent GEMup_moller;                 // Møller event reconstructed from upstream GEM
-    MollerEvent GEMdown_moller;               // Møller event reconstructed from downstream GEM
-    MollerEvent GEM_moller[4] = {};           // Møller events on same chamber from GEM1, GEM2, GEM3, GEM4
+    MollerEvent GEM_moller[4] = {};           // Møller events on same chamber from GEM0, GEM1, GEM2, GEM3
 };
 struct EventWithMott {
-    int event_num = -1;
     float HC_x = 0, HC_y = 0, HC_z = 0;
     float GEM_x[4] = {}, GEM_y[4] = {}, GEM_z[4] = {};
     bool match[4] = {false, false, false, false};
 };
 
-std::vector<EventWithMoller> AllMollerEvents;
-std::vector<EventWithMott> AllMottEvents;
-
 // ── forward declarations ──────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path);
-
 static double extract_peak(TH1F *hist);
+static std::string IterConfigPath(const std::string &base, int it);
 
 static bool ProcessFile(const std::string &input_root,
-                        const std::string &db_dir,
                         const RunConfig &gRunConfig, const RunConfig &in_run_config,
                         std::vector<EventWithMoller> &all_moller_events, std::vector<EventWithMott> &all_mott_events,
                         bool show_progress = false,
@@ -98,11 +76,8 @@ static bool ProcessFile(const std::string &input_root,
 // ── Main ──────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    ROOT::EnableThreadSafety();
+    InitRootThreading();
     TH1::AddDirectory(kFALSE);
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
 
     std::string  output_dir, run_config_in, run_config_out_path;
     int  max_files   = -1;
@@ -125,15 +100,11 @@ int main(int argc, char *argv[])
     }
 
     // collect input replay_recon files (files, directories, or mixed)
-    std::vector<std::string> recon_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectRootFiles(argv[i]);
-        recon_files.insert(recon_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> recon_files = CollectInputs(argc, argv, optind, IsReconRootName);
 
     if (recon_files.empty() || output_dir.empty()) {
         std::cerr <<
-            "Usage: det_calib <recon_file_or_dir> [more files/dirs...] -o output_dir\n"
+            "Usage: det_align <recon_file_or_dir> [more files/dirs...] -o output_dir\n"
             "       [-f max_files] [-j threads] [-i iteration] [-n max_events]\n"
             "       [-c run_config_in.json] [-r run_config_base_path.json]\n";
         return 1;
@@ -143,10 +114,7 @@ int main(int argc, char *argv[])
     if (max_files > 0) num_files = std::min(num_files, max_files);
     num_threads = std::max(1, std::min(num_threads, num_files));
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string db_dir = prad2::database_dir();
     std::string run_config = db_dir + "/runinfo/general.json";
 
     int run_num = get_run_int(recon_files[0]);
@@ -168,13 +136,7 @@ int main(int argc, char *argv[])
         }
     } else {
         // Use previous iteration's output config as input
-        fs::path base(config_base_path);
-        std::string stem = base.stem().string();
-        std::string ext = base.extension().string();
-        if (ext.empty()) ext = ".json";  // Default to .json if no extension
-        std::string prev_iter_config = (base.parent_path() / 
-                                        (stem + "_iter" + std::to_string(iter - 1) + ext)).string();
-        run_config_in = prev_iter_config;
+        run_config_in = IterConfigPath(config_base_path, iter - 1);
         std::cout << "Iteration " << iter << ": using output from iteration " << (iter - 1) << "\n";
         std::cout << "  Input:  " << run_config_in << "\n";
     }
@@ -188,44 +150,28 @@ int main(int argc, char *argv[])
     std::vector<std::vector<EventWithMoller>> events_per_file(num_files);
     std::vector<std::vector<EventWithMott>> events_per_file_mott(num_files);
     std::vector<char> processed_ok(num_files, 0);
-    std::atomic<int> next_file{0};
-    std::atomic<int> errors{0};
     std::mutex io_mtx;
-
-    auto worker = [&]() {
-        while (true) {
-            const int idx = next_file.fetch_add(1);
-            if (idx >= num_files) break;
-
-            const bool ok = ProcessFile(recon_files[idx],
-                                        db_dir,
-                                        gRunConfig, in_run_config,
-                                        events_per_file[idx],
-                                        events_per_file_mott[idx],
-                                        idx == 0, max_events);  // show progress only for first file
-            processed_ok[idx] = ok ? 1 : 0;
-
-            std::lock_guard<std::mutex> lock(io_mtx);
-            if (ok) {
-                std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                          << recon_files[idx] << ": "
-                          << events_per_file[idx].size() << " HyCal Mollers\n";
-            } else {
-                ++errors;
-                std::cerr << "  [" << (idx + 1) << "/" << num_files
-                          << "] FAILED: " << recon_files[idx] << "\n";
-            }
-        }
-    };
 
     std::cout << "Processing " << num_files << " Recon_ROOT files with "
               << num_threads << " threads\n";
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-    for (int i = 0; i < num_threads; ++i)
-        threads.emplace_back(worker);
-    for (auto &thread : threads)
-        thread.join();
+    ParallelFor(num_files, num_threads, [&](size_t idx, int) {
+        const bool ok = ProcessFile(recon_files[idx],
+                                    gRunConfig, in_run_config,
+                                    events_per_file[idx],
+                                    events_per_file_mott[idx],
+                                    idx == 0, max_events);  // show progress only for first file
+        processed_ok[idx] = ok ? 1 : 0;
+
+        std::lock_guard<std::mutex> lock(io_mtx);
+        if (ok) {
+            std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
+                      << recon_files[idx] << ": "
+                      << events_per_file[idx].size() << " HyCal Mollers\n";
+        } else {
+            std::cerr << "  [" << (idx + 1) << "/" << num_files
+                      << "] FAILED: " << recon_files[idx] << "\n";
+        }
+    });
 
     // Aggregate in input-file order, so results are deterministic regardless
     // of the order in which worker threads completed.
@@ -299,10 +245,17 @@ int main(int argc, char *argv[])
         h1_deltaX_gem_hycal[i] = new TH1F(Form("h1_deltaX_gem_hycal%d", i), Form("Delta X GEM%d vs HyCal", i), 1000, -20, 20);
         h1_deltaY_gem_hycal[i] = new TH1F(Form("h1_deltaY_gem_hycal%d", i), Form("Delta Y GEM%d vs HyCal", i), 1000, -20, 20);
     }
-    // ----- Up to here are just translational alignment histograms, next will be global roll histograms (pitch, yaw, roll)
 
-    
-    // analysis and filling of histograms will be done here
+    // Moller centre of two pairs, skipping the (0, 0) GetMollerCenter returns
+    // when the two lines do not intersect.
+    auto fill_center = [](const MollerEvent &a, const MollerEvent &b, TH2F *h2, TH1F *hx, TH1F *hy) {
+        const auto c = PhysicsTools::GetMollerCenter(a, b);
+        if (c[0] == 0.f && c[1] == 0.f) return;
+        h2->Fill(c[0], c[1]);
+        hx->Fill(c[0]);
+        hy->Fill(c[1]);
+    };
+
     for (int i = 0; i < all_events.size(); ++i) {
         EventWithMoller &thisEvent = all_events[i];
         // 1. HyCal moller events
@@ -311,50 +264,24 @@ int main(int argc, char *argv[])
         float hc_z[2] = {thisEvent.HC_moller.first.z, thisEvent.HC_moller.second.z};
         float hc_energy[2] = {thisEvent.HC_moller.first.E, thisEvent.HC_moller.second.E};
         float hc_z_distance = PhysicsTools::GetMollerZdistance(thisEvent.HC_moller, gRunConfig.Ebeam);
-        float hc_theta[2] = {static_cast<float>(std::atan2(std::sqrt(hc_x[0]*hc_x[0] + hc_y[0]*hc_y[0]), hc_z[0]) * 180.0 / M_PI),
-                             static_cast<float>(std::atan2(std::sqrt(hc_x[1]*hc_x[1] + hc_y[1]*hc_y[1]), hc_z[1]) * 180.0 / M_PI)};
+        float hc_theta[2] = {PhysicsTools::GetThetaAngle(hc_x[0], hc_y[0], hc_z[0]),
+                             PhysicsTools::GetThetaAngle(hc_x[1], hc_y[1], hc_z[1])};
         float hc_phi[2] = {static_cast<float>(std::atan2(hc_y[0], hc_x[0]) * 180.0 / M_PI), static_cast<float>(std::atan2(hc_y[1], hc_x[1]) * 180.0 / M_PI)};
         h2_hycal_hits->Fill(hc_x[0], hc_y[0]);
         h2_hycal_hits->Fill(hc_x[1], hc_y[1]);
         h2_hycal_energy_vs_angle->Fill(hc_theta[0], hc_energy[0]);
         h2_hycal_energy_vs_angle->Fill(hc_theta[1], hc_energy[1]);
         h1_hycal_Zdistance->Fill(hc_z_distance);
-        if(i >= 3) {
-            auto center = PhysicsTools::GetMollerCenter(all_events[i-1].HC_moller, thisEvent.HC_moller);
-            if(center[0] != 0 || center[1] != 0) {
-                h2_hycal_Center->Fill(center[0], center[1]);
-                h1_hycal_CenterX->Fill(center[0]); h1_hycal_CenterY->Fill(center[1]);
-            }
-            center = PhysicsTools::GetMollerCenter(all_events[i-2].HC_moller, thisEvent.HC_moller);
-            if(center[0] != 0 || center[1] != 0) {
-                h2_hycal_Center->Fill(center[0], center[1]);
-                h1_hycal_CenterX->Fill(center[0]); h1_hycal_CenterY->Fill(center[1]);
-            }
-            center = PhysicsTools::GetMollerCenter(all_events[i-3].HC_moller, thisEvent.HC_moller);
-            if(center[0] != 0 || center[1] != 0) {
-                h2_hycal_Center->Fill(center[0], center[1]);
-                h1_hycal_CenterX->Fill(center[0]); h1_hycal_CenterY->Fill(center[1]);
-            }
-        }
+        if (i >= 3)
+            for (int k = 1; k <= 3; ++k)
+                fill_center(all_events[i-k].HC_moller, thisEvent.HC_moller,
+                            h2_hycal_Center, h1_hycal_CenterX, h1_hycal_CenterY);
 
         // 2. Use upstream GEMs to measure the beam center
-        if (i >= 3){
-            auto beam_center = PhysicsTools::GetMollerCenter(all_events[i-1].GEMup_moller, thisEvent.GEMup_moller);
-            if(beam_center[0] != 0 || beam_center[1] != 0) {
-                h2_beam_Center->Fill(beam_center[0], beam_center[1]);
-                h1_beam_CenterX->Fill(beam_center[0]); h1_beam_CenterY->Fill(beam_center[1]);
-            }
-            beam_center = PhysicsTools::GetMollerCenter(all_events[i-2].GEMup_moller, thisEvent.GEMup_moller);
-            if(beam_center[0] != 0 || beam_center[1] != 0) {
-                h2_beam_Center->Fill(beam_center[0], beam_center[1]);
-                h1_beam_CenterX->Fill(beam_center[0]); h1_beam_CenterY->Fill(beam_center[1]);
-            }
-            beam_center = PhysicsTools::GetMollerCenter(all_events[i-3].GEMup_moller, thisEvent.GEMup_moller);
-            if(beam_center[0] != 0 || beam_center[1] != 0) {
-                h2_beam_Center->Fill(beam_center[0], beam_center[1]);
-                h1_beam_CenterX->Fill(beam_center[0]); h1_beam_CenterY->Fill(beam_center[1]);
-            }
-        }
+        if (i >= 3)
+            for (int k = 1; k <= 3; ++k)
+                fill_center(all_events[i-k].GEMup_moller, thisEvent.GEMup_moller,
+                            h2_beam_Center, h1_beam_CenterX, h1_beam_CenterY);
 
         // 3. per GEM chamber moller events
         float gem_x[4][2], gem_y[4][2], gem_z[4][2], gem_energy[4][2];
@@ -371,12 +298,11 @@ int main(int argc, char *argv[])
             gem_z[j][1] = thisEvent.GEM_moller[j].second.z;
             gem_energy[j][0] = thisEvent.GEM_moller[j].first.E;
             gem_energy[j][1] = thisEvent.GEM_moller[j].second.E;
-            gem_theta[j][0] = static_cast<float>(std::atan2(std::sqrt(gem_x[j][0]*gem_x[j][0] + gem_y[j][0]*gem_y[j][0]), gem_z[j][0]) * 180.0 / M_PI);
-            gem_theta[j][1] = static_cast<float>(std::atan2(std::sqrt(gem_x[j][1]*gem_x[j][1] + gem_y[j][1]*gem_y[j][1]), gem_z[j][1]) * 180.0 / M_PI);
+            gem_theta[j][0] = PhysicsTools::GetThetaAngle(gem_x[j][0], gem_y[j][0], gem_z[j][0]);
+            gem_theta[j][1] = PhysicsTools::GetThetaAngle(gem_x[j][1], gem_y[j][1], gem_z[j][1]);
             gem_phi[j][0] = static_cast<float>(std::atan2(gem_y[j][0], gem_x[j][0]) * 180.0 / M_PI);
             gem_phi[j][1] = static_cast<float>(std::atan2(gem_y[j][1], gem_x[j][1]) * 180.0 / M_PI);
             gem_z_distance[j] = PhysicsTools::GetMollerZdistance(thisEvent.GEM_moller[j], gRunConfig.Ebeam);
-            // Fill histograms for GEM chamber j
             h2_gem_hits[j]->Fill(gem_x[j][0], gem_y[j][0]);
             h2_gem_hits[j]->Fill(gem_x[j][1], gem_y[j][1]);
             h1_gem_Zdistance[j]->Fill(gem_z_distance[j]);
@@ -386,12 +312,8 @@ int main(int argc, char *argv[])
             int count = 0;
             for (int k = i - 1; k >= 0 && count < 3; --k) {
                 if (all_events[k].GEM_moller[j].first.E > 0 && all_events[k].GEM_moller[j].second.E > 0) {
-                    auto center = PhysicsTools::GetMollerCenter(all_events[k].GEM_moller[j], thisEvent.GEM_moller[j]);
-                    if(center[0] != 0 || center[1] != 0) {
-                        h2_gem_Center[j]->Fill(center[0], center[1]);
-                        h1_gem_CenterX[j]->Fill(center[0]); 
-                        h1_gem_CenterY[j]->Fill(center[1]);
-                    }
+                    fill_center(all_events[k].GEM_moller[j], thisEvent.GEM_moller[j],
+                                h2_gem_Center[j], h1_gem_CenterX[j], h1_gem_CenterY[j]);
                     ++count;
                 }
             }
@@ -410,12 +332,14 @@ int main(int argc, char *argv[])
     //    and check the residuals between GEM layers and HyCal
     // Calculate and fill residuals between the two layers of GEM chambers for each Mott event
     for (auto& event : all_mott_events) {
+        // scale the GEM hit of det by HC_z / GEM_z (projection onto the HyCal plane)
+        auto project = [&event](int det) {
+            const float scale = event.HC_z / event.GEM_z[det];
+            event.GEM_x[det] *= scale;
+            event.GEM_y[det] *= scale;
+        };
         if (event.match[0] && event.match[1] && event.match[2] && event.match[3]) {
-            for (int det = 0; det < 4; ++det) {
-                float scale = event.HC_z / event.GEM_z[det];
-                event.GEM_x[det] *= scale;
-                event.GEM_y[det] *= scale;
-            }
+            for (int det = 0; det < 4; ++det) project(det);
             h1_deltaX_gem_up->Fill(event.GEM_x[2] - event.GEM_x[3]);
             h1_deltaY_gem_up->Fill(event.GEM_y[2] - event.GEM_y[3]);
             if(event.GEM_y[1] > 0.) {
@@ -425,9 +349,7 @@ int main(int argc, char *argv[])
         }
         if (event.match[0] && event.match[2]) {
             for (int det : {0, 2}) {
-                float scale = event.HC_z / event.GEM_z[det];
-                event.GEM_x[det] *= scale;
-                event.GEM_y[det] *= scale;
+                project(det);
                 h1_deltaX_gem_hycal[det]->Fill(event.GEM_x[det] - event.HC_x);
                 h1_deltaY_gem_hycal[det]->Fill(event.GEM_y[det] - event.HC_y);
             }
@@ -437,9 +359,7 @@ int main(int argc, char *argv[])
         }
         if (event.match[1] && event.match[3]) {
             for (int det : {1, 3}) {
-                float scale = event.HC_z / event.GEM_z[det];
-                event.GEM_x[det] *= scale;
-                event.GEM_y[det] *= scale;
+                project(det);
                 h1_deltaX_gem_hycal[det]->Fill(event.GEM_x[det] - event.HC_x);
                 h1_deltaY_gem_hycal[det]->Fill(event.GEM_y[det] - event.HC_y);
             }
@@ -494,7 +414,7 @@ int main(int argc, char *argv[])
     std::cout << "The coordinates of HyCal center: " << std::endl;
     std::cout << "Beam center (X, Y): " << alignment_params["beam_center_x"] + in_run_config.target_x << ", "
               << alignment_params["beam_center_y"] + in_run_config.target_y << std::endl;
-    // Target center Z measurement with upstream GEM
+    // Target center Z measurement from each GEM
     alignment_params["target_center_z_gem3"] = in_run_config.gem_z[3] - alignment_params["moller_GEM3_z"];
     alignment_params["target_center_z_gem0"] = in_run_config.gem_z[0] - alignment_params["moller_GEM0_z"];
     alignment_params["target_center_z_gem1"] = in_run_config.gem_z[1] - alignment_params["moller_GEM1_z"];
@@ -533,7 +453,7 @@ int main(int argc, char *argv[])
     }
 
     // 2. Extract Detector Z position from HyCal/GEMs Z alignment parameter
-    // Use the extracted Moller vertex-Z peak; "HC_z" was never populated.
+    // (the extracted Moller vertex-Z peaks)
     in_run_config.hycal_z = alignment_params["moller_HC_z"];
     in_run_config.gem_z[0] = alignment_params["moller_GEM0_z"];
     in_run_config.gem_z[1] = alignment_params["moller_GEM1_z"];
@@ -552,13 +472,10 @@ int main(int argc, char *argv[])
     // 3.1.1 Align GEM2 to GEM3
     in_run_config.gem_x[2] -= 0.5 * alignment_params["Upstream_GEM_dx_d2-d3"];
     in_run_config.gem_y[2] -= 0.5 * alignment_params["Upstream_GEM_dy_d2-d3"];
-    // 3.1.2 Align GEM0 to GEM1
-    //in_run_config.gem_x[0] -= 0.5 * alignment_params["Downstream_GEM_dx_d0-d1"];
-    //in_run_config.gem_y[0] -= 0.5 * alignment_params["Downstream_GEM_dy_d0-d1"];
-    // 3.1.3 Align GEM1 to GEM3
+    // 3.1.2 Align GEM1 to GEM3
     in_run_config.gem_x[1] -= 0.5 * alignment_params["GEM_layer_right_dx_d1-d3"];
     in_run_config.gem_y[1] -= 0.5 * alignment_params["GEM_layer_right_dy_d1-d3"];
-    // 3.1.4 Align GEM0 to GEM2
+    // 3.1.3 Align GEM0 to GEM2
     in_run_config.gem_x[0] -= 0.5 * alignment_params["GEM_layer_left_dx_d0-d2"];
     in_run_config.gem_y[0] -= 0.5 * alignment_params["GEM_layer_left_dy_d0-d2"];
 
@@ -572,13 +489,7 @@ int main(int argc, char *argv[])
     //5. TODO: Extract GEMs rotation around X/Y axes (tilt) parameters
 
     // output the resolved new run_config file
-    // Automatically generate output filename with iteration number
-    fs::path base(config_base_path);
-    std::string stem = base.stem().string();
-    std::string ext = base.extension().string();
-    if (ext.empty()) ext = ".json";  // Default to .json if no extension
-    std::string actual_output_path = (base.parent_path() / 
-                                     (stem + "_iter" + std::to_string(iter) + ext)).string();
+    const std::string actual_output_path = IterConfigPath(config_base_path, iter);
     std::cout << "Iteration " << iter << " output: " << actual_output_path << "\n";
     WriteRunConfig(actual_output_path, run_num, in_run_config);
     
@@ -665,15 +576,12 @@ int main(int argc, char *argv[])
             std::string pfx = "GEM" + std::to_string(det);
             std::vector<double> xs, ys;
             for (int it = 1; it <= iter; ++it) {
-                fs::path bp(config_base_path);
-                std::string st = bp.stem().string(), ex = bp.extension().string();
-                if (ex.empty()) ex = ".json";
-                std::string p_curr = (bp.parent_path() / (st + "_iter" + std::to_string(it) + ex)).string();
+                std::string p_curr = IterConfigPath(config_base_path, it);
                 std::string p_prev;
                 if (it == 1)
                     p_prev = (iter == 1) ? run_config_in : "";  // iter0 only known when running iter1
                 else
-                    p_prev = (bp.parent_path() / (st + "_iter" + std::to_string(it - 1) + ex)).string();
+                    p_prev = IterConfigPath(config_base_path, it - 1);
                 if (p_prev.empty() || !fs::exists(p_prev) || !fs::exists(p_curr)) continue;
                 // suppress LoadRunConfig's per-call stderr log
                 std::streambuf *cerr_buf = std::cerr.rdbuf(nullptr);
@@ -763,29 +671,20 @@ int main(int argc, char *argv[])
         out_file->mkdir("Convergence");
         out_file->cd("Convergence");
         
+        auto draw_pad = [](TCanvas *c, int pad, TGraph *g, const char *ytitle) {
+            c->cd(pad);
+            g->Draw("APL");
+            g->GetXaxis()->SetTitle("Iteration");
+            g->GetYaxis()->SetTitle(ytitle);
+        };
+
         // Create a canvas for HyCal convergence plots
         if (g_hc_x && g_hc_y && g_hc_z) {
             auto *canvas_hc = new TCanvas("HyCal_Convergence", "HyCal Convergence Parameters", 400, 1200);
             canvas_hc->Divide(1, 3);
-            
-            // Plot HC_x
-            canvas_hc->cd(1);
-            g_hc_x->Draw("APL");
-            g_hc_x->GetXaxis()->SetTitle("Iteration");
-            g_hc_x->GetYaxis()->SetTitle("Value (mm)");
-            
-            // Plot HC_y
-            canvas_hc->cd(2);
-            g_hc_y->Draw("APL");
-            g_hc_y->GetXaxis()->SetTitle("Iteration");
-            g_hc_y->GetYaxis()->SetTitle("Value (mm)");
-            
-            // Plot HC_z
-            canvas_hc->cd(3);
-            g_hc_z->Draw("APL");
-            g_hc_z->GetXaxis()->SetTitle("Iteration");
-            g_hc_z->GetYaxis()->SetTitle("Delta (mm)");
-            
+            draw_pad(canvas_hc, 1, g_hc_x, "Value (mm)");
+            draw_pad(canvas_hc, 2, g_hc_y, "Value (mm)");
+            draw_pad(canvas_hc, 3, g_hc_z, "Delta (mm)");
             canvas_hc->Write();
         }
         
@@ -798,31 +697,8 @@ int main(int argc, char *argv[])
                     400, 1600
                 );
                 canvas_gem->Divide(1, 4);
-                
-                // Plot GEM_x
-                canvas_gem->cd(1);
-                g_gem[det][0]->Draw("APL");
-                g_gem[det][0]->GetXaxis()->SetTitle("Iteration");
-                g_gem[det][0]->GetYaxis()->SetTitle("Delta (mm)");
-                
-                // Plot GEM_y
-                canvas_gem->cd(2);
-                g_gem[det][1]->Draw("APL");
-                g_gem[det][1]->GetXaxis()->SetTitle("Iteration");
-                g_gem[det][1]->GetYaxis()->SetTitle("Delta (mm)");
-                
-                // Plot GEM_z
-                canvas_gem->cd(3);
-                g_gem[det][2]->Draw("APL");
-                g_gem[det][2]->GetXaxis()->SetTitle("Iteration");
-                g_gem[det][2]->GetYaxis()->SetTitle("Delta (mm)");
-                
-                // Plot phi_diff
-                canvas_gem->cd(4);
-                g_gem[det][3]->Draw("APL");
-                g_gem[det][3]->GetXaxis()->SetTitle("Iteration");
-                g_gem[det][3]->GetYaxis()->SetTitle("Value (deg)");
-                
+                const char *ytitle[4] = {"Delta (mm)", "Delta (mm)", "Delta (mm)", "Value (deg)"};  // x, y, z, phi
+                for (int p = 0; p < 4; ++p) draw_pad(canvas_gem, p + 1, g_gem[det][p], ytitle[p]);
                 canvas_gem->Write();
             }
         }
@@ -834,7 +710,17 @@ int main(int argc, char *argv[])
     }
 }
 
-// ── Helper: Extract peak center from histogram via FWHM method ──────────
+// <dir>/<stem>_iter<it><ext> for the config base path <dir>/<stem><ext>;
+// ext defaults to .json.
+static std::string IterConfigPath(const std::string &base, int it)
+{
+    const fs::path p(base);
+    std::string ext = p.extension().string();
+    if (ext.empty()) ext = ".json";
+    return (p.parent_path() / (p.stem().string() + "_iter" + std::to_string(it) + ext)).string();
+}
+
+// ── Helper: peak center via a Gaussian fit over the width at 70% of peak ──
 static double extract_peak(TH1F *hist)
 {
     if (!hist || hist->GetEntries() <= 0) return 0.0;
@@ -851,7 +737,7 @@ static double extract_peak(TH1F *hist)
     while (left_bin > 1 && hist->GetBinContent(left_bin) >= half_peak) --left_bin;
     while (right_bin < nbins && hist->GetBinContent(right_bin) >= half_peak) ++right_bin;
     
-    // Linear interpolation for precise FWHM edges
+    // Linear interpolation for precise 70%-of-peak edges
     auto crossing = [hist](int bin0, int bin1) {
         if (std::abs(hist->GetBinContent(bin1) - hist->GetBinContent(bin0)) < 1e-12)
             return hist->GetXaxis()->GetBinCenter(bin0);
@@ -877,13 +763,10 @@ static double extract_peak(TH1F *hist)
 }
 
 static bool ProcessFile(const std::string &input_root, 
-                        const std::string &db_dir,
                         const RunConfig &gRunConfig, const RunConfig &in_run_config,
                         std::vector<EventWithMoller> &all_moller_events, std::vector<EventWithMott> &all_mott_events,
                         bool show_progress, int max_events)
 {
-    // Implement the file processing logic here
-
     std::unique_ptr<TFile> f(TFile::Open(input_root.c_str(), "READ"));
     if (!f || f->IsZombie()) {
         std::cerr << "Cannot open " << input_root << "\n";
@@ -899,35 +782,11 @@ static bool ProcessFile(const std::string &input_root,
         std::cout << "Reading file: " << fs::path(input_root).filename() << "\n";
     }
 
-    DetectorTransform                 hycal_transform;
-    std::array<DetectorTransform, 4>  gem_transforms;
-
-    hycal_transform.set(
-        gRunConfig.hycal_x, gRunConfig.hycal_y, gRunConfig.hycal_z,
-        gRunConfig.hycal_tilt_x, gRunConfig.hycal_tilt_y, gRunConfig.hycal_tilt_z);
-    for (int d = 0; d < 4; ++d) {
-        gem_transforms[d].set(
-            gRunConfig.gem_x[d], gRunConfig.gem_y[d], gRunConfig.gem_z[d],
-            gRunConfig.gem_tilt_x[d], gRunConfig.gem_tilt_y[d], gRunConfig.gem_tilt_z[d]);
-    }
-
-    DetectorTransform in_hycal_transform;
-    std::array<DetectorTransform, 4>  in_gem_transforms;
-
-    in_hycal_transform.set(
-        in_run_config.hycal_x, in_run_config.hycal_y, in_run_config.hycal_z,
-        in_run_config.hycal_tilt_x, in_run_config.hycal_tilt_y, in_run_config.hycal_tilt_z);
-    for (int d = 0; d < 4; ++d) {
-        in_gem_transforms[d].set(
-            in_run_config.gem_x[d], in_run_config.gem_y[d], in_run_config.gem_z[d],
-            in_run_config.gem_tilt_x[d], in_run_config.gem_tilt_y[d], in_run_config.gem_tilt_z[d]);
-    }
+    const LabTransforms ref_xform = BuildLabTransforms(gRunConfig);
+    const LabTransforms in_xform  = BuildLabTransforms(in_run_config);
 
     MatchingTools matching(2);
-    matching.SetMatchRange(in_run_config.matching_radius);
-    matching.SetSquareSelection(in_run_config.matching_use_square);
-    matching.SetEnergyDependent(in_run_config.matching_energy_dependent);
-    matching.SetMatchSigma(in_run_config.matching_sigma);
+    matching.Configure(in_run_config);
 
     EventVars_Recon ev;
     prad2::SetReconReadBranches(tree, ev);
@@ -948,8 +807,6 @@ static bool ProcessFile(const std::string &input_root,
             std::cout.flush();
         }
         
-        // Process the event here
-
         // trigger selection
         bool is_sum      = (ev.trigger_bits & prad2::TBIT_sum) != 0;
         if (!is_sum) continue;
@@ -959,8 +816,8 @@ static bool ProcessFile(const std::string &input_root,
         if (ev.cl_nblocks[0] < 3 || (ev.n_clusters == 2 && ev.cl_nblocks[1] < 3)) continue;
 
         // store all HyCal hits and GEM hits
-        // transform hits from lab to detector coordinates
-        // then transform them to the detector coordinates for the input run_config
+        // transform hits from lab to detector coordinates (reference geometry),
+        // then back to lab coordinates with the input run_config geometry
         std::vector<HCHit> hycal_hits;
         std::vector<GEMHit> gem_hits[4];
         for (int i = 0; i < ev.n_clusters; ++i) {
@@ -968,8 +825,8 @@ static bool ProcessFile(const std::string &input_root,
                 ev.cl_x[i], ev.cl_y[i], ev.cl_z[i],
                 ev.cl_energy[i], ev.cl_center[i], ev.cl_flag[i]
             };
-            ApplyToLocal(hycal_transform, hit);
-            ApplyToLab(in_hycal_transform, hit);
+            ApplyToLocal(ref_xform.hycal, hit);
+            ApplyToLab(in_xform.hycal, hit);
             hycal_hits.push_back(hit);
             ev.cl_x[i] = hit.x;
             ev.cl_y[i] = hit.y;
@@ -981,8 +838,8 @@ static bool ProcessFile(const std::string &input_root,
                 GEMHit hit{
                     ev.gem_x[j], ev.gem_y[j], ev.gem_z[j], ev.det_id[j]
                 };
-                ApplyToLocal(gem_transforms[d], hit);
-                ApplyToLab(in_gem_transforms[d], hit);
+                ApplyToLocal(ref_xform.gem[d], hit);
+                ApplyToLab(in_xform.gem[d], hit);
                 gem_hits[d].push_back(hit);
             }
         }
@@ -990,37 +847,11 @@ static bool ProcessFile(const std::string &input_root,
         // do the matching between HyCal hits and GEM hits
         std::vector<MatchHit> matched_hits = matching.Match(hycal_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
         std::vector<MatchHit_perChamber> matched_hits_chamber = matching.MatchPerChamber(hycal_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]); 
-        ev.clear_match_lists();
-        for(int i = 0; i < matched_hits_chamber.size(); i++){
-            auto &m = matched_hits_chamber[i];
-            int cl_idx = m.hycal_idx;
-            if( cl_idx != i) std::cerr << "Warning: cluster index mismatch in matched_hits_chamber: " << cl_idx << " vs " << i << "\n";
-            for(int j = 0; j < 4; j++){
-                for (const auto &gh : m.gem_hits[j]) {
-                    ev.add_match(i, j, gh.x, gh.y, gh.z);
-                }
-            }
-            ev.matchFlag[i] = m.mflag;
-        }
+        FillReconMatches(ev, matched_hits, matched_hits_chamber);
 
-        ev.matchNum = std::min((int)matched_hits.size(), prad2::kMaxClusters);
-        for (int i = 0; i < ev.matchNum; i++){
-            // save the matched GEM hit (must 2 matchings) info in mHit_ arrays for quick check
-            ev.mHit_E[i] = matched_hits[i].hycal_hit.energy;
-            ev.mHit_x[i] = matched_hits[i].hycal_hit.x;
-            ev.mHit_y[i] = matched_hits[i].hycal_hit.y;
-            ev.mHit_z[i] = matched_hits[i].hycal_hit.z;
-            for(int j = 0; j < 2; j++) {
-                ev.mHit_gx[i][j] =  matched_hits[i].gem[j].x;
-                ev.mHit_gy[i][j] =  matched_hits[i].gem[j].y;
-                ev.mHit_gz[i][j] =  matched_hits[i].gem[j].z;
-                ev.mHit_gid[i][j] = matched_hits[i].gem[j].det_id; // placeholder for GEM hit ID if needed
-            }
-            ev.mHit_cl_index[i] = matched_hits[i].hycal_idx;
-        }
         if (ev.matchNum == 1 && ev.n_clusters == 1) {
             // select single matched events for Mott electron
-            float theta = std::atan2(std::sqrt(ev.cl_y[0]*ev.cl_y[0] + ev.cl_x[0]*ev.cl_x[0]), ev.cl_z[0]) * 180.0 / M_PI;
+            float theta = PhysicsTools::GetThetaAngle(ev.cl_x[0], ev.cl_y[0], ev.cl_z[0]);
             float E = ev.cl_energy[0];
             float expectE = PhysicsTools::ExpectedEnergy(theta, gRunConfig.Ebeam, "ep");
             float sigma = 0.03 * std::sqrt(expectE * 1000.0);
@@ -1051,8 +882,8 @@ static bool ProcessFile(const std::string &input_root,
 
         if (ev.matchNum == 2 && ev.n_clusters == 2) {
             // use HyCal to judge and select Moller events should be good enough
-            float theta1 = std::atan2(std::sqrt(ev.cl_y[0]*ev.cl_y[0] + ev.cl_x[0]*ev.cl_x[0]), ev.cl_z[0]) * 180.0 / M_PI;
-            float theta2 = std::atan2(std::sqrt(ev.cl_y[1]*ev.cl_y[1] + ev.cl_x[1]*ev.cl_x[1]), ev.cl_z[1]) * 180.0 / M_PI;
+            float theta1 = PhysicsTools::GetThetaAngle(ev.cl_x[0], ev.cl_y[0], ev.cl_z[0]);
+            float theta2 = PhysicsTools::GetThetaAngle(ev.cl_x[1], ev.cl_y[1], ev.cl_z[1]);
             float phi1 = std::atan2(ev.cl_y[0], ev.cl_x[0]) * 180.0 / M_PI;
             float phi2 = std::atan2(ev.cl_y[1], ev.cl_x[1]) * 180.0 / M_PI;
             float E1 = ev.cl_energy[0];
@@ -1064,53 +895,20 @@ static bool ProcessFile(const std::string &input_root,
             float sigma_sum = std::sqrt(sigma1*sigma1 + sigma2*sigma2);
 
             if (theta1 < 0.65 || theta2 < 0.65) continue;
-            if (std::abs(phi1 - phi2) -180.0 > 8.0) continue;
+            if (std::abs(phi1 - phi2) - 180.0 > 8.0) continue;
             if (std::abs(E1 + E2 - gRunConfig.Ebeam) > 3.0 * sigma_sum) continue;
             if (std::abs(E1 - expectE1) > 3.0 * sigma1) continue;
             if (std::abs(E2 - expectE2) > 3.0 * sigma2) continue;
 
             EventWithMoller thisEvent;
-            MollerEvent m_hycal, m_gemUp, m_gemDown;
+            const MollerEvent m_hycal(DataPoint(ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], E1),
+                                      DataPoint(ev.cl_x[1], ev.cl_y[1], ev.cl_z[1], E2));
+            MollerEvent m_gemUp;
             std::array<MollerEvent, 4> m_gem;
             // Initialize all m_gem entries to zero-energy Moller events
             for (int d = 0; d < 4; ++d) {
                 m_gem[d] = MollerEvent(DataPoint(0, 0, 0, 0), DataPoint(0, 0, 0, 0));
             }
-
-            m_hycal = MollerEvent(
-                DataPoint(ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], ev.cl_energy[0]),
-                DataPoint(ev.cl_x[1], ev.cl_y[1], ev.cl_z[1], ev.cl_energy[1]));
-            /*
-            for(int did = 0; did <= 1; did ++){
-                if (ev.mHit_gid[0][0] == did
-                    && ev.mHit_gid[1][0] == did) {
-                    float x0, y0, z0, x1, y1, z1;
-                    x0 = ev.mHit_gx[0][0];
-                    y0 = ev.mHit_gy[0][0];
-                    z0 = ev.mHit_gz[0][0];
-                    x1 = ev.mHit_gx[1][0];
-                    y1 = ev.mHit_gy[1][0];
-                    z1 = ev.mHit_gz[1][0];
-                    m_gem[did] = MollerEvent(
-                        DataPoint(x0, y0, z0, ev.mHit_E[0]),
-                        DataPoint(x1, y1, z1, ev.mHit_E[1]));
-                }
-            }
-            for(int did = 2; did <= 3; did ++){
-                if (ev.mHit_gid[0][1] == did
-                    && ev.mHit_gid[1][1] == did) {
-                    float x0, y0, z0, x1, y1, z1;
-                    x0 = ev.mHit_gx[0][1];
-                    y0 = ev.mHit_gy[0][1];
-                    z0 = ev.mHit_gz[0][1];
-                    x1 = ev.mHit_gx[1][1];
-                    y1 = ev.mHit_gy[1][1];
-                    z1 = ev.mHit_gz[1][1];
-                    m_gem[did] = MollerEvent(
-                        DataPoint(x0, y0, z0, ev.mHit_E[0]),
-                        DataPoint(x1, y1, z1, ev.mHit_E[1]));
-                }
-            }*/
             for(int did = 0; did < 4; did ++){
                 if (((ev.matchFlag[0] & (1u << did)) != 0)
                     && ((ev.matchFlag[1] & (1u << did)) != 0)) {
@@ -1125,17 +923,12 @@ static bool ProcessFile(const std::string &input_root,
             m_gemUp = MollerEvent(
                 DataPoint(ev.mHit_gx[0][1], ev.mHit_gy[0][1], ev.mHit_gz[0][1], ev.mHit_E[0]),
                 DataPoint(ev.mHit_gx[1][1], ev.mHit_gy[1][1], ev.mHit_gz[1][1], ev.mHit_E[1]));
-            m_gemDown = MollerEvent(
-                DataPoint(ev.mHit_gx[0][0], ev.mHit_gy[0][0], ev.mHit_gz[0][0], ev.mHit_E[0]),
-                DataPoint(ev.mHit_gx[1][0], ev.mHit_gy[1][0], ev.mHit_gz[1][0], ev.mHit_E[1]));
             
-            thisEvent.event_num = ev.event_num;
             thisEvent.HC_moller = m_hycal;
             for(int did = 0; did < 4; did++){
                 thisEvent.GEM_moller[did] = m_gem[did];
             }
             thisEvent.GEMup_moller = m_gemUp;
-            thisEvent.GEMdown_moller = m_gemDown;
             all_moller_events.push_back(thisEvent);
         }
     }
@@ -1144,25 +937,3 @@ static bool ProcessFile(const std::string &input_root,
     }
     return true;
 }
-
-// ── Helpers ──────────────────────────────────────────────────────────────
-static std::vector<std::string> collectRootFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (fs::is_directory(path)) {
-        for (auto &entry : fs::directory_iterator(path)) {
-            std::string name = entry.path().filename().string();
-            if (entry.is_regular_file() &&
-                name.find("_recon") != std::string::npos &&
-                name.size() >= 5 && name.compare(name.size() - 5, 5, ".root") == 0) {
-                files.push_back(entry.path().string());
-            }
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-

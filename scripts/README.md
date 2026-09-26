@@ -209,20 +209,6 @@ records      n_hits × 16-byte packed BinHit
 
 ## Calibration / analysis viewers
 
-### ep_calib_viewer.py
-
-Visualises `epCalib` output.  Reads
-`Physics_calib/{run}/calib_iter{N}.json` together with the
-companion `CalibResult_iter{N}.root` and renders the per-module
-energy distribution, the run-wide ratio, the energy-θ correlation,
-the (col, row) event map, and the measured-peak / σ histograms in a
-single window.
-
-```bash
-python scripts/ep_calib_viewer.py [Physics_calib_dir]
-python scripts/ep_calib_viewer.py build/Physics_calib
-```
-
 ### physics_calib_viewer.py
 
 Visualises the output of `analysis/tools/physics_calib.cpp`.  The viewer reads
@@ -254,6 +240,20 @@ After a manual fit is applied, its `peak`, `sigma`, `chi2/ndf`, `ratio`,
 `calib_result_iterN.json`; `old_factor` remains unchanged.  The calculated
 factor is written back to `calib_factor_iterN.json`.  The factor uses the producer rule
 `old_factor * clamp(1 + 0.7 * (expected_peak / peak - 1), 0.5, 2.0)`.
+
+### replay_report_viewer.py
+
+Viewer for the `*.report.json` written by `prad2ana_replay_filter`: cut
+status, livetime + data rate and EPICS values on a shared time (or
+`--evn` event-number) axis, with rejected regions dimmed.  Installed as
+`prad2ana_replay_report_viewer`; `replay_viewer.py` imports it for its
+Filter Report tab.  See
+[`docs/analysis_notes/replay_cuts.md`](../docs/analysis_notes/replay_cuts.md).
+
+```bash
+python scripts/replay_report_viewer.py [report.json]
+python scripts/replay_report_viewer.py --cli report.json [-o out.png] [--evn]
+```
 
 ### json_flattener.py
 
@@ -328,6 +328,10 @@ checkout on DAQ / operator machines.
   ```
 
 - `start_prad2mon` — tmux-session template for running `prad2_server` under tmux with a log tee.  Copy it, edit the site-specific config block at the top, and `chmod +x`.
+- `replay_recon.sh` — interactive single-run replay pipeline on JLab ifarm (replay recon → filter → live charge → quick check); see [`replay_recon.md`](shell/replay_recon.md).
+- `submit_replay_recon.sh` — the same pipeline as one Slurm batch job for one run; see [`submit_replay_recon.md`](shell/submit_replay_recon.md).
+- `submit_replay_recon_m.sh` — submits one such Slurm job per run for a run range or list (jcache staging for uncached runs); also covered in [`submit_replay_recon.md`](shell/submit_replay_recon.md).
+- `replay_common.sh` — defaults, prompts and pipeline functions sourced by the three replay scripts above; not run directly and must stay next to them.
 
 ## Using prad2py directly
 

@@ -17,19 +17,11 @@
 //     to two global histograms:
 //         W_sum_height     sum of peak heights over all W modules
 //         W_sum_integral   sum of peak integrals over all W modules
-//     The "W" subset is the PbWO4 crystal modules; the DAQ map at
-//     ``database/hycal_map.json`` identifies them by name (entries with "n"
-//     with 'W').  PbGlass ("G"), LMS references, veto, etc. are excluded.
+//     The "W" subset is the PbWO4 crystal modules (see WMap).
 //
 //   The summary canvas shows all 10 ΔT spectra with their fitted μ/±Nσ
 //   bounds plus the two W-sum histograms, and a terminal table breaks
 //   down how many events each pair selected.
-//
-// Pair layout (update if the DAQ cabling changes):
-//
-//   T10R           slot 18, channel  0
-//   E49 … E53      slot 18, channels 11…15
-//   E54 … E58      slot 19, channels  0…4
 //
 // Compile with ACLiC after loading rootlogon:
 //
@@ -42,13 +34,11 @@
 
 #include "EvChannel.h"
 #include "DaqConfig.h"
+#include "InstallPaths.h"
+#include "JsonUtil.h"
 #include "load_daq_config.h"
 #include "Fadc250Data.h"
-#include "SspData.h"
-#include "VtpData.h"
 #include "TdcData.h"
-
-#include <nlohmann/json.hpp>
 
 #include <TCanvas.h>
 #include <TF1.h>
@@ -58,14 +48,11 @@
 #include <TLine.h>
 #include <TString.h>
 #include <TStyle.h>
-#include <TSystem.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -74,9 +61,7 @@
 
 using namespace evc;
 
-//-----------------------------------------------------------------------------
 // Configuration — adjust if the DAQ layout changes
-//-----------------------------------------------------------------------------
 namespace {
 
 // Reference channel (T10R).
@@ -130,10 +115,6 @@ constexpr int    I_BINS = 300;
 constexpr double I_MIN  = 0.0;
 constexpr double I_MAX  = 300000.0;       // sum of peak integrals (ADC·sample)
 
-//-----------------------------------------------------------------------------
-// Helpers
-//-----------------------------------------------------------------------------
-
 // Earliest hit (smallest TDC value) for (slot, ch) in this event, or -1.
 static int first_tdc(const tdc::TdcEventData &t, int slot, int ch)
 {
@@ -180,11 +161,8 @@ struct WMap {
     int      n_entries = 0;
 
     bool load(const std::string &path) {
-        std::ifstream f(path);
-        if (!f.is_open()) return false;
         nlohmann::json j;
-        try { j = nlohmann::json::parse(f); }
-        catch (...) { return false; }
+        if (!prad2::read_json_file(path, j)) return false;
         for (auto &e : j) {
             std::string name = e.value("n", "");
             if (name.empty() || name[0] != 'W') continue;
@@ -250,12 +228,8 @@ struct Row {
 
 } // anonymous namespace
 
-//=============================================================================
-// Entry point
-//=============================================================================
-
-// Full version takes 4 explicit args (no defaults).  Convenience overloads
-// delegate to it — sidesteps a cling default-arg-marshalling bug that
+// Entry point.  Full version takes 4 explicit args (no defaults).
+// Convenience overloads delegate to it — sidesteps a cling default-arg-marshalling bug that
 // SEGVs at the call site for short-arg invocations of mixed-type defaults.
 int tagger_hycal_correlation(const char *evio_path,
                              const char *out_path,
@@ -277,10 +251,7 @@ int tagger_hycal_correlation(const char *evio_path,
 {
     //---- load DAQ config ----------------------------------------------------
     std::string cfg_path = (daq_config && *daq_config) ? daq_config : "";
-    if (cfg_path.empty()) {
-        const char *db = std::getenv("PRAD2_DATABASE_DIR");
-        cfg_path = std::string(db ? db : "database") + "/daq_config.json";
-    }
+    if (cfg_path.empty()) cfg_path = prad2::database_dir() + "/daq_config.json";
     DaqConfig cfg;
     if (!load_daq_config(cfg_path, cfg)) {
         std::cerr << "ERROR: cannot load " << cfg_path << "\n";
@@ -288,20 +259,11 @@ int tagger_hycal_correlation(const char *evio_path,
     }
 
     //---- load the W-channel lookup from hycal_map.json ------------------------
-    std::string hycal_map_path;
-    {
-        const char *db = std::getenv("PRAD2_DATABASE_DIR");
-        std::string dir = db ? db : "database";
-        // honour the hycal_map_file override in daq_config.json if present
-        std::ifstream dcf(cfg_path);
-        if (dcf.is_open()) {
-            auto dcj = nlohmann::json::parse(dcf, nullptr, false, true);
-            if (!dcj.is_discarded() && dcj.contains("hycal_map_file"))
-                hycal_map_path = dir + "/"
-                                 + dcj["hycal_map_file"].get<std::string>();
-        }
-        if (hycal_map_path.empty()) hycal_map_path = dir + "/hycal_map.json";
-    }
+    // honour the hycal_map_file override in daq_config.json if present
+    const std::string hycal_map_path = prad2::resolve_db_path(
+        cfg.hycal_map_file.empty() ? std::string("hycal_map.json")
+                                   : cfg.hycal_map_file,
+        prad2::database_dir());
     WMap wmap;
     if (!wmap.load(hycal_map_path)) {
         std::cerr << "ERROR: cannot load W-channel map from "
@@ -394,7 +356,6 @@ int tagger_hycal_correlation(const char *evio_path,
             int t0 = first_tdc(tdc_evt, T10R_SLOT, T10R_CH);
             if (t0 < 0) { ++n_physics; goto tick; }
 
-            // Collect this event's row.
             {
                 Row r{};
                 r.t10r = t0;

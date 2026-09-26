@@ -97,10 +97,10 @@ public:
     };
 
 public:
-    // initialize
     OpenConfig() { flag = 0; }
 
-    // set configuration and return a smart pointer
+    // ET open-config handle with the set_*() values applied; the returned
+    // pointer owns it (et_open_config_destroy on release).
     std::shared_ptr<void> configure() const
     {
         void *ptr;
@@ -114,9 +114,7 @@ public:
         OPEN_CONFIG_SET(flag, ptr, timeout);
 
         if (TEST_BIT(flag, static_cast<uint32_t>(Flag::host))) {
-            char temp[1024];
-            strncpy(temp, host.c_str(), 1024);
-            et_open_config_sethost(ptr, temp);
+            et_open_config_sethost(ptr, host.c_str());
         }
 
 #if ET_VERSION >= 14
@@ -181,10 +179,9 @@ public:
     };
 
 public:
-    // initialize
     StationConfig() { flag = 0; }
 
-    // set configuration and return a smart pointer
+    // Station-config counterpart of OpenConfig::configure().
     std::shared_ptr<void> configure() const
     {
         void *ptr;
@@ -204,16 +201,12 @@ public:
         }
 
         if (TEST_BIT(flag, static_cast<uint32_t>(Flag::function))) {
-            char temp[1024];
-            strncpy(temp, function.c_str(), 1024);
-            if (et_station_config_setfunction(ptr, temp) != ET_OK) {
+            if (et_station_config_setfunction(ptr, function.c_str()) != ET_OK) {
                 std::cerr << "Could not set function \"" << function << "\" for station config." << std::endl;
             }
         }
         if (TEST_BIT(flag, static_cast<uint32_t>(Flag::lib))) {
-            char temp[1024];
-            strncpy(temp, lib.c_str(), 1024);
-            if (et_station_config_setlib(ptr, temp) != ET_OK) {
+            if (et_station_config_setlib(ptr, lib.c_str()) != ET_OK) {
                 std::cerr << "Could not set library \"" << lib << "\" for station config." << std::endl;
             }
         }
@@ -229,8 +222,6 @@ public:
 
         return std::shared_ptr<void>(ptr, [] (void *p) { et_station_config_destroy(p); });
     }
-
-    std::unordered_set<std::string> broad_casts, multi_casts;
 
 private:
     uint32_t flag;
@@ -248,5 +239,5 @@ private:
     ETCONF_ADD_MEMBER(std::string, myclass, flag);
 };
 
-}; // namespace et_wrapper
+}; // namespace et_wrap
 

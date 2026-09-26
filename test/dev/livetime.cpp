@@ -1,238 +1,30 @@
 // livetime — calculate DAQ live time from EVIO files
 //
 // Two independent methods:
-//   1. DSC2 scalers: gated (busy) vs ungated (total) from the 0xe115 bank.
-//      "Gated" counts only during DAQ busy (dead time), "ungated" counts
-//      all the time.  Live time = 1 - gated/ungated.
-//      (Same convention as PRadAnalyzer/calcLiveTime.)
+//   1. DSC2 scalers: gated/ungated reference counts from the 0xe115 bank
+//      (gated counts while NOT busy; see DscData.h).
 //   2. Pulser counting: accepted 100 Hz pulser events vs expected from
 //      elapsed time.
 //
 // Accepts a single file, a base name (auto-discovers .00000, .00001, ...),
 // or a directory (processes all .evio* files sorted by name).
-//
-// Usage: livetime <input> [-D daq_config.json] [-f pulser_freq] [-t interval]
 
 #include "EvChannel.h"
 #include "DaqConfig.h"
 #include "load_daq_config.h"
 #include "Fadc250Data.h"
+#include "Dsc2Decoder.h"
+#include "InstallPaths.h"
+#include "evio_inputs.h"
 
 #include <iostream>
 #include <iomanip>
 #include <string>
 #include <cstdlib>
-#include <cstring>
-#include <vector>
 #include <map>
-#include <algorithm>
 #include <getopt.h>
 
-// portable directory listing
-#ifdef _WIN32
-#include <windows.h>
-#else
-#include <dirent.h>
-#include <sys/stat.h>
-#endif
-
 using namespace evc;
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
-// ---- DSC2 scaler data layout ----------------------------------------------
-//
-// 67-word payload (per slot):
-//   [0]      header
-//   [1..16]  TRG Grp1 — 16 channels
-//   [17..32] TDC Grp1 — 16 channels
-//   [33..48] TRG Grp2 — 16 channels
-//   [49..64] TDC Grp2 — 16 channels
-//   [65]     Ref Grp1
-//   [66]     Ref Grp2
-//
-// In PRad-II, Grp1 ("gated") is enabled while NOT busy and so counts LIVE
-// time; Grp2 ("ungated") is free-running.  Live time = gated/ungated.
-//
-// Two physical bank formats are observed:
-//   • Legacy: 67 words, payload at offset 0, slot in 0xDCA0... magic.
-//   • Run 024246 (rflag=1): 72 words, 3-word JLab BLKHDR/EVTHDR/TRGTIME
-//     prefix, 67-word payload at offset 2, 2-word FILLER/BLKTLR trailer;
-//     slot lives in BLKHDR bits 26:22.
-
-static constexpr int DSC2_WORDS_PER_SLOT   = 67;
-static constexpr int DSC2_NCH              = 16;
-
-struct Dsc2Slot {
-    uint32_t slot;
-    uint32_t trg_gated[DSC2_NCH];
-    uint32_t tdc_gated[DSC2_NCH];
-    uint32_t trg_ungated[DSC2_NCH];
-    uint32_t tdc_ungated[DSC2_NCH];
-    uint32_t ref_gated;
-    uint32_t ref_ungated;
-};
-
-static bool fill_payload(const uint32_t *data, size_t nwords, size_t off, Dsc2Slot &s)
-{
-    if (off + DSC2_WORDS_PER_SLOT > nwords) return false;
-    const uint32_t *p = &data[off + 1];
-    std::memcpy(s.trg_gated,   p,      DSC2_NCH * 4);
-    std::memcpy(s.tdc_gated,   p + 16, DSC2_NCH * 4);
-    std::memcpy(s.trg_ungated, p + 32, DSC2_NCH * 4);
-    std::memcpy(s.tdc_ungated, p + 48, DSC2_NCH * 4);
-    s.ref_gated   = p[64];
-    s.ref_ungated = p[65];
-    return s.ref_ungated > 0 && s.ref_ungated >= s.ref_gated;
-}
-
-static std::vector<Dsc2Slot> parse_dsc2_bank(const uint32_t *data, size_t nwords)
-{
-    std::vector<Dsc2Slot> slots;
-    if (nwords == 0 || data == nullptr) return slots;
-
-    static const size_t kOffsets[] = {0, 2};
-    Dsc2Slot s{};
-    for (size_t off : kOffsets) {
-        if (off + DSC2_WORDS_PER_SLOT > nwords) continue;
-        uint32_t hdr = data[off];
-        if ((hdr & 0xFFFF0000u) == 0xDCA00000u) {
-            if (!fill_payload(data, nwords, off, s)) continue;
-            s.slot = (hdr >> 8) & 0xFF;
-            slots.push_back(s);
-            return slots;
-        }
-        if (off >= 1 && (data[0] >> 27) == 0x10u) {  // BLKHDR
-            if (!fill_payload(data, nwords, off, s)) continue;
-            s.slot = (data[0] >> 22) & 0x1F;
-            slots.push_back(s);
-            return slots;
-        }
-    }
-    return slots;
-}
-
-// ---- file discovery ----------------------------------------------------------
-
-static bool is_regular_file(const std::string &path)
-{
-#ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path.c_str());
-    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
-#else
-    struct stat st;
-    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
-#endif
-}
-
-static bool is_directory(const std::string &path)
-{
-#ifdef _WIN32
-    DWORD attr = GetFileAttributesA(path.c_str());
-    return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
-#else
-    struct stat st;
-    return stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode);
-#endif
-}
-
-static std::vector<std::string> list_dir(const std::string &dir)
-{
-    std::vector<std::string> entries;
-#ifdef _WIN32
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA((dir + "\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return entries;
-    do {
-        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-            entries.push_back(dir + "/" + fd.cFileName);
-    } while (FindNextFileA(h, &fd));
-    FindClose(h);
-#else
-    DIR *d = opendir(dir.c_str());
-    if (!d) return entries;
-    while (auto *e = readdir(d)) {
-        if (e->d_name[0] == '.') continue;
-        std::string full = dir + "/" + e->d_name;
-        if (is_regular_file(full)) entries.push_back(full);
-    }
-    closedir(d);
-#endif
-    return entries;
-}
-
-// Discover EVIO files to process from a user-supplied path.
-// Handles: single file, base name with splits (.00000, .00001, ...),
-// or a directory (all .evio files sorted).
-static std::vector<std::string> discover_files(const std::string &path)
-{
-    std::vector<std::string> files;
-
-    if (is_regular_file(path)) {
-        // single file — also look for sibling splits
-        // e.g. "prad_023527.evio.00000" -> find all "prad_023527.evio.*"
-        auto dot = path.rfind('.');
-        if (dot != std::string::npos) {
-            std::string suffix = path.substr(dot + 1);
-            // check if suffix is all digits (split number)
-            bool is_split = !suffix.empty() &&
-                suffix.find_first_not_of("0123456789") == std::string::npos;
-            if (is_split) {
-                std::string base = path.substr(0, dot); // "path/prad_023527.evio"
-                auto slash = base.rfind('/');
-                if (slash == std::string::npos) slash = base.rfind('\\');
-                std::string dir = (slash != std::string::npos) ? base.substr(0, slash) : ".";
-                std::string base_name = (slash != std::string::npos) ? base.substr(slash + 1) : base;
-
-                for (auto &f : list_dir(dir)) {
-                    auto fslash = f.rfind('/');
-                    if (fslash == std::string::npos) fslash = f.rfind('\\');
-                    std::string fname = (fslash != std::string::npos) ? f.substr(fslash + 1) : f;
-                    if (fname.size() > base_name.size() && fname.substr(0, base_name.size() + 1) == base_name + ".")
-                        files.push_back(f);
-                }
-                std::sort(files.begin(), files.end());
-                if (!files.empty()) return files;
-            }
-        }
-        files.push_back(path);
-        return files;
-    }
-
-    // path might be a base name without split suffix: "prad_023527.evio"
-    if (!is_directory(path)) {
-        auto slash = path.rfind('/');
-        if (slash == std::string::npos) slash = path.rfind('\\');
-        std::string dir = (slash != std::string::npos) ? path.substr(0, slash) : ".";
-        std::string base_name = (slash != std::string::npos) ? path.substr(slash + 1) : path;
-
-        for (auto &f : list_dir(dir)) {
-            auto fslash = f.rfind('/');
-            if (fslash == std::string::npos) fslash = f.rfind('\\');
-            std::string fname = (fslash != std::string::npos) ? f.substr(fslash + 1) : f;
-            if (fname.size() > base_name.size() && fname.substr(0, base_name.size() + 1) == base_name + ".")
-                files.push_back(f);
-        }
-        if (files.empty()) {
-            // try as exact file
-            if (is_regular_file(path)) files.push_back(path);
-        }
-        std::sort(files.begin(), files.end());
-        return files;
-    }
-
-    // directory — collect all .evio files
-    for (auto &f : list_dir(path)) {
-        if (f.find(".evio") != std::string::npos)
-            files.push_back(f);
-    }
-    std::sort(files.begin(), files.end());
-    return files;
-}
-
-// ---- output helpers ----------------------------------------------------------
 
 static const char *tag_name(uint32_t tag)
 {
@@ -247,17 +39,19 @@ static const char *tag_name(uint32_t tag)
     }
 }
 
-// ---- main --------------------------------------------------------------------
+static void usage(const char *prog)
+{
+    std::cerr << "Usage: " << prog
+              << " <input> [-D daq_config.json] [-f freq_hz] [-t interval_sec]\n"
+              << "  <input>: file, base name (finds .00000 .00001 ...), or directory\n";
+}
 
 int main(int argc, char *argv[])
 {
-    std::string input, daq_config_file;
+    std::string input;
+    std::string daq_config_file = prad2::database_dir() + "/daq_config.json";
     double pulser_freq = 100.0;   // Hz
     double report_interval = 10.0; // seconds
-
-    std::string db_dir = DATABASE_DIR;
-    if (const char *env = std::getenv("PRAD2_DATABASE_DIR")) db_dir = env;
-    daq_config_file = db_dir + "/daq_config.json";
 
     int opt;
     while ((opt = getopt(argc, argv, "D:f:t:h")) != -1) {
@@ -266,16 +60,13 @@ int main(int argc, char *argv[])
         case 'f': pulser_freq = std::atof(optarg); break;
         case 't': report_interval = std::atof(optarg); break;
         default:
-            std::cerr << "Usage: " << argv[0]
-                      << " <input> [-D daq_config.json] [-f freq_hz] [-t interval_sec]\n"
-                      << "  <input>: file, base name (finds .00000 .00001 ...), or directory\n";
+            usage(argv[0]);
             return opt == 'h' ? 0 : 1;
         }
     }
     if (optind < argc) input = argv[optind];
     if (input.empty()) {
-        std::cerr << "Usage: " << argv[0]
-                  << " <input> [-D daq_config.json] [-f freq_hz] [-t interval_sec]\n";
+        usage(argv[0]);
         return 1;
     }
 
@@ -285,7 +76,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    auto files = discover_files(input);
+    auto files = devtools::discover_evio_inputs(input);
     if (files.empty()) {
         std::cerr << "No EVIO files found for: " << input << "\n";
         return 1;
@@ -294,7 +85,6 @@ int main(int argc, char *argv[])
     for (auto &f : files) std::cerr << "  " << f << "\n";
 
     // ---- state ----
-    static constexpr double TI_TICK_SEC = 4e-9;
     static constexpr uint32_t PULSER_TAG = 0x00B0;
     static constexpr uint32_t DSC2_BANK_TAG = 0xE115;
 
@@ -307,12 +97,11 @@ int main(int argc, char *argv[])
     int sync_count = 0;
 
     // DSC2 cumulative (latest SYNC)
-    std::vector<Dsc2Slot> dsc2_data;
+    dsc::DscEventData dsc2_data;
 
     // periodic reporting state
     double next_report = report_interval;
 
-    // print periodic report header
     auto print_header = []() {
         std::cout << std::left
                   << std::setw(10) << "Time(s)"
@@ -325,15 +114,13 @@ int main(int argc, char *argv[])
                   << "\n" << std::string(78, '-') << "\n";
     };
 
-    // emit one periodic row
     std::string current_file;
     auto print_row = [&](double elapsed) {
-        // cumulative DSC2 live time (from latest SYNC) — gated/ungated
-        // (Grp1 "gated" counts during live; ratio is the live fraction).
+        // cumulative DSC2 live time (latest SYNC), reference pair gated/ungated
         double lt_dsc2 = -1;
-        if (!dsc2_data.empty() && dsc2_data[0].ref_ungated > 0) {
-            lt_dsc2 = static_cast<double>(dsc2_data[0].ref_gated)
-                    / dsc2_data[0].ref_ungated * 100.0;
+        if (dsc2_data.present && dsc2_data.ref_ungated > 0) {
+            lt_dsc2 = static_cast<double>(dsc2_data.ref_gated)
+                    / dsc2_data.ref_ungated * 100.0;
         }
         // cumulative pulser live time
         double lt_pulser = -1;
@@ -344,7 +131,6 @@ int main(int argc, char *argv[])
         if (expected > 0)
             lt_pulser = 100.0 * static_cast<double>(pulser_total) / expected;
 
-        // extract just the filename from path
         auto slash = current_file.rfind('/');
         if (slash == std::string::npos) slash = current_file.rfind('\\');
         std::string fname = (slash != std::string::npos) ? current_file.substr(slash + 1) : current_file;
@@ -395,12 +181,11 @@ int main(int argc, char *argv[])
             // DSC2 scalers
             if (evtype == EventType::Sync || evtype == EventType::Physics) {
                 const EvNode *dsc2_node = ch.FindFirstByTag(DSC2_BANK_TAG);
-                if (dsc2_node && dsc2_node->data_words > 0) {
-                    auto parsed = parse_dsc2_bank(ch.GetData(*dsc2_node), dsc2_node->data_words);
-                    if (!parsed.empty()) {
-                        dsc2_data = std::move(parsed);
-                        if (evtype == EventType::Sync) sync_count++;
-                    }
+                dsc::DscEventData parsed;
+                if (dsc2_node && dsc::Dsc2Decoder::ParsePayload(ch.GetData(*dsc2_node),
+                                                               dsc2_node->data_words, parsed)) {
+                    dsc2_data = parsed;
+                    if (evtype == EventType::Sync) sync_count++;
                 }
             }
 
@@ -421,8 +206,7 @@ int main(int argc, char *argv[])
                     if (first_ts == 0) first_ts = ts;
                     last_ts = ts;
 
-                    // periodic report
-                    double elapsed = static_cast<double>(ts - first_ts) * TI_TICK_SEC;
+                    double elapsed = static_cast<double>(ts - first_ts) * fdec::TI_TICK_SEC;
                     while (elapsed >= next_report) {
                         print_row(next_report);
                         next_report += report_interval;
@@ -435,7 +219,7 @@ int main(int argc, char *argv[])
 
     // ---- final report ----
     double elapsed_ti = (first_ts != 0 && last_ts > first_ts)
-        ? static_cast<double>(last_ts - first_ts) * TI_TICK_SEC : 0.0;
+        ? static_cast<double>(last_ts - first_ts) * fdec::TI_TICK_SEC : 0.0;
     double elapsed_unix = (unix_start != 0 && unix_end > unix_start)
         ? static_cast<double>(unix_end - unix_start) : 0.0;
     double elapsed = (elapsed_ti > 0) ? elapsed_ti : elapsed_unix;
@@ -474,33 +258,32 @@ int main(int argc, char *argv[])
 
     // DSC2 summary
     std::cout << "\n--- DSC2 scaler live time (cumulative) ---\n";
-    if (dsc2_data.empty()) {
+    if (!dsc2_data.present) {
         std::cout << "(no DSC2 scaler bank 0xE115 found)\n";
     } else {
-        for (auto &s : dsc2_data) {
-            double lt = (s.ref_ungated > 0)
-                ? static_cast<double>(s.ref_gated) / s.ref_ungated * 100.0
-                : 0.0;
-            std::cout << std::fixed << std::setprecision(2);
-            std::cout << "  DSC2 slot " << s.slot
-                      << ": ref_gated=" << s.ref_gated
-                      << "  ref_ungated=" << s.ref_ungated
-                      << "  live=" << std::setprecision(3) << lt << "%\n";
+        const auto &s = dsc2_data;
+        double lt = (s.ref_ungated > 0)
+            ? static_cast<double>(s.ref_gated) / s.ref_ungated * 100.0
+            : 0.0;
+        std::cout << std::fixed << std::setprecision(2);
+        std::cout << "  DSC2 slot " << s.slot
+                  << ": ref_gated=" << s.ref_gated
+                  << "  ref_ungated=" << s.ref_ungated
+                  << "  live=" << std::setprecision(3) << lt << "%\n";
 
-            bool any = false;
-            for (int c = 0; c < DSC2_NCH; ++c) {
-                if (s.trg_ungated[c] == 0) continue;
-                if (!any) {
-                    std::cout << "    TRG ch  gated(live)  ungated(total)  live%\n";
-                    any = true;
-                }
-                double cl = static_cast<double>(s.trg_gated[c])
-                          / s.trg_ungated[c] * 100.0;
-                std::cout << "      " << std::setw(2) << c
-                          << std::setw(13) << s.trg_gated[c]
-                          << std::setw(16) << s.trg_ungated[c]
-                          << std::setw(9) << std::setprecision(2) << cl << "\n";
+        bool any = false;
+        for (int c = 0; c < dsc::DSC2_NCH; ++c) {
+            if (s.trg_ungated[c] == 0) continue;
+            if (!any) {
+                std::cout << "    TRG ch  gated(live)  ungated(total)  live%\n";
+                any = true;
             }
+            double cl = static_cast<double>(s.trg_gated[c])
+                      / s.trg_ungated[c] * 100.0;
+            std::cout << "      " << std::setw(2) << c
+                      << std::setw(13) << s.trg_gated[c]
+                      << std::setw(16) << s.trg_ungated[c]
+                      << std::setw(9) << std::setprecision(2) << cl << "\n";
         }
     }
 
