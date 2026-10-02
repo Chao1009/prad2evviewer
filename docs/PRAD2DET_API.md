@@ -578,15 +578,23 @@ no link-time ROOT dependency.
 ### Writers
 
 ```cpp
-SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks);
-SetReconWriteBranches(TTree*, ReconEventData&, bool is_x17 = false);
+SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks,
+                    bool Ecalib = false, bool noWaveform = false);
+SetReconWriteBranches(TTree*, ReconEventData&, bool x17_mode,
+                      bool with_gem_hits = false,
+                      const ReconReadStatus *layout = nullptr);
 SetScalerWriteBranches(TTree*, RawScalerData&);
 SetEpicsWriteBranches(TTree*, RawEpicsData&);
 ```
 
-For recon trees, `is_x17=true` omits the Veto branch group
-(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`). LMS,
-cluster, GEM, trigger-bank, and RF branches are unchanged.
+For recon trees, `x17_mode=true` omits the Veto branch group
+(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`).
+`with_gem_hits` (`replay_recon -gem_hit`) books the GEM hits, their
+quality variables and the `gem_cl_*` block; off by default. `layout` books
+only the GEM quality / cluster groups it flags: `replay_filter` passes the
+read status of the tree it copies (it also passes `noWaveform` when the raw
+input has no waveforms). LMS, HyCal cluster, trigger-bank, and RF branches
+are always written.
 
 ### Readers (skip missing branches; return optional-group flags)
 
@@ -597,8 +605,10 @@ SetScalerReadBranches(TTree*, RawScalerData&);   // void
 SetEpicsReadBranches(TTree*, RawEpicsData&);     // void
 ```
 
-`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw }`.
-`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw }`.
+`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw, has_vtp_raw, has_tdc_raw,
+has_waveform }`.
+`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw,
+has_vtp_raw, has_vtp_cl, has_rf, has_gem_hits, has_gem_qa, has_gem_cl }`.
 
 `ssp_raw` is a `std::vector<uint32_t>` branch — readers must bind their
 own held `vector<uint32_t>**` (see comment in header).

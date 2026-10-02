@@ -30,6 +30,21 @@ final `.root`.  For example, `prad_024327_recon_000.root` becomes
 writes these products side by side in `<output_base>/prad_<run>/`, with
 no filter subdirectory.
 
+`prad2ana_replay_filter` keeps the input's optional branch groups as they
+are: the HyCal waveforms of a raw file (absent with `replay_rawdata
+--noWaveform`), and in a recon file the veto group (absent in X17 mode) and
+the GEM groups (hits, per-hit quality variables, clusters; only with
+`replay_recon -gem_hit`).  The other groups follow the
+current schema, so an older input gains default-filled branches (e.g.
+`cl_bias_corr` = 1, `rf_*` = 0) and loses renamed ones (`matchGEMx/y/z`).
+Filters built before 2026-10 did not keep these groups: recon files they
+filtered from 2026-08-21 on lack the GEM hit and cluster branches even
+when the input had them, every X17 recon file they filtered (X17 mode exists
+since 2026-07-05) carries zero-filled `veto_*` branches, and filtered
+`--noWaveform` raw files carry zero-filled `hycal.samples`, which
+leaves `prad2ana_replay_recon` with no HyCal clusters.  Re-run the filter on
+the unfiltered files.
+
 # `events` tree (raw)
 
 Written by `prad2ana_replay_rawdata`.  Per-event scalars and per-channel
