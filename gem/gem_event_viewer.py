@@ -1148,9 +1148,19 @@ class AdvancedDock(QDockWidget):
         self.cluster_editors.update(add_config_rows(xf, cfg, [
             ("match_adc_asymmetry", 0.0, 1.0, 0.05, ""),
             ("match_time_diff", 0.0, 200.0, 1.0, "", "match_time_diff (ns)"),
+            ("match_ts_corr_min", -1.0, 1.0, 0.05,
+             "min Pearson r of the X/Y cluster-summed time samples; -1 = off"),
             ("ts_period", 1.0, 100.0, 0.5, "", "ts_period (ns)"),
         ], emit))
         layout.addWidget(xg)
+
+        # A field an older prad2py build lacks: disable its editor and keep
+        # it out of cluster_editors, so it is never read, applied or reset.
+        if cfg is not None:
+            for name in [n for n in self.cluster_editors if not hasattr(cfg, n)]:
+                ed = self.cluster_editors.pop(name)
+                ed.setEnabled(False)
+                ed.setToolTip(f"{name}: not in this prad2py build (rebuild it)")
 
         layout.addStretch(1)
 

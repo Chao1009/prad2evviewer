@@ -122,6 +122,44 @@ static void bind_gem(py::module_ &m)
         "defaults to w_x.  Returns (ax, bx, ay, by, chi2_per_dof) with "
         "dof = 2N - 4, or None when N < 2 or a fit is singular.");
 
+    // --- strip time-sample helpers (GemCluster.h) ----------------------------
+
+    m.def("strip_mean_time", &gem::StripMeanTime,
+          py::arg("ts_adc"), py::arg("ts_period") = 25.f,
+          "ADC-weighted mean time (ns) over the positive samples, sample i at "
+          "(i+1)*ts_period; NaN if no sample is positive.");
+
+    m.def("is_unimodal_pulse", &gem::IsUnimodalPulse, py::arg("ts_adc"),
+          "True if the samples strictly rise to the first maximum and "
+          "strictly fall after it; False for an empty list.");
+
+    using f32_array = py::array_t<float, py::array::c_style | py::array::forcecast>;
+    m.def("time_sample_correlation",
+        [](const f32_array &a, const f32_array &b) -> py::object {
+            const float nan = std::numeric_limits<float>::quiet_NaN();
+            if (a.ndim() == 1 && b.ndim() == 1)
+                return py::float_(a.shape(0) == b.shape(0)
+                    ? gem::TimeSampleCorrelation(a.data(), b.data(), a.shape(0))
+                    : nan);
+            if (a.ndim() != 2 || b.ndim() != 2 || a.shape(0) != b.shape(0))
+                throw py::value_error("time_sample_correlation: expects two 1-D "
+                                      "sample vectors or two (N, n_samples) arrays");
+            const py::ssize_t n = a.shape(0), ns = a.shape(1);
+            py::array_t<float> out(n);
+            float *o = out.mutable_data();
+            for (py::ssize_t i = 0; i < n; ++i)
+                o[i] = (b.shape(1) == ns)
+                    ? gem::TimeSampleCorrelation(a.data() + i * ns, b.data() + i * ns, ns)
+                    : nan;
+            return out;
+        },
+        py::arg("a"), py::arg("b"),
+        "Pearson correlation of two time-sample vectors, as GemCluster computes "
+        "it (GEMHit.xy_ts_corr = time_sample_correlation(X ts_adc_sum, Y "
+        "ts_adc_sum)).  Two 1-D arrays give a float; two (N, n_samples) arrays, "
+        "e.g. rows of the recon-tree gem_cl_ts_adc, give N row-wise values.  "
+        "Inputs are cast to float32; NaN for flat rows or unequal lengths.");
+
     // --- configuration leaves ------------------------------------------------
 
     py::class_<gem::ApvPedestal>(m, "ApvPedestal",
@@ -199,7 +237,17 @@ static void bind_gem(py::module_ &m)
         .def_readonly("total_charge", &gem::StripCluster::total_charge)
         .def_readonly("max_timebin",  &gem::StripCluster::max_timebin)
         .def_readonly("cross_talk",   &gem::StripCluster::cross_talk)
-        .def_readonly("hits",         &gem::StripCluster::hits);
+        .def_readonly("hits",         &gem::StripCluster::hits)
+        .def_readonly("seed_time",     &gem::StripCluster::seed_time)
+        .def_readonly("seed_peak_adc", &gem::StripCluster::seed_peak_adc)
+        .def_readonly("seed_sum_adc",  &gem::StripCluster::seed_sum_adc)
+        .def_readonly("max_strip_dt",  &gem::StripCluster::max_strip_dt)
+        .def_readonly("min_ts_corr",   &gem::StripCluster::min_ts_corr)
+        .def_property_readonly("ts_adc_sum",
+            [](const gem::StripCluster &c) { return to_numpy(c.ts_adc_sum); },
+            "Cluster-summed time samples, sum of the strips' ts_adc weighted "
+            "by charge / max sample (1/2 for a split valley strip, else 1); "
+            "numpy float32 copy, empty if undefined.");
 
     py::class_<gem::GEMHit>(m, "GEMHit",
         "2-D reconstructed GEM hit (X cluster × Y cluster match).")
@@ -215,6 +263,15 @@ static void bind_gem(py::module_ &m)
         .def_readonly("y_max_timebin", &gem::GEMHit::y_max_timebin)
         .def_readonly("x_size",        &gem::GEMHit::x_size)
         .def_readonly("y_size",        &gem::GEMHit::y_size)
+        .def_readonly("x_time",         &gem::GEMHit::x_time)
+        .def_readonly("y_time",         &gem::GEMHit::y_time)
+        .def_readonly("time_diff",      &gem::GEMHit::time_diff)
+        .def_readonly("adc_asym",       &gem::GEMHit::adc_asym)
+        .def_readonly("x_max_strip_dt", &gem::GEMHit::x_max_strip_dt)
+        .def_readonly("y_max_strip_dt", &gem::GEMHit::y_max_strip_dt)
+        .def_readonly("x_min_ts_corr",  &gem::GEMHit::x_min_ts_corr)
+        .def_readonly("y_min_ts_corr",  &gem::GEMHit::y_min_ts_corr)
+        .def_readonly("xy_ts_corr",     &gem::GEMHit::xy_ts_corr)
         .def("__repr__", [](const gem::GEMHit &h) {
             char buf[160];
             std::snprintf(buf, sizeof(buf),
@@ -241,7 +298,15 @@ static void bind_gem(py::module_ &m)
         .def_readwrite("match_mode",         &gem::ClusterConfig::match_mode)
         .def_readwrite("match_adc_asymmetry",&gem::ClusterConfig::match_adc_asymmetry)
         .def_readwrite("match_time_diff",    &gem::ClusterConfig::match_time_diff)
-        .def_readwrite("ts_period",          &gem::ClusterConfig::ts_period);
+        .def_readwrite("match_ts_corr_min",  &gem::ClusterConfig::match_ts_corr_min)
+        .def_readwrite("ts_period",          &gem::ClusterConfig::ts_period)
+        .def_readwrite("strip_time_min",     &gem::ClusterConfig::strip_time_min)
+        .def_readwrite("strip_time_max",     &gem::ClusterConfig::strip_time_max)
+        .def_readwrite("strip_unimodal",     &gem::ClusterConfig::strip_unimodal)
+        .def_readwrite("seed_min_peak_adc",  &gem::ClusterConfig::seed_min_peak_adc)
+        .def_readwrite("seed_min_sum_adc",   &gem::ClusterConfig::seed_min_sum_adc)
+        .def_readwrite("strip_time_agreement", &gem::ClusterConfig::strip_time_agreement)
+        .def_readwrite("strip_ts_corr_min",  &gem::ClusterConfig::strip_ts_corr_min);
 
     py::class_<gem::GemCluster>(m, "GemCluster",
         "Strip clustering + X/Y cluster matching.  Used by GemSystem during "

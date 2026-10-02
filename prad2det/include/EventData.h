@@ -304,8 +304,9 @@ struct ReconEventData {
     // gem::GEMHit (see GemSystem.h).  Times in ns; NaN = undefined (seed
     // strip without a positive sample, single-strip cluster, ...).  In
     // match_mode 1 hits exist only for X/Y pairs that PASSED the matching
-    // cuts, so gem_xy_dt / gem_xy_asym are truncated at the thresholds —
-    // use the per-cluster block below for the full distributions.
+    // cuts, so gem_xy_dt / gem_xy_asym / gem_xy_corr are post-cut — use the
+    // per-cluster block below for the full distributions (gem_xy_corr of
+    // any X/Y pair: gem::TimeSampleCorrelation on two gem_cl_ts_adc rows).
     float   gem_x_time[kMaxGemHits]     = {};  // X seed-strip mean time
     float   gem_y_time[kMaxGemHits]     = {};  // Y seed-strip mean time
     float   gem_xy_dt[kMaxGemHits]      = {};  // gem_x_time - gem_y_time (signed)
@@ -314,10 +315,12 @@ struct ReconEventData {
     float   gem_y_max_sdt[kMaxGemHits]  = {};  // Y: same
     float   gem_x_min_corr[kMaxGemHits] = {};  // X: min seed-vs-strip time-sample correlation
     float   gem_y_min_corr[kMaxGemHits] = {};  // Y: same
+    float   gem_xy_corr[kMaxGemHits]    = {};  // X/Y cluster-summed time-sample correlation (rho_cl)
 
     // GEM 1D clusters after cluster filtering, both planes of every
     // detector, ordered det 0 X, det 0 Y, det 1 X, ...; silently truncated
-    // at kMaxGemClusters.  Quality fields as in gem::StripCluster.
+    // at kMaxGemClusters.  Quality fields as in gem::StripCluster; a
+    // gem_cl_ts_adc row is NaN-padded past StripCluster::ts_adc_sum.
     int     n_gem_cl = 0;
     uint8_t gem_cl_det[kMaxGemClusters]       = {};  // detector ID
     uint8_t gem_cl_plane[kMaxGemClusters]     = {};  // 0=X, 1=Y
@@ -331,6 +334,7 @@ struct ReconEventData {
     float   gem_cl_seed_sum[kMaxGemClusters]  = {};  // sum of ts_adc of the seed strip
     float   gem_cl_max_sdt[kMaxGemClusters]   = {};  // max |t(strip) - t(seed)| over non-seed strips (ns)
     float   gem_cl_min_corr[kMaxGemClusters]  = {};  // min seed-vs-strip time-sample correlation
+    float   gem_cl_ts_adc[kMaxGemClusters][ssp::SSP_TIME_SAMPLES] = {};  // cluster-summed time samples (StripCluster::ts_adc_sum)
 
     //veto information
     int      veto_nch = 0;
@@ -439,11 +443,14 @@ struct ReconEventData {
     {
         constexpr float nan = std::numeric_limits<float>::quiet_NaN();
         for (float *a : {gem_x_time, gem_y_time, gem_xy_dt, gem_xy_asym,
-                         gem_x_max_sdt, gem_y_max_sdt, gem_x_min_corr, gem_y_min_corr})
+                         gem_x_max_sdt, gem_y_max_sdt, gem_x_min_corr, gem_y_min_corr,
+                         gem_xy_corr})
             std::fill(a, a + kMaxGemHits, nan);
         for (float *a : {gem_cl_pos, gem_cl_peak, gem_cl_charge, gem_cl_time,
                          gem_cl_seed_peak, gem_cl_seed_sum, gem_cl_max_sdt, gem_cl_min_corr})
             std::fill(a, a + kMaxGemClusters, nan);
+        std::fill(&gem_cl_ts_adc[0][0],
+                  &gem_cl_ts_adc[0][0] + kMaxGemClusters * ssp::SSP_TIME_SAMPLES, nan);
     }
 
     void clear_match_lists()

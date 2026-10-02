@@ -79,6 +79,7 @@ struct ReconReadStatus {
     bool has_gem_hits   = false;   // n_gem_hits + det_id + gem_* (replay_recon -gem_hit)
     bool has_gem_qa     = false;   // per-hit gem_x/y_time, gem_xy_dt/asym, gem_x/y_max_sdt, gem_x/y_min_corr
     bool has_gem_cl     = false;   // n_gem_cl + gem_cl_* per-cluster block
+    bool has_gem_ts     = false;   // gem_xy_corr + gem_cl_ts_adc (replayed after 2026-10)
 };
 
 // Holder for ROOT vector-branch pointer-to-pointer binding.
@@ -299,16 +300,17 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 // ── Recon tree — write ───────────────────────────────────────────────────
 // with_gem_hits (replay_recon -gem_hit) books the GEM hits with their quality
 // variables and the gem_cl_* per-cluster block.  `layout` limits that to the
-// GEM quality / cluster groups it flags: replay_filter passes the read status
-// of the tree it copies, so a copy of an older file keeps its GEM layout
-// instead of gaining NaN-only branches; the simulation converters, which fill
-// only the hits, pass a status with just has_gem_hits.
+// GEM quality / cluster / time-sample groups it flags: replay_filter passes the
+// read status of the tree it copies, so a copy of an older file keeps its GEM
+// layout instead of gaining NaN-only branches; the simulation converters, which
+// fill only the hits, pass a status with just has_gem_hits.
 inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode,
                                   bool with_gem_hits = false,
                                   const ReconReadStatus *layout = nullptr)
 {
     const bool gem_qa = !layout || layout->has_gem_qa;
     const bool gem_cl = !layout || layout->has_gem_cl;
+    const bool gem_ts = !layout || layout->has_gem_ts;
     tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
@@ -376,6 +378,8 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
             tree->Branch("gem_x_min_corr", ev.gem_x_min_corr, "gem_x_min_corr[n_gem_hits]/F");
             tree->Branch("gem_y_min_corr", ev.gem_y_min_corr, "gem_y_min_corr[n_gem_hits]/F");
         }
+        if (gem_ts)
+            tree->Branch("gem_xy_corr",    ev.gem_xy_corr,    "gem_xy_corr[n_gem_hits]/F");
 
         // GEM 1D clusters after filtering (detector-local position).
         if (gem_cl) {
@@ -392,6 +396,9 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
             tree->Branch("gem_cl_seed_sum",  ev.gem_cl_seed_sum,  "gem_cl_seed_sum[n_gem_cl]/F");
             tree->Branch("gem_cl_max_sdt",   ev.gem_cl_max_sdt,   "gem_cl_max_sdt[n_gem_cl]/F");
             tree->Branch("gem_cl_min_corr",  ev.gem_cl_min_corr,  "gem_cl_min_corr[n_gem_cl]/F");
+            if (gem_ts)
+                tree->Branch("gem_cl_ts_adc",    ev.gem_cl_ts_adc,
+                             Form("gem_cl_ts_adc[n_gem_cl][%d]/F", ssp::SSP_TIME_SAMPLES));
         }
     }
     // Veto + LMS soft-peak summaries.
@@ -511,6 +518,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
 
     s.has_gem_qa = (tree->GetBranch("gem_xy_dt") != nullptr);
     s.has_gem_cl = (tree->GetBranch("n_gem_cl") != nullptr);
+    s.has_gem_ts = (tree->GetBranch("gem_xy_corr") != nullptr);
     bind("gem_x_time",       ev.gem_x_time);
     bind("gem_y_time",       ev.gem_y_time);
     bind("gem_xy_dt",        ev.gem_xy_dt);
@@ -519,6 +527,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     bind("gem_y_max_sdt",    ev.gem_y_max_sdt);
     bind("gem_x_min_corr",   ev.gem_x_min_corr);
     bind("gem_y_min_corr",   ev.gem_y_min_corr);
+    bind("gem_xy_corr",      ev.gem_xy_corr);
     bind("n_gem_cl",         &ev.n_gem_cl);
     bind("gem_cl_det",       ev.gem_cl_det);
     bind("gem_cl_plane",     ev.gem_cl_plane);
@@ -532,6 +541,7 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     bind("gem_cl_seed_sum",  ev.gem_cl_seed_sum);
     bind("gem_cl_max_sdt",   ev.gem_cl_max_sdt);
     bind("gem_cl_min_corr",  ev.gem_cl_min_corr);
+    bind("gem_cl_ts_adc",    ev.gem_cl_ts_adc);
 
     s.has_veto = (tree->GetBranch("veto_nch") != nullptr);
     if (s.has_veto) {

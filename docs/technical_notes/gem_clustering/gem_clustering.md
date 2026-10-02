@@ -62,9 +62,9 @@ ADC counts):
 2. Once descending, track the running minimum.
 3. The first ascent step where `charge[i+1] − charge[i] > split_thres`
    confirms the valley.
-4. Halve the charge of the valley strip (it is shared between the
-   left and right sub-clusters), emit the left sub-cluster, and
-   recurse on the right.
+4. Halve the charge of the valley strip, emit the left sub-cluster
+   (the strips before the valley), and recurse on the right, which
+   starts with the halved valley strip.
 
 Groups smaller than 3 strips never split. Groups with multiple
 valleys split recursively, producing one cluster per "peak".
@@ -129,12 +129,13 @@ upstream strip clustering is clean enough that the brightest X
 genuinely matches the brightest Y.
 
 **Mode 1 — full Cartesian + cuts (default).** Form every X×Y pair,
-then drop any pair that fails either of:
+then drop any pair that fails one of:
 
 - **ADC asymmetry** — `|Q_X_peak − Q_Y_peak| / (Q_X_peak + Q_Y_peak) ≤ match_adc_asymmetry` (default 0.8). Real GEM hits deposit similar charge on both planes; large asymmetries flag ghosts from accidental coincidence.
 - **Time difference** — the seed-strip ADC-weighted mean times must satisfy `|⟨t⟩_X − ⟨t⟩_Y| ≤ match_time_diff` (default 50 ns). The seed mean time is `Σ(adc_i · t_i) / Σ adc_i` over the time samples with `adc_i > 0`, where `t_i = (i + 1) · ts_period` ns (`StripMeanTime`, see [SBS-style quality variables](#sbs-style-quality-variables-and-cuts)). A pair is not rejected by this cut when either seed has no positive sample (undefined time).
+- **Waveform correlation** (optional, off by default) — `xy_ts_corr ≥ match_ts_corr_min`, where `xy_ts_corr` is the Pearson correlation of the X and Y cluster-summed time samples (see [X/Y cluster time-sample correlation](#xy-cluster-time-sample-correlation)). An undefined (`NaN`) correlation passes.
 
-Any pair passing both cuts becomes a `GEMHit` with `det_id` and
+Any pair passing the cuts becomes a `GEMHit` with `det_id` and
 per-plane charge / size / max-timebin recorded for downstream use.
 
 ## Parameters
@@ -156,6 +157,7 @@ useful when the four GEMs have different APV gains or noise levels.
 | `match_mode` | 1 | — | `0` = ADC-sorted 1:1 matching, `1` = Cartesian product with cuts. |
 | `match_adc_asymmetry` | 0.8 | fraction | Cap on `|Q_X − Q_Y|/(Q_X + Q_Y)` (mode 1). Set negative to disable. |
 | `match_time_diff` | 50 | ns | Cap on `|⟨t⟩_X − ⟨t⟩_Y|` (mode 1). Set negative to disable. |
+| `match_ts_corr_min` | −1 (off) | — | Floor on `xy_ts_corr`, the X/Y cluster time-sample correlation (mode 1); ≤ −1 disables, `NaN` passes. See [below](#xy-cluster-time-sample-correlation). |
 | `ts_period` | 25 | ns | Time-sample period (default = 1 / 40 MHz APV clock). Also used for the strip mean times of the quality variables. |
 | `strip_time_min/max`, `strip_unimodal`, `seed_min_peak_adc`, `seed_min_sum_adc`, `strip_time_agreement`, `strip_ts_corr_min` | off | | SBS-style quality cuts, see [below](#sbs-style-quality-variables-and-cuts). |
 
@@ -171,9 +173,9 @@ produces three groups (110-114, 130-139, 158-160). The middle group
 has two local maxima — `splitCluster()` walks from the 132 peak,
 detects a descent into the 134/135 valley, then sees a 198 ADC upturn
 into the 137 peak (»`split_thres = 14`) and partitions the group at
-strip 135 (right panel). The valley strip's charge is halved and
-contributes to both sub-clusters, so neither side double-counts the
-shared edge.
+strip 135 (right panel). The valley strip's charge is halved and the
+strip is kept only in the right sub-cluster, so the shared edge is not
+double-counted.
 
 | cluster | strips | position (mm) | Σ ADC | peak ADC |
 |---|:---:|---:|---:|---:|
@@ -251,6 +253,7 @@ Each X/Y match produces one `GEMHit`:
 | `x_max_timebin`, `y_max_timebin` | `short` | Time-sample bin of the max-ADC strip on each plane. |
 | `x_size`, `y_size` | `int` | Number of strips in the X / Y cluster. |
 | `x_time`, `y_time`, `time_diff`, `adc_asym`, `x/y_max_strip_dt`, `x/y_min_ts_corr` | `float` | SBS-style X/Y quality, see [below](#sbs-style-quality-variables-and-cuts). NaN = undefined. |
+| `xy_ts_corr` | `float` | X/Y cluster time-sample correlation ρ_cl, see [below](#xy-cluster-time-sample-correlation). NaN = undefined. |
 
 These map directly onto the `gem_*` branches of the recon tree (see
 [`docs/REPLAYED_DATA.md`](../../REPLAYED_DATA.md)).
@@ -305,6 +308,7 @@ X/Y time cut. Per cluster (`StripCluster`, filled in
 | `seed_sum_adc` | sum of all the seed's `ts_adc` samples, negatives included (SBS "seed strip sum ADC") |
 | `max_strip_dt` | max over **all** non-seed strips of `\|t_i − seed_time\|` (ns) |
 | `min_ts_corr` | min over all non-seed strips of `TimeSampleCorrelation(seed, strip_i)` |
+| `ts_adc_sum` | cluster-summed time samples (one value per sample), see [X/Y cluster time-sample correlation](#xy-cluster-time-sample-correlation) |
 
 Non-finite per-strip values are skipped when forming the max / min;
 `max_strip_dt` and `min_ts_corr` are `NaN` for single-strip clusters.
@@ -316,6 +320,7 @@ Per 2-D hit (`GEMHit`, both match modes):
 | `time_diff` | `x_time − y_time` (signed, ns) |
 | `adc_asym` | `(x_peak − y_peak) / (x_peak + y_peak)`, signed; `NaN` if the sum ≤ 0. `\|adc_asym\|` is exactly what `match_adc_asymmetry` cuts |
 | `x/y_max_strip_dt`, `x/y_min_ts_corr` | copied from the X / Y cluster |
+| `xy_ts_corr` | `TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum)`, see [X/Y cluster time-sample correlation](#xy-cluster-time-sample-correlation) |
 
 In match mode 1, `GEMHit`s exist only for pairs that **passed** the
 X/Y cuts, so per-hit `adc_asym` / `time_diff` distributions are
@@ -362,7 +367,8 @@ other `ClusterConfig` knob):
   Python), the replay raw → recon path and
   `hycal_shower_profile`.
 - `PipelineBuilder` prints the values on the `[GEMCFG]` line
-  (`strip_t=[min,max] unimodal= seed_peak= seed_sum= strip_dt= ts_corr=`).
+  (`strip_t=[min,max] unimodal= seed_peak= seed_sum= strip_dt= ts_corr=`;
+  `match_ts_corr_min` follows `tdiff=` as `xy_corr=`).
 
 ### Mapping to SBS
 
@@ -380,6 +386,7 @@ other `ClusterConfig` knob):
 | `xy cluster matching mode` | mode 0 (rank pairing, no cuts) | `match_mode` (PRad production: 1) |
 | `2d cluster adc assymetry` (0.8) | **no** (mode 1 only, and a no-op there) | `match_adc_asymmetry`, value on `GEMHit::adc_asym` |
 | X/Y seed time agreement (50 ns) | **no** (mode 1 only) | `match_time_diff`, value on `GEMHit::time_diff` |
+| *(SBS-offline, not `mpd_gem_view_ssp`)* `corrcoeff_cut` on the X/Y cluster-summed sample correlation | yes in SBS-offline (0.4–0.5), mostly as a hit-quality flag | `match_ts_corr_min`, value on `GEMHit::xy_ts_corr`, see [below](#xy-cluster-time-sample-correlation) |
 
 **SBS bugs deliberately not ported:**
 
@@ -475,18 +482,124 @@ distributions; efficiencies from `gem_eff_audit.py`, leave-one-out):
   (p16–p84 half-width 2.5–5 ns), Y peaks ≈ 10–25 % larger than X
   (median asymmetry −0.05 to −0.11). The production `match_time_diff = 50` and
   `match_adc_asymmetry = 0.7` remove ≤ 0.1 % and ≤ 0.8 % of rank pairs.
+- The optional X/Y waveform-correlation cut `match_ts_corr_min` is
+  measured in [X/Y cluster time-sample correlation](#xy-cluster-time-sample-correlation).
+
+## X/Y cluster time-sample correlation
+
+The X and Y clusters of a real 2-D hit collect the charge of one
+avalanche, so their APV25 pulses have the same shape and timing; a wrong
+(ghost) pairing of clusters from different particles, noise or pile-up
+need not. The correlation variable ρ_cl measures this. It is the
+SBS-offline `corrcoeff_clust` (`SBSGEMModule::CorrCoeff`, introduced by
+A. Puckett, SBS GEM meeting 2019-11-13); `mpd_gem_view_ssp` has no
+X/Y correlation, only the strip-level one behind `min_ts_corr`:
+
+```
+ρ_cl = Σ_s (U_s − Ū)(V_s − V̄) / sqrt( Σ_s (U_s − Ū)² · Σ_s (V_s − V̄)² ),   s = 0..5
+```
+
+with `U_s` / `V_s` the cluster-summed samples of the X / Y cluster. It
+does not depend on the X/Y charge scale or on a baseline offset common
+to all samples, so it does not overlap with the ADC-asymmetry cut; it
+depends on the pulse shape and on the relative X/Y timing.
+
+**Implementation.** `reconstructCluster()` fills
+`StripCluster::ts_adc_sum[s] = Σ_i w_i · ts_adc_i[s]` over the cluster's
+strips, with `w_i = charge_i / max_s ts_adc_i[s]`: 1 for an ordinary
+strip and ½ for the valley strip that `splitCluster()` halved, which only
+the right-hand sub-cluster holds. The waveform thus carries the same strip
+weights as `total_charge`. (SBS-offline instead lets overlapping clusters
+share a strip and weights it in each by its split fraction.) A strip
+without a positive sample gets weight 1. `makeHit()` sets
+`GEMHit::xy_ts_corr = TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum)`
+for every pair in both match modes. It is `NaN` if a waveform is empty
+(strips with no samples or with different sample counts) or flat, which
+does not happen on real data.
+
+**Cut.** `match_ts_corr_min` (JSON key of the same name, per detector,
+mode 1 only) rejects a pair with `xy_ts_corr < match_ts_corr_min`;
+`≤ −1`, the default and the value in both shipped configs, disables it.
+Differences from SBS-offline:
+
+- SBS rejects `NaN` (its test is `ccor >= cut`); PRad lets an undefined
+  value pass, like its other X/Y matching and cluster-level cuts (only
+  the strip-level time window and unimodal cut reject undefined strips).
+- SBS uses the cut mainly to mark "high-quality" 2-D hits for track
+  finding and as a soft per-module filter (a failing hit is dropped only
+  if another hit of the module passes); it is a hard requirement only
+  for hits with a single-strip cluster. `match_ts_corr_min` is a hard
+  cut on every pair.
+- SBS production values of `corrcoeff_cut` are 0.4–0.5.
+
+**Measured on run 24246** (split 0, first 20k events, physics triggers
+(mask 0xf00), production config, noise bursts with ≥ 400 clusters excluded;
+a one-off study through `prad2py` whose scripts are not in the repository —
+`gem_xy_corr.py` prints per-detector quantiles of the stored hits and of all
+X×Y pairs with its own event selection, not the class numbers below). True pairs:
+detectors with exactly one X and one Y cluster (T1) and the X/Y pairs of
+HyCal-matched hits (T2). Wrong pairs: the other combinations of a matched
+cluster in the same event (B2), and X/Y clusters from consecutive events
+(B1). All pairs, before the matching cuts:
+
+| class | pairs | p16 | median | ρ ≥ 0.5 | ρ ≥ 0.8 |
+|---|---:|---:|---:|---:|---:|
+| T1 clean 1X+1Y | 11514 | 0.77 | 0.947 | 94 % | 81 % |
+| T2 HyCal-matched | 16532 | 0.72 | 0.941 | 92 % | 78 % |
+| B2 in-event wrong | 60828 | 0.23 | 0.804 | 73 % | 50 % |
+| B1 event-mixed | 49418 | −0.29 | 0.553 | 53 % | 30 % |
+
+- True pairs peak at 1 with an amplitude-driven tail: ρ ≥ 0.8 for 35 %
+  of the true pairs whose smaller peak is 60–100 ADC, 97 % above
+  800 ADC. The tail is noise, not impurity: a high-purity HyCal-matched
+  subset agrees with T1 at equal amplitude.
+- The 6-sample window sits on top of the pulse (median normalized
+  cluster waveform 0.62, 0.92, 1.00, 0.92, 0.78, 0.62), so the
+  mean-subtracted shape is small (std/max ≈ 0.17) and in-time wrong
+  pairs of real clusters correlate well too (B2 median 0.80, pairs of
+  two matched clusters 0.86). ρ_cl mainly rejects noise clusters and
+  out-of-time pairs; it is strongly anti-correlated with `|time_diff|`
+  (Spearman −0.49 to −0.72 across the classes).
+- On top of the production cuts (`|adc_asym| ≤ 0.7`, `|time_diff| ≤ 50` ns),
+  ρ ≥ 0.5 keeps 94 % (T1) / 92 % (T2) and rejects 25 % of B2; ρ ≥ 0.8
+  keeps 81 % / 78 % and rejects 48 %. At equal T2 efficiency a tighter
+  `|time_diff|` cut rejects at least as much B2 (99 % efficiency: 7.4 %
+  vs 6.1 %; 95 %: 21 % vs 19 %). After such a cut ρ_cl rejects another
+  5–14 % of the remaining B2 at a further 1–5 % T2 loss; at equal total
+  efficiency the combination rejects no more than `|time_diff|` alone.
+- True-pair ρ_cl follows amplitude: GEM1 highest, GEM2 lowest (T1 with
+  ρ ≥ 0.8: 94 % vs 72 %).
+- The valley-strip weight (½ instead of 1) changes ρ_cl for 11 % of the
+  pairs, by a median 0.012; the class quantiles move by ≤ 0.002.
+
+**Recommendation.** Keep `match_ts_corr_min` off in production and treat
+`gem_xy_corr` as a hit-quality variable that flags noise and out-of-time
+pairings. If a cut is wanted, keep it loose: ρ ≥ 0 keeps 98–99 % of true
+pairs and rejects 9 % of B2. The SBS value 0.5 on every pair costs 6–8 %
+of the true pairs (11 % on GEM2). To choose among hits that share a
+cluster, `|adc_asym|` did better than ρ_cl on run 24246 (true partner
+ranked first in 76 % vs 64 % of the cases with one competitor).
+
+**Offline.** `replay_recon -gem_hit` writes `gem_xy_corr` per hit and
+the cluster-summed samples of every cluster (`gem_cl_ts_adc[n_gem_cl][6]`),
+so ρ_cl can be formed for any X/Y pair, including pairs that the mode-1
+cuts rejected: `gem::TimeSampleCorrelation(ev.gem_cl_ts_adc[ix],
+ev.gem_cl_ts_adc[iy], 6)` in C++, `prad2py.det.time_sample_correlation`
+or [`analysis/pyscripts/gem_xy_corr.py`](../../../analysis/pyscripts/gem_xy_corr.py)
+(`ts_corr`, `xy_pairs`, bit-identical numpy) in Python. See
+[`docs/REPLAYED_DATA.md`](../../REPLAYED_DATA.md).
 
 ## Reproducing the plots
 
 The detector geometry is read from
 [`database/gem_map.json`](../../../database/gem_map.json); the
 strip-clustering and matching algorithms are re-implemented in pure
-Python in [`plot_gem_clustering.py`](plot_gem_clustering.py) (NumPy +
+Python in [`scripts/plot_gem_clustering.py`](scripts/plot_gem_clustering.py) (NumPy +
 Matplotlib only).
 
 ```bash
 cd docs/technical_notes/gem_clustering
-python plot_gem_clustering.py
+python scripts/plot_gem_clustering.py
 ```
 
 Regenerates `plots/gem_fig1_layout.png`, `plots/gem_fig2_strip_clustering.png`,
