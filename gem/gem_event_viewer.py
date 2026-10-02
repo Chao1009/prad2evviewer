@@ -43,7 +43,9 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 _SCRIPTS_DIR = _SCRIPT_DIR.parent / "scripts"
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
-from prad2_env import find_database_file, import_prad2py  # noqa: E402
+from prad2_env import find_database_file, fix_qt_lib_path, import_prad2py  # noqa: E402
+
+fix_qt_lib_path()   # before the first PyQt6 import
 
 prad2py, PRAD2PY_ERROR = import_prad2py()
 HAVE_PRAD2PY = prad2py is not None
