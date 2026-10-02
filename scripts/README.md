@@ -404,7 +404,8 @@ while ch.read() == dec.Status.success:
         gsys.process_event(ch.gem())
         gsys.reconstruct(gcl)
         for h in gsys.get_all_hits():
-            print("GEM", h.det_id, h.x, h.y, h.x_charge, h.y_charge)
+            # xy_ts_corr: X/Y cluster time-sample correlation (rho_cl)
+            print("GEM", h.det_id, h.x, h.y, h.x_charge, h.y_charge, h.xy_ts_corr)
 
         # HyCal — feed per-module energies (e.g. from ch.fadc() + your
         # calibration), then cluster:

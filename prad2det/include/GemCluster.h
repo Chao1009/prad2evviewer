@@ -7,11 +7,11 @@
 //   2. Split multi-peak clusters at local minima
 //   3. Charge-weighted position reconstruction + SBS-style quality variables
 //      (seed mean time / peak / sum, seed-vs-strip time spread and
-//      time-sample correlation)
+//      time-sample correlation, cluster-summed time samples)
 //   4. Cross-talk identification by characteristic distance
 //   5. Cluster filter (size, cross-talk, optional SBS-style quality cuts)
-//   6. Cartesian X-Y cluster matching → 2D hits (X/Y time + ADC asymmetry
-//      recorded on every GEMHit)
+//   6. Cartesian X-Y cluster matching → 2D hits (X/Y time, ADC asymmetry and
+//      cluster time-sample correlation recorded on every GEMHit)
 // The SBS-style cuts are all off by default (see ClusterConfig).
 //=============================================================================
 
@@ -32,9 +32,11 @@ float StripMeanTime(const std::vector<float> &ts_adc, float ts_period = 25.f);
 
 // Pearson correlation coefficient between two time-sample vectors (SBS "time
 // sample correlation coefficient").  NaN if the sizes differ, size < 2, or
-// either variance is zero.
+// either variance is zero.  The pointer form takes n samples from each array,
+// e.g. two rows of the recon-tree gem_cl_ts_adc[n_gem_cl][6] block.
 float TimeSampleCorrelation(const std::vector<float> &a,
                             const std::vector<float> &b);
+float TimeSampleCorrelation(const float *a, const float *b, size_t n);
 
 // SBS "concave shape" strip cut (Cuts::is_concave_shape): samples strictly
 // rising up to the first maximum and strictly falling after it.  A peak in
