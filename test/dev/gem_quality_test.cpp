@@ -5,9 +5,10 @@
 // hycal_energy_bias_test.
 //
 // Covers the three public helpers (StripMeanTime, TimeSampleCorrelation,
-// IsUnimodalPulse), the StripCluster / GEMHit quality fields, every quality
-// ClusterConfig cut on its own, the mode-1 X/Y time cut, and the
-// reconstruction_config.json parsing + [GEMCFG] log via PipelineBuilder.
+// IsUnimodalPulse), the StripCluster / GEMHit quality fields (including the
+// cluster-summed samples and the X/Y correlation xy_ts_corr), every quality
+// ClusterConfig cut on its own, the mode-1 X/Y time and correlation cuts, and
+// the reconstruction_config.json parsing + [GEMCFG] log via PipelineBuilder.
 //=============================================================================
 
 #include "GemCluster.h"
@@ -59,6 +60,37 @@ float legacy_mean_time(const std::vector<float> &ts, float ts_period)
         }
     }
     return (sum_w > 0.f) ? sum_wt / sum_w : -1.f;
+}
+
+// Pre-change TimeSampleCorrelation (GemCluster.cpp at d606375), kept verbatim
+// as the reference for the bit-identity check (gem_xy_corr.ts_corr in
+// analysis/pyscripts repeats this arithmetic).
+float legacy_ts_corr(const std::vector<float> &a, const std::vector<float> &b)
+{
+    const size_t n = a.size();
+    if (n < 2 || b.size() != n)
+        return std::numeric_limits<float>::quiet_NaN();
+
+    double mean_a = 0., mean_b = 0.;
+    for (size_t i = 0; i < n; ++i) {
+        mean_a += a[i];
+        mean_b += b[i];
+    }
+    mean_a /= static_cast<double>(n);
+    mean_b /= static_cast<double>(n);
+
+    double s_ab = 0., s_aa = 0., s_bb = 0.;
+    for (size_t i = 0; i < n; ++i) {
+        const double da = a[i] - mean_a, db = b[i] - mean_b;
+        s_ab += da * db;
+        s_aa += da * da;
+        s_bb += db * db;
+    }
+    if (!(s_aa > 0.) || !(s_bb > 0.))
+        return std::numeric_limits<float>::quiet_NaN();
+
+    const double r = s_ab / std::sqrt(s_aa * s_bb);
+    return static_cast<float>(std::max(-1., std::min(1., r)));
 }
 
 // StripHit as GemSystem::collectHits builds it: charge = first max sample,
@@ -179,8 +211,11 @@ bool clusters_identical(const std::vector<gem::StripCluster> &a,
             x.cross_talk != y.cross_talk || x.hits.size() != y.hits.size() ||
             !same_bits(x.seed_time, y.seed_time) || !same_bits(x.seed_peak_adc, y.seed_peak_adc) ||
             !same_bits(x.seed_sum_adc, y.seed_sum_adc) ||
-            !same_bits(x.max_strip_dt, y.max_strip_dt) || !same_bits(x.min_ts_corr, y.min_ts_corr))
+            !same_bits(x.max_strip_dt, y.max_strip_dt) || !same_bits(x.min_ts_corr, y.min_ts_corr) ||
+            x.ts_adc_sum.size() != y.ts_adc_sum.size())
             return false;
+        for (size_t s = 0; s < x.ts_adc_sum.size(); ++s)
+            if (!same_bits(x.ts_adc_sum[s], y.ts_adc_sum[s])) return false;
         for (size_t k = 0; k < x.hits.size(); ++k)
             if (x.hits[k].strip != y.hits[k].strip ||
                 !same_bits(x.hits[k].charge, y.hits[k].charge)) return false;
@@ -214,7 +249,25 @@ bool knobs_disabled(const gem::ClusterConfig &c)
            std::isinf(c.strip_time_max) && c.strip_time_max > 0.f &&
            !c.strip_unimodal && c.seed_min_peak_adc == 0.f &&
            c.seed_min_sum_adc == 0.f && c.strip_time_agreement == -1.f &&
-           c.strip_ts_corr_min == -1.f;
+           c.strip_ts_corr_min == -1.f && c.match_ts_corr_min == -1.f;
+}
+
+// Element-wise float sum of the strips' samples, in strip order, each
+// strip scaled by w (the reconstructCluster rule, spelled out).
+std::vector<float> weighted_sum(const std::vector<std::pair<float, std::vector<float>>> &strips)
+{
+    std::vector<float> sum(strips.front().second.size(), 0.f);
+    for (auto &[w, ts] : strips)
+        for (size_t s = 0; s < ts.size(); ++s) sum[s] += w * ts[s];
+    return sum;
+}
+
+bool same_vec(const std::vector<float> &a, const std::vector<float> &b)
+{
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!same_bits(a[i], b[i])) return false;
+    return true;
 }
 
 } // namespace
@@ -269,6 +322,29 @@ int main()
           "TimeSampleCorrelation size mismatch = NaN");
     check(std::isnan(gem::TimeSampleCorrelation({1.f}, {2.f})),
           "TimeSampleCorrelation size < 2 = NaN");
+    {
+        // both forms (the pointer one serves recon-tree rows) bit-identical to
+        // the pre-change implementation
+        std::mt19937 rng(777);
+        std::uniform_real_distribution<float> adc(-60.f, 1500.f);
+        int mismatches = 0;
+        for (int n = 0; n < 5000; ++n) {
+            std::vector<float> a(6), b(6);
+            for (auto &x : a) x = adc(rng);
+            for (auto &x : b) x = adc(rng);
+            const float ref = legacy_ts_corr(a, b);
+            if (!same_bits(gem::TimeSampleCorrelation(a, b), ref) ||
+                !same_bits(gem::TimeSampleCorrelation(a.data(), b.data(), a.size()), ref))
+                ++mismatches;
+        }
+        check(mismatches == 0,
+              "TimeSampleCorrelation (vector and pointer form) is bit-identical to the legacy one");
+        const float row[2][6] = {{10, 50, 100, 60, 20, 5}, {20, 100, 200, 120, 40, 10}};
+        check(close_to(gem::TimeSampleCorrelation(row[0], row[1], 6), 1.f, 1e-6f),
+              "TimeSampleCorrelation pointer form on 2-D array rows");
+        check(std::isnan(gem::TimeSampleCorrelation(row[0], row[1], 1)),
+              "TimeSampleCorrelation pointer form n < 2 = NaN");
+    }
 
     // ---- IsUnimodalPulse ----
     check(gem::IsUnimodalPulse(pulse), "IsUnimodalPulse rising/falling = true");
@@ -300,6 +376,13 @@ int main()
               "explicitly disabled cuts give bit-identical clusters");
     }
     if (const auto *a = find_cluster(def, 100)) {
+        check(same_vec(a->ts_adc_sum,
+                       weighted_sum({{1.f, scaled(PROMPT, 150.f)},
+                                     {1.f, {30.f, 150.f, 300.f, 150.f, 30.f, 60.f}},
+                                     {1.f, scaled(PROMPT, 400.f)},
+                                     {1.f, scaled(PROMPT, 250.f)},
+                                     {1.f, scaled(PROMPT, 100.f)}})),
+              "A ts_adc_sum = plain sum of its strips' samples (no split strip)");
         check(close_to(a->seed_time, gem::StripMeanTime(scaled(PROMPT, 400.f))),
               "A seed_time is the mean time of strip 102");
         check(close_to(a->seed_peak_adc, 400.f), "A seed_peak_adc = 400");
@@ -322,11 +405,61 @@ int main()
         check(std::isfinite(d->seed_time), "single-strip seed_time finite");
         check(std::isnan(d->max_strip_dt), "single-strip max_strip_dt NaN");
         check(std::isnan(d->min_ts_corr), "single-strip min_ts_corr NaN");
+        check(same_vec(d->ts_adc_sum, scaled(LATE, 300.f)),
+              "single-strip ts_adc_sum = its own samples");
     } else check(false, "cluster D present");
     if (const auto *f = find_cluster(def, 600)) {
         check(close_to(f->seed_peak_adc, 40.f), "F seed_peak_adc = 40");
         check(close_to(f->seed_sum_adc, 35.f), "F seed_sum_adc includes negative samples");
     } else check(false, "cluster F present");
+
+    // ---- Cluster-summed samples (ts_adc_sum) ----
+    {
+        // charges 100/300/100/300/100: the valley at strip 22 splits the run;
+        // splitCluster halves its charge and puts it in the right part only
+        gem::GemCluster gc;
+        gc.SetConfig(base_config());
+        const auto s0 = scaled(PROMPT, 100.f), s1 = scaled(PROMPT, 300.f),
+                   s2 = scaled(PROMPT, 100.f), s3 = scaled(PROMPT, 300.f),
+                   s4 = scaled(LATE, 100.f);
+        std::vector<gem::StripHit> hits = {make_strip(20, s0), make_strip(21, s1),
+                                           make_strip(22, s2), make_strip(23, s3),
+                                           make_strip(24, s4)};
+        std::vector<gem::StripCluster> cls;
+        gc.FormClusters(hits, cls);
+        check(summary(cls) == std::vector<std::pair<int, int>>{{20, 2}, {22, 3}},
+              "valley at strip 22 splits 20-24 into 20-21 + 22-24");
+        const auto *l = find_cluster(cls, 20), *r = find_cluster(cls, 22);
+        if (l && r) {
+            check(same_vec(l->ts_adc_sum, weighted_sum({{1.f, s0}, {1.f, s1}})),
+                  "split: left part ts_adc_sum is the plain sum");
+            check(same_vec(r->ts_adc_sum, weighted_sum({{0.5f, s2}, {1.f, s3}, {1.f, s4}})),
+                  "split: halved valley strip enters ts_adc_sum with weight 1/2");
+            check(close_to(r->total_charge, 450.f),
+                  "split: total_charge counts the valley strip at 1/2 too");
+        } else check(false, "split clusters present");
+    }
+    {
+        // a strip without positive sample keeps weight 1; mixed sample counts
+        // leave the waveform undefined
+        gem::GemCluster gc;
+        gc.SetConfig(base_config());
+        const std::vector<float> neg = {-5.f, -3.f, 0.f, -1.f, -2.f, -4.f};
+        std::vector<gem::StripHit> hits = {make_strip(40, scaled(PROMPT, 100.f)),
+                                           make_strip(41, neg)};
+        hits[1].charge = 50.f;
+        std::vector<gem::StripCluster> cls;
+        gc.FormClusters(hits, cls);
+        check(cls.size() == 1 && same_vec(cls[0].ts_adc_sum,
+                  weighted_sum({{1.f, scaled(PROMPT, 100.f)}, {1.f, neg}})),
+              "strip without positive sample enters ts_adc_sum with weight 1");
+
+        std::vector<gem::StripHit> mixed = {make_strip(50, scaled(PROMPT, 100.f)),
+                                            make_strip(51, {10.f, 50.f, 200.f, 60.f, 20.f})};
+        gc.FormClusters(mixed, cls);
+        check(cls.size() == 1 && cls[0].ts_adc_sum.empty(),
+              "strips with different sample counts: ts_adc_sum empty");
+    }
 
     // ---- Each quality cut on its own ----
     {
@@ -429,13 +562,39 @@ int main()
                   same_bits(h.x_min_ts_corr, xc[0].min_ts_corr) &&
                   same_bits(h.y_min_ts_corr, yc[0].min_ts_corr),
                   "cluster quality copied onto GEMHit" + tag);
+            check(same_bits(h.xy_ts_corr,
+                            gem::TimeSampleCorrelation(xc[0].ts_adc_sum, yc[0].ts_adc_sum)),
+                  "xy_ts_corr = correlation of the X / Y ts_adc_sum" + tag);
+            // X ∝ PROMPT, Y = the same pulse ~8 ns later: r(PROMPT, y_shape) = 0.869
+            check(h.xy_ts_corr > 0.85f && h.xy_ts_corr < 0.89f,
+                  "xy_ts_corr of the shifted pulse ~0.87" + tag);
             // swapped planes flip the sign of both signed quantities
             std::vector<gem::GEMHit> sw;
             gc.CartesianReconstruct(yc, xc, sw, 2);
             check(sw.size() == 1 && close_to(sw[0].adc_asym, -0.2f) &&
                   sw[0].time_diff == -h.time_diff,
                   "adc_asym / time_diff are signed" + tag);
+            check(sw.size() == 1 && same_bits(sw[0].xy_ts_corr, h.xy_ts_corr),
+                  "xy_ts_corr is symmetric in X / Y" + tag);
         }
+    }
+    {
+        // xy_ts_corr correlates the cluster-summed samples, not the seed
+        // strips: an X cluster of two differently shaped strips
+        gem::GemCluster gc;
+        gc.SetConfig(base_config());
+        std::vector<gem::StripHit> xh = {make_strip(10, scaled(PROMPT, 300.f)),
+                                         make_strip(11, scaled(LATE, 200.f))};
+        std::vector<gem::StripHit> yh = {make_strip(50, scaled(PROMPT, 400.f))};
+        std::vector<gem::StripCluster> xc, yc;
+        gc.FormClusters(xh, xc);
+        gc.FormClusters(yh, yc);
+        std::vector<gem::GEMHit> out;
+        gc.CartesianReconstruct(xc, yc, out, 0);
+        const float r_sum  = gem::TimeSampleCorrelation(xc[0].ts_adc_sum, yc[0].ts_adc_sum);
+        const float r_seed = gem::TimeSampleCorrelation(scaled(PROMPT, 300.f), yc[0].ts_adc_sum);
+        check(out.size() == 1 && same_bits(out[0].xy_ts_corr, r_sum) && r_sum < r_seed - 0.05f,
+              "xy_ts_corr uses the cluster-summed samples, not the seed strip");
     }
     {
         gem::GemCluster gc;
@@ -479,6 +638,55 @@ int main()
         gc.CartesianReconstruct(zx, zy, out, 0);
         check(out.size() == 1 && std::isnan(out[0].adc_asym) && std::isnan(out[0].x_time),
               "hand-built clusters: NaN adc_asym / times, pair kept");
+
+        // correlation cut alone (time cut still off): r(PROMPT, LATE) = -0.55
+        const float r_late = gem::TimeSampleCorrelation(xc[0].ts_adc_sum, yl[0].ts_adc_sum);
+        check(r_late < -0.5f && r_late > -0.6f, "PROMPT x LATE waveform correlation ~ -0.55");
+        cfg.match_ts_corr_min = 0.5f;
+        gc.SetConfig(cfg);
+        gc.CartesianReconstruct(xc, yl, out, 0);
+        check(out.empty(), "mode 1: pair with xy_ts_corr < match_ts_corr_min rejected");
+        gc.CartesianReconstruct(xc, yp, out, 0);
+        check(out.size() == 1 && out[0].xy_ts_corr > 0.99f,
+              "mode 1: in-time pair passes the correlation cut");
+        gc.CartesianReconstruct(zx, zy, out, 0);
+        check(out.size() == 1 && std::isnan(out[0].xy_ts_corr),
+              "mode 1: undefined xy_ts_corr (no samples) passes the correlation cut");
+        cfg.match_ts_corr_min = r_late;
+        gc.SetConfig(cfg);
+        gc.CartesianReconstruct(xc, yl, out, 0);
+        check(out.size() == 1, "mode 1: correlation cut is inclusive (xy_ts_corr == cut passes)");
+        cfg.match_ts_corr_min = -0.5f;
+        gc.SetConfig(cfg);
+        gc.CartesianReconstruct(xc, yl, out, 0);
+        check(out.empty(), "mode 1: a negative match_ts_corr_min above -1 is active");
+        {
+            // boundary on a positive r: the 8 ns-shifted pulse, r ~ 0.87
+            std::vector<gem::StripHit> yh_shift =
+                {make_strip(50, scaled({0.05f, 0.3f, 0.8f, 1.0f, 0.4f, 0.1f}, 280.f))};
+            std::vector<gem::StripCluster> ys;
+            gc.FormClusters(yh_shift, ys);
+            const float r = gem::TimeSampleCorrelation(xc[0].ts_adc_sum, ys[0].ts_adc_sum);
+            cfg.match_ts_corr_min = r;
+            gc.SetConfig(cfg);
+            gc.CartesianReconstruct(xc, ys, out, 0);
+            check(out.size() == 1 && same_bits(out[0].xy_ts_corr, r),
+                  "mode 1: positive cut equal to xy_ts_corr passes");
+            cfg.match_ts_corr_min = std::nextafter(r, 2.f);
+            gc.SetConfig(cfg);
+            gc.CartesianReconstruct(xc, ys, out, 0);
+            check(out.empty(), "mode 1: cut one ulp above xy_ts_corr rejects");
+        }
+        cfg.match_ts_corr_min = -1.5f;
+        gc.SetConfig(cfg);
+        gc.CartesianReconstruct(xc, yl, out, 0);
+        check(out.size() == 1 && same_bits(out[0].xy_ts_corr, r_late),
+              "mode 1: match_ts_corr_min <= -1 disables the cut");
+        cfg.match_ts_corr_min = 0.5f;
+        cfg.match_mode = 0;
+        gc.SetConfig(cfg);
+        gc.CartesianReconstruct(xc, yl, out, 0);
+        check(out.size() == 1, "mode 0 ignores match_ts_corr_min");
     }
 
     // ---- Config plumbing: shipped configs parse with every quality cut disabled ----
@@ -497,6 +705,8 @@ int main()
         check(line.size() >= expect_log.size() &&
               line.compare(line.size() - expect_log.size(), expect_log.size(), expect_log) == 0,
               std::string(name) + ": [GEMCFG] shows the new cuts disabled");
+        check(line.find(" tdiff=50 xy_corr=-1 tperiod=25 ") != std::string::npos,
+              std::string(name) + ": [GEMCFG] shows the X/Y correlation cut disabled");
         check(!cfgs.empty(), std::string(name) + ": per-detector configs installed");
         for (auto &c : cfgs)
             check(knobs_disabled(c), std::string(name) + ": new knobs at library defaults");
@@ -513,8 +723,10 @@ int main()
         d["seed_min_sum_adc"]      = 60;      // integer JSON value
         d["strip_time_agreement"]  = 50.0;
         d["strip_ts_corr_min"]     = 0.7;
+        d["match_ts_corr_min"]     = 0.5;
         root["gem"]["1"]["strip_mean_time_range"] = json::array();
         root["gem"]["1"]["strip_unimodal_shape"]  = false;
+        root["gem"]["1"]["match_ts_corr_min"]     = -1;
         root["gem"]["2"]["strip_mean_time_range"] = nullptr;
         root["gem"]["3"]["strip_mean_time_range"] = json::array({10.0});
         std::ofstream(path) << root.dump(2) << '\n';
@@ -530,12 +742,17 @@ int main()
         check(line.find(" strip_t=[25,150] unimodal=1 seed_peak=30 seed_sum=60"
                         " strip_dt=50 ts_corr=0.7") != std::string::npos,
               "fixture: [GEMCFG] d0 shows the parsed values");
+        check(line.find(" xy_corr=0.5 ") != std::string::npos,
+              "fixture: [GEMCFG] d0 shows match_ts_corr_min");
         if (cfgs.size() >= 4) {
             const auto &c0 = cfgs[0];
             check(c0.strip_time_min == 25.f && c0.strip_time_max == 150.f && c0.strip_unimodal &&
                   c0.seed_min_peak_adc == 30.f && c0.seed_min_sum_adc == 60.f &&
-                  c0.strip_time_agreement == 50.f && close_to(c0.strip_ts_corr_min, 0.7f, 1e-6f),
+                  c0.strip_time_agreement == 50.f && close_to(c0.strip_ts_corr_min, 0.7f, 1e-6f) &&
+                  c0.match_ts_corr_min == 0.5f,
                   "fixture: default block parsed");
+            check(cfgs[1].match_ts_corr_min == -1.f && cfgs[2].match_ts_corr_min == 0.5f,
+                  "fixture: det 1 override disables the correlation cut, det 2 inherits it");
             check(std::isinf(cfgs[1].strip_time_min) && std::isinf(cfgs[1].strip_time_max) &&
                   !cfgs[1].strip_unimodal && cfgs[1].seed_min_peak_adc == 30.f,
                   "fixture: det 1 override [] disables the window, keeps the rest");

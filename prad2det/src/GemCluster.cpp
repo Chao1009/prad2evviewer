@@ -9,7 +9,8 @@
 // correlation, X/Y time difference and ADC asymmetry — and applies the       //
 // matching optional cuts (all off by default).  SBS bugs deliberately not    //
 // ported: int-truncated sums / abs(), and the seed-vs-strip loop that stops  //
-// at the seed index.                                                         //
+// at the seed index.  The X/Y correlation of the cluster-summed time samples //
+// follows SBS-offline (SBSGEMModule corrcoeff_clust).                        //
 //============================================================================//
 
 #include "GemCluster.h"
@@ -38,8 +39,14 @@ float gem::StripMeanTime(const std::vector<float> &ts_adc, float ts_period)
 float gem::TimeSampleCorrelation(const std::vector<float> &a,
                                  const std::vector<float> &b)
 {
-    const size_t n = a.size();
-    if (n < 2 || b.size() != n)
+    if (b.size() != a.size())
+        return std::numeric_limits<float>::quiet_NaN();
+    return TimeSampleCorrelation(a.data(), b.data(), a.size());
+}
+
+float gem::TimeSampleCorrelation(const float *a, const float *b, size_t n)
+{
+    if (n < 2)
         return std::numeric_limits<float>::quiet_NaN();
 
     double mean_a = 0., mean_b = 0.;
@@ -265,6 +272,25 @@ void GemCluster::reconstructCluster(StripCluster &cluster) const
             (std::isnan(cluster.min_ts_corr) || r < cluster.min_ts_corr))
             cluster.min_ts_corr = r;
     }
+
+    // cluster-summed time samples (input of the X/Y correlation).  Each strip
+    // enters with the share of its pulse that `charge` gives this cluster:
+    // charge / max sample = 1, or 1/2 for the valley strip splitCluster
+    // halved — SBS-offline weights shared strips by split fraction likewise
+    cluster.ts_adc_sum.clear();
+    const size_t ns = seed->ts_adc.size();
+    bool same_ns = ns > 0;
+    for (auto &hit : cluster.hits)
+        same_ns = same_ns && hit.ts_adc.size() == ns;
+    if (same_ns) {
+        cluster.ts_adc_sum.assign(ns, 0.f);
+        for (auto &hit : cluster.hits) {
+            const float peak = *std::max_element(hit.ts_adc.begin(), hit.ts_adc.end());
+            const float w = (peak > 0.f) ? hit.charge / peak : 1.f;
+            for (size_t s = 0; s < ns; ++s)
+                cluster.ts_adc_sum[s] += w * hit.ts_adc[s];
+        }
+    }
 }
 
 namespace {
@@ -359,8 +385,11 @@ void GemCluster::filterClusters(std::vector<StripCluster> &clusters) const
 //   - ADC asymmetry: |Qx_peak - Qy_peak| / (Qx_peak + Qy_peak) <= threshold
 //   - Timing:        |mean_time_x_seed - mean_time_y_seed| <= threshold
 //                    (StripCluster::seed_time, filled by reconstructCluster)
+//   - Waveform:      xy_ts_corr >= match_ts_corr_min, the Pearson r of the X
+//                    and Y StripCluster::ts_adc_sum (off by default)
 // Both modes record the X/Y seed times, time difference, signed ADC
-// asymmetry and the cluster quality variables on every GEMHit.
+// asymmetry, waveform correlation and the cluster quality variables on
+// every GEMHit.
 
 static GEMHit makeHit(const StripCluster &xc, const StripCluster &yc,
                        int det_id)
@@ -390,6 +419,7 @@ static GEMHit makeHit(const StripCluster &xc, const StripCluster &yc,
     hit.y_max_strip_dt = yc.max_strip_dt;
     hit.x_min_ts_corr  = xc.min_ts_corr;
     hit.y_min_ts_corr  = yc.min_ts_corr;
+    hit.xy_ts_corr     = TimeSampleCorrelation(xc.ts_adc_sum, yc.ts_adc_sum);
     return hit;
 }
 
@@ -419,6 +449,7 @@ void GemCluster::CartesianReconstruct(
     // Mode 1: full Cartesian product with cuts
     const float adc_asym_cut = cfg_.match_adc_asymmetry;
     const float time_cut     = cfg_.match_time_diff;
+    const float corr_cut     = cfg_.match_ts_corr_min;
 
     for (auto &xc : x_clusters) {
         for (auto &yc : y_clusters) {
@@ -433,6 +464,10 @@ void GemCluster::CartesianReconstruct(
             if (time_cut >= 0.f &&
                 std::isfinite(xc.seed_time) && std::isfinite(yc.seed_time) &&
                 std::abs(hit.time_diff) > time_cut)
+                continue;
+
+            // waveform-correlation cut (NaN, i.e. undefined, passes)
+            if (corr_cut > -1.f && hit.xy_ts_corr < corr_cut)
                 continue;
 
             container.push_back(hit);

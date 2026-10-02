@@ -152,7 +152,9 @@ int main (int argc, char *argv[])
     // create TTree and branches for reconstructed data
     TTree *tree_out = new TTree("recon", "PRad2 replay reconstruction from G4");
     auto ev = std::make_unique<EventVars_Recon>();
-    prad2::SetReconWriteBranches(tree_out, *ev, false); // false indicates not x17_mode
+    prad2::ReconReadStatus gem_layout;   // smeared GEM hits only, no GEM quality / clusters
+    gem_layout.has_gem_hits = true;
+    prad2::SetReconWriteBranches(tree_out, *ev, false, true, &gem_layout); // not x17_mode
 
     // caculate luminosity and number of events to process for ep and ee
     double lumi = std::min(ep_lumi, ee_lumi);
@@ -214,9 +216,13 @@ int main (int argc, char *argv[])
 
         for(int j = 0; j < sim->GEM_n; j++){
             if(sim->GEM_edep[j] < 26.e-6*2.) continue; // add some energy threshold to reduce noise
-            ev->det_id[ev->n_gem_hits] = sim->GEM_id[j];
+            const int id = sim->GEM_id[j];
+            if(id < 0 || id >= 4) continue;
+            if(ev->n_gem_hits >= prad2::kMaxGemHits) break;
+            ev->det_id[ev->n_gem_hits] = id;
             ev->gem_x[ev->n_gem_hits] = float(0.5*(sim->GEM_x_in[j] + sim->GEM_x_out[j]) + gRandom->Gaus(0, 0.07)); // add some position smearing
             ev->gem_y[ev->n_gem_hits] = float(0.5*(sim->GEM_y_in[j] + sim->GEM_y_out[j]) + gRandom->Gaus(0, 0.07));
+            ev->gem_z[ev->n_gem_hits] = gem_z[id]; // the plane z the matching below uses
             ev->gem_x_charge[ev->n_gem_hits] = 0.f;
             ev->gem_y_charge[ev->n_gem_hits] = 0.f;
             ev->gem_x_peak[ev->n_gem_hits] = 0.f;

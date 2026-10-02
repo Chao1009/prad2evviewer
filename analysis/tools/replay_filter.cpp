@@ -1147,20 +1147,28 @@ int run(const std::vector<std::string> &input_files,
             }
             out->cd();
             TTree *out_ev = new TTree("events", "PRad2 filtered replay (raw)");
-            prad2::SetRawWriteBranches(out_ev, *ev, status.has_peaks);
+            // a --noWaveform input stays without waveforms: zero-filled ones
+            // would make replay_recon re-analyze empty pulses
+            prad2::SetRawWriteBranches(out_ev, *ev, status.has_peaks, false,
+                                       t && !status.has_waveform);
             copy_kept(out_ev, *ev, [](prad2::RawEventData &e) { e.clear_banks(); });
         } else {
             auto ev = std::make_unique<prad2::ReconEventData>();
+            prad2::ReconReadStatus status;
             prad2::ReconMatchVectorBindings match_bind;
             prad2::RawVectorBindings vb;
             if (t) {
-                prad2::SetReconReadBranches(t, *ev);
+                status = prad2::SetReconReadBranches(t, *ev);
                 prad2::BindReconMatchVectorBranches(t, *ev, match_bind);
                 prad2::BindRawVectorBranches(t, *ev, vb);
             }
             out->cd();
             TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
-            prad2::SetReconWriteBranches(out_ev, *ev, false); // not x17_mode
+            // keep the input's veto and GEM layout: X17 trees carry no veto
+            // branches, the GEM hit / cluster branches exist only with
+            // replay_recon -gem_hit, and older files lack some GEM groups
+            prad2::SetReconWriteBranches(out_ev, *ev, t && !status.has_veto,
+                                         status.has_gem_hits, &status);
             copy_kept(out_ev, *ev, [](prad2::ReconEventData &e) { e.clear(); });
         }
         write_slow_trees(*out, {fi}, s, split_active);

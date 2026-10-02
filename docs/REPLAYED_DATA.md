@@ -30,6 +30,21 @@ final `.root`.  For example, `prad_024327_recon_000.root` becomes
 writes these products side by side in `<output_base>/prad_<run>/`, with
 no filter subdirectory.
 
+`prad2ana_replay_filter` keeps the input's optional branch groups as they
+are: the HyCal waveforms of a raw file (absent with `replay_rawdata
+--noWaveform`), and in a recon file the veto group (absent in X17 mode) and
+the GEM groups (hits, per-hit quality variables, clusters, cluster time
+samples; only with `replay_recon -gem_hit`).  The other groups follow the
+current schema, so an older input gains default-filled branches (e.g.
+`cl_bias_corr` = 1, `rf_*` = 0) and loses renamed ones (`matchGEMx/y/z`).
+Filters built before 2026-10 did not keep these groups: recon files they
+filtered from 2026-08-21 on lack the GEM hit and cluster branches even
+when the input had them, every X17 recon file they filtered (X17 mode exists
+since 2026-07-05) carries zero-filled `veto_*` branches, and filtered
+`--noWaveform` raw files carry zero-filled `hycal.samples`, which
+leaves `prad2ana_replay_recon` with no HyCal clusters.  Re-run the filter on
+the unfiltered files.
+
 # `events` tree (raw)
 
 Written by `prad2ana_replay_rawdata`.  Per-event scalars and per-channel
@@ -50,7 +65,7 @@ LMS = 3100 (Pin) / 3101..3103.
 
 ## Branches
 
-### Event header — always written
+### Event header — `trigger_type`, `trigger_bits` always; the other branches here not with `--Ecalib`
 
 | Branch | Type | Meaning |
 |---|---|---|
@@ -66,7 +81,7 @@ LMS = 3100 (Pin) / 3101..3103.
 | `tdc_nwords`   | `vector<uint32>` | Word count per TDC bank, parallel to `tdc_roc_tags` |
 | `tdc_words`    | `vector<uint32>` | Concatenated TDC bank payload (one V1190/V1290 hit per word) |
 
-### HyCal / Veto / LMS FADC250 — always written
+### HyCal / Veto / LMS FADC250 — always written (`hycal.nsamples` / `hycal.samples`: not with `--Ecalib` or `--noWaveform`)
 
 | Branch | Type | Meaning |
 |---|---|---|
@@ -134,18 +149,29 @@ for the algorithm spec.
 | `hycal.daq_peak_fine`     | `int[nch][8]`   | Fine bits 0..63 (6-bit) |
 | `hycal.daq_peak_quality`  | `uint8[nch][8]` | `Q_DAQ_*` bitmask: `1` = peak@boundary, `2` = NSB-trunc, `4` = NSA-trunc, `8` = Va out-of-range |
 
-### GEM strips — always written
+### GEM strips — written unless `--Ecalib`
+
+One entry per strip that passed `GemSystem` zero suppression and the strip
+cuts, before clustering.  `prad2ana_replay_recon` re-clusters these arrays
+when given a `_raw.root` file.
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `gem.nch`         | `int`             | Number of GEM strips fired |
-| `gem.mpd_crate`   | `uint8[nch]`      | MPD crate ID |
-| `gem.mpd_fiber`   | `uint8[nch]`      | MPD fiber ID |
-| `gem.apv`         | `uint8[nch]`      | APV ADC channel |
-| `gem.strip`       | `uint8[nch]`      | Strip number on the APV |
-| `gem.ssp_samples` | `int16[nch][6]`   | 6 SSP time samples per strip |
+| `gem.nch`    | `int`              | Number of GEM strips stored |
+| `gem.det`    | `uint8[nch]`       | GEM detector ID (0..3) |
+| `gem.plane`  | `uint8[nch]`       | 0 = X, 1 = Y |
+| `gem.strip`  | `int32[nch]`       | Plane-wide strip number |
+| `gem.charge` | `float[nch]`       | Max over the time samples (pedestal / common-mode corrected ADC) |
+| `gem.max_tb` | `int16[nch]`       | Time sample of that maximum |
+| `gem.pos`    | `float[nch]`       | Strip position along the plane, detector-local mm |
+| `gem.xtalk`  | `uint8[nch]`       | Cross-talk candidate flag |
+| `gem.ts_adc` | `float[nch][6]`    | The 6 corrected time samples |
 
-### VTP raw banks — always written
+Files written before the per-strip schema above (`gem.mpd_crate`,
+`gem.mpd_fiber`, `gem.apv`, `gem.ssp_samples`, ...; before 2026-08) are
+rejected by `prad2ana_replay_recon`; replay those runs from EVIO.
+
+### VTP raw banks — written unless `--Ecalib`
 
 PRad-II reads up to 9 VTP banks per physics event (`0xE122`): one per
 HyCal-side ti_slave (ROCs `0x83 0x85 0x87 0x89 0x8B 0x8D 0x96`) and, on
@@ -191,7 +217,7 @@ summary.  `VtpDecoder.cpp` stores PRAD_CLUSTER in
 0.99 energy correlation.  `evio_dump -m vtp <file>` is the quick
 inspector and prints the decoded fields inline.
 
-### TDC raw banks — always written
+### TDC raw banks — written unless `--Ecalib`
 
 V1190/V1290 TDC hits arrive in `0xE107` banks (output of `rol2.c` — the
 raw `0xE10B` hardware stream is already stripped of TDC headers / EOB
@@ -402,6 +428,7 @@ values pick the upstream-downstream pair minimising inter-plane projected
 | `gem_y_max_sdt`  | `float[n_gem_hits]`  | `gem_cl_max_sdt` of the Y cluster (ns) |
 | `gem_x_min_corr` | `float[n_gem_hits]`  | `gem_cl_min_corr` of the X cluster |
 | `gem_y_min_corr` | `float[n_gem_hits]`  | `gem_cl_min_corr` of the Y cluster |
+| `gem_xy_corr`    | `float[n_gem_hits]`  | X/Y cluster time-sample correlation ρ_cl: Pearson r of the `gem_cl_ts_adc` rows of the X and Y cluster (`GEMHit::xy_ts_corr`) |
 
 All GEM hit and cluster branches (this table and the next) are written only
 by `replay_recon -gem_hit`, in both the EVIO and the `_raw.root` input
@@ -409,8 +436,8 @@ paths.  With a `_raw.root` input, the strip-level `GemSystem` cuts
 (`reject_*_timebin`, `min_peak_adc`, `min_sum_adc`) are the ones in force
 when `replay_rawdata` wrote the file, not the ones in `replay_recon -r`;
 only the `ClusterConfig` keys (`seed_min_*`, `strip_*`, `match_*`, …) can be
-changed at that stage.  The last eight branches above, and the per-cluster block below, are
-the SBS-style (mpd_gem_view_ssp) quality variables computed by
+changed at that stage.  The last nine branches above, and the per-cluster block below, are
+the SBS-style (mpd_gem_view_ssp, and SBS-offline for `gem_xy_corr`) quality variables computed by
 `gem::GemCluster` (`StripCluster` / `GEMHit` fields; definitions, config keys
 and the SBS mapping in
 [`technical_notes/gem_clustering/gem_clustering.md`](technical_notes/gem_clustering/gem_clustering.md)).
@@ -422,10 +449,12 @@ non-seed strip to compare, and a flat waveform has no correlation.
 **Caveat — `match_mode` 1 (the default).**  A 2D hit exists only for an X/Y
 pair that PASSED the matching cuts, so per-hit `gem_xy_asym` / `gem_xy_dt`
 are truncated at `match_adc_asymmetry` / `match_time_diff` (0.7 / 50 ns in
-`reconstruction_config.json`) and cannot show how those cuts perform.  For
-the full distributions either use the per-cluster block below (e.g. pair
-the X and Y clusters of one detector by descending `gem_cl_peak` rank, as
-SBS does in its `match_mode` 0), or replay with a QA configuration that sets
+`reconstruction_config.json`) and cannot show how those cuts perform, and
+`gem_xy_corr` covers only the surviving pairs.  For the full distributions
+either use the per-cluster block below (e.g. pair the X and Y clusters of
+one detector by descending `gem_cl_peak` rank, as SBS does in its
+`match_mode` 0, or form ρ_cl for every X × Y pair from `gem_cl_ts_adc`, see
+below), or replay with a QA configuration that sets
 `match_adc_asymmetry < 0` and `match_time_diff < 0` (both cuts disabled).
 
 ### GEM 1D clusters (per plane)
@@ -457,22 +486,53 @@ strip with the largest `charge` (the max-over-samples ADC) in the cluster.
 | `gem_cl_peak`      | `float[n_gem_cl]` | Highest strip charge (same as `gem_x/y_peak`) |
 | `gem_cl_charge`    | `float[n_gem_cl]` | Σ strip charges (same as `gem_x/y_charge`) |
 | `gem_cl_time`      | `float[n_gem_cl]` | Seed-strip mean time (ns); NaN if the seed has no positive sample |
-| `gem_cl_seed_peak` | `float[n_gem_cl]` | Max time-sample ADC of the seed strip (SBS "seed strip peak ADC"; equals `gem_cl_peak` except for a halved valley strip) |
+| `gem_cl_seed_peak` | `float[n_gem_cl]` | Max time-sample ADC of the seed strip (SBS "seed strip peak ADC"; equals `gem_cl_peak`, since a halved valley strip is never the seed) |
 | `gem_cl_seed_sum`  | `float[n_gem_cl]` | Σ of all time-sample ADCs of the seed strip (SBS "seed strip sum ADC") |
 | `gem_cl_max_sdt`   | `float[n_gem_cl]` | max over non-seed strips of \|t(strip) − t(seed)\| (ns); NaN for a single-strip cluster (SBS "strip time agreement") |
 | `gem_cl_min_corr`  | `float[n_gem_cl]` | min over non-seed strips of the Pearson correlation between the seed and strip time-sample vectors; NaN for a single-strip cluster (SBS "time sample correlation") |
+| `gem_cl_ts_adc`    | `float[n_gem_cl][6]` | Cluster-summed time samples, Σ over the cluster's strips of `w · gem.ts_adc` with `w` = 1, or ½ for the valley strip that `splitCluster` halved (it belongs to the right-hand cluster only) (`StripCluster::ts_adc_sum`) |
 
-Recon files replayed before 2026-09 don't have these branches.
-`prad2::SetReconReadBranches` then reports `has_gem_qa` / `has_gem_cl =
-false` and leaves the arrays NaN and `n_gem_cl = 0`; uproot scripts must
-check for the branch names themselves.  Don't mix old and new files in one
+**ρ_cl for any X/Y pair.**  `gem_xy_corr` of a stored hit is exactly the
+Pearson correlation of the two `gem_cl_ts_adc` rows of its X and Y cluster,
+so the same number can be formed for every X × Y cluster pair of a
+detector, including pairs that the matching cuts rejected:
+
+```cpp
+// C++ (prad2det): ix / iy index an X and a Y cluster of the same detector
+float rho = gem::TimeSampleCorrelation(ev.gem_cl_ts_adc[ix], ev.gem_cl_ts_adc[iy],
+                                       ssp::SSP_TIME_SAMPLES);
+```
+
+```python
+# Python, uproot: one event's arrays (library="np")
+from gem_xy_corr import xy_pairs          # analysis/pyscripts/gem_xy_corr.py
+ix, iy, rho = xy_pairs(cl_det, cl_plane, cl_ts_adc, det=0)   # rho[len(ix), len(iy)]
+```
+
+`gem_xy_corr.ts_corr` repeats the C++ arithmetic bit for bit;
+`prad2py.det.time_sample_correlation` calls the C++ directly.  Run
+`python analysis/pyscripts/gem_xy_corr.py <recon.root>` for per-detector
+ρ_cl quantiles of the stored hits and of all X × Y pairs.  Definition,
+cut (`match_ts_corr_min`, off by default) and measured performance:
+[`technical_notes/gem_clustering/gem_clustering.md`](technical_notes/gem_clustering/gem_clustering.md#xy-cluster-time-sample-correlation).
+
+Recon files replayed before 2026-09-25 don't have these branches, and files
+replayed before 2026-10 lack `gem_xy_corr` and `gem_cl_ts_adc`.
+`prad2::SetReconReadBranches` then reports `has_gem_qa` / `has_gem_cl` /
+`has_gem_ts = false` and leaves the arrays NaN and `n_gem_cl = 0`; uproot
+scripts must check for the branch names themselves.  Neither ρ_cl nor the
+cluster samples can be recovered from an older recon file (it keeps no time
+samples or strip lists): replay again with `-gem_hit`, from EVIO or from the
+run's `_raw.root` files, whose `gem.ts_adc` holds every strip's samples.
+Recon files filtered before 2026-10 may lack every GEM branch (see
+`prad2ana_replay_filter` above).  Don't mix old and new files in one
 `hadd` or `TChain`: their branch lists differ.
 
 ### Veto + LMS (peak summaries)
 
 Lightweight tag of the best soft peak per Veto / LMS channel — full
 waveforms live in the `events` tree, not here. The Veto group is optional:
-`SetReconWriteBranches(..., is_x17=true)` omits all `veto_*` branches.
+`SetReconWriteBranches(..., x17_mode=true, ...)` omits all `veto_*` branches.
 The LMS group remains available in both layouts.
 
 | Branch | Type | Meaning |

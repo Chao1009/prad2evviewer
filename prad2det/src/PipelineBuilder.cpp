@@ -56,6 +56,7 @@ void apply_gem_cluster_overrides(const json &j, gem::ClusterConfig &cfg)
     if (j.contains("match_mode"))          cfg.match_mode          = j["match_mode"];
     if (j.contains("match_adc_asymmetry")) cfg.match_adc_asymmetry = j["match_adc_asymmetry"];
     if (j.contains("match_time_diff"))     cfg.match_time_diff     = j["match_time_diff"];
+    if (j.contains("match_ts_corr_min"))   cfg.match_ts_corr_min   = j["match_ts_corr_min"];
     if (j.contains("match_ts_period"))     cfg.ts_period           = j["match_ts_period"];
 
     // SBS-style (mpd_gem_view_ssp Cuts) quality cuts — all off by default.
@@ -561,7 +562,7 @@ Pipeline PipelineBuilder::build()
                 if (gemr.contains(key) && gemr[key].is_object())
                     apply_gem_cluster_overrides(gemr[key], per[d]);
             }
-            // [GEMCFG] dump (matches Python audit byte-for-byte).
+            // [GEMCFG] dump (parsed by test/dev/gem_quality_test.cpp).
             for (int d = 0; d < (int)per.size(); ++d) {
                 const auto &c = per[d];
                 LOG("[GEMCFG] d", d,
@@ -574,6 +575,7 @@ Pipeline PipelineBuilder::build()
                     " match_mode=", c.match_mode,
                     " asym=",     c.match_adc_asymmetry,
                     " tdiff=",    c.match_time_diff,
+                    " xy_corr=",  c.match_ts_corr_min,
                     " tperiod=",  c.ts_period,
                     " strip_t=[", c.strip_time_min, ",", c.strip_time_max, "]",
                     " unimodal=", (int)c.strip_unimodal,

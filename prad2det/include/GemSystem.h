@@ -65,11 +65,17 @@ struct StripCluster {
     //                  (ns); NaN for single-strip clusters
     //   min_ts_corr    min over non-seed strips of TimeSampleCorrelation(seed, i);
     //                  NaN for single-strip clusters
+    //   ts_adc_sum     cluster-summed time samples, sum_i w_i * hits[i].ts_adc[s]
+    //                  with w_i = charge_i / max_s ts_adc_i[s]: 1 for a normal
+    //                  strip, 1/2 for the valley strip splitCluster halved (as in
+    //                  total_charge; 1 if the strip has no positive sample).
+    //                  Empty if the strips have no samples or differ in count.
     float   seed_time     = std::numeric_limits<float>::quiet_NaN();
     float   seed_peak_adc = std::numeric_limits<float>::quiet_NaN();
     float   seed_sum_adc  = std::numeric_limits<float>::quiet_NaN();
     float   max_strip_dt  = std::numeric_limits<float>::quiet_NaN();
     float   min_ts_corr   = std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> ts_adc_sum;
 };
 
 struct GEMHit {
@@ -88,6 +94,9 @@ struct GEMHit {
     //   adc_asym         (x_peak - y_peak) / (x_peak + y_peak), signed; NaN if
     //                    the sum <= 0.  |adc_asym| is what match_adc_asymmetry cuts
     //   x/y_max_strip_dt, x/y_min_ts_corr   copied from the X / Y StripCluster
+    //   xy_ts_corr       TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum), the
+    //                    X/Y cluster time-sample correlation rho_cl (SBS-offline
+    //                    corrcoeff_clust); NaN if a waveform is empty or flat
     float x_time    = std::numeric_limits<float>::quiet_NaN();
     float y_time    = std::numeric_limits<float>::quiet_NaN();
     float time_diff = std::numeric_limits<float>::quiet_NaN();
@@ -96,6 +105,7 @@ struct GEMHit {
     float y_max_strip_dt = std::numeric_limits<float>::quiet_NaN();
     float x_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
     float y_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
+    float xy_ts_corr     = std::numeric_limits<float>::quiet_NaN();
 };
 
 // --- APV pedestal -----------------------------------------------------------
@@ -206,6 +216,7 @@ struct ClusterConfig {
     // XY matching cuts (mode 1 only)
     float match_adc_asymmetry = 0.8f;  // max |Qx-Qy|/(Qx+Qy), <0 to disable
     float match_time_diff     = 50.f;  // max |mean_t_x - mean_t_y| in ns, <0 to disable
+    float match_ts_corr_min   = -1.f;  // min GEMHit::xy_ts_corr, <=-1 to disable; NaN passes (SBS corrcoeff_cut: 0.4-0.5)
     float ts_period           = 25.f;  // ns per time sample (also used for strip mean times)
 
     // --- SBS-style (mpd_gem_view_ssp Cuts) quality cuts; all off by default ---

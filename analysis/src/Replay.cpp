@@ -38,6 +38,7 @@ void fillGemHitQA(EventVars_Recon &ev, int i, const gem::GEMHit &h)
     ev.gem_y_max_sdt[i]  = h.y_max_strip_dt;
     ev.gem_x_min_corr[i] = h.x_min_ts_corr;
     ev.gem_y_min_corr[i] = h.y_min_ts_corr;
+    ev.gem_xy_corr[i]    = h.xy_ts_corr;
 }
 
 // Append the (already filtered) 1D clusters of one detector plane to the
@@ -61,6 +62,10 @@ void appendGemClusters(EventVars_Recon &ev, int det, int plane,
         ev.gem_cl_seed_sum[k]  = c.seed_sum_adc;
         ev.gem_cl_max_sdt[k]   = c.max_strip_dt;
         ev.gem_cl_min_corr[k]  = c.min_ts_corr;
+        for (int s = 0; s < ssp::SSP_TIME_SAMPLES; ++s)
+            ev.gem_cl_ts_adc[k][s] = s < static_cast<int>(c.ts_adc_sum.size())
+                                     ? c.ts_adc_sum[s]
+                                     : std::numeric_limits<float>::quiet_NaN();
     }
 }
 

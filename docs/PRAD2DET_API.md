@@ -178,8 +178,8 @@ full-readout vs online-ZS data per APV.
 
 `StripCluster { position, peak_charge, total_charge, max_timebin,
 cross_talk, hits, seed_time, seed_peak_adc, seed_sum_adc, max_strip_dt,
-min_ts_corr }` — see comment in header about value-init importance.
-The last five are SBS-style quality variables filled by
+min_ts_corr, ts_adc_sum }` — see comment in header about value-init importance.
+The last six are SBS-style quality variables filled by
 `GemCluster::FormClusters` for every cluster (seed = first strip with the
 max `charge`; `NaN` = undefined):
 
@@ -190,15 +190,19 @@ max `charge`; `NaN` = undefined):
 | `seed_sum_adc` | sum of the seed's `ts_adc`, all samples |
 | `max_strip_dt` | max over non-seed strips of \|t_i − seed_time\| (ns); `NaN` for 1-strip clusters |
 | `min_ts_corr` | min over non-seed strips of `TimeSampleCorrelation(seed, i)`; `NaN` for 1-strip clusters |
+| `ts_adc_sum` | cluster-summed samples `Σ_i w_i·ts_adc_i[s]`, `w_i = charge_i / max ts_adc_i` (1, or ½ for the valley strip `splitCluster` halved; 1 without a positive sample); empty if the strips have no samples or differ in count |
 
 `GEMHit { x, y, z, det_id, x_charge, y_charge, x_peak, y_peak,
 x_max_timebin, y_max_timebin, x_size, y_size, x_time, y_time, time_diff,
-adc_asym, x_max_strip_dt, y_max_strip_dt, x_min_ts_corr, y_min_ts_corr }`.
+adc_asym, x_max_strip_dt, y_max_strip_dt, x_min_ts_corr, y_min_ts_corr,
+xy_ts_corr }`.
 The quality fields are filled in both match modes: `x_time`/`y_time` =
 cluster `seed_time`, `time_diff = x_time − y_time` (signed ns),
 `adc_asym = (x_peak − y_peak)/(x_peak + y_peak)` (signed, `NaN` if the sum
-≤ 0; its magnitude is what `match_adc_asymmetry` cuts), the rest copied
-from the X / Y cluster.
+≤ 0; its magnitude is what `match_adc_asymmetry` cuts),
+`xy_ts_corr = TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum)` (the X/Y
+cluster time-sample correlation ρ_cl, SBS-offline `corrcoeff_clust`; what
+`match_ts_corr_min` cuts), the rest copied from the X / Y cluster.
 
 ### Configuration types
 
@@ -226,6 +230,7 @@ pedestal table, and per-APV CM range.
 | `match_mode`        | 1 | 0 = ADC-sorted 1:1, 1 = Cartesian-with-cuts |
 | `match_adc_asymmetry` | 0.8 | max \|Qx-Qy\|/(Qx+Qy); <0 disables |
 | `match_time_diff`     | 50 ns | <0 disables |
+| `match_ts_corr_min`   | −1 | reject X/Y pair if `xy_ts_corr` < value (mode 1, `NaN` passes); ≤−1 disables (off in the shipped configs, see gem_clustering.md) |
 | `ts_period`           | 25 ns | also the period for strip mean times; JSON `match_ts_period` |
 | `strip_time_min`, `strip_time_max` | −∞, +∞ | strip mean-time window (inclusive), active if either is finite; JSON `strip_mean_time_range: [lo, hi]` (`[]`/`null` = off) |
 | `strip_unimodal`      | false | strip must pass `IsUnimodalPulse`; JSON `strip_unimodal_shape` |
@@ -309,6 +314,7 @@ Free helpers (namespace `gem`), reusable on any `ts_adc` vector:
 |---|---|
 | `float StripMeanTime(const std::vector<float>& ts_adc, float ts_period = 25.f)` | ADC-weighted mean time (ns) over positive samples only, sample `i` at `(i+1)·ts_period`; `NaN` if no positive sample. The seed mean time used by the X/Y time cut. |
 | `float TimeSampleCorrelation(const std::vector<float>& a, const std::vector<float>& b)` | Pearson r of two sample vectors; `NaN` if sizes differ, size < 2, or either is flat. |
+| `float TimeSampleCorrelation(const float* a, const float* b, size_t n)` | Same on `n` samples of two arrays, e.g. two rows of the recon-tree `gem_cl_ts_adc[n_gem_cl][6]` (gives `gem_xy_corr` for any X/Y cluster pair). |
 | `bool IsUnimodalPulse(const std::vector<float>& ts_adc)` | SBS "concave shape": strictly rising to the first maximum, strictly falling after; peaks in the first/last sample pass; empty → false. |
 
 ---
@@ -543,16 +549,24 @@ Per-event header (`event_num`, `trigger_type`, `trigger_bits`,
 (`nch`, `module_id`, `module_type`, `nsamples`, `samples`,
 `gain_factor`), optional soft-analyzer peaks (`ped_*`, `npeaks`,
 `peak_*`), optional firmware-mode peaks (`daq_npeaks`, `daq_peak_*`),
-and GEM strip data (`gem_nch`, `mpd_crate`, `mpd_fiber`, `apv`,
-`strip`, `ssp_samples`). `ssp_raw` is a `std::vector<uint32_t>` of
-the raw 0xE10C SSP trigger bank words.
+GEM strip data (`gem_nch`, `gem_det`, `gem_plane`, `gem_strip`,
+`gem_charge`, `gem_max_tb`, `gem_pos`, `gem_xtalk`, `gem_ts_adc[][6]`), and
+the raw trigger / DAQ bank words as `std::vector<uint32_t>`: `ssp_raw`
+(0xE10C SSP), `vtp_roc_tags` / `vtp_nwords` / `vtp_words` (0xE122 VTP) and
+`tdc_roc_tags` / `tdc_nwords` / `tdc_words` (0xE107 TDC).
 
 ### `ReconEventData` ("recon" tree)
 
-HyCal clusters (`n_clusters`, `cl_x/y/z/energy/time/nblocks/center/flag`),
-HyCal↔GEM matches (`matchFlag`, `matchGEM[xyz]`), quick-access matched
-pairs (`match_num`, `mHit_*`), GEM hits (`n_gem_hits`, `det_id`, `gem_*`),
-Veto (optional) and LMS soft-peak summaries, and `ssp_raw`.
+`total_energy`, HyCal clusters (`n_clusters`,
+`cl_x/y/z/energy/time/nblocks/npos/center/flag`, `cl_linear_corr`,
+`cl_bias_corr`, `cl_dt_rf`),
+HyCal↔GEM matches (`matchFlag`, `match_cl_idx`, `match_det_id`,
+`match_gem_x/y/z`), quick-access matched pairs (`match_num`, `mHit_*`),
+GEM hits (`n_gem_hits`, `det_id`, `gem_*` incl. the per-hit quality
+variables and `gem_xy_corr`) and 1-D clusters (`n_gem_cl`, `gem_cl_*` incl.
+`gem_cl_ts_adc[][6]`), Veto (optional) and LMS soft-peak summaries,
+`ssp_raw`, the raw VTP bank words and decoded VTP clusters (`vtp_cl_*`), and
+the RF reference times (`rf_n_a/b`, `rf_ns_a/b`).
 
 ### `RawScalerData` ("scalers" tree)
 
@@ -578,15 +592,25 @@ no link-time ROOT dependency.
 ### Writers
 
 ```cpp
-SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks);
-SetReconWriteBranches(TTree*, ReconEventData&, bool is_x17 = false);
+SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks,
+                    bool Ecalib = false, bool noWaveform = false);
+SetReconWriteBranches(TTree*, ReconEventData&, bool x17_mode,
+                      bool with_gem_hits = false,
+                      const ReconReadStatus *layout = nullptr);
 SetScalerWriteBranches(TTree*, RawScalerData&);
 SetEpicsWriteBranches(TTree*, RawEpicsData&);
 ```
 
-For recon trees, `is_x17=true` omits the Veto branch group
-(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`). LMS,
-cluster, GEM, trigger-bank, and RF branches are unchanged.
+For recon trees, `x17_mode=true` omits the Veto branch group
+(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`).
+`with_gem_hits` (`replay_recon -gem_hit`) books the GEM hits, their
+quality variables (incl. `gem_xy_corr`) and the `gem_cl_*` block (incl.
+`gem_cl_ts_adc`); off by default. `layout` books only the GEM quality /
+cluster / time-sample groups it flags: `replay_filter` passes the read
+status of the tree it copies (it also passes `noWaveform` when the raw
+input has no waveforms), the simulation converters a status with only
+`has_gem_hits`. LMS, HyCal cluster, trigger-bank, and RF branches are
+always written.
 
 ### Readers (skip missing branches; return optional-group flags)
 
@@ -597,8 +621,11 @@ SetScalerReadBranches(TTree*, RawScalerData&);   // void
 SetEpicsReadBranches(TTree*, RawEpicsData&);     // void
 ```
 
-`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw }`.
-`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw }`.
+`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw, has_vtp_raw, has_tdc_raw,
+has_waveform }`.
+`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw,
+has_vtp_raw, has_vtp_cl, has_rf, has_gem_hits, has_gem_qa, has_gem_cl, has_gem_ts }`
+(`has_gem_ts`: `gem_xy_corr` + `gem_cl_ts_adc`; missing GEM quality arrays read as NaN).
 
 `ssp_raw` is a `std::vector<uint32_t>` branch — readers must bind their
 own held `vector<uint32_t>**` (see comment in header).
@@ -613,7 +640,7 @@ FillScalerRow(const dsc::DscEventData&, const psync::SyncInfo&,
 FillEpicsRow(const epics::EpicsRecord&, RawEpicsData&);
 ```
 
-Schema reference: `analysis/REPLAYED_DATA.md` is the human-readable
+Schema reference: [`REPLAYED_DATA.md`](REPLAYED_DATA.md) is the human-readable
 counterpart; this header is the executable schema.
 
 ---
