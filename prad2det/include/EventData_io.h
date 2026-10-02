@@ -301,7 +301,8 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
 // variables and the gem_cl_* per-cluster block.  `layout` limits that to the
 // GEM quality / cluster groups it flags: replay_filter passes the read status
 // of the tree it copies, so a copy of an older file keeps its GEM layout
-// instead of gaining NaN-only branches.
+// instead of gaining NaN-only branches; the simulation converters, which fill
+// only the hits, pass a status with just has_gem_hits.
 inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode,
                                   bool with_gem_hits = false,
                                   const ReconReadStatus *layout = nullptr)

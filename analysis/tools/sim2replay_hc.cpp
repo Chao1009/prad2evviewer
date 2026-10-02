@@ -576,7 +576,9 @@ int main(int argc, char *argv[])
 
     TTree tree_out("recon", "X17 replay reconstruction from G4 HC.ModuleEdep");
     auto ev = std::make_unique<prad2::ReconEventData>();
-    prad2::SetReconWriteBranches(&tree_out, *ev, true);
+    prad2::ReconReadStatus gem_layout;   // GEM point hits only, no GEM quality / clusters
+    gem_layout.has_gem_hits = true;
+    prad2::SetReconWriteBranches(&tree_out, *ev, true, true, &gem_layout);
 
     fdec::HyCalCluster clusterer(pipeline.hycal);
     clusterer.SetConfig(pipeline.hycal_cluster_cfg);

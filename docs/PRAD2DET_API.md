@@ -593,8 +593,9 @@ For recon trees, `x17_mode=true` omits the Veto branch group
 quality variables and the `gem_cl_*` block; off by default. `layout` books
 only the GEM quality / cluster groups it flags: `replay_filter` passes the
 read status of the tree it copies (it also passes `noWaveform` when the raw
-input has no waveforms). LMS, HyCal cluster, trigger-bank, and RF branches
-are always written.
+input has no waveforms), the simulation converters a status with only
+`has_gem_hits`. LMS, HyCal cluster, trigger-bank, and RF branches are
+always written.
 
 ### Readers (skip missing branches; return optional-group flags)
 
