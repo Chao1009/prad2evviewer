@@ -286,7 +286,22 @@ def main(argv=None):
                          "robust against the tail).  cb-peak falls back to a "
                          "narrow-window Gaussian and then the histogram "
                          "argmax for low-statistics modules.")
+    ap.add_argument("--write-cluster-tsv", action="store_true",
+                    help="Write <out_path>_clusters.tsv with one row per "
+                         "accepted single-cluster event (columns: event_num, "
+                         "config_name, seed_module_id, seed_x_mm, seed_y_mm, "
+                         "seed_row, seed_col, seed_energy_MeV, "
+                         "cluster_E_raw_MeV, cluster_E_cal_MeV).  Requires "
+                         "--calibrate (the event lists are only populated in "
+                         "that mode).")
     args = ap.parse_args(argv)
+
+    if args.write_cluster_tsv and not args.calibrate:
+        sys.stderr.write(
+            "[ERROR] --write-cluster-tsv requires --calibrate to be set.\n"
+            "        Re-run with both flags: --calibrate --write-cluster-tsv\n"
+        )
+        sys.exit(2)
 
     p = C.setup_pipeline(
         evio_path     = args.evio_path,
@@ -550,6 +565,42 @@ def main(argv=None):
               f"(α_l={alpha_l:.2f} n_l={n_l:.1f}  α_n={alpha_n:.2f} n_n={n_n:.1f})")
         print(f"  σ_E / E (CB)    | {sigE_l_cb*100:>12.2f}% | {sigE_n_cb*100:>12.2f}%  "
               f"(Δ = {(sigE_n_cb - sigE_l_cb)*100:+.2f} pp)")
+
+    # ---- Optional: per-event cluster TSV ------------------------------------
+    if args.write_cluster_tsv and cal is not None:
+        # gains_l / gains_n come from fit_per_module_gains above.
+        # events_X lists: (seed_id, x, y, row, col, seed_E, cluster_E)
+        def _mod_name(sid):
+            # PrimEx IDs: 1-900 → "G<n>", 1001-2152 → "W<n>"
+            if 1 <= sid <= 900:
+                return f"G{sid}"
+            if 1001 <= sid <= 2152:
+                return f"W{sid - 1000}"
+            return str(sid)
+
+        clust_path = (args.out_path[:-4] if args.out_path.endswith('.tsv')
+                      else args.out_path) + "_clusters.tsv"
+        n_rows_l = n_rows_n = 0
+        with open(clust_path, "w") as cf:
+            cf.write("event_num\tconfig_name\tseed_module_id\t"
+                     "seed_x_mm\tseed_y_mm\tseed_row\tseed_col\t"
+                     "seed_energy_MeV\tcluster_E_raw_MeV\tcluster_E_cal_MeV\n")
+            for ev_idx, (sid, x, y, row, col, se, ce) in enumerate(events_legacy):
+                g = gains_l.get(sid, float('nan'))
+                ce_cal = ce * g if not math.isnan(g) else float('nan')
+                cf.write(f"{ev_idx}\tlegacy\t{_mod_name(sid)}\t"
+                         f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
+                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\n")
+                n_rows_l += 1
+            for ev_idx, (sid, x, y, row, col, se, ce) in enumerate(events_new):
+                g = gains_n.get(sid, float('nan'))
+                ce_cal = ce * g if not math.isnan(g) else float('nan')
+                cf.write(f"{ev_idx}\tgated\t{_mod_name(sid)}\t"
+                         f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
+                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\n")
+                n_rows_n += 1
+        print(f"\n  wrote: {clust_path}  "
+              f"(N rows: {n_rows_l} legacy + {n_rows_n} gated)")
 
     # ---- TSV output --------------------------------------------------------
     tsv_path = args.out_path if args.out_path.endswith('.tsv') \

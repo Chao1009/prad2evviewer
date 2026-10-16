@@ -41,7 +41,19 @@ If only per-PMT/electronics variation drives the bi-modality, the colour
 pattern will look random or crate-striped (the latter being the signature
 tested by ``plot_template_by_crate.py``).
 
-A fourth map shows ``n_pulses_used`` per channel on a log colour scale,
+Two additional maps show the per-channel MAD (median absolute deviation) of τ_r
+and τ_f. The MAD measures how tightly the per-pulse fits cluster within a single
+channel: small MAD = shape-stable channel (single pulse population); large MAD =
+broad or bimodal per-pulse distribution (e.g. mixing of physics and background
+pulses on the same channel). Spatial patterns in the MAD maps reveal where the
+per-channel median values are trustworthy and where population mixing is
+degrading the aggregate. A companion pair of maps shows the same information
+scaled by 1.4826, which converts MAD to the equivalent 1σ Gaussian width in
+natural ns units. The σ maps are the physically interpretable version — color
+reads directly as "the typical ±1σ spread of this channel's per-pulse τ fits in
+ns" — while the MAD maps show the underlying robust statistic.
+
+The n_pulses_used map shows ``n_pulses_used`` per channel on a log colour scale,
 making it easy to see where the high-statistics physics signal lives (central
 modules) versus where peripheral or background-dominated channels sit.
 
@@ -57,10 +69,14 @@ Usage
 
 Outputs (per material, per parameter, in --out-dir)
 ----------------------------------------------------
-    template_2d_<material>_tau_r.png
-    template_2d_<material>_tau_f.png
-    template_2d_<material>_t0.png
-    template_2d_<material>_n_pulses.png
+    template_2d_<material>_tau_r.png          median rise time
+    template_2d_<material>_tau_f.png          median fall time
+    template_2d_<material>_t0.png             median pulse onset
+    template_2d_<material>_tau_r_mad.png      per-pulse spread of τ_r (raw MAD)
+    template_2d_<material>_tau_f_mad.png      per-pulse spread of τ_f (raw MAD)
+    template_2d_<material>_tau_r_sigma.png    per-pulse spread of τ_r (1σ-equivalent, 1.4826·MAD)
+    template_2d_<material>_tau_f_sigma.png    per-pulse spread of τ_f (1σ-equivalent, 1.4826·MAD)
+    template_2d_<material>_n_pulses.png       accepted-pulse count (log scale)
 
 No dependencies beyond numpy, matplotlib, argparse, json, pathlib, and os.
 """
@@ -122,6 +138,51 @@ def load_hycal_map(map_path: Path) -> dict[str, tuple[float, float, float, float
     return geo_map
 
 
+def compute_material_extent(
+    hcmap_path: Path,
+    material: str,
+) -> tuple[float, float, float, float] | None:
+    """Return (x_lo, x_hi, y_lo, y_hi) — bounding box of ALL modules of the
+    given type in hycal_map.json, using each module's (x, y, sx, sy) to
+    include the module's physical extent (not just its center).
+
+    Returns None if no modules of this type are in the map.
+
+    This is used to fix the axis limits of the 2D spatial maps to the full
+    material region, so plots with sparse channel coverage still show the
+    entire HyCal region and it's visually obvious where coverage is missing.
+    """
+    with hcmap_path.open(encoding="utf-8") as fh:
+        records = json.load(fh)
+
+    x_lo = float("inf")
+    x_hi = float("-inf")
+    y_lo = float("inf")
+    y_hi = float("-inf")
+    found = False
+
+    for rec in records:
+        if rec.get("t", "Unknown") != material:
+            continue
+        geo = rec.get("geo", {})
+        try:
+            x  = float(geo["x"])
+            y  = float(geo["y"])
+            sx = float(geo["sx"])
+            sy = float(geo["sy"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        x_lo = min(x_lo, x - sx / 2.0)
+        x_hi = max(x_hi, x + sx / 2.0)
+        y_lo = min(y_lo, y - sy / 2.0)
+        y_hi = max(y_hi, y + sy / 2.0)
+        found = True
+
+    if not found:
+        return None
+    return (x_lo, x_hi, y_lo, y_hi)
+
+
 # ---------------------------------------------------------------------------
 # Template JSON loading
 # ---------------------------------------------------------------------------
@@ -140,7 +201,7 @@ def load_template_channels(
     Returns
     -------
     dict mapping material name → list of dicts with keys:
-        name, tau_r, tau_f, t0   (all in ns, median values)
+        name, tau_r, tau_f, t0, tau_r_mad, tau_f_mad   (all in ns)
     """
     with json_path.open(encoding="utf-8") as fh:
         data = json.load(fh)
@@ -162,17 +223,25 @@ def load_template_channels(
             continue
 
         try:
-            tau_r = float(entry["tau_r_ns"]["median"])
-            tau_f = float(entry["tau_f_ns"]["median"])
-            t0    = float(entry["t0_ns"]["median"])
+            tau_r     = float(entry["tau_r_ns"]["median"])
+            tau_f     = float(entry["tau_f_ns"]["median"])
+            t0        = float(entry["t0_ns"]["median"])
+            tau_r_mad = float(entry["tau_r_ns"]["mad"])
+            tau_f_mad = float(entry["tau_f_ns"]["mad"])
+            tau_r_sigma = tau_r_mad * 1.4826  # Gaussian-equivalent 1σ
+            tau_f_sigma = tau_f_mad * 1.4826
         except (KeyError, TypeError, ValueError):
             continue
 
         by_material[material].append({
-            "name":  key,
-            "tau_r": tau_r,
-            "tau_f": tau_f,
-            "t0":    t0,
+            "name":        key,
+            "tau_r":       tau_r,
+            "tau_f":       tau_f,
+            "t0":          t0,
+            "tau_r_mad":   tau_r_mad,
+            "tau_f_mad":   tau_f_mad,
+            "tau_r_sigma": tau_r_sigma,
+            "tau_f_sigma": tau_f_sigma,
             "n_pulses_used": int(n_used),
         })
 
@@ -201,6 +270,30 @@ _PARAM_META = {
         "label": "t₀ (ns) — pulse onset",
         "cmap":  "viridis",
         "short": "t₀",
+    },
+    "tau_r_mad": {
+        "key":   "tau_r_mad",
+        "label": "τ_r MAD (ns) — per-pulse spread",
+        "cmap":  "magma",
+        "short": "τ_r MAD",
+    },
+    "tau_f_mad": {
+        "key":   "tau_f_mad",
+        "label": "τ_f MAD (ns) — per-pulse spread",
+        "cmap":  "magma",
+        "short": "τ_f MAD",
+    },
+    "tau_r_sigma": {
+        "key":   "tau_r_sigma",
+        "label": "τ_r 1σ-equiv (ns) — 1.4826·MAD",
+        "cmap":  "cividis",
+        "short": "τ_r σ",
+    },
+    "tau_f_sigma": {
+        "key":   "tau_f_sigma",
+        "label": "τ_f 1σ-equiv (ns) — 1.4826·MAD",
+        "cmap":  "cividis",
+        "short": "τ_f σ",
     },
 }
 
@@ -232,6 +325,7 @@ def make_2d_map(
     out_path: Path,
     vmin_override: float | None,
     vmax_override: float | None,
+    material_extent: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Render one 2D spatial map and save to *out_path*.
 
@@ -300,11 +394,16 @@ def make_2d_map(
     pc.set_clim(vmin, vmax)
 
     # --- Figure layout -------------------------------------------------------
-    # Determine axis limits from the geometry extent, with ~7 % padding.
-    x_lo = float((xs_arr - sxs_arr / 2.0).min())
-    x_hi = float((xs_arr + sxs_arr / 2.0).max())
-    y_lo = float((ys_arr - sys_arr / 2.0).min())
-    y_hi = float((ys_arr + sys_arr / 2.0).max())
+    # Axis limits: prefer the full material extent (so sparse channel coverage
+    # is visually obvious against the full detector region); fall back to the
+    # plotted-subset extent when material_extent is not provided.
+    if material_extent is not None:
+        x_lo, x_hi, y_lo, y_hi = material_extent
+    else:
+        x_lo = float((xs_arr - sxs_arr / 2.0).min())
+        x_hi = float((xs_arr + sxs_arr / 2.0).max())
+        y_lo = float((ys_arr - sys_arr / 2.0).min())
+        y_hi = float((ys_arr + sys_arr / 2.0).max())
     pad_x = 0.07 * (x_hi - x_lo)
     pad_y = 0.07 * (y_hi - y_lo)
 
@@ -348,6 +447,7 @@ def make_2d_map_n_pulses(
     out_path: Path,
     vmin_override: float | None,
     vmax_override: float | None,
+    material_extent: tuple[float, float, float, float] | None = None,
 ) -> None:
     """Render a 2D spatial map colour-coded by n_pulses_used and save to *out_path*.
 
@@ -437,10 +537,16 @@ def make_2d_map_n_pulses(
     pc.set_array(vals_arr)
 
     # --- Figure layout -------------------------------------------------------
-    x_lo = float((xs_arr - sxs_arr / 2.0).min())
-    x_hi = float((xs_arr + sxs_arr / 2.0).max())
-    y_lo = float((ys_arr - sys_arr / 2.0).min())
-    y_hi = float((ys_arr + sys_arr / 2.0).max())
+    # Axis limits: prefer the full material extent (so sparse channel coverage
+    # is visually obvious against the full detector region); fall back to the
+    # plotted-subset extent when material_extent is not provided.
+    if material_extent is not None:
+        x_lo, x_hi, y_lo, y_hi = material_extent
+    else:
+        x_lo = float((xs_arr - sxs_arr / 2.0).min())
+        x_hi = float((xs_arr + sxs_arr / 2.0).max())
+        y_lo = float((ys_arr - sys_arr / 2.0).min())
+        y_hi = float((ys_arr + sys_arr / 2.0).max())
     pad_x = 0.07 * (x_hi - x_lo)
     pad_y = 0.07 * (y_hi - y_lo)
 
@@ -493,10 +599,22 @@ def print_material_summary(
         f"\n=== {material}: {n}/{n_map_modules} map modules had templates"
         f" (min_pulses={min_pulses}) ==="
     )
+    tau_r_mad_arr = np.array([c["tau_r_mad"] for c in channels])
+    tau_f_mad_arr = np.array([c["tau_f_mad"] for c in channels])
     print(f"    τ_r range: {tau_r_arr.min():.1f} ns to {tau_r_arr.max():.1f} ns"
           f" (median {np.median(tau_r_arr):.1f} ns)")
     print(f"    τ_f range: {tau_f_arr.min():.1f} ns to {tau_f_arr.max():.1f} ns"
           f" (median {np.median(tau_f_arr):.1f} ns)")
+    print(f"    τ_r MAD range: {tau_r_mad_arr.min():.2f} ns to {tau_r_mad_arr.max():.2f} ns"
+          f" (median {np.median(tau_r_mad_arr):.2f} ns)")
+    print(f"    τ_f MAD range: {tau_f_mad_arr.min():.2f} ns to {tau_f_mad_arr.max():.2f} ns"
+          f" (median {np.median(tau_f_mad_arr):.2f} ns)")
+    tau_r_sigma_arr = np.array([c["tau_r_sigma"] for c in channels])
+    tau_f_sigma_arr = np.array([c["tau_f_sigma"] for c in channels])
+    print(f"    τ_r 1σ-equiv range: {tau_r_sigma_arr.min():.2f} ns to {tau_r_sigma_arr.max():.2f} ns"
+          f" (median {np.median(tau_r_sigma_arr):.2f} ns)")
+    print(f"    τ_f 1σ-equiv range: {tau_f_sigma_arr.min():.2f} ns to {tau_f_sigma_arr.max():.2f} ns"
+          f" (median {np.median(tau_f_sigma_arr):.2f} ns)")
     print(f"    t₀ range: {t0_arr.min():.1f} ns to {t0_arr.max():.1f} ns"
           f" (median {np.median(t0_arr):.1f} ns)")
     print(f"    n_pulses: min = {n_pulses_arr.min()}, max = {n_pulses_arr.max()},"
@@ -676,7 +794,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nProcessing {material}: {len(channels)} channels "
               f"({n_in_map} found in map) …")
 
-        for param_name in ("tau_r", "tau_f", "t0"):
+        material_extent = compute_material_extent(hcmap_path, material)
+        if material_extent is None:
+            print(f"  [WARN] material '{material}' — no geometry entries found "
+                  f"in HyCal map for axis-limit computation; falling back to "
+                  f"plotted-subset extent.", file=sys.stderr)
+
+        for param_name in ("tau_r", "tau_f", "t0", "tau_r_mad", "tau_f_mad", "tau_r_sigma", "tau_f_sigma"):
             out_png = out_dir / f"template_2d_{material}_{param_name}.png"
             make_2d_map(
                 material=material,
@@ -686,6 +810,7 @@ def main(argv: list[str] | None = None) -> int:
                 out_path=out_png,
                 vmin_override=args.vmin,
                 vmax_override=args.vmax,
+                material_extent=material_extent,
             )
 
         out_png_n = out_dir / f"template_2d_{material}_n_pulses.png"
@@ -696,6 +821,7 @@ def main(argv: list[str] | None = None) -> int:
             out_path=out_png_n,
             vmin_override=args.n_vmin,
             vmax_override=args.n_vmax,
+            material_extent=material_extent,
         )
 
         # Summary

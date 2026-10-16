@@ -32,6 +32,18 @@ With `--plot-dir <dir>` set, we:
 Use `--plot-channels W001,W002,...` to force-plot specific channels in
 addition to the auto-picked ones.
 
+Module-multiplicity filter
+--------------------------
+With `--min-modules-per-event N` and/or `--max-modules-per-event N` set, we do
+a preliminary pass on every channel to count how many have a qualifying pulse
+(defined by `--module-count-height-min` and `--module-count-require-clean`),
+then reject the entire event if the count is outside the requested range.
+Motivation: isolating candidate multi-module discharge events, where a
+discharge between two adjacent HyCal modules produces exactly two firing
+channels on an otherwise unrelated trigger. Typical use:
+`--min-modules-per-event 2 --max-modules-per-event 2` to select the
+two-channel topology.
+
 Usage
 -----
     python fit_pulse_template.py <evio_path> [<evio_path> ...] -o out.json
@@ -44,6 +56,10 @@ Usage
                                  [--n-plot-good N] [--n-plot-bad N]
                                  [--plot-channels W001,W002,…]
                                  [--no-summary-plot]
+                                 [--min-modules-per-event N]
+                                 [--max-modules-per-event N]
+                                 [--module-count-height-min ADC]
+                                 [--module-count-require-clean | --module-count-allow-dirty]
 
 Each `<evio_path>` accepts the same shapes as the other analysis scripts —
 glob, directory, or single split file.  Multiple paths are concatenated.
@@ -818,6 +834,40 @@ def main() -> int:
                          "per-event value), NOT on the trigger bitmask. "
                          "Empty (default) = accept all event types. "
                          "See --list-triggers for full details.")
+    ap.add_argument("--min-modules-per-event", type=int, default=0,
+                    metavar="N",
+                    help="Reject events where fewer than N channels have a "
+                         "qualifying pulse. Default 0 = no lower bound. A "
+                         "'qualifying pulse' is defined by "
+                         "--module-count-height-min and "
+                         "--module-count-require-clean. Useful for isolating "
+                         "multi-channel events (e.g. --min-modules-per-event 2 "
+                         "--max-modules-per-event 2 selects candidate "
+                         "two-channel discharge events).")
+    ap.add_argument("--max-modules-per-event", type=int, default=0,
+                    metavar="N",
+                    help="Reject events where more than N channels have a "
+                         "qualifying pulse. Default 0 = no upper bound.")
+    ap.add_argument("--module-count-height-min", type=float, default=-1.0,
+                    metavar="FLOAT",
+                    help="Minimum peak height (ADC, pedsub) for a channel to "
+                         "count as 'fired' toward the module-multiplicity "
+                         "filter. Default -1.0 = reuse --height-min. Set this "
+                         "independently when you want the multiplicity gate to "
+                         "use a different (typically lower) threshold than the "
+                         "fit-quality gate.")
+    _mc_grp = ap.add_mutually_exclusive_group()
+    _mc_grp.add_argument("--module-count-require-clean",
+                         dest="module_count_require_clean",
+                         action="store_true", default=True,
+                         help="Require pk.quality == 0 for a channel to count "
+                              "as 'fired' (default). Excludes piled-up or "
+                              "overflow channels from the multiplicity count.")
+    _mc_grp.add_argument("--module-count-allow-dirty",
+                         dest="module_count_require_clean",
+                         action="store_false",
+                         help="Include piled-up and overflow channels in the "
+                              "multiplicity count.")
     args = ap.parse_args()
 
     if args.trigger_bits_file:
@@ -902,6 +952,7 @@ def main() -> int:
 
     n_phys = n_pulses_attempted = n_pulses_used = 0
     n_events_trigger_filtered = 0
+    n_events_multiplicity_filtered = 0
     n_total = n_trigger = n_good = n_after_cut = n_good_fit = n_good_fit_time_cut = 0
     n_files_open = 0
     t0_wall = time.monotonic()
@@ -958,6 +1009,62 @@ def main() -> int:
                         evt_type = int(fadc_evt.info.trigger_type)
                         if evt_type not in event_type_accept:
                             n_events_trigger_filtered += 1
+                            continue
+
+                    # Module-multiplicity filter (optional; default no-op).
+                    # When active, do a first pass to count qualifying channels
+                    # before committing to the full fit loop.
+                    _mult_active = (args.min_modules_per_event > 0
+                                    or args.max_modules_per_event > 0)
+                    if _mult_active:
+                        _eff_height_min = (
+                            args.module_count_height_min
+                            if args.module_count_height_min >= 0
+                            else args.height_min
+                        )
+                        n_fired = 0
+                        _mult_exceeded = False
+                        for _ri in range(fadc_evt.nrocs):
+                            if _mult_exceeded:
+                                break
+                            _roc = fadc_evt.roc(_ri)
+                            if not _roc.present:
+                                continue
+                            for _s in _roc.present_slots():
+                                if _mult_exceeded:
+                                    break
+                                _slot = _roc.slot(_s)
+                                for _c in _slot.present_channels():
+                                    _cd = _slot.channel(_c)
+                                    if _cd.nsamples <= 0:
+                                        continue
+                                    _samples = np.asarray(_cd.samples,
+                                                          dtype=np.uint16)
+                                    _ped, _rms, _peaks = p.wave_ana.analyze(
+                                        _samples)
+                                    if len(_peaks) < 1:
+                                        continue
+                                    _pk = _peaks[0]
+                                    if args.module_count_require_clean:
+                                        if _pk.quality != 0:
+                                            continue
+                                        if _pk.overflow:
+                                            continue
+                                    if _pk.height < _eff_height_min:
+                                        continue
+                                    n_fired += 1
+                                    if (args.max_modules_per_event > 0
+                                            and n_fired
+                                            > args.max_modules_per_event):
+                                        _mult_exceeded = True
+                                        break
+                        if (args.min_modules_per_event > 0
+                                and n_fired < args.min_modules_per_event):
+                            n_events_multiplicity_filtered += 1
+                            continue
+                        if (args.max_modules_per_event > 0
+                                and n_fired > args.max_modules_per_event):
+                            n_events_multiplicity_filtered += 1
                             continue
 
                     n_trigger += 1
@@ -1106,6 +1213,7 @@ def main() -> int:
     print(f"[done] {n_phys} phys events  /  {n_pulses_attempted} fits attempted"
           f"  /  {n_pulses_used} converged  /  {len(stats)} channels"
           f"  /  trigger_filtered={n_events_trigger_filtered}"
+          f"  /  mult_filtered={n_events_multiplicity_filtered}"
           f"  /  {elapsed:.1f}s", flush=True)
 
     # Aggregate + write JSON.
@@ -1152,6 +1260,15 @@ def main() -> int:
             "trigger_event_type_spec": args.trigger_event_type or None,
             "trigger_event_type_accept": sorted(event_type_accept) if event_type_accept else None,
             "n_events_trigger_filtered": n_events_trigger_filtered,
+            "min_modules_per_event": args.min_modules_per_event,
+            "max_modules_per_event": args.max_modules_per_event,
+            "module_count_height_min": (
+                args.module_count_height_min
+                if args.module_count_height_min >= 0
+                else args.height_min
+            ),
+            "module_count_require_clean": args.module_count_require_clean,
+            "n_events_multiplicity_filtered": n_events_multiplicity_filtered,
         }
     }
     summaries: List[Dict] = []

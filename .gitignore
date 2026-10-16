@@ -36,3 +36,7 @@ __pycache__/
 # Per-user template extraction plots (derived — regenerate from JSONs)
 analysis/pyscripts/output/template_plots_*/
 analysis/pyscripts/output/
+
+# Derived output / per-run calibration results (keep locally, not in git)
+Physics_calib/
+analysis/pyscripts/plots/

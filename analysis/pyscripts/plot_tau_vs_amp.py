@@ -52,13 +52,31 @@ A ratio significantly different from 1 confirms amplitude-dependent pulse
 shape (hypothesis 1).  If per-material ratios are near 1 but individual
 channels cluster at different tau values, that points to hypothesis 2.
 
+Axis-range flags
+----------------
+`--amp-min` / `--amp-max` fix the x-axis range of all plots.
+`--tau-min` / `--tau-max` fix the y-axis range as a fallback that applies to
+both τ_r and τ_f plots when parameter-specific flags are not set.
+`--tau-r-min` / `--tau-r-max` fix the y-axis range of τ_r plots only, overriding
+--tau-min/--tau-max for those plots.
+`--tau-f-min` / `--tau-f-max` do the same for τ_f plots only.
+Default is auto-range per plot. Fixing the ranges is useful when comparing
+plots from different selections (e.g. baseline vs. a restrictive
+multiplicity-filtered template extraction) side by side — identical axes let
+the eye compare densities directly. Because τ_r (1–10 ns) and τ_f (15–50 ns)
+have very different natural ranges, the parameter-specific flags are usually
+what you want for τ-vs-amp comparisons.
+
 Usage
 -----
     python plot_tau_vs_amp.py per_pulse_amp_chi2.npz \\
         [--out-dir plots/] \\
         [--materials PbWO4,PbGlass] \\
         [--channels W042,W100,G100] \\
-        [--min-pulses-per-channel 100]
+        [--min-pulses-per-channel 100] \\
+        [--amp-min 50] [--amp-max 3000] \\
+        [--tau-r-min 0] [--tau-r-max 15] \\
+        [--tau-f-min 15] [--tau-f-max 50]
 
 Dependencies: numpy, matplotlib (headless Agg backend), pathlib, argparse.
 No prad2py or other project-specific imports are used.
@@ -172,7 +190,9 @@ def _decile_summary_tau(amp: np.ndarray, tau: np.ndarray,
 
 def _plot_material_tau(amp: np.ndarray, tau: np.ndarray,
                         material: str, param: str,
-                        n_pulses: int, out_path: Path) -> None:
+                        n_pulses: int, out_path: Path,
+                        amp_min: float = -1.0, amp_max: float = -1.0,
+                        tau_min: float = -1.0, tau_max: float = -1.0) -> None:
     """One 1×2 figure: hexbin density (left) + running percentile (right).
 
     Parameters
@@ -204,13 +224,36 @@ def _plot_material_tau(amp: np.ndarray, tau: np.ndarray,
     # --- left: hexbin density -----------------------------------------------
     ax = axes[0]
     if len(amp_pos) > 0:
-        hb = ax.hexbin(
-            amp_pos, tau_pos,
+        # Build hexbin grid in the user-specified window if provided, so
+        # separate invocations with the same --amp-min/--amp-max/--tau-min/
+        # --tau-max produce hex grids with identical cell boundaries (needed
+        # for side-by-side comparison of different template selections).
+        # hexbin with xscale="log" expects extent in log10 space on x,
+        # linear on y.
+        hexbin_kwargs = dict(
             xscale="log", yscale="linear",
             bins="log", mincnt=1,
             gridsize=60,
             cmap="viridis",
         )
+        if (amp_min > 0 and amp_max > 0
+                and tau_min >= 0 and tau_max >= 0):
+            # Check that at least one data point falls inside the window;
+            # otherwise hexbin's LogNorm colorbar crashes on all-zero cells.
+            in_window = ((amp_pos >= amp_min) & (amp_pos <= amp_max)
+                         & (tau_pos >= tau_min) & (tau_pos <= tau_max))
+            if in_window.any():
+                import math
+                hexbin_kwargs["extent"] = (
+                    math.log10(amp_min), math.log10(amp_max),
+                    tau_min, tau_max,
+                )
+            else:
+                print(f"[warn] {material} {param}: no data points in requested "
+                      f"window amp=[{amp_min}, {amp_max}] tau=[{tau_min}, {tau_max}]; "
+                      f"hexbin grid falls back to data-driven bounds for this plot.",
+                      flush=True)
+        hb = ax.hexbin(amp_pos, tau_pos, **hexbin_kwargs)
         cb = fig.colorbar(hb, ax=ax)
         cb.set_label("log₁₀(count)", fontsize=FS_LABEL)
     ax.set_xlabel("Peak amplitude (ADC)", fontsize=FS_LABEL)
@@ -234,6 +277,21 @@ def _plot_material_tau(amp: np.ndarray, tau: np.ndarray,
     ax.grid(True, which="both", ls=":", lw=0.5, alpha=0.6)
     ax.legend(fontsize=FS_LEGEND)
 
+    # Apply CLI-override axis limits if provided (>= 0 means "set this limit").
+    for ax in axes:
+        if amp_min >= 0 and amp_max >= 0:
+            ax.set_xlim(amp_min, amp_max)
+        elif amp_min >= 0:
+            ax.set_xlim(left=amp_min)
+        elif amp_max >= 0:
+            ax.set_xlim(right=amp_max)
+        if tau_min >= 0 and tau_max >= 0:
+            ax.set_ylim(tau_min, tau_max)
+        elif tau_min >= 0:
+            ax.set_ylim(bottom=tau_min)
+        elif tau_max >= 0:
+            ax.set_ylim(top=tau_max)
+
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150)
@@ -247,7 +305,9 @@ def _plot_material_tau(amp: np.ndarray, tau: np.ndarray,
 
 def _plot_channel_tau(amp: np.ndarray, tau_r: np.ndarray, tau_f: np.ndarray,
                        channel: str, mtype: str, n_pulses: int,
-                       out_path: Path) -> None:
+                       out_path: Path,
+                       amp_min: float = -1.0, amp_max: float = -1.0,
+                       tau_min: float = -1.0, tau_max: float = -1.0) -> None:
     """Two-panel scatter for a single channel: tau_r (left), tau_f (right).
 
     Plain scatter is used instead of hexbin because per-channel counts are
@@ -289,6 +349,21 @@ def _plot_channel_tau(amp: np.ndarray, tau_r: np.ndarray, tau_f: np.ndarray,
         ax.tick_params(labelsize=FS_TICK)
         ax.grid(True, which="both", ls=":", lw=0.5, alpha=0.6)
         ax.legend(fontsize=FS_LEGEND)
+
+    # Apply CLI-override axis limits if provided (>= 0 means "set this limit").
+    for ax in axes:
+        if amp_min >= 0 and amp_max >= 0:
+            ax.set_xlim(amp_min, amp_max)
+        elif amp_min >= 0:
+            ax.set_xlim(left=amp_min)
+        elif amp_max >= 0:
+            ax.set_xlim(right=amp_max)
+        if tau_min >= 0 and tau_max >= 0:
+            ax.set_ylim(tau_min, tau_max)
+        elif tau_min >= 0:
+            ax.set_ylim(bottom=tau_min)
+        elif tau_max >= 0:
+            ax.set_ylim(top=tau_max)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -339,7 +414,76 @@ def main() -> None:
         help="Minimum number of pulses a channel must have to be plotted "
              "individually (default: 100).",
     )
+    parser.add_argument(
+        "--amp-min",
+        type=float,
+        default=-1.0,
+        help="Minimum amplitude (ADC) for the x-axis. -1 = auto (use data range). "
+             "Set to fix the x-range across multiple invocations for side-by-side "
+             "comparison of different selections.",
+    )
+    parser.add_argument(
+        "--amp-max",
+        type=float,
+        default=-1.0,
+        help="Maximum amplitude (ADC) for the x-axis. -1 = auto.",
+    )
+    parser.add_argument(
+        "--tau-min",
+        type=float,
+        default=-1.0,
+        help="Minimum τ (ns) for the y-axis. -1 = auto.",
+    )
+    parser.add_argument(
+        "--tau-max",
+        type=float,
+        default=-1.0,
+        help="Maximum τ (ns) for the y-axis. -1 = auto.",
+    )
+    parser.add_argument(
+        "--tau-r-min",
+        type=float,
+        default=-1.0,
+        help="Minimum τ_r (ns) for the y-axis of τ_r plots. -1 = fall back "
+             "to --tau-min, then to auto. Overrides --tau-min for τ_r plots only.",
+    )
+    parser.add_argument(
+        "--tau-r-max",
+        type=float,
+        default=-1.0,
+        help="Maximum τ_r (ns) for the y-axis of τ_r plots. -1 = fall back "
+             "to --tau-max, then to auto.",
+    )
+    parser.add_argument(
+        "--tau-f-min",
+        type=float,
+        default=-1.0,
+        help="Minimum τ_f (ns) for the y-axis of τ_f plots. -1 = fall back "
+             "to --tau-min, then to auto. Overrides --tau-min for τ_f plots only.",
+    )
+    parser.add_argument(
+        "--tau-f-max",
+        type=float,
+        default=-1.0,
+        help="Maximum τ_f (ns) for the y-axis of τ_f plots. -1 = fall back "
+             "to --tau-max, then to auto.",
+    )
     args = parser.parse_args()
+
+    # --- resolve per-parameter tau limits ------------------------------------
+    def _resolve_tau_limits(param_specific_min: float, param_specific_max: float,
+                            tau_min_fallback: float, tau_max_fallback: float
+                            ) -> tuple:
+        """Return (min, max) for the parameter, preferring parameter-specific
+        flags over the generic --tau-min/--tau-max fallback."""
+        eff_min = param_specific_min if param_specific_min >= 0 else tau_min_fallback
+        eff_max = param_specific_max if param_specific_max >= 0 else tau_max_fallback
+        return eff_min, eff_max
+
+    tau_r_min_eff, tau_r_max_eff = _resolve_tau_limits(
+        args.tau_r_min, args.tau_r_max, args.tau_min, args.tau_max)
+    tau_f_min_eff, tau_f_max_eff = _resolve_tau_limits(
+        args.tau_f_min, args.tau_f_max, args.tau_min, args.tau_max)
 
     # --- resolve paths -------------------------------------------------------
     npz_path = Path(args.npz_path).resolve()
@@ -387,11 +531,15 @@ def main() -> None:
         # tau_r figure
         safe = material.replace(" ", "_")
         _plot_material_tau(a, tr, material, "tau_r", n,
-                           out_dir / f"tau_r_vs_amp_{safe}.png")
+                           out_dir / f"tau_r_vs_amp_{safe}.png",
+                           amp_min=args.amp_min, amp_max=args.amp_max,
+                           tau_min=tau_r_min_eff, tau_max=tau_r_max_eff)
 
         # tau_f figure
         _plot_material_tau(a, tf, material, "tau_f", n,
-                           out_dir / f"tau_f_vs_amp_{safe}.png")
+                           out_dir / f"tau_f_vs_amp_{safe}.png",
+                           amp_min=args.amp_min, amp_max=args.amp_max,
+                           tau_min=tau_f_min_eff, tau_max=tau_f_max_eff)
 
         # Console summary (tau_r then tau_f)
         if n >= 20:
@@ -432,7 +580,9 @@ def main() -> None:
 
         safe_ch = ch.replace(" ", "_")
         _plot_channel_tau(a, tr, tf, ch, ch_mtype, n,
-                          out_dir / f"tau_vs_amp_channel_{safe_ch}.png")
+                          out_dir / f"tau_vs_amp_channel_{safe_ch}.png",
+                          amp_min=args.amp_min, amp_max=args.amp_max,
+                          tau_min=args.tau_min, tau_max=args.tau_max)
 
         # Console decile summary
         print(f"[{ch} {ch_mtype} N={n:,}]", flush=True)

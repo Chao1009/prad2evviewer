@@ -436,3 +436,52 @@ What to check:
 ## 9. One-Sentence Summary
 
 HyCal time calibration here is: build clean neighbor-pair timing constraints, convert them into a reference-anchored linear network, solve per-module constant offsets with weighted least squares, and then apply uniformly as `t_calib = t_raw - offset_module` across replay and downstream timing analysis.
+
+---
+
+## 10. Secondary coincidence peak (afterpulsing)
+
+### 10.1 Observation
+
+On run 25320 (2.2 GeV e-p), the per-module $\Delta T = t_\text{neighbour} - t_\text{seed}$ diagnostic (`analysis/pyscripts/module_dt_diagnostic.py`) reveals a secondary peak at $\Delta T \approx 15\ \text{ns}$ in a fraction of HyCal modules, alongside the clean primary coincidence peak at $\Delta T \approx 0$ ($\sigma_\text{primary} \approx 1\ \text{ns}$).
+
+Characteristics of the secondary peak (from per-module fits):
+
+- $\mu_2$ varies module-to-module over roughly $8$–$30\ \text{ns}$.
+- $\sigma_2 > \sigma_\text{primary}$; the secondary is appreciably wider than the primary.
+- Shape is asymmetric with a long tail toward later $\Delta T$.
+- The fraction of affected modules and per-module fit parameters ($\mu_2$, $\sigma_2$, $A_2$, significance) are written to the per-run summary CSV produced by the diagnostic.
+
+### 10.2 Diagnosis
+
+Five hypotheses were considered:
+
+- (a) FADC pipeline / clock-domain artefact
+- (b) CEBAF RF structure
+- (c) PMT afterpulsing / ion feedback
+- (d) Correlated physics
+- (e) Misidentified pulses in `WaveAnalyzer`
+
+The three jointly observed features — per-module variation in $\mu_2$, $\sigma_2 > \sigma_1$, and an asymmetric late-side tail — are the characteristic signature of **PMT afterpulsing (ion feedback)**. Each of the other four hypotheses fails at least one criterion:
+
+- FADC pipeline / RF structure: predicts $\mu_2$ uniform across modules and a sharp secondary ($\sigma_2 \approx \sigma_1$); both are contradicted.
+- Correlated physics: predicts spatial correlation with HyCal geometry; the per-module variation is uncorrelated with module position.
+- Misidentified pulse (double pickoff / undershoot): predicts $\sigma_2 \leq \sigma_1$; contradicted by the observed broader secondary.
+
+### 10.3 Physical mechanism
+
+A primary photocathode avalanche ionises residual gas atoms (or trapped ions near the first dynode) inside the PMT vacuum. Positive ions then drift back toward the photocathode under the electrostatic field, with transit times of order $10$–$50\ \text{ns}$, depending on ion mass and tube geometry — hence the module-to-module variation in $\mu_2$. The ion-mobility kinetics smear the arrival time distribution, producing the observed asymmetric late-side tail. Afterpulse amplitude scales approximately linearly with primary pulse amplitude; this is an intrinsic PMT property, not a hardware defect.
+
+### 10.4 Impact on production reconstruction
+
+The production clusterer applies a seed-anchored timing coincidence cut $|t_\text{hit} - t_\text{seed}| \leq \texttt{seed\_time\_window}$ with `seed_time_window = 4 ns` (set in `database/reconstruction_config.json`). Afterpulses at $\Delta T \approx 15\ \text{ns}$ are more than $10\sigma$ outside this window and are rejected cleanly. Cluster energies, hit multiplicities, and the per-module `Module::time_offset` calibration values are unaffected. The `offset_i` values in `database/hycal_time_offsets/time_calib.json` are centred on the primary peak, which is correct; no recalibration is required.
+
+### 10.5 Action
+
+**None required for the 2.2 GeV e-p physics analysis.** The finding is documented for the record.
+
+The per-module secondary-peak table ($\mu_2$, $\sigma_2$, $A_2$, significance) produced by `module_dt_diagnostic.py` can be retained as a module-quality reference. If the finding needs to be revisited (e.g. for low-amplitude physics or very-high-rate running), the afterpulse amplitude dependence can be confirmed by rerunning the diagnostic with a higher `--min-seed-energy` cut; $A_2/A_1$ should increase with the primary energy threshold.
+
+### 10.6 Reference
+
+> See `docs/plans/plan-module-dt-diagnostic.md` for the diagnostic script specification and `analysis/pyscripts/module_dt_diagnostic.py` for the implementation (secondary-peak detection in `detect_secondary_peak`, §14 of the plan).
