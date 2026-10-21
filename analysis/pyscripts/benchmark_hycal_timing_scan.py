@@ -2,13 +2,30 @@
 """benchmark_hycal_timing_scan.py — Multi-run EVIO scan for secondary peaks.
 
 Scans all prad_*.evio.* files in an EVIO directory, invokes
-benchmark_hycal_timing.py (legacy path + --calibrate) on each split file,
+benchmark_hycal_timing_test_20261021.py (LMS-corrected, elastic-window
+--calibrate) on each split file,
 detects any secondary peaks in the energy spectrum (prominence threshold +
 min distance from primary), and aggregates σ_E/E trends across files / runs.
 
-Secondary-peak detection flags any peak detected by find_peaks() that is NOT
-the primary and is more than min_dist_mev away from it, regardless of whether
-it appears above or below the primary peak centre.
+Secondary-peak detection uses the **post-calibration inner-ring histogram**
+(header ``e_centre  legacy_pre  legacy_post  new_pre  new_post``), not the
+bulk/headline spectrum.  This histogram covers only inner-ring events
+(r < 200 mm) after per-module gain refinement, which means:
+
+- The inner-ring cut (r < 200 mm) removes most edge/leakage events that
+  inflate the bulk spectrum's inelastic shoulder.
+- Per-module gain refinement sharpens the elastic peak, making it easier to
+  resolve any secondary structure nearby.
+- Below-primary inelastic contamination (e.g., the ~1951 MeV shoulder visible
+  in full-detector spectra for run 25320) is largely suppressed in this view.
+- Any secondary peak that *does* remain visible here — e.g., the ~2600 MeV
+  pile-up feature in run 25320 — is a genuine physics contamination (pile-up
+  or a real double-population) that is interpretable and actionable.
+
+Secondary-peak detection flags only peaks that are BOTH more than
+min_dist_mev away from the primary AND located above the primary peak centre
+(higher energy).  Below-primary bumps (inelastic tail, Δ-excitation, Møller)
+are expected physics and are not flagged.
 
 By default the full EVIO file is processed (no --max-events cap). Pass an
 explicit --max-events value to impose a limit.
@@ -17,7 +34,10 @@ Outputs
 -------
   output/scan_${RUN}/split_${SPLITNUM}/         per-file benchmark outputs
   output/benchmark_hycal_timing_scan_summary.tsv  aggregate (one row per file)
-  output/benchmark_hycal_timing_scan_sigma_E_vs_file.png  trend plot
+  output/benchmark_hycal_timing_scan_sigma_E_vs_file_pre.png
+      σ_E/E (Gaussian, PRE-calibration) trend plot
+  output/benchmark_hycal_timing_scan_sigma_E_vs_file_post.png
+      σ_E/E (Gaussian, POST-calibration) trend plot
   output/benchmark_hycal_timing_scan_all_calibrated_plots.pdf  combined PDF
   output/benchmark_hycal_timing_scan_findings.md  human-readable summary
   benchmark_hycal_timing_scan.log                 persistent log
@@ -39,6 +59,7 @@ import datetime
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 import sys
@@ -62,8 +83,10 @@ except ImportError:
 # ---------------------------------------------------------------------------
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _BENCHMARK_SCRIPT = str(
-    _REPO_ROOT / "analysis" / "pyscripts" / "benchmark_hycal_timing.py"
+    _REPO_ROOT / "analysis" / "pyscripts" / "benchmark_hycal_timing_test_20261021.py"
 )
+_DATABASE_DIR = Path(os.environ.get("PRAD2_DATABASE_DIR",
+                                    str(_REPO_ROOT / "database")))
 
 _DEFAULT_EVIO_DIR  = "/Users/L00338853/work/PRad/data/evio"
 _DEFAULT_OUTPUT_DIR = str(_REPO_ROOT / "analysis" / "pyscripts" / "output")
@@ -71,6 +94,8 @@ _DEFAULT_MAX_EVENTS: Optional[int] = None   # None → process full EVIO file
 _DEFAULT_PROMINENCE = 40
 _DEFAULT_PEAK_DIST_MEV = 100.0
 _DEFAULT_PARALLEL   = 1
+# Runs left out of the scan entirely (user decision); value = reason shown in SKIP line.
+_EXCLUDED_RUNS: dict[int, str] = {24578: "non-standard trigger"}
 
 # ---------------------------------------------------------------------------
 # Run-number → target peak (MeV) mapping  (spec §2)
@@ -79,10 +104,18 @@ _TARGET_PEAK_MAP: dict[int, float] = {
     24386: 3488.5,
     24503: 3488.5,
     24512: 3488.5,
+    24578:  728.9,  # H2, 729 MeV (same as 24590)
     24590:  728.9,
+    24603:  728.9,  # H2, 729 MeV (same as 24590)
+    25228: 2239.5,  # H2, 2.24 GeV
+    25257: 2239.5,  # H2, 2.24 GeV
+    25260: 2239.5,  # H2, 2.24 GeV
+    25299: 2239.5,  # H2, 2.24 GeV
     25308: 2239.5,
     25320: 2239.5,
+    25800: 2239.5,  # X17 (Ta target), 2.24 GeV
     26138: 2239.5,
+    26230: 2239.5,  # X17 (Ta target), 2.24 GeV
 }
 _DEFAULT_TARGET_PEAK = 3488.5  # fallback for unknown runs
 
@@ -93,23 +126,59 @@ _RUN_COLORS: dict[int, str] = {
     24386: "blue",
     24503: "green",
     24512: "orange",
+    24578: "lightcoral",  # new 729 MeV run (distinct from 24590's "red")
     24590: "red",
+    25260: "cyan",      # new H2 run
+    24603: "darkred",   # 729 MeV H2
+    25228: "navy",      # 2.24 GeV H2
+    25257: "goldenrod", # 2.24 GeV H2
+    25299: "magenta",   # new H2 run
     25308: "purple",
     25320: "brown",
+    25800: "olive",     # new X17 run
     26138: "pink",
+    26230: "teal",      # new X17 run
 }
 _DEFAULT_COLOR = "gray"
+
+# Run type (beam energy + target) → marker shape for the σ_E/E trend plots.
+# Targets: H2 unless listed (25308 carbon; X17 runs Ta).
+_RUN_TARGET_LABEL: dict[int, str] = {
+    25308: "C", 25800: "Ta (X17)", 26138: "Ta (X17)", 26230: "Ta (X17)",
+}
+_RUN_TYPE_MARKERS: dict[str, str] = {
+    "0.73 GeV H2": "o",
+    "2.24 GeV H2": "s",
+    "2.24 GeV C": "D",
+    "2.24 GeV Ta (X17)": "^",
+    "3.49 GeV H2": "v",
+}
+_DEFAULT_MARKER = "X"
+
+
+def _run_type(run: int) -> str:
+    """Run-type label '<E> GeV <target>' from the beam energy and target."""
+    e_mev = _TARGET_PEAK_MAP.get(run)
+    if e_mev is None:
+        return "unknown run type"
+    e_gev = e_mev / 1000.0
+    return f"{e_gev:.2f} GeV {_RUN_TARGET_LABEL.get(run, 'H2')}"
 
 # ---------------------------------------------------------------------------
 # Summary column schema  (spec §5)
 # ---------------------------------------------------------------------------
 _SUMMARY_COLS = [
     "run_number", "split_number", "filename",
-    "n_events", "n_modules_used", "sigma_over_E_CB",
-    "primary_peak_mu_MeV", "primary_peak_sigma_MeV",
+    "n_events", "n_modules_used",
+    "sigma_over_E_pre_G", "sigma_over_E_post_G",
+    "sigma_over_E_cb_pre", "sigma_over_E_cb_post",   # renamed from sigma_over_E_CB; added _pre
+    "primary_peak_mu_pre_MeV", "primary_peak_sigma_pre_MeV",
+    "secondary_peak_pre_present", "secondary_peak_mu_pre_MeV", "secondary_peak_sigma_pre_MeV",
+    "primary_peak_mu_post_MeV", "primary_peak_sigma_post_MeV",
+    "secondary_peak_post_present", "secondary_peak_mu_post_MeV", "secondary_peak_sigma_post_MeV",
     "n_peaks_detected", "secondary_peak_present",
-    "secondary_peak_mu_MeV", "secondary_peak_sigma_MeV",
     "peak_prominence_values",
+    "sigma_over_E_CB",   # backward-compat alias for sigma_over_E_cb_post
 ]
 
 # Runinfo pre-window [lo, hi] ns used for each run family
@@ -117,28 +186,81 @@ _PRE_WINDOW_MAP: dict[int, tuple[float, float]] = {
     24386: (130.0, 200.0),
     24503: (130.0, 200.0),
     24512: (130.0, 200.0),
+    24578: (130.0, 200.0),  # same as 24590
     24590: (130.0, 200.0),
+    25260: (100.0, 200.0),  # same as other 25xxx runs
+    24603: (130.0, 200.0),  # same as 24590
+    25228: (100.0, 200.0),
+    25257: (100.0, 200.0),
+    25299: (100.0, 200.0),
     25308: (100.0, 200.0),
     25320: (100.0, 200.0),
+    25800: (100.0, 200.0),
     26138: (100.0, 200.0),
+    26230: (100.0, 200.0),
 }
 _DEFAULT_PRE_WINDOW = (100.0, 200.0)
 
-# signal-min cut — we use a broad cut so the headline captures secondary peaks
-# below the elastic line; 500 MeV is compatible with all runs
-_SIGNAL_MIN = 500.0
+# NOTE: _SIGNAL_MIN_MAP and _E_RANGE_MAP are no longer passed to the
+# benchmark; benchmark_hycal_timing_test_20261021.py derives --signal-min,
+# --e-range, --min-seed-energy, --bin-width and --target-peak from E_beam.
+# The tables are kept for reference.
+# signal-min cut (MeV) per run — the lowest single-cluster energy accepted
+# before histogramming. For low-beam-energy runs (e.g. 24590 at 729 MeV),
+# a 500 MeV cut would eat into the elastic peak, so a smaller value is used.
+_SIGNAL_MIN_MAP: dict[int, float] = {
+    24386: 500.0,
+    24503: 500.0,
+    24512: 500.0,
+    24578: 200.0,   # 729 MeV beam — need lower cut to keep elastic peak
+    24590: 200.0,   # 729 MeV beam — need lower cut to keep the elastic peak
+    24603: 200.0,   # same as 24590
+    25228: 500.0,   # same as 25260
+    25257: 500.0,   # same as 25260
+    25260: 500.0,
+    25299: 500.0,
+    25308: 500.0,
+    25320: 500.0,
+    25800: 500.0,
+    26138: 500.0,
+    26230: 500.0,
+}
+_DEFAULT_SIGNAL_MIN = 500.0
 
 # Energy histogram range for find_peaks input
 _E_RANGE_MAP: dict[int, tuple[float, float]] = {
     24386: (500.0, 4500.0),
     24503: (500.0, 4500.0),
     24512: (500.0, 4500.0),
+    24578: (500.0, 2000.0),  # same as 24590 (low-energy run)
     24590: (500.0, 2000.0),
+    24603: (500.0, 2000.0),  # same as 24590
     25308: (500.0, 3500.0),
     25320: (500.0, 3500.0),
     26138: (500.0, 3500.0),
 }
 _DEFAULT_E_RANGE = (500.0, 4500.0)
+
+# HyCal calibration file per run (FADC-integral calibrations), relative to
+# $PRAD2_DATABASE_DIR/calibration.  X17 runs use the _fadc variant of their
+# runinfo period file.  Runs not listed fall back to the runinfo default,
+# which the benchmark checks against E_beam (exit 2 on mismatch).
+_HC_CALIB_MAP: dict[int, str] = {
+    **{r: "calibration_factor_fadc_3p5.json" for r in (24386, 24503, 24512)},
+    **{r: "calibration_factor_fadc_0p7.json" for r in (24578, 24590, 24603)},
+    **{r: "calibration_factor_2p2_fadc.json"
+       for r in (25228, 25257, 25260, 25299, 25308, 25320)},
+    25800: "x17_25825_fadc.json",
+    26138: "x17_26094_fadc.json",
+    26230: "x17_26214_fadc.json",
+}
+
+
+def gain_corr_path(run: int) -> Path:
+    """LMS gain_corr file the benchmark's --lms-corr auto would use."""
+    return (_DATABASE_DIR / "gain_factor" / "gain_correction"
+            / f"prad_{run:06d}_gain_corr.root")
+
 
 # ---------------------------------------------------------------------------
 # Logging setup — module-level; callers add file handler after args are parsed
@@ -170,6 +292,18 @@ def discover_files(evio_dir: Path) -> dict[int, list[tuple[int, Path]]]:
     return runs
 
 
+def filter_excluded_runs(run_map: dict[int, list[tuple[int, Path]]]
+                         ) -> dict[int, list[tuple[int, Path]]]:
+    """Drop runs listed in _EXCLUDED_RUNS, printing one SKIP line per dropped run."""
+    kept: dict[int, list[tuple[int, Path]]] = {}
+    for run, splits in run_map.items():
+        if run in _EXCLUDED_RUNS:
+            print(f"SKIP run {run:06d}: {_EXCLUDED_RUNS[run]}", flush=True)
+            continue
+        kept[run] = splits
+    return kept
+
+
 # ===========================================================================
 # §2 — Per-file benchmark invocation
 # ===========================================================================
@@ -191,12 +325,16 @@ def run_benchmark(
     output_dir: Path,
     max_events: Optional[int],
     skip_benchmark: bool,
+    timeout_seconds: Optional[int] = None,
 ) -> Path:
-    """Invoke benchmark_hycal_timing.py; return path to the TSV.
+    """Invoke benchmark_hycal_timing_test_20261021.py; return path to the TSV.
 
     If skip_benchmark is True and the TSV already exists, skip the invocation.
     If max_events is None, --max-events is NOT passed to the subprocess so the
     full EVIO file is processed.
+    If timeout_seconds is a positive integer, the subprocess is killed after
+    that many wall-clock seconds; a RuntimeError is raised so the caller can
+    record the file as a timeout failure and continue.
     Raises RuntimeError on subprocess failure.
     """
     out_d   = benchmark_out_dir(output_dir, run, split)
@@ -210,9 +348,7 @@ def run_benchmark(
 
     out_d.mkdir(parents=True, exist_ok=True)
 
-    target_peak = _TARGET_PEAK_MAP.get(run, _DEFAULT_TARGET_PEAK)
     pre_lo, pre_hi = _PRE_WINDOW_MAP.get(run, _DEFAULT_PRE_WINDOW)
-    e_lo, e_hi = _E_RANGE_MAP.get(run, _DEFAULT_E_RANGE)
 
     cmd = [
         sys.executable,
@@ -220,17 +356,16 @@ def run_benchmark(
         str(evio_file),
         out_stem,
         "--calibrate",
-        "--target-peak", str(target_peak),
         "--exclude-rowcol", "15", "20", "15", "20",
-        "--signal-min", str(_SIGNAL_MIN),
         "--pre-window", str(pre_lo), str(pre_hi),
-        "--e-range", str(e_lo), str(e_hi),
-        "--bin-width", "20",
         "--inner-radius", "200",
-        "--min-seed-energy", "200",
         "--min-per-module", "30",
-        "--cal-method", "cb-peak",
+        # elastic-window (default); target from the benchmark's run map
+        "--lms-corr", "auto" if gain_corr_path(run).exists() else "off",
     ]
+    if run in _HC_CALIB_MAP:
+        cmd.extend(["--hc-calib-file",
+                    str(_DATABASE_DIR / "calibration" / _HC_CALIB_MAP[run])])
     # Only pass --max-events when an explicit limit is requested.
     # When max_events is None the subprocess processes the full EVIO file.
     if max_events is not None:
@@ -245,12 +380,27 @@ def run_benchmark(
     t0 = time.monotonic()
     try:
         with open(log_p, "w") as lf:
-            result = subprocess.run(
-                cmd,
-                stdout=lf,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
+            timeout_arg = timeout_seconds if (timeout_seconds and timeout_seconds > 0) else None
+            try:
+                result = subprocess.run(
+                    cmd,
+                    stdout=lf,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                    timeout=timeout_arg,
+                )
+            except subprocess.TimeoutExpired as te:
+                elapsed = time.monotonic() - t0
+                msg = (
+                    f"benchmark TIMEOUT after {elapsed:.1f}s "
+                    f"(limit: {timeout_arg}s) run={run} split={split}. "
+                    f"File likely triggers the known hang bug. Log: {log_p}"
+                )
+                log.error(msg)
+                # Also log to the per-file log so there's a record
+                with open(log_p, "a") as lf2:
+                    lf2.write(f"\n\n[ORCHESTRATOR] TIMEOUT after {elapsed:.1f}s (limit {timeout_arg}s)\n")
+                raise RuntimeError(msg)
         elapsed = time.monotonic() - t0
         if result.returncode != 0:
             msg = (
@@ -290,9 +440,18 @@ def parse_tsv(tsv_path: Path) -> dict:
     """Parse benchmark_hycal_timing TSV.
 
     Returns dict with keys:
-      'headline'     : {'legacy': {...}, 'new': {...}}  (bulk path metrics)
-      'calibration'  : {'legacy': {...}, 'new': {...}}  (inner-ring cal metrics)
-      'histogram'    : {'centres': [...], 'legacy': [...], 'new': [...]}
+      'headline'          : {'legacy': {...}, 'new': {...}}  (bulk path metrics)
+      'calibration'       : {'legacy': {...}, 'new': {...}}  (inner-ring cal metrics)
+      'histogram'         : {'centres': [...], 'legacy': [...], 'new': [...]}
+                            Bulk/headline histogram (all single-cluster events,
+                            full detector).  Kept for reference; NOT used for
+                            peak detection.
+      'postcal_histogram' : {'centres': [...], 'legacy_pre': [...],
+                             'legacy_post': [...], 'new_pre': [...],
+                             'new_post': [...]}
+                            Inner-ring post-calibration histogram (r < 200 mm,
+                            after per-module gain refinement).  Used for
+                            secondary peak detection.
 
     Raises RuntimeError loudly if headline block is missing (spec §10).
     calibration block absence only raises if --calibrate was expected.
@@ -303,6 +462,7 @@ def parse_tsv(tsv_path: Path) -> dict:
     headline_hdr_lineno    = None
     calibration_hdr_lineno = None
     hist_hdr_lineno        = None
+    postcal_hdr_lineno     = None
 
     for i, line in enumerate(lines):
         s = line.strip()
@@ -312,6 +472,8 @@ def parse_tsv(tsv_path: Path) -> dict:
             calibration_hdr_lineno = i
         if s.startswith("e_centre\tcount_legacy\t") and hist_hdr_lineno is None:
             hist_hdr_lineno = i
+        if s.startswith("e_centre\tlegacy_pre\t") and postcal_hdr_lineno is None:
+            postcal_hdr_lineno = i
 
     if headline_hdr_lineno is None:
         raise RuntimeError(
@@ -338,7 +500,7 @@ def parse_tsv(tsv_path: Path) -> dict:
             f"Headline block present in {tsv_path} but contained no data rows."
         )
 
-    # Parse histogram block
+    # Parse bulk histogram block (kept for reference; not used for peak detection)
     hist: dict = {}
     if hist_hdr_lineno is not None:
         centres_list, legacy_list, new_list = [], [], []
@@ -360,6 +522,44 @@ def parse_tsv(tsv_path: Path) -> dict:
             "legacy":  np.array(legacy_list,  dtype=int),
             "new":     np.array(new_list,      dtype=int),
         }
+
+    # Parse post-calibration inner-ring histogram block
+    # Header: e_centre  legacy_pre  legacy_post  new_pre  new_post
+    # Only present when --calibrate is active (which the scan always uses).
+    postcal: dict = {}
+    if postcal_hdr_lineno is not None:
+        pc_centres, pc_leg_pre, pc_leg_post, pc_new_pre, pc_new_post = (
+            [], [], [], [], []
+        )
+        for line in lines[postcal_hdr_lineno + 1:]:
+            s = line.strip()
+            if not s or s.startswith("#"):
+                break
+            parts = s.split("\t")
+            if len(parts) < 5:
+                continue
+            try:
+                pc_centres.append(float(parts[0]))
+                pc_leg_pre.append(int(parts[1]))
+                pc_leg_post.append(int(parts[2]))
+                pc_new_pre.append(int(parts[3]))
+                pc_new_post.append(int(parts[4]))
+            except ValueError:
+                continue
+        if pc_centres:
+            postcal = {
+                "centres":    np.array(pc_centres,  dtype=float),
+                "legacy_pre": np.array(pc_leg_pre,  dtype=int),
+                "legacy_post":np.array(pc_leg_post, dtype=int),
+                "new_pre":    np.array(pc_new_pre,  dtype=int),
+                "new_post":   np.array(pc_new_post, dtype=int),
+            }
+    if not postcal:
+        log.warning(
+            "WARNING: post-calibration histogram missing in %s; "
+            "peak detection skipped",
+            tsv_path,
+        )
 
     # Parse calibration block (optional — only if --calibrate was used)
     calibration: dict[str, dict] = {}
@@ -384,9 +584,10 @@ def parse_tsv(tsv_path: Path) -> dict:
                 calibration[name] = {k: _parse_float(v) for k, v in row.items()}
 
     return {
-        "headline":    headline,
-        "calibration": calibration,
-        "histogram":   hist,
+        "headline":          headline,
+        "calibration":       calibration,
+        "histogram":         hist,       # bulk, kept for reference
+        "postcal_histogram": postcal,    # inner-ring post-cal, used for peak detection
     }
 
 
@@ -427,16 +628,53 @@ def fit_gaussian_peak(centres: np.ndarray, counts: np.ndarray,
 
 
 def detect_peaks(
-    histogram: dict,
+    postcal_histogram: dict,
     target_peak: float,
     prominence_threshold: float,
     min_dist_mev: float,
+    min_prominence_ratio: float = 0.10,  # NEW: minimum secondary/primary prominence ratio
+    counts_key: str = "legacy_post",
+    label: str = "post-cal",
 ) -> dict:
-    """Detect primary and secondary peaks in the legacy energy spectrum.
+    """Detect primary and secondary peaks in a post-calibration inner-ring spectrum.
 
-    Secondary peaks are flagged for any peak distinct from the primary
-    (>min_dist_mev away), regardless of whether the peak appears above or
-    below the primary peak centre.
+    Uses the inner-ring post-calibration histogram (r < 200 mm, per-module
+    gain-refined legacy counts) rather than the bulk/headline spectrum.  This
+    view suppresses most inelastic contamination and sharpens the elastic peak,
+    making secondary peaks more interpretable:
+
+    - The inner-ring cut removes most edge/leakage events.
+    - Per-module gain refinement sharpens the elastic peak.
+    - Any secondary peak visible here (e.g. above-primary pile-up) is a
+      genuine contamination feature rather than an artefact of the bulk
+      detector acceptance.
+
+    A secondary peak is identified only when it is BOTH more than
+    min_dist_mev away from the primary peak AND located above the primary
+    peak centre (higher energy).  Below-primary bumps (inelastic tail) are
+    expected physics and are not flagged.
+
+    Parameters
+    ----------
+    postcal_histogram:
+        Dict with ``centres`` array and per-histogram count arrays (e.g.
+        ``legacy_pre``, ``legacy_post``).
+    target_peak:
+        Expected energy (MeV) of the primary (elastic) peak.
+    prominence_threshold:
+        scipy find_peaks prominence threshold.
+    min_dist_mev:
+        Minimum MeV separation between primary and any secondary peak.
+    min_prominence_ratio:
+        Minimum ratio (secondary_prominence / primary_prominence) for a
+        detected peak to qualify as a real secondary. Default 0.10 (secondary
+        must be at least 10% as prominent as the primary). Rejects false
+        positives from noise where scipy finds a weak bump that satisfies the
+        absolute prominence threshold but is tiny relative to the elastic peak.
+    counts_key:
+        Key in ``postcal_histogram`` to use for counts (default: ``legacy_post``).
+    label:
+        Short label included in log/print messages (default: ``post-cal``).
 
     Returns dict with keys:
       n_peaks            : int
@@ -458,13 +696,16 @@ def detect_peaks(
         "prominences":       [],
     }
 
-    if not HAVE_SCIPY or not histogram or "centres" not in histogram:
+    if not HAVE_SCIPY or not postcal_histogram or "centres" not in postcal_histogram:
         return result
-    if histogram["centres"].size == 0:
+    if postcal_histogram["centres"].size == 0:
+        return result
+    if counts_key not in postcal_histogram:
+        log.warning("  [%s] counts_key '%s' not found in postcal_histogram", label, counts_key)
         return result
 
-    centres = histogram["centres"]
-    counts  = histogram["legacy"].astype(float)
+    centres = postcal_histogram["centres"]
+    counts  = postcal_histogram[counts_key].astype(float)
 
     # Bin width (MeV) → convert distance threshold to bins
     if len(centres) < 2:
@@ -492,15 +733,39 @@ def detect_peaks(
     result["primary_mu"]    = primary_mu
     result["primary_sigma"] = primary_sigma
 
-    # Secondary peak: any peak that is > min_dist_mev away from the primary peak
-    # centre. Position relative to the primary is not considered.
+    # Always report the primary peak position.
     primary_e = centres[primary_bin]
     # Use the Gaussian-fitted centre when available; fall back to histogram bin centre.
     primary_peak_center = primary_mu if not math.isnan(primary_mu) else primary_e
-    secondary_bins = [
-        pk for pk in peaks
-        if abs(centres[pk] - primary_e) > min_dist_mev
-    ]
+    log.info("  [%s] Primary peak at %.0f MeV", label, primary_peak_center)
+    print(f"  [{label}] Primary peak at {primary_peak_center:.0f} MeV", flush=True)
+
+    # Secondary peak: a peak that is BOTH:
+    #   (a) more than min_dist_mev away from the primary peak centre, AND
+    #   (b) located ABOVE the primary peak centre (i.e. higher energy), AND
+    #   (c) at least min_prominence_ratio × primary prominence (ratio check).
+    # Peaks below the primary are expected physics (inelastic / Δ-excitation /
+    # Møller) in the post-cal inner-ring histogram's low-energy tail and are
+    # NOT flagged. Only above-primary peaks (pile-up signatures) are flagged.
+
+    # Primary peak prominence (for ratio check)
+    primary_prominence = float(props["prominences"][primary_idx_in_peaks])
+
+    secondary_bins = []
+    for pk in peaks:
+        if pk == primary_bin:
+            continue  # skip the primary itself
+        # Spatial criteria
+        if abs(centres[pk] - primary_e) <= min_dist_mev:
+            continue
+        if centres[pk] <= primary_peak_center:
+            continue  # must be above the primary
+        # Prominence ratio criterion (NEW)
+        pk_idx_in_peaks = int(np.where(peaks == pk)[0][0])
+        pk_prominence = float(props["prominences"][pk_idx_in_peaks])
+        if primary_prominence > 0 and pk_prominence / primary_prominence < min_prominence_ratio:
+            continue  # too small relative to primary
+        secondary_bins.append(pk)
 
     if secondary_bins:
         result["secondary_present"] = True
@@ -516,15 +781,16 @@ def detect_peaks(
         result["secondary_sigma"] = sec_sigma
 
         log.info(
-            "  Found secondary peak at %.0f MeV "
+            "  [%s] Found above-primary secondary peak at %.0f MeV "
             "(σ=%.0f MeV, prominence=%.1f, primary=%.0f MeV)",
+            label,
             sec_mu if not math.isnan(sec_mu) else centres[sec_bin],
             sec_sigma if not math.isnan(sec_sigma) else float("nan"),
             secondary_proms[best_sec_idx],
             primary_peak_center,
         )
         print(
-            f"  Found secondary peak at "
+            f"  [{label}] Found above-primary secondary peak at "
             f"{sec_mu if not math.isnan(sec_mu) else centres[sec_bin]:.0f} MeV"
             f" (primary at {primary_peak_center:.0f} MeV)",
             flush=True,
@@ -545,46 +811,116 @@ def extract_row(
     tsv_path: Path,
     prominence_threshold: float,
     min_dist_mev: float,
+    min_prominence_ratio: float = 0.10,  # NEW
 ) -> dict:
     """Parse TSV and peak-detect; return one aggregate row dict."""
     nan = float("nan")
     row: dict = {
-        "run_number":                  run,
-        "split_number":                split,
-        "filename":                    evio_file.name,
-        "n_events":                    nan,
-        "n_modules_used":              nan,
-        "sigma_over_E_CB":             nan,
-        "primary_peak_mu_MeV":         nan,
-        "primary_peak_sigma_MeV":      nan,
-        "n_peaks_detected":        0,
-        "secondary_peak_present":  "N",
-        "secondary_peak_mu_MeV":   nan,
-        "secondary_peak_sigma_MeV":    nan,
-        "peak_prominence_values":      "[]",
+        "run_number":                    run,
+        "split_number":                  split,
+        "filename":                      evio_file.name,
+        "n_events":                      nan,
+        "n_modules_used":                nan,
+        "sigma_over_E_pre_G":            nan,
+        "sigma_over_E_post_G":           nan,
+        "sigma_over_E_cb_pre":           nan,
+        "sigma_over_E_cb_post":          nan,
+        "sigma_over_E_CB":               nan,   # backward-compat alias
+        # Pre-calibration peak columns
+        "primary_peak_mu_pre_MeV":       nan,
+        "primary_peak_sigma_pre_MeV":    nan,
+        "secondary_peak_pre_present":    "N",
+        "secondary_peak_mu_pre_MeV":     nan,
+        "secondary_peak_sigma_pre_MeV":  nan,
+        # Post-calibration peak columns
+        "primary_peak_mu_post_MeV":      nan,
+        "primary_peak_sigma_post_MeV":   nan,
+        "secondary_peak_post_present":   "N",
+        "secondary_peak_mu_post_MeV":    nan,
+        "secondary_peak_sigma_post_MeV": nan,
+        # Aggregate peak info (post-cal aliased for backward compatibility)
+        "n_peaks_detected":              0,
+        "secondary_peak_present":        "N",
+        "peak_prominence_values":        "[]",
     }
 
     parsed = parse_tsv(tsv_path)
     hl  = parsed["headline"].get("legacy", {})
     cal = parsed["calibration"].get("legacy", {})
-    hist = parsed["histogram"]
 
-    row["n_events"]       = hl.get("n_events", nan)
-    row["n_modules_used"] = cal.get("n_modules", nan)
-    row["sigma_over_E_CB"] = cal.get("sigma_over_E_cb", nan)
+    row["n_events"]             = hl.get("n_events", nan)
+    row["n_modules_used"]       = cal.get("n_modules", nan)
+    row["sigma_over_E_cb_post"] = cal.get("sigma_over_E_cb", nan)
+    row["sigma_over_E_cb_pre"]  = cal.get("sigma_over_E_cb_pre", nan)
+    row["sigma_over_E_CB"]      = row["sigma_over_E_cb_post"]   # backward-compat alias
 
-    # Peak detection on full headline spectrum
+    # Pre-calibration Gaussian σ_E/E = sigma_pre_MeV / mu_pre_MeV
+    mu_pre    = cal.get("mu_pre_MeV",    nan)
+    sigma_pre = cal.get("sigma_pre_MeV", nan)
+    if (not math.isnan(mu_pre) and not math.isnan(sigma_pre)
+            and mu_pre != 0.0):
+        row["sigma_over_E_pre_G"] = sigma_pre / mu_pre
+    else:
+        row["sigma_over_E_pre_G"] = nan
+
+    # Post-calibration Gaussian σ_E/E — use sigma_over_E_post from TSV directly;
+    # fall back to sigma_post_MeV / mu_post_MeV if the direct field is absent.
+    sigma_over_E_post = cal.get("sigma_over_E_post", nan)
+    if not math.isnan(sigma_over_E_post):
+        row["sigma_over_E_post_G"] = sigma_over_E_post
+    else:
+        mu_post    = cal.get("mu_post_MeV",    nan)
+        sigma_post = cal.get("sigma_post_MeV", nan)
+        if (not math.isnan(mu_post) and not math.isnan(sigma_post)
+                and mu_post != 0.0):
+            row["sigma_over_E_post_G"] = sigma_post / mu_post
+        else:
+            row["sigma_over_E_post_G"] = nan
+
+    # Peak detection on the inner-ring histogram — run on BOTH pre and post columns.
     target_peak = _TARGET_PEAK_MAP.get(run, _DEFAULT_TARGET_PEAK)
-    peaks_info  = detect_peaks(hist, target_peak, prominence_threshold, min_dist_mev)
 
-    row["n_peaks_detected"]       = peaks_info["n_peaks"]
-    row["primary_peak_mu_MeV"]    = peaks_info["primary_mu"]
-    row["primary_peak_sigma_MeV"] = peaks_info["primary_sigma"]
-    row["secondary_peak_present"] = "Y" if peaks_info["secondary_present"] else "N"
-    row["secondary_peak_mu_MeV"]  = peaks_info["secondary_mu"]
-    row["secondary_peak_sigma_MeV"] = peaks_info["secondary_sigma"]
-    row["peak_prominence_values"]    = json.dumps(
-        [round(p, 2) for p in peaks_info["prominences"]]
+    # Pre-calibration inner-ring histogram
+    pre_peaks = detect_peaks(
+        postcal_histogram=parsed["postcal_histogram"],
+        target_peak=target_peak,
+        prominence_threshold=prominence_threshold,
+        min_dist_mev=min_dist_mev,
+        min_prominence_ratio=min_prominence_ratio,
+        counts_key="legacy_pre",
+        label="pre-cal",
+    )
+
+    # Post-calibration inner-ring histogram
+    post_peaks = detect_peaks(
+        postcal_histogram=parsed["postcal_histogram"],
+        target_peak=target_peak,
+        prominence_threshold=prominence_threshold,
+        min_dist_mev=min_dist_mev,
+        min_prominence_ratio=min_prominence_ratio,
+        counts_key="legacy_post",
+        label="post-cal",
+    )
+
+    # Populate pre-calibration peak columns
+    row["primary_peak_mu_pre_MeV"]       = pre_peaks["primary_mu"]
+    row["primary_peak_sigma_pre_MeV"]    = pre_peaks["primary_sigma"]
+    row["secondary_peak_pre_present"]    = "Y" if pre_peaks["secondary_present"] else "N"
+    row["secondary_peak_mu_pre_MeV"]     = pre_peaks["secondary_mu"]
+    row["secondary_peak_sigma_pre_MeV"]  = pre_peaks["secondary_sigma"]
+
+    # Populate post-calibration peak columns
+    row["primary_peak_mu_post_MeV"]      = post_peaks["primary_mu"]
+    row["primary_peak_sigma_post_MeV"]   = post_peaks["primary_sigma"]
+    row["secondary_peak_post_present"]   = "Y" if post_peaks["secondary_present"] else "N"
+    row["secondary_peak_mu_post_MeV"]    = post_peaks["secondary_mu"]
+    row["secondary_peak_sigma_post_MeV"] = post_peaks["secondary_sigma"]
+
+    # Aggregate / backward-compat columns (keyed off post-cal)
+    row["n_peaks_detected"]    = post_peaks["n_peaks"]
+    row["secondary_peak_present"] = "Y" if post_peaks["secondary_present"] else "N"
+    row["peak_prominence_values"] = json.dumps(
+        [round(p, 2) for p in post_peaks["prominences"]]
     )
 
     return row
@@ -601,7 +937,8 @@ def _fmt(val, col: str) -> str:
         if col in ("run_number", "split_number", "n_events",
                    "n_modules_used", "n_peaks_detected"):
             return f"{val:.0f}"
-        if col in ("sigma_over_E_CB",):
+        if col in ("sigma_over_E_pre_G", "sigma_over_E_post_G",
+                   "sigma_over_E_cb_pre", "sigma_over_E_cb_post", "sigma_over_E_CB"):
             return f"{val:.4f}"
         return f"{val:.2f}"
     return str(val)
@@ -638,9 +975,50 @@ def _label(run: int, split: int) -> str:
     return f"run_{run}.split_{split:05d}"
 
 
-def make_trend_plot(rows: list[dict], out_png: Path) -> None:
-    """σ_E/E (CB) vs. EVIO file, colour by run, star for secondary peaks."""
-    out_png.parent.mkdir(parents=True, exist_ok=True)
+def make_trend_plot(
+    rows: list[dict],
+    output_path: Path,
+    value_col_g: str = "sigma_over_E_post_G",
+    value_col_cb: str = "sigma_over_E_cb_post",
+    title_suffix: str = "POST-calibration",
+    secondary_flag_col: str = "secondary_peak_post_present",
+    # Legacy positional-keyword compat shim: ignored if callers pass value_col_g.
+) -> None:
+    """σ_E/E vs. EVIO file, overlaying Gaussian and Crystal Ball fits.
+
+    Plots TWO lines per run on the same axes:
+    - Solid line + open markers: Gaussian σ_E/E (``value_col_g``)
+    - Dashed line + filled markers: Crystal Ball σ_E/E (``value_col_cb``)
+    Marker shape encodes the run type (beam energy + target).
+
+    Both lines for a given run share the same colour.  Star markers (crimson)
+    indicate files where a secondary peak was detected; they are placed on the
+    CB values to reduce clutter.  NaN values are skipped naturally by
+    matplotlib (line gaps).
+
+    Parameters
+    ----------
+    rows:
+        Aggregate row dicts (one per EVIO file), already sorted by
+        (run_number, split_number).
+    output_path:
+        Destination PNG file path.
+    value_col_g:
+        Column name for the Gaussian σ_E/E (a raw ratio).  Multiplied by 100
+        for display.
+    value_col_cb:
+        Column name for the Crystal Ball σ_E/E (a raw ratio).  Multiplied by
+        100 for display.  Will be NaN for TSVs produced before the CB-pre fit
+        was added — those files simply show a gap in the CB line.
+    title_suffix:
+        String appended to the plot title, e.g. ``"PRE-calibration"`` or
+        ``"POST-calibration"``.
+    secondary_flag_col:
+        Column used to decide where to draw star markers.
+        Pre-cal: ``"secondary_peak_pre_present"``; post-cal (default):
+        ``"secondary_peak_post_present"``.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     fig, ax = plt.subplots(figsize=(max(12, len(rows) * 0.18 + 4), 6))
 
@@ -649,64 +1027,116 @@ def make_trend_plot(rows: list[dict], out_png: Path) -> None:
     for row in rows:
         run_groups.setdefault(int(row["run_number"]), []).append(row)
 
-    # Draw per-run lines + per-point markers
+    # Draw per-run lines + per-point markers (two series per run)
     all_x_labels: list[str] = []
     all_x_positions: list[int] = []
     x_pos = 0
 
-    x_by_run: dict[int, list[int]]   = {}
-    y_by_run: dict[int, list[float]] = {}
-    sec_x:    list[int]   = []
-    sec_y:    list[float] = []
+    # Stars placed on CB values (only one star per file to reduce clutter)
+    sec_x: list[int]   = []
+    sec_y: list[float] = []
 
+    # Collect all valid y-values to determine y-axis range
+    all_y_values: list[float] = []
+
+    types_seen: list[str] = []
     for run in sorted(run_groups.keys()):
-        color = _RUN_COLORS.get(run, _DEFAULT_COLOR)
+        color    = _RUN_COLORS.get(run, _DEFAULT_COLOR)
+        rtype    = _run_type(run)
+        marker   = _RUN_TYPE_MARKERS.get(rtype, _DEFAULT_MARKER)
+        if rtype not in types_seen:
+            types_seen.append(rtype)
         run_rows = run_groups[run]
-        run_x: list[int]   = []
-        run_y: list[float] = []
+
+        run_x_g:  list[int]   = []
+        run_y_g:  list[float] = []
+        run_x_cb: list[int]   = []
+        run_y_cb: list[float] = []
 
         for row in run_rows:
             lbl = _label(int(row["run_number"]), int(row["split_number"]))
             all_x_labels.append(lbl)
             all_x_positions.append(x_pos)
 
-            sigma_e = row.get("sigma_over_E_CB", float("nan"))
-            if isinstance(sigma_e, float) and not math.isnan(sigma_e):
-                sigma_e_pct = sigma_e * 100.0
-                run_x.append(x_pos)
-                run_y.append(sigma_e_pct)
-                if row.get("secondary_peak_present") == "Y":
+            # Gaussian value
+            sigma_g = row.get(value_col_g, float("nan"))
+            if isinstance(sigma_g, float) and not math.isnan(sigma_g):
+                sigma_g_pct = sigma_g * 100.0
+                run_x_g.append(x_pos)
+                run_y_g.append(sigma_g_pct)
+                all_y_values.append(sigma_g_pct)
+
+            # Crystal Ball value
+            sigma_cb = row.get(value_col_cb, float("nan"))
+            if isinstance(sigma_cb, float) and not math.isnan(sigma_cb):
+                sigma_cb_pct = sigma_cb * 100.0
+                run_x_cb.append(x_pos)
+                run_y_cb.append(sigma_cb_pct)
+                all_y_values.append(sigma_cb_pct)
+                # Star on CB line when secondary peak present
+                if row.get(secondary_flag_col) == "Y":
                     sec_x.append(x_pos)
-                    sec_y.append(sigma_e_pct)
+                    sec_y.append(sigma_cb_pct)
+            elif row.get(secondary_flag_col) == "Y" and run_x_g:
+                # CB value absent — fall back to placing star on the G value
+                last_g_idx = run_x_g.index(x_pos) if x_pos in run_x_g else -1
+                if last_g_idx >= 0:
+                    sec_x.append(x_pos)
+                    sec_y.append(run_y_g[last_g_idx])
 
             x_pos += 1
 
-        x_by_run[run] = run_x
-        y_by_run[run] = run_y
+        # Solid line + open markers: Gaussian
+        if run_x_g:
+            ax.plot(run_x_g, run_y_g, "-", marker=marker, color=color, lw=1.4,
+                    ms=6, mfc="none", mec=color, zorder=3)
 
-        if run_x:
-            ax.plot(run_x, run_y, "-o", color=color, lw=1.4, ms=5,
-                    label=f"run {run}", zorder=3)
+        # Dashed line + filled markers: Crystal Ball
+        if run_x_cb:
+            ax.plot(run_x_cb, run_y_cb, "--", marker=marker, color=color,
+                    lw=1.2, ms=5, zorder=3)
 
-    # Overlay star markers for files with secondary peaks
+        # One colour entry per run (shape/fill explained separately below)
+        ax.plot([], [], "-", color=color, lw=2, label=f"run {run}")
+
+    # Overlay star markers for files with secondary peaks (on CB when available)
     if sec_x:
         ax.scatter(sec_x, sec_y, marker="*", s=180, color="crimson",
                    zorder=5, label="secondary peak detected")
 
+    # Y-axis range: accommodate both G and CB values
+    if all_y_values:
+        max_y = max(all_y_values)
+        ax.set_ylim(0, max_y * 1.1)
+
     ax.set_xticks(all_x_positions)
     ax.set_xticklabels(all_x_labels, rotation=45, ha="right", fontsize=7)
     ax.set_xlabel("EVIO file")
-    ax.set_ylabel("σ_E/E CB (%)")
+    ax.set_ylabel("σ_E/E (%)")
     ax.set_title(
-        "σ_E/E (Crystal Ball) across EVIO files — all runs\n"
-        "(stars = secondary peak detected)"
+        f"σ_E/E ({title_suffix}) across EVIO files — all runs\n"
+        "(open marker + solid = Gaussian, filled marker + dashed = CB, "
+        "marker shape = run type, stars = secondary peak detected)"
     )
-    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    # Proxy handles: run-type shapes, then the fill convention
+    from matplotlib.lines import Line2D
+    run_handles, run_labels = ax.get_legend_handles_labels()
+    types_seen = ([t for t in _RUN_TYPE_MARKERS if t in types_seen]
+                  + [t for t in types_seen if t not in _RUN_TYPE_MARKERS])
+    type_handles = [Line2D([], [], ls="none", marker=_RUN_TYPE_MARKERS.get(t, _DEFAULT_MARKER),
+                           color="k", mfc="k", ms=6, label=t) for t in types_seen]
+    fill_handles = [
+        Line2D([], [], ls="--", marker="o", color="k", mfc="k", ms=6,
+               label="filled + dashed: CB"),
+        Line2D([], [], ls="-", marker="o", color="k", mfc="none", ms=6,
+               label="open + solid: Gaussian"),
+    ]
+    ax.legend(handles=run_handles + type_handles + fill_handles,
+              loc="upper right", fontsize=7, ncol=3)
     ax.grid(alpha=0.3, axis="y")
     fig.tight_layout()
-    fig.savefig(out_png, dpi=150)
+    fig.savefig(output_path, dpi=150)
     plt.close(fig)
-    print(f"\nWrote trend plot: {out_png}", flush=True)
 
 
 # ===========================================================================
@@ -727,10 +1157,40 @@ def write_findings_md(rows: list[dict], out_path: Path) -> None:
         f"_Generated {datetime.datetime.now().isoformat(timespec='seconds')}_\n"
     )
     lines.append("")
+    lines.append("## Trend Plots\n")
     lines.append(
-        "> **Note**: secondary peaks are flagged when a distinct peak is detected "
-        "(prominence > threshold) at least `min_dist_mev` away from the primary "
-        "(elastic) peak, regardless of position.\n"
+        "Two σ_E/E trend plots are generated (one row per EVIO split file,\n"
+        "colour by run, star markers for files with secondary peaks detected).\n"
+        "Each plot overlays **both** the Gaussian fit (solid line, open markers)\n"
+        "and the Crystal Ball fit (dashed line, filled markers) on the same axes;\n"
+        "marker shape = run type (beam energy + target).\n"
+        "CB values will be absent (line gap) for TSVs produced before the CB-pre\n"
+        "fit was added; they will populate once the benchmark is re-run.\n"
+    )
+    lines.append(
+        "- **Pre-calibration (Gaussian + CB)**: "
+        "`benchmark_hycal_timing_scan_sigma_E_vs_file_pre.png`  \n"
+        "  Gaussian: σ_E/E = σ_pre / μ_pre from the raw inner-ring Gaussian fit.  \n"
+        "  Crystal Ball: σ_E/E = σ_cb_pre from the CB fit to the pre-calibration spectrum."
+    )
+    lines.append(
+        "- **Post-calibration (Gaussian + CB)**: "
+        "`benchmark_hycal_timing_scan_sigma_E_vs_file_post.png`  \n"
+        "  Gaussian: σ_E/E = σ_over_E_post from the inner-ring Gaussian fit after "
+        "per-module gain refinement.  \n"
+        "  Crystal Ball: σ_E/E = σ_cb_post from the CB fit to the post-calibration spectrum."
+    )
+    lines.append("")
+    lines.append(
+        "> **Note**: Secondary peaks are flagged only when a distinct peak is "
+        "detected ABOVE the primary (elastic) peak centre in the post-calibration "
+        "inner-ring histogram, with prominence > threshold and at least "
+        "`min_dist_mev` away from the primary.  Peaks below the primary "
+        "(inelastic tail, Δ-excitation, Møller) are expected physics and are "
+        "not flagged.  Peak detection is run on **both** the pre-calibration "
+        "(`legacy_pre`) and post-calibration (`legacy_post`) inner-ring "
+        "histograms; both primary and secondary peak energies are recorded in "
+        "the summary TSV for comparison.\n"
     )
     lines.append("")
     lines.append("## Per-Run Summary\n")
@@ -907,7 +1367,7 @@ def generate_combined_pdf(
             )
 
             sec_present = row.get("secondary_peak_present", "N")
-            sec_mu = row.get("secondary_peak_mu_MeV", float("nan"))
+            sec_mu = row.get("secondary_peak_mu_post_MeV", float("nan"))
             try:
                 sec_mu_f = float(sec_mu)
             except (TypeError, ValueError):
@@ -990,6 +1450,15 @@ def build_parser() -> argparse.ArgumentParser:
              f"(default: {_DEFAULT_PEAK_DIST_MEV})",
     )
     ap.add_argument(
+        "--min-prominence-ratio",
+        type=float,
+        default=0.10,
+        help=f"Minimum ratio (secondary_prominence / primary_prominence) for a "
+             f"secondary peak to be flagged. Default: 0.10 (secondary must be "
+             f"at least 10%% as prominent as the primary). Rejects weak noise "
+             f"bumps that pass the absolute prominence threshold.",
+    )
+    ap.add_argument(
         "--parallel", type=int, default=_DEFAULT_PARALLEL,
         help=f"Number of parallel benchmark invocations "
              f"(default: {_DEFAULT_PARALLEL}; recommend ≤4)",
@@ -997,6 +1466,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--skip-benchmark", action="store_true",
         help="Reuse existing TSV files from a previous run (re-plot / re-analyse only).",
+    )
+    ap.add_argument(
+        "--timeout-seconds",
+        type=int,
+        default=1200,  # 20 minutes
+        help="Maximum wall-clock seconds for each benchmark subprocess. "
+             "Workers that exceed this are killed, their EVIO file is logged "
+             "as a timeout, and the scan continues. Set to 0 to disable timeout. "
+             "Default: 1200 (20 minutes).",
     )
     return ap
 
@@ -1029,8 +1507,11 @@ def main(argv=None) -> int:
              str(args.max_events) if args.max_events is not None else "full file")
     log.info("  prominence  : %.1f", args.prominence_threshold)
     log.info("  peak_dist   : %.1f MeV", args.peak_distance)
+    log.info("  min_prom_ratio: %.2f", args.min_prominence_ratio)
     log.info("  parallel    : %d", args.parallel)
     log.info("  skip_bench  : %s", args.skip_benchmark)
+    log.info("  timeout     : %s",
+             f"{args.timeout_seconds}s" if args.timeout_seconds > 0 else "disabled")
     log.info("=" * 70)
 
     if not HAVE_SCIPY:
@@ -1048,6 +1529,7 @@ def main(argv=None) -> int:
     if not run_map:
         log.error("No prad_*.evio.* files found in %s", evio_dir)
         return 1
+    run_map = filter_excluded_runs(run_map)   # drop excluded runs before scheduling
 
     total_files = sum(len(splits) for splits in run_map.values())
     log.info(
@@ -1055,6 +1537,10 @@ def main(argv=None) -> int:
         len(run_map), total_files,
         {r: len(s) for r, s in sorted(run_map.items())},
     )
+
+    no_lms = sorted(r for r in run_map if not gain_corr_path(r).exists())
+    if no_lms:
+        log.warning("No gain_corr file, running with --lms-corr off: %s", no_lms)
 
     # ---- Build work list (run, split, path) ---------------------------------
     work_items: list[tuple[int, int, Path]] = []
@@ -1073,6 +1559,7 @@ def main(argv=None) -> int:
                 output_dir=output_dir,
                 max_events=args.max_events,
                 skip_benchmark=args.skip_benchmark,
+                timeout_seconds=args.timeout_seconds,   # NEW
             )
             return run, split, fpath, tsv, None
         except Exception as exc:
@@ -1114,24 +1601,37 @@ def main(argv=None) -> int:
                 tsv_path=tsv_path,
                 prominence_threshold=args.prominence_threshold,
                 min_dist_mev=args.peak_distance,
+                min_prominence_ratio=args.min_prominence_ratio,  # NEW
             )
             all_rows.append(row)
             n_ev = row.get("n_events", float("nan"))
             n_ev_str = (
                 f"{int(n_ev):,}" if not math.isnan(float(n_ev)) else "unknown"
             )
+            # Format primary peak energies for both pre and post
+            mu_pre_f  = float(row.get("primary_peak_mu_pre_MeV",  float("nan")))
+            mu_post_f = float(row.get("primary_peak_mu_post_MeV", float("nan")))
+            mu_pre_str  = f"{mu_pre_f:.0f} MeV"  if not math.isnan(mu_pre_f)  else "N/A"
+            mu_post_str = f"{mu_post_f:.0f} MeV" if not math.isnan(mu_post_f) else "N/A"
+            sec_pre  = row.get("secondary_peak_pre_present",  "N")
+            sec_post = row.get("secondary_peak_post_present", "N")
+            sigma_cb = float(row["sigma_over_E_CB"])
+            sigma_str = f"{sigma_cb * 100.0:.3f}%" if not math.isnan(sigma_cb) else "N/A"
             log.info(
-                "  run=%d split=%05d  events=%s  σ_E/E=%.3f%%  secondary-peak=%s",
-                run, split,
-                n_ev_str,
-                row["sigma_over_E_CB"] * 100.0
-                if not math.isnan(float(row["sigma_over_E_CB"])) else float("nan"),
-                row["secondary_peak_present"],
+                "  run=%d split=%05d  events=%s"
+                "  pre: μ=%s sec=%s  post: μ=%s sec=%s  σ_E/E=%s",
+                run, split, n_ev_str,
+                mu_pre_str, sec_pre,
+                mu_post_str, sec_post,
+                sigma_str,
             )
         except Exception as exc:
             msg = f"run={run} split={split} TSV parse failed: {exc}"
             log.error(msg)
             errors.append(msg)
+
+    # Excluded runs stay out of summary, plots and PDF even if stale scan_* folders exist.
+    all_rows = [r for r in all_rows if int(r["run_number"]) not in _EXCLUDED_RUNS]
 
     if not all_rows:
         log.error("No rows collected — all benchmark runs failed or TSVs missing.")
@@ -1146,14 +1646,44 @@ def main(argv=None) -> int:
     print(f"\nWrote summary TSV: {summary_tsv}", flush=True)
     log.info("Wrote summary TSV: %s", summary_tsv)
 
-    # ---- Trend plot ---------------------------------------------------------
-    trend_png = output_dir / "benchmark_hycal_timing_scan_sigma_E_vs_file.png"
+    # ---- Trend plots (pre-calibration and post-calibration) -----------------
+    trend_pre_png  = (
+        output_dir / "benchmark_hycal_timing_scan_sigma_E_vs_file_pre.png"
+    )
+    trend_post_png = (
+        output_dir / "benchmark_hycal_timing_scan_sigma_E_vs_file_post.png"
+    )
     try:
-        make_trend_plot(all_rows, trend_png)
-        if not trend_png.exists():
-            log.error("Trend plot not generated: %s", trend_png)
+        # Pre-calibration plot (Gaussian + Crystal Ball overlaid)
+        make_trend_plot(
+            rows=all_rows,
+            output_path=trend_pre_png,
+            value_col_g="sigma_over_E_pre_G",
+            value_col_cb="sigma_over_E_cb_pre",
+            title_suffix="PRE-calibration",
+            secondary_flag_col="secondary_peak_pre_present",
+        )
+        print(f"\nWrote pre-calibration trend plot: {trend_pre_png}", flush=True)
+        log.info("Wrote pre-calibration trend plot: %s", trend_pre_png)
+
+        # Post-calibration plot (Gaussian + Crystal Ball overlaid)
+        make_trend_plot(
+            rows=all_rows,
+            output_path=trend_post_png,
+            value_col_g="sigma_over_E_post_G",
+            value_col_cb="sigma_over_E_cb_post",
+            title_suffix="POST-calibration",
+            secondary_flag_col="secondary_peak_post_present",
+        )
+        print(f"\nWrote post-calibration trend plot: {trend_post_png}", flush=True)
+        log.info("Wrote post-calibration trend plot: %s", trend_post_png)
+
+        if not trend_pre_png.exists() or not trend_post_png.exists():
+            log.error(
+                "One or both trend plots not generated: %s, %s",
+                trend_pre_png, trend_post_png,
+            )
             return 1
-        log.info("Wrote trend plot: %s", trend_png)
     except Exception as exc:
         log.error("Trend plot generation failed: %s", exc)
         return 1
@@ -1174,6 +1704,20 @@ def main(argv=None) -> int:
     write_findings_md(all_rows, findings_md)
     log.info("Wrote findings: %s", findings_md)
 
+    # Separate counting for timeouts vs. other errors
+    timeout_errors = [e for e in errors if "TIMEOUT" in e]
+    other_errors   = [e for e in errors if "TIMEOUT" not in e]
+
+    if timeout_errors:
+        log.warning("%d file(s) timed out (hang bug — moved to error list):",
+                    len(timeout_errors))
+        for e in timeout_errors:
+            log.warning("  %s", e)
+        log.warning(
+            "Consider moving these files to a quarantine directory to avoid "
+            "re-processing them in future scans."
+        )
+
     # ---- Final summary ------------------------------------------------------
     n_secondary = sum(
         1 for r in all_rows if r.get("secondary_peak_present") == "Y"
@@ -1187,7 +1731,10 @@ def main(argv=None) -> int:
         f"{n_secondary} files with secondary peaks.\n"
     )
     if errors:
-        summary_msg += f"  {len(errors)} error(s) (see log for details).\n"
+        summary_msg += (
+            f"  {len(errors)} error(s) total: "
+            f"{len(timeout_errors)} timeout(s), {len(other_errors)} other.\n"
+        )
     print(summary_msg, flush=True)
     log.info(summary_msg.strip())
 
