@@ -683,10 +683,18 @@ class RefRatioChart(QWidget):
                  centers: Optional[List[float]] = None, x_mode: str = "batch"):
         self._x = x
         self._x_mode = x_mode
-        self._ratios = ratios
         self._ok = ok
         self._run_spans = run_spans
         self._centers = centers or [math.nan, math.nan, math.nan]
+        self._ratios = []
+        for panel, values in enumerate(ratios):
+            center = self._centers[panel] if panel < len(self._centers) else math.nan
+            self._ratios.append([
+                v / center
+                if math.isfinite(center) and center > 0.0 and math.isfinite(v) and v > 0.0
+                else math.nan
+                for v in values
+            ])
         self.update()
 
     def paintEvent(self, event):
@@ -697,7 +705,7 @@ class RefRatioChart(QWidget):
 
         p.setPen(CHART_TEXT)
         p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        p.drawText(8, 18, "Ref PMT LMS/Alpha ratio")
+        p.drawText(8, 18, "Ref PMT (LMS/Alpha) / mean")
 
         finite = [
             v for series in self._ratios for x, v in zip(self._x, series)
@@ -716,33 +724,14 @@ class RefRatioChart(QWidget):
         plot_w = max(1, w - pad_l - pad_r)
         panel_w = max(1, (plot_w - 2 * gap) / 3)
         plot_h = max(1, h - pad_t - pad_b)
-        y_ranges: List[Tuple[float, float]] = []
-        y_ticks_by_panel: List[List[float]] = []
-        y_decimals: List[int] = []
-        for panel in range(3):
-            vals = [v for v in self._ratios[panel] if math.isfinite(v) and v > 0.0]
-            if not vals:
-                y_ranges.append((0.0, 1.0))
-                y_ticks_by_panel.append([0.0, 0.5, 1.0])
-                y_decimals.append(1)
-                continue
-            y_min, y_max = min(vals), max(vals)
-            center = self._centers[panel] if panel < len(self._centers) else math.nan
-            if math.isfinite(center) and center > 0.0:
-                y_min = min(y_min, center)
-                y_max = max(y_max, center)
-            y_min, y_max = _pad_span(y_min, y_max, 0.15, 0.02)
-            ticks, y_min, y_max, decimals = nice_ticks(y_min, y_max, 20)
-            y_ranges.append((y_min, y_max))
-            y_ticks_by_panel.append(ticks)
-            y_decimals.append(decimals)
+        y_min, y_max = 0.995, 1.005
+        y_ticks = [y_min + i * 0.0005 for i in range(21)]
 
         def sx(panel, x):
             base = pad_l + panel * (panel_w + gap)
             return base + (x - x_min) / (x_max - x_min) * panel_w
 
-        def sy(panel, y):
-            y_min, y_max = y_ranges[panel]
+        def sy(y):
             return pad_t + (y_max - y) / (y_max - y_min) * plot_h
 
         dash_pen = QPen(CHART_TEXT_DIM, 1)
@@ -765,25 +754,27 @@ class RefRatioChart(QWidget):
             p.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
             p.drawText(int(x0 + 6), pad_t + 14, REF_CHOICES[panel])
             p.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-            for tick in y_ticks_by_panel[panel]:
-                yy = sy(panel, tick)
+            for tick in y_ticks:
+                yy = sy(tick)
                 p.setPen(QPen(CHART_GRID, 1))
                 p.drawLine(int(x0), int(yy), int(x0 + panel_w), int(yy))
                 p.setPen(CHART_TEXT)
-                p.drawText(int(x0 + 4), int(yy - 3), tick_label(tick, y_decimals[panel]))
+                p.drawText(int(x0 + 4), int(yy - 3), tick_label(tick, 4))
             center = self._centers[panel] if panel < len(self._centers) else math.nan
             if math.isfinite(center) and center > 0.0:
-                yy = sy(panel, center)
+                yy = sy(1.0)
                 p.setPen(center_pen)
                 p.drawLine(int(x0), int(yy), int(x0 + panel_w), int(yy))
                 p.setPen(CHART_TEXT_DIM)
-                p.drawText(int(x0 + panel_w - 58), pad_t + plot_h - 4, f"avg {center:.3g}")
+                p.drawText(int(x0 + panel_w - 58), pad_t + plot_h - 4, "avg 1")
 
+            p.save()
+            p.setClipRect(int(x0), pad_t, int(panel_w), plot_h)
             pts = []
             for x, y, ok in zip(self._x, self._ratios[panel], self._ok[panel]):
                 if not (math.isfinite(x) and math.isfinite(y) and y > 0.0):
                     continue
-                px, py = sx(panel, x), sy(panel, y)
+                px, py = sx(panel, x), sy(y)
                 pts.append((px, py, ok))
             pts = decimate_points(pts, max(80, int(panel_w) * 2))
             p.setPen(QPen(REF_COLORS[panel], 1.3))
@@ -803,6 +794,7 @@ class RefRatioChart(QWidget):
                     p.drawLine(int(px - 4), int(py - 4), int(px + 4), int(py + 4))
                     p.drawLine(int(px - 4), int(py + 4), int(px + 4), int(py - 4))
 
+            p.restore()
             p.setPen(dash_pen)
             for _, start, end in self._run_spans:
                 for bx in (start, end):
