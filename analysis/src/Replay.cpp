@@ -512,7 +512,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 
                     // Gain correction applies to HyCal modules only; Veto /
                     // LMS get 1.
-                    ev->gain_factor[nch] = gain_corr.ModuleGain(mod_id);
+                    ev->gain_factor[nch] = gain_corr.ModuleGain(mod_id, gRunConfig.gain_ref_pmt);
 
                     if (write_peaks) {
                         // Soft analyzer drives both peaks AND the
@@ -817,7 +817,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
                         }
                         else{
                             if (!mod || !mod->is_hycal()) return;
-                            const float gain = gain_corr.ModuleGain(mod->id);
+                            const float gain = gain_corr.ModuleGain(mod->id, gRunConfig.gain_ref_pmt);
 
                             if (prad1 == true) {
                                 float adc = cd.samples[0] * 0.543f * gain; //0.543 for prad1 run1308, correct to 1.1GeV
@@ -1164,7 +1164,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
 
                     float time_offset = mod->time_offset;
 
-                    float gain = gain_corr.ModuleGain(mod->id);
+                    float gain = gain_corr.ModuleGain(mod->id, gRunConfig.gain_ref_pmt);
                     if (gain <= 0.f || gain == 1.0f) gain = in->gain_factor[j];
                     
                     if (has_waveform) {

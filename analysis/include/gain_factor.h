@@ -24,7 +24,7 @@
 //   auto ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 //   // Per-event lookup (read-only → safe from multiple threads after init):
 //   const auto& corr = ts.GetCorr(event_num);
-//   new_adc2mev = old_adc2mev * corr.ModuleGain(module_id);
+//   new_adc2mev = old_adc2mev * corr.ModuleGain(module_id, gRunConfig.gain_ref_pmt);
 //
 // Both kinds of file are looked up by exact run number (FindRunFile).
 //=============================================================================
@@ -170,12 +170,22 @@ struct GainCorrTable {
     int cur_run = -1;
 
     // Gain factor for a module id (PbGlass: G number, PbWO4: 1000 + W
-    // number).  PbWO4 uses the mean of the LMS2 and LMS3 corrections (LMS1
-    // is not used), PbGlass its avg; any other id (Veto, LMS) gets 1.
-    float ModuleGain(int id) const
+    // number). PbWO4 averages the reference PMTs selected by ref_pmt's
+    // digits (default: LMS2 and LMS3); PbGlass keeps its avg.
+    // Any other id (Veto, LMS) gets 1.
+    float ModuleGain(int id, int ref_pmt = 23) const
     {
-        if (id > 1000 && id - 1000 < MAX_W)
-            return (w[id - 1000].corr[1] + w[id - 1000].corr[2]) / 2.0f;
+        const unsigned mask = detail::GainRefPMTMask(ref_pmt);
+        if (id > 1000 && id - 1000 < MAX_W) {
+            float sum = 0.f;
+            int count = 0;
+            for (int j = 0; j < 3; ++j) {
+                if (!(mask & (1u << j))) continue;
+                sum += w[id - 1000].corr[j];
+                ++count;
+            }
+            return sum / static_cast<float>(count);
+        }
         if (id > 0 && id < MAX_G) return g[id].avg;
         return 1.f;
     }

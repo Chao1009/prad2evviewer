@@ -54,6 +54,7 @@
 #include <functional>
 #include <iostream>
 #include <regex>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,6 +96,7 @@ struct RunConfig {
     // For gain correction: which run to use as reference for computing the correction factors (negative = none).
     std::string gain_data_dir = "";
     int gain_ref_run = 23915;
+    int gain_ref_pmt = 23;  // Digits select reference PMTs to average (1, 2, 3).
     // Optional per-module HyCal peak-time window file (relative to database
     // dir).  Empty -> uniform [hc_time_win_lo, hc_time_win_hi] from runinfo
     // is used for every module.  See prad2det/include/HyCalTimeCuts.h.
@@ -110,6 +112,23 @@ struct RunConfig {
 };
 
 namespace detail {
+inline unsigned GainRefPMTMask(int ref_pmt)
+{
+    switch (ref_pmt) {
+        case 1:   return 0b001;
+        case 2:   return 0b010;
+        case 3:   return 0b100;
+        case 12:  return 0b011;
+        case 13:  return 0b101;
+        case 23:  return 0b110;
+        case 123: return 0b111;
+        default:
+            throw std::invalid_argument(
+                "gain_factor.ref_PMT must be one of 1, 2, 3, 12, 13, 23, 123; got "
+                + std::to_string(ref_pmt));
+    }
+}
+
 // Pull the trigger-run integer off an entry; supports `from_run` (new)
 // and `run_number` (legacy alias).  Returns -1 if neither is present.
 inline int RunEntryFromRun(const nlohmann::json &e)
@@ -228,6 +247,16 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
             const auto &gf = c["gain_factor"];
             if (gf.contains("data_dir")) result.gain_data_dir = gf["data_dir"].get<std::string>();
             if (gf.contains("ref_run"))  result.gain_ref_run  = gf["ref_run"].get<int>();
+            if (gf.contains("ref_PMT")) {
+                if (!gf["ref_PMT"].is_number_integer()
+                    || gf["ref_PMT"] < 1 || gf["ref_PMT"] > 123)
+                    throw std::invalid_argument(
+                        "gain_factor.ref_PMT must be an integer PMT selection; got "
+                        + gf["ref_PMT"].dump());
+                const int ref_pmt = gf["ref_PMT"].get<int>();
+                detail::GainRefPMTMask(ref_pmt);
+                result.gain_ref_pmt = ref_pmt;
+            }
         }
     };
 
@@ -335,6 +364,7 @@ inline RunConfig LoadRunConfig(const std::string &path, int run_num)
 inline bool WriteRunConfig(const std::string &path, int run_num,
                            const RunConfig &geo)
 {
+    detail::GainRefPMTMask(geo.gain_ref_pmt);
     nlohmann::json cfg;
     {
         std::ifstream in(path);
@@ -392,6 +422,7 @@ inline bool WriteRunConfig(const std::string &path, int run_num,
         if (!geo.gain_data_dir.empty()) entry["gain_factor"]["data_dir"] = geo.gain_data_dir;
         if (geo.gain_ref_run >= 0)      entry["gain_factor"]["ref_run"]  = geo.gain_ref_run;
     }
+    entry["gain_factor"]["ref_PMT"] = geo.gain_ref_pmt;
 
     auto &arr = cfg["configurations"];
     bool replaced = false;

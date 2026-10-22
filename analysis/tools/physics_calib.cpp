@@ -565,7 +565,7 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
             const auto *mod = hycal.module_by_id(in->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
-            float gain = gain_corr.ModuleGain(mod->id);
+            float gain = gain_corr.ModuleGain(mod->id, run_cfg.gain_ref_pmt);
             if (gain <= 0.f || gain == 1.f) gain = in->gain_factor[j];
 
             float time_offset = mod->time_offset;

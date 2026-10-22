@@ -472,6 +472,7 @@ struct GainCorrTable {
     Entry g[GainFactorTable::MAX_G];
     int   ref_run = -1;
     int   cur_run = -1;
+    float ModuleGain(int id, int ref_pmt = 23) const;
 };
 ```
 
@@ -487,8 +488,11 @@ GainCorrTable prad2::ComputeGainCorrection(const std::string &dir,
                                            int cur_run, int ref_run);
 ```
 
-`new_adc2mev = old_adc2mev * corr.w[id].avg` is the typical applier
-(see top of header for the worked example).
+Apply with `new_adc2mev = old_adc2mev * corr.ModuleGain(module_id, run_cfg.gain_ref_pmt)`.
+For PbWO4 (`module_id = 1000 + W number`), `ref_pmt` selects the PMTs whose
+corrections are averaged: `1`, `2`, `3`, `12`, `13`, `23` (default), or `123`.
+PbGlass uses its stored `avg`; other IDs return identity. Invalid selections
+throw `std::invalid_argument`.
 
 ---
 
