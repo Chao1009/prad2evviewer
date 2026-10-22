@@ -129,7 +129,7 @@
         },
         {
             "// calibration period 5-1-2 of 2.2GeV": "",
-            "from_run":    25358,
+            "from_run":    25357,
             "calibration": {"file": "calibration/PRad2_2p2_round1_5-1-2.json"}
         },
 
