@@ -211,6 +211,7 @@
         {"from_run": 0, "dead_modules": ["W1019", "W1020", "W1124", "W691"]},
         {"from_run": 24693, "dead_modules": ["W1019", "W1020", "W1124"]},
         {"from_run": 24850, "dead_modules": ["W1019", "W1020", "W1124", "W1141"]},
+        {"from_run": 25200, "dead_modules": ["W1019", "W1020", "W1124"]},
         {"from_run": 25540, "dead_modules": ["W1019", "W1020", "W1124", "W781"]}
     ]
 }
