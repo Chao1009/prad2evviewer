@@ -94,6 +94,16 @@ _DEFAULT_MAX_EVENTS: Optional[int] = None   # None → process full EVIO file
 _DEFAULT_PROMINENCE = 40
 _DEFAULT_PEAK_DIST_MEV = 100.0
 _DEFAULT_PARALLEL   = 1
+# Pulse-method tagging of outputs: rawsum keeps the legacy names/titles unchanged.
+_PULSE_LABEL = {"rawsum": "rawsum", "mf": "mf (template)"}
+_STEM_BASE = "benchmark_hycal_timing_scan"
+
+
+def _stem(pulse_method: str) -> str:
+    """Output-file stem; mf gets an ``_mf`` suffix, rawsum is unchanged."""
+    return _STEM_BASE + ("_mf" if pulse_method == "mf" else "")
+
+
 # Runs left out of the scan entirely (user decision); value = reason shown in SKIP line.
 _EXCLUDED_RUNS: dict[int, str] = {24578: "non-standard trigger"}
 
@@ -326,8 +336,14 @@ def run_benchmark(
     max_events: Optional[int],
     skip_benchmark: bool,
     timeout_seconds: Optional[int] = None,
+    pulse_method: str = "rawsum",
+    window: Optional[float] = None,
+    pre_window: Optional[tuple[float, float]] = None,
 ) -> Path:
     """Invoke benchmark_hycal_timing_test_20261021.py; return path to the TSV.
+
+    pulse_method "mf" appends ``--pulse-method mf``; window / pre_window, when
+    given, override the benchmark default window and the per-run pre-window.
 
     If skip_benchmark is True and the TSV already exists, skip the invocation.
     If max_events is None, --max-events is NOT passed to the subprocess so the
@@ -348,7 +364,8 @@ def run_benchmark(
 
     out_d.mkdir(parents=True, exist_ok=True)
 
-    pre_lo, pre_hi = _PRE_WINDOW_MAP.get(run, _DEFAULT_PRE_WINDOW)
+    pre_lo, pre_hi = (pre_window if pre_window is not None
+                      else _PRE_WINDOW_MAP.get(run, _DEFAULT_PRE_WINDOW))
 
     cmd = [
         sys.executable,
@@ -370,6 +387,10 @@ def run_benchmark(
     # When max_events is None the subprocess processes the full EVIO file.
     if max_events is not None:
         cmd.extend(["--max-events", str(max_events)])
+    if window is not None:
+        cmd.extend(["--window", str(window)])
+    if pulse_method == "mf":
+        cmd.extend(["--pulse-method", "mf"])
 
     max_ev_label = str(max_events) if max_events is not None else "full file"
     log.info("run %06d split %05d → %s  (max_events=%s)",
@@ -983,6 +1004,7 @@ def make_trend_plot(
     title_suffix: str = "POST-calibration",
     secondary_flag_col: str = "secondary_peak_post_present",
     # Legacy positional-keyword compat shim: ignored if callers pass value_col_g.
+    pulse_method: str = "rawsum",
 ) -> None:
     """σ_E/E vs. EVIO file, overlaying Gaussian and Crystal Ball fits.
 
@@ -1113,6 +1135,8 @@ def make_trend_plot(
     ax.set_xticklabels(all_x_labels, rotation=45, ha="right", fontsize=7)
     ax.set_xlabel("EVIO file")
     ax.set_ylabel("σ_E/E (%)")
+    if pulse_method != "rawsum":
+        title_suffix = f"{title_suffix}, {_PULSE_LABEL[pulse_method]}"
     ax.set_title(
         f"σ_E/E ({title_suffix}) across EVIO files — all runs\n"
         "(open marker + solid = Gaussian, filled marker + dashed = CB, "
@@ -1131,6 +1155,9 @@ def make_trend_plot(
         Line2D([], [], ls="-", marker="o", color="k", mfc="none", ms=6,
                label="open + solid: Gaussian"),
     ]
+    if pulse_method != "rawsum":
+        fill_handles.append(Line2D([], [], ls="none", label=
+                                   f"pulse method: {_PULSE_LABEL[pulse_method]}"))
     ax.legend(handles=run_handles + type_handles + fill_handles,
               loc="upper right", fontsize=7, ncol=3)
     ax.grid(alpha=0.3, axis="y")
@@ -1143,7 +1170,11 @@ def make_trend_plot(
 # §7 — Summary markdown
 # ===========================================================================
 
-def write_findings_md(rows: list[dict], out_path: Path) -> None:
+def write_findings_md(rows: list[dict], out_path: Path,
+                      pulse_method: str = "rawsum",
+                      window: Optional[float] = None,
+                      pre_window: Optional[tuple[float, float]] = None,
+                      stem: str = _STEM_BASE) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Group by run
@@ -1156,6 +1187,13 @@ def write_findings_md(rows: list[dict], out_path: Path) -> None:
     lines.append(
         f"_Generated {datetime.datetime.now().isoformat(timespec='seconds')}_\n"
     )
+    if pulse_method != "rawsum" or window is not None or pre_window is not None:
+        wp = [f"pulse method: **{_PULSE_LABEL[pulse_method]}**"]
+        if window is not None:
+            wp.append(f"window = {window:g} ns")
+        if pre_window is not None:
+            wp.append(f"pre-window = {pre_window[0]:g}\u2013{pre_window[1]:g} ns")
+        lines.append("_" + "; ".join(wp) + "_\n")
     lines.append("")
     lines.append("## Trend Plots\n")
     lines.append(
@@ -1169,13 +1207,13 @@ def write_findings_md(rows: list[dict], out_path: Path) -> None:
     )
     lines.append(
         "- **Pre-calibration (Gaussian + CB)**: "
-        "`benchmark_hycal_timing_scan_sigma_E_vs_file_pre.png`  \n"
+        f"`{stem}_sigma_E_vs_file_pre.png`  \n"
         "  Gaussian: σ_E/E = σ_pre / μ_pre from the raw inner-ring Gaussian fit.  \n"
         "  Crystal Ball: σ_E/E = σ_cb_pre from the CB fit to the pre-calibration spectrum."
     )
     lines.append(
         "- **Post-calibration (Gaussian + CB)**: "
-        "`benchmark_hycal_timing_scan_sigma_E_vs_file_post.png`  \n"
+        f"`{stem}_sigma_E_vs_file_post.png`  \n"
         "  Gaussian: σ_E/E = σ_over_E_post from the inner-ring Gaussian fit after "
         "per-module gain refinement.  \n"
         "  Crystal Ball: σ_E/E = σ_cb_post from the CB fit to the post-calibration spectrum."
@@ -1320,6 +1358,7 @@ def generate_combined_pdf(
     rows: list[dict],
     output_dir: Path,
     pdf_path: Path,
+    pulse_method: str = "rawsum",
 ) -> None:
     """Generate a multi-page PDF of all per-file calibrated result PNGs.
 
@@ -1385,6 +1424,8 @@ def generate_combined_pdf(
                 f"   \u2014   \u03c3_E/E = {sigma_str}"
                 f"   \u2014   Secondary peak: {sec_str}"
             )
+            if pulse_method != "rawsum":
+                title = f"[{_PULSE_LABEL[pulse_method]}]  " + title
 
             fig = plt.figure(figsize=(11, 8.5))
 
@@ -1476,6 +1517,22 @@ def build_parser() -> argparse.ArgumentParser:
              "as a timeout, and the scan continues. Set to 0 to disable timeout. "
              "Default: 1200 (20 minutes).",
     )
+    ap.add_argument(
+        "--pulse-method", choices=["rawsum", "mf"], default="rawsum",
+        help="Pulse reconstruction passed to the benchmark (default rawsum; "
+             "mf appends '--pulse-method mf' and tags output names/titles "
+             "with 'mf').",
+    )
+    ap.add_argument(
+        "--window", type=float, default=None, metavar="W",
+        help="seed_time_window (ns) passed to the benchmark for every run. "
+             "Default: not passed (benchmark default).",
+    )
+    ap.add_argument(
+        "--pre-window", type=float, nargs=2, default=None, metavar=("LO", "HI"),
+        help="Pre-window [LO, HI] ns for every run, overriding the per-run "
+             "map. Default: per-run map.",
+    )
     return ap
 
 
@@ -1487,7 +1544,9 @@ def main(argv=None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Logging setup -------------------------------------------------------
-    log_path = output_dir / "benchmark_hycal_timing_scan.log"
+    stem = _stem(args.pulse_method)
+    pre_window = tuple(args.pre_window) if args.pre_window is not None else None
+    log_path = output_dir / f"{stem}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -1512,6 +1571,13 @@ def main(argv=None) -> int:
     log.info("  skip_bench  : %s", args.skip_benchmark)
     log.info("  timeout     : %s",
              f"{args.timeout_seconds}s" if args.timeout_seconds > 0 else "disabled")
+    if args.pulse_method != "rawsum" or args.window is not None or pre_window is not None:
+        log.info("  pulse_method: %s", _PULSE_LABEL[args.pulse_method])
+        log.info("  window      : %s",
+                 f"{args.window:g} ns" if args.window is not None else "benchmark default")
+        log.info("  pre_window  : %s",
+                 f"{pre_window[0]:g}-{pre_window[1]:g} ns" if pre_window is not None
+                 else "per-run map")
     log.info("=" * 70)
 
     if not HAVE_SCIPY:
@@ -1560,6 +1626,9 @@ def main(argv=None) -> int:
                 max_events=args.max_events,
                 skip_benchmark=args.skip_benchmark,
                 timeout_seconds=args.timeout_seconds,   # NEW
+                pulse_method=args.pulse_method,
+                window=args.window,
+                pre_window=pre_window,
             )
             return run, split, fpath, tsv, None
         except Exception as exc:
@@ -1641,17 +1710,17 @@ def main(argv=None) -> int:
     all_rows.sort(key=lambda r: (int(r["run_number"]), int(r["split_number"])))
 
     # ---- Write aggregate TSV ------------------------------------------------
-    summary_tsv = output_dir / "benchmark_hycal_timing_scan_summary.tsv"
+    summary_tsv = output_dir / f"{stem}_summary.tsv"
     write_summary_tsv(all_rows, summary_tsv)
     print(f"\nWrote summary TSV: {summary_tsv}", flush=True)
     log.info("Wrote summary TSV: %s", summary_tsv)
 
     # ---- Trend plots (pre-calibration and post-calibration) -----------------
     trend_pre_png  = (
-        output_dir / "benchmark_hycal_timing_scan_sigma_E_vs_file_pre.png"
+        output_dir / f"{stem}_sigma_E_vs_file_pre.png"
     )
     trend_post_png = (
-        output_dir / "benchmark_hycal_timing_scan_sigma_E_vs_file_post.png"
+        output_dir / f"{stem}_sigma_E_vs_file_post.png"
     )
     try:
         # Pre-calibration plot (Gaussian + Crystal Ball overlaid)
@@ -1662,6 +1731,7 @@ def main(argv=None) -> int:
             value_col_cb="sigma_over_E_cb_pre",
             title_suffix="PRE-calibration",
             secondary_flag_col="secondary_peak_pre_present",
+            pulse_method=args.pulse_method,
         )
         print(f"\nWrote pre-calibration trend plot: {trend_pre_png}", flush=True)
         log.info("Wrote pre-calibration trend plot: %s", trend_pre_png)
@@ -1674,6 +1744,7 @@ def main(argv=None) -> int:
             value_col_cb="sigma_over_E_cb_post",
             title_suffix="POST-calibration",
             secondary_flag_col="secondary_peak_post_present",
+            pulse_method=args.pulse_method,
         )
         print(f"\nWrote post-calibration trend plot: {trend_post_png}", flush=True)
         log.info("Wrote post-calibration trend plot: %s", trend_post_png)
@@ -1690,18 +1761,20 @@ def main(argv=None) -> int:
 
     # ---- Combined calibrated-plot PDF ----------------------------------------
     combined_pdf = (
-        output_dir / "benchmark_hycal_timing_scan_all_calibrated_plots.pdf"
+        output_dir / f"{stem}_all_calibrated_plots.pdf"
     )
     try:
-        generate_combined_pdf(all_rows, output_dir, combined_pdf)
+        generate_combined_pdf(all_rows, output_dir, combined_pdf,
+                              pulse_method=args.pulse_method)
         log.info("Wrote combined calibrated PDF: %s", combined_pdf)
     except Exception as exc:
         log.error("Combined PDF generation failed: %s", exc)
         # Non-fatal: log and continue
 
     # ---- Findings markdown --------------------------------------------------
-    findings_md = output_dir / "benchmark_hycal_timing_scan_findings.md"
-    write_findings_md(all_rows, findings_md)
+    findings_md = output_dir / f"{stem}_findings.md"
+    write_findings_md(all_rows, findings_md, pulse_method=args.pulse_method,
+                      window=args.window, pre_window=pre_window, stem=stem)
     log.info("Wrote findings: %s", findings_md)
 
     # Separate counting for timeouts vs. other errors

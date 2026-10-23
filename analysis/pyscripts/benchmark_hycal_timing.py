@@ -528,8 +528,14 @@ def main(argv=None):
 
         cb_l = fit_peak_cb(corr_l, cal_lo, cal_hi, bw, mu0_hint=mu_l_post)
         cb_n = fit_peak_cb(corr_n, cal_lo, cal_hi, bw, mu0_hint=mu_n_post)
-        mu_cb_l, sig_cb_l, alpha_l, n_l, A_cb_l, *_ = cb_l
-        mu_cb_n, sig_cb_n, alpha_n, n_n, A_cb_n, *_ = cb_n
+        mu_cb_l_post, sig_cb_l_post, alpha_l_post, n_l_post, A_cb_l_post, *_ = cb_l
+        mu_cb_n_post, sig_cb_n_post, alpha_n_post, n_n_post, A_cb_n_post, *_ = cb_n
+
+        # ALSO fit CB on pre-cal spectra (symmetric with post for comparison)
+        cb_l_pre = fit_peak_cb(raw_l, cal_lo, cal_hi, bw, mu0_hint=mu_l_pre)
+        cb_n_pre = fit_peak_cb(raw_n, cal_lo, cal_hi, bw, mu0_hint=mu_n_pre)
+        mu_cb_l_pre, sig_cb_l_pre, alpha_l_pre, n_l_pre, A_cb_l_pre, *_ = cb_l_pre
+        mu_cb_n_pre, sig_cb_n_pre, alpha_n_pre, n_n_pre, A_cb_n_pre, *_ = cb_n_pre
 
         def _ratio(s, m):
             return s / m if (m and m > 0 and not math.isnan(m)) else float('nan')
@@ -541,15 +547,26 @@ def main(argv=None):
             mu_n_pre=mu_n_pre, sig_n_pre=sig_n_pre,
             mu_l_post=mu_l_post, sig_l_post=sig_l_post,
             mu_n_post=mu_n_post, sig_n_post=sig_n_post,
-            mu_cb_l=mu_cb_l, sig_cb_l=sig_cb_l, alpha_l=alpha_l, n_l=n_l, A_cb_l=A_cb_l,
-            mu_cb_n=mu_cb_n, sig_cb_n=sig_cb_n, alpha_n=alpha_n, n_n=n_n, A_cb_n=A_cb_n,
+            # Post-cal CB (renamed from mu_cb_l / sig_cb_l etc.)
+            mu_cb_l_post=mu_cb_l_post, sig_cb_l_post=sig_cb_l_post,
+            alpha_l_post=alpha_l_post, n_l_post=n_l_post, A_cb_l_post=A_cb_l_post,
+            mu_cb_n_post=mu_cb_n_post, sig_cb_n_post=sig_cb_n_post,
+            alpha_n_post=alpha_n_post, n_n_post=n_n_post, A_cb_n_post=A_cb_n_post,
+            # NEW: Pre-cal CB
+            mu_cb_l_pre=mu_cb_l_pre, sig_cb_l_pre=sig_cb_l_pre,
+            alpha_l_pre=alpha_l_pre, n_l_pre=n_l_pre, A_cb_l_pre=A_cb_l_pre,
+            mu_cb_n_pre=mu_cb_n_pre, sig_cb_n_pre=sig_cb_n_pre,
+            alpha_n_pre=alpha_n_pre, n_n_pre=n_n_pre, A_cb_n_pre=A_cb_n_pre,
             edges=edges_cal, centres=cal_centres,
             counts_l_pre=counts_l_pre, counts_n_pre=counts_n_pre,
             counts_l_post=counts_l_post, counts_n_post=counts_n_post,
         )
 
-        sigE_l_g, sigE_n_g  = _ratio(sig_l_post, mu_l_post), _ratio(sig_n_post, mu_n_post)
-        sigE_l_cb, sigE_n_cb = _ratio(sig_cb_l, mu_cb_l),    _ratio(sig_cb_n, mu_cb_n)
+        sigE_l_g,      sigE_n_g      = _ratio(sig_l_post, mu_l_post),         _ratio(sig_n_post, mu_n_post)
+        sigE_l_cb_post, sigE_n_cb_post = _ratio(sig_cb_l_post, mu_cb_l_post), _ratio(sig_cb_n_post, mu_cb_n_post)
+        sigE_l_cb_pre,  sigE_n_cb_pre  = _ratio(sig_cb_l_pre,  mu_cb_l_pre),  _ratio(sig_cb_n_pre,  mu_cb_n_pre)
+        # Keep old names as aliases for backward-compat downstream (if used)
+        sigE_l_cb, sigE_n_cb = sigE_l_cb_post, sigE_n_cb_post
         print()
         print(f"                  | legacy        | gated (W={W:g} ns)")
         print(f"  inner events    | {len(raw_l):>13d} | {len(raw_n):>13d}")
@@ -560,11 +577,16 @@ def main(argv=None):
               f"(target {args.target_peak:.1f})")
         print(f"  σ  Gaussian     | {sig_l_post:>13.1f} | {sig_n_post:>13.1f}")
         print(f"  σ_E / E (G)     | {sigE_l_g*100:>12.2f}% | {sigE_n_g*100:>12.2f}%")
-        print(f"  μ  Crystal Ball | {mu_cb_l:>13.1f} | {mu_cb_n:>13.1f}")
-        print(f"  σ  Crystal Ball | {sig_cb_l:>13.1f} | {sig_cb_n:>13.1f}  "
-              f"(α_l={alpha_l:.2f} n_l={n_l:.1f}  α_n={alpha_n:.2f} n_n={n_n:.1f})")
-        print(f"  σ_E / E (CB)    | {sigE_l_cb*100:>12.2f}% | {sigE_n_cb*100:>12.2f}%  "
-              f"(Δ = {(sigE_n_cb - sigE_l_cb)*100:+.2f} pp)")
+        print(f"  μ  CB post(MeV) | {mu_cb_l_post:>13.1f} | {mu_cb_n_post:>13.1f}")
+        print(f"  σ  CB post(MeV) | {sig_cb_l_post:>13.1f} | {sig_cb_n_post:>13.1f}  "
+              f"(α_l={alpha_l_post:.2f} n_l={n_l_post:.1f}  α_n={alpha_n_post:.2f} n_n={n_n_post:.1f})")
+        print(f"  σ_E / E (CB po) | {sigE_l_cb_post*100:>12.2f}% | {sigE_n_cb_post*100:>12.2f}%  "
+              f"(Δ = {(sigE_n_cb_post - sigE_l_cb_post)*100:+.2f} pp)")
+        print(f"  μ  CB pre (MeV) | {mu_cb_l_pre:>13.1f} | {mu_cb_n_pre:>13.1f}")
+        print(f"  σ  CB pre (MeV) | {sig_cb_l_pre:>13.1f} | {sig_cb_n_pre:>13.1f}  "
+              f"(α_l={alpha_l_pre:.2f} n_l={n_l_pre:.1f}  α_n={alpha_n_pre:.2f} n_n={n_n_pre:.1f})")
+        print(f"  σ_E / E (CB pr) | {sigE_l_cb_pre*100:>12.2f}% | {sigE_n_cb_pre*100:>12.2f}%  "
+              f"(Δ = {(sigE_n_cb_pre - sigE_l_cb_pre)*100:+.2f} pp)")
 
     # ---- Optional: per-event cluster TSV ------------------------------------
     if args.write_cluster_tsv and cal is not None:
@@ -629,26 +651,35 @@ def main(argv=None):
             f.write("path\tn_modules\tn_inner_events\tmu_pre_MeV\tsigma_pre_MeV"
                     "\tmu_post_MeV\tsigma_post_MeV\tsigma_over_E_post"
                     "\tmu_cb_MeV\tsigma_cb_MeV\talpha_cb\tn_cb"
-                    "\tsigma_over_E_cb\n")
+                    "\tsigma_over_E_cb"
+                    "\tmu_cb_pre_MeV\tsigma_cb_pre_MeV\talpha_cb_pre\tn_cb_pre"
+                    "\tsigma_over_E_cb_pre\n")
             for path, nmod, ne, mu_pre, sig_pre, mu_post, sig_post, \
-                mu_cb, sig_cb, a_cb, n_cb in [
-                ("legacy", cal['n_modules_l'], cal['n_events_l'],
+                mu_cb, sig_cb, a_cb, n_cb, \
+                mu_cb_pre, sig_cb_pre, a_cb_pre, n_cb_pre in [
+                ('legacy', cal['n_modules_l'], cal['n_events_l'],
                  cal['mu_l_pre'], cal['sig_l_pre'],
                  cal['mu_l_post'], cal['sig_l_post'],
-                 cal['mu_cb_l'], cal['sig_cb_l'], cal['alpha_l'], cal['n_l']),
-                ("new", cal['n_modules_n'], cal['n_events_n'],
+                 cal['mu_cb_l_post'], cal['sig_cb_l_post'], cal['alpha_l_post'], cal['n_l_post'],
+                 cal['mu_cb_l_pre'], cal['sig_cb_l_pre'], cal['alpha_l_pre'], cal['n_l_pre']),
+                ('new', cal['n_modules_n'], cal['n_events_n'],
                  cal['mu_n_pre'], cal['sig_n_pre'],
                  cal['mu_n_post'], cal['sig_n_post'],
-                 cal['mu_cb_n'], cal['sig_cb_n'], cal['alpha_n'], cal['n_n']),
+                 cal['mu_cb_n_post'], cal['sig_cb_n_post'], cal['alpha_n_post'], cal['n_n_post'],
+                 cal['mu_cb_n_pre'], cal['sig_cb_n_pre'], cal['alpha_n_pre'], cal['n_n_pre']),
             ]:
-                ratio    = sig_post / mu_post if mu_post > 0 else float('nan')
-                ratio_cb = (sig_cb / mu_cb if (mu_cb and mu_cb > 0
-                                               and not math.isnan(mu_cb))
+                ratio = (sig_post / mu_post if (mu_post and mu_post > 0 and not math.isnan(mu_post))
+                         else float('nan'))
+                ratio_cb = (sig_cb / mu_cb if (mu_cb and mu_cb > 0 and not math.isnan(mu_cb))
                             else float('nan'))
+                ratio_cb_pre = (sig_cb_pre / mu_cb_pre if (mu_cb_pre and mu_cb_pre > 0 and not math.isnan(mu_cb_pre))
+                                else float('nan'))
                 f.write(f"{path}\t{nmod}\t{ne}\t{mu_pre:.2f}\t{sig_pre:.2f}"
                         f"\t{mu_post:.2f}\t{sig_post:.2f}\t{ratio:.4f}"
                         f"\t{mu_cb:.2f}\t{sig_cb:.2f}\t{a_cb:.3f}\t{n_cb:.3f}"
-                        f"\t{ratio_cb:.4f}\n")
+                        f"\t{ratio_cb:.4f}"
+                        f"\t{mu_cb_pre:.2f}\t{sig_cb_pre:.2f}\t{a_cb_pre:.3f}\t{n_cb_pre:.3f}"
+                        f"\t{ratio_cb_pre:.4f}\n")
             f.write("\n# inner-ring histogram bin centres + counts (pre/post recal)\n")
             f.write("e_centre\tlegacy_pre\tlegacy_post\tnew_pre\tnew_post\n")
             for c, lp, lq, np_, nq in zip(cal['centres'],
@@ -657,105 +688,133 @@ def main(argv=None):
                 f.write(f"{c:.1f}\t{lp}\t{lq}\t{np_}\t{nq}\n")
     print(f"\n  wrote: {tsv_path}")
 
-    # ---- Plot --------------------------------------------------------------
+    # ---- Headline plot (safe-guard against matplotlib crashes) -------------
     png_path = args.out_path if args.out_path.endswith('.png') \
                else args.out_path + ".png"
-    fig, ax = plt.subplots(figsize=(9, 6))
-    ax.step(centres, counts_l, where='mid', color='#888',
-            lw=1.5, label=f'legacy   N={n_legacy}')
-    ax.step(centres, counts_n, where='mid', color='#1f77b4',
-            lw=1.5, label=f'new W={W:g} ns   N={n_new}')
+    try:
+        fig, ax = plt.subplots(figsize=(9, 6))
+        ax.step(centres, counts_l, where='mid', color='#888',
+                lw=1.5, label=f'legacy   N={n_legacy}')
+        ax.step(centres, counts_n, where='mid', color='#1f77b4',
+                lw=1.5, label=f'new W={W:g} ns   N={n_new}')
 
-    if HAVE_SCIPY and not math.isnan(mu_l):
-        x_fit = np.linspace(mu_l - 4 * sig_l, mu_l + 4 * sig_l, 200)
-        ax.plot(x_fit, gauss(x_fit, A_l, mu_l, sig_l),
-                color='#888', ls='--', lw=1.0,
-                label=f'   μ={mu_l:.0f} σ={sig_l:.0f} MeV')
-    if HAVE_SCIPY and not math.isnan(mu_n):
-        x_fit = np.linspace(mu_n - 4 * sig_n, mu_n + 4 * sig_n, 200)
-        ax.plot(x_fit, gauss(x_fit, A_n, mu_n, sig_n),
-                color='#1f77b4', ls='--', lw=1.0,
-                label=f'   μ={mu_n:.0f} σ={sig_n:.0f} MeV')
+        if HAVE_SCIPY and not math.isnan(mu_l):
+            x_fit = np.linspace(mu_l - 4 * sig_l, mu_l + 4 * sig_l, 200)
+            ax.plot(x_fit, gauss(x_fit, A_l, mu_l, sig_l),
+                    color='#888', ls='--', lw=1.0,
+                    label=f'   μ={mu_l:.0f} σ={sig_l:.0f} MeV')
+        if HAVE_SCIPY and not math.isnan(mu_n):
+            x_fit = np.linspace(mu_n - 4 * sig_n, mu_n + 4 * sig_n, 200)
+            ax.plot(x_fit, gauss(x_fit, A_n, mu_n, sig_n),
+                    color='#1f77b4', ls='--', lw=1.0,
+                    label=f'   μ={mu_n:.0f} σ={sig_n:.0f} MeV')
 
-    ax.axvline(args.signal_min, color='#d62728', lw=0.8, ls=':',
-               label=f'cut E > {args.signal_min:.0f} MeV')
-    ax.set_xlabel('cluster energy (MeV)')
-    ax.set_ylabel('events / bin')
-    ax.set_title(f"Single-cluster energy: legacy vs seed-time-gated\n"
-                 f"run window [{pre_lo:.0f}, {pre_hi:.0f}] ns, "
-                 f"{n_phys} physics events, {n_kept} triggered")
-    ax.grid(alpha=0.3)
-    ax.legend(loc='upper right', fontsize=9)
-    ax.set_xlim(e_lo, e_hi)
-    fig.tight_layout()
-    fig.savefig(png_path, dpi=130)
-    plt.close(fig)
-    print(f"  wrote: {png_path}")
+        ax.axvline(args.signal_min, color='#d62728', lw=0.8, ls=':',
+                   label=f'cut E > {args.signal_min:.0f} MeV')
+        ax.set_xlabel('cluster energy (MeV)')
+        ax.set_ylabel('events / bin')
+        ax.set_title(f"Single-cluster energy: legacy vs seed-time-gated\n"
+                     f"run window [{pre_lo:.0f}, {pre_hi:.0f}] ns, "
+                     f"{n_phys} physics events, {n_kept} triggered")
+        ax.grid(alpha=0.3)
+        ax.legend(loc='upper right', fontsize=9)
+        ax.set_xlim(e_lo, e_hi)
+        fig.tight_layout()
+        fig.savefig(png_path, dpi=130)
+        plt.close(fig)
+        print(f"  wrote: {png_path}")
+    except Exception as plot_exc:
+        sys.stderr.write(
+            f"[WARN] headline PNG plot failed: {plot_exc}\n"
+            f"       TSV written to {tsv_path} is still valid.\n"
+        )
+        try:
+            plt.close('all')  # cleanup any dangling figures
+        except Exception:
+            pass
 
     # ---- Optional: calibration before/after plot --------------------------
     if cal is not None:
-        cal_png = png_path[:-4] + "_calibrated.png"
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
+        try:
+            cal_png = png_path[:-4] + "_calibrated.png"
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
 
-        for ax, label, c_pre, c_post, mu_pre, sig_pre, mu_post, sig_post, \
-            mu_cb, sig_cb, alpha_cb, n_cb, A_cb, base_col in [
-            (axes[0], 'legacy',
-             cal['counts_l_pre'], cal['counts_l_post'],
-             cal['mu_l_pre'], cal['sig_l_pre'],
-             cal['mu_l_post'], cal['sig_l_post'],
-             cal['mu_cb_l'], cal['sig_cb_l'], cal['alpha_l'],
-             cal['n_l'], cal['A_cb_l'], '#888'),
-            (axes[1], f'new (W={W:g} ns)',
-             cal['counts_n_pre'], cal['counts_n_post'],
-             cal['mu_n_pre'], cal['sig_n_pre'],
-             cal['mu_n_post'], cal['sig_n_post'],
-             cal['mu_cb_n'], cal['sig_cb_n'], cal['alpha_n'],
-             cal['n_n'], cal['A_cb_n'], '#1f77b4'),
-        ]:
-            ax.step(cal['centres'], c_pre, where='mid', color=base_col,
-                    alpha=0.45, lw=1.3,
-                    label=f'pre   μ={mu_pre:.0f}  σ_G={sig_pre:.0f} MeV')
-            ax.step(cal['centres'], c_post, where='mid', color=base_col,
-                    lw=1.8,
-                    label=f'post  μ={mu_post:.0f}  σ_G={sig_post:.0f} MeV')
-            # Crystal-ball curve overlay
-            if not math.isnan(mu_cb) and A_cb > 0:
-                xfine = np.linspace(mu_cb - 6 * sig_cb, mu_cb + 4 * sig_cb,
-                                    400)
-                yfine = crystal_ball(xfine, A_cb, mu_cb, sig_cb,
-                                     alpha_cb, n_cb)
-                ax.plot(xfine, yfine, color='#d62728', lw=1.4,
-                        label=f'CB    μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  '
-                              f'(α={alpha_cb:.2f} n={n_cb:.1f})')
-            ax.axvline(args.target_peak, color='#444', ls=':', lw=0.8)
-            ax.set_xlabel('cluster energy (MeV)')
-            ax.set_title(label)
-            ax.grid(alpha=0.3)
-            ax.legend(loc='upper right', fontsize=8.5)
-        axes[0].set_ylabel('events / bin')
-        excl_str = (f",  exclude rows [{args.exclude_rowcol[0]},"
-                    f"{args.exclude_rowcol[1]}]×cols "
-                    f"[{args.exclude_rowcol[2]},{args.exclude_rowcol[3]}]"
-                    if args.exclude_rowcol else "")
-        sigEcb_l = (cal['sig_cb_l']/cal['mu_cb_l']*100
-                    if cal['mu_cb_l'] and not math.isnan(cal['mu_cb_l'])
-                    else float('nan'))
-        sigEcb_n = (cal['sig_cb_n']/cal['mu_cb_n']*100
-                    if cal['mu_cb_n'] and not math.isnan(cal['mu_cb_n'])
-                    else float('nan'))
-        fig.suptitle(
-            f"Inner-ring per-module gain refinement "
-            f"(r < {args.inner_radius:.0f} mm,  "
-            f"seed E ≥ {args.min_seed_energy:.0f} MeV,  "
-            f"≥ {args.min_per_module} ev/mod{excl_str})\n"
-            f"σ_E/E (Gauss):  legacy = {cal['sig_l_post']/cal['mu_l_post']*100:.2f} %   "
-            f"new = {cal['sig_n_post']/cal['mu_n_post']*100:.2f} %     "
-            f"(CB):  legacy = {sigEcb_l:.2f} %   new = {sigEcb_n:.2f} %",
-            fontsize=10.5)
-        fig.tight_layout()
-        fig.savefig(cal_png, dpi=130)
-        plt.close(fig)
-        print(f"  wrote: {cal_png}")
+            for ax, label, c_pre, c_post, mu_pre, sig_pre, mu_post, sig_post, \
+                mu_cb, sig_cb, alpha_cb, n_cb, A_cb, base_col in [
+                (axes[0], 'legacy',
+                 cal['counts_l_pre'], cal['counts_l_post'],
+                 cal['mu_l_pre'], cal['sig_l_pre'],
+                 cal['mu_l_post'], cal['sig_l_post'],
+                 cal['mu_cb_l_post'], cal['sig_cb_l_post'], cal['alpha_l_post'],
+                 cal['n_l_post'], cal['A_cb_l_post'], '#888'),
+                (axes[1], f'new (W={W:g} ns)',
+                 cal['counts_n_pre'], cal['counts_n_post'],
+                 cal['mu_n_pre'], cal['sig_n_pre'],
+                 cal['mu_n_post'], cal['sig_n_post'],
+                 cal['mu_cb_n_post'], cal['sig_cb_n_post'], cal['alpha_n_post'],
+                 cal['n_n_post'], cal['A_cb_n_post'], '#1f77b4'),
+            ]:
+                ax.step(cal['centres'], c_pre, where='mid', color=base_col,
+                        alpha=0.45, lw=1.3,
+                        label=f'pre   μ={mu_pre:.0f}  σ_G={sig_pre:.0f} MeV')
+                ax.step(cal['centres'], c_post, where='mid', color=base_col,
+                        lw=1.8,
+                        label=f'post  μ={mu_post:.0f}  σ_G={sig_post:.0f} MeV')
+                # Crystal-ball curve overlay (guard against numeric overflow)
+                if not math.isnan(mu_cb) and A_cb > 0:
+                    try:
+                        xfine = np.linspace(mu_cb - 6 * sig_cb,
+                                            mu_cb + 4 * sig_cb, 400)
+                        with np.errstate(over='ignore', invalid='ignore'):
+                            yfine = crystal_ball(xfine, A_cb, mu_cb, sig_cb,
+                                                 alpha_cb, n_cb)
+                        # Filter out NaN/inf from the overflow
+                        yfine = np.where(np.isfinite(yfine), yfine, 0.0)
+                        ax.plot(xfine, yfine, color='#d62728', lw=1.4,
+                                label=f'CB    μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  '
+                                      f'(α={alpha_cb:.2f} n={n_cb:.1f})')
+                    except Exception as cb_exc:
+                        sys.stderr.write(
+                            f"[WARN] CB curve overlay failed for {label}: {cb_exc}\n"
+                        )
+                ax.axvline(args.target_peak, color='#444', ls=':', lw=0.8)
+                ax.set_xlabel('cluster energy (MeV)')
+                ax.set_title(label)
+                ax.grid(alpha=0.3)
+                ax.legend(loc='upper right', fontsize=8.5)
+            axes[0].set_ylabel('events / bin')
+            excl_str = (f",  exclude rows [{args.exclude_rowcol[0]},"
+                        f"{args.exclude_rowcol[1]}]×cols "
+                        f"[{args.exclude_rowcol[2]},{args.exclude_rowcol[3]}]"
+                        if args.exclude_rowcol else "")
+            sigEcb_l = (cal['sig_cb_l_post']/cal['mu_cb_l_post']*100
+                        if cal['mu_cb_l_post'] and not math.isnan(cal['mu_cb_l_post'])
+                        else float('nan'))
+            sigEcb_n = (cal['sig_cb_n_post']/cal['mu_cb_n_post']*100
+                        if cal['mu_cb_n_post'] and not math.isnan(cal['mu_cb_n_post'])
+                        else float('nan'))
+            fig.suptitle(
+                f"Inner-ring per-module gain refinement "
+                f"(r < {args.inner_radius:.0f} mm,  "
+                f"seed E ≥ {args.min_seed_energy:.0f} MeV,  "
+                f"≥ {args.min_per_module} ev/mod{excl_str})\n"
+                f"σ_E/E (Gauss):  legacy = {cal['sig_l_post']/cal['mu_l_post']*100:.2f} %   "
+                f"new = {cal['sig_n_post']/cal['mu_n_post']*100:.2f} %     "
+                f"(CB):  legacy = {sigEcb_l:.2f} %   new = {sigEcb_n:.2f} %",
+                fontsize=10.5)
+            fig.tight_layout()
+            fig.savefig(cal_png, dpi=130)
+            plt.close(fig)
+            print(f"  wrote: {cal_png}")
+        except Exception as cal_plot_exc:
+            sys.stderr.write(
+                f"[WARN] calibrated PNG plot failed: {cal_plot_exc}\n"
+                f"       TSV written to {tsv_path} is still valid.\n"
+            )
+            try:
+                plt.close('all')
+            except Exception:
+                pass
 
     return 0
 

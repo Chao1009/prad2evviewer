@@ -48,6 +48,28 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
     pass would return gain 1 exactly.  --cal-method cb-peak / median are
     the unchanged old refinements (use --target-peak, 2 iterations).
 
+  Per-crystal calibration (plan_20261023 section 4; percrystal_calib.py).
+    --cal-method percrystal solves one gain per cluster-member module from
+    the elastic events (member-level chi2, regularised, iterated with the
+    elastic windows) and applies E_cal = sum_i g_i E_i per event.
+    --gain-file applies such a table to every cluster before the refinement
+    selected by --cal-method.  --cluster-dump writes the calibration pool
+    with its cluster members for the offline solver.  All three need
+    --calibrate; they are off by default and the default outputs are
+    unchanged.
+
+  Seed-time-constrained neighbour amplitudes (plan_20261023 section 5).
+    --mf-nb-amp seedtime (mf only, needs --time-calib): per path, in events
+    with exactly one cluster above --signal-min, the amplitude of every
+    PbWO4 module in the seed's 3x3 (--mf-nb-window 5: 5x5) is the fixed-onset
+    template LS amplitude at the seed time (MFReconstructor.amp_at; no
+    threshold, no positivity cut) and replaces that module's mf hits by one
+    hit (E, t_seed).  Off by default; defaults unchanged.
+
+  Per-module time offsets (--time-calib).  Subtracts the per-module offset
+    from hycal_time_offsets/time_calib.json from every peak time before the
+    pre-window cut and the clustering time (as the C++ replay does).
+
   All beam energies.  Thresholds, bin width, histogram range and
   --target-peak default from Ebeam (kE = Ebeam/2239.51, kS = sqrt(kE)):
   500·kE signal cut, 500..3500·kE range, 200·kE min seed energy, 20·kS MeV
@@ -63,15 +85,21 @@ Outputs:
   <out>_clusters.tsv      — per-event table (--write-cluster-tsv)
   <out>_lms.tsv / _lms.png — per-batch LMS factor summary (png: not for off)
   <out>_window.tsv        — per-module elastic-window table
-                            (--calibrate --cal-method elastic-window)
+                            (--calibrate --cal-method elastic-window /
+                            percrystal)
+  <out>_gains.tsv         — per-crystal gain table (--cal-method percrystal)
+  <out>_dump.npz          — calibration-pool cluster dump (--cluster-dump)
 """
 
 from __future__ import annotations
 
 import argparse
 import bisect
+import functools
+import json
 import math
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, field
@@ -119,6 +147,8 @@ RUN_TARGET = {**{r: 'H2' for r in (24386, 24503, 24512, 24578, 24590,
                                    25320)},
               25308: 'C',
               **{r: 'Ta' for r in (25800, 26138, 26230)}}
+
+X17_RUNS = (25800, 26138, 26230)   # mf: per-run template table (--mf-templates auto)
 
 E_REF = 2239.51                      # reference beam energy (MeV) of the
                                      # default (2.24 GeV) thresholds/shapes
@@ -393,7 +423,7 @@ def fit_elastic_window_gains(events, *, ebeam, hycal_z, m_target, inner_r,
         return {}, np.array([]), np.array([]), 0, [], nan, nan, nan
 
     per_mod = {}
-    for sid, x, y, row, col, _se, ce, feff in pool:
+    for sid, x, y, row, col, _se, ce, feff, *_ in pool:
         d = per_mod.setdefault(sid, dict(x=x, y=y, row=row, col=col,
                                          ce=[], ce_nolms=[]))
         d['ce'].append(ce)
@@ -531,6 +561,36 @@ def resolve_lms_path(arg, run_num):
     db = os.environ.get("PRAD2_DATABASE_DIR") or _repo_database_dir()
     return os.path.join(db, "gain_factor", "gain_correction",
                         f"prad_{run_num:06d}_gain_corr.root")
+
+
+def resolve_time_calib_path(arg):
+    """--time-calib value -> time_calib.json path, or None for 'off'.
+    'auto' = <PRAD2_DATABASE_DIR>/hycal_time_offsets/time_calib.json
+    (repo database/ without the env var)."""
+    if arg == 'off':
+        return None
+    if arg != 'auto':
+        return arg
+    db = os.environ.get("PRAD2_DATABASE_DIR") or _repo_database_dir()
+    return os.path.join(db, "hycal_time_offsets", "time_calib.json")
+
+
+def load_time_offsets(path, hycal):
+    """time_calib.json -> (list of offsets [ns] indexed by Module.index,
+    n modules with a resolved offset).  Unresolved / unlisted modules keep 0."""
+    with open(path) as fh:
+        entries = json.load(fh)["modules"]
+    off = [0.0] * hycal.module_count()
+    n = 0
+    for e in entries:
+        if not e.get("resolved"):
+            continue
+        m = hycal.module_by_id(int(e["module_id"]))
+        if m is None:
+            continue
+        off[m.index] = float(e["offset_ns"])
+        n += 1
+    return off, n
 
 
 def _require_uproot():
@@ -856,6 +916,441 @@ def check_calib_file(calib, explicit, ebeam):
     sys.exit(2)
 
 
+class MFBlock:
+    """Block-batched mf pulse reconstruction for the event loop (--pulse-method mf).
+
+    collect() runs the per-channel WaveAnalyzer only for non-PbWO4 channels
+    (and for PbWO4 channels when the dump or --mf-ped-floor needs it) and copies
+    PbWO4 samples into a block buffer; flush() reconstructs the whole block in
+    one batched pass and then replays the buffered events through the same
+    pre-window / add_hit logic as the rawsum path, in the original channel order.
+    """
+
+    DUMP_WAVE_PER_MODULE = 200
+    DUMP_WAVE_MIN_AMP = 50.0
+
+    def __init__(self, p, rec, bank, mf_pulse, *, kappa, ped_floor, overflow,
+                 t_off, pre_lo, pre_hi, cl_legacy, cl_new, finish_event,
+                 dump, pwo4_flags, count_pulses=False, block=256, nb=None):
+        self.p, self.rec, self.bank, self.mfp = p, rec, bank, mf_pulse
+        self.nb = nb       # seed-time neighbour amplitudes (dict) or None
+        self.kappa, self.ped_floor, self.overflow = kappa, ped_floor, overflow
+        self.t_off, self.pre_lo, self.pre_hi = t_off, pre_lo, pre_hi
+        self.cl_legacy, self.cl_new = cl_legacy, cl_new
+        self.finish_event = finish_event
+        self.count_pulses = count_pulses
+        self.dump = dump
+        self.pwo4 = pwo4_flags
+        self.need_wa = bool(dump) or ped_floor
+        self.block = block
+        self.ns = None
+        self.cap = 0
+        self.stats = dict(n_cand=0, n_peaks=0, n_multi=0, n_joint=0, n_sat=0,
+                          n_sat_fallback=0)
+        self.n_chan = 0
+        self.n_odd = 0
+        self.nbs = dict(n_events=0, n_replaced=0, n_fallback=0, n_skipped_legacy=0,
+                        n_skipped_new=0, n_seed_flip=0, n_nosingle=0,
+                        n_glass_seed=0, n_norow=0, sumE_empty=0.0, n_empty=0)
+        self.nb_chunks = []
+        self._reset_rows()
+        # dump state
+        self.chunks = []
+        self.wave_chunks = []
+        self.dump_n = 0
+        self.wave_count = {}
+        self.n_wave = 0
+
+    def _reset_rows(self):
+        self.nrow = 0
+        self.events = []
+        self.mods, self.fs, self.evn = [], [], []
+        self.wa = []          # per row: (ped_mean, ped_rms, [(t, integral, height, pos, ovf)])
+
+    def _alloc(self, ns):
+        self.ns = ns
+        self.cap = self.block * 256
+        self.Y = np.zeros((self.cap, ns), dtype=np.uint16)
+        self.mid = np.zeros(self.cap, dtype=np.int64)
+
+    def _grow(self):
+        self.cap *= 2
+        self.Y = np.concatenate([self.Y, np.zeros_like(self.Y)])
+        self.mid = np.concatenate([self.mid, np.zeros_like(self.mid)])
+
+    # ------------------------------------------------------------------
+    def collect(self, fadc_evt, evnum, fvec):
+        """Buffer one event; returns True when the block is full."""
+        p = self.p
+        recs = []
+        for ri in range(fadc_evt.nrocs):
+            roc = fadc_evt.roc(ri)
+            if not roc.present:
+                continue
+            crate = p.crate_map.get(roc.tag)
+            if crate is None:
+                continue
+            for s in roc.present_slots():
+                slot = roc.slot(s)
+                for c in slot.present_channels():
+                    mod = p.hycal.module_by_daq(crate, s, c)
+                    if mod is None or not mod.is_hycal():
+                        continue
+                    cd = slot.channel(c)
+                    if cd.nsamples <= 0:
+                        continue
+                    f = fvec[mod.index]
+                    if self.pwo4[mod.index]:
+                        if self.ns is None:
+                            self._alloc(cd.nsamples)
+                        if cd.nsamples == self.ns:
+                            if self.nrow >= self.cap:
+                                self._grow()
+                            r = self.nrow
+                            samp = cd.samples
+                            self.Y[r] = samp
+                            self.mid[r] = mod.index
+                            self.mods.append(mod)
+                            self.fs.append(f)
+                            self.evn.append(evnum)
+                            if self.need_wa:
+                                pm, pr, pks = p.wave_ana.analyze(samp)
+                                self.wa.append((pm, pr, [
+                                    (pk.time, pk.integral, pk.height, pk.pos,
+                                     bool(pk.overflow)) for pk in pks]))
+                            recs.append((mod, f, None, r))
+                            self.nrow += 1
+                            self.n_chan += 1
+                            continue
+                        self.n_odd += 1      # unexpected sample count: WaveAnalyzer
+                    _, _, peaks = p.wave_ana.analyze(cd.samples)
+                    recs.append((mod, f, [(pk.time, pk.integral) for pk in peaks],
+                                 -1))
+        self.events.append((evnum, fvec, recs))
+        return len(self.events) >= self.block
+
+    # ------------------------------------------------------------------
+    def _event_hits(self, recs, wafb, fb_peaks, starts, tl, el):
+        """Hit lists (module index, E_MeV, t) of one event: (legacy, new, npd)."""
+        pre_lo, pre_hi, t_off = self.pre_lo, self.pre_hi, self.t_off
+        hl, hn = [], []
+        npd = {} if self.count_pulses else None
+        for mod, f, plist, r in recs:
+            if r >= 0:
+                if wafb[r]:
+                    plist = fb_peaks[r]
+                else:
+                    a, b = starts[r], starts[r + 1]
+                    plist = list(zip(tl[a:b], el[a:b]))
+            if npd is not None:
+                npd[mod.index] = len(plist)
+            toff = t_off[mod.index] if t_off else 0.0
+            best_int, best_t, found = -1.0, 0.0, False
+            for tm, eu in plist:
+                t = tm - toff
+                if t <= pre_lo or t >= pre_hi:
+                    continue
+                hn.append((mod.index, mod.energize(eu * f), float(t)))
+                if eu > best_int:
+                    best_int, best_t, found = eu, t, True
+            if found:
+                hl.append((mod.index, mod.energize(best_int * f), float(best_t)))
+        return hl, hn, npd
+
+    def _replay_nb(self, res, el, tl, starts, wafb, fb_peaks):
+        """flush replay with seed-time-constrained neighbour amplitudes.
+
+        Pass 1: per event and path, cluster the plain mf hits and, for a path
+        with exactly one cluster above signal_min and a PbWO4 seed, collect the
+        neighbours (3x3 / 5x5 minus the seed) that have a clean waveform row.
+        One batched amp_at over the block.  Pass 2: replace the neighbours' hits
+        by the single constrained hit (E, t_seed), cluster, accumulate.
+        """
+        nb, st, bank = self.nb, self.nbs, self.bank
+        cls = (self.cl_legacy, self.cl_new)
+        t_off, pre_lo, pre_hi = self.t_off, self.pre_lo, self.pre_hi
+        emin = nb['emin']
+        # ---- pass 1
+        evs = []
+        rq = dict(ev=[], path=[], seed=[], mod=[], row=[], ts=[], ring=[])
+        for k, (evnum, fvec, recs) in enumerate(self.events):
+            hl, hn, npd = self._event_hits(recs, wafb, fb_peaks, starts, tl, el)
+            rowmap = {mod.index: r for mod, f, plist, r in recs if r >= 0}
+            hits = (hl, hn)
+            sel = [None, None]
+            for q in (0, 1):
+                cl = cls[q]
+                cl.clear()
+                for h in hits[q]:
+                    cl.add_hit(*h)
+                cl.form_clusters()
+                big = [r for r in cl.reconstruct_matched()
+                       if r.hit.energy > nb['signal_min']]
+                if len(big) != 1:
+                    st['n_skipped_legacy' if q == 0 else 'n_skipped_new'] += 1
+                    continue
+                c = big[0].cluster.center
+                nbr = nb['nbr'].get(c.index)
+                if nbr is None:
+                    st['n_glass_seed'] += 1
+                    continue
+                st['n_events'] += 1
+                sel[q] = (c.index, c.time)
+                for i, ring in nbr:
+                    r = rowmap.get(i)
+                    if r is None:
+                        st['n_norow'] += 1
+                        continue
+                    if wafb[r] or self.res_clipped[r]:
+                        st['n_fallback'] += 1
+                        continue
+                    rq['ev'].append(k)
+                    rq['path'].append(q)
+                    rq['seed'].append(c.index)
+                    rq['mod'].append(i)
+                    rq['row'].append(r)
+                    rq['ts'].append(c.time)
+                    rq['ring'].append(ring)
+            cl_l, cl_n = cls
+            cl_l.clear()
+            cl_n.clear()
+            evs.append((evnum, fvec, npd, hits, sel))
+        # ---- batched amplitudes
+        nq = len(rq['ev'])
+        if nq:
+            rows = np.asarray(rq['row'], dtype=np.int64)
+            m = np.asarray(rq['mod'], dtype=np.int64)
+            toff = np.asarray([t_off[i] for i in rq['mod']], dtype=np.float64)
+            t0 = np.asarray(rq['ts'], dtype=np.float64) + toff - bank.t50[m]
+            y = self.Y[rows].astype(np.float32) - res.ped[rows][:, None]
+            sg = res.sigma[rows]
+            if nb['time'] == 'search':
+                offs = np.array([-2.0, -1.0, 0.0, 1.0, 2.0])
+                t5 = (t0[:, None] + offs[None, :])
+                A5, s5 = self.rec.amp_at(np.repeat(y, 5, axis=0),
+                                         np.repeat(m, 5), t5.ravel(),
+                                         sigma=np.repeat(sg, 5))
+                A5 = A5.reshape(nq, 5)
+                kk = np.argmax(A5, axis=1)
+                ar = np.arange(nq)
+                A = A5[ar, kk]
+                sA = s5.reshape(nq, 5)[ar, kk]
+                t0 = t5[ar, kk]
+            else:
+                A, sA = self.rec.amp_at(y, m, t0, sigma=sg)
+            Eu = (A.astype(np.float64) * bank.iint(m, t0) * self.kappa).tolist()
+        # ---- per-request energies and free-fit bookkeeping
+        by_evq = {}
+        for j in range(nq):
+            by_evq.setdefault((rq['ev'][j], rq['path'][j]), []).append(j)
+        hycal_mods = nb['mods']
+        E = [0.0] * nq
+        free = [None] * nq        # (A_free, E_free, dt_free) or None
+        for j in range(nq):
+            k = rq['ev'][j]
+            fvec = evs[k][1]
+            i = rq['mod'][j]
+            E[j] = hycal_mods[i].energize(Eu[j] * fvec[i])
+            r = rq['row'][j]
+            a, b = starts[r], starts[r + 1]
+            bi, bt = -1, 0.0
+            bu = -1.0
+            for u in range(a, b):
+                t = tl[u] - t_off[i]
+                if pre_lo < t < pre_hi and el[u] > bu:
+                    bu, bi, bt = el[u], u, t
+            if bi >= 0:
+                free[j] = (float(res.p_amp[bi]),
+                           hycal_mods[i].energize(bu * fvec[i]),
+                           bt - rq['ts'][j])
+            else:
+                st['sumE_empty'] += E[j]
+                st['n_empty'] += 1
+        st['n_replaced'] += nq
+        # ---- pass 2
+        for k, (evnum, fvec, npd, hits, sel) in enumerate(evs):
+            new_h = []
+            for q in (0, 1):
+                h = hits[q]
+                js = by_evq.get((k, q))
+                if js:
+                    rep = {rq['mod'][j] for j in js}
+                    h = [x for x in h if x[0] not in rep]
+                    ts = rq['ts'][js[0]]
+                    h.extend((rq['mod'][j], E[j], float(ts)) for j in js
+                             if E[j] >= emin)
+                new_h.append(h)
+            cl_l, cl_n = cls
+            cl_l.clear()
+            cl_n.clear()
+            for x in new_h[0]:
+                cl_l.add_hit(*x)
+            for x in new_h[1]:
+                cl_n.add_hit(*x)
+            big = self.finish_event(fvec, npd, evnum)
+            for q in (0, 1):
+                if sel[q] is None:
+                    continue
+                if len(big[q]) != 1:
+                    st['n_nosingle'] += 1
+                elif big[q][0].cluster.center.index != sel[q][0]:
+                    st['n_seed_flip'] += 1
+        if self.dump:
+            nan = float('nan')
+            self.nb_chunks.append(dict(
+                nb_event=np.asarray([self.events[k][0] for k in rq['ev']],
+                                    dtype=np.int64),
+                nb_path=np.asarray(rq['path'], dtype=np.int8),
+                nb_seed=np.asarray(rq['seed'], dtype=np.int32),
+                nb_midx=np.asarray(rq['mod'], dtype=np.int32),
+                nb_ring=np.asarray(rq['ring'], dtype=np.int8),
+                nb_A=np.asarray(A, dtype=np.float64) if nq else np.zeros(0),
+                nb_sigmaA=np.asarray(sA, dtype=np.float64) if nq else np.zeros(0),
+                nb_E_MeV=np.asarray(E, dtype=np.float64),
+                nb_has_free=np.asarray([f is not None for f in free], dtype=bool),
+                nb_A_free=np.asarray([f[0] if f else nan for f in free]),
+                nb_E_free_MeV=np.asarray([f[1] if f else nan for f in free]),
+                nb_dt_free=np.asarray([f[2] if f else nan for f in free]),
+                nb_t0=np.asarray(t0, dtype=np.float64) if nq else np.zeros(0)))
+
+    def flush(self):
+        if not self.events:
+            return
+        n = self.nrow
+        res = None
+        wafb, starts, tl, el, fb_peaks = [], [], [], [], {}
+        if n:
+            res = self.rec.run(self.Y[:n], self.mid[:n], self.overflow)
+            self.res_clipped = res.clipped
+            for k, v in res.stats.items():
+                self.stats[k] += v
+            mids = self.mid[:n]
+            pc = res.p_ch
+            ped_p = (np.array([self.wa[r][1] for r in range(n)])[pc]
+                     if self.ped_floor else None)
+            Eu = self.mfp.pulse_energy_units(self.bank, mids[pc], res.p_t0,
+                                             res.p_amp, self.kappa, ped_p)
+            starts = np.searchsorted(pc, np.arange(n + 1)).tolist()
+            tl = res.p_time.tolist()
+            el = Eu.tolist()
+            wafb = res.wa_fb.tolist()
+            for r in np.nonzero(res.wa_fb)[0].tolist():
+                if self.need_wa:
+                    fb_peaks[r] = [(t, e) for t, e, *_ in self.wa[r][2]]
+                else:
+                    _, _, pks = self.p.wave_ana.analyze(self.Y[r])
+                    fb_peaks[r] = [(pk.time, pk.integral) for pk in pks]
+        cl_l, cl_n = self.cl_legacy, self.cl_new
+        if self.nb is not None and n:
+            self._replay_nb(res, el, tl, starts, wafb, fb_peaks)
+        else:
+            for evnum, fvec, recs in self.events:
+                hl, hn, npd = self._event_hits(recs, wafb, fb_peaks, starts,
+                                               tl, el)
+                cl_l.clear()
+                cl_n.clear()
+                for h in hl:
+                    cl_l.add_hit(*h)
+                for h in hn:
+                    cl_n.add_hit(*h)
+                self.finish_event(fvec, npd, evnum)
+        if self.dump and n:
+            self._dump_block(res, el, tl, starts, wafb)
+        self._reset_rows()
+
+    # ------------------------------------------------------------------
+    def _dump_block(self, res, el, tl, starts, wafb):
+        n = self.nrow
+        cols = {k: [] for k in ("event", "midx", "method", "time_ns", "E_units",
+                                "E_MeV", "amp", "chi2dof", "npk", "clipped",
+                                "onset", "ped_rms", "sigma_raw", "wa_fallback",
+                                "f_lms")}
+        nan = float('nan')
+
+        def put(*vals):
+            for k, v in zip(cols, vals):
+                cols[k].append(v)
+
+        for r in range(n):                          # rawsum rows
+            mod, f, ev = self.mods[r], self.fs[r], self.evn[r]
+            prms = self.wa[r][1]
+            pks = self.wa[r][2]
+            for t, e, h, pos, ovf in pks:
+                put(ev, mod.index, 0, t, e, mod.energize(e * f), h, nan,
+                    len(pks), ovf, float(pos), prms, nan, False, f)
+        pcl = res.p_chi2.tolist()
+        pam = res.p_amp.tolist()
+        pon = res.p_onset.tolist()
+        wave_rows, wave_src = [], []
+        for r in range(n):                          # mf rows
+            mod, f, ev = self.mods[r], self.fs[r], self.evn[r]
+            prms = self.wa[r][1]
+            sg = float(res.sigma[r])
+            clip = bool(res.clipped[r])
+            if wafb[r]:
+                pks = self.wa[r][2]
+                for t, e, h, pos, ovf in pks:
+                    put(ev, mod.index, 1, t, e, mod.energize(e * f), h, nan,
+                        len(pks), clip, float(pos), prms, sg, True, f)
+                continue
+            a, b = starts[r], starts[r + 1]
+            for i in range(a, b):
+                put(ev, mod.index, 1, tl[i], el[i], mod.energize(el[i] * f),
+                    pam[i], pcl[i], b - a, clip, pon[i], prms, sg, False, f)
+            if (b - a == 1 and not clip and pam[a] >= self.DUMP_WAVE_MIN_AMP
+                    and self.wave_count.get(mod.index, 0)
+                    < self.DUMP_WAVE_PER_MODULE):
+                self.wave_count[mod.index] = self.wave_count.get(mod.index, 0) + 1
+                wave_rows.append(self.dump_n + len(cols["event"]) - 1)
+                wave_src.append(r)
+        dt = dict(event=np.int64, midx=np.int32, method=np.int8,
+                  time_ns=np.float64, E_units=np.float64, E_MeV=np.float64,
+                  amp=np.float64, chi2dof=np.float64, npk=np.int16,
+                  clipped=bool, onset=np.float64, ped_rms=np.float32,
+                  sigma_raw=np.float64, wa_fallback=bool, f_lms=np.float64)
+        self.chunks.append({k: np.asarray(v, dtype=dt[k]) for k, v in cols.items()})
+        self.dump_n += len(cols["event"])
+        if wave_src:
+            ws = np.asarray(wave_src)
+            self.wave_chunks.append((
+                self.Y[ws].copy(),
+                np.array([self.wa[r][0] for r in wave_src], dtype=np.float32),
+                res.sigma[ws].astype(np.float32),
+                np.asarray(wave_rows, dtype=np.int64)))
+            self.n_wave += len(wave_src)
+
+    def write_dump(self, path, hycal, run):
+        bank = self.bank
+        names = np.array([hycal.module(i).name
+                          for i in range(hycal.module_count())])
+        out = {}
+        if self.chunks:
+            for k in self.chunks[0]:
+                out[k] = np.concatenate([c[k] for c in self.chunks])
+        if self.wave_chunks:
+            out["wave"] = np.concatenate([w[0] for w in self.wave_chunks])
+            out["wave_ped"] = np.concatenate([w[1] for w in self.wave_chunks])
+            out["wave_sigma"] = np.concatenate([w[2] for w in self.wave_chunks])
+            out["wave_row"] = np.concatenate([w[3] for w in self.wave_chunks])
+        pw = bank.pwo4
+        for k, v in (("tau_r", bank.tau_r), ("tau_f", bank.tau_f),
+                     ("I_int_mean", bank.I_mean), ("t50", bank.t50),
+                     ("template_area", bank.area)):
+            out[k] = np.where(pw, v, np.nan)
+        if self.nb is not None:
+            for k in ("nb_event", "nb_path", "nb_seed", "nb_midx", "nb_ring",
+                      "nb_A", "nb_sigmaA", "nb_E_MeV", "nb_has_free",
+                      "nb_A_free", "nb_E_free_MeV", "nb_dt_free", "nb_t0"):
+                out[k] = (np.concatenate([c[k] for c in self.nb_chunks])
+                          if self.nb_chunks else np.zeros(0))
+        out["module_names"] = names
+        out["run"] = np.array(run)
+        out["int_tail_ratio"] = np.array(bank.int_tail_ratio)
+        out["kappa"] = np.array(self.kappa)
+        np.savez_compressed(path, **out)
+        return self.dump_n, self.n_wave
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__.split("\n\n")[0],
@@ -904,7 +1399,8 @@ def main(argv=None):
                          "16 19 removes the 4x4 PbWO4 block surrounding the "
                          "beam hole, where leakage biases the per-module mean).")
     ap.add_argument("--cal-method",
-                    choices=['elastic-window', 'cb-peak', 'median'],
+                    choices=['elastic-window', 'cb-peak', 'median',
+                             'percrystal'],
                     default='elastic-window',
                     help="Per-module gain refinement: 'elastic-window' "
                          "(default; CB pre-fit, fixed ±--window-nsigma window, "
@@ -914,7 +1410,13 @@ def main(argv=None):
                          "peak per module, robust against the tail; falls "
                          "back to a narrow-window Gaussian and then the "
                          "histogram argmax for low-statistics modules).  "
-                         "median / cb-peak use --target-peak, 2 iterations.")
+                         "median / cb-peak use --target-peak, 2 iterations.  "
+                         "'percrystal' = one gain per cluster-member module "
+                         "(regularised member-level least squares inside the "
+                         "elastic windows, iterated; percrystal_calib.py), "
+                         "E_cal = sum g_i E_i; same target / kinematics rules "
+                         "as elastic-window; writes <out>_gains.tsv and the "
+                         "window table of the final pass.")
     ap.add_argument("--target", choices=['H2', 'C', 'Ta'], default=None,
                     help="Elastic target for elastic-window (H2 = e-p, C / Ta "
                          "= e-nucleus recoil kinematics).  Default: from the "
@@ -934,6 +1436,13 @@ def main(argv=None):
                     help="LMS normalisation: 'first-batch' = A_b/A_0 "
                          "(in-run drift only, default) or 'ref-run' = the "
                          "stored scale, as the C++ replay.")
+    ap.add_argument("--time-calib", default='off', metavar="{off,auto,PATH}",
+                    help="Per-module peak-time offsets: 'auto' = "
+                         "$PRAD2_DATABASE_DIR/hycal_time_offsets/"
+                         "time_calib.json, 'off' = none (default), or an "
+                         "explicit file.  The offset is subtracted before "
+                         "the pre-window cut.  A missing file is an error "
+                         "(exit 2).")
     ap.add_argument("--write-cluster-tsv", action="store_true",
                     help="Write <out_path>_clusters.tsv with one row per "
                          "accepted single-cluster event (columns: event_num, "
@@ -942,6 +1451,94 @@ def main(argv=None):
                          "cluster_E_raw_MeV, cluster_E_cal_MeV).  Requires "
                          "--calibrate (the event lists are only populated in "
                          "that mode).")
+    ap.add_argument("--gain-file", default=None, metavar="PATH",
+                    help="Per-crystal gain table (percrystal_calib.py output, "
+                         "<out>_gains.tsv or fit gains_<run>_<half>.tsv).  "
+                         "Replaces every cluster energy of the calibration "
+                         "event lists by sum_i g_i E_i (modules missing from "
+                         "the table get the table's g0) before the "
+                         "--cal-method refinement; seed energies, the pool "
+                         "selection and the headline spectrum are unchanged. "
+                         "Requires --calibrate.")
+    ap.add_argument("--cluster-dump", default=None, metavar="{PATH,auto}",
+                    help="Write the legacy-path calibration pool (single "
+                         "cluster, seed r < --inner-radius, seed E >= "
+                         "--min-seed-energy; the --exclude-rowcol rectangle "
+                         "is not applied) with its cluster members to an NPZ "
+                         "for percrystal_calib.py fit.  'auto' = "
+                         "<out_path>_dump.npz.  Requires --calibrate and a "
+                         "resolvable elastic target.")
+    ap.add_argument("--pulse-method", choices=['rawsum', 'mf'], default='rawsum',
+                    help="Pulse reconstruction for PbWO4 channels: 'rawsum' "
+                         "(default; WaveAnalyzer peaks, output unchanged) or "
+                         "'mf' (matched filter with per-module h50 templates, "
+                         "mf_pulse.py).  The --mf-* flags and --pulse-dump are "
+                         "ignored with rawsum.")
+    ap.add_argument("--mf-templates", default="auto", metavar="{auto,PATH}",
+                    help="mf template table: 'auto' (default) = output/"
+                         "pulse_templates_x17_combined_h50.dat (column 27000 = "
+                         "25800+26138+26230 combined) for "
+                         "the X17 runs 25800/26138/26230, else output/"
+                         "pulse_templates_h50.dat (column 25320), next to this "
+                         "script; or an explicit path.  A missing file is an "
+                         "error (exit 2).")
+    ap.add_argument("--mf-template-column", default="auto", metavar="RUN",
+                    help="mf: run column of the template table (default auto: "
+                         "X17 runs (25800, 26138, 26230) default to "
+                         "pulse_templates_x17_combined_h50.dat (column 27000), "
+                         "else 25320 if the table has it, "
+                         "else its last column).")
+    ap.add_argument("--single-pulse", choices=['off', 'seed', 'cluster'],
+                    default='off',
+                    help="Keep a single-cluster event only if its seed module "
+                         "('seed') or every cluster member module ('cluster') "
+                         "has exactly one pulse in its full readout (no time "
+                         "cut; rawsum: WaveAnalyzer peaks, mf: mf pulses).  "
+                         "Applied per path before the fits; default off.")
+    ap.add_argument("--mf-nsigma", type=float, default=5.0,
+                    help="mf: primary detection threshold in matched-filter "
+                         "sigma units (default 5).")
+    ap.add_argument("--mf-min-amp", type=float, default=5.0,
+                    help="mf: minimum accepted amplitude, ADC (default 5).")
+    ap.add_argument("--mf-kmax", type=int, default=4,
+                    help="mf: maximum pulses per channel (default 4).")
+    ap.add_argument("--mf-r-model", type=float, default=0.3,
+                    help="mf: a secondary under an accepted pulse's kernel "
+                         "span needs A >= r_model * A_parent (default 0.3, "
+                         "plan_20261022 Round 3 step 1).")
+    ap.add_argument("--mf-scale", type=float, default=1.010,
+                    help="mf: global energy scale kappa, E_units = A * I_int "
+                         "* kappa (default 1.010 = 1/V6 at r_model 0.3, "
+                         "plan_20261022 Round 3 step 1).")
+    ap.add_argument("--mf-int-tail-ratio", type=float, default=None,
+                    help="mf: integration cut fraction of the template peak "
+                         "(default: int_tail_ratio of the loaded wave config).")
+    ap.add_argument("--mf-ped-floor", action="store_true",
+                    help="mf: also apply the ped_rms floor in the integration "
+                         "walk (per pulse, with the channel's WaveAnalyzer "
+                         "ped_rms and the fitted amplitude); default off.")
+    ap.add_argument("--pulse-dump", default=None, metavar="PATH",
+                    help="mf only: write an NPZ with one row per PbWO4 pulse for "
+                         "both methods (rawsum WaveAnalyzer and mf) on the "
+                         "processed physics events, plus raw waveforms of "
+                         "isolated mf pulses.  Use with --max-events.")
+    ap.add_argument("--mf-nb-amp", choices=['off', 'seedtime'], default='off',
+                    help="mf: seed-time-constrained neighbour amplitudes "
+                         "(plan_20261023 section 5).  Per path, in events with "
+                         "exactly one cluster above --signal-min, every PbWO4 "
+                         "module of the seed's neighbourhood (excluding the "
+                         "seed) gets the fixed-onset template amplitude at the "
+                         "seed time (offset-corrected, no threshold) as one "
+                         "hit (E, t_seed), replacing its mf hits.  Needs "
+                         "--pulse-method mf and --time-calib; excludes "
+                         "--mf-ped-floor.  Default off (output unchanged).")
+    ap.add_argument("--mf-nb-window", type=int, choices=[3, 5], default=3,
+                    help="--mf-nb-amp: neighbourhood size, 3 = 3x3 (default), "
+                         "5 = 5x5 around the seed.")
+    ap.add_argument("--mf-nb-time", choices=['fixed', 'search'], default='fixed',
+                    help="--mf-nb-amp: onset at the seed time (fixed, default) "
+                         "or the largest amplitude over onset shifts of "
+                         "-2..+2 ns (search).")
     args = ap.parse_args(argv)
 
     if args.write_cluster_tsv and not args.calibrate:
@@ -951,18 +1548,95 @@ def main(argv=None):
         )
         sys.exit(2)
 
+    if (args.cal_method == 'percrystal' or args.gain_file
+            or args.cluster_dump) and not args.calibrate:
+        sys.stderr.write(
+            "[ERROR] --cal-method percrystal, --gain-file and --cluster-dump "
+            "require --calibrate (the event lists are only populated in that "
+            "mode).\n")
+        sys.exit(2)
+    if args.cal_method == 'percrystal' and args.write_cluster_tsv:
+        sys.stderr.write(
+            "[ERROR] --write-cluster-tsv is not supported with --cal-method "
+            "percrystal (the table is per module, not per seed).\n")
+        sys.exit(2)
+    if args.gain_file and not os.path.isfile(args.gain_file):
+        sys.stderr.write(f"[ERROR] --gain-file not found: {args.gain_file}\n")
+        sys.exit(2)
+    if args.gain_file and args.cal_method == 'percrystal':
+        sys.stderr.write("[ERROR] --gain-file with --cal-method percrystal is not "
+                         "supported (the table rescales cluster_E, not the members)\n")
+        sys.exit(2)
+    rec_ext = bool(args.calibrate and (args.cal_method == 'percrystal'
+                                       or args.gain_file or args.cluster_dump))
+
     run_for_lms = (args.run_num if args.run_num > 0
                    else C.extract_run_number(args.evio_path))
     target = args.target or RUN_TARGET.get(run_for_lms)
-    if args.calibrate and args.cal_method == 'elastic-window' and target is None:
+    if args.calibrate and target is None and (
+            args.cal_method in ('elastic-window', 'percrystal')
+            or args.cluster_dump):
+        need = (args.cal_method if args.cal_method in ('elastic-window',
+                                                       'percrystal')
+                else 'the cluster dump')
         sys.stderr.write(
-            f"[ERROR] elastic-window needs the elastic target: run "
+            f"[ERROR] {need} needs the elastic target: run "
             f"{run_for_lms} is not in RUN_TARGET and --target was not given.\n"
             f"        Pass --target {{H2,C,Ta}} (or use --cal-method "
             f"cb-peak / median).\n")
         sys.exit(2)
     m_target = TARGET_MASS[target] if target else None
     kin_label = ('ep' if target == 'H2' else 'eA') if target else 'n/a'
+    time_calib_path = resolve_time_calib_path(args.time_calib)
+    if time_calib_path is not None and not os.path.isfile(time_calib_path):
+        sys.stderr.write(f"[ERROR] time calibration file not found: "
+                         f"{time_calib_path}\n"
+                         "        Re-run with --time-calib off (or "
+                         "--time-calib PATH).\n")
+        sys.exit(2)
+    use_mf = args.pulse_method == 'mf'
+    use_nb = args.mf_nb_amp == 'seedtime'
+    if use_nb and not use_mf:
+        print("[WARN] --mf-nb-amp seedtime needs --pulse-method mf; ignored.",
+              flush=True)
+        use_nb = False
+    if use_nb and time_calib_path is None:
+        sys.stderr.write("[ERROR] --mf-nb-amp seedtime needs per-module time "
+                         "offsets: pass --time-calib auto (or PATH).\n")
+        sys.exit(2)
+    if use_nb and args.mf_ped_floor:
+        sys.stderr.write("[ERROR] --mf-nb-amp seedtime does not support "
+                         "--mf-ped-floor.\n")
+        sys.exit(2)
+    mf_path = None
+    mf_column = None
+    if use_mf:
+        import mf_pulse
+        x17 = run_for_lms in X17_RUNS
+        if args.mf_templates in (None, "auto"):
+            if run_for_lms <= 0:
+                sys.stderr.write("[ERROR] --mf-templates auto: cannot determine "
+                                 "the run number; pass --run-num or "
+                                 "--mf-templates PATH.\n")
+                sys.exit(2)
+            mf_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "output",
+                "pulse_templates_x17_combined_h50.dat" if x17
+                else "pulse_templates_h50.dat")
+        else:
+            mf_path = args.mf_templates
+        if not os.path.isfile(mf_path):
+            sys.stderr.write(f"[ERROR] mf template table not found: {mf_path}\n"
+                             "        Pass --mf-templates PATH or use "
+                             "--pulse-method rawsum.\n")
+            sys.exit(2)
+        try:
+            mf_column = mf_pulse.resolve_column(
+                mf_path, args.mf_template_column,
+                prefer="27000" if x17 else "25320")
+        except ValueError as exc:
+            sys.stderr.write(f"[ERROR] mf template table: {exc}\n")
+            sys.exit(2)
     lms_path = resolve_lms_path(args.lms_corr, run_for_lms)
     if lms_path is not None:
         if args.lms_corr == 'auto' and run_for_lms <= 0:
@@ -1040,11 +1714,73 @@ def main(argv=None):
     print(f"[setup] seed window : ±{W} ns (new method only)", flush=True)
     print(f"[setup] signal cut  : single cluster E > {args.signal_min:.0f} MeV",
           flush=True)
+    if time_calib_path is not None:
+        t_off, n_t_off = load_time_offsets(time_calib_path, p.hycal)
+    else:
+        t_off, n_t_off = None, 0
+    print(f"[setup] time calib  : {time_calib_path or 'off'}  "
+          f"({n_t_off} modules with offset)", flush=True)
     lms = load_lms_gain_corr(lms_path, p.hycal, args.lms_ref)
     print(f"[setup] LMS corr    : {lms.path}  ({lms.n_batches} batch(es), "
           f"ref {args.lms_ref})", flush=True)
     lms_tag = "LMS: off" if lms_path is None else "LMS: on"
     n_ev_per_batch = [0] * lms.n_batches
+
+    mf_bank = mf_info = mf_rec = None
+    if use_mf:
+        hy_mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
+        mf_pwo4 = [bool(m_.is_pwo4()) for m_ in hy_mods]
+        wcfg = p.wave_ana.cfg
+        try:
+            mf_bank, mf_info = mf_pulse.build_bank(
+                [m_.name for m_ in hy_mods], mf_pwo4, mf_path,
+                dict(smooth_order=int(wcfg.smooth_order),
+                     int_tail_ratio=float(wcfg.int_tail_ratio),
+                     tail_break_n=int(wcfg.tail_break_n)),
+                column=mf_column, int_tail_ratio=args.mf_int_tail_ratio)
+        except (OSError, ValueError, KeyError) as exc:
+            sys.stderr.write(f"[ERROR] mf template table {mf_path}: {exc}\n")
+            sys.exit(2)
+        mf_rec = mf_pulse.MFReconstructor(
+            mf_bank, nsigma=args.mf_nsigma, min_amp=args.mf_min_amp,
+            kmax=args.mf_kmax, r_model=args.mf_r_model,
+            ped_nsamples=int(wcfg.ped_nsamples))
+        print(f"[setup] pulse method: mf  templates {mf_path} (column "
+              f"{mf_info['column']}, aggregate {mf_info['agg_json']})  "
+              f"{mf_info['n_module']} from file, {len(mf_info['fallback'])} "
+              f"fallback ({','.join(mf_info['fallback']) or 'none'})  "
+              f"int_tail_ratio {mf_info['int_tail_ratio']:g}  "
+              f"tail_break_n {mf_info['tail_break_n']}  "
+              f"ped_floor {int(args.mf_ped_floor)}  kappa {args.mf_scale:g}",
+              flush=True)
+    elif args.pulse_dump:
+        print("[WARN] --pulse-dump needs --pulse-method mf; ignored.", flush=True)
+
+    nb_cfg = None
+    if use_nb:
+        rad = args.mf_nb_window // 2
+        pw_idx = {}
+        for i_, m_ in enumerate(hy_mods):
+            if mf_pwo4[i_] and not (m_.flag >> 5) & 1:     # bit 5 = kDeadModule
+                pw_idx[(m_.sector, m_.row, m_.column)] = i_
+        nbr = {}
+        for (sec, r_, c_), i_ in pw_idx.items():
+            lst = []
+            for dr in range(-rad, rad + 1):
+                for dc in range(-rad, rad + 1):
+                    j_ = pw_idx.get((sec, r_ + dr, c_ + dc))
+                    if j_ is None or (dr == 0 and dc == 0):
+                        continue
+                    ad, ac = abs(dr), abs(dc)
+                    ring = 1 if ad + ac == 1 else (2 if max(ad, ac) == 1 else 3)
+                    lst.append((j_, ring))
+            nbr[i_] = lst
+        nb_cfg = dict(nbr=nbr, mods=hy_mods, time=args.mf_nb_time,
+                      emin=float(p.hc_clusterer.get_config().min_module_energy),
+                      signal_min=args.signal_min)
+        print(f"[setup] mf seed-time neighbours: window {args.mf_nb_window}x"
+              f"{args.mf_nb_window}  time {args.mf_nb_time}  "
+              f"E_min {nb_cfg['emin']:g} MeV", flush=True)
 
     # Two clusterers sharing the geometry; differ only in seed_time_window.
     base_cfg = p.hc_clusterer.get_config()
@@ -1064,12 +1800,110 @@ def main(argv=None):
     # Bulk: single-cluster energies for the bulk Gaussian fit.
     # Per-event: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff) —
     # populated only when --calibrate is set, so the memory cost is opt-in.
+    # With --cal-method percrystal / --gain-file / --cluster-dump (rec_ext)
+    # the tuple is extended by (members_idx, members_E, x_cl, y_cl, evnum).
     energies_legacy, energies_new = [], []
     events_legacy,   events_new   = [], []
     n_legacy = n_new = n_phys = n_kept = n_read = n_files_open = 0
+    ncl_l = [0, 0, 0]       # events with 0 / 1 / >=2 clusters > signal-min
+    ncl_n = [0, 0, 0]
+    n_same_seed = 0
+    dE_frac_sum = 0.0
+
+    sp_mode = args.single_pulse
+    sp_tot = [0, 0]      # single-cluster events per path before the cut (legacy, new)
+    sp_keep = [0, 0]     # ... kept by --single-pulse
+
+    def sp_pass(r, npulse):
+        """--single-pulse: seed module / every cluster member has exactly 1 pulse."""
+        if sp_mode == 'seed':
+            return npulse.get(r.cluster.center.index, 0) == 1
+        return all(npulse.get(h.index, 0) == 1 for h in r.cluster.hits)
+
+    # sum(members_E) vs r.hit.energy: [n, violations, max relative deviation]
+    ident = {'legacy': [0, 0, 0.0], 'new': [0, 0, 0.0]}
+
+    def member_rec(r, evnum, lab):
+        """Extension of the per-event tuple (rec_ext) + identity check."""
+        hits = r.cluster.hits
+        mi = np.fromiter((h.index for h in hits), np.int32, len(hits))
+        me = np.fromiter((h.energy for h in hits), np.float64, len(hits))
+        e = r.hit.energy
+        dev = abs(float(me.sum()) - e)
+        st = ident[lab]
+        st[0] += 1
+        if dev > 1e-6 * abs(e) + 1e-6:
+            st[1] += 1
+        st[2] = max(st[2], dev / abs(e) if e else 0.0)
+        return (mi, me, r.hit.x, r.hit.y, evnum)
+
+    def finish_event(fvec, npulse=None, evnum=-1):
+        """Cluster the buffered hits of one event and accumulate the energies.
+
+        npulse: module index -> pulses in its full readout (--single-pulse).
+        evnum: TI event number (only recorded with rec_ext)."""
+        nonlocal n_legacy, n_new, n_same_seed, dE_frac_sum
+        cl_legacy.form_clusters()
+        cl_new.form_clusters()
+        # reconstruct_matched gives us seed energy + center
+        # module without a second lookup; needed only by the
+        # --calibrate branch but cheap enough to use always.
+        rec_l = cl_legacy.reconstruct_matched()
+        rec_n = cl_new.reconstruct_matched()
+        big_l = [r for r in rec_l if r.hit.energy > args.signal_min]
+        big_n = [r for r in rec_n if r.hit.energy > args.signal_min]
+        ncl_l[min(len(big_l), 2)] += 1
+        ncl_n[min(len(big_n), 2)] += 1
+        if (len(big_l) == 1 and len(big_n) == 1
+                and big_l[0].hit.center_id == big_n[0].hit.center_id):
+            n_same_seed += 1
+            dE_frac_sum += (big_n[0].hit.energy
+                            / big_l[0].hit.energy - 1.0)
+        if len(big_l) == 1:
+            r = big_l[0]
+            sp_tot[0] += 1
+            if sp_mode == 'off' or sp_pass(r, npulse):
+                sp_keep[0] += 1
+                n_legacy += 1
+                energies_legacy.append(r.hit.energy)
+                if args.calibrate:
+                    sm = p.hycal.module_by_id(r.hit.center_id)
+                    events_legacy.append((r.hit.center_id, sm.x, sm.y,
+                                          sm.row, sm.column,
+                                          r.cluster.center.energy,
+                                          r.hit.energy,
+                                          cluster_lms_feff(r.cluster, fvec))
+                                         + (member_rec(r, evnum, 'legacy')
+                                            if rec_ext else ()))
+        if len(big_n) == 1:
+            r = big_n[0]
+            sp_tot[1] += 1
+            if sp_mode == 'off' or sp_pass(r, npulse):
+                sp_keep[1] += 1
+                n_new += 1
+                energies_new.append(r.hit.energy)
+                if args.calibrate:
+                    sm = p.hycal.module_by_id(r.hit.center_id)
+                    events_new.append((r.hit.center_id, sm.x, sm.y,
+                                       sm.row, sm.column,
+                                       r.cluster.center.energy,
+                                       r.hit.energy,
+                                       cluster_lms_feff(r.cluster, fvec))
+                                      + (member_rec(r, evnum, 'new')
+                                         if rec_ext else ()))
+        return big_l, big_n
 
     ch = dec.EvChannel()
     ch.set_config(p.cfg)
+
+    mf_block = None
+    if use_mf:
+        mf_block = MFBlock(
+            p, mf_rec, mf_bank, mf_pulse, kappa=args.mf_scale,
+            ped_floor=args.mf_ped_floor, overflow=int(p.wave_ana.cfg.overflow),
+            t_off=t_off, pre_lo=pre_lo, pre_hi=pre_hi, cl_legacy=cl_legacy,
+            cl_new=cl_new, finish_event=finish_event, dump=args.pulse_dump,
+            pwo4_flags=mf_pwo4, count_pulses=(sp_mode != 'off'), nb=nb_cfg)
 
     t0 = time.monotonic()
     try:
@@ -1104,8 +1938,18 @@ def main(argv=None):
                     fvec = lms.factors_list[b]
                     n_ev_per_batch[b] += 1
 
+                    if mf_block is not None:
+                        if mf_block.collect(fadc_evt,
+                                            int(fadc_evt.info.event_number),
+                                            fvec):
+                            mf_block.flush()
+                        if args.max_events > 0 and n_phys >= args.max_events:
+                            done = True; break
+                        continue
+
                     cl_legacy.clear()
                     cl_new.clear()
+                    cur_np = {} if sp_mode != 'off' else None
 
                     # One waveform pass; both clusterers consume the same peaks.
                     for ri in range(fadc_evt.nrocs):
@@ -1125,55 +1969,32 @@ def main(argv=None):
                                 if cd.nsamples <= 0:
                                     continue
                                 _, _, peaks = p.wave_ana.analyze(cd.samples)
+                                if cur_np is not None:
+                                    cur_np[mod.index] = len(peaks)
                                 f = fvec[mod.index]
+                                toff = t_off[mod.index] if t_off else 0.0
 
                                 best_int  = -1.0
                                 best_pk   = None
+                                best_t    = 0.0
                                 for pk in peaks:
-                                    if pk.time <= pre_lo or pk.time >= pre_hi:
+                                    t = pk.time - toff
+                                    if t <= pre_lo or t >= pre_hi:
                                         continue
                                     cl_new.add_hit(mod.index,
                                                    mod.energize(pk.integral * f),
-                                                   float(pk.time))
+                                                   float(t))
                                     if pk.integral > best_int:
                                         best_int = pk.integral
                                         best_pk  = pk
+                                        best_t   = t
                                 if best_pk is not None:
                                     cl_legacy.add_hit(mod.index,
                                                       mod.energize(best_pk.integral * f),
-                                                      float(best_pk.time))
+                                                      float(best_t))
 
-                    cl_legacy.form_clusters()
-                    cl_new.form_clusters()
-                    # reconstruct_matched gives us seed energy + center
-                    # module without a second lookup; needed only by the
-                    # --calibrate branch but cheap enough to use always.
-                    rec_l = cl_legacy.reconstruct_matched()
-                    rec_n = cl_new.reconstruct_matched()
-                    big_l = [r for r in rec_l if r.hit.energy > args.signal_min]
-                    big_n = [r for r in rec_n if r.hit.energy > args.signal_min]
-                    if len(big_l) == 1:
-                        r = big_l[0]
-                        n_legacy += 1
-                        energies_legacy.append(r.hit.energy)
-                        if args.calibrate:
-                            sm = p.hycal.module_by_id(r.hit.center_id)
-                            events_legacy.append((r.hit.center_id, sm.x, sm.y,
-                                                  sm.row, sm.column,
-                                                  r.cluster.center.energy,
-                                                  r.hit.energy,
-                                                  cluster_lms_feff(r.cluster, fvec)))
-                    if len(big_n) == 1:
-                        r = big_n[0]
-                        n_new += 1
-                        energies_new.append(r.hit.energy)
-                        if args.calibrate:
-                            sm = p.hycal.module_by_id(r.hit.center_id)
-                            events_new.append((r.hit.center_id, sm.x, sm.y,
-                                               sm.row, sm.column,
-                                               r.cluster.center.energy,
-                                               r.hit.energy,
-                                               cluster_lms_feff(r.cluster, fvec)))
+                    finish_event(fvec, cur_np,
+                                 int(fadc_evt.info.event_number))
 
                     if args.max_events > 0 and n_phys >= args.max_events:
                         done = True; break
@@ -1189,8 +2010,22 @@ def main(argv=None):
             ch.close()
             if done:
                 break
+        if mf_block is not None:
+            mf_block.flush()
     finally:
         elapsed = time.monotonic() - t0
+
+    if mf_block is not None:
+        _st = mf_block.stats
+        print(f"[mf] PbWO4 channels {mf_block.n_chan}  ({mf_block.n_chan / max(n_kept, 1):.1f}/event)  "
+              f"candidates {_st['n_cand']}  pulses {_st['n_peaks']}  "
+              f"multi {_st['n_multi']}  joint {_st['n_joint']}  "
+              f"sat {_st['n_sat']}  sat_fallback {_st['n_sat_fallback']}  "
+              f"odd-length {mf_block.n_odd}", flush=True)
+        if args.pulse_dump:
+            _nr, _nw = mf_block.write_dump(args.pulse_dump, p.hycal, run_for_lms)
+            print(f"[mf] pulse dump {args.pulse_dump}: {_nr} rows, {_nw} waveforms",
+                  flush=True)
 
     # ---- summary + Gaussian fits ------------------------------------------
     e_lo, e_hi = args.e_range
@@ -1220,6 +2055,12 @@ def main(argv=None):
     else:
         print("  (scipy not available — fit skipped)")
 
+    dE_frac_mean = dE_frac_sum / n_same_seed if n_same_seed else float('nan')
+    print(f"  clusters > cut  : legacy n0/n1/n2+ = {ncl_l[0]}/{ncl_l[1]}/{ncl_l[2]}"
+          f"   gated {ncl_n[0]}/{ncl_n[1]}/{ncl_n[2]}")
+    print(f"  paired same seed: {n_same_seed}  mean dE/E (gated/legacy - 1) "
+          f"{dE_frac_mean:.6f}")
+
     # ---- LMS summary (stdout) ----------------------------------------------
     touched = [bi for bi in range(lms.n_batches) if n_ev_per_batch[bi] > 0]
     print()
@@ -1235,16 +2076,129 @@ def main(argv=None):
         print(f"    uncorrected     : {len(unc)} module(s)"
               + (f"  {unc[:10]}" if unc else ""))
 
+    # ---- member records: identity check, cluster dump, gain file -----------
+    PCC = None
+    if rec_ext:
+        import percrystal_calib as PCC
+        print()
+        for lab in ('legacy', 'new'):
+            n_i, v_i, m_i = ident[lab]
+            print(f"  member identity {lab:<6}: {n_i} events, {v_i} violations "
+                  f"(|sum E_i - E_cluster| > 1e-6 rel + 1e-6 MeV), max rel dev "
+                  f"{m_i:.2e}", flush=True)
+            if v_i:
+                print(f"[WARN] member identity violated on {v_i}/{n_i} {lab} "
+                      f"events (max rel dev {m_i:.2e}); per-crystal gains "
+                      f"are inconsistent with the cluster energy.", flush=True)
+    dump_info = None
+    if args.cluster_dump:
+        base_out = (args.out_path[:-4] if args.out_path.endswith('.tsv')
+                    else args.out_path)
+        dump_path = (base_out + "_dump.npz" if args.cluster_dump == 'auto'
+                     else args.cluster_dump)
+        pool_d = _select_pool(events_legacy, inner_r=args.inner_radius,
+                              min_seed_E=args.min_seed_energy,
+                              exclude_rowcol=None)
+        hycal_z_ = float(p.geo.hycal_z)
+        sid_info = {}
+        for sid in {e[0] for e in pool_d}:
+            sm_ = p.hycal.module_by_id(sid)
+            sid_info[sid] = (sm_.index, sm_.size_x, sm_.size_y)
+        nd = len(pool_d)
+        th = np.array([module_theta_deg(e[1], e[2], hycal_z_) for e in pool_d])
+        cnt = np.array([len(e[8]) for e in pool_d], dtype=np.int64)
+        ptr_d = np.zeros(nd + 1, np.int64)
+        np.cumsum(cnt, out=ptr_d[1:])
+        n_mod_all = p.hycal.module_count()
+        mods_all = [p.hycal.module(i) for i in range(n_mod_all)]
+        calfile_sha = (PCC.file_sha1(calib_file) if os.path.isfile(calib_file)
+                       else None)
+        first_file = p.evio_files[0] if len(p.evio_files) else args.evio_path
+        m_sp = re.search(r"\.evio\.0*(\d+)", os.path.basename(str(first_file)))
+        dump_hdr = dict(
+            schema=1, run=int(run_for_lms),
+            split=int(m_sp.group(1)) if m_sp else -1,
+            evio=str(first_file), evio_files=[str(x) for x in p.evio_files],
+            argv=list(sys.argv[1:] if argv is None else argv),
+            calibration_file=calib_file, calibration_sha1=calfile_sha,
+            pulse_method=args.pulse_method, ebeam=ebeam, hycal_z=hycal_z_,
+            m_target=m_target, target=target, kE=kE, kS=kS,
+            bin_width=args.bin_width, window_nsigma=args.window_nsigma,
+            min_per_module=args.min_per_module,
+            inner_radius=args.inner_radius,
+            min_seed_energy=args.min_seed_energy, signal_min=args.signal_min,
+            exclude_rowcol=(list(args.exclude_rowcol) if args.exclude_rowcol
+                            else None),
+            pre_window=[pre_lo, pre_hi], seed_time_window=W,
+            lms_corr=lms.path, time_calib=time_calib_path,
+            max_events=args.max_events, n_pool=nd)
+        if use_mf:
+            dump_hdr['mf'] = dict(templates=mf_path, sha1=mf_info['sha1'],
+                                  column=mf_info['column'], kappa=args.mf_scale,
+                                  r_model=args.mf_r_model)
+        arrs = dict(
+            evnum=np.array([e[12] for e in pool_d], dtype=np.int64),
+            seed_idx=np.array([sid_info[e[0]][0] for e in pool_d], dtype=np.int32),
+            row=np.array([e[3] for e in pool_d], dtype=np.int32),
+            col=np.array([e[4] for e in pool_d], dtype=np.int32),
+            E_cluster=np.array([e[6] for e in pool_d]),
+            E_seed=np.array([e[5] for e in pool_d]),
+            x_cl=np.array([e[10] for e in pool_d]),
+            y_cl=np.array([e[11] for e in pool_d]),
+            x_seed=np.array([e[1] for e in pool_d]),
+            y_seed=np.array([e[2] for e in pool_d]),
+            size_x=np.array([sid_info[e[0]][1] for e in pool_d]),
+            size_y=np.array([sid_info[e[0]][2] for e in pool_d]),
+            theta_deg=th,
+            eprime_MeV=np.array([expected_energy_elastic(t_, ebeam, m_target)
+                                 for t_ in th]),
+            emoller_MeV=np.array([expected_energy_ee(t_, ebeam) for t_ in th]),
+            f_lms=np.array([e[7] for e in pool_d]),
+            ptr=ptr_d,
+            midx=(np.concatenate([e[8] for e in pool_d]).astype(np.int32)
+                  if nd else np.zeros(0, np.int32)),
+            E=(np.concatenate([e[9] for e in pool_d]).astype(np.float32)
+               if nd else np.zeros(0, np.float32)),
+            mod_index=np.arange(n_mod_all, dtype=np.int32),
+            mod_id=np.array([m_.id for m_ in mods_all], dtype=np.int32),
+            mod_name=np.array([m_.name for m_ in mods_all]),
+            mod_row=np.array([m_.row for m_ in mods_all], dtype=np.int32),
+            mod_col=np.array([m_.column for m_ in mods_all], dtype=np.int32),
+            header=np.array(json.dumps(dump_hdr)))
+        with open(dump_path, "wb") as fdump:
+            np.savez_compressed(fdump, **arrs)
+        dump_info = (dump_path, nd, os.path.getsize(dump_path))
+        print(f"  cluster dump    : {dump_path}  ({nd} pool events, "
+              f"{dump_info[2] / 1e6:.1f} MB)", flush=True)
+    gain_info = None
+    if args.gain_file:
+        gtab, gtab_g0 = PCC.read_gain_table(args.gain_file)
+        gtab_sha = PCC.file_sha1(args.gain_file)
+        garr = np.full(max(p.hycal.module_count(), max(gtab) + 1), gtab_g0)
+        for i_, g_ in gtab.items():
+            garr[i_] = g_
+        for evs_ in (events_legacy, events_new):
+            for k_, t_ in enumerate(evs_):
+                evs_[k_] = (t_[:6] + (float(np.dot(garr[t_[8]], t_[9])), t_[7])
+                            + t_[8:])
+        gain_info = (args.gain_file, gtab_sha, len(gtab), gtab_g0)
+        print(f"  gain file       : {args.gain_file}  ({len(gtab)} modules, "
+              f"g0 {gtab_g0:.4f}, sha1 {gtab_sha[:12]})  applied to the "
+              f"calibration event lists", flush=True)
+
     # ---- Optional: per-seed-module calibration on the inner ring ----------
     cal = None
     rows_by_path = {}
     eprime_by_path, sigma_glob_by_path, mu_global_by_path = {}, {}, {}
     target_ref = args.target_peak
+    peak_yield = None
+    pcm = bool(args.calibrate and args.cal_method == 'percrystal')
+    pc_res, pc_ecal, pc_modinfo = {}, {}, {}
     if args.calibrate:
         ew = args.cal_method == 'elastic-window'
         print()
         print(f"  --calibrate mode  : target μ = "
-              + ("E'(θ_M) per module (elastic-window)" if ew
+              + (f"E'(θ_M) per module ({args.cal_method})" if (ew or pcm)
                  else f"{args.target_peak:.1f} MeV")
               + f", inner r < {args.inner_radius:.0f} mm,")
         print(f"                      seed E ≥ {args.min_seed_energy:.0f} MeV, "
@@ -1255,7 +2209,7 @@ def main(argv=None):
             print(f"                      exclude rows {excl[0]}..{excl[1]} "
                   f"AND cols {excl[2]}..{excl[3]}")
         print(f"                      per-module reference: {args.cal_method}")
-        if ew:
+        if ew or pcm:
             ew_kw = dict(ebeam=float(p.geo.Ebeam), hycal_z=float(p.geo.hycal_z),
                          m_target=m_target, escale=kS, kE=kE,
                          inner_r=args.inner_radius,
@@ -1266,10 +2220,52 @@ def main(argv=None):
                   f"hycal_z {ew_kw['hycal_z']:.1f} mm, window ±"
                   f"{args.window_nsigma:g}σ, target {target} ({kin_label}, "
                   f"M {m_target:.1f} MeV)")
-            gains_l, raw_l, corr_l, nmod_l, rows_l, sg_l, ep_l, mg_l = \
-                fit_elastic_window_gains(events_legacy, **ew_kw)
-            gains_n, raw_n, corr_n, nmod_n, rows_n, sg_n, ep_n, mg_n = \
-                fit_elastic_window_gains(events_new, **ew_kw)
+            if ew:
+                gains_l, raw_l, corr_l, nmod_l, rows_l, sg_l, ep_l, mg_l = \
+                    fit_elastic_window_gains(events_legacy, **ew_kw)
+                gains_n, raw_n, corr_n, nmod_n, rows_n, sg_n, ep_n, mg_n = \
+                    fit_elastic_window_gains(events_new, **ew_kw)
+            else:
+                # Per-crystal solver (percrystal_calib.py): the window
+                # machinery stays fit_elastic_window_gains, re-run on the
+                # current E_cal each iteration.  `gains` only marks the seed
+                # modules used in the final pass (value 1.0).
+                pc_modinfo = {}
+                for i2 in range(p.hycal.module_count()):
+                    m2 = p.hycal.module(i2)
+                    pc_modinfo[i2] = (m2.name, m2.row, m2.column)
+                window_fn = functools.partial(fit_elastic_window_gains, **ew_kw)
+                pc_out = {}
+                for lab, evs in (('legacy', events_legacy), ('new', events_new)):
+                    pool_c = _select_pool(evs, inner_r=args.inner_radius,
+                                          min_seed_E=args.min_seed_energy,
+                                          exclude_rowcol=excl)
+                    s2i = {sid: p.hycal.module_by_id(sid).index
+                           for sid in {e[0] for e in pool_c}}
+                    print(f"  percrystal {lab}: pool {len(pool_c)} events",
+                          flush=True)
+                    res = (PCC.solve(pool_c, window_fn, seed_to_idx=s2i,
+                                     verbose=True) if pool_c else None)
+                    pc_res[lab] = res
+                    if res is None:
+                        sys.stderr.write(f"[ERROR] percrystal ({lab}): window "
+                                         f"pass failed; skipping this path.\n")
+                        pc_out[lab] = ({}, np.array([]), np.array([]), 0, [],
+                                       float('nan'), float('nan'),
+                                       float('nan'))
+                        continue
+                    pc_ecal[lab] = res['ecal']
+                    used_ids = set(res['used_keys'].tolist())
+                    keep = np.array([e[0] in used_ids for e in pool_c])
+                    pc_out[lab] = ({sid: 1.0 for sid in used_ids},
+                                   np.array([e[6] for e in pool_c])[keep],
+                                   res['ecal'][keep], len(used_ids),
+                                   res['rows'], res['sigma_glob'],
+                                   res['eprime_mean'], res['mu_global'])
+                gains_l, raw_l, corr_l, nmod_l, rows_l, sg_l, ep_l, mg_l = \
+                    pc_out['legacy']
+                gains_n, raw_n, corr_n, nmod_n, rows_n, sg_n, ep_n, mg_n = \
+                    pc_out['new']
             rows_by_path = {'legacy': rows_l, 'new': rows_n}
             eprime_by_path = {'legacy': ep_l, 'new': ep_n}
             sigma_glob_by_path = {'legacy': sg_l, 'new': sg_n}
@@ -1341,6 +2337,33 @@ def main(argv=None):
         sigE_l_g,      sigE_n_g      = _ratio(sig_l_post, mu_l_post),         _ratio(sig_n_post, mu_n_post)
         sigE_l_cb_post, sigE_n_cb_post = _ratio(sig_cb_l_post, mu_cb_l_post), _ratio(sig_cb_n_post, mu_cb_n_post)
         sigE_l_cb_pre,  sigE_n_cb_pre  = _ratio(sig_cb_l_pre,  mu_cb_l_pre),  _ratio(sig_cb_n_pre,  mu_cb_n_pre)
+        # Peak yield: pool events within +-2.5 s_ref of the module's target
+        # after refinement, on the modules calibrated in both paths.
+        s_ref = sigE_l_g
+        common = set(gains_l) & set(gains_n)
+        tgt_m = {r['module']: r['target'] for r in rows_l} if (ew or pcm) else {}
+        py_n = {}
+        for lab, evs, gns in (('legacy', events_legacy, gains_l),
+                              ('new', events_new, gains_n)):
+            n_in = 0
+            if math.isfinite(s_ref) and s_ref > 0:
+                pool = _select_pool(evs, inner_r=args.inner_radius,
+                                    min_seed_E=args.min_seed_energy,
+                                    exclude_rowcol=excl)
+                for k_pool, e in enumerate(pool):
+                    sid = e[0]
+                    if sid not in common:
+                        continue
+                    t_m = tgt_m[sid] if (ew or pcm) else args.target_peak
+                    e_cal = pc_ecal[lab][k_pool] if pcm else e[6] * gns[sid]
+                    if abs(e_cal / t_m - 1.0) <= 2.5 * s_ref:
+                        n_in += 1
+            py_n[lab] = n_in
+        peak_yield = (s_ref, len(common), py_n['legacy'], py_n['new'])
+        print()
+        print(f"  peak yield ±2.5σ: legacy {py_n['legacy']}  gated {py_n['new']}  "
+              f"({len(common)} common modules, s_ref {s_ref:.6f})")
+
         # Keep old names as aliases for backward-compat downstream (if used)
         sigE_l_cb, sigE_n_cb = sigE_l_cb_post, sigE_n_cb_post
         print()
@@ -1364,9 +2387,9 @@ def main(argv=None):
         print(f"  σ_E / E (CB pr) | {sigE_l_cb_pre*100:>12.2f}% | {sigE_n_cb_pre*100:>12.2f}%  "
               f"(Δ = {(sigE_n_cb_pre - sigE_l_cb_pre)*100:+.2f} pp)")
 
-        if ew:
+        if ew or pcm:
             print()
-            print(f"  elastic-window    : window ±{args.window_nsigma:g}σ, "
+            print(f"  {args.cal_method:<17} : window ±{args.window_nsigma:g}σ, "
                   f"in-window min/module {args.min_per_module}, "
                   f"target mean {target_ref:.1f} MeV")
             for label, rws in rows_by_path.items():
@@ -1388,6 +2411,20 @@ def main(argv=None):
                     print(f"            pooled in-window fraction "
                           f"{n_in / n_tot:.3f} with LMS, "
                           f"{n_nl / n_tot:.3f} without")
+
+        if pcm:
+            print()
+            for lab, res in pc_res.items():
+                if res is None:
+                    continue
+                gfree = res['g'][res['prior_frac'] < PCC.FREE_FRAC]
+                print(f"  percrystal {lab:<6}: iterations {res['iterations']} "
+                      f"converged {res['converged']}  modules {len(res['g'])} "
+                      f"(free {res['n_free']}, prior-dominated "
+                      f"{res['n_prior']})  g0 {res['g0']:.4f}  g(free) mean "
+                      f"{gfree.mean():.4f} sd {gfree.std():.4f}  selected "
+                      f"events {res['n_sel']}  max|dg| history "
+                      + ",".join(f"{h:.1e}" for h in res['history']))
 
     # ---- Optional: per-event cluster TSV ------------------------------------
     if args.write_cluster_tsv and cal is not None:
@@ -1424,8 +2461,44 @@ def main(argv=None):
         f.write("# benchmark_hycal_timing\n")
         f.write(f"# evio_path={args.evio_path} max_events={args.max_events}\n")
         f.write(f"# pre_window=[{pre_lo},{pre_hi}] ns  seed_time_window={W} ns\n")
+        f.write(f"# time_calib={time_calib_path or 'off'} n_offsets={n_t_off}\n")
         f.write(f"# selection: single cluster E > {args.signal_min} MeV\n")
         f.write(f"# n_phys={n_phys} n_kept={n_kept} elapsed_s={elapsed:.1f}\n")
+        if mf_block is not None:
+            _st = mf_block.stats
+            f.write(f"# pulse_method=mf templates={mf_path} "
+                    f"sha1={mf_info['sha1']} column={mf_info['column']} "
+                    f"n_module={mf_info['n_module']} "
+                    f"n_fallback={len(mf_info['fallback'])} "
+                    f"fallback={','.join(mf_info['fallback']) or 'none'} "
+                    f"int_tail_ratio={mf_info['int_tail_ratio']:g} "
+                    f"tail_break_n={mf_info['tail_break_n']} "
+                    f"ped_floor={int(args.mf_ped_floor)} kappa={args.mf_scale:g} "
+                    f"nsigma={args.mf_nsigma:g} min_amp={args.mf_min_amp:g} "
+                    f"kmax={args.mf_kmax} r_model={args.mf_r_model:g}\n")
+            f.write(f"# mf_stats n_cand={_st['n_cand']} n_peaks={_st['n_peaks']} "
+                    f"n_multi={_st['n_multi']} n_joint={_st['n_joint']} "
+                    f"n_sat={_st['n_sat']} n_sat_fallback={_st['n_sat_fallback']}\n")
+            if nb_cfg is not None:
+                _nb = mf_block.nbs
+                f.write(f"# mf_nb window={args.mf_nb_window} "
+                        f"time={args.mf_nb_time} offsets={time_calib_path} "
+                        f"n_events={_nb['n_events']} "
+                        f"n_replaced={_nb['n_replaced']} "
+                        f"n_fallback={_nb['n_fallback']} "
+                        f"n_skipped_legacy={_nb['n_skipped_legacy']} "
+                        f"n_skipped_new={_nb['n_skipped_new']} "
+                        f"n_seed_flip={_nb['n_seed_flip']} "
+                        f"mean_E_empty_MeV="
+                        f"{_nb['sumE_empty'] / max(_nb['n_empty'], 1):.4f} "
+                        f"n_empty={_nb['n_empty']} "
+                        f"n_nosingle={_nb['n_nosingle']} "
+                        f"n_glass_seed={_nb['n_glass_seed']} "
+                        f"n_norow={_nb['n_norow']}\n")
+        if sp_mode != 'off':
+            f.write(f"# single_pulse={sp_mode} legacy_kept={sp_keep[0]} "
+                    f"legacy_total={sp_tot[0]} new_kept={sp_keep[1]} "
+                    f"new_total={sp_tot[1]}\n")
         f.write(f"# lms_corr={lms.path} lms_ref={args.lms_ref} "
                 f"batches_touched={','.join(map(str, touched))} n_uncorrected_module_batches="
                 f"{sum(lms.n_uncorrected(bi) for bi in touched)}\n")
@@ -1448,6 +2521,33 @@ def main(argv=None):
             f.write("# window_mu_global " + " ".join(
                 f"{lab}={mg:.2f}MeV(offset={(mg / eprime_by_path[lab] - 1) * 100:+.2f}%)"
                 for lab, mg in mu_global_by_path.items()) + "\n")
+        if rec_ext:
+            f.write("# member_identity " + " ".join(
+                f"{lab}_n={ident[lab][0]} {lab}_viol={ident[lab][1]} "
+                f"{lab}_maxrel={ident[lab][2]:.3e}"
+                for lab in ('legacy', 'new')) + "\n")
+        for lab, res in pc_res.items():
+            if res is None:
+                f.write(f"# percrystal path={lab} failed\n")
+                continue
+            f.write(f"# percrystal path={lab} iterations={res['iterations']} "
+                    f"converged={int(res['converged'])} "
+                    f"n_free={res['n_free']} n_prior={res['n_prior']} "
+                    f"g0={res['g0']:.6f} n_sel_events={res['n_sel']}\n")
+        if gain_info is not None:
+            f.write(f"# gain_file={gain_info[0]} sha1={gain_info[1]} "
+                    f"n_modules={gain_info[2]} g0={gain_info[3]:.6f}\n")
+        if dump_info is not None:
+            f.write(f"# cluster_dump={dump_info[0]} n_rows={dump_info[1]}\n")
+        f.write(f"# cluster_counts legacy n0={ncl_l[0]} n1={ncl_l[1]} "
+                f"n2plus={ncl_l[2]} new n0={ncl_n[0]} n1={ncl_n[1]} "
+                f"n2plus={ncl_n[2]}\n")
+        f.write(f"# paired n_same_seed={n_same_seed} "
+                f"dE_frac_mean={dE_frac_mean:.6f}\n")
+        if peak_yield is not None:
+            f.write(f"# peak_yield nsigma=2.5 s_ref={peak_yield[0]:.6f} "
+                    f"modules_common={peak_yield[1]} legacy={peak_yield[2]} "
+                    f"new={peak_yield[3]}\n")
         f.write("\n")
         f.write("path\tn_events\tgauss_mu_MeV\tgauss_sigma_MeV\tn_in_fit\n")
         f.write(f"legacy\t{n_legacy}\t{mu_l:.2f}\t{sig_l:.2f}\t{nf_l}\n")
@@ -1527,6 +2627,13 @@ def main(argv=None):
                               target=target, label=kin_label, mass=m_target,
                               ebeam=ebeam))
         print(f"  wrote: {win_tsv}")
+    if pcm and pc_res:
+        gains_tsv = base_path + "_gains.tsv"
+        PCC.write_gain_table(gains_tsv, pc_res, pc_modinfo, extra_header=[
+            f"evio={args.evio_path} target={target} ebeam={ebeam:.2f} "
+            f"calib_file={calib_file} pulse_method={args.pulse_method} "
+            f"exclude_rowcol={excl}"])
+        print(f"  wrote: {gains_tsv}")
 
     # ---- Headline plot (safe-guard against matplotlib crashes) -------------
     png_path = args.out_path if args.out_path.endswith('.png') \
