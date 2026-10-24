@@ -566,7 +566,6 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
             if (!mod || !mod->is_pwo4()) continue;
 
             float gain = gain_corr.ModuleGain(mod->id, run_cfg.gain_ref_pmt);
-            if (gain <= 0.f || gain == 1.f) gain = in->gain_factor[j];
 
             float time_offset = mod->time_offset;
 
@@ -616,7 +615,7 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
 
         if (fdec::test_bit(hits[0].flag, fdec::kDeadModule)) continue;
         //if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue;
-        
+
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         const auto [xd, yd] = mod->cell_offset<float>(hits[0].x, hits[0].y);
         if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && central_region

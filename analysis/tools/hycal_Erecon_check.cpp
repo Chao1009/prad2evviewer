@@ -504,8 +504,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         if (!mod) continue;
         const int module_index = mod->id - 1001;
         if (module_index < 0 || module_index >= 1156) continue;
-        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
-        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y, true);
+        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
+        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
 
         const float theta = std::atan2(
             std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
