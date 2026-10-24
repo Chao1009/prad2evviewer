@@ -615,8 +615,8 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
         if (!mod || !mod->is_pwo4()) continue;
 
         if (fdec::test_bit(hits[0].flag, fdec::kDeadModule)) continue;
-        if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue;
-
+        //if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue;
+        
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         const auto [xd, yd] = mod->cell_offset<float>(hits[0].x, hits[0].y);
         if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) && central_region
