@@ -498,7 +498,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         gem_hit.y = event.mHit_gy[0][0];
 
         ApplyToHyCal(hc_hit, run_config);
-        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.5, 15.)) continue;
+        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
