@@ -23,10 +23,19 @@ Reconstruction (MFReconstructor.run), batched over any number of channels:
      window has < 6 unclipped samples or < 2 on the leading edge are flagged
      for a WaveAnalyzer fallback (done by the caller).
 
-Energy: E_units = A * I_int[m](phase) * kappa, where I_int is the WaveAnalyzer
+Banks: TemplateBank (two-tau, above) or SampledTemplateBank (per-module
+sampled shapes from a spline_templates_v1 .npz, via build_bank on a ".npz"
+path).  Both provide shape(m, t) / shape_and_slope(m, t), K, t50, t_pk, I_tab,
+iint, so MFReconstructor does not care which one it holds.
+
+Energy: E_units = A * I_int[m](phase) * kappa [* f(A)], where I_int is the WaveAnalyzer
 walk-out integral (WaveAnalyzer.cpp:391-462, smoothing :235) of the noiseless
 sample-aligned unit template, in the high-amplitude limit (cut = int_tail_ratio
 * smoothed peak, tail_break_n consecutive sub-cut samples end the walk).
+The sampled bank (iint_mode "continuous", default) uses the phase average of that
+walk-out over the continuous template (I_cont = I_mean; no sub-sample phase
+dependence; continuous_walk_integral is kept as the I_cont_walk diagnostic) and may
+carry a global amplitude factor f(A) (ampcorr keys of the .npz); see SampledTemplateBank.
 
     python3 mf_pulse.py --self-test
 """
@@ -143,6 +152,99 @@ def unit_integral(tr, tf, tm, u, smooth_order, ratio, nbreak, floor=None):
     return walk_integral(smooth_tri(s, smooth_order), ratio, nbreak, floor)
 
 
+def unit_integral_fn(shape_fn, u, smooth_order, ratio, nbreak, floor=None):
+    """unit_integral for any shape: shape_fn maps times [R, N] (ns) to values [R, N].
+
+    The caller closes over the row -> module mapping; u (and floor) are 1-D, length R.
+    """
+    tau = DT * (np.arange(_TBL_N) - _TBL_I0)[None, :] + np.asarray(u)[:, None]
+    return walk_integral(smooth_tri(shape_fn(tau), smooth_order), ratio, nbreak, floor)
+
+
+def _cont_smooth(shape_fn, smooth_order, dt, t_max, nrow):
+    """Continuous triangle-smoothed template on a fine grid: S[nrow, n].
+
+    S(t) = sum_j w_j s(t + DT j) / sum_j w_j, j = -(order-1)..(order-1),
+    w_j = 1 - |j|/(order+1) (smooth_tri); t = -DT (order-1) + dt i up to t_max.
+    s is evaluated once on an extended grid (DT / dt must be an integer).
+    """
+    q = int(round(DT / dt))
+    if abs(q * dt - DT) > 1e-9:
+        raise ValueError("dt must divide the 4 ns sample")
+    order = max(int(smooth_order), 1)
+    k = q * (order - 1)                       # index shift of the outermost term
+    n = int(round((t_max + DT * (order - 1)) / dt)) + 1
+    t = dt * (np.arange(n + 2 * k) - k) - DT * (order - 1)
+    s = np.asarray(shape_fn(np.broadcast_to(t, (nrow, t.size))), dtype=np.float64)
+    if order == 1:
+        return s
+    S = s[:, k:k + n].copy()
+    wsum = 1.0
+    for j in range(1, order):
+        w = 1.0 - j / float(order + 1)
+        S += w * (s[:, k - q * j:k - q * j + n] + s[:, k + q * j:k + q * j + n])
+        wsum += 2.0 * w
+    return S / wsum
+
+
+def _cont_walk(S, ratio, nbreak, floor, dt):
+    """Walk-out integral of the continuous smoothed rows S[R, n] -> (I, peak).
+
+    Continuous analogue of walk_integral: cut = max(ratio * peak, floor);
+    the kept region is the connected set around the peak where S >= cut, in
+    which a below-cut stretch (or S < 0) shorter than (nbreak - 0.5) DT is
+    bridged (kept, below-cut values included) and a stretch of at least that
+    length ends the walk on that side; a trailing stretch with nothing above
+    the cut after it is dropped.  The discrete rule ends the walk on nbreak
+    consecutive below-cut samples, i.e. on a stretch holding >= nbreak samples;
+    a stretch of length L holds nbreak samples with probability 0 for
+    L <= (nbreak - 1) DT and 1 for L >= nbreak DT, 1/2 at (nbreak - 0.5) DT,
+    so this is the phase average of that rule.  I = integral of S over the
+    kept region / DT (trapezoid on the dt grid): the phase average of the
+    discrete sample sum.  A cut above the peak gives I = peak (one sample).
+    """
+    R, n = S.shape
+    ar = np.arange(R)
+    pk = np.argmax(S, axis=1)
+    h = S[ar, pk]
+    cut = ratio * h
+    if floor is not None:
+        cut = np.maximum(cut, floor)
+    below = (S < cut[:, None]) | (S < 0.0)
+    Lp = max(1, int(round((max(1, int(nbreak)) - 0.5) * DT / dt)))
+    idx = np.arange(n, dtype=np.int32)[None, :]
+
+    def end(bel, p):
+        la = np.maximum.accumulate(np.where(bel, np.int32(-1), idx), axis=1)
+        hit = bel & ((idx - la) >= Lp) & (idx > p[:, None])
+        i1 = np.where(hit.any(axis=1), hit.argmax(axis=1), n - 1)
+        return np.clip(la[ar, i1], 0, n - 1)
+
+    r = end(below, pk)
+    l = (n - 1) - end(below[:, ::-1], (n - 1) - pk)
+    cs = np.cumsum(S, axis=1)
+    I = (cs[ar, r] - cs[ar, l] + 0.5 * (S[ar, l] - S[ar, r])) * (dt / DT)
+    return np.where(cut > h, h, I), h
+
+
+def continuous_walk_integral(shape_fn, smooth_order, ratio, nbreak, floor=None,
+                             dt=0.01, t_max=400.0, nrow=None):
+    """Walk-out I_int on the continuous smoothed template (no sub-sample phase).
+
+    shape_fn maps times [R, N] (ns after onset) to values [R, N] as for
+    unit_integral_fn; R = len(floor) if floor (unit-peak units, per row) is
+    given, else nrow.  Returns I[R]: the phase average of unit_integral_fn
+    (see _cont_walk for the continuous walk rule).  Keep R modest (~32): the
+    working arrays are R x (t_max + 4 (order-1)) / dt.
+    """
+    R = len(floor) if floor is not None else nrow
+    if R is None:
+        raise ValueError("give floor or nrow")
+    S = _cont_smooth(shape_fn, smooth_order, dt, t_max, R)
+    fl = None if floor is None else np.asarray(floor, dtype=np.float64)
+    return _cont_walk(S, ratio, nbreak, fl, dt)[0]
+
+
 # -------------------------------------------------------------- h50 loader --
 AGG_FALLBACK = (2.499476432800293, 24.406997680664062)
 
@@ -162,7 +264,12 @@ def table_columns(path):
 
 
 def resolve_column(path, column="auto", prefer="25320"):
-    """`column` as given, or `prefer` if the table has it, else its last column."""
+    """`column` as given, or `prefer` if the table has it, else its last column.
+
+    "sampled" for a spline_templates_v1 .npz (no run columns).
+    """
+    if str(path).endswith(".npz"):
+        return "sampled"
     if column not in (None, "auto"):
         return str(column)
     cols = table_columns(path)
@@ -258,8 +365,13 @@ def load_aggregate(json_path):
 class TemplateBank:
     """Per-module kernel bank, t50 and I_int tables (indexed by module index)."""
 
+    kind = "two_tau"
+
     def __init__(self, tau_r, tau_f, pwo4, *, smooth_order, int_tail_ratio,
                  tail_break_n, L=24):
+        self.names = None              # build_bank sets the module names
+        self.fallback = []             # names on the aggregate (build_bank)
+        self.T_end = 400.0             # ns, unused: the analytic shape has no end
         self.tau_r = np.asarray(tau_r, dtype=np.float64)
         self.tau_f = np.asarray(tau_f, dtype=np.float64)
         self.pwo4 = np.asarray(pwo4, dtype=bool)
@@ -292,6 +404,21 @@ class TemplateBank:
         fr = np.where(s1 > s0, (0.5 - s0) / np.maximum(s1 - s0, 1e-300), 0.0)
         self.t50 = g[ar, i0] + fr * (g[ar, i1] - g[ar, i0])
         self.build_iint(int_tail_ratio)
+
+    def shape(self, m, t, dtype=np.float32):
+        """Unit-peak shape at module index m, t ns after onset (m, t broadcast).
+
+        The module parameters are cast to `dtype` (float32 as the reconstructor
+        always did; float64 for the synthetic generator).
+        """
+        return template(t, self.tau_r[m].astype(dtype), self.tau_f[m].astype(dtype),
+                        self.tmx[m].astype(dtype))
+
+    def shape_and_slope(self, m, t, dtype=np.float32):
+        """(shape, d shape/dt); both 0 for t <= 0."""
+        return template_and_slope(t, self.tau_r[m].astype(dtype),
+                                  self.tau_f[m].astype(dtype),
+                                  self.tmx[m].astype(dtype))
 
     def build_iint(self, ratio):
         """I_int[m, phase-grid] (NIPH+1 points over one 4 ns sample)."""
@@ -326,14 +453,313 @@ class TemplateBank:
                              self.tail_break_n, floor=fl)
 
 
+_LUT_DT = 0.05                  # ns, lookup step of the sampled bank
+
+
+class _ClippedSpline:
+    """BSpline callable that holds its end value beyond the base interval."""
+
+    def __init__(self, spl):
+        self.spl = spl
+        self.tmax = float(spl.t[-spl.k - 1])
+
+    def __call__(self, x):
+        return self.spl(np.minimum(x, self.tmax))
+
+    def derivative(self):
+        return _ClippedSpline(self.spl.derivative())
+
+
+_CONT_DT, _CONT_TMAX, _CONT_CHUNK = 0.01, 400.0, 32   # continuous walk-out grid
+
+
+class SampledTemplateBank:
+    """TemplateBank interface on per-module sampled shapes (spline_templates_v1).
+
+    shape_rows: one entry per module (bank order) -- a callable f(t) of ns after
+    onset (unit peak; a `.derivative()` method gives the slope, else it is
+    differenced) or an array of values on t = 0, 0.05, ..., T_end.  Tables
+    lut/dlut[nm, n] (float32, step 0.05 ns) hold value and slope; shape() is
+    their linear interpolation, 0 outside (0, T_end).  Non-PbWO4 rows hold
+    whatever shape the caller gives them (from_npz: the average).
+
+    Energy integral: iint_mode "continuous" (default) takes I_cont[nm] = I_mean, the
+    phase average of the discrete walk-out over the continuous template (no
+    sub-sample phase dependence); "phase" keeps the 256-phase table I_tab.
+    I_tab and the strictly continuous walk I_cont_walk are kept as diagnostics.
+    ampcorr = (log A, f) (optional, from_npz) is a global amplitude-dependent
+    integral factor applied by pulse_energy_units through f_amp(amp).
+    """
+
+    kind = "sampled"
+
+    def __init__(self, shape_rows, names, pwo4, *, smooth_order, int_tail_ratio,
+                 tail_break_n, L=24, T_end=160.0, fallback=(), meta=None,
+                 iint_mode="continuous", ampcorr=None, ampcorr_meta=None):
+        if iint_mode not in ("continuous", "phase"):
+            raise ValueError(f"iint_mode must be 'continuous' or 'phase', got {iint_mode!r}")
+        self.iint_mode = iint_mode
+        if ampcorr is not None:
+            la, fa = (np.asarray(x, dtype=np.float64) for x in ampcorr)
+            if (la.ndim != 1 or la.size < 1 or la.shape != fa.shape
+                    or not (np.isfinite(la).all() and np.isfinite(fa).all())
+                    or (np.diff(la) <= 0).any()):
+                raise ValueError("ampcorr: need equal-length 1-D finite arrays, "
+                                 "log A strictly increasing")
+            ampcorr = (la, fa)
+        self.ampcorr = ampcorr
+        self.ampcorr_meta = dict(ampcorr_meta or {})
+        self.names = list(names)
+        self.pwo4 = np.asarray(pwo4, dtype=bool)
+        nm = len(self.names)
+        if len(shape_rows) != nm or self.pwo4.size != nm:
+            raise ValueError("shape_rows, names and pwo4 must have equal length")
+        self.L = L
+        self.smooth_order = int(smooth_order)
+        self.int_tail_ratio = float(int_tail_ratio)
+        self.tail_break_n = int(tail_break_n)
+        self.T_end = float(T_end)
+        self.fallback = list(fallback)
+        self.n_fallback = len(self.fallback)
+        self.n_file = int(self.pwo4.sum()) - self.n_fallback   # rows with own shape
+        self.meta = dict(meta or {})
+        self.run_type = self.meta.get("run_type")
+        n = self.n_lut = int(round(self.T_end / _LUT_DT)) + 1
+        tg = _LUT_DT * np.arange(n)
+        self.lut = np.empty((nm, n), dtype=np.float32)
+        self.dlut = np.empty((nm, n), dtype=np.float32)
+        cache = {}                     # rows sharing one object (the average)
+        for i, f in enumerate(shape_rows):
+            if id(f) not in cache:
+                if callable(f):
+                    v = np.asarray(f(tg), dtype=np.float64)
+                    d = (f.derivative()(tg) if hasattr(f, "derivative")
+                         else np.gradient(v, _LUT_DT))
+                else:
+                    v = np.asarray(f, dtype=np.float64)
+                    if v.shape != (n,):
+                        raise ValueError(f"row {self.names[i]}: need {n} samples")
+                    d = np.gradient(v, _LUT_DT)
+                cache[id(f)] = (v.astype(np.float32),
+                                np.asarray(d, dtype=np.float64).astype(np.float32))
+            self.lut[i], self.dlut[i] = cache[id(f)]
+        self._lut = self.lut.reshape(-1)
+        self._dlut = self.dlut.reshape(-1)
+        mi = np.arange(nm)
+        # kernel bank K[m, phi, l] = p(4 l + phi)
+        tl = (DT * np.arange(L)[None, None, :]
+              + np.arange(NPHASE)[None, :, None])
+        K = self.shape(mi[:, None, None], tl, dtype=np.float64)
+        self.K = K.astype(np.float32)
+        self.K2 = (K * K).astype(np.float32)
+        self.Kn2 = (K * K).sum(axis=2).astype(np.float32)          # [nm, 4]
+        self.Kinv = (1.0 / np.sqrt(np.maximum(self.Kn2, 1e-12))).astype(np.float32)
+        self.t_pk = np.argmax(self.lut, axis=1) * _LUT_DT
+        # leading-edge 50% time relative to onset (grid search as TemplateBank)
+        g = np.linspace(0.0, 1.0, 4001)[None, :] * self.t_pk[:, None]
+        sg = self.shape(mi[:, None], g, dtype=np.float64)
+        i1 = np.argmax(sg >= 0.5, axis=1)
+        i0 = np.maximum(i1 - 1, 0)
+        s0, s1 = sg[mi, i0], sg[mi, i1]
+        fr = np.where(s1 > s0, (0.5 - s0) / np.maximum(s1 - s0, 1e-300), 0.0)
+        self.t50 = g[mi, i0] + fr * (g[mi, i1] - g[mi, i0])
+        self.build_iint(int_tail_ratio)
+
+    def _locate(self, m, t, dtype):
+        t = np.asarray(t, dtype=dtype)
+        x = t * dtype(1.0 / _LUT_DT)
+        i = np.clip(np.floor(x), 0, self.n_lut - 2)
+        f = x - i
+        base = np.asarray(m, dtype=np.int64) * self.n_lut + i.astype(np.int64)
+        return base, f, (t > 0) & (t < self.T_end)
+
+    def _interp(self, tab, base, f, inside, dtype):
+        v = tab[base].astype(dtype) * (1 - f) + tab[base + 1].astype(dtype) * f
+        return np.where(inside, v, dtype(0))
+
+    def shape(self, m, t, dtype=np.float32):
+        """Unit-peak shape at module index m, t ns after onset (m, t broadcast).
+
+        dtype (np.float32 / np.float64) is the arithmetic of the interpolation.
+        """
+        base, f, inside = self._locate(m, t, dtype)
+        return self._interp(self._lut, base, f, inside, dtype)
+
+    def shape_and_slope(self, m, t, dtype=np.float32):
+        """(shape, d shape/dt); both 0 for t <= 0 and t >= T_end."""
+        base, f, inside = self._locate(m, t, dtype)
+        return (self._interp(self._lut, base, f, inside, dtype),
+                self._interp(self._dlut, base, f, inside, dtype))
+
+    def build_iint(self, ratio):
+        """I_int[m, phase-grid] (NIPH+1 points over one 4 ns sample)."""
+        self.int_tail_ratio = float(ratio)
+        nm = len(self.names)
+        u = DT * np.arange(NIPH + 1) / NIPH
+        tab = np.empty((nm, u.size))
+        for a in range(0, nm, 128):                  # bounded memory
+            mrow = np.repeat(np.arange(a, min(a + 128, nm)), u.size)
+            tab[a:a + 128] = unit_integral_fn(
+                lambda tau: self.shape(mrow[:, None], tau, dtype=np.float64),
+                np.tile(u, mrow.size // u.size), self.smooth_order,
+                self.int_tail_ratio, self.tail_break_n).reshape(-1, u.size)
+        self.I_tab = tab.astype(np.float32)
+        self.I_mean = tab[:, :NIPH].mean(axis=1)
+        self.area = self.shape(np.arange(nm)[:, None], DT * np.arange(400)[None, :],
+                               dtype=np.float64).sum(axis=1)
+        # continuous walk-out integral; rows with an identical shape computed once
+        _, first, inv = np.unique(self.lut, axis=0, return_index=True, return_inverse=True)
+        Iu, hu = np.empty(len(first)), np.empty(len(first))
+        for a in range(0, len(first), _CONT_CHUNK):
+            mu = np.arange(a, min(a + _CONT_CHUNK, len(first)))
+            mrow = first[mu]
+            S = _cont_smooth(lambda tau: self.shape(mrow[:, None], tau, dtype=np.float64),
+                             self.smooth_order,
+                             _CONT_DT, _CONT_TMAX, mu.size)
+            Iu[mu], hu[mu] = _cont_walk(S, self.int_tail_ratio, self.tail_break_n,
+                                        None, _CONT_DT)
+        # I_cont_walk: walk-out on the continuous smoothed template (cut from the true
+        # smoothed peak); it sits 0.1-0.7 % below the phase average of the discrete
+        # rule because the discrete cut uses the sample peak.  The energy integral
+        # I_cont is the phase average of the exact discrete walk-out (I_mean): no
+        # sub-sample phase dependence and equal to the C++ rule averaged over phase.
+        self.I_cont_walk = Iu[inv.reshape(-1)]
+        self.I_cont = np.asarray(self.I_mean, dtype=np.float64).copy()
+        self.h_cont = hu[inv.reshape(-1)]          # peak of the smoothed unit template
+
+    def iint(self, m, t0):
+        """I_int at module index m for onset t0 (ns); continuous mode: no t0 dependence."""
+        if self.iint_mode == "phase":
+            return TemplateBank.iint(self, m, t0)
+        return self.I_cont[np.asarray(m, dtype=np.int64)] + np.zeros(np.shape(t0))
+
+    def iint_floor(self, m, t0, amp, ped_rms):
+        """I_int with the ped_rms floor (v < max(ratio*h, ped_rms)), per pulse.
+
+        Continuous mode: pulses whose floor ped_rms/amp stays below ratio * (smoothed
+        peak) have the unfloored cut and take I_cont; the others are walked on the
+        continuous template with that floor (slower, ~1 ms per pulse).
+        """
+        mm = np.asarray(m, dtype=np.int64)
+        fl = np.asarray(ped_rms, dtype=np.float64) / np.maximum(amp, 1e-6)
+        if self.iint_mode == "phase":
+            u = np.mod(-np.asarray(t0, dtype=np.float64), DT)
+            return unit_integral_fn(
+                lambda tau: self.shape(mm[:, None], tau, dtype=np.float64), u,
+                self.smooth_order, self.int_tail_ratio, self.tail_break_n, floor=fl)
+        mm, fl = np.broadcast_arrays(mm, fl)
+        shp = mm.shape
+        mm, fl = mm.reshape(-1), fl.reshape(-1)
+        out = self.I_cont[mm].copy()
+        need = np.flatnonzero(fl > self.int_tail_ratio * self.h_cont[mm])
+        for a in range(0, need.size, _CONT_CHUNK):
+            sel = need[a:a + _CONT_CHUNK]
+            um, back = np.unique(mm[sel], return_inverse=True)
+            S = _cont_smooth(lambda tau: self.shape(um[:, None], tau, dtype=np.float64),
+                             self.smooth_order, _CONT_DT, _CONT_TMAX, um.size)
+            # floored walk, rescaled by I_cont / I_cont_walk so floored and unfloored
+            # pulses share the I_cont normalisation
+            out[sel] = (_cont_walk(S[back.reshape(-1)], self.int_tail_ratio,
+                                   self.tail_break_n, fl[sel], _CONT_DT)[0]
+                        * self.I_cont[mm[sel]] / self.I_cont_walk[mm[sel]])
+        return out.reshape(shp)
+
+    def f_amp(self, amp):
+        """Amplitude-dependent integral factor f(A): log-linear in A between the
+        ampcorr knots, constant outside; 1 if the bank carries none."""
+        amp = np.asarray(amp, dtype=np.float64)
+        if self.ampcorr is None:
+            return np.ones(amp.shape)
+        return np.interp(np.log(np.maximum(amp, 1.0)), *self.ampcorr)
+
+    def ampcorr_str(self):
+        """Short description of ampcorr (None if absent)."""
+        if self.ampcorr is None:
+            return None
+        la, fa = self.ampcorr
+        return (f"f(A) {la.size} points, A {math.exp(la[0]):.0f}-{math.exp(la[-1]):.0f} ADC, "
+                f"f {fa.min():.4f}-{fa.max():.4f}")
+
+    @classmethod
+    def from_npz(cls, path, names, pwo4, *, smooth_order, int_tail_ratio,
+                 tail_break_n, L=24, iint_mode="continuous"):
+        """Bank from a spline_templates_v1 .npz, rows matched to `names` by name.
+
+        Each file row is a unit-peak cubic B-spline on the onset-shifted axis.  A
+        PbWO4 name missing from the file or with valid == 0 takes the average
+        spline; those and the file's own fallback == 2 rows are listed in
+        `fallback`.  Non-PbWO4 rows hold the average.  Optional keys ampcorr_logA,
+        ampcorr_f (both or neither; ln A in ADC, multiplicative factors) and
+        ampcorr_meta (JSON string) give bank.ampcorr and bank.f_amp.
+        """
+        from scipy.interpolate import BSpline
+        z = np.load(path, allow_pickle=False)
+        k = int(z["spline_k"])
+        T_end = float(z["T_end"])
+
+        def spline(t, c):
+            s = _ClippedSpline(BSpline(np.asarray(t, dtype=np.float64),
+                                       np.asarray(c, dtype=np.float64), k))
+            if s.tmax < T_end - 1e-6:
+                raise ValueError(f"{path}: spline ends at {s.tmax} ns < T_end {T_end}")
+            return s
+
+        avg_t, avg_c = z["avg_spline_t"], z["avg_spline_c"]
+        avg = spline(avg_t[np.isfinite(avg_t)], avg_c[np.isfinite(avg_c)])
+        row = {str(nm): r for r, nm in enumerate(z["names"])}
+        valid, fbs = z["valid"], z["fallback"]
+        nt, nc = z["spline_nt"], z["spline_nc"]
+        rows, fallback = [], []
+        for nm, is_p in zip(names, pwo4):
+            r = row.get(nm) if is_p else None
+            if r is not None and valid[r] > 0:
+                rows.append(spline(z["spline_t"][r, :nt[r]], z["spline_c"][r, :nc[r]]))
+                if fbs[r] == 2:
+                    fallback.append(nm)
+            else:
+                rows.append(avg)
+                if is_p:
+                    fallback.append(nm)
+        meta = json.loads(str(z["meta"])) if "meta" in z.files else {}
+        has = ("ampcorr_logA" in z.files, "ampcorr_f" in z.files)
+        if has[0] != has[1]:
+            raise ValueError(f"{path}: ampcorr_logA and ampcorr_f must come together")
+        ampcorr = (z["ampcorr_logA"], z["ampcorr_f"]) if has[0] else None
+        acm = json.loads(str(z["ampcorr_meta"])) if "ampcorr_meta" in z.files else {}
+        return cls(rows, names, pwo4, smooth_order=smooth_order,
+                   int_tail_ratio=int_tail_ratio, tail_break_n=tail_break_n, L=L,
+                   T_end=T_end, fallback=fallback, meta=meta, iint_mode=iint_mode,
+                   ampcorr=ampcorr, ampcorr_meta=acm)
+
+
 def build_bank(names, pwo4, table_path, wave_cfg, *, column="25320",
-               int_tail_ratio=None, L=24):
+               int_tail_ratio=None, L=24, iint_mode="continuous"):
     """TemplateBank for a geometry (names/pwo4 indexed by module index).
 
     Modules missing from the table or failing the validity rule get the PbWO4
     aggregate of the JSON named in the table header.  Returns (bank, info);
-    info has sha1, n_module, fallback (names), column, agg, agg_json.
+    info has sha1, n_module, fallback (names), column, agg, agg_json, kind.
+    A table_path ending in ".npz" (spline_templates_v1) gives a
+    SampledTemplateBank instead (column "sampled", agg None; info also has
+    n_fallback, run_type, iint_mode and ampcorr (description or None));
+    iint_mode applies to the .npz bank only.
     """
+    ratio = (wave_cfg["int_tail_ratio"] if int_tail_ratio is None
+             else int_tail_ratio)
+    if str(table_path).endswith(".npz"):
+        with open(table_path, "rb") as fh:
+            sha1 = hashlib.sha1(fh.read()).hexdigest()
+        bank = SampledTemplateBank.from_npz(
+            table_path, names, pwo4, smooth_order=wave_cfg["smooth_order"],
+            int_tail_ratio=ratio, tail_break_n=wave_cfg["tail_break_n"], L=L,
+            iint_mode=iint_mode)
+        info = dict(sha1=sha1, n_module=bank.n_file, fallback=list(bank.fallback),
+                    column="sampled", agg=None, agg_json=None,
+                    int_tail_ratio=float(ratio),
+                    tail_break_n=int(wave_cfg["tail_break_n"]), kind="sampled",
+                    n_fallback=bank.n_fallback, run_type=bank.run_type,
+                    iint_mode=bank.iint_mode, ampcorr=bank.ampcorr_str())
+        return bank, info
     rows, sha1, agg_json = load_h50(table_path, column)
     agg = load_aggregate(agg_json)
     tr = np.full(len(names), agg[0])
@@ -347,14 +773,14 @@ def build_bank(names, pwo4, table_path, wave_cfg, *, column="25320",
             n_file += 1
         else:
             fallback.append(nm)
-    ratio = (wave_cfg["int_tail_ratio"] if int_tail_ratio is None
-             else int_tail_ratio)
     bank = TemplateBank(tr, tf, pwo4, smooth_order=wave_cfg["smooth_order"],
                         int_tail_ratio=ratio,
                         tail_break_n=wave_cfg["tail_break_n"], L=L)
+    bank.names = list(names)
+    bank.fallback = fallback
     info = dict(sha1=sha1, n_module=n_file, fallback=fallback, column=column,
                 agg=agg, agg_json=agg_json, int_tail_ratio=float(ratio),
-                tail_break_n=int(wave_cfg["tail_break_n"]))
+                tail_break_n=int(wave_cfg["tail_break_n"]), kind="two_tau")
     return bank, info
 
 
@@ -404,9 +830,7 @@ class MFReconstructor:
         """Full-length unit model s(4 i - t0) for peaks (arrays of equal length)."""
         b = self.b
         tau = DT * np.arange(ns, dtype=np.float32)[None, :] - t0[:, None]
-        return template(tau, b.tau_r[m][:, None].astype(np.float32),
-                        b.tau_f[m][:, None].astype(np.float32),
-                        b.tmx[m][:, None].astype(np.float32)).astype(np.float32)
+        return b.shape(m[:, None], tau).astype(np.float32)
 
     def _window(self, t0, ns):
         """(sample idx [n, LW], valid [n, LW]) fit window of onset t0."""
@@ -431,10 +855,7 @@ class MFReconstructor:
         if w is not None:
             ww = ww * np.take_along_axis(w, ic, axis=1)
         yy = np.take_along_axis(y, ic, axis=1)
-        s = template(DT * idx.astype(np.float32) - t0[:, None],
-                     b.tau_r[m][:, None].astype(np.float32),
-                     b.tau_f[m][:, None].astype(np.float32),
-                     b.tmx[m][:, None].astype(np.float32))
+        s = b.shape(m[:, None], DT * idx.astype(np.float32) - t0[:, None])
         Gss = (ww * s * s).sum(1)
         A = (ww * s * yy).sum(1) / np.maximum(Gss, 1e-20)
         sA = None if sigma is None else (
@@ -450,14 +871,12 @@ class MFReconstructor:
         ww = valid.astype(np.float32)
         if w is not None:
             ww = ww * np.take_along_axis(w, ic, axis=1)
-        tr = b.tau_r[m][:, None].astype(np.float32)
-        tf = b.tau_f[m][:, None].astype(np.float32)
-        tm = b.tmx[m][:, None].astype(np.float32)
+        mc = m[:, None]
         xt = DT * idx.astype(np.float32)
         t0 = t0.astype(np.float32).copy()
         a = a.astype(np.float32).copy()
         for _ in range(nit):
-            s, ds = template_and_slope(xt - t0[:, None], tr, tf, tm)
+            s, ds = b.shape_and_slope(mc, xt - t0[:, None])
             g = -a[:, None] * ds
             res = rr - a[:, None] * s
             Gss = (ww * s * s).sum(1)
@@ -518,9 +937,7 @@ class MFReconstructor:
         t0 = t0.astype(np.float32).copy()
         a, valid, S, wmask = self._solve_joint(y, w, m, t0, a, valid, ns)
         b = self.b
-        tr = b.tau_r[m][:, None].astype(np.float32)
-        tf = b.tau_f[m][:, None].astype(np.float32)
-        tm = b.tmx[m][:, None].astype(np.float32)
+        mc = m[:, None]
         xt = DT * np.arange(ns, dtype=np.float32)[None, :]
         eye = np.eye(2 * kmax, dtype=np.float32)[None]
         redo = np.ones(c, dtype=bool)        # stage 2 only for channels that dropped
@@ -532,7 +949,7 @@ class MFReconstructor:
                 for k in range(kmax):
                     if not valid[:, k].any():
                         continue
-                    s_, ds_ = template_and_slope(xt - t0[:, k, None], tr, tf, tm)
+                    s_, ds_ = b.shape_and_slope(mc, xt - t0[:, k, None])
                     vk = valid[:, k, None]
                     Sk[:, k] = s_ * vk
                     Gk[:, k] = -a[:, k, None] * ds_ * vk
@@ -677,10 +1094,7 @@ class MFReconstructor:
             if w is not None:
                 ww = ww * np.take_along_axis(w[one], ic, axis=1)
             yy = np.take_along_axis(y[one], ic, axis=1)
-            s = template(DT * idx.astype(np.float32) - t1[:, None],
-                         b.tau_r[m[one]][:, None].astype(np.float32),
-                         b.tau_f[m[one]][:, None].astype(np.float32),
-                         b.tmx[m[one]][:, None].astype(np.float32))
+            s = b.shape(m[one][:, None], DT * idx.astype(np.float32) - t1[:, None])
             Gss = (ww * s * s).sum(1)
             a1 = (ww * s * yy).sum(1) / np.maximum(Gss, 1e-20)
             keep = a1 > 0
@@ -791,11 +1205,16 @@ class MFReconstructor:
 
 
 def pulse_energy_units(bank, midx_of_pulse, t0, amp, kappa=1.0, ped_rms=None):
-    """A * I_int(phase) * kappa; with ped_rms (per pulse) the ped floor is applied."""
+    """A * I_int(phase) * kappa; with ped_rms (per pulse) the ped floor is applied.
+
+    A bank carrying ampcorr (sampled) also multiplies I_int by f(A).
+    """
     if ped_rms is None:
         I = bank.iint(midx_of_pulse, t0)
     else:
         I = bank.iint_floor(midx_of_pulse, t0, amp, ped_rms)
+    if getattr(bank, "ampcorr", None) is not None:
+        I = I * bank.f_amp(amp)
     return amp * I * kappa
 
 
@@ -805,7 +1224,7 @@ def _synth(bank, m, pulses, ns=100, ped=200.0, noise=0.0, rng=None, clip=None):
     t = DT * np.arange(ns)
     y = np.full(ns, ped, dtype=np.float64)
     for t0, a in pulses:
-        y += a * template(t - t0, bank.tau_r[m], bank.tau_f[m], bank.tmx[m])
+        y += a * bank.shape(m, t - t0, dtype=np.float64)
     if noise > 0:
         y += rng.normal(0.0, noise, ns)
     if clip is not None:
@@ -982,6 +1401,175 @@ def self_test(verbose=True):
           f"{int((r.npk > 1).sum())}; A>150: sigma(dA)/A="
           f"{np.nanstd(dA[big]/amp[big])*100:.2f}% sigma(dt)={np.nanstd(dT_[big]):.3f} ns; "
           f"A<60: miss={int(((amp<60)&(r.npk==0)).sum())}/{int((amp<60).sum())}")
+
+    # ---- I_int regression of the aggregate two-tau (recorded from the pre-sampled code)
+    agg_bank = TemplateBank([AGG_FALLBACK[0]], [AGG_FALLBACK[1]], [True], **wcfg)
+    ref_mean, ref_00 = 7.212860678845598, 7.027331829071045
+    e_mean = abs(agg_bank.I_mean[0] / ref_mean - 1.0)
+    e_00 = abs(float(agg_bank.I_tab[0, 0]) / ref_00 - 1.0)
+    report("I_int regression (aggregate)", e_mean < 1e-9 and e_00 < 1e-9,
+           f"I_mean={agg_bank.I_mean[0]:.12f} (ref {ref_mean:.12f}, rel {e_mean:.1e}) "
+           f"I_tab[0,0]={float(agg_bank.I_tab[0, 0]):.9f} (ref {ref_00:.9f}, rel {e_00:.1e})")
+
+    # ---- sampled bank built from the analytic shapes
+    import tempfile
+    from scipy.interpolate import make_interp_spline
+    rng2 = np.random.default_rng(777)
+    tg = np.arange(0.0, 400.0 + 1e-9, 0.1)       # T_end 400: analytic tail kept
+    spl = [make_interp_spline(tg, template(tg, tr_, tf_, tmax_of(tr_, tf_)), k=3)
+           for tr_, tf_ in taus]
+    sb = SampledTemplateBank(spl, [f"M{i}" for i in range(nm)], [True] * nm,
+                             smooth_order=2, int_tail_ratio=0.1, tail_break_n=2,
+                             T_end=400.0)
+    dK = np.abs(sb.K - bank.K).max()
+    dt50 = np.abs(sb.t50 - bank.t50).max()
+    rI = np.abs(sb.I_tab - bank.I_tab) / bank.I_tab
+    nflip = int((rI > 1e-4).sum())             # walk-out cut flips on a sample at the cut
+    dIm = np.abs(sb.I_mean / bank.I_mean - 1.0).max()
+    report("sampled == analytic (K, t50, I_tab)",
+           dK < 1e-4 and dt50 < 1e-3 and np.median(rI) < 1e-4 and nflip <= 3
+           and dIm < 1e-3,
+           f"max|dK|={dK:.2e} max|dt50|={dt50:.2e} ns (<=1e-3) median rel|dI_tab|="
+           f"{np.median(rI):.1e} (<=1e-4), {nflip}/{rI.size} phases differ >1e-4 "
+           f"(cut flips, <=3), max rel dI_mean={dIm:.1e} (<=1e-3)")
+
+    # ---- continuous walk-out integral vs the phase average of the discrete table
+    rc = np.abs(sb.I_cont_walk / sb.I_mean - 1.0)
+    trv, tfv, tmv = np.array([t[0] for t in taus]), np.array([t[1] for t in taus]), bank.tmx
+    I_an = continuous_walk_integral(
+        lambda tau: template(tau, trv[:, None], tfv[:, None], tmv[:, None]), 2, 0.1, 2,
+        nrow=nm)
+    rc_an = np.abs(I_an / bank.I_mean - 1.0)
+    pk2 = bank.iint(np.zeros(5, dtype=int), np.linspace(100, 104, 5))   # two-tau still phase-dependent
+    sb_ph = SampledTemplateBank(spl, [f"M{i}" for i in range(nm)], [True] * nm,
+                                smooth_order=2, int_tail_ratio=0.1, tail_break_n=2,
+                                T_end=400.0, iint_mode="phase")
+    t0s = np.linspace(100.0, 104.0, 64, endpoint=False)
+    Ic_ = sb.iint(np.full(64, 1), t0s)
+    Ip_ = sb_ph.iint(np.full(64, 1), t0s)
+    flc = sb.iint_floor(np.full(64, 1), t0s, np.full(64, 400.0), np.full(64, 2.0))
+    fl_hi = 0.2                                   # floor above ratio * peak: the floor path
+    flc2 = sb.iint_floor(np.full(64, 2), t0s, np.full(64, 5.0), np.full(64, 5.0 * fl_hi))
+    flp2 = sb_ph.iint_floor(np.full(64, 2), t0s, np.full(64, 5.0), np.full(64, 5.0 * fl_hi))
+    rf = abs(flc2.mean() / flp2.mean() - 1.0)
+    report("continuous I_int vs phase average (I_mean)",
+           rc.max() < 2e-3 and rc_an.max() < 2e-3 and np.ptp(pk2) > 0.01
+           and sb.iint_mode == "continuous" and sb_ph.iint_mode == "phase"
+           and np.all(Ic_ == sb.I_cont[1]) and Ic_.shape == t0s.shape
+           and np.ptp(Ip_) > 0.01 and np.array_equal(sb_ph.I_tab, sb.I_tab)
+           and np.all(flc == sb.I_cont[1]) and np.ptp(flc2) == 0.0 and rf < 5e-3
+           and flc2[0] < sb.I_cont[2],
+           f"max rel|I_cont/I_mean-1| = {rc.max():.2e} (sampled), {rc_an.max():.2e} (analytic) "
+           f"(<=2e-3); phase-table p-p {np.ptp(Ip_) / Ip_.mean() * 100:.1f}% vs continuous 0; "
+           f"floored (floor {fl_hi}) cont/phase-mean-1 = {rf:.1e} (<=5e-3), "
+           f"I {flc2[0]:.3f} < unfloored {sb.I_cont[2]:.3f}")
+
+    def single_gate(tag, sbank):
+        n = 600
+        mi_ = rng2.integers(0, nm, n)
+        amp_ = np.exp(rng2.uniform(np.log(50), np.log(3000), n))   # A>=50: the analytic gate itself reaches ~0.2-0.3 % near A~24 (onset-kink GN difference)
+        t0_ = rng2.uniform(80.0, 160.0, n)
+        Y_ = np.stack([_synth(bank, mi_[i], [(t0_[i], amp_[i])])
+                       for i in range(n)]).astype(np.float32)
+        r_ = MFReconstructor(sbank).run(Y_, mi_)
+        dA_, dt_ = np.full(n, np.nan), np.full(n, np.nan)
+        for c, a_, t_ in zip(r_.p_ch, r_.p_amp, r_.p_t0):
+            dA_[c], dt_[c] = abs(a_ - amp_[c]) / amp_[c], abs(t_ - t0_[c])
+        report(tag, (r_.npk == 1).all() and np.nanmax(dA_) < 2e-3 and np.nanmax(dt_) < 0.05,
+               f"N={n} found={int((r_.npk == 1).sum())} max|dA|/A={np.nanmax(dA_)*100:.4f}% "
+               f"max|dt|={np.nanmax(dt_):.4f} ns (analytic waveforms)")
+
+    single_gate("sampled single", sb)
+
+    # ---- round trip through the spline_templates_v1 .npz and build_bank
+    def pad(rows_):
+        w = max(len(r_) for r_ in rows_)
+        return np.array([np.r_[r_, np.full(w - len(r_), np.nan)] for r_ in rows_])
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "spline_test.npz")
+        np.savez(path, names=np.array(["A", "B", "C"]), valid=np.ones(3, dtype=int),
+                 fallback=np.zeros(3, dtype=int), T_end=400.0, spline_k=3,
+                 spline_t=pad([x.t for x in spl]), spline_c=pad([x.c for x in spl]),
+                 spline_nt=np.array([len(x.t) for x in spl]),
+                 spline_nc=np.array([len(x.c) for x in spl]),
+                 avg_spline_t=spl[0].t, avg_spline_c=spl[0].c,
+                 meta=json.dumps(dict(run_type="selftest")))
+        gn, gp = ["A", "B", "C", "D", "E"], [True, True, True, True, False]
+        fb_bank, info = build_bank(gn, gp, path, wcfg)
+        ph_bank, _ = build_bank(gn, gp, path, wcfg, iint_mode="phase")
+        sel_ = [0, 1, 2]
+        dK2 = np.abs(fb_bank.K[sel_] - bank.K).max()
+        dI2 = np.median(np.abs(ph_bank.I_tab[sel_] - bank.I_tab) / bank.I_tab)
+        dav = np.abs(fb_bank.K[3] - bank.K[0]).max()
+        okb = (info["column"] == "sampled" and info["kind"] == "sampled"
+               and info["fallback"] == ["D"] and info["n_module"] == 3
+               and info["n_fallback"] == 1 and info["run_type"] == "selftest"
+               and info["agg"] is None and info["agg_json"] is None
+               and info["iint_mode"] == "continuous" and info["ampcorr"] is None
+               and fb_bank.ampcorr is None
+               and len(info["sha1"]) == 40 and fb_bank.fallback == ["D"]
+               and resolve_column(path) == "sampled")
+        report("build_bank(.npz)", okb and dK2 < 1e-4 and dI2 < 1e-4 and dav < 1e-6
+               and np.isfinite(fb_bank.I_mean).all(),
+               f"max|dK|={dK2:.2e} median rel|dI_tab|={dI2:.2e} fallback D==avg: {dav:.1e} "
+               f"info={ {k_: info[k_] for k_ in ('n_module', 'n_fallback', 'run_type', 'column')} }")
+        single_gate("sampled single (npz round trip)", fb_bank)
+        pe = pulse_energy_units(ph_bank, np.array([0, 1]), np.array([100.0, 101.3]),
+                                np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
+        pe0 = pulse_energy_units(bank, np.array([0, 1]), np.array([100.0, 101.3]),
+                                 np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
+        report("sampled pulse_energy_units (ped floor)", np.abs(pe / pe0 - 1).max() < 1e-3,
+               f"max rel diff to analytic = {np.abs(pe / pe0 - 1).max():.2e}")
+        pc = pulse_energy_units(fb_bank, np.array([0, 1]), np.array([100.0, 101.3]),
+                                np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
+        pc2 = pulse_energy_units(fb_bank, np.array([0, 1]), np.array([100.0, 101.3]),
+                                 np.array([500.0, 800.0]))
+        pm_ = np.array([500.0, 800.0]) * bank.I_mean[:2]
+        report("sampled pulse_energy_units (continuous)",
+               np.array_equal(pc, pc2) and np.abs(pc / pm_ - 1).max() < 2e-3,
+               f"max rel diff to A*I_mean = {np.abs(pc / pm_ - 1).max():.2e}")
+        pb = pulse_energy_units(bank, np.array([0, 1]), np.array([100.0, 101.3]),
+                                np.array([500.0, 800.0]), 1.01)
+        report("two-tau pulse_energy_units unchanged (no ampcorr)",
+               np.array_equal(pb, np.array([500.0, 800.0])
+                              * bank.iint(np.array([0, 1]), np.array([100.0, 101.3])) * 1.01)
+               and not hasattr(bank, "ampcorr"), "A * I_int * kappa exactly")
+
+        # ---- amplitude correction f(A) from the .npz keys
+        kn_la, kn_f = np.log([200.0, 1000.0]), np.array([1.01, 0.99])
+        path2 = os.path.join(td, "spline_test_ampcorr.npz")
+        np.savez(path2, names=np.array(["A", "B", "C"]), valid=np.ones(3, dtype=int),
+                 fallback=np.zeros(3, dtype=int), T_end=400.0, spline_k=3,
+                 spline_t=pad([x.t for x in spl]), spline_c=pad([x.c for x in spl]),
+                 spline_nt=np.array([len(x.t) for x in spl]),
+                 spline_nc=np.array([len(x.c) for x in spl]),
+                 avg_spline_t=spl[0].t, avg_spline_c=spl[0].c,
+                 meta=json.dumps(dict(run_type="selftest")),
+                 ampcorr_logA=kn_la, ampcorr_f=kn_f,
+                 ampcorr_meta=json.dumps(dict(scope="global", note="selftest")))
+        ac_bank, ac_info = build_bank(gn, gp, path2, wcfg)
+        Aa = np.array([100.0, 200.0, 447.0, 1000.0, 3000.0])
+        ma = np.array([0, 1, 2, 0, 1])
+        ta = np.linspace(100, 103, 5)
+        got = pulse_energy_units(ac_bank, ma, ta, Aa, 1.01) / pulse_energy_units(fb_bank, ma, ta, Aa, 1.01)
+        got_p = (pulse_energy_units(ac_bank, ma, ta, Aa, ped_rms=np.full(5, 1.0))
+                 / pulse_energy_units(fb_bank, ma, ta, Aa, ped_rms=np.full(5, 1.0)))
+        fx = np.interp(np.log(np.maximum(Aa, 1.0)), kn_la, kn_f)
+        f447 = 1.01 + (0.99 - 1.01) * (np.log(447.0) - kn_la[0]) / (kn_la[1] - kn_la[0])
+        report("amplitude correction f(A)",
+               np.abs(got / fx - 1).max() < 1e-12 and np.abs(got_p / fx - 1).max() < 1e-12
+               and abs(fx[2] - f447) < 1e-12 and fx[0] == 1.01 and fx[1] == 1.01
+               and fx[3] == 0.99 and fx[4] == 0.99
+               and np.array_equal(ac_bank.ampcorr[0], kn_la)
+               and np.array_equal(ac_bank.ampcorr[1], kn_f)
+               and ac_bank.ampcorr_meta == dict(scope="global", note="selftest")
+               and isinstance(ac_info["ampcorr"], str) and ac_info["iint_mode"] == "continuous"
+               and np.array_equal(ac_bank.f_amp(Aa), fx)
+               and np.array_equal(fb_bank.f_amp(Aa), np.ones(5)),
+               f"f at A={Aa.tolist()}: {np.round(got, 6).tolist()} (exact interp, "
+               f"max dev {np.abs(got / fx - 1).max():.1e}); info ampcorr: {ac_info['ampcorr']}")
+
     print("SELF-TEST", "PASS" if ok_all else "FAIL")
     return ok_all
 

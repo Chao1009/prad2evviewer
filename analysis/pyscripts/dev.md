@@ -32,5 +32,5 @@ fit_pulse_template.md
 
 Work Notes:
 /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts
-plan_waveform.md
+plans/plan_waveform.md
 Commands.md

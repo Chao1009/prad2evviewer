@@ -290,7 +290,9 @@ def per_module_peak(values, bin_width, escale=1.0):
 
 def _select_pool(events, *, inner_r, min_seed_E, exclude_rowcol):
     """Calibration pool shared by both refinements: seed radius < inner_r,
-    seed energy ≥ min_seed_E, and outside the exclude_rowcol rectangle."""
+    seed energy ≥ min_seed_E, and outside the exclude_rowcol rectangle.
+    The rectangle is 1-based inclusive (rows/cols 1-34, beam hole 17-18);
+    the event row/col are the 0-based C++ Module.row/column."""
     inner_r2 = inner_r * inner_r
     excl = exclude_rowcol
 
@@ -298,7 +300,8 @@ def _select_pool(events, *, inner_r, min_seed_E, exclude_rowcol):
         _sid, x, y, row, col, se, _ce, *_ = e
         if (x * x + y * y) >= inner_r2 or se < min_seed_E:
             return False
-        if excl is not None and excl[0] <= row <= excl[1] and excl[2] <= col <= excl[3]:
+        if (excl is not None and excl[0] <= row + 1 <= excl[1]
+                and excl[2] <= col + 1 <= excl[3]):
             return False
         return True
 
@@ -313,8 +316,8 @@ def fit_per_module_gains(events, *, target_peak, inner_r, min_seed_E,
 
     `events`         list of (seed_id, x, y, row, col, seed_E, cluster_E,
                      f_eff); f_eff is not used here.
-    `exclude_rowcol` (R_LO, R_HI, C_LO, C_HI): drop seeds whose row/col
-                     falls inside the rectangle (used to peel the
+    `exclude_rowcol` (R_LO, R_HI, C_LO, C_HI): drop seeds whose 1-based
+                     row/col falls inside the rectangle (used to peel the
                      leakage-prone ring around the beam hole).
     `method`         'median' (cheap, biased low by the radiative tail)
                      or 'cb-peak' (per_module_peak()).
@@ -928,11 +931,28 @@ class MFBlock:
 
     DUMP_WAVE_PER_MODULE = 200
     DUMP_WAVE_MIN_AMP = 50.0
+    # --mf-shape dump columns (appended to the base columns, only when set)
+    SHAPE_COLS = ("fx_amp", "fx_chi2dof", "fx_E_units", "ft_status", "ft_t0",
+                  "ft_tau_r", "ft_tau_f", "ft_sig_tau_r", "ft_sig_tau_f",
+                  "ft_sigw_tau_r", "ft_sigw_tau_f", "ft_sig_amp",
+                  "ft_chi2dof_seed", "ft_niter", "ft_bound", "ft_I_int")
+    SHAPE_NONE = (float('nan'), float('nan'), float('nan'), -1,
+                  *([float('nan')] * 9), -1, -1, float('nan'))
+    SHAPE_DT = dict(fx_amp=np.float64, fx_chi2dof=np.float64,
+                    fx_E_units=np.float64, ft_status=np.int8,
+                    ft_t0=np.float64, ft_tau_r=np.float64, ft_tau_f=np.float64,
+                    ft_sig_tau_r=np.float64, ft_sig_tau_f=np.float64,
+                    ft_sigw_tau_r=np.float64, ft_sigw_tau_f=np.float64,
+                    ft_sig_amp=np.float64, ft_chi2dof_seed=np.float64,
+                    ft_niter=np.int16, ft_bound=np.int8, ft_I_int=np.float64)
 
     def __init__(self, p, rec, bank, mf_pulse, *, kappa, ped_floor, overflow,
                  t_off, pre_lo, pre_hi, cl_legacy, cl_new, finish_event,
-                 dump, pwo4_flags, count_pulses=False, block=256, nb=None):
+                 dump, pwo4_flags, count_pulses=False, block=256, nb=None,
+                 shape=None, shape_meta=None):
         self.p, self.rec, self.bank, self.mfp = p, rec, bank, mf_pulse
+        self.shape = shape  # mf_fit_pulse.FreeTauFitter or None (fixed template)
+        self.shape_meta = shape_meta    # dict(mode, nsig, sig_r, sig_f) for the dump
         self.nb = nb       # seed-time neighbour amplitudes (dict) or None
         self.kappa, self.ped_floor, self.overflow = kappa, ped_floor, overflow
         self.t_off, self.pre_lo, self.pre_hi = t_off, pre_lo, pre_hi
@@ -949,6 +969,11 @@ class MFBlock:
                           n_sat_fallback=0)
         self.n_chan = 0
         self.n_odd = 0
+        self.sh = dict(t_mf_s=0.0, t_fit_s=0.0, n_fit=0, n_fail=0,
+                       n_status=[0, 0, 0, 0], n_at_lo_r=0, n_at_hi_r=0,
+                       n_at_lo_f=0, n_at_hi_f=0, n_any_bound=0,
+                       n_multi_skipped=0, n_clipped_skipped=0)
+        self._sh_cur = None   # per-block refit record for the dump
         self.nbs = dict(n_events=0, n_replaced=0, n_fallback=0, n_skipped_legacy=0,
                         n_skipped_new=0, n_seed_flip=0, n_nosingle=0,
                         n_glass_seed=0, n_norow=0, sumE_empty=0.0, n_empty=0)
@@ -1138,7 +1163,10 @@ class MFBlock:
                 t0 = t5[ar, kk]
             else:
                 A, sA = self.rec.amp_at(y, m, t0, sigma=sg)
-            Eu = (A.astype(np.float64) * bank.iint(m, t0) * self.kappa).tolist()
+            Ii = bank.iint(m, t0)
+            if getattr(bank, "ampcorr", None) is not None:
+                Ii = Ii * bank.f_amp(A)          # sampled bank: f(A) as in pulse_energy_units
+            Eu = (A.astype(np.float64) * Ii * self.kappa).tolist()
         # ---- per-request energies and free-fit bookkeeping
         by_evq = {}
         for j in range(nq):
@@ -1213,6 +1241,47 @@ class MFBlock:
                 nb_dt_free=np.asarray([f[2] if f else nan for f in free]),
                 nb_t0=np.asarray(t0, dtype=np.float64) if nq else np.zeros(0)))
 
+    def _refit(self, res, mids, pc, Eu):
+        """Free two-tau refit of single-peak unclipped mf pulses (--mf-shape).
+
+        Replaces Eu on the refit pulses (status != 0 rows keep the fixed
+        template value, bit for bit); p_time / p_t0 are left untouched.
+        """
+        sh = self.sh
+        nopf = ~res.wa_fb[pc]
+        one = res.npk[pc] == 1
+        clip = res.clipped[pc]
+        sh['n_clipped_skipped'] += int((nopf & clip).sum())
+        sh['n_multi_skipped'] += int((nopf & ~clip & ~one).sum())
+        sel = np.nonzero(nopf & one & ~clip)[0]
+        fx_Eu = Eu.copy()
+        fr = None
+        if sel.size:
+            row = pc[sel]
+            y = self.Y[row].astype(np.float32) - res.ped[row][:, None]
+            _t = time.perf_counter()
+            fr = self.shape.fit(y, mids[pc][sel], res.p_t0[sel],
+                                res.p_amp[sel], res.sigma[row])
+            Eu_fit = self.shape.energy_units(fr, self.kappa)
+            sh['t_fit_s'] += time.perf_counter() - _t
+            st = np.asarray(fr.status)
+            Eu = Eu.copy()
+            Eu[sel] = np.where(st == 0, Eu_fit, fx_Eu[sel])   # failed: exact fixed value
+            sh['n_fit'] += int(sel.size)
+            sh['n_fail'] += int((st != 0).sum())
+            for c in range(4):
+                sh['n_status'][c] += int((st == c).sum())
+            lo_r, hi_r = np.asarray(fr.at_lo_r, bool), np.asarray(fr.at_hi_r, bool)
+            lo_f, hi_f = np.asarray(fr.at_lo_f, bool), np.asarray(fr.at_hi_f, bool)
+            sh['n_at_lo_r'] += int(lo_r.sum())
+            sh['n_at_hi_r'] += int(hi_r.sum())
+            sh['n_at_lo_f'] += int(lo_f.sum())
+            sh['n_at_hi_f'] += int(hi_f.sum())
+            sh['n_any_bound'] += int((lo_r | hi_r | lo_f | hi_f).sum())
+        if self.dump:
+            self._sh_cur = dict(sel=sel, fr=fr, fx_Eu=fx_Eu)
+        return Eu
+
     def flush(self):
         if not self.events:
             return
@@ -1220,7 +1289,9 @@ class MFBlock:
         res = None
         wafb, starts, tl, el, fb_peaks = [], [], [], [], {}
         if n:
+            _t = time.perf_counter()
             res = self.rec.run(self.Y[:n], self.mid[:n], self.overflow)
+            self.sh['t_mf_s'] += time.perf_counter() - _t
             self.res_clipped = res.clipped
             for k, v in res.stats.items():
                 self.stats[k] += v
@@ -1230,6 +1301,8 @@ class MFBlock:
                      if self.ped_floor else None)
             Eu = self.mfp.pulse_energy_units(self.bank, mids[pc], res.p_t0,
                                              res.p_amp, self.kappa, ped_p)
+            if self.shape is not None:
+                Eu = self._refit(res, mids, pc, Eu)
             starts = np.searchsorted(pc, np.arange(n + 1)).tolist()
             tl = res.p_time.tolist()
             el = Eu.tolist()
@@ -1266,10 +1339,17 @@ class MFBlock:
                                 "onset", "ped_rms", "sigma_raw", "wa_fallback",
                                 "f_lms")}
         nan = float('nan')
+        shc = self._sh_cur if self.shape is not None else None
+        if self.shape is not None:
+            for k in self.SHAPE_COLS:
+                cols[k] = []
 
-        def put(*vals):
+        def put(*vals, ext=None):
             for k, v in zip(cols, vals):
                 cols[k].append(v)
+            if self.shape is not None:
+                for k, v in zip(self.SHAPE_COLS, ext or self.SHAPE_NONE):
+                    cols[k].append(v)
 
         for r in range(n):                          # rawsum rows
             mod, f, ev = self.mods[r], self.fs[r], self.evn[r]
@@ -1281,6 +1361,36 @@ class MFBlock:
         pcl = res.p_chi2.tolist()
         pam = res.p_amp.tolist()
         pon = res.p_onset.tolist()
+        shx = None
+        if shc is not None:
+            sel, fr = shc['sel'], shc['fr']
+            npl = len(res.p_amp)
+            shx = [None] * npl            # per pulse: ft_* tuple, or None
+            if fr is not None:
+                ok = np.asarray(fr.status) == 0
+                a_u = res.p_amp.astype(np.float64).copy()
+                c_u = res.p_chi2.astype(np.float64).copy()
+                a_u[sel[ok]] = np.asarray(fr.amp, np.float64)[ok]
+                c_u[sel[ok]] = np.asarray(fr.chi2dof, np.float64)[ok]
+                fxa, fxc = pam, pcl
+                pam, pcl = a_u.tolist(), c_u.tolist()
+                fxe = shc['fx_Eu']
+                bnd = (np.asarray(fr.at_lo_r, bool).astype(np.int8)
+                       | (np.asarray(fr.at_hi_r, bool).astype(np.int8) << 1)
+                       | (np.asarray(fr.at_lo_f, bool).astype(np.int8) << 2)
+                       | (np.asarray(fr.at_hi_f, bool).astype(np.int8) << 3))
+                cols_ft = [np.asarray(getattr(fr, k), np.float64).tolist()
+                           for k in ("t0", "tau_r", "tau_f", "sig_tau_r",
+                                     "sig_tau_f", "sigw_tau_r", "sigw_tau_f",
+                                     "sig_amp", "chi2dof_seed")]
+                st_l = np.asarray(fr.status).tolist()
+                ni_l = np.asarray(fr.niter).tolist()
+                bn_l = bnd.tolist()
+                ii_l = np.asarray(fr.I_int, np.float64).tolist()
+                for j, i in enumerate(sel.tolist()):
+                    shx[i] = (fxa[i], fxc[i], float(fxe[i]), st_l[j],
+                              *(c[j] for c in cols_ft[:9]), ni_l[j], bn_l[j],
+                              ii_l[j])
         wave_rows, wave_src = [], []
         for r in range(n):                          # mf rows
             mod, f, ev = self.mods[r], self.fs[r], self.evn[r]
@@ -1296,7 +1406,8 @@ class MFBlock:
             a, b = starts[r], starts[r + 1]
             for i in range(a, b):
                 put(ev, mod.index, 1, tl[i], el[i], mod.energize(el[i] * f),
-                    pam[i], pcl[i], b - a, clip, pon[i], prms, sg, False, f)
+                    pam[i], pcl[i], b - a, clip, pon[i], prms, sg, False, f,
+                    ext=(shx[i] if shx is not None else None))
             if (b - a == 1 and not clip and pam[a] >= self.DUMP_WAVE_MIN_AMP
                     and self.wave_count.get(mod.index, 0)
                     < self.DUMP_WAVE_PER_MODULE):
@@ -1308,6 +1419,7 @@ class MFBlock:
                   amp=np.float64, chi2dof=np.float64, npk=np.int16,
                   clipped=bool, onset=np.float64, ped_rms=np.float32,
                   sigma_raw=np.float64, wa_fallback=bool, f_lms=np.float64)
+        dt.update(self.SHAPE_DT)
         self.chunks.append({k: np.asarray(v, dtype=dt[k]) for k, v in cols.items()})
         self.dump_n += len(cols["event"])
         if wave_src:
@@ -1333,16 +1445,27 @@ class MFBlock:
             out["wave_sigma"] = np.concatenate([w[2] for w in self.wave_chunks])
             out["wave_row"] = np.concatenate([w[3] for w in self.wave_chunks])
         pw = bank.pwo4
-        for k, v in (("tau_r", bank.tau_r), ("tau_f", bank.tau_f),
+        nan_m = np.full(pw.shape, np.nan)       # sampled bank: no tau_r / tau_f
+        for k, v in (("tau_r", getattr(bank, "tau_r", nan_m)),
+                     ("tau_f", getattr(bank, "tau_f", nan_m)),
                      ("I_int_mean", bank.I_mean), ("t50", bank.t50),
                      ("template_area", bank.area)):
             out[k] = np.where(pw, v, np.nan)
+        if getattr(bank, "ampcorr", None) is not None:
+            out["ampcorr_logA"], out["ampcorr_f"] = bank.ampcorr
         if self.nb is not None:
             for k in ("nb_event", "nb_path", "nb_seed", "nb_midx", "nb_ring",
                       "nb_A", "nb_sigmaA", "nb_E_MeV", "nb_has_free",
                       "nb_A_free", "nb_E_free_MeV", "nb_dt_free", "nb_t0"):
                 out[k] = (np.concatenate([c[k] for c in self.nb_chunks])
                           if self.nb_chunks else np.zeros(0))
+        if self.shape is not None:
+            sm = self.shape_meta
+            out["tau_sig_r"] = np.where(pw, sm['sig_r'], np.nan)
+            out["tau_sig_f"] = np.where(pw, sm['sig_f'], np.nan)
+            out["mf_shape"] = np.array(sm['mode'])
+            out["mf_shape_nsigma"] = np.array(sm['nsig'])
+            out["mf_shape_weight"] = np.array(sm['weight'])
         out["module_names"] = names
         out["run"] = np.array(run)
         out["int_tail_ratio"] = np.array(bank.int_tail_ratio)
@@ -1395,9 +1518,14 @@ def main(argv=None):
                     metavar=("R_LO", "R_HI", "C_LO", "C_HI"),
                     help="Drop seed modules with row in [R_LO, R_HI] AND "
                          "column in [C_LO, C_HI] from the per-module "
-                         "calibration sample (e.g. --exclude-rowcol 16 19 "
-                         "16 19 removes the 4x4 PbWO4 block surrounding the "
-                         "beam hole, where leakage biases the per-module mean).")
+                         "calibration sample.  Rows/columns are 1-based "
+                         "(1-34, as in hycal_map.json), inclusive; the beam "
+                         "hole is rows/cols 17-18.  E.g. --exclude-rowcol 15 "
+                         "20 15 20 removes the 6x6 block (two rings around "
+                         "the hole), where leakage biases the per-module "
+                         "mean.  Scans up to scan_20261023_pc compared the "
+                         "values 0-based (15 20 15 20 was one ring "
+                         "off-centre).")
     ap.add_argument("--cal-method",
                     choices=['elastic-window', 'cb-peak', 'median',
                              'percrystal'],
@@ -1480,8 +1608,11 @@ def main(argv=None):
                          "25800+26138+26230 combined) for "
                          "the X17 runs 25800/26138/26230, else output/"
                          "pulse_templates_h50.dat (column 25320), next to this "
-                         "script; or an explicit path.  A missing file is an "
-                         "error (exit 2).")
+                         "script; or an explicit path: a per-module (tau_r, "
+                         "tau_f) table or a spline_templates_v1 .npz (sampled "
+                         "per-module templates, optional f(A) energy factor; "
+                         "see mf_pulse.SampledTemplateBank).  A missing file is "
+                         "an error (exit 2).")
     ap.add_argument("--mf-template-column", default="auto", metavar="RUN",
                     help="mf: run column of the template table (default auto: "
                          "X17 runs (25800, 26138, 26230) default to "
@@ -1517,6 +1648,28 @@ def main(argv=None):
                     help="mf: also apply the ped_rms floor in the integration "
                          "walk (per pulse, with the channel's WaveAnalyzer "
                          "ped_rms and the fitted amplitude); default off.")
+    ap.add_argument("--mf-shape", choices=['fixed', 'bounded', 'prior'],
+                    default='fixed',
+                    help="mf only: per-pulse free two-tau refit of "
+                         "single-peak unclipped mf pulses, seeded at the mf "
+                         "result and the h50 template; bounded = tau in "
+                         "template +- N sigma, prior = Gaussian prior with "
+                         "that sigma, sigma = 1.4826 MAD of the table; energy "
+                         "= A_fit * I_int(fitted shape) * kappa; hit times "
+                         "stay those of the mf fit.  Default fixed (current "
+                         "code path, output unchanged).  Excludes "
+                         "--mf-ped-floor and --mf-nb-amp seedtime.")
+    ap.add_argument("--mf-shape-nsigma", type=float, default=3.0,
+                    help="--mf-shape: N sigma of the tau box / prior "
+                         "(default 3).")
+    ap.add_argument("--mf-shape-weight", choices=['uniform', 'seedmodel'],
+                    default='uniform',
+                    help="--mf-shape: sample weights of the refit.  uniform "
+                         "(default) = one sigma per pulse, max(max(sigma,1), "
+                         "0.03*A_mf), as in the h50 extraction "
+                         "(WaveAnalyzer::fit_pulse_shape); seedmodel = "
+                         "sigma^2 + (0.03*A s_seed(t_i))^2 per sample, frozen "
+                         "at the mf fit (study variant).")
     ap.add_argument("--pulse-dump", default=None, metavar="PATH",
                     help="mf only: write an NPZ with one row per PbWO4 pulse for "
                          "both methods (rawsum WaveAnalyzer and mf) on the "
@@ -1607,6 +1760,18 @@ def main(argv=None):
     if use_nb and args.mf_ped_floor:
         sys.stderr.write("[ERROR] --mf-nb-amp seedtime does not support "
                          "--mf-ped-floor.\n")
+        sys.exit(2)
+    use_shape = args.mf_shape != 'fixed'
+    if use_shape and not use_mf:
+        print("[WARN] --mf-shape needs --pulse-method mf; ignored.", flush=True)
+        use_shape = False
+    if use_shape and args.mf_ped_floor:
+        sys.stderr.write("[ERROR] --mf-shape does not support "
+                         "--mf-ped-floor.\n")
+        sys.exit(2)
+    if use_shape and use_nb:
+        sys.stderr.write("[ERROR] --mf-shape does not support --mf-nb-amp "
+                         "seedtime.\n")
         sys.exit(2)
     mf_path = None
     mf_column = None
@@ -1726,7 +1891,7 @@ def main(argv=None):
     lms_tag = "LMS: off" if lms_path is None else "LMS: on"
     n_ev_per_batch = [0] * lms.n_batches
 
-    mf_bank = mf_info = mf_rec = None
+    mf_bank = mf_info = mf_rec = mf_shape = None
     if use_mf:
         hy_mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
         mf_pwo4 = [bool(m_.is_pwo4()) for m_ in hy_mods]
@@ -1751,8 +1916,29 @@ def main(argv=None):
               f"fallback ({','.join(mf_info['fallback']) or 'none'})  "
               f"int_tail_ratio {mf_info['int_tail_ratio']:g}  "
               f"tail_break_n {mf_info['tail_break_n']}  "
-              f"ped_floor {int(args.mf_ped_floor)}  kappa {args.mf_scale:g}",
+              f"ped_floor {int(args.mf_ped_floor)}  kappa {args.mf_scale:g}"
+              + (f"  kind {mf_info['kind']}  ampcorr {mf_info['ampcorr']}"
+                 if mf_info['kind'] == 'sampled' else ""),
               flush=True)
+        if use_shape:
+            import mf_fit_pulse
+            try:
+                _sr, _sf, mf_sinfo = mf_fit_pulse.load_tau_sigma(
+                    mf_path, mf_info['column'], [m_.name for m_ in hy_mods],
+                    mf_pwo4)
+            except (OSError, ValueError, KeyError) as exc:
+                sys.stderr.write(f"[ERROR] mf tau sigma {mf_path}: {exc}\n")
+                sys.exit(2)
+            mf_shape = mf_fit_pulse.FreeTauFitter(
+                mf_bank, _sr, _sf, mode=args.mf_shape,
+                nsig=args.mf_shape_nsigma, weight=args.mf_shape_weight)
+            print(f"[setup] mf free-tau refit: mode {args.mf_shape}  "
+                  f"weight {args.mf_shape_weight}  "
+                  f"nsigma {args.mf_shape_nsigma:g}  sigma table: "
+                  f"{mf_sinfo['n_module']} modules, "
+                  f"{mf_sinfo['n_fallback']} fallback  median sig_tau_r "
+                  f"{mf_sinfo['median_sig_r']:.4f} sig_tau_f "
+                  f"{mf_sinfo['median_sig_f']:.4f} ns", flush=True)
     elif args.pulse_dump:
         print("[WARN] --pulse-dump needs --pulse-method mf; ignored.", flush=True)
 
@@ -1903,7 +2089,13 @@ def main(argv=None):
             ped_floor=args.mf_ped_floor, overflow=int(p.wave_ana.cfg.overflow),
             t_off=t_off, pre_lo=pre_lo, pre_hi=pre_hi, cl_legacy=cl_legacy,
             cl_new=cl_new, finish_event=finish_event, dump=args.pulse_dump,
-            pwo4_flags=mf_pwo4, count_pulses=(sp_mode != 'off'), nb=nb_cfg)
+            pwo4_flags=mf_pwo4, count_pulses=(sp_mode != 'off'), nb=nb_cfg,
+            shape=mf_shape,
+            shape_meta=(dict(mode=args.mf_shape, nsig=args.mf_shape_nsigma,
+                             weight=args.mf_shape_weight,
+                             sig_r=np.asarray(_sr, dtype=np.float64),
+                             sig_f=np.asarray(_sf, dtype=np.float64))
+                        if mf_shape is not None else None))
 
     t0 = time.monotonic()
     try:
@@ -2136,6 +2328,8 @@ def main(argv=None):
             dump_hdr['mf'] = dict(templates=mf_path, sha1=mf_info['sha1'],
                                   column=mf_info['column'], kappa=args.mf_scale,
                                   r_model=args.mf_r_model)
+            if mf_info['kind'] == 'sampled':
+                dump_hdr['mf'].update(kind='sampled', ampcorr=mf_info['ampcorr'])
         arrs = dict(
             evnum=np.array([e[12] for e in pool_d], dtype=np.int64),
             seed_idx=np.array([sid_info[e[0]][0] for e in pool_d], dtype=np.int32),
@@ -2475,10 +2669,34 @@ def main(argv=None):
                     f"tail_break_n={mf_info['tail_break_n']} "
                     f"ped_floor={int(args.mf_ped_floor)} kappa={args.mf_scale:g} "
                     f"nsigma={args.mf_nsigma:g} min_amp={args.mf_min_amp:g} "
-                    f"kmax={args.mf_kmax} r_model={args.mf_r_model:g}\n")
+                    f"kmax={args.mf_kmax} r_model={args.mf_r_model:g}"
+                    + (f" kind={mf_info['kind']} "
+                       f"ampcorr={mf_info['ampcorr']}"
+                       if mf_info['kind'] == 'sampled' else "") + "\n")
             f.write(f"# mf_stats n_cand={_st['n_cand']} n_peaks={_st['n_peaks']} "
                     f"n_multi={_st['n_multi']} n_joint={_st['n_joint']} "
                     f"n_sat={_st['n_sat']} n_sat_fallback={_st['n_sat_fallback']}\n")
+            if mf_shape is not None:
+                _sh = mf_block.sh
+                f.write(f"# mf_shape mode={args.mf_shape} "
+                        f"nsigma={args.mf_shape_nsigma:g} "
+                        f"weight={args.mf_shape_weight} "
+                        f"n_fit={_sh['n_fit']} n_fail={_sh['n_fail']} "
+                        f"n_status1={_sh['n_status'][1]} "
+                        f"n_status2={_sh['n_status'][2]} "
+                        f"n_status3={_sh['n_status'][3]} "
+                        f"n_at_lo_r={_sh['n_at_lo_r']} "
+                        f"n_at_hi_r={_sh['n_at_hi_r']} "
+                        f"n_at_lo_f={_sh['n_at_lo_f']} "
+                        f"n_at_hi_f={_sh['n_at_hi_f']} "
+                        f"n_any_bound={_sh['n_any_bound']} "
+                        f"n_skip_multi={_sh['n_multi_skipped']} "
+                        f"n_skip_clipped={_sh['n_clipped_skipped']} "
+                        f"t_mf_s={_sh['t_mf_s']:.2f} "
+                        f"t_fit_s={_sh['t_fit_s']:.2f} "
+                        f"n_chan={mf_block.n_chan} "
+                        f"median_sig_r={mf_sinfo['median_sig_r']:.5g} "
+                        f"median_sig_f={mf_sinfo['median_sig_f']:.5g}\n")
             if nb_cfg is not None:
                 _nb = mf_block.nbs
                 f.write(f"# mf_nb window={args.mf_nb_window} "
@@ -2632,7 +2850,7 @@ def main(argv=None):
         PCC.write_gain_table(gains_tsv, pc_res, pc_modinfo, extra_header=[
             f"evio={args.evio_path} target={target} ebeam={ebeam:.2f} "
             f"calib_file={calib_file} pulse_method={args.pulse_method} "
-            f"exclude_rowcol={excl}"])
+            f"exclude_rowcol={excl} rowcol_origin=1"])
         print(f"  wrote: {gains_tsv}")
 
     # ---- Headline plot (safe-guard against matplotlib crashes) -------------

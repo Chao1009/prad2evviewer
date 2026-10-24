@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-21
 **Branch:** `waveform_jz`
-**Plan:** `analysis/pyscripts/plan_benchmark_hycal_timing_test_20261021.md`
+**Plan:** `analysis/pyscripts/plans/plan_benchmark_hycal_timing_test_20261021.md`
 **LMS research:** `docs/research-lms-gain-tracking.md`
 
 All paths are relative to the repo root `/Users/L00338853/work/PRad/prad2evviewer` unless absolute.

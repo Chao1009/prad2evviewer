@@ -628,12 +628,16 @@ def cmd_fit(args):
                          extra_header=[
                              f"run={run} splits={','.join(str(s) for s, _ in sel)} "
                              f"half={tag} n_events={len(pool)} "
-                             f"exclude_rowcol={excl}",
+                             f"exclude_rowcol={excl} rowcol_origin=1 "
+                             f"fixed_windows={int(args.fixed_windows)} "
+                             f"max_iter={args.max_iter}",
                              f"calibration_file={hdr0.get('calibration_file')} "
                              f"sha1={calsha}"])
         prov = dict(schema=SCHEMA, run=run, half=tag,
                     splits=[s for s, _ in sel], dumps=[f for _, f in sel],
-                    n_events=len(pool), exclude_rowcol=excl,
+                    n_events=len(pool), exclude_rowcol=excl, rowcol_origin=1,
+                    fixed_windows=bool(args.fixed_windows),
+                    max_iter=args.max_iter, argv=sys.argv,
                     iterations=res['iterations'], converged=res['converged'],
                     history=res['history'], n_free=res['n_free'],
                     n_prior=res['n_prior'], g0=res['g0'],
@@ -786,8 +790,10 @@ def main(argv=None):
                    help="select the events once, with the windows of the g = 1 (seed-indexed) pass in pre-refinement energy; the solve is then independent of the starting gains (P1-6).  Default: windows refit in passes 1-3 on E_cal (the algorithm of the 2026-10-23 scans)")
     f.add_argument("--exclude-rowcol", type=int, nargs=4, default=None,
                    metavar=("R_LO", "R_HI", "C_LO", "C_HI"),
-                   help="Rectangle to drop from the pool (default: the dump "
-                        "header's value).")
+                   help="Rectangle to drop from the pool, 1-based "
+                        "inclusive rows/cols (default: the dump header's "
+                        "value; the dumps of output/scan_20261023 carry 15 "
+                        "20 15 20, now read 1-based, i.e. centred).")
     s = sub.add_parser("stability", help="run-to-run vs split-to-split gain "
                                          "spread from per-job gain tables")
     s.add_argument("--gains", nargs="+", required=True, metavar="GLOB")

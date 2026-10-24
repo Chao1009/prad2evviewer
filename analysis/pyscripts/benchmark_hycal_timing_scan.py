@@ -95,13 +95,32 @@ _DEFAULT_PROMINENCE = 40
 _DEFAULT_PEAK_DIST_MEV = 100.0
 _DEFAULT_PARALLEL   = 1
 # Pulse-method tagging of outputs: rawsum keeps the legacy names/titles unchanged.
-_PULSE_LABEL = {"rawsum": "rawsum", "mf": "mf (template)"}
+_PULSE_LABEL = {"rawsum": "rawsum", "mf": "mf (template)",
+                "rawsum_pc": "rawsum + per-crystal", "mf_pc": "mf + per-crystal"}
 _STEM_BASE = "benchmark_hycal_timing_scan"
+# --gain-file-map auto: pooled per-crystal gain table per run (percrystal_calib.py fit)
+_PERCRYSTAL_DIR = Path(__file__).resolve().parent / "output" / "percrystal"
 
 
-def _stem(pulse_method: str) -> str:
-    """Output-file stem; mf gets an ``_mf`` suffix, rawsum is unchanged."""
-    return _STEM_BASE + ("_mf" if pulse_method == "mf" else "")
+def _stem(pulse_method: str, spl: bool = False) -> str:
+    """Output-file stem; mf gets an ``_mf`` suffix, rawsum is unchanged; the
+    per-crystal label keys (``*_pc``) append ``_pc``; spl (--mf-templates-map,
+    sampled templates) appends ``_spl``."""
+    return (_STEM_BASE + {"rawsum": "", "mf": "_mf", "rawsum_pc": "_pc",
+                          "mf_pc": "_mf_pc"}[pulse_method]
+            + ("_spl" if spl else ""))
+
+
+def gain_file_path(run: int, gain_dir: Path = _PERCRYSTAL_DIR) -> Path:
+    """Pooled per-crystal gain table of a run (--gain-file-map auto)."""
+    return Path(gain_dir) / f"{run:06d}" / f"gains_{run:06d}_all.tsv"
+
+
+def mf_templates_path(run: int, pattern: str) -> Path:
+    """Template file of a run (--mf-templates-map): ``{runtype}`` in pattern ->
+    gate_scan_20261022.runtype_slug(run), e.g. '2p24GeV_H2'."""
+    import gate_scan_20261022            # lazy: it imports this module
+    return Path(pattern.replace("{runtype}", gate_scan_20261022.runtype_slug(run)))
 
 
 # Runs left out of the scan entirely (user decision); value = reason shown in SKIP line.
@@ -339,8 +358,19 @@ def run_benchmark(
     pulse_method: str = "rawsum",
     window: Optional[float] = None,
     pre_window: Optional[tuple[float, float]] = None,
+    gain_file: Optional[Path] = None,
+    write_cluster_tsv: bool = False,
+    mf_templates: Optional[Path] = None,
+    mf_scale: Optional[float] = None,
 ) -> Path:
     """Invoke benchmark_hycal_timing_test_20261021.py; return path to the TSV.
+
+    gain_file, when given, is passed as ``--gain-file`` (per-crystal gains at
+    the member level, the seed-indexed elastic-window refinement on top); a
+    missing file raises RuntimeError (the split is skipped and logged).
+    write_cluster_tsv appends ``--write-cluster-tsv`` (result_clusters.tsv).
+    mf_templates, when given, is passed as ``--mf-templates`` (a missing file
+    raises RuntimeError like gain_file); mf_scale as ``--mf-scale``.
 
     pulse_method "mf" appends ``--pulse-method mf``; window / pre_window, when
     given, override the benchmark default window and the per-run pre-window.
@@ -362,6 +392,10 @@ def run_benchmark(
         log.info("skip (TSV exists): %s", tsv_p)
         return tsv_p
 
+    if gain_file is not None and not Path(gain_file).is_file():
+        raise RuntimeError(f"gain file missing: {gain_file}")
+    if mf_templates is not None and not Path(mf_templates).is_file():
+        raise RuntimeError(f"mf templates missing: {mf_templates}")
     out_d.mkdir(parents=True, exist_ok=True)
 
     pre_lo, pre_hi = (pre_window if pre_window is not None
@@ -391,6 +425,14 @@ def run_benchmark(
         cmd.extend(["--window", str(window)])
     if pulse_method == "mf":
         cmd.extend(["--pulse-method", "mf"])
+    if mf_templates is not None:
+        cmd.extend(["--mf-templates", str(mf_templates)])
+    if mf_scale is not None:
+        cmd.extend(["--mf-scale", f"{mf_scale:g}"])
+    if gain_file is not None:
+        cmd.extend(["--gain-file", str(gain_file)])
+    if write_cluster_tsv:
+        cmd.append("--write-cluster-tsv")
 
     max_ev_label = str(max_events) if max_events is not None else "full file"
     log.info("run %06d split %05d → %s  (max_events=%s)",
@@ -1533,6 +1575,41 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pre-window [LO, HI] ns for every run, overriding the per-run "
              "map. Default: per-run map.",
     )
+    ap.add_argument(
+        "--gain-file-map", choices=["off", "auto"], default="off",
+        help="auto: pass --gain-file output/percrystal/<run>/gains_<run>_all.tsv "
+             "(pooled per-crystal gains) for every run, with the seed-indexed "
+             "elastic-window refinement on top; output names/titles get the "
+             "'per-crystal' tag.  The tables are fitted on mf dumps with "
+             "W = 16 ns and pre-window 100-200 ns: use matching flags.  "
+             "Default off (commands unchanged).",
+    )
+    ap.add_argument(
+        "--gain-dir", type=Path, default=_PERCRYSTAL_DIR, metavar="DIR",
+        help="Directory of the --gain-file-map auto tables "
+             "(<DIR>/<run>/gains_<run>_all.tsv).  Default output/percrystal.",
+    )
+    ap.add_argument(
+        "--mf-templates-map", default=None, metavar="PATTERN",
+        help="mf only: per-run template file, passed as --mf-templates; "
+             "{runtype} in PATTERN -> run-type slug (2p24GeV_H2, 2p24GeV_C, "
+             "3p49GeV_H2, 0p73GeV_H2, 2p24GeV_Ta_X17), e.g. "
+             "output/templates_spline/{runtype}/templates_{runtype}.npz.  A "
+             "missing file skips the split like a missing gain file.  Output "
+             "names get the '_spl' stem label.  Default off (commands "
+             "unchanged).",
+    )
+    ap.add_argument(
+        "--mf-scale", type=float, default=None, metavar="F",
+        help="mf only: pass --mf-scale F to the benchmark (energy scale kappa).  "
+             "Default: not passed (benchmark default).",
+    )
+    ap.add_argument(
+        "--write-cluster-tsv", action="store_true",
+        help="Pass --write-cluster-tsv to the benchmark (per-event "
+             "result_clusters.tsv per split, input of "
+             "plot_module_resolution.py).  Default off (commands unchanged).",
+    )
     return ap
 
 
@@ -1544,7 +1621,12 @@ def main(argv=None) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # ---- Logging setup -------------------------------------------------------
-    stem = _stem(args.pulse_method)
+    # label key for names/titles; the benchmark still gets args.pulse_method
+    lab = args.pulse_method + ("_pc" if args.gain_file_map == "auto" else "")
+    if args.pulse_method != "mf" and (args.mf_templates_map is not None
+                                      or args.mf_scale is not None):
+        ap.error("--mf-templates-map and --mf-scale need --pulse-method mf")
+    stem = _stem(lab, spl=args.mf_templates_map is not None)
     pre_window = tuple(args.pre_window) if args.pre_window is not None else None
     log_path = output_dir / f"{stem}.log"
     logging.basicConfig(
@@ -1571,13 +1653,17 @@ def main(argv=None) -> int:
     log.info("  skip_bench  : %s", args.skip_benchmark)
     log.info("  timeout     : %s",
              f"{args.timeout_seconds}s" if args.timeout_seconds > 0 else "disabled")
-    if args.pulse_method != "rawsum" or args.window is not None or pre_window is not None:
-        log.info("  pulse_method: %s", _PULSE_LABEL[args.pulse_method])
+    if lab != "rawsum" or args.window is not None or pre_window is not None:
+        log.info("  pulse_method: %s", _PULSE_LABEL[lab])
         log.info("  window      : %s",
                  f"{args.window:g} ns" if args.window is not None else "benchmark default")
         log.info("  pre_window  : %s",
                  f"{pre_window[0]:g}-{pre_window[1]:g} ns" if pre_window is not None
                  else "per-run map")
+    if args.mf_templates_map is not None:
+        log.info("  mf templates: %s", args.mf_templates_map)
+    if args.mf_scale is not None:
+        log.info("  mf scale    : %g", args.mf_scale)
     log.info("=" * 70)
 
     if not HAVE_SCIPY:
@@ -1629,6 +1715,13 @@ def main(argv=None) -> int:
                 pulse_method=args.pulse_method,
                 window=args.window,
                 pre_window=pre_window,
+                gain_file=(gain_file_path(run, args.gain_dir)
+                           if args.gain_file_map == "auto"
+                           else None),
+                write_cluster_tsv=args.write_cluster_tsv,
+                mf_templates=(mf_templates_path(run, args.mf_templates_map)
+                              if args.mf_templates_map is not None else None),
+                mf_scale=args.mf_scale,
             )
             return run, split, fpath, tsv, None
         except Exception as exc:
@@ -1731,7 +1824,7 @@ def main(argv=None) -> int:
             value_col_cb="sigma_over_E_cb_pre",
             title_suffix="PRE-calibration",
             secondary_flag_col="secondary_peak_pre_present",
-            pulse_method=args.pulse_method,
+            pulse_method=lab,
         )
         print(f"\nWrote pre-calibration trend plot: {trend_pre_png}", flush=True)
         log.info("Wrote pre-calibration trend plot: %s", trend_pre_png)
@@ -1744,7 +1837,7 @@ def main(argv=None) -> int:
             value_col_cb="sigma_over_E_cb_post",
             title_suffix="POST-calibration",
             secondary_flag_col="secondary_peak_post_present",
-            pulse_method=args.pulse_method,
+            pulse_method=lab,
         )
         print(f"\nWrote post-calibration trend plot: {trend_post_png}", flush=True)
         log.info("Wrote post-calibration trend plot: %s", trend_post_png)
@@ -1765,7 +1858,7 @@ def main(argv=None) -> int:
     )
     try:
         generate_combined_pdf(all_rows, output_dir, combined_pdf,
-                              pulse_method=args.pulse_method)
+                              pulse_method=lab)
         log.info("Wrote combined calibrated PDF: %s", combined_pdf)
     except Exception as exc:
         log.error("Combined PDF generation failed: %s", exc)
@@ -1773,7 +1866,7 @@ def main(argv=None) -> int:
 
     # ---- Findings markdown --------------------------------------------------
     findings_md = output_dir / f"{stem}_findings.md"
-    write_findings_md(all_rows, findings_md, pulse_method=args.pulse_method,
+    write_findings_md(all_rows, findings_md, pulse_method=lab,
                       window=args.window, pre_window=pre_window, stem=stem)
     log.info("Wrote findings: %s", findings_md)
 

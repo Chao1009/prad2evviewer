@@ -25,13 +25,13 @@ The template **peak** sits at a fixed positive offset past the onset:
 
     t_peak_offset = τ_r · log((τ_r + τ_f) / τ_r)  ≈ 5.5 ns (PbWO4)
 
-WaveAnalyzer.analyze returns pk.time = the **peak position** (interpolated,
-in ns), NOT the onset.  WaveAnalyzer.deconvolve reports dec_out.t0_ns =
-the fitted **template onset**.  These differ by t_peak_offset.
+WaveAnalyzer.analyze returns pk.time = the 50 % CFD leading-edge time
+(interpolated, in ns), NOT the peak and NOT the onset.  WaveAnalyzer.deconvolve
+reports dec_out.t0_ns = the fitted **template onset**.
 
-ΔT in this generator = **peak-to-peak separation** (intuitive, scope-like).
-Because both pulses share the same (τ_r, τ_f), the onset-to-onset
-separation equals the peak-to-peak separation.
+ΔT in this generator = peak-to-peak separation of the injected pulse w.r.t.
+the base peak position (intuitive, scope-like).  Because both pulses share
+the same (τ_r, τ_f), the onset-to-onset separation equals ΔT (two-tau).
 
 Each synthetic event stores BOTH:
   truth_peak_times_ns[:, k]  — peak time (ns);   compare to pk.time from analyze.
@@ -85,10 +85,41 @@ Output schema (§3.2 — per-cell .npz)
   meta_T_max              float32 ()
   meta_t_peak_offset_ns   float32 ()
   meta_n_events           int32   ()
+  meta_template_kind      <U9     ()               "two_tau" (JSON) or "sampled" (.npz)
+  meta_template_sha1      <U40    ()               sha1 of the --template file
+  inject_template_row     int32   (N,)             sampled: bank row of the injected shape
+                                                   (index into the npz `names` + average row
+                                                   at index len(names)); two_tau: -1
+  inject_template_fallback int8   (N,)             1 = the run-type average shape was used
+                                                   (module absent/invalid in the bank or the
+                                                   bank's own fallback 2 row); 0 otherwise
+  inject_t_peak_offset_ns float32 (N,)             peak offset of the injected shape (ns);
+                                                   constant for two_tau, t_pk[row] for sampled
+  truth_onset_sampled_ns  float32 (N, 2)           sampled templates only: [injected, base_ref]
+                                                   onset in the sampled-template convention
+                                                   (definition in meta_onset_sampled_def and
+                                                   the sidecar); truth_onset_t0_ns is unchanged
+  meta_onset_sampled_def  <U...   ()               sampled templates only
   meta_dt_min_ns          float32 ()               random-dt mode only
   meta_dt_max_ns          float32 ()               random-dt mode only
 
 All arrays are pickle-free; np.load(path, allow_pickle=False) works.
+
+Sampled templates (--template *.npz, schema spline_templates_v1)
+----------------------------------------------------------------
+The injected shape is the module's own unit-peak spline (mf_pulse.
+SampledTemplateBank, the shapes the matched filter uses; 0 for t <= 0 and
+t >= T_end), chosen per base event from base_channel_name; modules absent
+from the bank or invalid take the run-type average (counted).  T_max = 1
+(truth_model_amplitudes == truth_heights_adc), the injected onset is
+base_peak_time + dt - t_pk[row]; dt = injected peak - base pk.time
+(WaveAnalyzer 50 % CFD time); the true onset separation is ~dt - 6.4 ns, per
+event truth_onset_sampled_ns[:,0] - [:,1].  The onset t=0 convention is the
+bank's.  meta_tau_r_ns / meta_tau_f_ns are NaN and
+meta_t_peak_offset_ns is the average row's t_pk (per-event value:
+inject_t_peak_offset_ns).  Base selection is unchanged (C++ two-tau
+fit_pulse_shape gate); the residual veto subtracts h * shape(t - (pk.time -
+t50[row])) over the same +-3*24 ns protected window.
 
 Non-goals for v0.1 (§13)
 -------------------------
@@ -107,6 +138,7 @@ Non-goals for v0.1 (§13)
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -154,6 +186,7 @@ DEFAULT_RESIDUAL_VETO_SIGMA = 5.0
 DEFAULT_N_PER_CONFIG = 50
 DEFAULT_PROGRESS_EVERY = 500
 DEFAULT_SEED = 12345
+SAMPLED_VETO_TAU_F_NS = 24.0    # residual-veto half window = 3x this (PbWO4 two-tau median tau_f)
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +201,16 @@ class TemplateShape:
     tau_f_ns: float
     t0_template_ns: float           # median onset t0 from the fit output
     T_max: float                    # (1 - u) · u^(τ_r / τ_f), u = τ_r/(τ_r+τ_f)
-    t_peak_offset_ns: float         # τ_r · log((τ_r+τ_f)/τ_r)
+    t_peak_offset_ns: float         # τ_r · log((τ_r+τ_f)/τ_r)  (sampled: average row t_pk)
     source_path: str = ""
+    kind: str = "two_tau"           # "two_tau" (JSON) | "sampled" (spline_templates_v1 .npz)
+    sha1: str = ""                  # sha1 of the template file ("" for synthetic)
+    # --- kind == "sampled" only (tau_r/tau_f are NaN, T_max = 1) ---
+    bank: object = None             # mf_pulse.SampledTemplateBank (rows = file names + average)
+    row_of: Dict[str, int] = field(default_factory=dict)   # module name -> own bank row
+    row_avg_fb: Dict[str, int] = field(default_factory=dict)  # name -> 1 if file fallback == 2
+    avg_row: int = -1               # bank row of the run-type average
+    t_pk: Optional[np.ndarray] = None   # per bank row: peak time after onset (ns)
 
 
 @dataclass
@@ -179,7 +220,7 @@ class BaseEvent:
     ped_mean: float                 # from wave_ana.analyze
     ped_rms: float                  # noise σ
     base_height: float              # pk.height (ADC, pedsub)
-    base_peak_time_ns: float        # pk.time (ns) — WaveAnalyzer peak position
+    base_peak_time_ns: float        # pk.time (ns) — WaveAnalyzer 50 % CFD time
     base_onset_t0_ns: float         # fitted template onset from fit_pulse_shape
     base_peak_sample: int           # pk.pos (integer sample index)
     base_chi2_per_dof: float        # from fit_pulse_shape
@@ -194,6 +235,9 @@ class BaseEvent:
     base_source_file: str           # basename of the EVIO split
     base_physics_event_index: int   # physics-event counter within the run
     base_run_number: int
+    # sampled templates only: onset of the base pulse in the sampled-template
+    # convention (see fit_sampled_onset); NaN for two_tau
+    base_onset_sampled_ns: float = float("nan")
 
 
 @dataclass
@@ -221,6 +265,10 @@ class GridPoint:
     _base_source_files: List[str] = field(init=False)
     _base_physics_event_index: List[int] = field(init=False)
     _base_chi2_per_dof: List[float] = field(init=False)
+    _truth_onset_sampled_ns: np.ndarray = field(init=False)
+    _inject_template_row: List[int] = field(init=False)
+    _inject_template_fallback: List[int] = field(init=False)
+    _inject_t_peak_offset_ns: List[float] = field(init=False)
     _n_filled: int = field(init=False, default=0)
 
     def __post_init__(self) -> None:
@@ -241,6 +289,10 @@ class GridPoint:
         self._base_source_files     = [""] * N
         self._base_physics_event_index = [0] * N
         self._base_chi2_per_dof     = [0.0] * N
+        self._truth_onset_sampled_ns = np.full((N, 2), np.nan, dtype=np.float32)
+        self._inject_template_row      = [-1] * N
+        self._inject_template_fallback = [0] * N
+        self._inject_t_peak_offset_ns  = [0.0] * N
         self._n_filled = 0
 
     @property
@@ -306,6 +358,11 @@ class GridPoint:
         self._base_source_files[i]         = base.base_source_file
         self._base_physics_event_index[i]  = base.base_physics_event_index
         self._base_chi2_per_dof[i]         = base.base_chi2_per_dof
+        self._truth_onset_sampled_ns[i, 0] = truth["inject_onset_t0_ns"]
+        self._truth_onset_sampled_ns[i, 1] = base.base_onset_sampled_ns
+        self._inject_template_row[i]       = truth["inject_template_row"]
+        self._inject_template_fallback[i]  = truth["inject_template_fallback"]
+        self._inject_t_peak_offset_ns[i]   = truth["inject_t_peak_offset_ns"]
         self._n_filled += 1
 
     def slice(self) -> Dict:
@@ -328,6 +385,10 @@ class GridPoint:
             base_source_files       = np.array(self._base_source_files[:n],  dtype="<U64"),
             base_physics_event_index= np.array(self._base_physics_event_index[:n], dtype=np.int32),
             base_chi2_per_dof       = np.array(self._base_chi2_per_dof[:n],  dtype=np.float32),
+            truth_onset_sampled_ns  = self._truth_onset_sampled_ns[:n],
+            inject_template_row     = np.array(self._inject_template_row[:n],      dtype=np.int32),
+            inject_template_fallback= np.array(self._inject_template_fallback[:n], dtype=np.int8),
+            inject_t_peak_offset_ns = np.array(self._inject_t_peak_offset_ns[:n],  dtype=np.float32),
         )
 
 
@@ -395,18 +456,139 @@ def load_template_shape(json_path: str, material: str) -> TemplateShape:
     )
 
 
+def _file_sha1(path: Path) -> str:
+    h = hashlib.sha1()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def load_sampled_template_shape(npz_path: str, material: str) -> TemplateShape:
+    """Load a spline_templates_v1 .npz as a per-module sampled TemplateShape.
+
+    Rows are built by mf_pulse.SampledTemplateBank.from_npz (the shapes the
+    matched filter uses).  Bank rows = the file's valid module names + one
+    run-type-average row; a module absent from the file or with valid == 0
+    resolves to the average row.
+    """
+    p = Path(npz_path)
+    if not p.is_file():
+        raise SystemExit(f"[ERROR] template file not found: {npz_path}")
+    import mf_pulse
+    z = np.load(str(p), allow_pickle=False)
+    meta = json.loads(str(z["meta"])) if "meta" in z.files else {}
+    if meta.get("schema") != "spline_templates_v1":
+        raise SystemExit(
+            f"[ERROR] {npz_path}: schema {meta.get('schema')!r} != 'spline_templates_v1'"
+        )
+    wc = meta.get("wave_config", {})
+    valid, fbs = z["valid"], z["fallback"]
+    own = [str(nm) for nm, v in zip(z["names"], valid) if v > 0]
+    names = own + ["__avg__"]
+    bank = mf_pulse.SampledTemplateBank.from_npz(
+        str(p), names, np.ones(len(names), dtype=bool),
+        smooth_order=int(wc.get("smooth_order", 2)),
+        int_tail_ratio=float(wc.get("int_tail_ratio", 0.1)),
+        tail_break_n=int(wc.get("tail_break_n", 2)))
+    row_of = {nm: i for i, nm in enumerate(own)}
+    fb_of = {str(nm): int(f) for nm, f in zip(z["names"], fbs)}
+    return TemplateShape(
+        material=material,
+        tau_r_ns=float("nan"),
+        tau_f_ns=float("nan"),
+        t0_template_ns=0.0,
+        T_max=1.0,
+        t_peak_offset_ns=float(bank.t_pk[len(own)]),
+        source_path=str(p.resolve()),
+        kind="sampled",
+        sha1=_file_sha1(p),
+        bank=bank,
+        row_of=row_of,
+        row_avg_fb={nm: int(fb_of[nm] == 2) for nm in own},
+        avg_row=len(own),
+        t_pk=np.asarray(bank.t_pk, dtype=np.float64),
+    )
+
+
+def load_template(path: str, material: str) -> TemplateShape:
+    """Suffix dispatch: .npz -> sampled bank, anything else -> two-tau JSON."""
+    if str(path).lower().endswith(".npz"):
+        return load_sampled_template_shape(path, material)
+    shape = load_template_shape(path, material)
+    shape.sha1 = _file_sha1(Path(path))
+    return shape
+
+
+def template_row(shape: TemplateShape, name: str) -> Tuple[int, int]:
+    """(bank row, fallback flag) of the shape for module `name`.
+
+    two_tau: (-1, 0).  sampled: own row (flag 1 if the file row is itself the
+    run-type average) or the average row with flag 1 when `name` is absent
+    from the bank / invalid.
+    """
+    if shape.kind != "sampled":
+        return -1, 0
+    r = shape.row_of.get(name)
+    if r is None:
+        return shape.avg_row, 1
+    return r, shape.row_avg_fb[name]
+
+
+ONSET_FIT_WINDOW_NS = (-20.0, 160.0)    # fit window around t0 (sampled-onset definition)
+ONSET_FIT_HALF_NS = 8.0                 # search half-range around (pk.time - t50[row]); pk.time is the 50 % CFD time
+ONSET_FIT_STEP_NS = 0.02
+SAMPLED_ONSET_DEF = (
+    "truth_onset_sampled_ns[:,0] = injected onset exactly as injected "
+    "(peak - t_pk[row]); [:,1] = base pulse onset: least-squares fit of the "
+    "pedestal-subtracted base waveform (before injection) with the module's "
+    "sampled shape, closed-form amplitude at each t0 on a 0.02 ns grid within "
+    "+-8 ns of (pk.time - t50[row]), samples with t-t0 in [-20, 160] ns; t0 is "
+    "in the sampled convention (t=0 at the 0.5 % foot)."
+)
+
+
+def fit_sampled_onset(shape: TemplateShape, row: int, samples_u16: np.ndarray,
+                      ped_mean: float, clk_ns: float, peak_time_ns: float) -> float:
+    """Onset (sampled-template convention) of a single base pulse.
+
+    Minimises sum_{t-t0 in window} (y - A s(t - t0))^2 over t0 on a fine grid
+    with the closed-form A = sum(y s)/sum(s^2); y = samples - ped_mean.
+    """
+    y = samples_u16.astype(np.float64) - float(ped_mean)
+    t = np.arange(y.size, dtype=np.float64) * clk_ns
+    c = float(peak_time_ns) - float(shape.bank.t50[row])
+    g = c + np.arange(-ONSET_FIT_HALF_NS, ONSET_FIT_HALF_NS + 0.5 * ONSET_FIT_STEP_NS,
+                      ONSET_FIT_STEP_NS)
+    tau = t[None, :] - g[:, None]
+    sh = shape.bank.shape(int(row), tau, dtype=np.float64)
+    w = ((tau >= ONSET_FIT_WINDOW_NS[0]) & (tau <= ONSET_FIT_WINDOW_NS[1])).astype(np.float64)
+    num = (w * y[None, :] * sh).sum(axis=1)
+    den = (w * sh * sh).sum(axis=1)
+    chi2 = (w * y[None, :] ** 2).sum(axis=1) - np.where(den > 0, num * num / np.maximum(den, 1e-12), 0.0)
+    return float(g[int(np.argmin(chi2))])
+
+
 # ---------------------------------------------------------------------------
 # Template evaluation (Python-side — for injection kernel only)
 # ---------------------------------------------------------------------------
 
 def eval_template(t_ns: np.ndarray, t0_ns: float,
-                  tau_r: float, tau_f: float, T_max: float) -> np.ndarray:
-    """Evaluate the peak-normalised two-τ template on grid t_ns.
+                  tau_r: float, tau_f: float, T_max: float,
+                  shape: Optional[TemplateShape] = None,
+                  row: int = -1) -> np.ndarray:
+    """Evaluate the peak-normalised template on grid t_ns.
 
     Returns array of same shape as t_ns, dtype float32.
     Peak value = 1.0 by construction (divided by T_max).
     Returns zeros everywhere t_ns <= t0_ns.
+
+    With shape.kind == "sampled" the bank row `row` is evaluated instead
+    (tau_r, tau_f, T_max are ignored); zero for t <= t0 and t >= t0 + T_end.
     """
+    if shape is not None and shape.kind == "sampled":
+        t = np.asarray(t_ns, dtype=np.float64) - float(t0_ns)
+        return shape.bank.shape(int(row), t, dtype=np.float64).astype(np.float32)
     out = np.zeros(t_ns.shape, dtype=np.float32)
     mask = t_ns > t0_ns
     if not mask.any():
@@ -434,6 +616,7 @@ def inject_pulse(
     clk_ns: float,
     noise_model: str,
     rng: np.random.Generator,
+    channel_name: str = "",
 ) -> Tuple[np.ndarray, Dict]:
     """Compose a synthetic 2-pulse waveform by injecting one template pulse
     on top of a real base event.
@@ -441,24 +624,32 @@ def inject_pulse(
     ΔT = dt_ns is peak-to-peak (§1a.1).  Both pulses share (τ_r, τ_f), so
     onset-to-onset separation == peak-to-peak separation.
 
+    channel_name selects the bank row for a sampled shape (ignored for two_tau).
+
     Returns
     -------
     (composite_u16, truth_dict)
       composite_u16 : uint16 array of shape (n_samples,)
-      truth_dict    : 8 keys (inject_*, base_*) — see inline comments.
+      truth_dict    : 8 keys (inject_*, base_*) — see inline comments — plus
+                      inject_template_row, inject_template_fallback and
+                      inject_t_peak_offset_ns.
     """
     n = base_samples_u16.shape[0]
     t_ns = np.arange(n, dtype=np.float32) * clk_ns
 
     # Injected-pulse timing (§1a.1)
+    row, fallback = template_row(shape, channel_name)
+    t_peak_offset_ns = (float(shape.t_pk[row]) if shape.kind == "sampled"
+                        else shape.t_peak_offset_ns)
     inject_peak_time_ns = base_peak_time_ns + dt_ns
-    inject_onset_t0_ns  = inject_peak_time_ns - shape.t_peak_offset_ns
+    inject_onset_t0_ns  = inject_peak_time_ns - t_peak_offset_ns
 
     # Height convention (§1a.2): inject_height IS the peak height in ADC.
     inject_height = ratio * base_height
 
     pulse_unit = eval_template(t_ns, inject_onset_t0_ns,
-                               shape.tau_r_ns, shape.tau_f_ns, shape.T_max)
+                               shape.tau_r_ns, shape.tau_f_ns, shape.T_max,
+                               shape=shape, row=row)
 
     composite_f = (base_samples_u16.astype(np.float32)
                    + inject_height * pulse_unit)
@@ -485,7 +676,7 @@ def inject_pulse(
     assert composite_u16.shape == base_samples_u16.shape
     assert composite_u16.dtype == np.uint16
     assert abs(inject_peak_time_ns - (base_peak_time_ns + dt_ns)) < 1e-6
-    assert abs(inject_onset_t0_ns - (inject_peak_time_ns - shape.t_peak_offset_ns)) < 1e-6
+    assert abs(inject_onset_t0_ns - (inject_peak_time_ns - t_peak_offset_ns)) < 1e-6
 
     truth = {
         # Injected — exact truth (col 0)
@@ -498,6 +689,10 @@ def inject_pulse(
         "base_model_amp":      float(base_height / shape.T_max),
         "base_onset_t0_ns":    float(base_onset_t0_ns),
         "base_peak_time_ns":   float(base_peak_time_ns),
+        # Template provenance of the injected shape
+        "inject_template_row":      int(row),
+        "inject_template_fallback": int(fallback),
+        "inject_t_peak_offset_ns":  float(t_peak_offset_ns),
     }
     return composite_u16, truth
 
@@ -581,225 +776,248 @@ def iterate_base_events(
     n_bases_yielded = 0
 
     # Residual veto window (§4 cut 8): ±3·τ_f around the main peak (in samples)
-    veto_half_ns  = 3.0 * shape.tau_f_ns
+    veto_half_ns  = 3.0 * (SAMPLED_VETO_TAU_F_NS if shape.kind == "sampled"
+                           else shape.tau_f_ns)
     veto_half_smp = int(round(veto_half_ns / clk_ns))
     residual_sigma = float(args.residual_veto_sigma)
 
-    for fpath in pipeline.evio_files:
-        if ch.open_auto(fpath) != dec.Status.success:
-            print(f"[WARN] skip (cannot open): {fpath}", file=sys.stderr, flush=True)
-            continue
-        n_files_open += 1
-        print(f"[file {n_files_open}/{len(pipeline.evio_files)}] {fpath}", flush=True)
-        done = False
-
-        while ch.read() == dec.Status.success:
-            if not ch.scan():
+    try:
+        for fpath in pipeline.evio_files:
+            if ch.open_auto(fpath) != dec.Status.success:
+                print(f"[WARN] skip (cannot open): {fpath}", file=sys.stderr, flush=True)
                 continue
-            if ch.get_event_type() != dec.EventType.Physics:
-                continue
+            n_files_open += 1
+            print(f"[file {n_files_open}/{len(pipeline.evio_files)}] {fpath}", flush=True)
+            done = False
 
-            for i in range(ch.get_n_events()):
-                decoded = ch.decode_event(i, with_ssp=False)
-                if not decoded["ok"]:
+            while ch.read() == dec.Status.success:
+                if not ch.scan():
                     continue
-                n_phys += 1
-                if args.max_events and n_phys >= args.max_events:
-                    done = True
+                if ch.get_event_type() != dec.EventType.Physics:
+                    continue
 
-                run_number = C.extract_run_number(fpath)
-                fadc_evt = decoded["event"]
-
-                for ri in range(fadc_evt.nrocs):
-                    roc = fadc_evt.roc(ri)
-                    if not roc.present:
+                for i in range(ch.get_n_events()):
+                    decoded = ch.decode_event(i, with_ssp=False)
+                    if not decoded["ok"]:
                         continue
-                    crate = pipeline.crate_map.get(roc.tag)
-                    for s in roc.present_slots():
-                        slot_obj = roc.slot(s)
-                        for c in slot_obj.present_channels():
-                            cd = slot_obj.channel(c)
-                            if cd.nsamples <= 0:
-                                continue
+                    n_phys += 1
+                    if args.max_events and n_phys >= args.max_events:
+                        done = True
 
-                            n_total_candidates += 1
+                    run_number = C.extract_run_number(fpath)
+                    fadc_evt = decoded["event"]
 
-                            samples_raw = np.asarray(cd.samples, dtype=np.uint16)
-                            ped, rms, peaks = pipeline.wave_ana.analyze(samples_raw)
+                    for ri in range(fadc_evt.nrocs):
+                        roc = fadc_evt.roc(ri)
+                        if not roc.present:
+                            continue
+                        crate = pipeline.crate_map.get(roc.tag)
+                        for s in roc.present_slots():
+                            slot_obj = roc.slot(s)
+                            for c in slot_obj.present_channels():
+                                cd = slot_obj.channel(c)
+                                if cd.nsamples <= 0:
+                                    continue
 
-                            # Cut 1: exactly one peak
-                            if len(peaks) != 1:
-                                n_reject_multi_peak += 1
-                                continue
-                            pk = peaks[0]
+                                n_total_candidates += 1
 
-                            # Cut 2: quality == 0 (no Q_PEAK_PILED etc.)
-                            if pk.quality != 0:
-                                n_reject_quality += 1
-                                continue
+                                samples_raw = np.asarray(cd.samples, dtype=np.uint16)
+                                ped, rms, peaks = pipeline.wave_ana.analyze(samples_raw)
 
-                            # Cut 3: not overflow
-                            if pk.overflow:
-                                n_reject_overflow += 1
-                                continue
+                                # Cut 1: exactly one peak
+                                if len(peaks) != 1:
+                                    n_reject_multi_peak += 1
+                                    continue
+                                pk = peaks[0]
 
-                            # Cut 4: height in [height_min, height_max]
-                            h = float(pk.height)
-                            if not (args.height_min <= h <= args.height_max):
-                                n_reject_height += 1
-                                continue
+                                # Cut 2: quality == 0 (no Q_PEAK_PILED etc.)
+                                if pk.quality != 0:
+                                    n_reject_quality += 1
+                                    continue
 
-                            # Cut 5: height >= height_rms_mult * ped_rms (SNR)
-                            if h < args.height_rms_mult * float(rms):
-                                n_reject_snr += 1
-                                continue
+                                # Cut 3: not overflow
+                                if pk.overflow:
+                                    n_reject_overflow += 1
+                                    continue
 
-                            # Cut 6: module type matches --material
-                            name, chan_id, mtype = _key_for(roc.tag, crate, s, c)
-                            if mtype != args.material:
-                                n_reject_material += 1
-                                continue
+                                # Cut 4: height in [height_min, height_max]
+                                h = float(pk.height)
+                                if not (args.height_min <= h <= args.height_max):
+                                    n_reject_height += 1
+                                    continue
 
-                            # Cut 7: fit-quality gate — run fit_pulse_shape
-                            n_samples = samples_raw.shape[0]
-                            pk_pos = int(pk.pos)
-                            # Use a window around the peak (matching fit_pulse_template.py)
-                            pre_smp  = min(pk_pos, 8)
-                            post_smp = min(n_samples - pk_pos - 1, 40)
-                            lo = pk_pos - pre_smp
-                            hi = pk_pos + post_smp + 1
-                            if lo < 0 or hi > n_samples:
-                                n_reject_fit_converged += 1
-                                continue
+                                # Cut 5: height >= height_rms_mult * ped_rms (SNR)
+                                if h < args.height_rms_mult * float(rms):
+                                    n_reject_snr += 1
+                                    continue
 
-                            slice_u16 = samples_raw[lo:hi]
-                            rel_peak  = pk_pos - lo
+                                # Cut 6: module type matches --material
+                                name, chan_id, mtype = _key_for(roc.tag, crate, s, c)
+                                if mtype != args.material:
+                                    n_reject_material += 1
+                                    continue
 
-                            fit = dec.WaveAnalyzer.fit_pulse_shape(
-                                slice_u16, rel_peak,
-                                float(ped), float(rms), clk_ns, 0.03
-                            )
+                                # Cut 7: fit-quality gate — run fit_pulse_shape
+                                n_samples = samples_raw.shape[0]
+                                pk_pos = int(pk.pos)
+                                # Use a window around the peak (matching fit_pulse_template.py)
+                                pre_smp  = min(pk_pos, 8)
+                                post_smp = min(n_samples - pk_pos - 1, 40)
+                                lo = pk_pos - pre_smp
+                                hi = pk_pos + post_smp + 1
+                                if lo < 0 or hi > n_samples:
+                                    n_reject_fit_converged += 1
+                                    continue
 
-                            if not fit.ok:
-                                n_reject_fit_converged += 1
-                                continue
+                                slice_u16 = samples_raw[lo:hi]
+                                rel_peak  = pk_pos - lo
 
-                            # Fitted onset must be in the physics Population A window
-                            if fit.t0_ns < args.t0_min:
-                                n_reject_fit_t0 += 1
-                                continue
-                            # Must be inside the readout window
-                            if not (0.0 < fit.t0_ns < n_samples * clk_ns):
-                                n_reject_fit_t0 += 1
-                                continue
+                                fit = dec.WaveAnalyzer.fit_pulse_shape(
+                                    slice_u16, rel_peak,
+                                    float(ped), float(rms), clk_ns, 0.03
+                                )
 
-                            if fit.chi2_per_dof > args.chi2_max:
-                                n_reject_fit_chi2 += 1
-                                continue
+                                if not fit.ok:
+                                    n_reject_fit_converged += 1
+                                    continue
 
-                            # Cut 8: residual hidden-pileup veto
-                            # Reconstruct fitted single-pulse, subtract, check outside
-                            # the ±veto_half_smp window around the main peak.
-                            t_ns_arr = np.arange(n_samples, dtype=np.float32) * clk_ns
-                            # The fit gave us t0_ns in slice-relative coords; convert
-                            # back to full-window coords using the lo offset.
-                            fit_t0_full_ns = fit.t0_ns + lo * clk_ns
-                            fit_tau_r = float(shape.tau_r_ns)  # use material median shape
-                            fit_tau_f = float(shape.tau_f_ns)
+                                # Fitted onset must be in the physics Population A window
+                                if fit.t0_ns < args.t0_min:
+                                    n_reject_fit_t0 += 1
+                                    continue
+                                # Must be inside the readout window
+                                if not (0.0 < fit.t0_ns < n_samples * clk_ns):
+                                    n_reject_fit_t0 += 1
+                                    continue
 
-                            model_pulse = (h * eval_template(
-                                t_ns_arr, fit_t0_full_ns,
-                                fit_tau_r, fit_tau_f, shape.T_max
-                            ))
-                            # Residual = raw (pedsub) − fitted model
-                            pedsub = samples_raw.astype(np.float32) - float(ped)
-                            residual = pedsub - model_pulse
+                                if fit.chi2_per_dof > args.chi2_max:
+                                    n_reject_fit_chi2 += 1
+                                    continue
 
-                            # Define the protected window around the main peak
-                            veto_lo = max(0, pk_pos - veto_half_smp)
-                            veto_hi = min(n_samples, pk_pos + veto_half_smp + 1)
+                                # Cut 8: residual hidden-pileup veto
+                                # Reconstruct fitted single-pulse, subtract, check outside
+                                # the ±veto_half_smp window around the main peak.
+                                t_ns_arr = np.arange(n_samples, dtype=np.float32) * clk_ns
+                                # The fit gave us t0_ns in slice-relative coords; convert
+                                # back to full-window coords using the lo offset.
+                                fit_t0_full_ns = fit.t0_ns + lo * clk_ns
+                                fit_tau_r = float(shape.tau_r_ns)  # use material median shape
+                                fit_tau_f = float(shape.tau_f_ns)
 
-                            # Scan outside the protected bracket
-                            outside_mask = np.ones(n_samples, dtype=bool)
-                            outside_mask[veto_lo:veto_hi] = False
-                            threshold = residual_sigma * float(rms)
-                            if float(rms) > 0 and np.any(np.abs(residual[outside_mask]) > threshold):
-                                n_reject_residual_veto += 1
-                                continue
+                                if shape.kind == "sampled":
+                                    # Same per-module shape as the injection, peak
+                                    # aligned to the WaveAnalyzer peak time.
+                                    v_row, _ = template_row(shape, name)
+                                    model_pulse = (h * eval_template(
+                                        t_ns_arr, float(pk.time) - float(shape.bank.t50[v_row]),
+                                        fit_tau_r, fit_tau_f, shape.T_max,
+                                        shape=shape, row=v_row
+                                    ))
+                                else:
+                                    model_pulse = (h * eval_template(
+                                        t_ns_arr, fit_t0_full_ns,
+                                        fit_tau_r, fit_tau_f, shape.T_max
+                                    ))
+                                # Residual = raw (pedsub) − fitted model
+                                pedsub = samples_raw.astype(np.float32) - float(ped)
+                                residual = pedsub - model_pulse
 
-                            # Cut 9: injection headroom — base peak + dt_max + post_pad < n_samples
-                            if pk_pos + dt_max_samples + post_pad >= n_samples:
-                                n_reject_headroom += 1
-                                continue
+                                # Define the protected window around the main peak
+                                veto_lo = max(0, pk_pos - veto_half_smp)
+                                veto_hi = min(n_samples, pk_pos + veto_half_smp + 1)
 
-                            # Cut 10: saturation rejection (§4 cut 10)
-                            # Composite peak ≈ ped_mean + base_height + ratio_max * base_height
-                            # We check the peak of the injected pulse added to the base
-                            # (conservative: ped_mean + (1 + ratio_max) * base_height)
-                            composite_peak_approx = float(ped) + (1.0 + ratio_max) * h
-                            if composite_peak_approx >= safety_adc:
-                                n_reject_saturation += 1
-                                continue
+                                # Scan outside the protected bracket
+                                outside_mask = np.ones(n_samples, dtype=bool)
+                                outside_mask[veto_lo:veto_hi] = False
+                                threshold = residual_sigma * float(rms)
+                                if float(rms) > 0 and np.any(np.abs(residual[outside_mask]) > threshold):
+                                    n_reject_residual_veto += 1
+                                    continue
 
-                            # --- All cuts passed: accepted base event ---
-                            # Compute base_peak_time_ns (in full-window coordinates)
-                            base_peak_time_ns = float(pk.time)
-                            # fit.t0_ns is slice-relative; convert to full window
-                            base_onset_t0_ns = fit.t0_ns + lo * clk_ns
+                                # Cut 9: injection headroom — base peak + dt_max + post_pad < n_samples
+                                if pk_pos + dt_max_samples + post_pad >= n_samples:
+                                    n_reject_headroom += 1
+                                    continue
 
-                            # Make a copy of samples so we don't alias C++ buffer
-                            samples_copy = samples_raw.copy()
+                                # Cut 10: saturation rejection (§4 cut 10)
+                                # Composite peak ≈ ped_mean + base_height + ratio_max * base_height
+                                # We check the peak of the injected pulse added to the base
+                                # (conservative: ped_mean + (1 + ratio_max) * base_height)
+                                composite_peak_approx = float(ped) + (1.0 + ratio_max) * h
+                                if composite_peak_approx >= safety_adc:
+                                    n_reject_saturation += 1
+                                    continue
 
-                            base = BaseEvent(
-                                samples             = samples_copy,
-                                ped_mean            = float(ped),
-                                ped_rms             = float(rms),
-                                base_height         = h,
-                                base_peak_time_ns   = base_peak_time_ns,
-                                base_onset_t0_ns    = base_onset_t0_ns,
-                                base_peak_sample    = pk_pos,
-                                base_chi2_per_dof   = float(fit.chi2_per_dof),
-                                base_fit_converged  = bool(fit.ok),
-                                base_roc_tag        = int(roc.tag),
-                                base_slot           = int(s),
-                                base_chan           = int(c),
-                                base_channel_id     = chan_id,
-                                base_channel_name   = name,
-                                module_type         = mtype,
-                                base_source_file    = Path(fpath).name,
-                                base_physics_event_index = n_phys,
-                                base_run_number     = run_number,
-                            )
-                            n_bases_yielded += 1
-                            yield base
+                                # --- All cuts passed: accepted base event ---
+                                # Compute base_peak_time_ns (in full-window coordinates)
+                                base_peak_time_ns = float(pk.time)
+                                # fit.t0_ns is slice-relative; convert to full window
+                                base_onset_t0_ns = fit.t0_ns + lo * clk_ns
+
+                                # Make a copy of samples so we don't alias C++ buffer
+                                samples_copy = samples_raw.copy()
+
+                                onset_sampled = float("nan")
+                                if shape.kind == "sampled":
+                                    s_row, _ = template_row(shape, name)
+                                    onset_sampled = fit_sampled_onset(
+                                        shape, s_row, samples_copy, float(ped),
+                                        clk_ns, base_peak_time_ns)
+
+                                base = BaseEvent(
+                                    samples             = samples_copy,
+                                    ped_mean            = float(ped),
+                                    ped_rms             = float(rms),
+                                    base_height         = h,
+                                    base_peak_time_ns   = base_peak_time_ns,
+                                    base_onset_t0_ns    = base_onset_t0_ns,
+                                    base_peak_sample    = pk_pos,
+                                    base_chi2_per_dof   = float(fit.chi2_per_dof),
+                                    base_fit_converged  = bool(fit.ok),
+                                    base_roc_tag        = int(roc.tag),
+                                    base_slot           = int(s),
+                                    base_chan           = int(c),
+                                    base_channel_id     = chan_id,
+                                    base_channel_name   = name,
+                                    module_type         = mtype,
+                                    base_source_file    = Path(fpath).name,
+                                    base_physics_event_index = n_phys,
+                                    base_run_number     = run_number,
+                                    base_onset_sampled_ns = onset_sampled,
+                                )
+                                n_bases_yielded += 1
+                                yield base
+
+                    if done:
+                        break
 
                 if done:
                     break
 
-        ch.close()
-        if done:
-            break
-
-    # Store rejection counters as attributes on the generator frame so
-    # the caller can retrieve them after exhaustion.  We use a workaround:
-    # attach to a module-level dict that scan_grid can read.
-    _rejection_counts.update(dict(
-        n_total_candidates    = n_total_candidates,
-        n_reject_multi_peak   = n_reject_multi_peak,
-        n_reject_quality      = n_reject_quality,
-        n_reject_overflow     = n_reject_overflow,
-        n_reject_height       = n_reject_height,
-        n_reject_snr          = n_reject_snr,
-        n_reject_material     = n_reject_material,
-        n_reject_fit_converged= n_reject_fit_converged,
-        n_reject_fit_t0       = n_reject_fit_t0,
-        n_reject_fit_chi2     = n_reject_fit_chi2,
-        n_reject_residual_veto= n_reject_residual_veto,
-        n_reject_headroom     = n_reject_headroom,
-        n_reject_saturation   = n_reject_saturation,
-        n_phys_events_scanned = n_phys,
-        n_bases_yielded       = n_bases_yielded,
-    ))
+            ch.close()
+            if done:
+                break
+    finally:
+        # Rejection counters (scanned events only; the generator is closed
+        # once the grid is filled or --max-events is reached) go to a
+        # module-level dict that main() reads.
+        _rejection_counts.update(dict(
+            n_total_candidates    = n_total_candidates,
+            n_reject_multi_peak   = n_reject_multi_peak,
+            n_reject_quality      = n_reject_quality,
+            n_reject_overflow     = n_reject_overflow,
+            n_reject_height       = n_reject_height,
+            n_reject_snr          = n_reject_snr,
+            n_reject_material     = n_reject_material,
+            n_reject_fit_converged= n_reject_fit_converged,
+            n_reject_fit_t0       = n_reject_fit_t0,
+            n_reject_fit_chi2     = n_reject_fit_chi2,
+            n_reject_residual_veto= n_reject_residual_veto,
+            n_reject_headroom     = n_reject_headroom,
+            n_reject_saturation   = n_reject_saturation,
+            n_phys_events_scanned = n_phys,
+            n_bases_yielded       = n_bases_yielded,
+        ))
 
 
 # Module-level dict for passing rejection stats out of the generator.
@@ -851,7 +1069,8 @@ def scan_grid(
                 base.base_height, base.base_peak_time_ns,
                 base.base_onset_t0_ns,
                 gp.dt_ns, gp.ratio, shape, clk_ns,
-                noise_model, rng_map[gp.key]
+                noise_model, rng_map[gp.key],
+                channel_name=base.base_channel_name,
             )
             gp.append(wf, truth, base, event_dt_ns=gp.dt_ns)
         n_bases_done += 1
@@ -921,6 +1140,7 @@ def scan_grid_random_dt(
                 base.base_onset_t0_ns,
                 dt_ns, gp.ratio, shape, clk_ns,
                 noise_model, rng,
+                channel_name=base.base_channel_name,
             )
             gp.append(wf, truth, base, event_dt_ns=dt_ns)
         n_bases_done += 1
@@ -998,12 +1218,14 @@ def write_grid_point(
         "material":          shape.material,
         "dt_ns":             sidecar_dt_ns,
         "amplitude_ratio":   gp.ratio,
-        "tau_r_ns":          shape.tau_r_ns,
-        "tau_f_ns":          shape.tau_f_ns,
+        "tau_r_ns":          None if shape.kind == "sampled" else shape.tau_r_ns,
+        "tau_f_ns":          None if shape.kind == "sampled" else shape.tau_f_ns,
         "T_max":             shape.T_max,
         "t_peak_offset_ns":  shape.t_peak_offset_ns,
         "template_t0_ns":    shape.t0_template_ns,
         "template_source":   shape.source_path,
+        "template_kind":     shape.kind,
+        "template_sha1":     shape.sha1,
         "n_events":          n_ev,
         "n_samples":         gp.n_samples,
         "clk_ns":            meta_common["clk_ns"],
@@ -1035,6 +1257,8 @@ def write_grid_point(
             ),
         },
     }
+    if shape.kind == "sampled":
+        sidecar["truth_onset_sampled_def"] = SAMPLED_ONSET_DEF
     if random_dt:
         sidecar["dt_min_ns"] = meta_common["dt_min_ns"]
         sidecar["dt_max_ns"] = meta_common["dt_max_ns"]
@@ -1061,6 +1285,11 @@ def write_grid_point(
         base_source_files        = arrays["base_source_files"],
         base_physics_event_index = arrays["base_physics_event_index"],
         base_chi2_per_dof        = arrays["base_chi2_per_dof"],
+        inject_template_row      = arrays["inject_template_row"],
+        inject_template_fallback = arrays["inject_template_fallback"],
+        inject_t_peak_offset_ns  = arrays["inject_t_peak_offset_ns"],
+        meta_template_kind       = np.array(shape.kind),
+        meta_template_sha1       = np.array(shape.sha1),
         meta_dt_ns               = meta_dt_value,
         meta_ratio               = np.float32(gp.ratio),
         meta_tau_r_ns            = np.float32(shape.tau_r_ns),
@@ -1069,6 +1298,9 @@ def write_grid_point(
         meta_t_peak_offset_ns    = np.float32(shape.t_peak_offset_ns),
         meta_n_events            = np.int32(n_ev),
     )
+    if shape.kind == "sampled":
+        save_dict["truth_onset_sampled_ns"] = arrays["truth_onset_sampled_ns"]
+        save_dict["meta_onset_sampled_def"] = np.array(SAMPLED_ONSET_DEF)
     if random_dt:
         save_dict["meta_dt_min_ns"] = np.float32(meta_common["dt_min_ns"])
         save_dict["meta_dt_max_ns"] = np.float32(meta_common["dt_max_ns"])
@@ -1100,6 +1332,8 @@ def write_manifest(
         "generated_utc":     meta_common["generated_utc"],
         "material":          shape.material,
         "template_source":   shape.source_path,
+        "template_kind":     shape.kind,
+        "template_sha1":     shape.sha1,
         "clk_ns":            meta_common["clk_ns"],
         "n_samples":         meta_common.get("n_samples", 0),
         "ratio_grid":        sorted({gp.ratio for gp in grid_points}),
@@ -1111,6 +1345,15 @@ def write_manifest(
         "seed":              meta_common["seed"],
         "cli":               cli_argv,
     }
+    if shape.kind == "sampled" and grid_points:
+        # Every cell reuses the same base events; count the fallback per base.
+        arr = grid_points[0].slice()
+        fb = arr["inject_template_fallback"].astype(bool)
+        manifest["template_fallback"] = {
+            "n_bases":          int(fb.size),
+            "n_bases_average":  int(fb.sum()),
+            "modules_average":  sorted({str(n) for n in arr["base_channel_names"][fb]}),
+        }
     if random_dt:
         manifest["random_dt"]  = True
         manifest["dt_min_ns"]  = meta_common["dt_min_ns"]
@@ -1128,9 +1371,11 @@ def write_manifest(
 # Validation
 # ---------------------------------------------------------------------------
 
-def validate_output(npz_path: Path, wave_ana=None) -> None:
+def validate_output(npz_path: Path, wave_ana=None,
+                    shape: Optional[TemplateShape] = None) -> None:
     """Schema-only validation (no C++ deps) when wave_ana is None.
-    Adds a peak-detect smoke test when wave_ana is provided.
+    Adds a peak-detect smoke test when wave_ana is provided.  With a sampled
+    `shape` the per-event template rows / peak offsets are checked against it.
 
     Raises AssertionError with a descriptive message on any schema failure.
     """
@@ -1201,9 +1446,31 @@ def validate_output(npz_path: Path, wave_ana=None) -> None:
     # independently measured peak_time (from WaveAnalyzer pk.time) and onset_t0
     # (from fit_pulse_shape), which don't satisfy this relationship exactly on
     # real noisy data.
+    # Sampled templates: the offset is per event (t_pk of the injected row).
     meta_tpo = float(data["meta_t_peak_offset_ns"])
     offset_injected = tp[:, 0] - to[:, 0]
-    assert np.allclose(offset_injected, meta_tpo, atol=1e-4), \
+    sampled = ("meta_template_kind" in data
+               and str(data["meta_template_kind"]) == "sampled")
+    if sampled:
+        expect_off = data["inject_t_peak_offset_ns"].astype(np.float64)
+        assert expect_off.shape == (N,), \
+            f"inject_t_peak_offset_ns shape {expect_off.shape} != ({N},) in {npz_path.name}"
+        if shape is not None:
+            assert shape.kind == "sampled" and str(data["meta_template_sha1"]) == shape.sha1, \
+                f"template kind/sha1 mismatch in {npz_path.name}"
+            rows = data["inject_template_row"]
+            assert np.all((rows >= 0) & (rows <= shape.avg_row)), \
+                f"inject_template_row outside the bank in {npz_path.name}"
+            assert np.allclose(shape.t_pk[rows], expect_off, atol=1e-4), \
+                f"inject_t_peak_offset_ns != t_pk[inject_template_row] in {npz_path.name}"
+            rf = [template_row(shape, str(n)) for n in data["base_channel_names"]]
+            assert np.array_equal(np.array([r for r, _ in rf]), rows) and \
+                np.array_equal(np.array([f for _, f in rf]),
+                               data["inject_template_fallback"]), \
+                f"template row/fallback do not match base_channel_names in {npz_path.name}"
+    else:
+        expect_off = meta_tpo
+    assert np.allclose(offset_injected, expect_off, atol=1e-4), \
         (f"t_peak_offset round-trip failed for injected pulses in {npz_path.name}: "
          f"expected {meta_tpo}, got range "
          f"[{offset_injected.min():.4f}, {offset_injected.max():.4f}]")
@@ -1471,7 +1738,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     # Required (unless --self-test)
     ap.add_argument("--template", default="",
-                    help="Path to pulse_templates JSON file (required).")
+                    help="Template file (required): pulse_templates JSON (two-tau "
+                         "medians) or a spline_templates_v1 .npz (per-module "
+                         "sampled shapes; suffix dispatch).")
     ap.add_argument("--out-dir", default="",
                     help="Output directory (required unless --self-test).")
 
@@ -1574,18 +1843,24 @@ def main() -> int:
     generated_utc = datetime.now(timezone.utc).isoformat()
 
     # --- Template loading ---
-    shape = load_template_shape(args.template, args.material)
+    shape = load_template(args.template, args.material)
     clk_ns_fallback = 4.0  # filled in from pipeline below
 
     if args.random_dt:
         dt_mode_str = f"random ΔT in [{args.dt_min}, {args.dt_max}] ns"
     else:
         dt_mode_str = f"fixed grid {args.dt_grid}"
+    if shape.kind == "sampled":
+        shape_str = (f"sampled bank: {len(shape.row_of)} module rows + average  "
+                     f"T_max=1  t_pk(avg)={shape.t_peak_offset_ns:.3f} ns  "
+                     f"sha1={shape.sha1[:12]}")
+    else:
+        shape_str = (f"τ_r={shape.tau_r_ns:.4f} ns  τ_f={shape.tau_f_ns:.4f} ns  "
+                     f"T_max={shape.T_max:.4f}  "
+                     f"t_peak_offset={shape.t_peak_offset_ns:.3f} ns")
     print(
-        f"[setup] template   : {shape.source_path}\n"
-        f"[setup] material   : {shape.material}  "
-        f"τ_r={shape.tau_r_ns:.4f} ns  τ_f={shape.tau_f_ns:.4f} ns  "
-        f"T_max={shape.T_max:.4f}  t_peak_offset={shape.t_peak_offset_ns:.3f} ns\n"
+        f"[setup] template   : {shape.source_path}  (kind={shape.kind})\n"
+        f"[setup] material   : {shape.material}  {shape_str}\n"
         f"[setup] dt mode    : {dt_mode_str}\n"
         f"[setup] ratio_grid : {args.ratio_grid}\n"
         f"[setup] n_per_config={args.n_per_config}  "
@@ -1737,12 +2012,9 @@ def main() -> int:
         print("\n[interrupted — partial output]", flush=True)
         n_bases_done = sum(gp.n_filled for gp in grid_points) // max(1, n_cells)
 
-    # Exhaust the iterator to let it finalize rejection counts
-    try:
-        for _ in base_iter:
-            pass
-    except Exception:
-        pass
+    # Close the iterator (runs its finally block: rejection counts cover
+    # the events actually scanned).
+    base_iter.close()
 
     # --- Warn on under-filled cells ---
     underfilled = [gp for gp in grid_points if gp.n_filled < args.n_per_config]
@@ -1769,7 +2041,7 @@ def main() -> int:
             out_dir, gp, shape, meta_common, args.metadata_in_npz,
             random_dt=args.random_dt,
         )
-        validate_output(npz_p, wave_ana=None)
+        validate_output(npz_p, wave_ana=None, shape=shape)
         entry: Dict = {
             "ratio":     gp.ratio,
             "path":      npz_p.name,
@@ -1794,6 +2066,10 @@ def main() -> int:
         f"files={len(file_entries)}  elapsed={elapsed:.1f}s",
         flush=True,
     )
+    if shape.kind == "sampled" and grid_points and grid_points[0].n_filled:
+        fbv = grid_points[0].slice()["inject_template_fallback"].astype(bool)
+        print(f"[done] template fallback (average shape): {int(fbv.sum())}/{fbv.size} "
+              f"bases", flush=True)
     print("[done] rejection histogram:", flush=True)
     for key, val in [
         ("total_candidates",     rc.get("n_total_candidates", "?")),

@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-22
 **Branch:** `waveform_jz` (baseline commit `315e4af`; everything below is uncommitted)
-**Plan:** `analysis/pyscripts/plan_20261022.md` (mf method, Rounds 3–4); Phase 1 gate scan in `analysis/pyscripts/plan_20261021.md` §8
+**Plan:** `analysis/pyscripts/plans/plan_20261022.md` (mf method, Rounds 3–4); Phase 1 gate scan in `analysis/pyscripts/plans/plan_20261021.md` §8
 **Previous note:** `analysis/pyscripts/notes/PbWO4_energy_resolution_20261021.md` (LMS, elastic-window refinement, `RUN_TARGET`, calibration map, Legacy vs New)
 
 Paths are relative to `analysis/pyscripts/` in `/Users/L00338853/work/PRad/prad2evviewer` unless they start with `analysis/` or `docs/`. "rawsum" is the WaveAnalyzer pulse (integral and tiered time, as before); "mf" is the template pulse of §3. Legacy and New (gated) paths are as in the 20261021 note §5. σ/E is post-refinement σ_E/E, inner ring r < 200 mm; Δ in pp.
@@ -12,7 +12,7 @@ Paths are relative to `analysis/pyscripts/` in `/Users/L00338853/work/PRad/prad2
 - `benchmark_hycal_timing_test_20261021.py` is still the benchmark. New flags: `--time-calib`, `--pulse-method`, `--mf-*` (templates, template-column, nsigma, min-amp, kmax, r-model, scale, int-tail-ratio, ped-floor), `--pulse-dump`, `--single-pulse`.
 - `rawsum` is the default and byte-identical to the previous output (V1). mf defaults are the decided values: `--mf-r-model 0.3`, `--mf-scale 1.010`.
 - `benchmark_hycal_timing_scan.py` (driver) passes `--pulse-method`, `--window` and `--pre-window` through. Defaults are unchanged and rawsum commands are byte-identical. mf outputs carry the `_mf` stem.
-- Git: nothing committed since `315e4af`. Modified: the benchmark, the driver, `plan_20261021.md`. Untracked: `mf_pulse.py`, `mf_validate.py`, `gate_scan_20261021.py`, `gate_scan_20261022.py`, `plan_20261022.md`, this note. `output/` is gitignored. Other uncommitted changes (`benchmark_hycal_timing.py`, `plan_waveform.md`, bimodality and plotting scripts) are not covered here.
+- Git: nothing committed since `315e4af`. Modified: the benchmark, the driver, `../plans/plan_20261021.md`. Untracked: `mf_pulse.py`, `mf_validate.py`, `gate_scan_20261021.py`, `gate_scan_20261022.py`, `../plans/plan_20261022.md`, this note. `output/` is gitignored. Other uncommitted changes (`benchmark_hycal_timing.py`, `../plans/plan_waveform.md`, bimodality and plotting scripts) are not covered here.
 
 ## 2. Timing-gate scan, rawsum (Phase 1)
 
@@ -47,7 +47,7 @@ Results:
 | Energy | E_units = A · I_int[m](φ) · κ. I_int is the WaveAnalyzer walk-out integral of the noiseless unit template at the fitted onset, with `int_tail_ratio` (0.1) and `tail_break_n` (2) from `wave_cfg` (`--mf-int-tail-ratio` overrides). κ = `--mf-scale` 1.010. Then × f_LMS, `energize()` and the elastic-window refinement, exactly as rawsum (20261021 note §2.1). |
 | Paths | Pre-window cut unchanged. Legacy takes the largest-energy mf pulse per module; New takes all. |
 
-Validation (Phase 2). Rows marked ¹ are quoted from the Phase 2 summary of 2026-10-22; they are not in `plan_20261022.md`, and their source files were deleted (§9).
+Validation (Phase 2). Rows marked ¹ are quoted from the Phase 2 summary of 2026-10-22; they are not in `../plans/plan_20261022.md`, and their source files were deleted (§9).
 
 | Check | Result |
 |---|---|
@@ -195,7 +195,7 @@ Stage C (half B, preferred fit; σ/E in %, Δ in pp ± SE, paired) against the r
 
 - The pulse method helps most at low energy: −0.31 pp at 0.73 GeV against −0.04 to −0.07 pp at 2.24 and 3.49 GeV (§4.1). This is where the stochastic and noise part dominates and where mf recovers the low-amplitude charge (§3).
 - Timing is not a resolution lever on e-p or C, with either pulse method (§2, §7). Ta is the only run type where the gate matters.
-- The next levers target the constant term: per-crystal calibration, a position-dependent correction, and seed-time-constrained neighbour amplitudes. `plan_20261023.md` is in preparation.
+- The next levers target the constant term: per-crystal calibration, a position-dependent correction, and seed-time-constrained neighbour amplitudes. `../plans/plan_20261023.md` is in preparation.
 
 ## 9. Caveats and open items
 
