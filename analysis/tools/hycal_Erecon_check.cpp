@@ -175,7 +175,7 @@ int main(int argc, char *argv[])
             gRunConfig.hycal_z) * 180.0f / M_PI;
         const float expected_energy = analysis::PhysicsTools::ExpectedEnergy(
             theta, gRunConfig.Ebeam, "ep");
-        auto fit_result = physics.fitPeak(energy_histogram, expected_energy, true);
+        auto fit_result = physics.fitPeak(energy_histogram, expected_energy, false);
         const float peak = static_cast<float>(fit_result[0]);
         const float sigma = static_cast<float>(fit_result[1]);
         const float chi2 = static_cast<float>(fit_result[2]);
