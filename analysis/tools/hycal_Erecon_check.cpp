@@ -502,6 +502,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
+        const int module_index = mod->id - 1001;
+        if (module_index < 0 || module_index >= 1156) continue;
         const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
         const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y, true);
 
@@ -528,8 +530,6 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[0]);
         }
 
-        const int module_index = mod->id - 1001;
-        if (module_index < 0 || module_index >= 1156) continue;
         result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
         result->h2_hit_gem->Fill(gem_hit.x, gem_hit.y);
         result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
