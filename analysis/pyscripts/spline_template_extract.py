@@ -26,18 +26,25 @@ and to seed (t0, A); it is never a chi2 selection.
     # -> <stem>.npz (spline_templates_v1, loads with mf_pulse.build_bank),
     #    <stem>.root, <stem>.pdf and summary.tsv next to them.  20 % of the
     #    candidates are held out by `holdout_mask` (for `check`).
+    #    --bands 100,250,500,1000,2000,4000: f(A) from these bands (n knots; npz
+    #    band_edges / shape_band / r_band / n_band) instead of lo / mid / top.
 
     python3 spline_template_extract.py ampcorr \\
         --templates output/templates_spline/*/templates_*.npz \\
         --out output/templates_spline/ampcorr_summary.json
     # f(A): one global correction in every .npz if the run types agree (within 2
     #   combined SE), else each keeps its own (keys ampcorr_logA/ampcorr_f/ampcorr_meta)
+    # --per-module-f OUTDIR (banks built with --bands): writes COPIES
+    #   OUTDIR/<slug>/templates_<slug>.npz whose ampcorr_f is a per-module table
+    #   [module, ln A grid] (a module keeps its own band ratio r_b / r_mod where its
+    #   stat SE < 0.3 %, else the run-type knot); the inputs are not modified.
 
     python3 spline_template_extract.py check \\
         --pulses "output/templates_spline/2p24GeV_H2/pulses/*.npz" \\
         --templates output/templates_spline/2p24GeV_H2/templates_2p24GeV_H2.npz \\
         --h50 output/pulse_templates_h50.dat \\
         --out output/templates_spline/2p24GeV_H2/check/
+    # --amp-bins E0,...,En: the G1-7 bins (default 100,300,1000,2500).
     # cross-check (24386 split 00010) adds: --pass1-macro-out p1.root --raw-root
     #   prad_024386.00010_raw.root --macro-tsv p1_cands.tsv --evio-cands <nocap.npz>
 """
@@ -1530,10 +1537,12 @@ def process_module(ctx, midx, idx):
             cum_shift=float(np.sum(r["shifts"])), chi2_it=tuple(r["chi2_it"]))
         # amplitude bands against the module's own final template
         cand = ~held & (tier >= 1)
-        # lo / hi (G1-9) first, then mid / top (f(A)): the lo / hi draws are unchanged
-        for key, lo, hi in (("lo", *BAND_LO), ("hi", *BAND_HI),
-                            ("mid", *BAND_MID), ("top", *BAND_TOP)):
-            m = cand & (amp >= lo) & ((amp < hi) if key in ("lo", "mid") else (amp <= hi))
+        # lo / hi (G1-9) first, then the f(A) bands (default mid / top, or --bands):
+        # the lo / hi draws are unchanged
+        for key, lo, hi, incl in (("lo", *BAND_LO, False), ("hi", *BAND_HI, True),
+                                  *[(b["key"], b["lo"], b["hi"], b["incl"])
+                                    for b in ctx["fa_bands"] if b["key"] != "lo"]):
+            m = cand & (amp >= lo) & ((amp <= hi) if incl else (amp < hi))
             res["n_" + key] = int(m.sum())
             if m.sum() < BAND_MIN:
                 continue
@@ -1631,15 +1640,20 @@ def write_root(path, ctx, rows, avg_fn, meta_json):
           flush=True)
 
 
-def write_tsv(path, rows, cutflow_names):
+def write_tsv(path, rows, cutflow_names, fa_keys=None):
+    """fa_keys (--bands): the n_mid / n_top / r_lo / r_mid / r_top columns are
+    replaced by n_<band> / r_<band> columns of the generalised f(A) bands."""
+    leg = fa_keys is None
     cols = ["name", "module_id", "module_index", "fallback", "valid", "tier_rule",
             "n_cand", "n_pool", "N0", "N1", "N2", "band_lo", "band_hi", "chi2_ndf",
             "t_pk", "t50", "iint_wa", "area", "onset_shift_ns", "onset_shift_it0",
             "T_data", "tau_slow", "a_slow", "knot_scale", "n_knots",
-            "rise_empty_bins", "phase_R", "n_lo", "n_hi", "n_mid", "n_top",
-            "lohi_maxdiff", "lohi_iint_ratio", "iint_phase_pp", "r_lo", "r_mid", "r_top", "r_mod",
-            "n_p1ok"
-            ] + ["cf_" + c for c in cutflow_names[:N_SEQ]]
+            "rise_empty_bins", "phase_R", "n_lo", "n_hi"] \
+        + (["n_mid", "n_top"] if leg else []) \
+        + ["lohi_maxdiff", "lohi_iint_ratio", "iint_phase_pp"] \
+        + (["r_lo", "r_mid", "r_top"] if leg else []) + ["r_mod"] \
+        + ([] if leg else ["n_" + k for k in fa_keys] + ["r_" + k for k in fa_keys]) \
+        + ["n_p1ok"] + ["cf_" + c for c in cutflow_names[:N_SEQ]]
 
     def fmt(v):
         if isinstance(v, (float, np.floating)):
@@ -1656,10 +1670,14 @@ def write_tsv(path, rows, cutflow_names):
                  r["tau_slow"], r["a_slow"], r.get("knot_scale", 0),
                  r.get("n_knots", 0), r.get("rise_empty", -1),
                  r.get("phase_R", np.nan), r.get("n_lo", 0), r.get("n_hi", 0),
-                 r.get("n_mid", 0), r.get("n_top", 0),
+                 *([r.get("n_mid", 0), r.get("n_top", 0)] if leg else []),
                  r.get("lohi_maxdiff", np.nan), r.get("lohi_iint_ratio", np.nan),
-                 r["iint_pp"], r.get("r_lo", np.nan), r.get("r_mid", np.nan),
-                 r.get("r_top", np.nan), r.get("r_mod", np.nan),
+                 r["iint_pp"],
+                 *([r.get("r_lo", np.nan), r.get("r_mid", np.nan), r.get("r_top", np.nan)]
+                   if leg else []),
+                 r.get("r_mod", np.nan),
+                 *([] if leg else [r.get("n_" + k, 0) for k in fa_keys]
+                   + [r.get("r_" + k, np.nan) for k in fa_keys]),
                  r.get("n_p1ok", -1),
                  *[int(x) for x in r["cutflow"][:N_SEQ]]]
             fh.write("\t".join(fmt(x) for x in v) + "\n")
@@ -1998,6 +2016,8 @@ def cmd_build(a):
     pm = np.array(pwo4)
     cutflow_tot = D["cutflow"][pm].sum(axis=0)
     ctx = dict(D=D, args=a, hold=hold, names=names, tau=tau_rows, tau_agg=tau_agg,
+               band_edges=a.bands,
+               fa_bands=FA_BANDS_DEFAULT if a.bands is None else fa_bands_from_edges(a.bands),
                wave=wave, run_type=a.run_type, files=files,
                cutflow_names=D["cutflow_names"], cutflow_tot=cutflow_tot,
                geom=dict(glass=glass, rows=geo_rows, xlim=(min(xs), max(xs)),
@@ -2079,6 +2099,7 @@ def _meta_json(ctx):
         holdout_frac=a.holdout_frac, band_b0=list(BAND_B0), band_relaxed=list(RELAXED_BAND),
         band_lo=list(BAND_LO), band_hi=list(BAND_HI), band_mid=list(BAND_MID),
         band_top=list(BAND_TOP), band_min_pulses=BAND_MIN,
+        **({} if ctx["band_edges"] is None else dict(fa_band_edges=list(ctx["band_edges"]))),
         align_window_ns=list(WIN), pool_tau_min_ns=POOL_TAU_MIN, bin_ns=BIN_W,
         drop_frac=DROP_FRAC, n_iterations=N_IT, sigma_min_adc=SIG_MIN,
         sigma_t_ns=SIGMA_T_NS, smooth_lambda=SMOOTH_LAMBDA, onset_frac=ONSET_FRAC))
@@ -2166,6 +2187,31 @@ AMPCORR_RULE = ("E = A * I_int * f(A); f = PCHIP (monotone cubic) in ln A throug
                 "f_mid = f_lo * median(r_mid / r_lo), f_top = f_mid * median(r_top / "
                 "r_mid) (chosen on the production banks, see plan progress log)")
 FA_BANDS = (("lo", BAND_LO), ("mid", BAND_MID), ("top", BAND_TOP))
+FA_BANDS_DEFAULT = [dict(key=k, lo=lo, hi=hi, incl=(k == "top")) for k, (lo, hi) in FA_BANDS]
+
+
+def fa_bands_from_edges(edges):
+    """--bands E0,...,En -> the n f(A) bands [E_k, E_k+1) (the last one closed),
+    keyed "E_k-E_k+1" (that label is the knot's identity in ampcorr_meta)."""
+    return [dict(key=_bin_label(lo, hi), lo=float(lo), hi=float(hi),
+                 incl=(k == len(edges) - 2))
+            for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:]))]
+
+
+def ampcorr_rule(edges):
+    """AMPCORR_RULE for the default bands, its generalisation for --bands."""
+    if edges is None:
+        return AMPCORR_RULE
+    return (f"E = A * I_int * f(A); f = PCHIP (monotone cubic) in ln A through the band "
+            f"knots (bands {', '.join(_bin_label(lo, hi) for lo, hi in zip(edges[:-1], edges[1:]))} "
+            f"ADC; a band with no usable module has no knot; knot at the band's median "
+            f"amplitude), stored as a dense table (8 points per interval, knots included) "
+            f"so the linear np.interp of mf_pulse is smooth; constant outside the outer "
+            f"knots; f_b = <C++ walk-out integral / mf energy> of noise-free band-template "
+            f"waveforms fitted with the module template, relative to the same for the "
+            f"module template; 16 phases; knots chained within modules: f_b0 = "
+            f"median(r_b0 / r_mod), f_bk = f_b(k-1) * median(r_bk / r_b(k-1)) over the "
+            f"modules having both bands")
 FA_PER_INTERVAL = 8                     # dense-table points per knot interval (17 for 3 knots)
 
 
@@ -2215,7 +2261,8 @@ def _fa_ratios(ctx, bank, sets, mod_rows, own, band_i, A_b, H_b0):
     mf = mf_pulse.MFReconstructor(bank, ped_nsamples=ped_n, **FA_MF)
     phi = DT_NS * np.arange(FA_NPH) / FA_NPH
     skipped = {}
-    todo = [(k, sets[k], A_b[k]) for k, _ in FA_BANDS if sets.get(k)]
+    todo = [(b["key"], sets[b["key"]], A_b[b["key"]]) for b in ctx["fa_bands"]
+            if sets.get(b["key"])]
     todo.append(("mod", mod_rows, H_b0))
     for key, rr, H in todo:
         nm = len(rr)
@@ -2266,7 +2313,7 @@ def finalize_integrals(ctx):
     shapes.append((ctx["avg_fin"]["t"], ctx["avg_fin"]["c"]))
     band_i = {}
     for r in rows:
-        for key in ("lo", "hi", "mid", "top"):
+        for key in ("lo", "hi", *[b["key"] for b in ctx["fa_bands"] if b["key"] != "lo"]):
             if "spl_" + key in r:
                 band_i[(r["midx"], key)] = len(shapes)
                 shapes.append(r["spl_" + key])
@@ -2281,11 +2328,15 @@ def finalize_integrals(ctx):
             r["lohi_iint_ratio"] = r["iint_hi"] / r["iint_lo"]
     ctx["avg_der"]["iint_wa"] = float(I[avg_i])
     own_rows = [r for r in rows if r["fallback"] < 2]
-    sets = {b: [r for r in own_rows if "spl_" + b in r] for b, _ in FA_BANDS}
-    mod_rows = [r for r in own_rows if any("spl_" + b in r for b, _ in FA_BANDS)]
-    ac = dict(rule=AMPCORR_RULE, scope="per_run_type", run_type=ctx["run_type"],
-              bands=dict(lo=list(BAND_LO), mid=list(BAND_MID), top=list(BAND_TOP),
-                         hi_g19_only=list(BAND_HI)), band_min_pulses=BAND_MIN,
+    fa_keys = [b["key"] for b in ctx["fa_bands"]]
+    sets = {b: [r for r in own_rows if "spl_" + b in r] for b in fa_keys}
+    mod_rows = [r for r in own_rows if any("spl_" + b in r for b in fa_keys)]
+    ac = dict(rule=ampcorr_rule(ctx["band_edges"]), scope="per_run_type",
+              run_type=ctx["run_type"],
+              bands=(dict(lo=list(BAND_LO), mid=list(BAND_MID), top=list(BAND_TOP),
+                          hi_g19_only=list(BAND_HI)) if ctx["band_edges"] is None else
+                     dict({b["key"]: [b["lo"], b["hi"]] for b in ctx["fa_bands"]},
+                          hi_g19_only=list(BAND_HI))), band_min_pulses=BAND_MIN,
               n_modules=len(mod_rows), knots={}, f=None, logA=None, per_run_type=None,
               se_rule="1.2533 * std(ddof=1) / sqrt(n) of the per-module ratios",
               integral_def="I = mean over 256 sub-sample phases of the exact discrete "
@@ -2293,22 +2344,33 @@ def finalize_integrals(ctx):
                            "SampledTemplateBank.I_cont)")
     if mod_rows:
         A_b = {b: float(np.median(np.concatenate([r["amp_" + b] for r in sets[b]])))
-               for b, _ in FA_BANDS if sets[b]}
+               for b in fa_keys if sets[b]}
         H_b0 = float(np.median(np.concatenate([r["amp_b0"] for r in mod_rows])))
         skipped = _fa_ratios(ctx, bank, sets, mod_rows, own, band_i, A_b, H_b0)
         ac.update(H_b0=H_b0, n_skipped_waveforms=skipped,
                   fa_mf=dict(FA_MF), fa_phases=FA_NPH,
-                  fa_note="per-module r_b = mean over phases of Q_raw / E_mf (b = lo, "
-                          "mid, top, mod); f_lo = median over the modules having lo "
-                          "(and a finite r_mod) of r_lo / r_mod; f_mid = f_lo * median "
-                          "over the modules having lo and mid of r_mid / r_lo; f_top = "
-                          "f_mid * median over the modules having mid and top of r_top / "
-                          "r_mid (chained within-module steps; chosen on the production "
-                          "banks, see plan progress log); SEs of the steps are combined "
-                          "in quadrature of relative errors, n_modules = size of the "
-                          "step's module set; npz r_lo / r_mid / r_top / r_mod hold the r_b")
+                  fa_note=(
+                      "per-module r_b = mean over phases of Q_raw / E_mf (b = lo, "
+                      "mid, top, mod); f_lo = median over the modules having lo "
+                      "(and a finite r_mod) of r_lo / r_mod; f_mid = f_lo * median "
+                      "over the modules having lo and mid of r_mid / r_lo; f_top = "
+                      "f_mid * median over the modules having mid and top of r_top / "
+                      "r_mid (chained within-module steps; chosen on the production "
+                      "banks, see plan progress log); SEs of the steps are combined "
+                      "in quadrature of relative errors, n_modules = size of the "
+                      "step's module set; npz r_lo / r_mid / r_top / r_mod hold the r_b"
+                      if ctx["band_edges"] is None else
+                      "per-module r_b = mean over phases of Q_raw / E_mf (b = the "
+                      "bands, mod); f_b0 = median over the modules having b0 (and a "
+                      "finite r_mod) of r_b0 / r_mod; f_bk = f_b(k-1) * median over the "
+                      "modules having b(k-1) and bk of r_bk / r_b(k-1) (chained "
+                      "within-module steps; a band with no such module ends the "
+                      "chain); SEs of the steps are combined in quadrature of relative "
+                      "errors, n_modules = size of the step's module set; npz r_band "
+                      "[nb, nm] and r_mod hold the r_b"))
         fin = lambda r, *ks: all(np.isfinite(r.get("r_" + k, np.nan)) for k in ks)
-        chain = (("lo", "mod", None), ("mid", "lo", "lo"), ("top", "mid", "mid"))
+        chain = tuple((b, "mod" if k == 0 else fa_keys[k - 1], None if k == 0 else fa_keys[k - 1])
+                      for k, b in enumerate(fa_keys))
         for b, den, prev in chain:
             if b not in A_b:
                 print(f"[WARN] f(A): no module with a usable {b} band", flush=True)
@@ -2329,7 +2391,7 @@ def finalize_integrals(ctx):
     if tab is None:
         print("[WARN] fewer than two usable f(A) band knots: no f(A) stored", flush=True)
     else:
-        if len(ac["knots"]) < len(FA_BANDS):
+        if len(ac["knots"]) < len(fa_keys):
             print(f"[WARN] f(A) from {len(ac['knots'])} band knots only "
                   f"({', '.join(ac['knots'])})", flush=True)
         ac.update(logA=tab[0], f=tab[1], n_table=len(tab[0]),
@@ -2346,7 +2408,7 @@ def finalize_integrals(ctx):
             f"{b} A {k['A']:.0f} f {k['f']:.4f} +- {k['se']:.4f} (n {k['n_modules']})"
             for b, k in ac["knots"].items()) + f";  {ac['n_modules']} modules, "
             f"table {ac.get('n_table', 0)} points", flush=True)
-        print(f"[ampcorr] f_b chained (r_lo / r_mod, r_mid / r_lo, r_top / r_mid); "
+        print(f"[ampcorr] f_b chained ({', '.join(f'r_{b} / r_{d}' for b, d, _ in chain)}); "
               f"H_b0 {ac['H_b0']:.0f}; skipped waveforms "
               f"(C++ / mf not one peak): "
               + ", ".join(f"{k} {v['cpp_not_one_peak']} / {v['mf_not_one_peak']} of {v['n']}"
@@ -2396,7 +2458,7 @@ def finish_build(ctx):
         onset_shift_ns=g("cum_shift"),     # total: final axis vs the mf seed axis (fb 2: the average's, vs the modules' final axes)
         t_pk=g("t_pk"), t50=g("t50"), iint_wa=g("iint_wa"),
         iint_phase_pp=g("iint_pp"), iint_lo=g("iint_lo"), iint_hi=g("iint_hi"),
-        r_lo=g("r_lo"), r_mid=g("r_mid"), r_top=g("r_top"), r_mod=g("r_mod"),
+        r_mod=g("r_mod"),
         area=g("area"),   # r_*: Q_raw / E_mf of the f(A) waveforms (_fa_ratios), not iint ratios
         T_data=g("T_data"), tau_slow=g("tau_slow"), a_slow=g("a_slow"),
         knot_scale=np.array([r.get("knot_scale", 0) for r in rows], dtype=np.int32),
@@ -2404,16 +2466,32 @@ def finish_build(ctx):
             [r.get("rise_empty", -1) for r in rows], dtype=np.int32),
         shape_lo=np.stack([r.get("shape_lo", nan_row) for r in rows]),
         shape_hi=np.stack([r.get("shape_hi", nan_row) for r in rows]),
-        shape_mid=np.stack([r.get("shape_mid", nan_row) for r in rows]),
-        shape_top=np.stack([r.get("shape_top", nan_row) for r in rows]),
         n_lo=np.array([r.get("n_lo", 0) for r in rows], dtype=np.int32),
         n_hi=np.array([r.get("n_hi", 0) for r in rows], dtype=np.int32),
-        n_mid=np.array([r.get("n_mid", 0) for r in rows], dtype=np.int32),
-        n_top=np.array([r.get("n_top", 0) for r in rows], dtype=np.int32),
         lohi_maxdiff=g("lohi_maxdiff"), lohi_iint_ratio=g("lohi_iint_ratio"),
         shape_avg=ctx["avg_shape"], T_end=np.float64(T_END),
         cutflow_names=np.array(ctx["cutflow_names"]), cutflow=cf_sel,
         meta=np.array(_meta_json(ctx)))
+    if ctx["band_edges"] is None:
+        # default bands: the lo / mid / top arrays (the lo / hi ones above are G1-9's)
+        arr.update(
+            r_lo=g("r_lo"), r_mid=g("r_mid"), r_top=g("r_top"),
+            shape_mid=np.stack([r.get("shape_mid", nan_row) for r in rows]),
+            shape_top=np.stack([r.get("shape_top", nan_row) for r in rows]),
+            n_mid=np.array([r.get("n_mid", 0) for r in rows], dtype=np.int32),
+            n_top=np.array([r.get("n_top", 0) for r in rows], dtype=np.int32))
+    else:
+        # --bands: generalised layout, band k = [band_edges[k], band_edges[k + 1])
+        keys = [b["key"] for b in ctx["fa_bands"]]
+        arr.update(
+            band_edges=np.array(ctx["band_edges"], dtype=np.float64),
+            shape_band=np.stack([np.stack([r.get("shape_" + k, nan_row) for r in rows])
+                                 for k in keys]),
+            r_band=np.stack([g("r_" + k) for k in keys]),
+            n_band=np.array([[r.get("n_" + k, 0) for r in rows] for k in keys],
+                            dtype=np.int32),
+            A_med_band=np.array([[float(np.median(r["amp_" + k])) if "amp_" + k in r
+                                  else np.nan for r in rows] for k in keys]))
     ac = ctx["ampcorr"]
     if ac["f"] is not None:
         arr.update(ampcorr_logA=np.array(ac["logA"]), ampcorr_f=np.array(ac["f"]),
@@ -2444,7 +2522,8 @@ def finish_build(ctx):
     meta_json = str(arr["meta"])
     write_root(str(stem.with_suffix(".root")), ctx, rows, ctx["avg_shape_fn"],
                meta_json)
-    write_tsv(str(stem.parent / "summary.tsv"), rows, ctx["cutflow_names"])
+    write_tsv(str(stem.parent / "summary.tsv"), rows, ctx["cutflow_names"],
+              None if ctx["band_edges"] is None else [b["key"] for b in ctx["fa_bands"]])
     print(f"[tsv] {stem.parent / 'summary.tsv'}", flush=True)
     if a.png_dir:
         want = set(s.strip() for s in a.png_modules.split(",")) if a.png_modules \
@@ -2492,9 +2571,155 @@ def _rewrite_npz(path, arrays):
     os.replace(tmp, out)
 
 
+PM_SE_MAX = 0.003                       # --per-module-f: own band ratio kept below this SE
+PM_GRID_STEP = 0.02                     # --per-module-f: ln A step of the common table grid
+
+
+def _pm_nmax(z):
+    """The build's per-template pulse cap n_max (band and module templates are fit
+    on at most this many pulses; n_band holds the count before the cap)."""
+    return int(json.loads(str(z["meta"])).get("cuts", {}).get("build", {})
+               .get("n_max", 200))
+
+
+def _pm_cells(z):
+    """Per-module f(A) inputs of a `build --bands` bank: (labels, f_own, A_own, x)
+    with f_own = r_b / r_mod [nb, nm] (NaN where either is missing or the module
+    has no own template), A_own = the module's median amplitude in band b,
+    x = 1 / min(n_b, n_max) + 1 / min(n_pool, n_max) (the variance weight of the
+    stat model)."""
+    if "band_edges" not in z:
+        sys.exit("[ERROR] --per-module-f needs banks built with --bands (band_edges, "
+                 "r_band, n_band, A_med_band)")
+    be = np.asarray(z["band_edges"], dtype=np.float64)
+    labels = [_bin_label(lo, hi) for lo, hi in zip(be[:-1], be[1:])]
+    with np.errstate(invalid="ignore", divide="ignore"):
+        f_own = np.asarray(z["r_band"]) / np.asarray(z["r_mod"])[None, :]
+        nb = np.minimum(np.asarray(z["n_band"], dtype=np.float64), _pm_nmax(z))
+        npl = np.minimum(np.asarray(z["n_pool"], dtype=np.float64), _pm_nmax(z))
+        x = 1.0 / np.where(nb > 0, nb, np.nan) + 1.0 / npl[None, :]
+    A_own = np.asarray(z["A_med_band"], dtype=np.float64)
+    ok = np.isfinite(f_own) & np.isfinite(A_own) & (A_own > 0) & np.isfinite(x)
+    return labels, np.where(ok, f_own, np.nan), np.where(ok, A_own, np.nan), \
+        np.where(ok, x, np.nan)
+
+
+def _pm_se_model(Z):
+    """Stat model of a module's band ratio, calibrated on the banks Z: the step
+    ratio s = r_b / r_(b-1) (r_(-1) = r_mod) over the modules of all banks has a
+    robust scatter sigma^2 = s0^2 + c^2 (1 / n_b + 1 / n_ref), n_ref = n_(b-1)
+    (n_pool for r_mod), every n capped at the build's n_max; c and s0 from a least-squares line through the binned
+    (6 quantile bins of x per band and bank) robust variances (1.4826 MAD).  s0 is
+    the n-independent scatter (real module differences and what the band template
+    does not average out); the stat SE of a module's r_b / r_mod is then
+    c sqrt(1 / n_b + 1 / n_pool) (capped).  Returns dict(c, s0, n_bins)."""
+    X, Y = [], []
+    for z in Z:
+        nmax = _pm_nmax(z)
+        rb = np.asarray(z["r_band"])
+        nb = np.minimum(np.asarray(z["n_band"], dtype=np.float64), nmax)
+        rm = np.asarray(z["r_mod"])
+        npool = np.minimum(np.asarray(z["n_pool"], dtype=np.float64), nmax)
+        for b in range(rb.shape[0]):
+            den, nd = (rm, npool) if b == 0 else (rb[b - 1], nb[b - 1])
+            m = np.isfinite(rb[b]) & np.isfinite(den) & (nb[b] > 0) & (nd > 0)
+            if m.sum() < 30:
+                continue
+            st = rb[b][m] / den[m]
+            x = 1.0 / nb[b][m] + 1.0 / nd[m]
+            d = st - np.median(st)
+            q = np.quantile(x, np.linspace(0.0, 1.0, 7))
+            for lo, hi in zip(q[:-1], q[1:]):
+                k = (x >= lo) & (x <= hi)
+                if k.sum() < 5:
+                    continue
+                X.append(x[k].mean())
+                Y.append((1.4826 * np.median(np.abs(d[k] - np.median(d[k])))) ** 2)
+    if len(X) < 3:
+        sys.exit("[ERROR] --per-module-f: too few modules to calibrate the stat model")
+    coef = np.linalg.lstsq(np.vstack([np.ones(len(X)), X]).T, np.array(Y), rcond=None)[0]
+    if not coef[1] > 0:
+        sys.exit(f"[ERROR] --per-module-f: stat model c^2 = {coef[1]:.3g} <= 0")
+    return dict(c=float(np.sqrt(coef[1])), s0=float(np.sqrt(max(coef[0], 0.0))),
+                n_bins=len(X))
+
+
+def _pm_table(z, am, own_knots, model):
+    """Per-module f(A) of one bank: (logA[ng], f[nm, ng], f_rt[ng], own[nb, nm], se[nb,
+    nm], stats).  Cell (module, band) keeps the module's own r_b / r_mod (knot at its
+    median band amplitude; the same number as the chain f_b0 = r_b0 / r_mod, f_bk =
+    f_b(k-1) r_bk / r_b(k-1) of the run-type rule for a module that has every band
+    of the chain) where SE = c sqrt(1 / n_b + 1 / n_pool) < PM_SE_MAX; a band where
+    it does not is set from the module's nearest own band b' (lower one on a tie) by
+    the run-type step, f = f_own(b') f_rt(b) / f_rt(b'), at the run-type knot A of b,
+    so the module keeps its level; a module with no own cell takes the run-type row.  A module's row is PCHIP in ln A through its
+    knots (constant outside, one knot: constant), sampled on a common grid: the run
+    type's table am['logA'] plus a uniform ln A step PM_GRID_STEP over the span of
+    all knots (the own knots of the modules sit at different A, so the 8-point
+    run-type grid would cut their kinks)."""
+    from scipy.interpolate import PchipInterpolator
+    labels, f_own, A_own, x = _pm_cells(z)
+    nbd, nm = f_own.shape
+    se = model["c"] * np.sqrt(x)
+    own = np.isfinite(se) & (se < PM_SE_MAX)
+    rt = {b: own_knots[b] for b in labels if b in own_knots}
+    kn = []                                  # per module: (lnA[], f[])
+    for m in range(nm):
+        ob = np.array([b for b in np.nonzero(own[:, m])[0] if labels[b] in rt], int)
+        pts = []
+        for b, lab in enumerate(labels):
+            if own[b, m]:
+                pts.append((A_own[b, m], f_own[b, m]))
+            elif lab in rt:
+                if ob.size:
+                    b1 = ob[np.argmin(np.abs(ob - b))]
+                    pts.append((rt[lab]["A"], f_own[b1, m] * rt[lab]["f"]
+                                / rt[labels[b1]]["f"]))
+                else:
+                    pts.append((rt[lab]["A"], rt[lab]["f"]))
+        kn.append((np.log([p[0] for p in pts]), np.array([p[1] for p in pts])))
+    la_rt, f_rt = np.array(am["logA"]), np.array(am["f"])
+    lo = min([la_rt[0]] + [k[0][0] for k in kn if k[0].size])
+    hi = max([la_rt[-1]] + [k[0][-1] for k in kn if k[0].size])
+    ug = np.linspace(lo, hi, int(np.ceil((hi - lo) / PM_GRID_STEP)) + 1)
+    ug = ug[np.abs(ug[:, None] - la_rt[None, :]).min(axis=1) > 1e-3]
+    grid = np.sort(np.concatenate([la_rt, ug]))
+    F = np.empty((nm, grid.size))
+    for m, (la, fv) in enumerate(kn):
+        if la.size == 0:
+            F[m] = np.interp(grid, la_rt, f_rt)
+        elif la.size == 1:
+            F[m] = fv[0]
+        else:
+            F[m] = PchipInterpolator(la, fv)(np.clip(grid, la[0], la[-1]))
+    # interpolation error of the stored table at the modules' knots
+    errs = np.array([np.abs(np.interp(la, grid, F[m]) - fv).max()
+                     for m, (la, fv) in enumerate(kn) if la.size])
+    err = errs.max() if errs.size else 0.0
+    has = np.isfinite(f_own)
+    stats = dict(
+        labels=labels, se_max=PM_SE_MAX, se_model=model, n_modules=nm,
+        n_cells_with_ratio=int(has.sum()), n_cells_own=int(own.sum()),
+        frac_own_of_cells_with_ratio=float(own.sum() / max(has.sum(), 1)),
+        per_band={lab: dict(n_with_ratio=int(has[b].sum()), n_own=int(own[b].sum()),
+                            frac_own=float(own[b].sum() / max(has[b].sum(), 1)),
+                            se_median=float(np.nanmedian(se[b])) if has[b].any() else None,
+                            own_f_median=float(np.median(f_own[b][own[b]]))
+                            if own[b].any() else None,
+                            own_f_std=float(np.std(f_own[b][own[b]], ddof=1))
+                            if own[b].sum() > 1 else None,
+                            run_type_f=rt[lab]["f"] if lab in rt else None)
+                  for b, lab in enumerate(labels)},
+        n_grid=int(grid.size), table_interp_err_at_knots=float(err),
+        table_interp_err_median=float(np.median(errs)) if errs.size else 0.0,
+        n_modules_all_run_type=int((~own.any(axis=0)).sum()))
+    return grid, F, np.interp(grid, la_rt, f_rt), own.astype(np.int8), se, stats
+
+
 def cmd_ampcorr(a):
-    """Compare the run types' band knots (f_b, b = lo / mid / top); one global f(A)
-    if consistent.
+    """Compare the run types' band knots (f_b, b = lo / mid / top, or the E_k-E_k+1
+    labels of a `build --bands` bank: any number of knots; the files' band labels
+    are pooled); one global f(A) if consistent.
 
     Rule: for each band b present (finite positive SE) in at least two files (all
     of them if a band is in every file), over the files having it, the SE-weighted
@@ -2506,9 +2731,16 @@ def cmd_ampcorr(a):
     in its global knots), scope "global"; otherwise each file keeps (or is reset to)
     its own per-run-type knots, scope "per_run_type".  A band in fewer than two
     files is left out (warning).  One file: nothing to compare, scope
-    "per_run_type".  The stored table is fa_table(knots)."""
+    "per_run_type".  The stored table is fa_table(knots).
+
+    --per-module-f OUTDIR: the inputs stay as they are; every bank is copied to
+    OUTDIR/<slug>/templates_<slug>.npz with ampcorr_f [module, ln A grid] (the module
+    rows of the bank file), ampcorr_f_rt (the run-type f on that grid, for modules
+    without a row), ampcorr_pm_own / ampcorr_pm_se [band, module] and
+    ampcorr_meta.per_module = true (_pm_table).  The consistency test is run and
+    reported as above; the knots a module falls back to are always its run type's."""
     files = [str(Path(f)) for f in a.templates]
-    Z, own = [], []
+    Z, own, rules = [], [], []
     for f in files:
         z = dict(np.load(f, allow_pickle=False))
         if "ampcorr_meta" not in z:
@@ -2521,8 +2753,14 @@ def cmd_ampcorr(a):
         meta = json.loads(str(z["meta"]))
         Z.append(z)
         own.append(dict(o, run_type=meta.get("run_type", Path(f).stem)))
+        rules.append(am.get("rule", AMPCORR_RULE))
     n = len(Z)
-    bands = [b for b, _ in FA_BANDS]
+    # band labels of all files, in order of the mean knot amplitude
+    labels = {}
+    for o in own:
+        for b, k in o["knots"].items():
+            labels.setdefault(b, []).append(k["A"])
+    bands = sorted(labels, key=lambda b: float(np.mean(labels[b])))
     stat, usable = {}, []
     ok_all = n > 1
     for q in bands:
@@ -2565,6 +2803,16 @@ def cmd_ampcorr(a):
                   f"{b} {stat[b]['dev_in_combined_se'][stat[b]['files'].index(i)]:+.2f}"
                   for b in usable if i in stat[b]["files"]) if n > 1 else ""))
     glob_ = n > 1 and ok_all
+    if a.per_module_f and glob_:
+        print("[WARN] ampcorr: run types consistent, but --per-module-f falls back to "
+              "the per-run-type knots (scope per_run_type)", flush=True)
+        glob_ = False
+    pm_model = _pm_se_model(Z) if a.per_module_f else None
+    if pm_model:
+        print(f"[ampcorr] per-module stat model: SE(r_b / r_mod) = {pm_model['c']:.4f} "
+              f"sqrt(1/n_b + 1/n_pool) (n-independent scatter s0 {pm_model['s0']:.4f}, "
+              f"{pm_model['n_bins']} bins); own value kept below SE {PM_SE_MAX:g}",
+              flush=True)
     if n > 1:
         print("[ampcorr] weighted mean " + ", ".join(
             f"f_{b} {stat[b]['wmean']:.4f} +- {stat[b]['wmean_se']:.4f}" for b in usable)
@@ -2584,8 +2832,8 @@ def cmd_ampcorr(a):
                     for b in usable}
         gl = dict(knots=gl_knots, n_modules=int(sum(o["n_modules"] for o in own)))
     summary = dict(
-        rule=AMPCORR_RULE,
-        consistency_rule=f"per band q in (lo, mid, top) present in at least two run "
+        rule=rules[0],
+        consistency_rule=f"per band q in ({', '.join(bands)}) present in at least two run "
                          f"types: weighted mean over the run types having it of f_q "
                          f"with weights 1/se^2, se_bar = (sum 1/se^2)^-1/2; every run "
                          f"type must satisfy |f_i - fbar| <= {AMPCORR_NSIG:g} "
@@ -2598,14 +2846,14 @@ def cmd_ampcorr(a):
         run_types=[o["run_type"] for o in own], per_run_type=own, stat=stat,
         global_values=gl if glob_ else None, files=[], created=datetime.now().isoformat(
             timespec="seconds"), argv=sys.argv)
-    for f, z, o in zip(files, Z, own):
+    for f, z, o, rule in zip(files, Z, own, rules):
         v = gl if glob_ else o
         tab = fa_table(v["knots"])
         if tab is None:
             print(f"[WARN] ampcorr: {f}: fewer than two usable knots; file left as is",
                   flush=True)
             continue
-        am = dict(rule=AMPCORR_RULE, scope="global" if glob_ else "per_run_type",
+        am = dict(rule=rule, scope="global" if glob_ else "per_run_type",
                   run_type=o["run_type"], n_modules=v["n_modules"], knots=v["knots"],
                   f=tab[1], logA=tab[0], n_table=len(tab[0]),
                   per_run_type={k: o[k] for k in ("knots", "n_modules")},
@@ -2616,15 +2864,50 @@ def cmd_ampcorr(a):
                                    run_types=summary["run_types"], stat=stat))
         z["ampcorr_logA"] = np.array(am["logA"])
         z["ampcorr_f"] = np.array(am["f"])
+        dest = f
+        if a.per_module_f:
+            slug = Path(f).stem.removeprefix("templates_")
+            dest = str(Path(a.per_module_f) / slug / f"templates_{slug}.npz")
+            if Path(dest).resolve() == Path(f).resolve():
+                sys.exit(f"[ERROR] --per-module-f: {f} would overwrite its own input")
+            grid, F, f_rt, own_c, se_c, pst = _pm_table(z, am, v["knots"], pm_model)
+            Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            am["per_module"] = True
+            am["per_module_rule"] = (
+                "ampcorr_f[nm, ngrid] rows = the module rows of this file; module "
+                "cell (band b): own r_b / r_mod at A = the module's median amplitude "
+                "in b if SE = c sqrt(1/n_b + 1/n_pool) < se_max (c from the pooled "
+                "regression of the robust step scatter on 1/n_b + 1/n_ref, s0 the "
+                "n-independent part; n capped at n_max), else chained from the module's "
+                "nearest own band b' by the run-type step: f_own(b') f_rt(b) / "
+                "f_rt(b') at the run-type knot A (no own cell: the run-type row); PCHIP in ln A per "
+                "module, constant outside its knots; ampcorr_f_rt = the run-type "
+                "f(A) (the 1-D table of ampcorr_meta f / logA) on the same grid; "
+                "ampcorr_pm_own / ampcorr_pm_se [band, module]")
+            am["per_module_stats"] = pst
+            z["ampcorr_logA"] = grid
+            z["ampcorr_f"] = F
+            z["ampcorr_f_rt"] = f_rt
+            z["ampcorr_pm_own"] = own_c
+            z["ampcorr_pm_se"] = se_c
+            print(f"[ampcorr] per-module {slug}: {pst['n_cells_own']} of "
+                  f"{pst['n_cells_with_ratio']} cells with a ratio keep their own value "
+                  f"({100 * pst['frac_own_of_cells_with_ratio']:.1f} %); " + ", ".join(
+                      f"{b} {100 * d['frac_own']:.0f} %" for b, d in pst["per_band"].items())
+                  + f"; table {F.shape[1]} points, knot interpolation error "
+                  f"{pst['table_interp_err_at_knots']:.1e}", flush=True)
         z["ampcorr_meta"] = np.array(json.dumps(am))
         meta = json.loads(str(z["meta"]))
         meta["ampcorr"] = am
         z["meta"] = np.array(json.dumps(meta))
-        _rewrite_npz(f, z)
-        summary["files"].append(dict(path=os.path.abspath(f), sha1=_sha1(f),
+        _rewrite_npz(dest, z)
+        summary["files"].append(dict(path=os.path.abspath(dest), sha1=_sha1(dest),
                                      scope=am["scope"], knots=am["knots"],
                                      logA=am["logA"], f=am["f"]))
-        print(f"[ampcorr] rewrote {f}: scope {am['scope']}, knots " + ", ".join(
+        if a.per_module_f:
+            summary["files"][-1].update(per_module=True, source=os.path.abspath(f),
+                                        per_module_stats=pst)
+        print(f"[ampcorr] rewrote {dest}: scope {am['scope']}, knots " + ", ".join(
             f"{b} f {k['f']:.4f} @ {k['A']:.0f}" for b, k in v["knots"].items())
               + f"; table {len(tab[0])} points", flush=True)
     Path(a.out).parent.mkdir(parents=True, exist_ok=True)
@@ -2843,11 +3126,13 @@ def _iint_at(bank, midx, t0, A, with_f=True):
     return q
 
 
-def _bin_stats(r, gm, amp):
-    """Median and SE (1.2533 std / sqrt(n)) of the ratio r in the three CHK_AMP_BINS."""
+def _bin_stats(r, gm, amp, bins=CHK_AMP_BINS):
+    """Median and SE (1.2533 std / sqrt(n)) of the ratio r in the amplitude bins
+    (default the three CHK_AMP_BINS; the last bin is closed)."""
     out = []
-    for lo, hi in CHK_AMP_BINS:
-        m = gm & (amp >= lo) & (amp < hi if hi < 2500 else amp <= hi) & np.isfinite(r)
+    for lo, hi in bins:
+        m = gm & (amp >= lo) & (amp < hi if (lo, hi) != bins[-1] else amp <= hi) \
+            & np.isfinite(r)
         n = int(m.sum())
         out.append(dict(bin=_bin_label(lo, hi), n=n,
                         median=_med(r[m]) if n else float("nan"),
@@ -3121,7 +3406,10 @@ def gate_g16(G, p, mods_pwo4, bank_s, bank_t, outd, png):
         png.close(fig)
 
 
-def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
+def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png, amp_bins=CHK_AMP_BINS):
+    """amp_bins: the bins of the flatness gate and the bin tables (default
+    CHK_AMP_BINS); the per-module RMS (A > 100 / A > 300), the pre-f(A) absolute
+    conditions, kappa and the two-tau check always use CHK_AMP_BINS."""
     amp, midx = H["amp"], H["midx"]
     qraw = H["wa_integral"]
     ratio = {}
@@ -3133,7 +3421,7 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
     for gname, gm in _groups(fb).items():
         gb = {}
         for key, lab in (("s", "sampled"), ("t", "two_tau")):
-            lst = _bin_stats(ratio[key], gm, amp)
+            lst = _bin_stats(ratio[key], gm, amp, amp_bins)
             for d in lst:
                 rows.append([gname, lab, d["bin"], d["n"], d["median"], d["se"]])
             # per-module statistics of the ratio.  within_rms: RMS of the ratio
@@ -3176,7 +3464,7 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
                 if tag == "amp300":
                     gb.setdefault("_modmed_" + lab, meds.tolist())
             gb[lab] = dict(bins=lst, per_module_rms=rmsv)
-        gb["sampled_no_fA"] = dict(bins=_bin_stats(ratio_nof, gm, amp))
+        gb["sampled_no_fA"] = dict(bins=_bin_stats(ratio_nof, gm, amp, amp_bins))
         for d in gb["sampled_no_fA"]["bins"]:
             rows.append([gname, "sampled_no_fA", d["bin"], d["n"], d["median"], d["se"]])
         gb["flatness_with_fA"] = _flatness(gb["sampled"]["bins"])
@@ -3189,10 +3477,17 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
                 del res[g][k]
     s_fb = res["fb01"]["sampled"]
     b = s_fb["bins"]
-    ok_med = [abs(d["median"] - 1.0) <= 0.005 for d in b[1:] if d["n"] >= CHK_MIN_N]
-    have = [d for d in b[1:] if d["n"] >= CHK_MIN_N]
-    b2b = abs(b[1]["median"] - b[2]["median"]) if len(have) == 2 else float("nan")
-    allmed = [d["median"] for d in b if d["n"] >= CHK_MIN_N]
+
+    def leg_bins(key, gname):                    # the CHK_AMP_BINS stats of a group
+        if amp_bins == CHK_AMP_BINS:
+            return res[gname]["sampled" if key == "s" else "two_tau"]["bins"]
+        return _bin_stats(ratio[key], _groups(fb)[gname], amp)
+
+    bl = leg_bins("s", "fb01")
+    ok_med = [abs(d["median"] - 1.0) <= 0.005 for d in bl[1:] if d["n"] >= CHK_MIN_N]
+    have = [d for d in bl[1:] if d["n"] >= CHK_MIN_N]
+    b2b = abs(bl[1]["median"] - bl[2]["median"]) if len(have) == 2 else float("nan")
+    allmed = [d["median"] for d in bl if d["n"] >= CHK_MIN_N]
     rmsm = s_fb["per_module_rms"]["amp300"]["module_median_spread_rms"]
     rms_stat = s_fb["per_module_rms"]["amp300"]["module_median_stat_expected"]
     rms_corr = s_fb["per_module_rms"]["amp300"]["module_median_spread_corrected"]
@@ -3201,9 +3496,9 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
     flat = res["fb01"]["flatness_with_fA"]
     flat0 = res["fb01"]["flatness_without_fA"]
     result = "N/A" if flat["n_bins"] < 2 else ("PASS" if flat["flat"] else "FAIL")
-    kap = 1.0 / b[1]["median"] if b[1]["n"] and math.isfinite(b[1]["median"]) else float("nan")
-    kap_all = 1.0 / res["all"]["sampled"]["bins"][1]["median"] \
-        if res["all"]["sampled"]["bins"][1]["n"] else float("nan")
+    kap = 1.0 / bl[1]["median"] if bl[1]["n"] and math.isfinite(bl[1]["median"]) else float("nan")
+    ba = leg_bins("s", "all")
+    kap_all = 1.0 / ba[1]["median"] if ba[1]["n"] else float("nan")
     res["kappa_candidate_sampled_300_1000_fb01"] = kap
     res["kappa_candidate_sampled_300_1000_all"] = kap_all
     res["conditions_note"] = ("informational (the pre-f(A) absolute criteria); the gate "
@@ -3227,12 +3522,18 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
                                                  "within-module scatter (~1.8 % for both "
                                                  "banks, pulse-level noise) is reported "
                                                  "beside it")
-    tt = res["fb01"]["two_tau"]["bins"]
+    tt = leg_bins("t", "fb01")
+    if amp_bins != CHK_AMP_BINS:
+        medc = [d["median"] for d in b if d["n"] >= CHK_MIN_N]
+        res["amp_bins"] = [list(x) for x in amp_bins]
+        res["conditions"]["max_bin_spread_amp_bins"] = (max(medc) - min(medc)
+                                                        if len(medc) > 1 else float("nan"))
     res["two_tau_reproduces_deficit_100_1000"] = bool(
         all(0.975 <= d["median"] <= 0.996 for d in tt[:2] if d["n"] >= CHK_MIN_N)) \
         if all(d["n"] >= CHK_MIN_N for d in tt[:2]) else None
     G.add("G1-7", "the deficit",
-          "median Q_template/Q_raw flat across 100-300 / 300-1000 / 1000-2500 ADC "
+          f"median Q_template/Q_raw flat across "
+          f"{' / '.join(_bin_label(*x) for x in amp_bins)} ADC "
           "(fallback-0/1 modules, bins with >= 30 pulses): every pairwise difference of "
           "the bin medians <= 2 x its combined SE (SE = 1.2533 std / sqrt(n)); "
           "Q_template = pulse_energy_units(bank, m, t0_fit, A_fit, kappa=1) = A I_int "
@@ -3269,7 +3570,7 @@ def gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png):
     _write_tab(outd / "g17_module_stats.tsv", ["group", "template", "quantity", "value"], mrows)
     if png:
         fig, ax = png.subplots(1, 2, figsize=(10, 3.8))
-        e = np.geomspace(100, 2500, 12)
+        e = np.geomspace(amp_bins[0][0], amp_bins[-1][1], 12)
         for key, lab, c in (("s", "sampled", "C0"), ("t", "two-tau", "C3")):
             m = (fb >= 0) & (fb <= 1) & np.isfinite(ratio[key])
             xc, md, lo_, hi_ = [], [], [], []
@@ -3964,7 +4265,8 @@ def cmd_check(a):
     gate_g14(G, H, F, fb, outd, png)
     gate_g15(G, H, F, fb, outd, png)
     gate_g16(G, p, pwo4, bank_s, bank_t, outd, png)
-    gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png)
+    gate_g17(G, H, F, fb, bank_s, bank_t, names, outd, png,
+             CHK_AMP_BINS if a.amp_bins is None else tuple(zip(a.amp_bins[:-1], a.amp_bins[1:])))
     gate_g18(G, z, run_type, outd, png)
     gate_g19(G, z, P, bank_s, wave, noise_rows, rng, outd, png, n_max)
 
@@ -4008,6 +4310,18 @@ def cmd_check(a):
 
 
 # ==================================================================== main ==
+def _edges_arg(txt):
+    """'E0,E1,...,En' -> tuple of strictly increasing positive floats (n >= 1 bands)."""
+    try:
+        e = tuple(float(x) for x in txt.split(","))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a comma-separated list of numbers: {txt!r}")
+    if len(e) < 2 or e[0] <= 0 or any(b <= a for a, b in zip(e[:-1], e[1:])):
+        raise argparse.ArgumentTypeError("need at least two strictly increasing "
+                                         f"positive edges: {txt!r}")
+    return e
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -4047,6 +4361,11 @@ def main(argv=None):
     b.add_argument("--holdout-frac", type=float, default=HOLDOUT_FRAC)
     b.add_argument("--smooth-lambda", type=float, default=SMOOTH_LAMBDA,
                    help="spline roughness penalty lam * int f''(t)^2 dt (peak units)")
+    b.add_argument("--bands", type=_edges_arg, default=None, metavar="E0,E1,...,En",
+                   help="f(A) amplitude bands [E_k, E_k+1) in ADC (default: the "
+                        "lo / mid / top bands 100-400 / 400-1000 / 1000-2500); the npz "
+                        "gets band_edges / shape_band / r_band / n_band / A_med_band "
+                        "instead of the lo / mid / top arrays")
     b.add_argument("--no-pdf", action="store_true")
     b.add_argument("--modules", default="",
                    help="debug: comma-separated module names (e.g. W100,W200); "
@@ -4062,6 +4381,10 @@ def main(argv=None):
     m.add_argument("--templates", nargs="+", required=True,
                    help="templates_<slug>.npz of the run types (rewritten in place)")
     m.add_argument("--out", required=True, help="summary .json")
+    m.add_argument("--per-module-f", default=None, metavar="OUTDIR",
+                   help="banks built with --bands: leave --templates untouched, write "
+                        "copies OUTDIR/<slug>/templates_<slug>.npz with a per-module "
+                        "ampcorr_f [module, ln A grid]")
     m.set_defaults(fn=cmd_ampcorr)
 
     q = sub.add_parser("check", help="held-out gates G1-4..G1-9 and the PASS 1 "
@@ -4079,6 +4402,9 @@ def main(argv=None):
                         "G1-4/5/7 (0 = all)")
     q.add_argument("--noise-modules", type=int, default=100,
                    help="modules for the G1-9 half-vs-half noise-floor estimate")
+    q.add_argument("--amp-bins", type=_edges_arg, default=None, metavar="E0,E1,...,En",
+                   help="amplitude bin edges (ADC) of G1-7 (default: CHK_AMP_BINS "
+                        "100-300 / 300-1000 / 1000-2500); the last bin is closed")
     q.add_argument("--no-png", action="store_true")
     q.add_argument("--pass1-macro-out", default="",
                    help="cross-check: the patched PASS 1 macro ROOT output")

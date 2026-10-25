@@ -20,6 +20,12 @@ Subcommands (all take --root; MPLBACKEND=Agg):
   tables/eraw_sampled_<run>.tsv, plots/eraw_ratio_sampled_<run>.png,
   diag_summary_sampled.txt; int_vs_rawsum/*_sampled*); existing outputs are not rewritten.
   The existing arms are those of --root: use <study>/uniform (headline, uniform weights).
+  --arm NAME (any name) with --arm-dir DIR reads the arm's dumps at DIR/<run>_<split>/pulses.npz
+  (default <root>/dump/NAME, or <root>/../dump/NAME); outputs and labels use NAME.
+  diag --out DIR writes plots/, tables/ and the summary under DIR (default: <root>).
+  intraw --bins E0,E1,... (ADC edges): per run median Q_template/Q_raw and SE per bin, split by the
+  fallback class of the arm's bank (--bank PATTERN with {runtype}), flatness verdict;
+  <out>/intraw_bins_<arm>.{tsv,md} (arm = the --arm name, else fixed).
 
 diag uses the mf rows with ft_status >= 0 (refit pulses); amplitude axis = fx_amp
 (mf amplitude, ADC).  Status-0 means converged fits; failed rows keep the fixed value.
@@ -184,8 +190,9 @@ def pair_rows(k_ref, t_ref, k_s, t_s):
     return out
 
 
-def sampled_path(root, run, s):
-    for base in (root / "dump" / "sampled", root.parent / "dump" / "sampled"):
+def sampled_path(root, run, s, arm="sampled", arm_dir=None):
+    bases = [Path(arm_dir)] if arm_dir else [root / "dump" / arm, root.parent / "dump" / arm]
+    for base in bases:
         p = base / f"{run}_{s}" / "pulses.npz"
         if p.is_file():
             return p
@@ -200,14 +207,14 @@ def _load_sampled_split(path):
     return d, raw, float(z["kappa"]), z["module_names"]
 
 
-def load_sampled(root, run, R):
+def load_sampled(root, run, R, arm="sampled", arm_dir=None):
     """Sampled-template mf rows paired to the rows of R (arrays of length R.n, nan where
     unpaired) plus ok mask.  The rawsum match uses the sampled dump's own rawsum rows."""
     parts, raws, kap = [], [], NAN
     empty = {k: np.zeros(0, np.int64) for k in ("event", "midx", "npk")}
     empty["E_units"] = np.zeros(0)
     for si, s in enumerate(R.splits):
-        p = sampled_path(root, run, s)
+        p = sampled_path(root, run, s, arm, arm_dir)
         if p is None:
             raws.append(empty)
             continue
@@ -219,7 +226,7 @@ def load_sampled(root, run, R):
         raws.append(raw)
         kap = kp
     if not parts:
-        print(f"[diag] run {run}: no sampled dumps for splits {R.splits}; skipped")
+        print(f"[diag] run {run}: no {arm} dumps for splits {R.splits}; skipped")
         return None
     S = {k: np.concatenate([d[k] for d in parts]) for k in parts[0]}
     S["eraw"] = match_raw(R, S, raws)
@@ -230,7 +237,7 @@ def load_sampled(root, run, R):
     A = {"ok": ok, "kappa": kap, "splits": sorted({int(x) for x in S["split"]})}
     for k in ("E_units", "amp", "chi2dof", "eraw"):
         A[k] = np.where(ok, S[k][np.where(ok, j, 0)], NAN)
-    print(f"[diag] run {run}: sampled dumps in {len(A['splits'])}/{len(R.splits)} splits, "
+    print(f"[diag] run {run}: {arm} dumps in {len(A['splits'])}/{len(R.splits)} splits, "
           f"{len(S['event'])} mf rows, {int(ok.sum())} paired to the {R.n} rows "
           f"({int((ok & R.refit).sum())} of {int(R.refit.sum())} refit rows)")
     return A
@@ -734,14 +741,15 @@ def diag_waveforms(root, R, plots, out):
     savefig(fig, plots / f"waveforms_{R.run}.png")
 
 
-def diag_sampled(R, S, plots, tabs, out):
+def diag_sampled(R, S, plots, tabs, out, arm="sampled"):
     """Sampled-template arm beside fixed / bounded / prior: chi2/dof and E_mf/E_raw per
     amplitude bin (bins of the existing mf amplitude, so every arm sees the same pulses)."""
     xc, labels = bin_centers(), bin_labels()
     ok = S["ok"]
-    out.append(f"\n== sampled arm, run {R.run}: {int(ok.sum())} paired rows ({int((ok & R.refit).sum())} "
+    col_arm = COL.get(arm, COL["sampled"])
+    out.append(f"\n== {arm} arm, run {R.run}: {int(ok.sum())} paired rows ({int((ok & R.refit).sum())} "
                f"of {int(R.refit.sum())} refit rows); amp bins from the existing fixed-template "
-               f"mf amplitude; sampled kappa {fmt(S['kappa'], 4)} ==")
+               f"mf amplitude; {arm} kappa {fmt(S['kappa'], 4)} ==")
     sub = ok & (R.bi >= 0)
     fx = R.arms[next(iter(R.arms))]["fx_chi2dof"]
     per = [(D["ft_status"] == 0) & np.isfinite(D["chi2dof"]) for D in R.arms.values()]
@@ -749,12 +757,12 @@ def diag_sampled(R, S, plots, tabs, out):
     fvs = sub & R.refit & np.isfinite(fx) & np.isfinite(S["chi2dof"])
     sets = (("common (status 0 in all existing arms)", "common", com,
              [("fixed", fx, "k", "-")] + [(a, D["chi2dof"], COL[a], "-") for a, D in R.arms.items()]
-             + [("sampled", S["chi2dof"], COL["sampled"], "-")]),
-            ("fixed vs sampled (all refit-eligible rows)", "fixed_vs_sampled", fvs,
-             [("fixed", fx, "k", "-"), ("sampled", S["chi2dof"], COL["sampled"], "-")]))
+             + [(arm, S["chi2dof"], col_arm, "-")]),
+            (f"fixed vs {arm} (all refit-eligible rows)", f"fixed_vs_{arm}", fvs,
+             [("fixed", fx, "k", "-"), (arm, S["chi2dof"], col_arm, "-")]))
     fig, ax = plt.subplots(2, 2, figsize=(11, 8))
     rows = []
-    out.append("-- chi2/dof (median, p84), paired rows; ratio = fixed / sampled median")
+    out.append(f"-- chi2/dof (median, p84), paired rows; ratio = fixed / {arm} median")
     for c, (tag, key, m, curves) in enumerate(sets):
         stats = {}
         for name, v, col, ls in curves:
@@ -768,16 +776,16 @@ def diag_sampled(R, S, plots, tabs, out):
                 rows.append((key, name, labels[k], int(n[k]), med[k], p84[k]))
         ax[0, c].set_title(f"median chi2/dof, {tag}", fontsize=9)
         ax[1, c].set_title(f"84th percentile chi2/dof, {tag}", fontsize=9)
-        out.append(f"  subset {key}: bin n " + " ".join(f"{nm}" for nm in stats) + "  fixed/sampled")
+        out.append(f"  subset {key}: bin n " + " ".join(f"{nm}" for nm in stats) + f"  fixed/{arm}")
         n = counts(R.bi, m)
         for k in range(len(xc)):
             out.append(f"  {labels[k]:<10} {int(n[k]):6d} "
                        + " ".join(f"{fmt(stats[nm][k], 3):>8}" for nm in stats)
-                       + f"  {fmt(stats['fixed'][k] / stats['sampled'][k], 2):>6}")
+                       + f"  {fmt(stats['fixed'][k] / stats[arm][k], 2):>6}")
         hi = m & (R.amp > 500)
         if hi.sum() >= MIN_BIN:
             out.append(f"  A>500: n={int(hi.sum())} median chi2/dof fixed {fmt(np.median(fx[hi]), 3)} "
-                       f"sampled {fmt(np.median(S['chi2dof'][hi]), 3)} ratio "
+                       f"{arm} {fmt(np.median(S['chi2dof'][hi]), 3)} ratio "
                        f"{fmt(np.median(fx[hi]) / np.median(S['chi2dof'][hi]), 2)}")
     for x in ax.ravel():
         x.set_xscale("log")
@@ -785,9 +793,9 @@ def diag_sampled(R, S, plots, tabs, out):
         x.set_xlabel("mf amplitude (ADC)")
         x.grid(alpha=.3)
         x.legend(fontsize=7)
-    fig.suptitle(f"run {R.run}: chi2/dof with the sampled-template arm")
-    savefig(fig, plots / f"chi2_vs_amp_sampled_{R.run}.png")
-    write_tsv(tabs / f"chi2_sampled_{R.run}.tsv", ["subset", "curve", "amp_bin", "n", "median", "p84"], rows)
+    fig.suptitle(f"run {R.run}: chi2/dof with the {arm}-template arm")
+    savefig(fig, plots / f"chi2_vs_amp_{arm}_{R.run}.png")
+    write_tsv(tabs / f"chi2_{arm}_{R.run}.tsv", ["subset", "curve", "amp_bin", "n", "median", "p84"], rows)
     # E_mf / E_raw (rawsum integral of the npk == 1 row of the same event and module)
     mraw = fvs & np.isfinite(R.eraw) & (R.eraw > 0) & np.isfinite(S["eraw"]) & (S["eraw"] > 0)
     mraw &= (R.arms[next(iter(R.arms))]["fx_E_units"] > 0) & (S["E_units"] > 0)
@@ -796,27 +804,27 @@ def diag_sampled(R, S, plots, tabs, out):
     with np.errstate(all="ignore"):
         ar = S["amp"] / R.amp
     st = {n: (bin_stat(R.bi[mraw], v[mraw], np.median), bin_stat(R.bi[mraw], v[mraw], rsig))
-          for n, v in (("fixed", rf), ("sampled", rs))}
+          for n, v in (("fixed", rf), (arm, rs))}
     amp_r = bin_stat(R.bi[mraw], ar[mraw], np.median)
     n = counts(R.bi, mraw)
     out.append(f"-- E_mf/E_raw, {int(mraw.sum())} rows with an npk==1 rawsum partner (E_units incl. kappa; "
-               "median and 1.4826*MAD); amp_ratio = median sampled amp / fixed amp\n"
-               "  bin           n   fixed/raw  rms     |  sampled/raw  rms  | amp_ratio")
+               f"median and 1.4826*MAD); amp_ratio = median {arm} amp / fixed amp\n"
+               f"  bin           n   fixed/raw  rms     |  {arm}/raw  rms  | amp_ratio")
     rows = []
     for k in range(len(xc)):
         rows.append((labels[k], int(n[k]), st["fixed"][0][k], st["fixed"][1][k],
-                     st["sampled"][0][k], st["sampled"][1][k], amp_r[k]))
+                     st[arm][0][k], st[arm][1][k], amp_r[k]))
         out.append(f"  {labels[k]:<10} {int(n[k]):6d}  {fmt(st['fixed'][0][k])} {fmt(st['fixed'][1][k])}"
-                   f"  |  {fmt(st['sampled'][0][k])} {fmt(st['sampled'][1][k])}  | {fmt(amp_r[k])}")
+                   f"  |  {fmt(st[arm][0][k])} {fmt(st[arm][1][k])}  | {fmt(amp_r[k])}")
     for lab, lo, hi in (("100-300", 100, 300), ("300-1000", 300, 1000), ("1000-4000", 1000, 4000)):
         m = mraw & (R.amp >= lo) & (R.amp < hi)
         if m.sum() >= MIN_BIN:
             out.append(f"  A {lab} (n={int(m.sum())}): fixed/raw {fmt(np.median(rf[m]))} "
-                       f"(rms {fmt(rsig(rf[m]))}), sampled/raw {fmt(np.median(rs[m]))} "
+                       f"(rms {fmt(rsig(rf[m]))}), {arm}/raw {fmt(np.median(rs[m]))} "
                        f"(rms {fmt(rsig(rs[m]))})")
     fig, ax = plt.subplots(1, 2, figsize=(11, 4))
     for name, (med, rms) in st.items():
-        col = COL[name]
+        col = COL.get(name, col_arm)
         ax[0].plot(xc, med, marker="o", ms=3, color=col, label=name)
         ax[1].plot(xc, rms, marker="o", ms=3, color=col, label=name)
     ax[0].axhline(1, color="gray", lw=.8)
@@ -828,10 +836,10 @@ def diag_sampled(R, S, plots, tabs, out):
         x.set_xlabel("mf amplitude (ADC)")
         x.grid(alpha=.3)
         x.legend(fontsize=7)
-    fig.suptitle(f"run {R.run}: mf integral energy / rawsum integral, fixed vs sampled")
-    savefig(fig, plots / f"eraw_ratio_sampled_{R.run}.png")
-    write_tsv(tabs / f"eraw_sampled_{R.run}.tsv",
-              ["amp_bin", "n", "fixed_over_raw", "fixed_rms", "sampled_over_raw", "sampled_rms",
+    fig.suptitle(f"run {R.run}: mf integral energy / rawsum integral, fixed vs {arm}")
+    savefig(fig, plots / f"eraw_ratio_{arm}_{R.run}.png")
+    write_tsv(tabs / f"eraw_{arm}_{R.run}.tsv",
+              ["amp_bin", "n", "fixed_over_raw", "fixed_rms", f"{arm}_over_raw", f"{arm}_rms",
                "amp_ratio"], rows)
 
 
@@ -859,19 +867,20 @@ def diag_splits(R, out):
 
 def cmd_diag(args):
     root = Path(args.root)
-    plots, tabs = root / "plots", root / "tables"
+    dest = Path(args.out) if args.out else root
+    plots, tabs = dest / "plots", dest / "tables"
     out = [f"mf_fit_study diag, root {root}"]
-    if args.arm == "sampled":
-        out[0] += ", arm sampled"
+    if args.arm:
+        out[0] += f", arm {args.arm}"
         for run, splits in RUNS.items():
             R = load_run(root, run, splits)
-            S = load_sampled(root, run, R) if R is not None else None
+            S = load_sampled(root, run, R, args.arm, args.arm_dir) if R is not None else None
             if S is not None:
                 out.append(f"\n######## run {run}: splits {R.splits}, existing arms {list(R.arms)}")
-                diag_sampled(R, S, plots, tabs, out)
-        root.mkdir(parents=True, exist_ok=True)
-        (root / "diag_summary_sampled.txt").write_text("\n".join(out) + "\n")
-        print(f"[diag] wrote {root / 'diag_summary_sampled.txt'}, plots in {plots}, tables in {tabs}")
+                diag_sampled(R, S, plots, tabs, out, args.arm)
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / f"diag_summary_{args.arm}.txt").write_text("\n".join(out) + "\n")
+        print(f"[diag] wrote {dest / f'diag_summary_{args.arm}.txt'}, plots in {plots}, tables in {tabs}")
         return
     for run, splits in RUNS.items():
         R = load_run(root, run, splits)
@@ -892,9 +901,9 @@ def cmd_diag(args):
         diag_raw(R, plots, tabs, out)
         diag_waveforms(root, R, plots, out)
         diag_splits(R, out)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "diag_summary.txt").write_text("\n".join(out) + "\n")
-    print(f"[diag] wrote {root / 'diag_summary.txt'}, plots in {plots}, tables in {tabs}")
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "diag_summary.txt").write_text("\n".join(out) + "\n")
+    print(f"[diag] wrote {dest / 'diag_summary.txt'}, plots in {plots}, tables in {tabs}")
 
 
 # -------------------------------------------------------------------- headers --
@@ -1153,25 +1162,27 @@ def cmd_cost(args):
 
 # --------------------------------------------------------------------- intraw --
 INTRAW_RUNS = dict(RUNS, **{"024590": ["00010"]})
+DEFAULT_BANK = "output/templates_spline/{runtype}/templates_{runtype}.npz"
 INT_BINS = [(5, 20), (20, 100), (100, 300), (300, 1000), (1000, 4000)]
 SEED_SUF = " (seedmodel weights)"
 
 
 def _arm_style(a):
-    return COL[a.split()[0]], ("--" if "seedmodel" in a else "-")
+    return COL.get(a.split()[0], COL["sampled"]), ("--" if "seedmodel" in a else "-")
 
 
-def intraw_load(root, run, splits, sampled=False):
+def intraw_load(root, run, splits, arm=None, arm_dir=None):
     """Common-set Q_template (A*I_int, kappa removed) and Q_raw in ADC*ns for one run.
-    sampled: add the sampled-template arm, restrict every arm to the pulses paired to it, and
-    skip the seed-model-weight variants."""
+    arm: add that template arm (dumps of sampled_path), restrict every arm to the pulses paired to
+    it, and skip the seed-model-weight variants."""
     from mf_pulse import LEAD, LW
+    sampled = arm is not None
     out = []
     for si, s in enumerate(splits):
         pth = {a: root / "dump" / a / f"{run}_{s}" / "pulses.npz" for a in DUMP_ARMS}
         if not all(x.is_file() for x in pth.values()):
             continue
-        ps_ = sampled_path(root, run, s) if sampled else None
+        ps_ = sampled_path(root, run, s, arm, arm_dir) if sampled else None
         if sampled and ps_ is None:
             continue
         z = {a: np.load(x) for a, x in pth.items()}
@@ -1198,7 +1209,7 @@ def intraw_load(root, run, splits, sampled=False):
         sel &= (rk[i] == k) & ~zb["clipped"][r] & (pos >= 3) & (pos <= ns - 4) & (zb["E_units"][r] > 0)
         d = dict(A=zb["fx_amp"][idx][sel], midx=mi[idx][sel], split=np.full(int(sel.sum()), si),
                  Q={"fixed": zb["fx_E_units"][idx][sel] / kap * 4.0},
-                 raw=zb["E_units"][r][sel] * 4.0, nmod=len(zb["module_names"]))
+                 raw=zb["E_units"][r][sel] * 4.0, nmod=len(zb["module_names"]), names=zb["module_names"])
         for a in ("prior", "bounded"):
             d["Q"][a] = z[a]["E_units"][idx][sel] / kap * 4.0
         if sampled:
@@ -1213,8 +1224,8 @@ def intraw_load(root, run, splits, sampled=False):
             for k in ("A", "midx", "split", "raw"):
                 d[k] = d[k][hit]
             d["Q"] = {a: v[hit] for a, v in d["Q"].items()}
-            d["Q"]["sampled"] = ds["E_units"][j[hit]] / kap_s * 4.0
-            print(f"[intraw] {run}_{s}: sampled pairs {int(hit.sum())} of {d['n_sel']} common-set pulses")
+            d["Q"][arm] = ds["E_units"][j[hit]] / kap_s * 4.0
+            print(f"[intraw] {run}_{s}: {arm} pairs {int(hit.sum())} of {d['n_sel']} common-set pulses")
         for a in () if sampled else DUMP_ARMS:       # optional seed-model-weight variant
             ps = root.parent / "dump" / a / f"{run}_{s}" / "pulses.npz"
             if ps.is_file():
@@ -1229,7 +1240,8 @@ def intraw_load(root, run, splits, sampled=False):
     R = {k: np.concatenate([d[k] for d in out]) for k in ("A", "midx", "raw", "split")}
     R["Q"] = {a: np.concatenate([d["Q"][a] for d in out]) for a in arms}
     R["nmod"] = out[0]["nmod"]
-    R["order"] = [a for a in ("fixed", "prior", "bounded", "sampled")
+    R["names"] = out[0]["names"]
+    R["order"] = [a for a in ("fixed", "prior", "bounded", arm)
                   + tuple(x + SEED_SUF for x in ("prior", "bounded")) if a in arms]
     return R
 
@@ -1338,35 +1350,128 @@ def intraw_plots(run, R, out_dir, md, sfx=""):
     md.append("")
 
 
+def parse_edges(s):
+    e = [float(x) for x in s.split(",") if x.strip()]
+    if len(e) < 2 or any(b <= a for a, b in zip(e, e[1:])):
+        sys.exit(f"FATAL: --bins needs >= 2 increasing edges, got {s!r}")
+    return e
+
+
+def bank_classes(pattern, run, names):
+    """Fallback class (0/1/2; -1 = module not in the bank) per module of the dump, from the
+    `fallback` array (by module name) of the run type's bank; (None, path) if the bank is missing."""
+    from gate_scan_20261022 import runtype_slug
+    path = Path(pattern.replace("{runtype}", runtype_slug(int(run))))
+    if not path.is_absolute() and not path.exists():
+        path = HERE / path
+    if not path.is_file():
+        print(f"[intraw] run {run}: bank {path} not found; no class split")
+        return None, path
+    z = np.load(path)
+    fb = dict(zip(z["names"].tolist(), z["fallback"].tolist()))
+    return np.array([fb.get(str(n), -1) for n in names], np.int64), path
+
+
+def bin_med_se(v):
+    """(n, median, SE) with SE = 1.2533 * sigma / sqrt(n), sigma = 1.4826 MAD; nan below MIN_BIN."""
+    v = v[np.isfinite(v)]
+    if v.size < MIN_BIN:
+        return int(v.size), NAN, NAN
+    return int(v.size), float(np.median(v)), 1.2533 * rsig(v) / np.sqrt(v.size)
+
+
+def flatness(stats, edges):
+    """Over the bins with lower edge >= 100 ADC (and a statistic): (flat, spread %, worst pull)
+    with flat = every pairwise |median_i - median_j| <= 2 hypot(SE_i, SE_j); spread = (max - min
+    median) / min median; pull = max |difference| / hypot(SE_i, SE_j).  None for < 2 bins."""
+    b = [s for s, lo in zip(stats, edges[:-1]) if lo >= 100 and np.isfinite(s[1])]
+    if len(b) < 2:
+        return None
+    pull = max(abs(x[1] - y[1]) / np.hypot(x[2], y[2]) for i, x in enumerate(b) for y in b[i + 1:])
+    med = [x[1] for x in b]
+    return pull <= 2.0, (max(med) / min(med) - 1) * 100, pull
+
+
+def intraw_bins(run, R, arm, edges, bank, tsv, md):
+    """Rows for intraw_bins_<arm>.tsv and tables + flatness verdicts for the .md, one run."""
+    A = R["A"]
+    ratio = R["Q"][arm] / R["raw"]
+    cls = None
+    if bank:
+        cm, path = bank_classes(bank, run, R["names"])
+        if cm is not None:
+            cls = cm[R["midx"]]
+            md.append(f"Fallback classes from {path} (module counts 0/1/2: "
+                      + "/".join(str(int((cm == c).sum())) for c in range(3)) + ").")
+            md.append("")
+    labels = [f"{lo:g}-{hi:g}" for lo, hi in zip(edges[:-1], edges[1:])]
+    bi = np.digitize(A, edges) - 1
+    sets = [("all", np.ones(len(A), bool))] + ([(str(c), cls == c) for c in range(3)] if cls is not None else [])
+    stats = {}
+    for name, m in sets:
+        stats[name] = [bin_med_se(ratio[m & (bi == k)]) for k in range(len(labels))]
+        for k, lab in enumerate(labels):
+            tsv.append((run, name, lab, stats[name][k][0], stats[name][k][1], stats[name][k][2]))
+    md.append("| A bin (ADC) | " + " | ".join(f"{n}: n | median +- SE" for n, _ in sets) + " |")
+    md.append("|---|" + "---|---|" * len(sets))
+    for k, lab in enumerate(labels):
+        md.append(f"| {lab} | " + " | ".join(
+            f"{stats[n][k][0]} | {fmt(stats[n][k][1])} +- {fmt(stats[n][k][2])}" for n, _ in sets) + " |")
+    md.append("")
+    for name, _ in sets:
+        f = flatness(stats[name], edges)
+        md.append(f"- flatness, class {name}, bins with A >= 100 (n >= {MIN_BIN}): "
+                  + ("not enough bins" if f is None else
+                     f"{'FLAT' if f[0] else 'NOT FLAT'}, max-min spread {f[1]:.3f} %, "
+                     f"worst pairwise pull {f[2]:.2f} x hypot(SE) (limit 2)"))
+    md.append("")
+
+
 def cmd_intraw(args):
     root = Path(args.root).resolve()
     out_dir = Path(args.out) if args.out else root.parent / "int_vs_rawsum"
     out_dir.mkdir(parents=True, exist_ok=True)
-    smp = args.arm == "sampled"
-    sfx = "_sampled" if smp else ""
-    md = ["# Integrated template vs rawsum integral" + (", sampled-template arm" if smp else ""), "",
+    arm = args.arm
+    smp = arm is not None
+    sfx = f"_{arm}" if smp else ""
+    md = ["# Integrated template vs rawsum integral" + (f", {arm}-template arm" if smp else ""), "",
           "Q_template = fx_E_units (fixed) or E_units (arm, status 0) divided by kappa (removed, so Q = "
           "A*I_int) times 4 ns; Q_raw = rawsum E_units * 4 ns of the npk==1 row of the same "
           "(split, event, midx).  Pulses: refit rows, status 0 in both arms, not clipped, mf window "
           "inside the waveform, rawsum peak position >= 3 samples from either end."
-          + ("  The sampled arm is the E_units of a plain mf dump with the sampled-template bank "
+          + (f"  The {arm} arm is the E_units of a plain mf dump with the {arm}-template bank "
              f"(its own kappa removed; the bank's f(A) stays in), paired to the common-set pulses by "
              f"(event, midx) with a single mf row on both sides and |dt| <= {SAMPLED_DT_MAX:g} ns; "
              "every arm is evaluated on the pulses paired to it.  Seed-model-weight arms are left out."
              if smp else
              "  Arms marked 'seedmodel weights' come from the dump directory above the root (same pulses, "
              "fit weights from the seed model)."), ""]
+    edges = parse_edges(args.bins) if args.bins else None
+    barm = arm or "fixed"
+    bank = args.bank or (DEFAULT_BANK if arm == "sampled" else None)
+    btsv, bmd = [], [f"# Q_template / Q_raw per amplitude bin, {barm} arm", "",
+                     f"Bins (ADC, [lo, hi)): {args.bins}.  median and SE = 1.2533 * sigma / sqrt(n), sigma = "
+                     f"1.4826 MAD, per bin with n >= {MIN_BIN}.  Flatness: every pairwise difference of bin "
+                     "medians (bins with A >= 100) <= 2 hypot(SE_i, SE_j); spread = (max median / min median "
+                     "- 1) in %.  Q_template of the " + barm + " arm; Q = A*I_int (kappa removed).", ""]
     for run, splits in INTRAW_RUNS.items():
-        R = intraw_load(root, run, splits, sampled=smp)
+        R = intraw_load(root, run, splits, arm, args.arm_dir)
         if R is None:
             print(f"[intraw] run {run}: no complete split under {root / 'dump'}"
-                  + (" with a sampled dump" if smp else "") + "; skipped")
+                  + (f" with a {arm} dump" if smp else "") + "; skipped")
             md += [f"## run {run}: no dumps found", ""]
             continue
         print(f"[intraw] run {run}: {len(R['A'])} pulses, arms {R['order']}")
         intraw_plots(run, R, out_dir, md, sfx)
+        if edges:
+            bmd += [f"## run {run}", "", f"{len(R['A'])} pulses in the common set.", ""]
+            intraw_bins(run, R, barm, edges, bank, btsv, bmd)
     (out_dir / f"int_vs_rawsum{sfx}.md").write_text("\n".join(md) + "\n")
     print("\n".join(md))
+    if edges:
+        write_tsv(out_dir / f"intraw_bins_{barm}.tsv", ["run", "class", "bin", "n", "median", "se"], btsv)
+        (out_dir / f"intraw_bins_{barm}.md").write_text("\n".join(bmd) + "\n")
+        print("\n".join(bmd))
     print(f"[intraw] wrote {out_dir}")
 
 
@@ -1379,12 +1484,22 @@ def main(argv=None):
         p.add_argument("--root", default=str(DEFAULT_ROOT))
         p.set_defaults(fn=fn)
         if name in ("diag", "intraw"):
-            p.add_argument("--arm", choices=("sampled",), default=None,
-                           help="sampled: add the sampled-template arm from <root>/dump/sampled "
-                                "(or <root>/../dump/sampled); outputs are written with a "
-                                "'sampled' label beside the existing ones")
+            p.add_argument("--arm", default=None,
+                           help="add the template arm NAME (e.g. sampled) from <root>/dump/NAME "
+                                "(or <root>/../dump/NAME); outputs are written with a "
+                                "NAME label beside the existing ones")
+            p.add_argument("--arm-dir", default=None,
+                           help="dumps of --arm at DIR/<run>_<split>/pulses.npz")
+        if name == "diag":
+            p.add_argument("--out", default=None, help="default: <root> (plots/, tables/, summary)")
         if name == "intraw":
             p.add_argument("--out", default=None, help="default: <root>/../int_vs_rawsum")
+            p.add_argument("--bins", default=None,
+                           help="ADC bin edges E0,E1,...: per-bin median ratio, SE, fallback classes "
+                                "and flatness -> <out>/intraw_bins_<arm>.{tsv,md}")
+            p.add_argument("--bank", default=None,
+                           help="bank npz pattern with {runtype} for the fallback classes "
+                                f"(default for --arm sampled: {DEFAULT_BANK})")
         if name == "cost":
             p.add_argument("--dump", default=None, help="pulses.npz (default: first under root/dump)")
             p.add_argument("--n", type=int, default=4000, help="max wave rows")

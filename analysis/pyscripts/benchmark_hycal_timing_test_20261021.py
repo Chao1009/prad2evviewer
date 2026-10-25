@@ -57,6 +57,11 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
     with its cluster members for the offline solver.  All three need
     --calibrate; they are off by default and the default outputs are
     unchanged.
+    --pos-corr FILE (poscorr_v1 JSON) divides every cluster energy by
+    R(u,v), the position-dependent correction in crystal units of the
+    reconstructed centroid relative to the seed module, after --gain-file and
+    before the refinement.  --write-cluster-tsv appends cluster_x_mm,
+    cluster_y_mm (centroid) to every row.
 
   Seed-time-constrained neighbour amplitudes (plan_20261023 section 5).
     --mf-nb-amp seedtime (mf only, needs --time-calib): per path, in events
@@ -78,6 +83,16 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
   2p2, 3p5, x17) is checked against Ebeam: a mismatching runinfo default is
   an error (exit 2), a mismatching explicit --hc-calib-file only a warning.
 
+  Reported Gaussian (--gauss-window).  The Gaussian σ / μ in result.tsv and
+    the plots (whole-spectrum headline, inner-ring pre/post) default to an
+    iterative fit in [μ-2σ, μ+2σ] (≈ ±100 MeV at 2.24 GeV; start = the fixed
+    fit, repeat until μ and σ change by < 1 %, max 5 refits); a
+    `# gauss_fit` header line records the final windows and iteration counts
+    (`*` = capped without converging).
+    --gauss-window fixed150 = the old fixed ±150·kS MeV window around the
+    argmax (earlier tables).  Gains, windows, CB columns, cluster TSVs and
+    the peak-yield s_ref always use the fixed-window fit.
+
 Outputs:
   <out>.tsv               — summary + histogram bins
   <out>.png               — energy spectrum + Gaussian fits
@@ -96,6 +111,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import functools
+import hashlib
 import json
 import math
 import os
@@ -308,6 +324,66 @@ def _select_pool(events, *, inner_r, min_seed_E, exclude_rowcol):
     return [e for e in events if keep(e)]
 
 
+def poscorr_load(path):
+    """Read a poscorr_v1 JSON (position_corr.py fit output) for --pos-corr.
+
+    Returns the parsed dict plus numpy arrays 'u_edges', 'v_edges',
+    'R_arr' (nb_u x nb_v, R[iu][iv]), 'poly_c' (c0..c7, poly8 only) and the
+    file 'sha1'."""
+    with open(path, "rb") as fb:
+        raw = fb.read()
+    pc = json.loads(raw.decode("utf-8"))
+    if pc.get("schema") != "poscorr_v1":
+        raise ValueError(f"{path}: schema {pc.get('schema')!r} != 'poscorr_v1'")
+    if pc.get("form") not in ("bilinear", "poly8"):
+        raise ValueError(f"{path}: unknown form {pc.get('form')!r}")
+    pc['u_edges'] = np.asarray(pc['u_edges'], dtype=np.float64)
+    pc['v_edges'] = np.asarray(pc['v_edges'], dtype=np.float64)
+    pc['R_arr'] = np.asarray(pc['R'], dtype=np.float64)
+    nbu, nbv = len(pc['u_edges']) - 1, len(pc['v_edges']) - 1
+    if pc['R_arr'].shape != (nbu, nbv):
+        raise ValueError(f"{path}: R shape {pc['R_arr'].shape} != ({nbu}, {nbv})")
+    if pc['form'] == 'poly8':
+        pc['poly_c'] = np.array([pc['poly'][f"c{i}"] for i in range(8)],
+                                dtype=np.float64)
+    pc['sha1'] = hashlib.sha1(raw).hexdigest()
+    return pc
+
+
+def poscorr_eval(pc, u, v):
+    """Vectorised R(u, v) of a poscorr_load dict; returns (R, clamped).
+
+    clamped: u or v outside [edges[0], edges[-1]].  bilinear: interpolation of
+    R on the bin-centre grid, u/v clamped to the centre range.  poly8: u/v
+    clamped to the edge range.  NaN inputs give NaN R and clamped False."""
+    u = np.asarray(u, dtype=np.float64)
+    v = np.asarray(v, dtype=np.float64)
+    ue, ve = pc['u_edges'], pc['v_edges']
+    clamped = (u < ue[0]) | (u > ue[-1]) | (v < ve[0]) | (v > ve[-1])
+    if pc['form'] == 'poly8':
+        c = pc['poly_c']
+        uc = np.clip(u, ue[0], ue[-1])
+        vc = np.clip(v, ve[0], ve[-1])
+        R = c[0] * (1 + c[1] * uc ** 2 + c[2] * vc ** 2
+                    + c[3] * uc ** 2 * vc ** 2 + c[4] * uc ** 4
+                    + c[5] * vc ** 4 + c[6] * uc + c[7] * vc)
+        return R, clamped
+    cu = 0.5 * (ue[:-1] + ue[1:])
+    cv = 0.5 * (ve[:-1] + ve[1:])
+    if len(cu) < 2 or len(cv) < 2:
+        raise ValueError("bilinear needs at least 2 bins per axis")
+    Rg = pc['R_arr']
+    uc = np.clip(u, cu[0], cu[-1])
+    vc = np.clip(v, cv[0], cv[-1])
+    iu = np.clip(np.searchsorted(cu, uc, side='right') - 1, 0, len(cu) - 2)
+    iv = np.clip(np.searchsorted(cv, vc, side='right') - 1, 0, len(cv) - 2)
+    tu = (uc - cu[iu]) / (cu[iu + 1] - cu[iu])
+    tv = (vc - cv[iv]) / (cv[iv + 1] - cv[iv])
+    R = ((1 - tu) * (1 - tv) * Rg[iu, iv] + tu * (1 - tv) * Rg[iu + 1, iv]
+         + (1 - tu) * tv * Rg[iu, iv + 1] + tu * tv * Rg[iu + 1, iv + 1])
+    return R, clamped
+
+
 def fit_per_module_gains(events, *, target_peak, inner_r, min_seed_E,
                          min_per_mod, n_iter=2, exclude_rowcol=None,
                          method='median', bin_width=20.0, escale=1.0):
@@ -386,7 +462,8 @@ def fit_module_cb(vals, lo, hi, seed, bin_width, sigma_glob, escale=1.0):
 
 def fit_elastic_window_gains(events, *, ebeam, hycal_z, m_target, inner_r,
                              min_seed_E, min_per_mod, exclude_rowcol, nsigma,
-                             bin_width, escale=1.0, kE=1.0):
+                             bin_width, escale=1.0, kE=1.0,
+                             moller_nsigma=MOLLER_GAP_NSIGMA):
     """Elastic-window per-seed-module gain refinement (single pass).
 
     Pool as fit_per_module_gains.  E'(theta_M) is the elastic energy for
@@ -403,7 +480,8 @@ def fit_elastic_window_gains(events, *, ebeam, hycal_z, m_target, inner_r,
     mu_M ± nsigma·sigma_M is fixed (not clipped); the gain is
     E'(theta_M) / median(in-window events).
     A module is not used (exclude_reason) if
-      "moller_gap"        gap_meas < MOLLER_GAP_NSIGMA·sigma_M, with
+      "moller_gap"        gap_meas < moller_nsigma·sigma_M (default
+                          MOLLER_GAP_NSIGMA; 0 = never), with
                           gap_meas = (mu_global/Ē')·(E'_el,M - E_ee,M) (the
                           scale factor puts the gap in measured-energy
                           units, like sigma_M);
@@ -499,7 +577,7 @@ def fit_elastic_window_gains(events, *, ebeam, hycal_z, m_target, inner_r,
                    frac_lms=n_in / len(vals), frac_nolms=n_in_nl / len(vals),
                    flag_mu_off=int(abs(mu_m - mu_global) > 2.0 * sig_m),
                    moller_gap_nsigma=gap_meas / sig_m)
-        if gap_meas < MOLLER_GAP_NSIGMA * sig_m:
+        if moller_nsigma > 0 and gap_meas < moller_nsigma * sig_m:
             row['exclude_reason'] = 'moller_gap'
             continue
         if n_in < min_per_mod or n_in == 0:
@@ -517,6 +595,31 @@ def fit_elastic_window_gains(events, *, ebeam, hycal_z, m_target, inner_r,
     return gains, raw, corr, len(gains), rows, sigma_glob, eprime_mean, mu_global
 
 
+def _gauss_fixed_hist(centres, counts, e_lo, e_hi, bin_width, escale):
+    """Core of fit_peak on a histogram: Gaussian in a ±150·escale MeV window
+    around the argmax.  Returns (mu, sigma, A, n_in_fit)."""
+    nan = float('nan')
+    if not HAVE_SCIPY or counts.sum() == 0:
+        return nan, nan, nan, 0
+
+    mu0  = float(centres[int(np.argmax(counts))])
+    win  = max(150.0 * escale, 4.0 * bin_width)
+    mask = (centres > mu0 - win) & (centres < mu0 + win)
+    x, y = centres[mask], counts[mask].astype(float)
+    if y.sum() < 20:
+        return nan, nan, nan, int(y.sum())
+    try:
+        popt, _ = curve_fit(
+            gauss, x, y,
+            p0     = [float(y.max()), mu0, max(bin_width, 60.0 * escale)],
+            bounds = ([0, e_lo, 1.0], [np.inf, e_hi, win]))
+        A, mu, sig = popt
+        return float(mu), abs(float(sig)), float(A), int(y.sum())
+    except Exception as e:
+        sys.stderr.write(f"[WARN] gauss fit failed: {e}\n")
+        return nan, nan, nan, int(y.sum())
+
+
 def fit_peak(values, e_lo, e_hi, bin_width, escale=1.0):
     """Gaussian fit around the histogram argmax in a ±150·escale MeV window.
     Returns (mu, sigma, A, n_in_fit, edges, counts); mu/sigma NaN if
@@ -524,26 +627,101 @@ def fit_peak(values, e_lo, e_hi, bin_width, escale=1.0):
     edges  = np.arange(e_lo, e_hi + bin_width, bin_width)
     counts, _ = np.histogram(values, bins=edges)
     centres = 0.5 * (edges[:-1] + edges[1:])
-    nan = float('nan')
-    if not HAVE_SCIPY or counts.sum() == 0:
-        return nan, nan, nan, 0, edges, counts
+    mu, sig, A, nf = _gauss_fixed_hist(centres, counts, e_lo, e_hi,
+                                       bin_width, escale)
+    return mu, sig, A, nf, edges, counts
 
-    mu0  = float(centres[int(np.argmax(counts))])
-    win  = max(150.0 * escale, 4.0 * bin_width)
-    mask = (centres > mu0 - win) & (centres < mu0 + win)
-    x, y = centres[mask], counts[mask].astype(float)
-    if y.sum() < 20:
-        return nan, nan, nan, int(y.sum()), edges, counts
-    try:
-        popt, _ = curve_fit(
-            gauss, x, y,
-            p0     = [float(y.max()), mu0, max(bin_width, 60.0 * escale)],
-            bounds = ([0, e_lo, 1.0], [np.inf, e_hi, win]))
-        A, mu, sig = popt
-        return float(mu), abs(float(sig)), float(A), int(y.sum()), edges, counts
-    except Exception as e:
-        sys.stderr.write(f"[WARN] gauss fit failed: {e}\n")
-        return nan, nan, nan, int(y.sum()), edges, counts
+
+GAUSS_WINDOWS = ('2sigma', 'fixed150')
+
+
+def _hist_geometry(centres, bin_width, e_lo, e_hi):
+    """Histogram bin width and range (the mu bounds of the fixed fit) from
+    the bin centres when not given."""
+    if bin_width is None:
+        bin_width = float(np.median(np.diff(centres))) if len(centres) > 1 else 1.0
+    if e_lo is None:
+        e_lo = float(centres[0]) - 0.5 * bin_width
+    if e_hi is None:
+        e_hi = float(centres[-1]) + 0.5 * bin_width
+    return bin_width, e_lo, e_hi
+
+
+def fit_gauss_2sigma_hist(centres, counts, bin_width=None, escale=1.0,
+                          e_lo=None, e_hi=None, start=None,
+                          nsigma=2.0, max_iter=5, tol=0.01):
+    """Iterative ±nsigma·σ Gaussian on a histogram (centres, counts).
+    Starts from `start` = (mu, sigma) or, if None, from the fixed ±150·escale
+    window fit (_gauss_fixed_hist); refits the bins whose centre lies in
+    [mu - nsigma·σ, mu + nsigma·σ] until mu and sigma each change by less
+    than `tol` (relative), at most `max_iter` refits.  A failed refit keeps
+    the last good fit.  bin_width, e_lo, e_hi default from the centres.
+    Returns (mu, sigma, A, n_in_fit, lo, hi, n_iter, converged): lo / hi = window of
+    the last successful refit, n_iter = refits done (0 with lo = hi = NaN,
+    and the fixed-window values, if the start fit failed or no refit
+    succeeded); converged = False if the cap was reached without
+    convergence."""
+    centres = np.asarray(centres, dtype=float)
+    counts = np.asarray(counts)
+    bin_width, e_lo, e_hi = _hist_geometry(centres, bin_width, e_lo, e_hi)
+    mu, sig, A, nf = _gauss_fixed_hist(centres, counts, e_lo, e_hi,
+                                       bin_width, escale)
+    if start is not None:
+        mu, sig = float(start[0]), float(start[1])
+    lo = hi = float('nan')
+    n_iter = 0
+    if not (HAVE_SCIPY and math.isfinite(mu) and math.isfinite(sig)
+            and sig > 0):
+        return mu, sig, A, nf, lo, hi, n_iter, True
+    converged = True
+    for _ in range(max_iter):
+        w_lo, w_hi = mu - nsigma * sig, mu + nsigma * sig
+        mask = (centres >= w_lo) & (centres <= w_hi)
+        x, y = centres[mask], counts[mask].astype(float)
+        if len(x) < 4 or y.sum() < 20:
+            break
+        try:
+            popt, _ = curve_fit(
+                gauss, x, y,
+                p0     = [float(y.max()), mu, sig],
+                bounds = ([0, w_lo, 1.0], [np.inf, w_hi, w_hi - w_lo]))
+        except Exception as e:
+            sys.stderr.write(f"[WARN] gauss 2sigma refit failed: {e}\n")
+            break
+        A, mu_new, sig_new = float(popt[0]), float(popt[1]), abs(float(popt[2]))
+        nf, lo, hi = int(y.sum()), w_lo, w_hi
+        n_iter += 1
+        done = (abs(mu_new - mu) < tol * abs(mu)
+                and abs(sig_new - sig) < tol * sig)
+        mu, sig = mu_new, sig_new
+        if done:
+            break
+    else:
+        converged = False
+    return mu, sig, A, nf, lo, hi, n_iter, converged
+
+
+def fit_gauss_reported(centres, counts, bin_width=None, escale=1.0,
+                       e_lo=None, e_hi=None, mode='2sigma', start=None):
+    """The Gaussian that is REPORTED (result.tsv, plots, scan tables):
+    mode '2sigma' = fit_gauss_2sigma_hist, 'fixed150' = the fit_peak window
+    (lo = hi = NaN, n_iter = 0, converged = True).  Same 8-tuple either way:
+    (mu, sigma, A, n_in_fit, lo, hi, n_iter, converged).  Calibration-internal fits keep calling
+    fit_peak."""
+    if mode == '2sigma':
+        return fit_gauss_2sigma_hist(centres, counts, bin_width, escale,
+                                     e_lo, e_hi, start=start)
+    centres = np.asarray(centres, dtype=float)
+    bin_width, e_lo, e_hi = _hist_geometry(centres, bin_width, e_lo, e_hi)
+    mu, sig, A, nf = _gauss_fixed_hist(centres, np.asarray(counts), e_lo, e_hi,
+                                       bin_width, escale)
+    return mu, sig, A, nf, float('nan'), float('nan'), 0, True
+
+
+def _gwin(lo, hi, n_iter, converged=True):
+    """'lo-hi/n_iter' (window in MeV / refits; `*` = not converged) for the
+    gauss_fit header."""
+    return f"{lo:.1f}-{hi:.1f}/{n_iter}" + ("" if converged else "*")
 
 
 # ---- LMS gain-drift correction ----------------------------------------------
@@ -822,7 +1000,7 @@ def write_window_tsv(path, rows_by_path, args, eprime_mean, sigma_glob,
         f.write(f"# window_nsigma={args.window_nsigma} "
                 f"prefit_range={kin_info['prefit']} "
                 f"min_fit_events={MIN_FIT_EVENTS} "
-                f"moller_gap_nsigma={MOLLER_GAP_NSIGMA} "
+                f"moller_gap_nsigma={args.moller_gap_nsigma} "
                 f"min_per_module(in-window)={args.min_per_module}\n")
         f.write(f"# target={kin_info['target']} kinematics={kin_info['label']} "
                 f"mass_MeV={kin_info['mass']:.3f} Ebeam_MeV={kin_info['ebeam']:.2f}\n")
@@ -1165,7 +1343,7 @@ class MFBlock:
                 A, sA = self.rec.amp_at(y, m, t0, sigma=sg)
             Ii = bank.iint(m, t0)
             if getattr(bank, "ampcorr", None) is not None:
-                Ii = Ii * bank.f_amp(A)          # sampled bank: f(A) as in pulse_energy_units
+                Ii = Ii * bank.f_amp(A, m)       # sampled bank: f(A) as in pulse_energy_units
             Eu = (A.astype(np.float64) * Ii * self.kappa).tolist()
         # ---- per-request energies and free-fit bookkeeping
         by_evq = {}
@@ -1502,6 +1680,16 @@ def main(argv=None):
                          "(target peak = Ebeam by default), then refit the "
                          "Gaussian to compare σ_E between methods under "
                          "matched per-module calibration.")
+    ap.add_argument("--gauss-window", choices=GAUSS_WINDOWS, default='2sigma',
+                    help="Window of the REPORTED Gaussian fits (headline and "
+                         "inner-ring pre/post σ, μ in result.tsv and plots): "
+                         "'2sigma' (default) = iterative refit in "
+                         "[μ-2σ, μ+2σ] (<1 %% change in μ and σ, max 5 "
+                         "iterations; starts from the fixed fit), "
+                         "'fixed150' = the old fixed ±150·kS MeV window "
+                         "around the argmax.  Calibration-internal fits "
+                         "(gains, windows, CB seeds, peak yield) always use "
+                         "the fixed window.")
     ap.add_argument("--target-peak", type=float, default=None,
                     help="Target μ for the median / cb-peak gain refinement "
                          "(default Ebeam in MeV; ignored by elastic-window).")
@@ -1571,12 +1759,46 @@ def main(argv=None):
                          "explicit file.  The offset is subtracted before "
                          "the pre-window cut.  A missing file is an error "
                          "(exit 2).")
+    ap.add_argument("--veto-second-cluster", type=float, default=None,
+                    metavar="EMIN_MEV",
+                    help="Software Moller veto: reject a single-cluster event "
+                         "if any cluster other than the selected one (PbWO4 "
+                         "or lead glass) has energy > EMIN_MEV, per path "
+                         "(legacy and gated use their own clusters).  "
+                         "Default off (selection unchanged).")
+    ap.add_argument("--veto-dphi", type=float, default=None, metavar="DEG",
+                    help="--veto-second-cluster: the vetoing cluster must also "
+                         "be within +-DEG of back-to-back in azimuth about "
+                         "the beam axis (|dphi - 180| <= DEG, centroid "
+                         "x,y).  Default: no azimuth requirement.")
+    ap.add_argument("--cluster-min-module-energy", type=float, default=None,
+                    metavar="MEV",
+                    help="Clustering: override min_module_energy (MeV) on "
+                         "both clusterers.  Default: the pipeline config "
+                         "value.  Any --cluster-* flag adds a `# cluster_cfg` "
+                         "header line.")
+    ap.add_argument("--cluster-corner-conn", type=int, choices=(0, 1),
+                    default=None,
+                    help="Clustering: override corner_conn on both "
+                         "clusterers.  Default: the pipeline config value.")
+    ap.add_argument("--cluster-non-linear-corr", type=int, choices=(0, 1),
+                    default=None,
+                    help="Clustering: override non_linear_corr on both "
+                         "clusterers (the cluster-energy nl1/nl2 correction; "
+                         "the binding default is on).  Default: untouched.")
+    ap.add_argument("--moller-gap-nsigma", type=float,
+                    default=MOLLER_GAP_NSIGMA, metavar="X",
+                    help="Elastic-window: exclude a seed module if its "
+                         "elastic-Moller gap is < X sigma_M (default "
+                         f"{MOLLER_GAP_NSIGMA:g}; 0 disables the exclusion).")
     ap.add_argument("--write-cluster-tsv", action="store_true",
                     help="Write <out_path>_clusters.tsv with one row per "
                          "accepted single-cluster event (columns: event_num, "
                          "config_name, seed_module_id, seed_x_mm, seed_y_mm, "
                          "seed_row, seed_col, seed_energy_MeV, "
-                         "cluster_E_raw_MeV, cluster_E_cal_MeV).  Requires "
+                         "cluster_E_raw_MeV, cluster_E_cal_MeV, "
+                         "cluster_x_mm, cluster_y_mm; the last two are the "
+                         "reconstructed centroid, mm).  Requires "
                          "--calibrate (the event lists are only populated in "
                          "that mode).")
     ap.add_argument("--gain-file", default=None, metavar="PATH",
@@ -1588,6 +1810,16 @@ def main(argv=None):
                          "--cal-method refinement; seed energies, the pool "
                          "selection and the headline spectrum are unchanged. "
                          "Requires --calibrate.")
+    ap.add_argument("--pos-corr", default=None, metavar="FILE",
+                    help="Position-dependent cluster-energy correction "
+                         "(poscorr_v1 JSON from position_corr.py fit).  "
+                         "Replaces every cluster energy of the calibration "
+                         "event lists by E/R(u,v), u,v = reconstructed "
+                         "cluster centroid minus seed-module centre in "
+                         "crystal units, after --gain-file and before the "
+                         "--cal-method refinement.  Header line "
+                         "'# pos_corr=...' (n_applied, n_clamped summed over "
+                         "both paths).  Requires --calibrate.")
     ap.add_argument("--cluster-dump", default=None, metavar="{PATH,auto}",
                     help="Write the legacy-path calibration pool (single "
                          "cluster, seed r < --inner-radius, seed E >= "
@@ -1694,6 +1926,9 @@ def main(argv=None):
                          "-2..+2 ns (search).")
     args = ap.parse_args(argv)
 
+    if args.veto_dphi is not None and args.veto_second_cluster is None:
+        ap.error("--veto-dphi requires --veto-second-cluster")
+
     if args.write_cluster_tsv and not args.calibrate:
         sys.stderr.write(
             "[ERROR] --write-cluster-tsv requires --calibrate to be set.\n"
@@ -1702,10 +1937,10 @@ def main(argv=None):
         sys.exit(2)
 
     if (args.cal_method == 'percrystal' or args.gain_file
-            or args.cluster_dump) and not args.calibrate:
+            or args.cluster_dump or args.pos_corr) and not args.calibrate:
         sys.stderr.write(
-            "[ERROR] --cal-method percrystal, --gain-file and --cluster-dump "
-            "require --calibrate (the event lists are only populated in that "
+            "[ERROR] --cal-method percrystal, --gain-file, --cluster-dump "
+            "and --pos-corr require --calibrate (the event lists are only populated in that "
             "mode).\n")
         sys.exit(2)
     if args.cal_method == 'percrystal' and args.write_cluster_tsv:
@@ -1720,8 +1955,17 @@ def main(argv=None):
         sys.stderr.write("[ERROR] --gain-file with --cal-method percrystal is not "
                          "supported (the table rescales cluster_E, not the members)\n")
         sys.exit(2)
+    if args.pos_corr and not os.path.isfile(args.pos_corr):
+        sys.stderr.write(f"[ERROR] --pos-corr not found: {args.pos_corr}\n")
+        sys.exit(2)
+    if args.pos_corr and args.cal_method == 'percrystal':
+        sys.stderr.write("[ERROR] --pos-corr with --cal-method percrystal is "
+                         "not supported\n")
+        sys.exit(2)
     rec_ext = bool(args.calibrate and (args.cal_method == 'percrystal'
-                                       or args.gain_file or args.cluster_dump))
+                                       or args.gain_file or args.cluster_dump
+                                       or args.pos_corr
+                                       or args.write_cluster_tsv))
 
     run_for_lms = (args.run_num if args.run_num > 0
                    else C.extract_run_number(args.evio_path))
@@ -1977,6 +2221,12 @@ def main(argv=None):
                   "least_split", "log_weight_thres"):
             setattr(cfg, f, getattr(base_cfg, f))
         cfg.seed_time_window = seed_window
+        if args.cluster_min_module_energy is not None:
+            cfg.min_module_energy = args.cluster_min_module_energy
+        if args.cluster_corner_conn is not None:
+            cfg.corner_conn = bool(args.cluster_corner_conn)
+        if args.cluster_non_linear_corr is not None:
+            cfg.non_linear_corr = bool(args.cluster_non_linear_corr)
         cl = det.HyCalCluster(p.hycal)
         cl.set_config(cfg)
         return cl
@@ -2023,6 +2273,45 @@ def main(argv=None):
         st[2] = max(st[2], dev / abs(e) if e else 0.0)
         return (mi, me, r.hit.x, r.hit.y, evnum)
 
+    # --veto-second-cluster: [single-cluster events, vetoed] per path
+    veto_on = args.veto_second_cluster is not None
+    veto_n = {'legacy': [0, 0], 'new': [0, 0]}
+    veto_sub_min = (veto_on and args.veto_second_cluster
+                    < float(cl_legacy.get_config().min_cluster_energy))
+
+    def veto_other(recs, prim, lab, cl):
+        """True if a cluster other than `prim` vetoes the event.  `recs` only
+        holds clusters >= min_cluster_energy; with EMIN below it the
+        clusters of `cl` below min_cluster_energy and above EMIN also veto
+        (module-level energy, centre-module position)."""
+        st = veto_n[lab]
+        st[0] += 1
+        phi0 = math.atan2(prim.hit.y, prim.hit.x)
+        for r in recs:
+            if r is prim or r.hit.energy <= args.veto_second_cluster:
+                continue
+            if args.veto_dphi is not None:
+                dphi = math.degrees(math.atan2(r.hit.y, r.hit.x) - phi0)
+                if abs(dphi % 360.0 - 180.0) > args.veto_dphi:
+                    continue
+            st[1] += 1
+            return True
+        if veto_sub_min:
+            cfg_ = cl.get_config()
+            for c in cl.get_clusters():
+                if (c.energy >= cfg_.min_cluster_energy
+                        or c.energy <= args.veto_second_cluster
+                        or len(c.hits) < cfg_.min_cluster_size):
+                    continue
+                if args.veto_dphi is not None:
+                    m = p.hycal.module(c.center.index)
+                    dphi = math.degrees(math.atan2(m.y, m.x) - phi0)
+                    if abs(dphi % 360.0 - 180.0) > args.veto_dphi:
+                        continue
+                st[1] += 1
+                return True
+        return False
+
     def finish_event(fvec, npulse=None, evnum=-1):
         """Cluster the buffered hits of one event and accumulate the energies.
 
@@ -2045,7 +2334,8 @@ def main(argv=None):
             n_same_seed += 1
             dE_frac_sum += (big_n[0].hit.energy
                             / big_l[0].hit.energy - 1.0)
-        if len(big_l) == 1:
+        if (len(big_l) == 1 and not (veto_on and veto_other(
+                rec_l, big_l[0], 'legacy', cl_legacy))):
             r = big_l[0]
             sp_tot[0] += 1
             if sp_mode == 'off' or sp_pass(r, npulse):
@@ -2061,7 +2351,8 @@ def main(argv=None):
                                           cluster_lms_feff(r.cluster, fvec))
                                          + (member_rec(r, evnum, 'legacy')
                                             if rec_ext else ()))
-        if len(big_n) == 1:
+        if (len(big_n) == 1 and not (veto_on and veto_other(
+                rec_n, big_n[0], 'new', cl_new))):
             r = big_n[0]
             sp_tot[1] += 1
             if sp_mode == 'off' or sp_pass(r, npulse):
@@ -2226,6 +2517,15 @@ def main(argv=None):
     mu_n, sig_n, A_n, nf_n, _,     counts_n = fit_peak(
         energies_new,    e_lo, e_hi, args.bin_width, kS)
     centres = 0.5 * (edges[:-1] + edges[1:])
+    gw_on = args.gauss_window == '2sigma'
+    if gw_on:
+        # reported headline Gaussian: iterative ±2σ, started from the fixed fit
+        gwh_l = fit_gauss_reported(centres, counts_l, args.bin_width, kS,
+                                   e_lo, e_hi, '2sigma', start=(mu_l, sig_l))
+        gwh_n = fit_gauss_reported(centres, counts_n, args.bin_width, kS,
+                                   e_lo, e_hi, '2sigma', start=(mu_n, sig_n))
+        mu_l, sig_l, A_l, nf_l = gwh_l[:4]
+        mu_n, sig_n, A_n, nf_n = gwh_n[:4]
 
     rate = n_phys / max(elapsed, 1e-3)
     print()
@@ -2236,6 +2536,12 @@ def main(argv=None):
           f"records {n_read},  physics {n_phys},  triggered {n_kept}")
     print(f"  elapsed {elapsed:.1f} s  ({rate:.1f} ev/s)")
     print(f"  selection: single cluster E > {args.signal_min:.0f} MeV")
+    if veto_on:
+        print(f"  veto     : 2nd cluster E > {args.veto_second_cluster:g} MeV"
+              + (f", |dphi-180| <= {args.veto_dphi:g} deg"
+                 if args.veto_dphi is not None else "")
+              + f"; vetoed {veto_n['legacy'][1]}/{veto_n['legacy'][0]} legacy, "
+                f"{veto_n['new'][1]}/{veto_n['new'][0]} gated")
     print()
     print(f"               | legacy        | gated (W={W:g} ns)")
     print(f"  events kept  | {n_legacy:>13d} | {n_new:>13d}    "
@@ -2244,6 +2550,9 @@ def main(argv=None):
         print(f"  Gauss μ (MeV)| {mu_l:>13.1f} | {mu_n:>13.1f}")
         print(f"  Gauss σ (MeV)| {sig_l:>13.1f} | {sig_n:>13.1f}")
         print(f"  N in fit win | {nf_l:>13d} | {nf_n:>13d}")
+        if gw_on:
+            print(f"  Gauss win MeV| {_gwin(*gwh_l[4:]):>13s} | "
+                  f"{_gwin(*gwh_n[4:]):>13s}   (±2σ refit: lo-hi/iterations)")
     else:
         print("  (scipy not available — fit skipped)")
 
@@ -2380,12 +2689,43 @@ def main(argv=None):
               f"g0 {gtab_g0:.4f}, sha1 {gtab_sha[:12]})  applied to the "
               f"calibration event lists", flush=True)
 
+    pc_info = None
+    if args.pos_corr:
+        pcd = poscorr_load(args.pos_corr)
+        size_by_sid = {}
+        n_app = n_clp = 0
+        for evs_ in (events_legacy, events_new):
+            if not evs_:
+                continue
+            for e_ in evs_:
+                if e_[0] not in size_by_sid:
+                    sm_ = p.hycal.module_by_id(e_[0])
+                    size_by_sid[e_[0]] = (sm_.size_x, sm_.size_y)
+            sz = np.array([size_by_sid[e_[0]] for e_ in evs_], dtype=np.float64)
+            u_ = (np.array([e_[10] - e_[1] for e_ in evs_], dtype=np.float64)
+                  / sz[:, 0])
+            v_ = (np.array([e_[11] - e_[2] for e_ in evs_], dtype=np.float64)
+                  / sz[:, 1])
+            R_, clp_ = poscorr_eval(pcd, u_, v_)
+            ok_ = np.isfinite(u_) & np.isfinite(v_) & np.isfinite(R_)
+            n_app += int(ok_.sum())
+            n_clp += int((clp_ & ok_).sum())
+            for k_, t_ in enumerate(evs_):
+                if ok_[k_]:
+                    evs_[k_] = t_[:6] + (t_[6] / float(R_[k_]),) + t_[7:]
+        pc_info = (args.pos_corr, pcd['sha1'], pcd['form'],
+                   float(pcd.get('norm', float('nan'))), n_app, n_clp)
+        print(f"  pos-corr        : {args.pos_corr}  (form {pcd['form']}, "
+              f"sha1 {pcd['sha1'][:12]})  applied to {n_app} events "
+              f"(both paths), {n_clp} clamped", flush=True)
+
     # ---- Optional: per-seed-module calibration on the inner ring ----------
     cal = None
     rows_by_path = {}
     eprime_by_path, sigma_glob_by_path, mu_global_by_path = {}, {}, {}
     target_ref = args.target_peak
     peak_yield = None
+    gw_cal = None
     pcm = bool(args.calibrate and args.cal_method == 'percrystal')
     pc_res, pc_ecal, pc_modinfo = {}, {}, {}
     if args.calibrate:
@@ -2409,7 +2749,8 @@ def main(argv=None):
                          inner_r=args.inner_radius,
                          min_seed_E=args.min_seed_energy,
                          min_per_mod=args.min_per_module, exclude_rowcol=excl,
-                         nsigma=args.window_nsigma, bin_width=args.bin_width)
+                         nsigma=args.window_nsigma, bin_width=args.bin_width,
+                         moller_nsigma=args.moller_gap_nsigma)
             print(f"                      Ebeam {ew_kw['ebeam']:.2f} MeV, "
                   f"hycal_z {ew_kw['hycal_z']:.1f} mm, window ±"
                   f"{args.window_nsigma:g}σ, target {target} ({kin_label}, "
@@ -2505,6 +2846,24 @@ def main(argv=None):
         def _ratio(s, m):
             return s / m if (m and m > 0 and not math.isnan(m)) else float('nan')
 
+        # Peak-yield s_ref stays on the fixed-window Gaussian (as the CB
+        # seeds above), whatever --gauss-window reports.
+        s_ref_fixed = _ratio(sig_l_post, mu_l_post)
+        if args.gauss_window == '2sigma':
+            gw_cal = {}
+            for key, cnt, mu0_, sg0_ in (
+                    ('l_pre', counts_l_pre, mu_l_pre, sig_l_pre),
+                    ('n_pre', counts_n_pre, mu_n_pre, sig_n_pre),
+                    ('l_post', counts_l_post, mu_l_post, sig_l_post),
+                    ('n_post', counts_n_post, mu_n_post, sig_n_post)):
+                gw_cal[key] = fit_gauss_reported(
+                    cal_centres, cnt, bw, kS, cal_lo, cal_hi, '2sigma',
+                    start=(mu0_, sg0_))
+            mu_l_pre,  sig_l_pre,  _,        _ = gw_cal['l_pre'][:4]
+            mu_n_pre,  sig_n_pre,  _,        _ = gw_cal['n_pre'][:4]
+            mu_l_post, sig_l_post, A_l_post, _ = gw_cal['l_post'][:4]
+            mu_n_post, sig_n_post, A_n_post, _ = gw_cal['n_post'][:4]
+
         cal = dict(
             n_modules_l=nmod_l, n_modules_n=nmod_n,
             n_events_l=len(raw_l), n_events_n=len(raw_n),
@@ -2533,7 +2892,7 @@ def main(argv=None):
         sigE_l_cb_pre,  sigE_n_cb_pre  = _ratio(sig_cb_l_pre,  mu_cb_l_pre),  _ratio(sig_cb_n_pre,  mu_cb_n_pre)
         # Peak yield: pool events within +-2.5 s_ref of the module's target
         # after refinement, on the modules calibrated in both paths.
-        s_ref = sigE_l_g
+        s_ref = s_ref_fixed
         common = set(gains_l) & set(gains_n)
         tgt_m = {r['module']: r['target'] for r in rows_l} if (ew or pcm) else {}
         py_n = {}
@@ -2569,6 +2928,10 @@ def main(argv=None):
         print(f"  μ  after  (MeV) | {mu_l_post:>13.1f} | {mu_n_post:>13.1f}  "
               f"(target {target_ref:.1f})")
         print(f"  σ  Gaussian     | {sig_l_post:>13.1f} | {sig_n_post:>13.1f}")
+        if gw_cal is not None:
+            print(f"  Gauss win MeV   | {_gwin(*gw_cal['l_post'][4:]):>13s} | "
+                  f"{_gwin(*gw_cal['n_post'][4:]):>13s}  (post, ±2σ refit: "
+                  f"lo-hi/iterations)")
         print(f"  σ_E / E (G)     | {sigE_l_g*100:>12.2f}% | {sigE_n_g*100:>12.2f}%")
         print(f"  μ  CB post(MeV) | {mu_cb_l_post:>13.1f} | {mu_cb_n_post:>13.1f}")
         print(f"  σ  CB post(MeV) | {sig_cb_l_post:>13.1f} | {sig_cb_n_post:>13.1f}  "
@@ -2623,27 +2986,31 @@ def main(argv=None):
     # ---- Optional: per-event cluster TSV ------------------------------------
     if args.write_cluster_tsv and cal is not None:
         # gains_l / gains_n come from the chosen --cal-method above.
-        # events_X lists: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff)
+        # events_X lists: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff,
+        #                  members_idx, members_E, x_cl, y_cl, evnum)
         clust_path = (args.out_path[:-4] if args.out_path.endswith('.tsv')
                       else args.out_path) + "_clusters.tsv"
         n_rows_l = n_rows_n = 0
         with open(clust_path, "w") as cf:
             cf.write("event_num\tconfig_name\tseed_module_id\t"
                      "seed_x_mm\tseed_y_mm\tseed_row\tseed_col\t"
-                     "seed_energy_MeV\tcluster_E_raw_MeV\tcluster_E_cal_MeV\n")
-            for ev_idx, (sid, x, y, row, col, se, ce, *_) in enumerate(events_legacy):
+                     "seed_energy_MeV\tcluster_E_raw_MeV\tcluster_E_cal_MeV\t"
+                     "cluster_x_mm\tcluster_y_mm\n")
+            for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_legacy):
                 g = gains_l.get(sid, float('nan'))
                 ce_cal = ce * g if not math.isnan(g) else float('nan')
                 cf.write(f"{ev_idx}\tlegacy\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
-                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\n")
+                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}\n")
                 n_rows_l += 1
-            for ev_idx, (sid, x, y, row, col, se, ce, *_) in enumerate(events_new):
+            for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_new):
                 g = gains_n.get(sid, float('nan'))
                 ce_cal = ce * g if not math.isnan(g) else float('nan')
                 cf.write(f"{ev_idx}\tgated\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
-                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\n")
+                         f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}\n")
                 n_rows_n += 1
         print(f"\n  wrote: {clust_path}  "
               f"(N rows: {n_rows_l} legacy + {n_rows_n} gated)")
@@ -2657,6 +3024,19 @@ def main(argv=None):
         f.write(f"# pre_window=[{pre_lo},{pre_hi}] ns  seed_time_window={W} ns\n")
         f.write(f"# time_calib={time_calib_path or 'off'} n_offsets={n_t_off}\n")
         f.write(f"# selection: single cluster E > {args.signal_min} MeV\n")
+        if veto_on:
+            f.write(f"# veto_second_cluster emin={args.veto_second_cluster:g} "
+                    f"dphi={args.veto_dphi if args.veto_dphi is not None else 'off'} "
+                    f"legacy_vetoed={veto_n['legacy'][1]} of {veto_n['legacy'][0]} "
+                    f"new_vetoed={veto_n['new'][1]} of {veto_n['new'][0]}\n")
+        if (args.cluster_min_module_energy is not None
+                or args.cluster_corner_conn is not None
+                or args.cluster_non_linear_corr is not None):
+            _cc = cl_new.get_config()
+            f.write(f"# cluster_cfg min_module_energy={_cc.min_module_energy:g} "
+                    f"corner_conn={int(_cc.corner_conn)} "
+                    f"non_linear_corr={int(_cc.non_linear_corr)} "
+                    f"log_weight_thres={_cc.log_weight_thres:g}\n")
         f.write(f"# n_phys={n_phys} n_kept={n_kept} elapsed_s={elapsed:.1f}\n")
         if mf_block is not None:
             _st = mf_block.stats
@@ -2755,6 +3135,10 @@ def main(argv=None):
         if gain_info is not None:
             f.write(f"# gain_file={gain_info[0]} sha1={gain_info[1]} "
                     f"n_modules={gain_info[2]} g0={gain_info[3]:.6f}\n")
+        if pc_info is not None:
+            f.write(f"# pos_corr={pc_info[0]} sha1={pc_info[1]} "
+                    f"form={pc_info[2]} norm={pc_info[3]:.6f} "
+                    f"n_applied={pc_info[4]} n_clamped={pc_info[5]}\n")
         if dump_info is not None:
             f.write(f"# cluster_dump={dump_info[0]} n_rows={dump_info[1]}\n")
         f.write(f"# cluster_counts legacy n0={ncl_l[0]} n1={ncl_l[1]} "
@@ -2766,6 +3150,16 @@ def main(argv=None):
             f.write(f"# peak_yield nsigma=2.5 s_ref={peak_yield[0]:.6f} "
                     f"modules_common={peak_yield[1]} legacy={peak_yield[2]} "
                     f"new={peak_yield[3]}\n")
+        if gw_on:
+            f.write("# gauss_fit window=2sigma"
+                    + ("".join(f" {k}={_gwin(*gw_cal[k2][4:])}"
+                               for k, k2 in (('legacy_pre', 'l_pre'),
+                                             ('legacy_post', 'l_post'),
+                                             ('new_pre', 'n_pre'),
+                                             ('new_post', 'n_post')))
+                       if gw_cal is not None else "")
+                    + f" headline_legacy={_gwin(*gwh_l[4:])}"
+                      f" headline_new={_gwin(*gwh_n[4:])}\n")
         f.write("\n")
         f.write("path\tn_events\tgauss_mu_MeV\tgauss_sigma_MeV\tn_in_fit\n")
         f.write(f"legacy\t{n_legacy}\t{mu_l:.2f}\t{sig_l:.2f}\t{nf_l}\n")

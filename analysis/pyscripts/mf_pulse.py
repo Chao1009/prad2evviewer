@@ -488,7 +488,10 @@ class SampledTemplateBank:
     sub-sample phase dependence); "phase" keeps the 256-phase table I_tab.
     I_tab and the strictly continuous walk I_cont_walk are kept as diagnostics.
     ampcorr = (log A, f) (optional, from_npz) is a global amplitude-dependent
-    integral factor applied by pulse_energy_units through f_amp(amp).
+    integral factor applied by pulse_energy_units through f_amp(amp).  f may also
+    be a per-module table [n_modules, len(log A)] (rows = this bank's modules; from_npz
+    maps the file's per-module ampcorr_f to them); f_amp(amp, midx) then takes the
+    module of every pulse.
     """
 
     kind = "sampled"
@@ -501,11 +504,14 @@ class SampledTemplateBank:
         self.iint_mode = iint_mode
         if ampcorr is not None:
             la, fa = (np.asarray(x, dtype=np.float64) for x in ampcorr)
-            if (la.ndim != 1 or la.size < 1 or la.shape != fa.shape
+            per_module = fa.ndim == 2
+            if (la.ndim != 1 or la.size < 1
+                    or (la.shape != fa.shape and not (
+                        per_module and fa.shape == (len(names), la.size)))
                     or not (np.isfinite(la).all() and np.isfinite(fa).all())
                     or (np.diff(la) <= 0).any()):
-                raise ValueError("ampcorr: need equal-length 1-D finite arrays, "
-                                 "log A strictly increasing")
+                raise ValueError("ampcorr: need equal-length 1-D finite arrays (f may be "
+                                 "[n_modules, len(log A)]), log A strictly increasing")
             ampcorr = (la, fa)
         self.ampcorr = ampcorr
         self.ampcorr_meta = dict(ampcorr_meta or {})
@@ -664,20 +670,38 @@ class SampledTemplateBank:
                         * self.I_cont[mm[sel]] / self.I_cont_walk[mm[sel]])
         return out.reshape(shp)
 
-    def f_amp(self, amp):
+    def f_amp(self, amp, midx=None):
         """Amplitude-dependent integral factor f(A): log-linear in A between the
-        ampcorr knots, constant outside; 1 if the bank carries none."""
+        ampcorr knots, constant outside; 1 if the bank carries none.  A per-module
+        table (2-D f) needs `midx`, the bank module of every pulse; its rows are
+        interpolated like np.interp does the 1-D table."""
         amp = np.asarray(amp, dtype=np.float64)
         if self.ampcorr is None:
             return np.ones(amp.shape)
-        return np.interp(np.log(np.maximum(amp, 1.0)), *self.ampcorr)
+        if self.ampcorr[1].ndim == 1:
+            return np.interp(np.log(np.maximum(amp, 1.0)), *self.ampcorr)
+        if midx is None:
+            raise ValueError("f_amp: the bank carries a per-module f(A) table; "
+                             "pass the module index of every pulse")
+        la, F = self.ampcorr
+        x = np.log(np.maximum(amp, 1.0))
+        m = np.broadcast_to(np.asarray(midx), x.shape)
+        j = np.clip(np.searchsorted(la, x, side="right") - 1, 0, la.size - 2) \
+            if la.size > 1 else np.zeros(x.shape, dtype=np.intp)
+        f0 = F[m, j]
+        if la.size == 1:
+            return f0
+        f1 = F[m, j + 1]
+        out = (f1 - f0) / (la[j + 1] - la[j]) * (x - la[j]) + f0
+        return np.where(x <= la[0], F[m, 0], np.where(x >= la[-1], F[m, -1], out))
 
     def ampcorr_str(self):
         """Short description of ampcorr (None if absent)."""
         if self.ampcorr is None:
             return None
         la, fa = self.ampcorr
-        return (f"f(A) {la.size} points, A {math.exp(la[0]):.0f}-{math.exp(la[-1]):.0f} ADC, "
+        return (f"f(A) {'per-module ' if fa.ndim == 2 else ''}{la.size} points, "
+                f"A {math.exp(la[0]):.0f}-{math.exp(la[-1]):.0f} ADC, "
                 f"f {fa.min():.4f}-{fa.max():.4f}")
 
     @classmethod
@@ -690,7 +714,14 @@ class SampledTemplateBank:
         spline; those and the file's own fallback == 2 rows are listed in
         `fallback`.  Non-PbWO4 rows hold the average.  Optional keys ampcorr_logA,
         ampcorr_f (both or neither; ln A in ADC, multiplicative factors) and
-        ampcorr_meta (JSON string) give bank.ampcorr and bank.f_amp.
+        ampcorr_meta (JSON string) give bank.ampcorr and bank.f_amp.  A 2-D
+        ampcorr_f [file rows, len(ampcorr_logA)] (`ampcorr --per-module-f`) is a
+        per-module table: bank row = the file row of the same name; names without a
+        file row (non-PbWO4, absent) take ampcorr_f_rt (the run-type f on the same
+        grid) if the file has it, else the median over the file rows.  The band
+        arrays of the file (lo / mid / top, or the generalised band_edges /
+        shape_band / r_band / n_band of `build --bands`) are diagnostics and are
+        not read.
         """
         from scipy.interpolate import BSpline
         z = np.load(path, allow_pickle=False)
@@ -725,6 +756,13 @@ class SampledTemplateBank:
         if has[0] != has[1]:
             raise ValueError(f"{path}: ampcorr_logA and ampcorr_f must come together")
         ampcorr = (z["ampcorr_logA"], z["ampcorr_f"]) if has[0] else None
+        if has[0] and ampcorr[1].ndim == 2:
+            zf = ampcorr[1]
+            dflt = (z["ampcorr_f_rt"] if "ampcorr_f_rt" in z.files
+                    else np.median(zf, axis=0))
+            ampcorr = (ampcorr[0], np.array(
+                [zf[row[nm]] if is_p and nm in row else dflt
+                 for nm, is_p in zip(names, pwo4)]))
         acm = json.loads(str(z["ampcorr_meta"])) if "ampcorr_meta" in z.files else {}
         return cls(rows, names, pwo4, smooth_order=smooth_order,
                    int_tail_ratio=int_tail_ratio, tail_break_n=tail_break_n, L=L,
@@ -1214,7 +1252,8 @@ def pulse_energy_units(bank, midx_of_pulse, t0, amp, kappa=1.0, ped_rms=None):
     else:
         I = bank.iint_floor(midx_of_pulse, t0, amp, ped_rms)
     if getattr(bank, "ampcorr", None) is not None:
-        I = I * bank.f_amp(amp)
+        I = I * (bank.f_amp(amp) if bank.ampcorr[1].ndim == 1
+                 else bank.f_amp(amp, midx_of_pulse))
     return amp * I * kappa
 
 
@@ -1569,6 +1608,56 @@ def self_test(verbose=True):
                and np.array_equal(fb_bank.f_amp(Aa), np.ones(5)),
                f"f at A={Aa.tolist()}: {np.round(got, 6).tolist()} (exact interp, "
                f"max dev {np.abs(got / fx - 1).max():.1e}); info ampcorr: {ac_info['ampcorr']}")
+
+        # ---- the generalised band layout of spline_template_extract `build --bands`
+        # (band_edges / shape_band / r_band / n_band / A_med_band) is ignored by the bank
+        path3 = os.path.join(td, "spline_test_bands.npz")
+        np.savez(path3, **dict(np.load(path2), band_edges=np.array([100.0, 250.0, 500.0]),
+                               shape_band=np.full((2, 3, 5), np.nan, dtype=np.float32),
+                               r_band=np.ones((2, 3)), n_band=np.zeros((2, 3), dtype=np.int32),
+                               A_med_band=np.full((2, 3), np.nan)))
+        bd_bank, bd_info = build_bank(gn, gp, path3, wcfg)
+        report("band-layout npz (band_edges, shape_band, ...) loads like the three-band one",
+               np.array_equal(bd_bank.ampcorr[0], kn_la) and np.array_equal(bd_bank.ampcorr[1], kn_f)
+               and np.array_equal(bd_bank.f_amp(Aa), fx)
+               and np.array_equal(pulse_energy_units(bd_bank, ma, ta, Aa, 1.01),
+                                  pulse_energy_units(ac_bank, ma, ta, Aa, 1.01)),
+               f"info ampcorr: {bd_info['ampcorr']}")
+
+        # ---- per-module f(A) table [file rows, grid] (`ampcorr --per-module-f`)
+        pm_la = np.log([200.0, 400.0, 1000.0])
+        pm_f = np.interp(pm_la, kn_la, kn_f)
+        path4 = os.path.join(td, "spline_test_pm.npz")
+        np.savez(path4, **dict(np.load(path2), ampcorr_logA=pm_la,
+                               ampcorr_f=np.tile(pm_f, (3, 1)),
+                               ampcorr_meta=json.dumps(dict(scope="per_run_type",
+                                                            per_module=True))))
+        pm_bank, pm_info = build_bank(gn, gp, path4, wcfg)
+        Ab = np.array([100.0, 200.0, 300.0, 447.0, 1000.0, 3000.0, 600.0])
+        mb = np.array([0, 1, 2, 3, 0, 1, 2])
+        tb = np.linspace(100, 103, Ab.size)
+        pm_e = pulse_energy_units(pm_bank, mb, tb, Ab, 1.01)
+        d_e = pulse_energy_units(ac_bank, mb, tb, Ab, 1.01)
+        pm_ep = pulse_energy_units(pm_bank, mb, tb, Ab, ped_rms=np.full(Ab.size, 1.0))
+        d_ep = pulse_energy_units(ac_bank, mb, tb, Ab, ped_rms=np.full(Ab.size, 1.0))
+        # rows differ: module B x 1.02, file default row (D) x 0.97, A and C unchanged
+        pm_f2 = np.tile(pm_f, (3, 1))
+        pm_f2[1] *= 1.02
+        path5 = os.path.join(td, "spline_test_pm2.npz")
+        np.savez(path5, **dict(np.load(path4), ampcorr_f=pm_f2, ampcorr_f_rt=pm_f * 0.97))
+        pm2_bank, _ = build_bank(gn, gp, path5, wcfg)
+        pm2_e = pulse_energy_units(pm2_bank, mb, tb, Ab, 1.01)
+        want = d_e * np.array([1.0, 1.02, 1.0, 0.97, 1.0, 1.02, 1.0])
+        report("per-module f(A) table",
+               np.array_equal(pm_e, d_e) and np.array_equal(pm_ep, d_ep)
+               and pm_bank.ampcorr[1].shape == (5, 3)
+               and isinstance(pm_info["ampcorr"], str) and "per-module" in pm_info["ampcorr"]
+               and np.abs(pm2_e / want - 1).max() < 1e-12
+               and np.array_equal(pm_bank.f_amp(Ab, mb),
+                                  np.interp(np.log(np.maximum(Ab, 1.0)), pm_la, pm_f)),
+               f"equal rows == 1-D table: max |dE/E| {np.abs(pm_e / d_e - 1).max():.1e} "
+               f"(ped floor {np.abs(pm_ep / d_ep - 1).max():.1e}); distinct rows "
+               f"max dev {np.abs(pm2_e / want - 1).max():.1e}; info ampcorr: {pm_info['ampcorr']}")
 
     print("SELF-TEST", "PASS" if ok_all else "FAIL")
     return ok_all

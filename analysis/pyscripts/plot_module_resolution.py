@@ -26,15 +26,19 @@ With --group-runs the primary products are per run type, <out>/<slug>/<slug>_*
   (slug 3p49_H2, 2p24_H2, 0p73_H2, 2p24_C, Ta_X17; same files): the events of all
   runs of the type are pooled before the per-module fits, so N and the --min-n
   cut refer to the type total; the per-run products above are still written.
+The Gaussian is the benchmark's reported Gaussian (--gauss-window): by default the iterative
+  [mu-2sigma, mu+2sigma] refit (g_hw = final half-width in MeV, g_nit = iterations in modules.tsv),
+  fixed150 = the old fixed +-150*kS MeV window; the CB is unchanged.
 A module is fitted only if N > --min-n; 0 < N <= --min-n is "low_stat" (hatched).
 <out>/summary/: runs_summary.tsv, types_summary.tsv (--group-runs), corr_2p24_H2_r.tsv + scatter grid,
+  gauss_window.txt (the --gauss-window used);
   worst_modules.tsv (10 worst modules, W428/W494 and Moller-excluded modules per
   run type; from the pooled type tables with --group-runs).
 
 Usage:
   python3 plot_module_resolution.py --scan-dir output/scan_20261023_pc_clusters \\
       --out output/module_resolution [--runs 24386 25320] [--path gated] \\
-      [--fit {auto,gauss,cb}] [--min-n 1000] [--group-runs] [--splits 10 20] [--no-pdf]
+      [--fit {auto,gauss,cb}] [--gauss-window {2sigma,fixed150}] [--min-n 1000] [--group-runs] [--splits 10 20] [--no-pdf]
 """
 
 from __future__ import annotations
@@ -81,6 +85,7 @@ GAUSS_RUNS = {25228, 25257, 25260, 25299, 25320, 24590, 24603}
 H2_224 = [25228, 25257, 25260, 25299, 25320]
 NEEDED = ("result.tsv", "result_window.tsv", "result_clusters.tsv")
 FIT_LABEL = {"g": "Gaussian", "cb": "Crystal Ball"}
+GAUSS_WINDOW = "2sigma"     # set from --gauss-window in main()
 SPECIAL = ("W428", "W494")
 N_WORST = 10
 PER_PAGE = 12
@@ -181,11 +186,16 @@ def fit_one(vals, hdr):
     lo, hi = hist_range(hdr)
     with contextlib.redirect_stderr(io.StringIO()), warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        gmu, gsig, gA, *_ = bench.fit_peak(vals, lo, hi, hdr["bw"], hdr["kS"])
+        gmu, gsig, gA, _, edges, counts = bench.fit_peak(vals, lo, hi, hdr["bw"], hdr["kS"])
         cmu, csig, ca, cn, cA, *_ = bench.fit_peak_cb(
             vals, lo, hi, hdr["bw"], mu0_hint=None if math.isnan(gmu) else gmu, escale=hdr["kS"])
-    return dict(g_mu=gmu, g_sigma=gsig, g_A=gA, cb_mu=cmu, cb_sigma=csig,
-                cb_alpha=ca, cb_n=cn, cb_A=cA)
+        out = dict(g_mu=gmu, g_sigma=gsig, g_A=gA, cb_mu=cmu, cb_sigma=csig,
+                   cb_alpha=ca, cb_n=cn, cb_A=cA)
+        if GAUSS_WINDOW == "2sigma":    # reported Gaussian; the CB seed above stays on the fixed fit
+            g = bench.fit_gauss_reported(0.5 * (edges[:-1] + edges[1:]), counts, hdr["bw"], hdr["kS"],
+                                         lo, hi, "2sigma", start=(gmu, gsig))
+            out.update(g_mu=g[0], g_sigma=g[1], g_A=g[2], g_hw=0.5 * (g[5] - g[4]), g_nit=g[6])
+    return out
 
 
 def fit_modules(mod, energies, win, geo, hdr, min_n):
@@ -202,7 +212,10 @@ def fit_modules(mod, energies, win, geo, hdr, min_n):
     cols = {}
     for tag, e in energies.items():
         res = {m: fit_one(e[groups[m]], hdr) for m in df.index[df.N > min_n]}
-        for k in ("g_mu", "g_sigma", "g_A", "cb_mu", "cb_sigma", "cb_alpha", "cb_n", "cb_A"):
+        keys = ("g_mu", "g_sigma", "g_A", "cb_mu", "cb_sigma", "cb_alpha", "cb_n", "cb_A")
+        if GAUSS_WINDOW == "2sigma":
+            keys += ("g_hw", "g_nit")
+        for k in keys:
             cols[f"{tag}_{k}"] = [res[m][k] if m in res else float("nan") for m in df.index]
         for f in ("g", "cb"):
             cols[f"{tag}_{f}_s_over_mu"] = [ratio(cols[f"{tag}_{f}_sigma"][i], cols[f"{tag}_{f}_mu"][i])
@@ -515,6 +528,10 @@ def main(argv=None):
     ap.add_argument("--fit", choices=("auto", "gauss", "cb"), default="auto",
                     help="auto: CB for 3.49 GeV/C/Ta runs, Gaussian for 2.24 and 0.73 GeV H2")
     ap.add_argument("--no-pdf", action="store_true")
+    ap.add_argument("--gauss-window", choices=("2sigma", "fixed150"), default="2sigma",
+                    help="Gaussian fit window: 2sigma (default) = iterative refit in [mu-2s, mu+2s] "
+                         "(benchmark fit_gauss_2sigma_hist, adds g_hw/g_nit columns to modules.tsv); "
+                         "fixed150 = the fixed +-150*kS MeV window of earlier outputs. CB unchanged.")
     ap.add_argument("--inner-radius", type=float, default=200.0, help="pool seed radius (mm)")
     ap.add_argument("--exclude-rowcol", type=int, nargs=4, default=(15, 20, 15, 20),
                     metavar=("ROW0", "ROW1", "COL0", "COL1"),
@@ -523,6 +540,8 @@ def main(argv=None):
                          "scans up to scan_20261023_pc* used the 0-based reading, i.e. 16 21 16 21 here)")
     ap.add_argument("--splits", type=int, nargs="+", help="restrict to these split numbers")
     args = ap.parse_args(argv)
+    global GAUSS_WINDOW
+    GAUSS_WINDOW = args.gauss_window
     if args.path == "gated":   # keep the primary (legacy) outputs intact
         args.out = args.out.with_name(args.out.name + "_gated")
 
@@ -548,6 +567,7 @@ def main(argv=None):
                                                            index=False, float_format="%.4f")
             pooled = {typ: t["df"] for typ, t in trs}
     worst_table(results, args, sdir, pooled)
+    (sdir / "gauss_window.txt").write_text(f"gauss_window={args.gauss_window}\n")
 
 
 if __name__ == "__main__":

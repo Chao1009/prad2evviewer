@@ -31,6 +31,13 @@ candidate:
       n_events of the scan / sum of legacy n_events of scan 1; eps_peak = sum of the
       peak_yield "new" / "legacy" counts within the scan.  Floor 0.99.
 
+Gaussian definition (--gauss-window): 2sigma (default) / fixed150 refit the Gaussian pre and
+post sigma and mu of every split and path from the inner-ring histogram stored in result.tsv
+("inner-ring histogram bin centres + counts") with the benchmark's fit_gauss_reported
+(2sigma = iterative fit in [mu-2s, mu+2s]; fixed150 = the old fixed +-150*kS MeV window, which
+reproduces the stored values to the printed precision); stored = the values in result.tsv.
+CB columns are never refitted.
+
 Outputs: PREFIX.md, PREFIX.tsv (per run type x path x comparison), PREFIX_splits.tsv
 (one row per split and path, all four sigma kinds of every scan).
 """
@@ -73,6 +80,73 @@ def load_scan(d: Path, exclude: set[int]) -> dict:
         if rec is not None:
             out[(run, sp)] = rec
     return out
+
+
+_RX_KS = re.compile(r"\bkE=([\d.eE+-]+) kS=([\d.eE+-]+)")
+_RX_BW = re.compile(r"\bbin_width=([\d.]+)")
+_RX_TREF = re.compile(r"\btarget_mean_MeV=([\d.]+)")
+_HIST = {"legacy": ("legacy_pre", "legacy_post"), "new": ("new_pre", "new_post")}
+_BENCH = None
+
+
+def _bench():
+    """The benchmark module (fit functions); imported on first use (needs prad2py)."""
+    global _BENCH
+    if _BENCH is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "bench_gauss", Path(__file__).resolve().parent / "benchmark_hycal_timing_test_20261021.py")
+        _BENCH = importlib.util.module_from_spec(spec)
+        sys.modules["bench_gauss"] = _BENCH
+        spec.loader.exec_module(_BENCH)
+    return _BENCH
+
+
+def refit_gauss(rec, mode):
+    """Refit the Gaussian of rec's four inner-ring spectra from the histogram stored in
+    result.tsv, with the benchmark's fit_gauss_reported (mode '2sigma' | 'fixed150').
+    Returns {(path, 'pre'|'post'): (mu, sigma, A, n_in_fit, lo, hi, n_iter, converged)} for path in
+    legacy/new, or None if the histogram or header values are missing."""
+    txt = Path(rec["path"]).read_text(encoding="utf-8", errors="replace")
+    hdr = "\n".join(l for l in txt.splitlines() if l.startswith("#"))
+    mk, mb, mt = _RX_KS.search(hdr), _RX_BW.search(hdr), _RX_TREF.search(hdr)
+    h = G.parse_tsv(Path(rec["path"])).get("postcal_histogram")
+    if not (mk and mb and mt and h):
+        return None
+    kE, kS, bw, tref = float(mk.group(1)), float(mk.group(2)), float(mb.group(1)), float(mt.group(1))
+    lo, hi = tref - 800 * kE, tref + 800 * kE
+    B = _bench()
+    # the stored centres are rounded to 0.1 MeV; the bins are lo + bw (i + 1/2) exactly (lo from
+    # the 0.01-rounded target_mean), which is closer to the benchmark's own centres
+    cen = lo + bw * (np.arange(len(h["centres"])) + 0.5)
+    if np.max(np.abs(cen - h["centres"])) > 0.06:
+        cen = h["centres"]
+    out = {}
+    for path, cols in _HIST.items():
+        for when, col in zip(("pre", "post"), cols):
+            out[(path, when)] = B.fit_gauss_reported(cen, h[col], bw, kS, lo, hi, mode)
+    return out
+
+
+def apply_gauss(scans, mode):
+    """Replace the Gaussian pre/post mu, sigma (MeV) of every record by the refit of
+    refit_gauss (nothing for mode 'stored'); a record without histogram keeps its values."""
+    if mode == "stored":
+        return
+    miss = 0
+    for recs in scans.values():
+        for rec in recs.values():
+            fits = refit_gauss(rec, mode)
+            if fits is None:
+                miss += 1
+                continue
+            for (path, when), v in fits.items():
+                c = rec["cal"].get(path)
+                if c is not None:
+                    c[f"mu_{when}_MeV"], c[f"sigma_{when}_MeV"] = v[0], v[1]
+    if miss:
+        print(f"WARNING: {miss} record(s) without stored histogram keep the stored Gaussian",
+              file=sys.stderr)
 
 
 def pref_fit(run: int) -> str:
@@ -275,6 +349,9 @@ def split_rows(scans, labels, keys):
 
 def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -> str:
     L = ["# Scan comparison", ""]
+    if args.gauss_window != "stored":
+        L += [f"Gaussian window: {args.gauss_window} (refit from the stored inner-ring "
+              "histograms; CB values as stored).", ""]
     L += ["| label | directory | splits loaded | paired |", "|---|---|---|---|"]
     for lab in labels:
         L.append(f"| {lab} | `{dirs[lab]}` | {len(scans[lab])} | {len(keys)} |")
@@ -377,6 +454,10 @@ def main():
                     help="writes PREFIX.md, PREFIX.tsv and PREFIX_splits.tsv")
     ap.add_argument("--exclude-runs", nargs="*", type=int, default=[24578],
                     help="runs to skip (default: 24578)")
+    ap.add_argument("--gauss-window", choices=("2sigma", "fixed150", "stored"), default="2sigma",
+                    help="Gaussian sigma/mu: refit from the stored inner-ring histograms with "
+                         "the iterative +-2 sigma window (default) or the old fixed +-150*kS MeV "
+                         "window, or use the values stored in result.tsv (stored)")
     args = ap.parse_args()
 
     labels, dirs = [], {}
@@ -390,6 +471,7 @@ def main():
         dirs[lab] = d
     scans = {lab: load_scan(Path(dirs[lab]), set(args.exclude_runs)) for lab in labels}
     print("splits loaded:", {k: len(v) for k, v in scans.items()})
+    apply_gauss(scans, args.gauss_window)
     if any(len(v) == 0 for v in scans.values()):
         sys.exit("ERROR: a scan directory has no usable result.tsv")
     keys = sorted(set.intersection(*[set(s) for s in scans.values()]))
