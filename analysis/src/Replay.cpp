@@ -232,12 +232,12 @@ tdc::RfTimeData fillRf(EventVars_Recon &ev, const std::vector<uint32_t> &roc_tag
     return rf;
 }
 
-// HyCal clusters (at most kMaxClusters): lab-frame position at shower depth
-// projected to hycal_z, and the RF time difference.
+// HyCal clusters (at most kMaxClusters): lab-frame position with optional
+// shower depth, projected to hycal_z, and the RF time difference.
 void fillClusters(EventVars_Recon &ev, const std::vector<fdec::ClusterHit> &hits,
                   const DetectorTransform &hycal_xform, float hycal_z,
                   const tdc::RfTimeData &rf, const fdec::HyCalSystem &hycal,
-                  const prad2::HyCalRfOffsets &rf_offsets)
+                  const prad2::HyCalRfOffsets &rf_offsets, bool shower_depth_corr)
 {
     ev.n_clusters = std::min((int)hits.size(), prad2::kMaxClusters);
     for (int i = 0; i < ev.n_clusters; ++i) {
@@ -245,7 +245,7 @@ void fillClusters(EventVars_Recon &ev, const std::vector<fdec::ClusterHit> &hits
         ev.cl_nblocks[i] = h.nblocks;
         ev.cl_npos[i]    = h.npos;
         ev.cl_time[i]    = h.time;
-        HCHit lab = ClusterToLab(hycal_xform, h);
+        HCHit lab = ClusterToLab(hycal_xform, h, shower_depth_corr);
         GetProjection(lab, hycal_z);
         ev.cl_x[i]           = lab.x;
         ev.cl_y[i]           = lab.y;
@@ -596,7 +596,8 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                const float zerosup_override, bool prad1, bool x17, bool x17_blind, bool random, bool gem_hit)
+                                const float zerosup_override, bool prad1, bool x17, bool x17_blind, bool random, bool gem_hit,
+                                bool shower_depth_corr)
 {
     // Similar to Process(), but with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree.
@@ -880,7 +881,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             clusterer.FormClusters();
             std::vector<fdec::ClusterHit> hits;
             clusterer.ReconstructHits(hits);
-            fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets);
+            fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets, shower_depth_corr);
 
             //decode GEM data and reconstruct GEM hits
         if(!prad1 && gem_sys.GetNDetectors() > 0){
@@ -914,7 +915,7 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
 bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &output_root, RunConfig &gRunConfig,
                                 const std::string &db_dir, const std::string &recon_config_file,
                                 const std::string &daq_config_file, const std::string &gem_ped_file,
-                                bool x17, bool x17_blind, bool random, bool gem_hit)
+                                bool x17, bool x17_blind, bool random, bool gem_hit, bool shower_depth_corr)
 {
     // Similar to ProcessWithRecon(), with HyCal reconstruction and GEM hit reconstruction
     // before filling the ROOT tree. But unlike ProcessWithRecon(), it starts from raw root files 
@@ -1249,7 +1250,7 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         clusterer.FormClusters();
         std::vector<fdec::ClusterHit> hits;
         clusterer.ReconstructHits(hits);
-        fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets);
+        fillClusters(*ev, hits, hc_xform, gRunConfig.hycal_z, rf, hycal, hc_rf_offsets, shower_depth_corr);
         // Reconstruct GEM hits from the strip-level data saved on the raw
         // replay tree.  This starts after pedestal/common-mode/ZS, so it
         // resumes at the same clustering and X/Y matching stage used by
