@@ -107,30 +107,30 @@
         {
             "// calibration period 3-1-1 of 2.2GeV": "",
             "from_run":    25292,
-            "calibration": {"file": "calibration/PRad2_2p2_round1_3-1-1.json"},
+            "calibration": {"file": "calibration/PRad2_2p2_round1_3.json"},
             "gain_factor": {"data_dir": "", "ref_run":  25292, "ref_PMT": 12}
         },
         {
             "// calibration period 4-1-1 of 2.2GeV": "",
             "from_run":    25311,
-            "calibration": {"file": "calibration/PRad2_2p2_round1_4-1-1.json"},
+            "calibration": {"file": "calibration/PRad2_2p2_round1_4.json"},
             "gain_factor": {"data_dir": "", "ref_run":  25326, "ref_PMT": 12}
         },
         {
             "// calibration period 4-2-1 of 2.2GeV": "",
             "from_run":    25332,
-            "calibration": {"file": "calibration/PRad2_2p2_round1_4-2-1.json"}
+            "calibration": {"file": "calibration/PRad2_2p2_round1_4.json"}
         },
         {
             "// calibration period 5-1-1 of 2.2GeV": "",
             "from_run":    25349,
-            "calibration": {"file": "calibration/PRad2_2p2_round1_5-1-1.json"},
+            "calibration": {"file": "calibration/PRad2_2p2_round1_5.json"},
             "gain_factor": {"data_dir": "", "ref_run":  25353, "ref_PMT": 12}
         },
         {
             "// calibration period 5-1-2 of 2.2GeV": "",
             "from_run":    25357,
-            "calibration": {"file": "calibration/PRad2_2p2_round1_5-1-2.json"}
+            "calibration": {"file": "calibration/PRad2_2p2_round1_5.json"}
         },
 
 
