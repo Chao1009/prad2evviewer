@@ -246,7 +246,7 @@ void fillClusters(EventVars_Recon &ev, const std::vector<fdec::ClusterHit> &hits
         ev.cl_npos[i]    = h.npos;
         ev.cl_time[i]    = h.time;
         HCHit lab = ClusterToLab(hycal_xform, h, shower_depth_corr);
-        GetProjection(lab, hycal_z);
+        if(shower_depth_corr) GetProjection(lab, hycal_z);
         ev.cl_x[i]           = lab.x;
         ev.cl_y[i]           = lab.y;
         ev.cl_z[i]           = lab.z;
