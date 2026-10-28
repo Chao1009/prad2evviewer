@@ -49,7 +49,7 @@ struct ClusterConfig {
 
     // energy correction
     bool  non_linear_corr    = true;      // apply per-module energy non-linearity correction
-    bool  energy_bias_correction = false; // apply position-dependent 5x5 energy bias
+    bool  energy_bias_correction = false; // apply position-dependent energy bias
     std::shared_ptr<const HyCalEnergyBias> energy_bias;
     std::shared_ptr<const IClusterProfile> profile;
     bool  leakage_correction = false;

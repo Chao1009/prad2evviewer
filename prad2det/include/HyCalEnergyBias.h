@@ -2,10 +2,11 @@
 //=============================================================================
 // HyCalEnergyBias.h — position-dependent HyCal cluster-energy correction.
 //
-// Each input JSON contains one 5x5 bias map per PbWO4 module:
+// Each input JSON contains one 5x5 or 10x10 bias map per PbWO4 module:
 //   "W1": { "y0": { "x0": bias, ... }, ... }
 // where bias = E_rec / E_expected - 1.  The correction factor is therefore
-// 1 / (1 + bias).  Missing or invalid entries use zero bias.
+// 1 / (1 + bias).  The optional top-level "grid_size" selects the map
+// resolution; files without it retain the legacy 5x5 format.
 //=============================================================================
 
 #include "HyCalSystem.h"
@@ -45,11 +46,14 @@ inline HyCalEnergyBiasSet SelectHyCalEnergyBiasSet(float beam_energy)
 
 struct HyCalEnergyBias {
     static constexpr int GRID_SIZE = 5;
-    using Grid = std::array<float, GRID_SIZE * GRID_SIZE>;
+    static constexpr int MAX_GRID_SIZE = 10;
+    using Grid = std::array<float, MAX_GRID_SIZE * MAX_GRID_SIZE>;
 
     float beam_energy = 0.f;
     std::vector<Grid> ee;
     std::vector<Grid> ep;
+    int ee_grid_size = GRID_SIZE;
+    int ep_grid_size = GRID_SIZE;
     int ee_cells_loaded = 0;
     int ep_cells_loaded = 0;
 
@@ -66,35 +70,46 @@ struct HyCalEnergyBias {
     }
 
     // Grid cell of a hit at (x, y) on `module`; the bias-table producer
-    // (hycal_energy_bowl_shape) bins with the same rule.  False for a
-    // non-finite position or a module without size.
+    // (hycal_energy_bowl_shape) bins with the same rule. False for an invalid
+    // position, unsupported grid size, or module without size.
     static bool cell(const Module &module, float x, float y,
-                     int &column, int &row)
+                     int grid_size, int &column, int &row)
     {
         if (!std::isfinite(x) || !std::isfinite(y) ||
-            module.size_x <= 0. || module.size_y <= 0.)
+            module.size_x <= 0. || module.size_y <= 0. ||
+            (grid_size != GRID_SIZE && grid_size != MAX_GRID_SIZE))
             return false;
         const auto [local_x, local_y] = module.cell_offset(x, y);
         column = std::clamp(
-            static_cast<int>(std::floor((local_x + 0.5f) * GRID_SIZE)),
-            0, GRID_SIZE - 1);
+            static_cast<int>(std::floor((local_x + 0.5f) * grid_size)),
+            0, grid_size - 1);
         row = std::clamp(
-            static_cast<int>(std::floor((local_y + 0.5f) * GRID_SIZE)),
-            0, GRID_SIZE - 1);
+            static_cast<int>(std::floor((local_y + 0.5f) * grid_size)),
+            0, grid_size - 1);
         return true;
+    }
+
+    static bool cell(const Module &module, float x, float y,
+                     int &column, int &row)
+    {
+        return cell(module, x, y, GRID_SIZE, column, row);
     }
 
     float bias(const Module &module, float x, float y,
                float cluster_energy) const
     {
-        int column, row;
         if (!module.is_pwo4() || module.index < 0 ||
-            !std::isfinite(cluster_energy) || !cell(module, x, y, column, row))
+            !std::isfinite(cluster_energy))
             return 0.f;
 
-        const auto &table = is_ep(cluster_energy) ? ep : ee;
+        const bool use_ep = is_ep(cluster_energy);
+        const auto &table = use_ep ? ep : ee;
+        const int grid_size = use_ep ? ep_grid_size : ee_grid_size;
+        int column, row;
+        if (!cell(module, x, y, grid_size, column, row))
+            return 0.f;
         if (module.index >= static_cast<int>(table.size())) return 0.f;
-        return table[module.index][row * GRID_SIZE + column];
+        return table[module.index][row * grid_size + column];
     }
 
     float correction_factor(const Module &module, float x, float y,
@@ -110,7 +125,8 @@ namespace detail {
 
 inline int LoadHyCalEnergyBiasFile(const std::string &path,
                                    const HyCalSystem &hycal,
-                                   std::vector<HyCalEnergyBias::Grid> &table)
+                                   std::vector<HyCalEnergyBias::Grid> &table,
+                                   int &grid_size)
 {
     table.assign(hycal.module_count(), {});
     if (path.empty()) return 0;
@@ -127,6 +143,25 @@ inline int LoadHyCalEnergyBiasFile(const std::string &path,
         return 0;
     }
 
+    grid_size = HyCalEnergyBias::GRID_SIZE;
+    const auto grid_size_it = j.find("grid_size");
+    if (grid_size_it != j.end()) {
+        if (!grid_size_it->is_number_integer()) {
+            std::cerr << "Warning: HyCal energy-bias file " << path
+                      << " has an invalid grid_size, using zero bias.\n";
+            return 0;
+        }
+        grid_size = grid_size_it->get<int>();
+        if (grid_size != HyCalEnergyBias::GRID_SIZE &&
+            grid_size != HyCalEnergyBias::MAX_GRID_SIZE) {
+            std::cerr << "Warning: unsupported grid_size " << grid_size
+                      << " in HyCal energy-bias file " << path
+                      << ", using zero bias.\n";
+            grid_size = HyCalEnergyBias::GRID_SIZE;
+            return 0;
+        }
+    }
+
     int loaded = 0;
     for (int module_index = 0; module_index < hycal.module_count(); ++module_index) {
         const auto &module = hycal.module(module_index);
@@ -134,15 +169,15 @@ inline int LoadHyCalEnergyBiasFile(const std::string &path,
         auto module_it = j.find(module.name);
         if (module_it == j.end() || !module_it->is_object()) continue;
 
-        for (int row = 0; row < HyCalEnergyBias::GRID_SIZE; ++row) {
+        for (int row = 0; row < grid_size; ++row) {
             auto row_it = module_it->find("y" + std::to_string(row));
             if (row_it == module_it->end() || !row_it->is_object()) continue;
-            for (int column = 0; column < HyCalEnergyBias::GRID_SIZE; ++column) {
+            for (int column = 0; column < grid_size; ++column) {
                 auto cell_it = row_it->find("x" + std::to_string(column));
                 if (cell_it == row_it->end() || !cell_it->is_number()) continue;
                 const float value = cell_it->get<float>();
                 if (!std::isfinite(value)) continue;
-                table[module_index][row * HyCalEnergyBias::GRID_SIZE + column] = value;
+                table[module_index][row * grid_size + column] = value;
                 ++loaded;
             }
         }
@@ -159,9 +194,9 @@ inline std::shared_ptr<const HyCalEnergyBias> LoadHyCalEnergyBias(
     auto result = std::make_shared<HyCalEnergyBias>();
     result->beam_energy = beam_energy;
     result->ee_cells_loaded = detail::LoadHyCalEnergyBiasFile(
-        ee_path, hycal, result->ee);
+        ee_path, hycal, result->ee, result->ee_grid_size);
     result->ep_cells_loaded = detail::LoadHyCalEnergyBiasFile(
-        ep_path, hycal, result->ep);
+        ep_path, hycal, result->ep, result->ep_grid_size);
     return result;
 }
 

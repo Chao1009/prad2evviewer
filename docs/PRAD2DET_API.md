@@ -122,7 +122,7 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 | `least_split`       | 0.01 | minimum split fraction |
 | `log_weight_thres`  | 3.6 | W = max(0, thres + ln(E_i / E_tot)) |
 | `non_linear_corr`   | true | apply per-module energy non-linearity correction |
-| `energy_bias_correction` | false | apply the beam- and position-dependent PbWO4 5x5 correction |
+| `energy_bias_correction` | false | apply the beam- and position-dependent PbWO4 energy correction (5x5 or 10x10) |
 
 ### Per-event types
 
@@ -455,7 +455,7 @@ server, Python bindings) share the same wiring.
 | `hycal` | initialized + calibrated `fdec::HyCalSystem` |
 | `gem`   | initialized GEM with pedestals / CM / per-detector configs installed |
 | `hycal_cluster_cfg` | `fdec::ClusterConfig` (caller wires into `HyCalCluster::SetConfig`) |
-| `hycal_energy_bias` | shared ee/ep 5x5 bias tables loaded when the correction is enabled |
+| `hycal_energy_bias` | shared ee/ep 5x5 or 10x10 bias tables loaded when the correction is enabled |
 | `hycal_energy_bias_nominal` | selected nominal parameter energy in MeV (700, 2200, or 3500) |
 | `hycal_transform`, `gem_transforms[4]` | poses already `set()`, matrices cached |
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |

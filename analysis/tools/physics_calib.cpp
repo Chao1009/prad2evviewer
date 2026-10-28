@@ -15,7 +15,7 @@
 // For each non-dead module with at least 40 entries, the reconstructed elastic
 // e-p peak is fitted near the expected energy calculated from the run beam
 // energy and detector geometry. The expected/fitted peak ratio is damped to
-// 85% of the full correction, limited to [0.5, 2.0], and applied to the current
+// 95% of the full correction, limited to [0.5, 2.0], and applied to the current
 // calibration constant. Later iterations use the preceding result. Dead
 // modules are not calibrated, and dead/dead-neighbor flags are recorded in the
 // fit-result JSON.
@@ -393,7 +393,7 @@ int main(int argc, char *argv[])
         }
         if (peak <= 0) peak = expected_peak; // fallback to expected if fit failed
         float ratio         = expected_peak / peak; 
-        ratio = (ratio - 1.f) * 0.85f + 1.f; // apply a conservative factor to avoid over-correction
+        ratio = (ratio - 1.f) * 0.95f + 1.f; // apply a conservative factor to avoid over-correction
         if(ratio < 0.5) ratio = 0.5;
         if(ratio > 2.0) ratio = 2.0;
 

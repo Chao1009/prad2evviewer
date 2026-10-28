@@ -16,26 +16,30 @@ using namespace testutil;
 
 namespace {
 
-json make_grid(float center, float upper_left)
+json make_grid(int grid_size, float center, float upper_left)
 {
     json module = json::object();
-    for (int row = 0; row < fdec::HyCalEnergyBias::GRID_SIZE; ++row) {
+    for (int row = 0; row < grid_size; ++row) {
         json values = json::object();
-        for (int column = 0; column < fdec::HyCalEnergyBias::GRID_SIZE; ++column)
+        for (int column = 0; column < grid_size; ++column)
             values["x" + std::to_string(column)] = 0.f;
         module["y" + std::to_string(row)] = std::move(values);
     }
-    module["y2"]["x2"] = center;
-    module["y4"]["x0"] = upper_left;
+    module["y" + std::to_string(grid_size / 2)]
+          ["x" + std::to_string(grid_size / 2)] = center;
+    module["y" + std::to_string(grid_size - 1)]["x0"] = upper_left;
     return module;
 }
 
-void write_fixture(const fs::path &path, float center, float upper_left)
+void write_fixture(const fs::path &path, float center, float upper_left,
+                   int grid_size = fdec::HyCalEnergyBias::GRID_SIZE)
 {
     json root = {
         {"comment", "test fixture"},
-        {"W1", make_grid(center, upper_left)}
+        {"W1", make_grid(grid_size, center, upper_left)}
     };
+    if (grid_size != fdec::HyCalEnergyBias::GRID_SIZE)
+        root["grid_size"] = grid_size;
     std::ofstream output(path);
     output << root.dump(2) << '\n';
 }
@@ -87,6 +91,25 @@ int main()
     check(close_to(bias->correction_factor(*w1, static_cast<float>(w1->x),
                                            static_cast<float>(w1->y), 2100.f), 1.25f),
           "ep bias converts to reciprocal correction factor");
+
+    const fs::path ee10_path = fixture_dir / "ee10.json";
+    const fs::path ep10_path = fixture_dir / "ep10.json";
+    write_fixture(ee10_path, 0.11f, 0.37f, 10);
+    write_fixture(ep10_path, -0.21f, -0.31f, 10);
+    auto bias10 = fdec::LoadHyCalEnergyBias(
+        ee10_path.string(), ep10_path.string(), hycal, 2200.f);
+    check(bias10->ee_grid_size == 10 && bias10->ep_grid_size == 10,
+          "load 10x10 grid sizes");
+    check(bias10->ee_cells_loaded == 100 && bias10->ep_cells_loaded == 100,
+          "load 100 cells from each 10x10 table");
+    check(close_to(bias10->bias(*w1, static_cast<float>(w1->x),
+                                static_cast<float>(w1->y), threshold), 0.11f),
+          "10x10 center cell lookup");
+    check(close_to(bias10->bias(*w1,
+                                static_cast<float>(w1->x - 0.49 * w1->size_x),
+                                static_cast<float>(w1->y + 0.49 * w1->size_y),
+                                threshold), 0.37f),
+          "10x10 edge cell lookup");
 
     check(close_to(fdec::SelectHyCalEnergyBiasSet(728.9f).nominal_mev, 700.f),
           "select nearest 0.7 GeV parameter set");

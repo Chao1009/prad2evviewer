@@ -527,7 +527,7 @@ All knobs live in `fdec::ClusterConfig`. Defaults match
 | `log_weight_thres` | 3.6 | — | $T$ in $w = \max(0,\; T + \ln(E_h / E_{\mathrm{tot}}))$. |
 | `seed_time_window` | $-1$ | ns | $W$ for the multi-pulse coincidence gate; $\le 0$ disables. |
 | `non_linear_corr`   | true | — | Apply per-module energy non-linearity correction. |
-| `energy_bias_correction` | false | — | Apply the position-dependent 5x5 PbWO4 energy-bias correction. |
+| `energy_bias_correction` | false | — | Apply the position-dependent 5x5 or 10x10 PbWO4 energy-bias correction. |
 
 `PipelineBuilder` reads the JSON `recon.hycal` block and applies
 overrides for any of the above. To enable the timing-coincidence
@@ -571,7 +571,7 @@ $E = E_{\mathrm{cluster}} C_{\mathrm{bias}} C_{\mathrm{linear}}$.
 | `npos` | `int` | Modules used in the log-weighted position ($\le 9$) |
 | `flag` | `uint32_t` | Bitmask of layout + algorithm flags |
 | `linear_corr` | `float` | Per-module non-linearity correction factor. |
-| `bias_corr` | `float` | Position-dependent 5x5 energy-bias correction factor. |
+| `bias_corr` | `float` | Position-dependent 5x5 or 10x10 energy-bias correction factor. |
 
 Useful flag bits (defined in `HyCalSystem.h`):
 
