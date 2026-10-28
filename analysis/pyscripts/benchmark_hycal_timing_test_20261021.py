@@ -57,11 +57,12 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
     with its cluster members for the offline solver.  All three need
     --calibrate; they are off by default and the default outputs are
     unchanged.
-    --pos-corr FILE (poscorr_v1 JSON) divides every cluster energy by
-    R(u,v), the position-dependent correction in crystal units of the
-    reconstructed centroid relative to the seed module, after --gain-file and
-    before the refinement.  --write-cluster-tsv appends cluster_x_mm,
-    cluster_y_mm (centroid) to every row.
+    --pos-corr FILE (poscorr_v1 JSON, or a poscorr_hybrid_v1 per-module map
+    detected by schema) divides every cluster energy by R(u,v), the
+    position-dependent correction in crystal units of the reconstructed
+    centroid relative to the seed module, after --gain-file and before the
+    refinement.  --write-cluster-tsv appends cluster_x_mm, cluster_y_mm
+    (centroid) to every row.
 
   Seed-time-constrained neighbour amplitudes (plan_20261023 section 5).
     --mf-nb-amp seedtime (mf only, needs --time-calib): per path, in events
@@ -324,15 +325,8 @@ def _select_pool(events, *, inner_r, min_seed_E, exclude_rowcol):
     return [e for e in events if keep(e)]
 
 
-def poscorr_load(path):
-    """Read a poscorr_v1 JSON (position_corr.py fit output) for --pos-corr.
-
-    Returns the parsed dict plus numpy arrays 'u_edges', 'v_edges',
-    'R_arr' (nb_u x nb_v, R[iu][iv]), 'poly_c' (c0..c7, poly8 only) and the
-    file 'sha1'."""
-    with open(path, "rb") as fb:
-        raw = fb.read()
-    pc = json.loads(raw.decode("utf-8"))
+def _poscorr_v1_parse(pc, path):
+    """Validate a parsed poscorr_v1 dict in place and add the numpy arrays."""
     if pc.get("schema") != "poscorr_v1":
         raise ValueError(f"{path}: schema {pc.get('schema')!r} != 'poscorr_v1'")
     if pc.get("form") not in ("bilinear", "poly8"):
@@ -346,16 +340,75 @@ def poscorr_load(path):
     if pc['form'] == 'poly8':
         pc['poly_c'] = np.array([pc['poly'][f"c{i}"] for i in range(8)],
                                 dtype=np.float64)
+    return pc
+
+
+def poscorr_load(path):
+    """Read a poscorr_v1 or poscorr_hybrid_v1 JSON for --pos-corr.
+
+    poscorr_v1 (position_corr.py fit output): the parsed dict plus numpy
+    arrays 'u_edges', 'v_edges', 'R_arr' (nb_u x nb_v, R[iu][iv]), 'poly_c'
+    (c0..c7, poly8 only) and the file 'sha1'.
+    poscorr_hybrid_v1: dict with form 'hybrid', 'fb' (the embedded fallback,
+    parsed as poscorr_v1), 'norm' (the fallback's), 'clamp', the module table
+    'mod_names' (list) / 'mod_c' (n_mod x 8) / 'mod_index' (name -> row) and
+    the file 'sha1'."""
+    with open(path, "rb") as fb:
+        raw = fb.read()
+    pc = json.loads(raw.decode("utf-8"))
+    if pc.get("schema") == "poscorr_hybrid_v1":
+        pc['fb'] = _poscorr_v1_parse(pc['fallback'], path + " [fallback]")
+        pc['form'] = 'hybrid'
+        pc['norm'] = pc['fb'].get('norm', float('nan'))
+        pc['clamp'] = float(pc['clamp'])
+        names = list(pc['modules'])
+        pc['mod_names'] = names
+        pc['mod_index'] = {n: i for i, n in enumerate(names)}
+        pc['mod_c'] = np.array([[pc['modules'][n]['c'][i] for i in range(8)]
+                                for n in names],
+                               dtype=np.float64).reshape(len(names), 8)
+    else:
+        _poscorr_v1_parse(pc, path)
     pc['sha1'] = hashlib.sha1(raw).hexdigest()
     return pc
 
 
-def poscorr_eval(pc, u, v):
+def poscorr_own_mask(pc, seed):
+    """Bool array: seed module name has its own fit in a hybrid map."""
+    idx = pc['mod_index']
+    return np.fromiter((s_ in idx for s_ in seed), dtype=bool, count=len(seed))
+
+
+def poscorr_eval(pc, u, v, seed=None):
     """Vectorised R(u, v) of a poscorr_load dict; returns (R, clamped).
 
     clamped: u or v outside [edges[0], edges[-1]].  bilinear: interpolation of
     R on the bin-centre grid, u/v clamped to the centre range.  poly8: u/v
-    clamped to the edge range.  NaN inputs give NaN R and clamped False."""
+    clamped to the edge range.  NaN inputs give NaN R and clamped False.
+    hybrid: `seed` (module names, one per u) is required; seeds listed in the
+    map use their own poly8 (u/v clamped to +-clamp, clamped flag likewise),
+    all others the embedded fallback.  `seed` is ignored for poscorr_v1."""
+    if pc['form'] == 'hybrid':
+        if seed is None:
+            raise ValueError("hybrid pos-corr needs seed module names")
+        R, clamped = poscorr_eval(pc['fb'], u, v)
+        u = np.asarray(u, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        seed = np.asarray(seed)
+        own = poscorr_own_mask(pc, seed)
+        if own.any():
+            R, clamped = R.copy(), clamped.copy()
+            k = np.array([pc['mod_index'][s_] for s_ in seed[own]], dtype=int)
+            c = pc['mod_c'][k].T
+            cl = pc['clamp']
+            uo, vo = u[own], v[own]
+            uc = np.clip(uo, -cl, cl)
+            vc = np.clip(vo, -cl, cl)
+            R[own] = c[0] * (1 + c[1] * uc ** 2 + c[2] * vc ** 2
+                             + c[3] * uc ** 2 * vc ** 2 + c[4] * uc ** 4
+                             + c[5] * vc ** 4 + c[6] * uc + c[7] * vc)
+            clamped[own] = (uo < -cl) | (uo > cl) | (vo < -cl) | (vo > cl)
+        return R, clamped
     u = np.asarray(u, dtype=np.float64)
     v = np.asarray(v, dtype=np.float64)
     ue, ve = pc['u_edges'], pc['v_edges']
@@ -1791,6 +1844,12 @@ def main(argv=None):
                     help="Elastic-window: exclude a seed module if its "
                          "elastic-Moller gap is < X sigma_M (default "
                          f"{MOLLER_GAP_NSIGMA:g}; 0 disables the exclusion).")
+    ap.add_argument("--cluster-times", action="store_true",
+                    help="With --write-cluster-tsv: append columns evnum, "
+                         "seed_time_ns, n_members, members "
+                         "(name:E_MeV:t_ns;... over the cluster members, "
+                         "module-index names, hit times as fed to the "
+                         "clusterer) to <out_path>_clusters.tsv.")
     ap.add_argument("--write-cluster-tsv", action="store_true",
                     help="Write <out_path>_clusters.tsv with one row per "
                          "accepted single-cluster event (columns: event_num, "
@@ -1812,14 +1871,16 @@ def main(argv=None):
                          "Requires --calibrate.")
     ap.add_argument("--pos-corr", default=None, metavar="FILE",
                     help="Position-dependent cluster-energy correction "
-                         "(poscorr_v1 JSON from position_corr.py fit).  "
+                         "(poscorr_v1 JSON from position_corr.py fit, or a "
+                         "poscorr_hybrid_v1 per-module map).  "
                          "Replaces every cluster energy of the calibration "
                          "event lists by E/R(u,v), u,v = reconstructed "
                          "cluster centroid minus seed-module centre in "
                          "crystal units, after --gain-file and before the "
                          "--cal-method refinement.  Header line "
                          "'# pos_corr=...' (n_applied, n_clamped summed over "
-                         "both paths).  Requires --calibrate.")
+                         "both paths; hybrid adds n_own, own_modules).  "
+                         "Requires --calibrate.")
     ap.add_argument("--cluster-dump", default=None, metavar="{PATH,auto}",
                     help="Write the legacy-path calibration pool (single "
                          "cluster, seed r < --inner-radius, seed E >= "
@@ -1928,6 +1989,11 @@ def main(argv=None):
 
     if args.veto_dphi is not None and args.veto_second_cluster is None:
         ap.error("--veto-dphi requires --veto-second-cluster")
+
+    if args.cluster_times and not args.write_cluster_tsv:
+        sys.stderr.write(
+            "[ERROR] --cluster-times requires --write-cluster-tsv.\n")
+        sys.exit(2)
 
     if args.write_cluster_tsv and not args.calibrate:
         sys.stderr.write(
@@ -2237,7 +2303,8 @@ def main(argv=None):
     # Per-event: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff) —
     # populated only when --calibrate is set, so the memory cost is opt-in.
     # With --cal-method percrystal / --gain-file / --cluster-dump (rec_ext)
-    # the tuple is extended by (members_idx, members_E, x_cl, y_cl, evnum).
+    # the tuple is extended by (members_idx, members_E, x_cl, y_cl, evnum,
+    # members_t, seed_t); the last two are None unless --cluster-times.
     energies_legacy, energies_new = [], []
     events_legacy,   events_new   = [], []
     n_legacy = n_new = n_phys = n_kept = n_read = n_files_open = 0
@@ -2271,7 +2338,12 @@ def main(argv=None):
         if dev > 1e-6 * abs(e) + 1e-6:
             st[1] += 1
         st[2] = max(st[2], dev / abs(e) if e else 0.0)
-        return (mi, me, r.hit.x, r.hit.y, evnum)
+        if args.cluster_times:
+            mt = np.fromiter((h.time for h in hits), np.float64, len(hits))
+            t_seed = float(r.cluster.center.time)
+        else:
+            mt = t_seed = None
+        return (mi, me, r.hit.x, r.hit.y, evnum, mt, t_seed)
 
     # --veto-second-cluster: [single-cluster events, vetoed] per path
     veto_on = args.veto_second_cluster is not None
@@ -2693,7 +2765,8 @@ def main(argv=None):
     if args.pos_corr:
         pcd = poscorr_load(args.pos_corr)
         size_by_sid = {}
-        n_app = n_clp = 0
+        name_by_sid = {}
+        n_app = n_clp = n_own = 0
         for evs_ in (events_legacy, events_new):
             if not evs_:
                 continue
@@ -2701,13 +2774,20 @@ def main(argv=None):
                 if e_[0] not in size_by_sid:
                     sm_ = p.hycal.module_by_id(e_[0])
                     size_by_sid[e_[0]] = (sm_.size_x, sm_.size_y)
+                    name_by_sid[e_[0]] = sm_.name
             sz = np.array([size_by_sid[e_[0]] for e_ in evs_], dtype=np.float64)
             u_ = (np.array([e_[10] - e_[1] for e_ in evs_], dtype=np.float64)
                   / sz[:, 0])
             v_ = (np.array([e_[11] - e_[2] for e_ in evs_], dtype=np.float64)
                   / sz[:, 1])
-            R_, clp_ = poscorr_eval(pcd, u_, v_)
+            if pcd['form'] == 'hybrid':
+                seed_ = [name_by_sid[e_[0]] for e_ in evs_]
+                R_, clp_ = poscorr_eval(pcd, u_, v_, seed_)
+            else:
+                R_, clp_ = poscorr_eval(pcd, u_, v_)
             ok_ = np.isfinite(u_) & np.isfinite(v_) & np.isfinite(R_)
+            if pcd['form'] == 'hybrid':
+                n_own += int((poscorr_own_mask(pcd, seed_) & ok_).sum())
             n_app += int(ok_.sum())
             n_clp += int((clp_ & ok_).sum())
             for k_, t_ in enumerate(evs_):
@@ -2715,9 +2795,14 @@ def main(argv=None):
                     evs_[k_] = t_[:6] + (t_[6] / float(R_[k_]),) + t_[7:]
         pc_info = (args.pos_corr, pcd['sha1'], pcd['form'],
                    float(pcd.get('norm', float('nan'))), n_app, n_clp)
+        if pcd['form'] == 'hybrid':
+            pc_info += (n_own, len(pcd['mod_names']))
         print(f"  pos-corr        : {args.pos_corr}  (form {pcd['form']}, "
               f"sha1 {pcd['sha1'][:12]})  applied to {n_app} events "
-              f"(both paths), {n_clp} clamped", flush=True)
+              f"(both paths), {n_clp} clamped"
+              + (f"; {len(pcd['mod_names'])} own modules, {n_own} events "
+                 f"with own fit" if pcd['form'] == 'hybrid' else ""),
+              flush=True)
 
     # ---- Optional: per-seed-module calibration on the inner ring ----------
     cal = None
@@ -2987,22 +3072,36 @@ def main(argv=None):
     if args.write_cluster_tsv and cal is not None:
         # gains_l / gains_n come from the chosen --cal-method above.
         # events_X lists: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff,
-        #                  members_idx, members_E, x_cl, y_cl, evnum)
+        #                  members_idx, members_E, x_cl, y_cl, evnum,
+        #                  members_t, seed_t)
         clust_path = (args.out_path[:-4] if args.out_path.endswith('.tsv')
                       else args.out_path) + "_clusters.tsv"
         n_rows_l = n_rows_n = 0
+        if args.cluster_times:
+            idx_name = [p.hycal.module(i).name
+                        for i in range(p.hycal.module_count())]
+
+        def _tcols(ex_):
+            if not args.cluster_times:
+                return ""
+            return (f"\t{ex_[5]}\t{ex_[7]:.3f}\t{len(ex_[1])}\t"
+                    + ";".join(f"{idx_name[i]}:{e:.1f}:{t:.3f}"
+                               for i, e, t in zip(ex_[1], ex_[2], ex_[6])))
+
         with open(clust_path, "w") as cf:
             cf.write("event_num\tconfig_name\tseed_module_id\t"
                      "seed_x_mm\tseed_y_mm\tseed_row\tseed_col\t"
                      "seed_energy_MeV\tcluster_E_raw_MeV\tcluster_E_cal_MeV\t"
-                     "cluster_x_mm\tcluster_y_mm\n")
+                     "cluster_x_mm\tcluster_y_mm"
+                     + ("\tevnum\tseed_time_ns\tn_members\tmembers"
+                        if args.cluster_times else "") + "\n")
             for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_legacy):
                 g = gains_l.get(sid, float('nan'))
                 ce_cal = ce * g if not math.isnan(g) else float('nan')
                 cf.write(f"{ev_idx}\tlegacy\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
                          f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
-                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}\n")
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}\n")
                 n_rows_l += 1
             for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_new):
                 g = gains_n.get(sid, float('nan'))
@@ -3010,7 +3109,7 @@ def main(argv=None):
                 cf.write(f"{ev_idx}\tgated\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
                          f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
-                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}\n")
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}\n")
                 n_rows_n += 1
         print(f"\n  wrote: {clust_path}  "
               f"(N rows: {n_rows_l} legacy + {n_rows_n} gated)")
@@ -3138,7 +3237,9 @@ def main(argv=None):
         if pc_info is not None:
             f.write(f"# pos_corr={pc_info[0]} sha1={pc_info[1]} "
                     f"form={pc_info[2]} norm={pc_info[3]:.6f} "
-                    f"n_applied={pc_info[4]} n_clamped={pc_info[5]}\n")
+                    f"n_applied={pc_info[4]} n_clamped={pc_info[5]}"
+                    + (f" n_own={pc_info[6]} own_modules={pc_info[7]}"
+                       if len(pc_info) > 6 else "") + "\n")
         if dump_info is not None:
             f.write(f"# cluster_dump={dump_info[0]} n_rows={dump_info[1]}\n")
         f.write(f"# cluster_counts legacy n0={ncl_l[0]} n1={ncl_l[1]} "

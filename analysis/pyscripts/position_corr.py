@@ -36,6 +36,14 @@ Subcommands:
        Pools the per-type maps (Ta excluded) by inverse variance -> poscorr_global_<set>.json
        and consistency_global.tsv (verdict 'global' only if >= 95 % of populated bins agree
        within 2 sigma in every H2 and C run type, else 'per_run_type').
+  fit  --per-module --scan-dir DIR --fallback FALLBACK_JSON --out OUT_JSON [--splits all|even|odd]
+       [--slug SLUG] [--min-clusters 3000] [--clamp 0.6]
+       Hybrid correction (poscorr_hybrid_v1; Study B form d): per seed module with >= --min-clusters
+       training clusters (r in [0.85, 1.12], the `map` pool of the runs whose run-type slug is SLUG,
+       default the fallback's slug) a poly8 fitted to 6x6-bin +-2 sigma truncated means (bins with
+       >= 30 events, >= 10 bins), normalised to event mean 1, accepted if R in [0.9, 1.1] on a
+       13x13 grid over [-clamp, clamp]^2; every other module uses the fallback poscorr_v1 JSON
+       (embedded verbatim).  Also writes <stem>_modules.tsv (all seeding modules).
 
 Usage:
   python3 position_corr.py map --scan-dir output/scan_20261025_fa --splits even --out output/poscorr_20261025/
@@ -43,6 +51,8 @@ Usage:
       --out output/poscorr_20261025/2p24GeV_H2/poscorr_2p24GeV_H2_even.json
   python3 position_corr.py fit --global --maps "output/poscorr_20261025/map_*_all.tsv" \\
       --out output/poscorr_20261025/global/
+  python3 position_corr.py fit --per-module --scan-dir output/scan_20261025_ref --splits even \\
+      --fallback output/poscorr_20261025/2p24GeV_H2/poscorr_2p24GeV_H2_even.json --out hybrid_even.json
 """
 
 from __future__ import annotations
@@ -51,6 +61,7 @@ import argparse
 import concurrent.futures
 import contextlib
 import datetime
+import hashlib
 import glob
 import io
 import json
@@ -102,7 +113,7 @@ def split_filter(scan_dir, run, which):
 
 def load_pool(scan_dir, run, args, geo):
     """Pool events of a run: R.load_run's cuts, keeping the centroid.  Returns a dict of
-    arrays (u, v, r, row, col) plus hdr and the (run, split) list, or None."""
+    arrays (u, v, r, row, col, seed = seed module name) plus hdr and the (run, split) list, or None."""
     wanted = split_filter(scan_dir, run, args.splits)
     if wanted is not None and not wanted:
         return None
@@ -112,7 +123,7 @@ def load_pool(scan_dir, run, args, geo):
     cfg = "legacy" if args.path == "legacy" else "gated"
     wpath = "legacy" if args.path == "legacy" else "new"
     r2, (r0, r1, c0, c1) = args.inner_radius ** 2, args.exclude_rowcol
-    out = {k: [] for k in ("u", "v", "r", "row", "col")}
+    out = {k: [] for k in ("u", "v", "r", "row", "col", "seed")}
     for d in splits:
         h = R.parse_header(d / "result.tsv")
         df = pd.read_csv(d / "result_clusters.tsv", sep="\t")
@@ -134,7 +145,7 @@ def load_pool(scan_dir, run, args, geo):
         r = df.cluster_E_cal_MeV.to_numpy() / ep
         ok = np.isfinite(u) & np.isfinite(v) & np.isfinite(r) & (ep > 0)
         for k, a in (("u", u), ("v", v), ("r", r), ("row", df.seed_row.to_numpy() + 1),
-                     ("col", df.seed_col.to_numpy() + 1)):
+                     ("col", df.seed_col.to_numpy() + 1), ("seed", df.seed_module_id.to_numpy())):
             out[k].append(a[ok])
     out = {k: np.concatenate(a) for k, a in out.items()}
     out["hdr"] = R.parse_header(splits[0] / "result.tsv")
@@ -146,7 +157,7 @@ def pool_type(pools):
     pools = [p for p in pools if p]
     if not pools:
         return None
-    d = {k: np.concatenate([p[k] for p in pools]) for k in ("u", "v", "r", "row", "col")}
+    d = {k: np.concatenate([p[k] for p in pools]) for k in ("u", "v", "r", "row", "col", "seed")}
     d["hdr"] = pools[0]["hdr"]
     d["splits"] = [s for p in pools for s in p["splits"]]
     return d
@@ -762,7 +773,228 @@ def cmd_fit_global(a):
     return 0
 
 
+# ---- hybrid per-module poly8 (Study B form d) --------------------------------
+
+HYB_SCHEMA = "poscorr_hybrid_v1"
+HYB_RMIN, HYB_RMAX = 0.85, 1.12     # training r window (before the per-module cluster count)
+HYB_GRID = 6                        # 6x6 bins over [-clamp, clamp]^2
+HYB_MIN_BIN = 30                    # events per populated bin
+HYB_MIN_BINS = 10                   # populated bins needed for the poly8 (8 parameters)
+HYB_RANGE = (0.9, 1.1)              # accepted R range of a module fit over the clamp square
+HYB_TRUNC_K = 2.0
+_PHI = math.exp(-HYB_TRUNC_K ** 2 / 2) / math.sqrt(2 * math.pi)
+_CTRUNC = 1 - 2 * HYB_TRUNC_K * _PHI / math.erf(HYB_TRUNC_K / math.sqrt(2))   # var of the +-2 sigma truncated Gaussian / sigma^2
+
+
+def poly_basis(u, v):
+    return np.stack([np.ones_like(u), u ** 2, v ** 2, u ** 2 * v ** 2, u ** 4, v ** 4, u, v], axis=-1)
+
+
+def poly_R(c, u, v):
+    """c0 (1 + c1 u^2 + c2 v^2 + c3 u^2 v^2 + c4 u^4 + c5 v^4 + c6 u + c7 v); c (..., 8)."""
+    c = np.asarray(c, float)
+    return c[..., 0] * (1 + c[..., 1] * u ** 2 + c[..., 2] * v ** 2 + c[..., 3] * u ** 2 * v ** 2
+                        + c[..., 4] * u ** 4 + c[..., 5] * v ** 4 + c[..., 6] * u + c[..., 7] * v)
+
+
+def poly_R_clamped(c, u, v, clamp):
+    return poly_R(c, np.clip(u, -clamp, clamp), np.clip(v, -clamp, clamp))
+
+
+def trunc_mean(r, k=HYB_TRUNC_K, max_iter=20):
+    """Iterative +-2 sigma truncated mean: start at the median and 1.4826 MAD, then mean and the
+    truncation-corrected sigma of the events in [mu-2s, mu+2s] until stable.  Returns
+    (mu, sigma, n_in, converged) or None."""
+    r = np.asarray(r, float)
+    if len(r) < 5:
+        return None
+    mu = float(np.median(r))
+    sig = 1.4826 * float(np.median(np.abs(r - mu)))
+    if not sig > 0:
+        return None
+    n_in = 0
+    conv = False
+    for _ in range(max_iter):
+        sel = np.abs(r - mu) <= k * sig
+        n_in = int(sel.sum())
+        if n_in < 5:
+            return None
+        mu2 = float(r[sel].mean())
+        sig2 = float(r[sel].std(ddof=1)) / math.sqrt(_CTRUNC)
+        done = abs(mu2 - mu) < 1e-7 and abs(sig2 - sig) < 1e-4 * sig
+        mu, sig = mu2, sig2
+        if done:
+            conv = True
+            break
+    sel = np.abs(r - mu) <= k * sig
+    return mu, sig, int(sel.sum()), conv
+
+
+def bin_index(u, v, bins, rng):
+    """fit_grid's binning (exact 0 alternates over the two central bins by event parity)."""
+    w = 2 * rng / bins
+    iu = np.floor((u + rng) / w).astype(int)
+    iv = np.floor((v + rng) / w).astype(int)
+    if bins % 2 == 0:
+        idx = np.arange(len(u))
+        iu = np.where(u == 0, bins // 2 - 1 + idx % 2, iu)
+        iv = np.where(v == 0, bins // 2 - 1 + (idx // 2) % 2, iv)
+    inb = (iu >= 0) & (iu < bins) & (iv >= 0) & (iv < bins)
+    return iu, iv, inb
+
+
+def grid_estimates(u, v, r, bins, rng, min_n):
+    """Truncated-mean R and SE per bin (n >= min_n).  Returns centres (uc, vc), R, SE, n arrays
+    for the populated bins, or None."""
+    iu, iv, inb = bin_index(u, v, bins, rng)
+    flat = np.where(inb, iu * bins + iv, -1)
+    cen = -rng + (np.arange(bins) + 0.5) * 2 * rng / bins
+    order = np.argsort(flat, kind="stable")
+    ids, start = np.unique(flat[order], return_index=True)
+    out = []
+    for b, idx in zip(ids, np.split(order, start[1:])):
+        if b < 0 or len(idx) < min_n:
+            continue
+        t = trunc_mean(r[idx])
+        if t is None:
+            continue
+        mu, sig, nin, _ = t
+        i, j = divmod(int(b), bins)
+        out.append((cen[i], cen[j], mu, sig / math.sqrt(nin), len(idx)))
+    if not out:
+        return None
+    a = np.array(out)
+    return a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4]
+
+
+def fit_poly8_bins(uc, vc, Rv, se):
+    X = poly_basis(uc, vc)
+    w = 1.0 / se
+    coef, *_ = np.linalg.lstsq(X * w[:, None], Rv * w, rcond=None)
+    a0 = coef[0]
+    return np.concatenate([[a0], coef[1:] / a0])
+
+
+def normalise(p, u, v, clamp):
+    """Rescale c0 so the event mean of R(u, v) over the given points is 1."""
+    p = np.array(p, float)
+    p[0] /= poly_R_clamped(p, u, v, clamp).mean()
+    return p
+
+
+def range_ok(p, clamp):
+    g = np.linspace(-clamp, clamp, 13)
+    U, V = np.meshgrid(g, g, indexing="ij")
+    Rv = poly_R_clamped(p, U.ravel(), V.ravel(), clamp)
+    return (bool(np.isfinite(Rv).all() and Rv.min() >= HYB_RANGE[0] and Rv.max() <= HYB_RANGE[1]),
+            float(Rv.min()), float(Rv.max()))
+
+
+def fit_events(u, v, r, clamp):
+    """6x6 truncated-mean estimator + poly8 fit + event normalisation.  Returns (p, reason)."""
+    g = grid_estimates(u, v, r, HYB_GRID, clamp, HYB_MIN_BIN)
+    if g is None:
+        return None, "no_bins"
+    uc, vc, Rv, se, n = g
+    if len(Rv) < HYB_MIN_BINS:
+        return None, "few_bins"
+    try:
+        p = fit_poly8_bins(uc, vc, Rv, se)
+    except Exception:
+        return None, "fit_fail"
+    if p is None or not np.isfinite(p).all():
+        return None, "fit_fail"
+    p = normalise(p, u, v, clamp)
+    ok, lo, hi = range_ok(p, clamp)
+    if not ok:
+        return None, f"range({lo:.3f},{hi:.3f})"
+    return p, "ok"
+
+
+def lifts(p, clamp):
+    """Edge lift (mean R at (+-0.5,0),(0,+-0.5)) - R(0,0) and corner lift (+-0.5,+-0.5) - R(0,0), in %."""
+    p = np.asarray(p, float)
+    e = [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)]
+    c = [(0.5, 0.5), (0.5, -0.5), (-0.5, 0.5), (-0.5, -0.5)]
+    f = lambda pts: float(np.mean([poly_R_clamped(p, np.array(a), np.array(b), clamp) for a, b in pts]))
+    r0 = float(poly_R_clamped(p, np.array(0.0), np.array(0.0), clamp))
+    return 100 * (f(e) - r0), 100 * (f(c) - r0)
+
+
+def cmd_fit_hybrid(a):
+    if not (a.scan_dir and a.fallback):
+        sys.exit("fit --per-module needs --scan-dir and --fallback")
+    scan_dir = Path(a.scan_dir)
+    fb_path = Path(a.fallback)
+    fb_bytes = fb_path.read_bytes()
+    fb = json.loads(fb_bytes)
+    slug = a.slug or fb["slug"]
+    runs = [run for run in sorted(int(p.name.split("_")[1]) for p in scan_dir.glob("scan_*") if p.is_dir())
+            if G.runtype_slug(run) == slug]
+    if not runs:
+        sys.exit(f"no run of {scan_dir} has run-type slug {slug}")
+    rt = G._run_type(runs[0])
+    geo = R.load_geometry(runs[0])
+    d = pool_type([load_pool(scan_dir, run, a, geo) for run in runs])
+    if d is None:
+        sys.exit(f"no complete split in set {a.splits} for {slug}")
+    m = np.isfinite(d["u"]) & np.isfinite(d["v"]) & np.isfinite(d["r"]) & (d["r"] >= HYB_RMIN) & (d["r"] <= HYB_RMAX)
+    u, v, r, seed = d["u"][m], d["v"][m], d["r"][m], d["seed"][m]
+    n_ev = len(r)
+    names, inv = np.unique(seed, return_inverse=True)
+    order = np.argsort(inv, kind="stable")
+    cnt = np.bincount(inv, minlength=len(names))
+    bounds = np.concatenate([[0], np.cumsum(cnt)])
+    mods, recs, failed = {}, [], {}
+    n_own_ev = 0
+    n_elig = 0
+    for i, name in enumerate(names):
+        ev = order[bounds[i]:bounds[i + 1]]
+        mid = int(geo.module_id[name])
+        rec = dict(module=name, id=mid, n=int(cnt[i]), own=0, reason=f"n<{a.min_clusters}")
+        if cnt[i] >= a.min_clusters:
+            n_elig += 1
+            p, reason = fit_events(u[ev], v[ev], r[ev], a.clamp)
+            rec["reason"] = reason
+            if p is None:
+                failed[name] = reason
+            else:
+                le, lc = lifts(p, a.clamp)
+                rec.update(own=1, L_e=le, L_c=lc, **{f"c{k}": float(x) for k, x in enumerate(p)})
+                mods[name] = {"id": mid, "n": int(cnt[i]), "c": [float(x) for x in p], "L_e": le, "L_c": lc}
+                n_own_ev += int(cnt[i])
+        recs.append(rec)
+    nseed, n_own = len(names), len(mods)
+    stats = {"seeding_modules": nseed, "eligible": n_elig, "own": n_own,
+             "own_frac_modules": n_own / nseed, "own_frac_events": n_own_ev / n_ev,
+             "n_events": n_ev, "failed": failed}
+    gi = G.git_info()
+    js = {"schema": HYB_SCHEMA, "form": "hybrid", "run_type": rt, "slug": slug,
+          "module_form": "poly8", "clamp": float(a.clamp), "min_clusters": int(a.min_clusters),
+          "fallback": fb, "fallback_path": str(a.fallback),
+          "fallback_sha1": hashlib.sha1(fb_bytes).hexdigest(),
+          "modules": dict(sorted(mods.items(), key=lambda kv: kv[1]["id"])), "stats": stats,
+          "estimator": {"grid": HYB_GRID, "min_bin": HYB_MIN_BIN, "trunc_k": HYB_TRUNC_K,
+                        "r_range": [HYB_RMIN, HYB_RMAX], "min_bins": HYB_MIN_BINS,
+                        "range_check": list(HYB_RANGE), "norm": "module event mean"},
+          "source": {"scan_dir": str(a.scan_dir), "splits": [list(s) for s in d["splits"]],
+                     "set": a.splits, "path": a.path, "n_events": n_ev},
+          "created": datetime.datetime.now().isoformat(timespec="seconds"),
+          "git": f"{gi['head']}{'+dirty' if gi['dirty'] else ''}" if gi["head"] else None}
+    out = Path(a.out)
+    write_json(out, js)
+    cols = ["module", "id", "n", "own", "reason", "L_e", "L_c"] + [f"c{k}" for k in range(8)]
+    pd.DataFrame(recs).reindex(columns=cols).sort_values("id").to_csv(
+        out.with_name(out.stem + "_modules.tsv"), sep="\t", index=False, float_format="%.6g")
+    print(f"{slug} [{a.splits}]: seeding {nseed}, eligible (>= {a.min_clusters}) {n_elig}, own {n_own} "
+          f"({100 * n_own / nseed:.1f}% of modules, {100 * n_own_ev / n_ev:.1f}% of {n_ev} events), "
+          f"failed {len(failed)}" + (f" {failed}" if failed else ""))
+    return 0
+
+
 def cmd_fit(a):
+    if a.per_module:
+        return cmd_fit_hybrid(a)
     if a.glob:
         if not a.maps:
             sys.exit("fit --global needs --maps GLOB")
@@ -798,12 +1030,27 @@ def main(argv=None):
                    help="bootstrap refits per bin for mu_err (0: sigma/sqrt(n_in_fit))")
     m.add_argument("--workers", type=int, default=1, help="processes for the bootstrap (capped at 6)")
     m.set_defaults(func=cmd_map)
-    f = sub.add_parser("fit", help="poscorr_v1 JSON from a map (or the pooled global map)")
+    f = sub.add_parser("fit", help="poscorr_v1 JSON from a map (or the pooled global map), or a poscorr_hybrid_v1 (--per-module)")
     f.add_argument("--map", help="map_<slug>_<set>.tsv")
     f.add_argument("--form", choices=("bilinear", "poly8", "both"), default="bilinear")
     f.add_argument("--out", required=True, help="JSON path (DIR with --global)")
     f.add_argument("--global", dest="glob", action="store_true", help="pool the per-type maps")
     f.add_argument("--maps", help="with --global: glob of map_*_<set>.tsv")
+    f.add_argument("--per-module", dest="per_module", action="store_true",
+                   help="hybrid: per-module poly8 for seed modules with >= --min-clusters clusters, "
+                        "--fallback elsewhere (poscorr_hybrid_v1 JSON + <stem>_modules.tsv)")
+    f.add_argument("--scan-dir", help="with --per-module: scan directory (cluster TSVs)")
+    f.add_argument("--fallback", help="with --per-module: poscorr_v1 JSON used outside the own fits")
+    f.add_argument("--splits", choices=("even", "odd", "all"), default="all",
+                   help="with --per-module: split set (as `map`)")
+    f.add_argument("--slug", help="with --per-module: run-type slug of the runs used "
+                                  "(default: the fallback's slug)")
+    f.add_argument("--min-clusters", type=int, default=3000, help="with --per-module: own fit threshold")
+    f.add_argument("--clamp", type=float, default=0.6, help="with --per-module: u, v clipped to +-clamp")
+    f.add_argument("--path", choices=("legacy", "gated"), default="legacy")
+    f.add_argument("--exclude-rowcol", type=int, nargs=4, default=(15, 20, 15, 20),
+                   metavar=("ROW0", "ROW1", "COL0", "COL1"), help="excluded seed rectangle, 1-based inclusive")
+    f.add_argument("--inner-radius", type=float, default=200.0, help="pool seed radius (mm)")
     f.set_defaults(func=cmd_fit)
     args = ap.parse_args(argv)
     return args.func(args)

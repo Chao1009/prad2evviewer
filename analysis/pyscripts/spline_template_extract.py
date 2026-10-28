@@ -18,6 +18,11 @@ and to seed (t0, A); it is never a chi2 selection.
     python3 spline_template_extract.py select \\
         /path/prad_025320.evio.00050 \\
         --out output/templates_spline/2p24GeV_H2/pulses/025320_00050.npz
+    # opt-in (defaults reproduce the above exactly): --per-module-best 50 keeps the 50
+    #   highest-E candidates per module (E = mf_amp * I_int * cal, MeV; --calib-file;
+    #   npz mf_energy) instead of the first-come cap; with --emax-frac 1.2 (E < 1.2 E_beam)
+    #   --mf-strict (mf_npk == 1) --max-modules-per-event 20 --exclude-trigger-bits 0x1000000
+    #   --mf-bank output/templates_spline/<slug>/templates_<slug>.npz
 
     python3 spline_template_extract.py build \\
         --pulses "output/templates_spline/2p24GeV_H2/pulses/*.npz" \\
@@ -28,6 +33,23 @@ and to seed (t0, A); it is never a chi2 selection.
     #    candidates are held out by `holdout_mask` (for `check`).
     #    --bands 100,250,500,1000,2000,4000: f(A) from these bands (n knots; npz
     #    band_edges / shape_band / r_band / n_band) instead of lo / mid / top.
+    #    --pool-order energy (best-K candidate files): pool = top n-max by mf_energy,
+    #    hold-out = the next ~n-max*frac/(1-frac) (npz holdout_keys, used by `check`).
+    # opt-in: --lambda-select heldout (per-module lambda from the held-out chi2, grid
+    #   0..1e4; summary.tsv / meta get lam, lam_flag, n_ho, ho_chi2_*); --converge-df X
+    #   (convergence threshold on max |f_k - f_(k-1)|, default 1e-3).
+    # opt-in, with --fit-points direct / --lambda-select heldout: --shape-sigma S (adds
+    #   (S*ref)^2 to the point variance), --lambda-chi2-sigma full (held-out chi2 with the
+    #   timing + shape terms), --lambda-min X, --lambda-fallback Y (grid floor / fallback).
+    # opt-in: --osc-escalate (module template with spurious wiggles: lambda x10 and rebuild
+    #   until none, run-type average at 1e4; adds osc_* / lam_final to summary.tsv, lam_module).
+
+    # opt-in Wassim single-pulse reference (best_ref_shape_fit.C, PDF section 4):
+    #   select --wassim-ref  keeps per module ONLY the best valid PASS 1 candidate of the
+    #     split (betterCandidate order; clip veto + PASS 1 only, no mf / other cuts);
+    #   build --single-pulse --pulses "<those npz>"  one bank row per module = the best
+    #     candidate over all files, R(k) = (W - bg_mean) / max(W - bg_mean) as a not-a-knot cubic
+    #     interpolating spline (exp. tail only to reach 400 ns; no f(A); fallback 2 = average)
 
     python3 spline_template_extract.py ampcorr \\
         --templates output/templates_spline/*/templates_*.npz \\
@@ -53,6 +75,7 @@ from __future__ import annotations
 import argparse
 import glob
 import hashlib
+import heapq
 import json
 import math
 import os
@@ -60,6 +83,7 @@ import re
 import subprocess
 import sys
 import time
+import warnings
 from datetime import datetime
 from pathlib import Path
 
@@ -479,8 +503,20 @@ class Selector:
     pattern): rows of PbWO4 raw waveforms are stacked per BLOCK events and
     cut with numpy; the mf runs only on the survivors of every other cut."""
 
-    def __init__(self, p, rec, per_module_cap, run, split):
+    def __init__(self, p, rec, per_module_cap, run, split, best_k=0,
+                 mf_strict=False, energy=None, emax_mev=None, max_modules=0,
+                 module_h=50.0, t0_off=None):
         self.p, self.rec, self.cap = p, rec, per_module_cap
+        # opt-in extras (all off = the original first-come selection)
+        self.best_k, self.mf_strict = int(best_k), bool(mf_strict)
+        self.energy, self.emax_mev = energy, emax_mev   # energy(midx, t0, amp) -> MeV
+        self.max_modules, self.module_h = int(max_modules), float(module_h)
+        self.t0_off = t0_off                # --mf-bank: per-module bank-axis offset (ns) or None
+        self.heaps = [[] for _ in range(p.hycal.module_count())]
+        self.seq = 0
+        self.n_no_energy = self.n_above_emax = self.n_rej_mf_strict = 0
+        self.n_rows_mult_rej = 0
+        self.event_counts = []              # per flush: channels with A >= module_h per event
         self.run, self.split = run, split
         self.nm = p.hycal.module_count()
         self.mods = [p.hycal.module(i) for i in range(self.nm)]
@@ -499,6 +535,9 @@ class Selector:
             "falling", "sec_max", "p1_shape_ok", "slope", "tail_dev", "mf_t0",
             "mf_amp", "mf_npk", "mf_sec_ratio", "mf_t0_min", "wa_integral",
             "wa_npeaks")}
+        if energy is not None:
+            self.out["mf_energy"] = []
+        self._best_done = False
         self.ci = {n: i for i, n in enumerate(CUTFLOW_NAMES)}
 
     def add(self, row, ev, evnum, trig, midx):
@@ -515,6 +554,32 @@ class Selector:
         Y = np.stack(self.rows)                       # uint16 [n, 100]
         meta = np.array(self.meta, dtype=np.int64)    # ev, evnum, trig, midx
         self.rows, self.meta = [], []
+        pre = None
+        if self.max_modules > 0:
+            # --max-modules-per-event: WaveAnalyzer on ALL rows (clipped too),
+            # reused below; drop every row of an event with > N channels at
+            # A = raw max - ped >= module_h
+            ana = self.p.wave_ana.analyze
+            nr0 = Y.shape[0]
+            ped_a, rms_a = np.empty(nr0), np.empty(nr0)
+            npk_a = np.empty(nr0, dtype=np.int64)
+            int_a = np.full(nr0, np.nan)
+            for k in range(nr0):
+                pd, rm, pks = ana(Y[k])
+                ped_a[k], rms_a[k], npk_a[k] = pd, rm, len(pks)
+                if len(pks) == 1:
+                    int_a[k] = pks[0].integral
+            hit = (Y.max(axis=1) - ped_a) >= self.module_h
+            _, inv = np.unique(meta[:, 0], return_inverse=True)
+            cnt = np.bincount(inv, weights=hit).astype(np.int64)
+            self.event_counts.append(cnt)
+            rej = cnt > self.max_modules
+            kr = ~rej[inv]
+            self.n_rows_mult_rej += int((~kr).sum())
+            Y, meta = Y[kr], meta[kr]
+            pre = (ped_a[kr], rms_a[kr], npk_a[kr], int_a[kr])
+            if Y.shape[0] == 0:
+                return
         mid = meta[:, 3]
         self._count("nseen", mid)
 
@@ -527,17 +592,20 @@ class Selector:
 
         # WaveAnalyzer pedestal / rms / integral on every unclipped channel
         # (cheap: ~10 us/channel) so that A is exact
-        ana = self.p.wave_ana.analyze
         n1 = sel.size
-        ped = np.empty(n1)
-        rms = np.empty(n1)
-        npk = np.empty(n1, dtype=np.int64)
-        integ = np.full(n1, np.nan)
-        for k, r in enumerate(sel):
-            pd, rm, pks = ana(Y[r])
-            ped[k], rms[k], npk[k] = pd, rm, len(pks)
-            if len(pks) == 1:
-                integ[k] = pks[0].integral
+        if pre is None:
+            ana = self.p.wave_ana.analyze
+            ped = np.empty(n1)
+            rms = np.empty(n1)
+            npk = np.empty(n1, dtype=np.int64)
+            integ = np.full(n1, np.nan)
+            for k, r in enumerate(sel):
+                pd, rm, pks = ana(Y[r])
+                ped[k], rms[k], npk[k] = pd, rm, len(pks)
+                if len(pks) == 1:
+                    integ[k] = pks[0].integral
+        else:
+            ped, rms, npk, integ = (x[sel] for x in pre)
         Y1 = Y[sel]
         mid1 = mid[sel]
         peak1 = np.argmax(Y1, axis=1)
@@ -606,6 +674,10 @@ class Selector:
             if hi - lo > 1:
                 sec[k] = np.delete(a_k, j).max() / a_k[j]
         m9 = mid1[rows9]
+        t0_bank = t0                        # the mf bank's own onset axis (for the energy)
+        if self.t0_off is not None:         # --mf-bank: onsets on the h50 axis (t0 - off)
+            t0 = t0 - self.t0_off[m9]
+            t0min = t0min - self.t0_off[m9]
         one = (npk_mf >= 1) & (sec < MF_SEC_RATIO)
         self._count("c2_mf_no_secondary", m9[one])
         fin = one & (t0min >= MF_ONSET_MIN_NS)
@@ -614,11 +686,60 @@ class Selector:
         if f.size == 0:
             return
 
-        # per-module caps (first come, separate for band b0 and the rest)
+        # opt-in extras on the all-cut survivors (default: f unchanged)
+        if self.mf_strict:                  # exactly one mf pulse, after c3b
+            g1 = npk_mf[f] == 1
+            self.n_rej_mf_strict += int((~g1).sum())
+            f = f[g1]
+        Ef = None
+        if self.energy is not None:         # E (MeV) of the survivors only
+            Ef = np.full(nr, np.nan)
+            if f.size:
+                Ef[f] = self.energy(m9[f], t0_bank[f], amf[f])
+                fe = np.isfinite(Ef[f])
+                self.n_no_energy += int((~fe).sum())
+                f = f[fe]
+                if self.emax_mev is not None:
+                    lo_e = Ef[f] < self.emax_mev
+                    self.n_above_emax += int((~lo_e).sum())
+                    f = f[lo_e]
+        if f.size == 0:
+            return
+
         tier9 = P["tier"][s9]
         A9 = P["amp"][s9]
         b0 = (A9 >= BAND_B0[0]) & (A9 <= BAND_B0[1])
         t2 = tier9 == 2
+
+        def fields(ix):                     # every output field of candidates ix
+            r9 = rows9[ix]
+            sk = sel[r9]                    # indices into Y/meta
+            d = dict(
+                event=meta[sk, 0], event_number=meta[sk, 1],
+                trigger_bits=meta[sk, 2], midx=meta[sk, 3], samples=Y[sk],
+                ped=ped[r9], rms=rms[r9], amp=A9[ix],
+                peak_sample=P["peak"][s9][ix], first_thr=P["first_thr"][s9][ix],
+                tier=tier9[ix], rising=P["rising"][s9][ix],
+                falling=P["falling"][s9][ix], sec_max=P["sec_max"][s9][ix],
+                p1_shape_ok=k6[s9][ix], slope=slope[s9][ix],
+                tail_dev=tdev[s9][ix], mf_t0=t0[ix], mf_amp=amf[ix],
+                mf_npk=npk_mf[ix], mf_sec_ratio=sec[ix], mf_t0_min=t0min[ix],
+                wa_integral=integ[r9], wa_npeaks=npk[r9])
+            if Ef is not None:
+                d["mf_energy"] = Ef[ix]
+            return d
+
+        if self.best_k > 0:
+            # per-module best-K by energy: no cap; counts of the stored set
+            # (stored / info_p1_shape_ok / info_wa_npeaks_ne1) come at the end
+            self._count("info_mf_npk_eq1", m9[f][npk_mf[f] == 1])
+            self._count("info_tier2", m9[f][t2[f]])
+            self._count("info_b0", m9[f][b0[f]])
+            self._count("info_tier2_b0", m9[f][(t2 & b0)[f]])
+            self._push_best(f, m9[f], Ef[f], fields)
+            return
+
+        # per-module caps (first come, separate for band b0 and the rest)
         keep = []
         for j in f:
             mi, cl = int(m9[j]), 0 if b0[j] else 1
@@ -634,39 +755,64 @@ class Selector:
         if keep.size == 0:
             return
         self._count("stored", m9[keep])
-        sk = sel[rows9[keep]]                           # indices into Y/meta
         o = self.out
-        o["event"].append(meta[sk, 0])
-        o["event_number"].append(meta[sk, 1])
-        o["trigger_bits"].append(meta[sk, 2])
-        o["midx"].append(meta[sk, 3])
-        o["samples"].append(Y[sk])
-        o["ped"].append(ped[rows9[keep]])
-        o["rms"].append(rms[rows9[keep]])
-        o["amp"].append(A9[keep])
-        o["peak_sample"].append(P["peak"][s9][keep])
-        o["first_thr"].append(P["first_thr"][s9][keep])
-        o["tier"].append(tier9[keep])
-        o["rising"].append(P["rising"][s9][keep])
-        o["falling"].append(P["falling"][s9][keep])
-        o["sec_max"].append(P["sec_max"][s9][keep])
-        o["p1_shape_ok"].append(k6[s9][keep])
-        o["slope"].append(slope[s9][keep])
-        o["tail_dev"].append(tdev[s9][keep])
-        o["mf_t0"].append(t0[keep])
-        o["mf_amp"].append(amf[keep])
-        o["mf_npk"].append(npk_mf[keep])
-        o["mf_sec_ratio"].append(sec[keep])
-        o["mf_t0_min"].append(t0min[keep])
-        wi = integ[rows9[keep]]
-        wn = npk[rows9[keep]]
-        o["wa_integral"].append(wi)
-        o["wa_npeaks"].append(wn)
-        ne1 = wn != 1
+        d = fields(keep)
+        for k, v in d.items():
+            o[k].append(v)
+        ne1 = d["wa_npeaks"] != 1
         self.n_wa_ne1 += int(ne1.sum())
         self._count("info_wa_npeaks_ne1", m9[keep][ne1])
 
+    def _push_best(self, f, mf_, Ee, fields):
+        """Per-module bounded min-heap of size best_k keyed by (E, -seq): on
+        equal E the earlier candidate wins.  Payload = one tuple of every
+        output field (the samples row copied)."""
+        K, heaps = self.best_k, self.heaps
+        # a candidate not above the root of a full heap can never enter (the
+        # root only grows), so only the others are materialised
+        adm = np.array([len(heaps[m]) < K or e > heaps[m][0][0]
+                        for m, e in zip(mf_.tolist(), Ee.tolist())], dtype=bool)
+        seqs = self.seq + np.nonzero(adm)[0]
+        self.seq += f.size
+        if not adm.any():
+            return
+        d = fields(f[adm])
+        self._pkeys = list(d)
+        cols = [d[k] for k in self._pkeys]
+        si = self._pkeys.index("samples")
+        for i, (m, e) in enumerate(zip(mf_[adm].tolist(), Ee[adm].tolist())):
+            row = [c[i] for c in cols]
+            row[si] = row[si].copy()
+            h = heaps[m]
+            (heapq.heappush if len(h) < K else heapq.heappushpop)(
+                h, (e, -int(seqs[i]), tuple(row)))
+
+    def kept(self):
+        if self.best_k > 0:
+            return sum(len(h) for h in self.heaps)
+        return int(self.n_stored.sum())
+
+    def _finalize_best(self):
+        """Heap contents in event order -> self.out; stored-set cutflow."""
+        self._best_done = True
+        items = sorted((it for h in self.heaps for it in h), key=lambda t: -t[1])
+        if not items:
+            return
+        o = self.out
+        for j, k in enumerate(self._pkeys):
+            col = [it[2][j] for it in items]
+            o[k].append(np.stack(col) if k == "samples" else np.array(col))
+        mi, ci, cf = o["midx"][0], self.ci, self.cutflow
+        cf[:, ci["stored"]] = np.bincount(mi, minlength=self.nm)
+        cf[:, ci["info_p1_shape_ok"]] = np.bincount(
+            mi[o["p1_shape_ok"][0]], minlength=self.nm)
+        ne1 = o["wa_npeaks"][0] != 1
+        cf[:, ci["info_wa_npeaks_ne1"]] = np.bincount(mi[ne1], minlength=self.nm)
+        self.n_wa_ne1 = int(ne1.sum())
+
     def arrays(self):
+        if self.best_k > 0 and not self._best_done:
+            self._finalize_best()
         o = self.out
         dt = dict(event=np.int64, event_number=np.int64, trigger_bits=np.int64,
                   midx=np.int64, samples=np.uint16, ped=np.float64,
@@ -678,6 +824,8 @@ class Selector:
                   mf_npk=np.int16, mf_sec_ratio=np.float64,
                   mf_t0_min=np.float64, wa_integral=np.float64,
                   wa_npeaks=np.int16)
+        if self.energy is not None:
+            dt["mf_energy"] = np.float64
         res = {}
         for k, d in dt.items():
             if o[k]:
@@ -693,6 +841,237 @@ class Selector:
         res["band_lo"] = (A >= BAND_LO[0]) & (A <= BAND_LO[1])
         res["band_hi"] = (A >= BAND_HI[0]) & (A <= BAND_HI[1])
         return res
+
+
+# ---------------------------------------------- Wassim single-pulse reference --
+# Opt-in `select --wassim-ref` (and `build --single-pulse`): the single best PASS 1
+# candidate per module of a split (Waveform_Wassim/best_ref_shape_fit.C, the macro's
+# betterCandidate order), nothing else.  Selector above is not involved.
+WASSIM_CUTFLOW = [
+    "nseen",              # PbWO4, nsamples == 100, event passed the trigger gate
+    "c1_clip_ok",         # no raw sample >= 4095
+    "c_time_ok",          # raw argmax (== argmax of W) in the macro window 150-170 ns
+    "c_amp_gt_thr",       # A = max(samples - ped) > 2 ADC (counted among time_ok rows)
+    "c_valid_p1",         # macro Candidate.valid (pass1_evaluate_batch valid_p1)
+    "info_tier2_valid",   # of the valid rows: tier 2 (strict background)
+    "stored",             # 1 if the module has a best candidate in this split
+]
+WASSIM_N_SEQ = 5
+WASSIM_CUT_ORDER_TEXT = (
+    "nseen > clip veto (no raw sample >= 4095) > raw argmax in 150-170 ns (same row as "
+    "argmax of samples - ped, evaluated before the pedestal so that WaveAnalyzer runs "
+    "only on these rows) > A = max(samples - ped) > 2 ADC > valid_p1 = pass1_evaluate_batch "
+    "(macro defaults, incl. rising >= 4, falling >= 10, no secondary > 15 %, 20-sample "
+    "pre-pulse window) > per module only the best valid candidate of the split by the "
+    "macro's betterCandidate order (tier desc, amp desc, roughness asc, bg_rms asc; "
+    "strict comparisons: first come on exact ties).  No mf, no c3a/c8/c9/c2/c3b, no "
+    "A >= 50, no containment, no multiplicity / energy extras.")
+WASSIM_NEW_FIELDS = ("bg_mean", "bg_rms", "bg_maxabs", "roughness")
+
+
+def _wassim_better(new, old):
+    """Macro betterCandidate: tier desc, amp desc, roughness asc, bg_rms asc (strict)."""
+    for x, y, hi in zip(new, old, (True, True, False, False)):
+        if x != y:
+            return (x > y) if hi else (x < y)
+    return False
+
+
+class WassimSelector:
+    """Block-batched `select --wassim-ref`: rows of PbWO4 raw waveforms are stacked per
+    BLOCK events; per module only the best valid_p1 candidate of the split is kept."""
+
+    def __init__(self, p, run, split):
+        self.p, self.run, self.split = p, run, split
+        self.nm = p.hycal.module_count()
+        self.mods = [p.hycal.module(i) for i in range(self.nm)]
+        self.names = np.array([m.name for m in self.mods])
+        self.mids = np.array([m.id for m in self.mods], dtype=np.int64)
+        self.cutflow = np.zeros((self.nm, len(WASSIM_CUTFLOW)), dtype=np.int64)
+        self.peak_hist = np.zeros(NS_EXPECT, dtype=np.int64)
+        self.ci = {n: i for i, n in enumerate(WASSIM_CUTFLOW)}
+        self.rows, self.meta = [], []
+        self.best = {}                      # midx -> (key tuple, payload dict)
+
+    def add(self, row, ev, evnum, trig, midx):
+        self.rows.append(row)
+        self.meta.append((ev, evnum, trig, midx))
+
+    def _count(self, name, midx_rows):
+        np.add.at(self.cutflow[:, self.ci[name]], midx_rows, 1)
+
+    def kept(self):
+        return len(self.best)
+
+    def flush(self):
+        if not self.rows:
+            return
+        Y = np.stack(self.rows)                       # uint16 [n, 100]
+        meta = np.array(self.meta, dtype=np.int64)    # ev, evnum, trig, midx
+        self.rows, self.meta = [], []
+        mid = meta[:, 3]
+        self._count("nseen", mid)
+        ok = Y.max(axis=1) < CLIP_ADC
+        self._count("c1_clip_ok", mid[ok])
+        sel = np.nonzero(ok)[0]
+        if sel.size == 0:
+            return
+        Y1 = Y[sel]
+        peak1 = np.argmax(Y1, axis=1)
+        # peak_hist: unclipped rows with (max - mean of the first 20 samples) >= 50
+        # (the WaveAnalyzer pedestal is only evaluated on the time_ok rows)
+        px = Y1.max(axis=1).astype(np.float64) - Y1[:, :P1_BG_SAMPLES].mean(axis=1)
+        self.peak_hist += np.bincount(peak1[px >= A_STORE_MIN], minlength=NS_EXPECT)
+        tok = (peak1 * DT_NS >= P1_T_LO) & (peak1 * DT_NS <= P1_T_HI)
+        self._count("c_time_ok", mid[sel][tok])
+        s = np.nonzero(tok)[0]
+        if s.size == 0:
+            return
+        ana = self.p.wave_ana.analyze
+        ns_ = s.size
+        ped, rms = np.empty(ns_), np.empty(ns_)
+        npk = np.empty(ns_, dtype=np.int64)
+        integ = np.full(ns_, np.nan)
+        Ys = Y1[s]
+        for k in range(ns_):
+            pd, rm, pks = ana(Ys[k])
+            ped[k], rms[k], npk[k] = pd, rm, len(pks)
+            if len(pks) == 1:
+                integ[k] = pks[0].integral
+        W = Ys.astype(np.float64) - ped[:, None]
+        P = pass1_evaluate_batch(W)
+        msel = mid[sel][s]
+        self._count("c_amp_gt_thr", msel[P["amp"] > P1_THR])
+        v = np.nonzero(P["valid_p1"])[0]
+        self._count("c_valid_p1", msel[v])
+        if v.size == 0:
+            return
+        self._count("info_tier2_valid", msel[v][P["tier"][v] == 2])
+        mv = msel[v]
+        o = np.lexsort((v, P["bg_rms"][v], P["roughness"][v], -P["amp"][v],
+                        -P["tier"][v], mv))
+        vs = v[o]
+        mo = mv[o]
+        first = np.concatenate([[True], mo[1:] != mo[:-1]])
+        for j in vs[first]:
+            mi = int(msel[j])
+            key = (int(P["tier"][j]), float(P["amp"][j]), float(P["roughness"][j]),
+                   float(P["bg_rms"][j]))
+            cur = self.best.get(mi)
+            if cur is not None and not _wassim_better(key, cur[0]):
+                continue
+            sk = sel[s[j]]
+            self.best[mi] = (key, dict(
+                event=meta[sk, 0], event_number=meta[sk, 1], trigger_bits=meta[sk, 2],
+                midx=meta[sk, 3], samples=Y[sk].copy(), ped=ped[j], rms=rms[j],
+                amp=P["amp"][j], peak_sample=P["peak"][j], first_thr=P["first_thr"][j],
+                tier=P["tier"][j], rising=P["rising"][j], falling=P["falling"][j],
+                sec_max=P["sec_max"][j], p1_shape_ok=P["shape_ok"][j],
+                bg_mean=P["bg_mean"][j], bg_rms=P["bg_rms"][j],
+                bg_maxabs=P["bg_maxabs"][j], roughness=P["roughness"][j],
+                wa_integral=integ[j], wa_npeaks=npk[j]))
+
+    def arrays(self):
+        dt = dict(event=np.int64, event_number=np.int64, trigger_bits=np.int64,
+                  midx=np.int64, samples=np.uint16, ped=np.float64, rms=np.float64,
+                  amp=np.float64, peak_sample=np.int16, first_thr=np.int16,
+                  tier=np.int8, rising=np.int16, falling=np.int16, sec_max=np.float64,
+                  p1_shape_ok=np.bool_, bg_mean=np.float64, bg_rms=np.float64,
+                  bg_maxabs=np.float64, roughness=np.float64,
+                  wa_integral=np.float64, wa_npeaks=np.int16)
+        items = [self.best[m][1] for m in sorted(self.best)]
+        n = len(items)
+        res = {}
+        for k, d in dt.items():
+            if n:
+                res[k] = np.array([it[k] for it in items]).astype(d)
+            else:
+                res[k] = np.zeros((0, NS_EXPECT) if k == "samples" else (0,), d)
+        # not computed in this mode
+        for k in ("slope", "tail_dev", "mf_t0", "mf_amp", "mf_sec_ratio", "mf_t0_min"):
+            res[k] = np.full(n, np.nan)
+        res["mf_npk"] = np.full(n, -1, dtype=np.int16)
+        mi = res["midx"]
+        res["name"] = self.names[mi] if n else np.array([], dtype="<U8")
+        res["module_id"] = self.mids[mi] if n else np.zeros(0, np.int64)
+        A = res["amp"]
+        res["band_b0"] = (A >= BAND_B0[0]) & (A <= BAND_B0[1])
+        res["band_lo"] = (A >= BAND_LO[0]) & (A <= BAND_LO[1])
+        res["band_hi"] = (A >= BAND_HI[0]) & (A <= BAND_HI[1])
+        if n:
+            self.cutflow[mi, self.ci["stored"]] = 1
+        return res
+
+
+def _wassim_select_finish(a, sel, arr, mods, wcfg, wave_cfg, run, split, evio, out_path,
+                          trig_rule, n_seen, n_trig, wall):
+    """Meta, npz and terminal summary of `select --wassim-ref`."""
+    pm = np.array([m.is_pwo4() for m in mods])
+    cf = sel.cutflow[pm].sum(axis=0)
+    cut_tot = {n: int(v) for n, v in zip(WASSIM_CUTFLOW, cf)}
+    st = os.stat(evio)
+    meta = dict(
+        schema=SCHEMA, mode="wassim_ref", evio=os.path.abspath(evio),
+        evio_size=st.st_size, evio_mtime=datetime.fromtimestamp(st.st_mtime).isoformat(),
+        run=run, split=split, trigger=a.trigger, trigger_rule=trig_rule,
+        max_events=a.max_events,
+        wassim=dict(
+            ref="Waveform_Wassim/best_ref_shape_fit.C (PASS 1 evaluateCandidate / "
+                "betterCandidate), Hycal_prad_wf_analysis.pdf section 4",
+            params=dict(thr=P1_THR, min_rising=P1_MIN_RISING, min_falling=P1_MIN_FALLING,
+                        bg_samples=P1_BG_SAMPLES, bg_max_abs=P1_BG_MAX_ABS,
+                        bg_max_rms=P1_BG_MAX_RMS, bg_max_rough=P1_BG_MAX_ROUGH,
+                        sec_frac=P1_SEC_FRAC, sec_excl=P1_SEC_EXCL,
+                        t_window_ns=[P1_T_LO, P1_T_HI], clip_adc=CLIP_ADC),
+            better_candidate="tier desc, amp desc, roughness asc, bg_rms asc; strict "
+                             "comparisons (first come on exact ties); one best valid "
+                             "candidate per module and split",
+            cutflow_total=cut_tot,
+            cutflow_note="sequential columns nseen > c1_clip_ok > c_time_ok (raw argmax "
+                         "in the window) > c_amp_gt_thr (counted among the time_ok rows; "
+                         "the pedestal is only evaluated there) > c_valid_p1; "
+                         "info_tier2_valid = tier 2 among the valid rows; stored = 1 per "
+                         "module with a candidate; per module in the npz cutflow"),
+        n_events_seen=n_seen, n_events_after_trigger=n_trig,
+        n_candidates=int(arr["midx"].size),
+        cut_order=WASSIM_CUT_ORDER_TEXT, cut_values=cut_values(),
+        cutflow_names=WASSIM_CUTFLOW, n_cutflow_sequential=WASSIM_N_SEQ,
+        peak_hist_note="raw argmax of unclipped channels with (max - mean of the first 20 "
+                       "samples) >= 50 (proxy pedestal; WaveAnalyzer runs only on the "
+                       "150-170 ns rows), no amplitude / containment cut",
+        wave_config=dict(
+            wave_cfg, ped_nsamples=int(wcfg.ped_nsamples),
+            overflow=int(wcfg.overflow), clk_mhz=float(wcfg.clk_mhz),
+            peak_nsigma=float(wcfg.peak_nsigma),
+            min_peak_height=float(wcfg.min_peak_height),
+            ped_flatness=float(wcfg.ped_flatness),
+            ped_max_iter=int(wcfg.ped_max_iter)),
+        amplitude_def="A = max(samples - WaveAnalyzer pedestal)",
+        pedestal_def="WaveAnalyzer pedestal / rms (wave_ana.analyze); W = samples - ped; "
+                     "bg_mean = mean of the 20 samples before first_thr (stored)",
+        peak_def="first argmax of the samples (macro max_element)",
+        not_computed="slope, tail_dev, mf_* (NaN, mf_npk -1); wa_* are the WaveAnalyzer "
+                     "single-peak integral / peak count of the stored candidate",
+        wall_s=round(wall, 1), events_per_s=round(n_seen / wall, 1),
+        git=_git_short(), created=datetime.now().isoformat(timespec="seconds"),
+        python=sys.version.split()[0], numpy=np.__version__, argv=sys.argv)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        np.savez_compressed(
+            fh, run=np.int64(run), split=np.int64(split), **arr,
+            cutflow_names=np.array(WASSIM_CUTFLOW), cutflow=sel.cutflow,
+            peak_hist=sel.peak_hist, meta=np.array(json.dumps(meta)))
+    os.replace(tmp, out_path)
+    print(f"[done] {out_path}  {n_seen} events ({n_trig} after trigger) in "
+          f"{wall:.0f} s = {n_seen / wall:.0f} ev/s  ({wall / max(n_seen, 1):.4f} s/event)")
+    print("[cutflow] (Wassim single-pulse reference, PbWO4 totals)")
+    for nme, v in cut_tot.items():
+        print(f"  {nme:34s} {v:>10d}")
+    t2 = int((arr["tier"] == 2).sum())
+    print(f"[stored] {arr['midx'].size} reference candidates (one per module), "
+          f"{t2} tier-2, {int(pm.sum())} PbWO4 modules", flush=True)
+    return 0
 
 
 def _trigger_gate(spec, bits_file):
@@ -714,6 +1093,23 @@ def _trigger_gate(spec, bits_file):
     return (lambda fe: True, "all events (no trigger gate)")
 
 
+def _mf_bank_offsets(path, nmod):
+    """Per-module offset (ns) from the --mf-bank onset axis to the h50 onset axis
+    (t0_h50 = t0_bank - off), the convention of check's `t0_seed_sampled = mf_t0 +
+    onset_shift_ns`: onset_shift_ns of the module's row (fallback 0/1); a fallback-2
+    row and a module absent from the bank take d_typ = median over the fallback-0/1
+    rows (+ the row's own shift for fallback 2)."""
+    z = np.load(path, allow_pickle=False)
+    sh = z["onset_shift_ns"].astype(np.float64)
+    own = z["fallback"] <= 1
+    d_typ = float(np.median(sh[own])) if own.any() else 0.0
+    off = np.full(nmod, d_typ)
+    for r, m in enumerate(z["module_index"]):
+        if 0 <= int(m) < nmod:
+            off[int(m)] = sh[r] if own[r] else d_typ + sh[r]
+    return off
+
+
 def cmd_select(a):
     import _common as C
     from _common import dec
@@ -729,6 +1125,16 @@ def cmd_select(a):
     out_path = Path(a.out)
     if out_path.suffix != ".npz":
         sys.exit("[ERROR] --out must end in .npz")
+    wass = bool(a.wassim_ref)
+    if wass:
+        bad = [n for n, on in (
+            ("--per-module-best", a.per_module_best != 0),
+            ("--mf-strict", a.mf_strict), ("--max-modules-per-event", a.max_modules_per_event != 0),
+            ("--emax-frac", a.emax_frac is not None),
+            ("--exclude-trigger-bits", a.exclude_trigger_bits != 0),
+            ("--mf-bank", bool(a.mf_bank))) if on]
+        if bad:
+            sys.exit(f"[ERROR] --wassim-ref cannot be combined with {', '.join(bad)}")
 
     p = C.setup_pipeline(evio_path=evio, run_num=run)
     mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
@@ -741,27 +1147,85 @@ def cmd_select(a):
     if not h50.is_absolute():
         h50 = HERE / h50
     column = mf_pulse.resolve_column(str(h50), "auto", prefer="25320")
-    bank, info = mf_pulse.build_bank([m.name for m in mods], pwo4, str(h50),
-                                     wave_cfg, column=column)
-    rec = mf_pulse.MFReconstructor(
+    mf_bank_path = mf_bank_sha1 = mf_bank_kind = ""
+    t0_off = None
+    if wass:                                    # no matched filter in this mode
+        bank = info = None
+    elif a.mf_bank:
+        mf_bank_path = os.path.abspath(a.mf_bank)
+        bank, info = mf_pulse.build_bank([m.name for m in mods], pwo4, mf_bank_path,
+                                         wave_cfg)
+        mf_bank_sha1, mf_bank_kind = info["sha1"], info["kind"]
+        t0_off = _mf_bank_offsets(mf_bank_path, len(mods))
+    else:
+        bank, info = mf_pulse.build_bank([m.name for m in mods], pwo4, str(h50),
+                                         wave_cfg, column=column)
+    rec = None if wass else mf_pulse.MFReconstructor(
         bank, nsigma=MF_NSIGMA, min_amp=MF_MIN_AMP, kmax=MF_KMAX,
         r_model=MF_R_MODEL, ped_nsamples=int(wcfg.ped_nsamples))
 
     bits_file = Path(os.environ.get("PRAD2_DATABASE_DIR", "")) / "trigger_bits.json"
     gate, trig_rule = _trigger_gate(a.trigger, bits_file)
-    print(f"[setup] run {run} split {split}  trigger: {trig_rule}\n"
-          f"[setup] mf: h50 {h50.name} column {column}  nsigma {MF_NSIGMA:g} "
-          f"min_amp {MF_MIN_AMP:g} kmax {MF_KMAX} r_model {MF_R_MODEL:g}",
-          flush=True)
+    if wass:
+        print(f"[setup] run {run} split {split}  trigger: {trig_rule}\n"
+              "[setup] --wassim-ref: single best valid_p1 candidate per module "
+              "(best_ref_shape_fit.C betterCandidate order); no mf, no cuts but the clip "
+              "veto and PASS 1", flush=True)
+    else:
+        print(f"[setup] run {run} split {split}  trigger: {trig_rule}\n"
+              + (f"[setup] mf: h50 {h50.name} column {column}" if not a.mf_bank else
+                 f"[setup] mf: --mf-bank {mf_bank_path} ({mf_bank_kind}, sha1 "
+                 f"{mf_bank_sha1[:12]}, ampcorr {info['ampcorr']})")
+              + f"  nsigma {MF_NSIGMA:g} "
+              f"min_amp {MF_MIN_AMP:g} kmax {MF_KMAX} r_model {MF_R_MODEL:g}",
+              flush=True)
 
-    sel = Selector(p, rec, a.per_module_cap, run, split)
+    extras = (a.per_module_best > 0 or a.emax_frac is not None or a.mf_strict
+              or a.max_modules_per_event > 0 or a.exclude_trigger_bits != 0
+              or bool(a.mf_bank))
+    energy = emax_mev = ebeam = None
+    calib_path = calib_sha1 = ""
+    if a.per_module_best < 0 or a.max_modules_per_event < 0:
+        sys.exit("[ERROR] --per-module-best and --max-modules-per-event must be >= 0")
+    if a.emax_frac is not None and not a.emax_frac > 0:
+        sys.exit("[ERROR] --emax-frac must be > 0")
+    if a.per_module_best > 0 or a.emax_frac is not None:
+        calib_path = a.calib_file
+        if not calib_path:
+            import module_timing_dump as mtd
+            if run not in mtd.RUN_CFG:
+                sys.exit(f"[ERROR] run {run} is not in module_timing_dump.RUN_CFG: "
+                         "pass --calib-file")
+            calib_path = os.path.join(mtd.CALIB_DIR, mtd.RUN_CFG[run][1])
+        cal = np.full(len(mods), np.nan)
+        by_name = {m["name"]: float(m.get("factor", 0.0))
+                   for m in json.load(open(calib_path))}
+        for i, m in enumerate(mods):
+            fc = by_name.get(m.name, 0.0)
+            if fc > 0:
+                cal[i] = fc
+        calib_sha1 = _sha1(calib_path)
+        ebeam = float(p.geo.Ebeam)
+        if a.emax_frac is not None:
+            emax_mev = a.emax_frac * ebeam
+        energy = lambda mi_, t0_, amp_: (                    # noqa: E731
+            mf_pulse.pulse_energy_units(bank, mi_, t0_, amp_, kappa=1.0) * cal[mi_])
+        print(f"[setup] energy E = mf_amp * I_int * cal (MeV): calib {calib_path}, "
+              f"E_beam {ebeam:.1f} MeV" + ("" if emax_mev is None else
+              f", E < {a.emax_frac:g} * E_beam = {emax_mev:.1f} MeV"), flush=True)
+
+    sel = WassimSelector(p, run, split) if wass else Selector(
+        p, rec, a.per_module_cap, run, split, best_k=a.per_module_best,
+                   mf_strict=a.mf_strict, energy=energy, emax_mev=emax_mev,
+                   max_modules=a.max_modules_per_event,
+                   module_h=a.module_count_height_min, t0_off=t0_off)
     ch = dec.EvChannel()
     ch.set_config(p.cfg)
     if ch.open_auto(evio) != dec.Status.success:
         sys.exit(f"[ERROR] cannot open {evio}")
 
     cache = {}                                  # (roc tag, slot, ch) -> midx|-1
-    n_seen = n_trig = n_blk = 0
+    n_seen = n_trig = n_blk = n_excl_bits = 0
     done = False
     next_prog = 20000
     while not done and ch.read() == dec.Status.success:
@@ -783,6 +1247,11 @@ def cmd_select(a):
             n_trig += 1
             evnum = int(fe.info.event_number)
             trig = int(fe.info.trigger_bits)
+            if a.exclude_trigger_bits and (trig & a.exclude_trigger_bits):
+                n_excl_bits += 1
+                if done:
+                    break
+                continue
             for ri in range(fe.nrocs):
                 roc = fe.roc(ri)
                 if not roc.present:
@@ -814,7 +1283,7 @@ def cmd_select(a):
             if n_seen >= next_prog:
                 el = time.monotonic() - t_start
                 print(f"  [progress] {n_seen} events ({n_trig} gated)  stored "
-                      f"{int(sel.n_stored.sum())}  {n_seen / el:.0f} ev/s  "
+                      f"{sel.kept()}  {n_seen / el:.0f} ev/s  "
                       f"{el:.0f} s", flush=True)
                 next_prog += 20000
             if done:
@@ -825,14 +1294,63 @@ def cmd_select(a):
     arr = sel.arrays()
     if not a.max_events and n_seen == 0:
         sys.exit("[ERROR] no events decoded")
+    if wass:
+        return _wassim_select_finish(a, sel, arr, mods, wcfg, wave_cfg, run, split, evio,
+                                     out_path, trig_rule, n_seen, n_trig, wall)
+    n_analyzed = n_trig - n_excl_bits
+    ex = None
+    if extras:
+        ex = dict(
+            mode=(f"per_module_best K={a.per_module_best}, ranked by mf_energy"
+                  if a.per_module_best > 0 else "per_module_cap (first come)"),
+            per_module_best=a.per_module_best, emax_frac=a.emax_frac,
+            mf_strict=bool(a.mf_strict),
+            max_modules_per_event=a.max_modules_per_event,
+            module_count_height_min=a.module_count_height_min,
+            exclude_trigger_bits=a.exclude_trigger_bits,
+            n_excl_bits=n_excl_bits, n_events_analyzed=n_analyzed,
+            n_rej_mf_strict=sel.n_rej_mf_strict,
+            **({} if not a.mf_bank else dict(
+                mf_bank_ampcorr=info["ampcorr"],
+                mf_t0_axis="h50 onset axis: mf_t0 / mf_t0_min = bank onset - "
+                           "onset_shift_ns of the module (fallback-2 rows: + the "
+                           "median of the fallback-0/1 rows; modules absent from the "
+                           "bank: that median), as check does; the energy uses the "
+                           "bank's own axis")))
+        if energy is not None:
+            ex.update(
+                energy_def="mf_energy = mf_amp * I_int(" + ("h50 bank" if not a.mf_bank
+                                                           else "--mf-bank (x f(A) if it carries ampcorr)")
+                           + (", mf_t0" if not a.mf_bank else ", onset on the bank axis = mf_t0 + module offset")
+                           + ") * cal_factor "
+                           "(MeV; mf_pulse.pulse_energy_units kappa=1 times the "
+                           "per-module `factor` of calib_file; factor <= 0 or "
+                           "missing -> NaN, dropped)",
+                calib_file=os.path.abspath(calib_path), calib_sha1=calib_sha1,
+                e_beam_mev=ebeam, e_max_mev=emax_mev,
+                n_no_energy=sel.n_no_energy, n_above_emax=sel.n_above_emax)
+        if a.max_modules_per_event > 0:
+            nev = np.concatenate(sel.event_counts + [np.zeros(
+                max(n_analyzed - sum(c.size for c in sel.event_counts), 0),
+                dtype=np.int64)])
+            n_rej_ev = int((nev > a.max_modules_per_event).sum())
+            ex.update(
+                mult_mean=float(nev.mean()) if nev.size else float("nan"),
+                mult_p99=float(np.percentile(nev, 99)) if nev.size else float("nan"),
+                n_events_mult_rejected=n_rej_ev,
+                frac_events_mult_rejected=(n_rej_ev / nev.size if nev.size
+                                           else float("nan")),
+                n_rows_mult_rejected=sel.n_rows_mult_rej)
     st = os.stat(evio)
     meta = dict(
         schema=SCHEMA, evio=os.path.abspath(evio), evio_size=st.st_size,
         evio_mtime=datetime.fromtimestamp(st.st_mtime).isoformat(),
         run=run, split=split, trigger=a.trigger, trigger_rule=trig_rule,
         max_events=a.max_events, per_module_cap=a.per_module_cap,
-        per_module_cap_rule="cap applied separately to band-b0 candidates and "
-                            "to all other candidates, first come in event order",
+        per_module_cap_rule=("not applied: per-module best K by energy"
+                             if a.per_module_best > 0 else
+                             "cap applied separately to band-b0 candidates and "
+                             "to all other candidates, first come in event order"),
         p1_shape_def="p1_shape_ok = rising>=4 & falling>=10 (strict) & no "
                      "secondary >15% outside +-6 (old cut 6; stored, not applied)",
         n_events_seen=n_seen, n_events_after_trigger=n_trig,
@@ -865,8 +1383,9 @@ def cmd_select(a):
                   "stores the signed mean"),
         slope_def="least-squares slope of the 20 samples [first_thr-20, "
                   "first_thr-1]",
-        mf=dict(h50=str(h50), column=column, nsigma=MF_NSIGMA,
-                min_amp=MF_MIN_AMP, kmax=MF_KMAX, r_model=MF_R_MODEL,
+        mf=dict(**(dict(h50=str(h50), column=column) if not a.mf_bank else
+                   dict(h50=mf_bank_path, sha1=mf_bank_sha1, kind=mf_bank_kind)),
+                nsigma=MF_NSIGMA, min_amp=MF_MIN_AMP, kmax=MF_KMAX, r_model=MF_R_MODEL,
                 sec_ratio_used=MF_SEC_RATIO,
                 onset_def="mf_t0 / mf_amp = onset (ns) / amplitude of the "
                           "largest mf pulse; mf_t0_min = earliest mf onset; "
@@ -874,6 +1393,7 @@ def cmd_select(a):
                           "largest other / largest amplitude",
                 use="pulse count, onset and (t0, A) seed only; never a chi2 "
                     "selection"),
+        **({} if ex is None else dict(selection_extras=ex)),
         wall_s=round(wall, 1), events_per_s=round(n_seen / wall, 1),
         git=_git_short(), created=datetime.now().isoformat(timespec="seconds"),
         python=sys.version.split()[0], numpy=np.__version__,
@@ -905,6 +1425,34 @@ def cmd_select(a):
           f"{int((cb0 >= 50).sum())}, >= 50 tier-2 b0: {int((cnt >= 50).sum())}; "
           f"peak-sample histogram mode = {int(sel.peak_hist.argmax())} "
           f"({int(sel.peak_hist.max())} ch)", flush=True)
+    if ex is not None:
+        print(f"[extras] mode: {ex['mode']}")
+        if a.exclude_trigger_bits:
+            print(f"[extras] exclude-trigger-bits 0x{a.exclude_trigger_bits:x}: "
+                  f"{n_excl_bits} of {n_trig} gated events rejected "
+                  f"({n_analyzed} analysed)")
+        if a.max_modules_per_event > 0:
+            print(f"[extras] max-modules-per-event {a.max_modules_per_event} "
+                  f"(A >= {a.module_count_height_min:g} ADC): per-event count mean "
+                  f"{ex['mult_mean']:.2f}, 99th pct {ex['mult_p99']:.1f}; "
+                  f"{ex['n_events_mult_rejected']} of {n_analyzed} events rejected "
+                  f"({100 * ex['frac_events_mult_rejected']:.2f} %), "
+                  f"{sel.n_rows_mult_rej} channel rows dropped")
+        if a.mf_strict:
+            print(f"[extras] mf-strict: {sel.n_rej_mf_strict} c3b survivors "
+                  "rejected (mf_npk != 1)")
+        if energy is not None:
+            print(f"[extras] energy: {sel.n_no_energy} dropped (non-finite E: no "
+                  f"calibration factor), "
+                  + ("" if emax_mev is None else
+                     f"{sel.n_above_emax} rejected above E_max = {emax_mev:.1f} MeV "
+                     f"({a.emax_frac:g} * E_beam {ebeam:.1f}), ")
+                  + f"calib {os.path.basename(calib_path)}")
+        if a.per_module_best > 0:
+            nk = np.bincount(arr["midx"], minlength=len(mods))[pm]
+            print(f"[extras] best-K {a.per_module_best}: {arr['midx'].size} stored, "
+                  f"{int((nk >= a.per_module_best).sum())} of {int(pm.sum())} modules "
+                  f"full, {int((nk == 0).sum())} empty")
 
 
 # =================================================================== build ==
@@ -930,9 +1478,25 @@ SMOOTH_LAMBDA = 10000.0                   # penalty lam * int f''(t)^2 dt  (f in
 ONSET_FRAC = 0.005                      # onset = last time before peak <= 0.5 % of max
 DROP_FRAC = 0.20
 N_IT = 3                                # alignment iterations (0, 1, 2)
+MAX_IT = 10                             # --max-iterations default (only with --converge-tol)
+FREEZE_IT = 3                           # from this iteration on the pool is frozen to iteration FREEZE_IT-1's keep mask
+CONV_DF = 1e-3                          # convergence: max |f_k - f_(k-1)| on T_GRID (unit-peak shapes)
+CONV_CHI2 = 0.01                        # convergence: chi2/dof not decreasing by more than this fraction
+FIT_POINTS = "bins"                     # build --fit-points (set in cmd_build); bins | direct
+ITER_COLS = ("dt0_med_ns", "chi2_dof", "max_dshape", "rise_10_90_ns", "width_99_ns", "n_pool")
 GRID_DT = 0.1
 T_GRID = np.round(-8.0 + GRID_DT * np.arange(int(round((T_END + 8.0) / GRID_DT)) + 1), 6)
 LUT_DT = 0.05
+LAM_GRID = (0.0, 1e1, 1e2, 1e3, 1e4)    # build --lambda-select heldout
+LAM_FALLBACK = 1e2                      # < LAM_MIN_HO held-out pulses
+LAM_MIN_HO = 5
+LAM_MIN = 0.0                           # build --lambda-min: held-out grid = LAM_GRID values >= this
+LAM_CHI2_SIGMA = "noise"                # build --lambda-chi2-sigma (set in cmd_build): noise | full
+SHAPE_SIGMA = 0.0                       # build --shape-sigma (set in cmd_build): relative shape term of the direct point sigma
+OSC_PROM = 0.002                        # build --osc-escalate: find_peaks prominence / main-peak value
+OSC_WIN = (2.0, 150.0)                  # ns: wiggle search window
+OSC_EXCL = 3.0                          # ns: |t - t_peak| excluded
+OSC_PEAK_WIN = (3.0, 30.0)              # ns: the main peak is the largest value in here
 HOLDOUT_FRAC = 0.2
 BAND_MIN = 20                           # pulses needed for a lo / hi band
 RELAXED_BAND = (100.0, 2500.0)
@@ -968,6 +1532,27 @@ def holdout_mask(run, split, event, midx, seed=1, frac=HOLDOUT_FRAC):
             h = _mix64(h ^ v.astype(np.int64).astype(np.uint64))
     u = (h >> np.uint64(11)).astype(np.float64) * (1.0 / 9007199254740992.0)
     return u < frac
+
+
+def holdout_energy(D, n_max, frac):
+    """--pool-order energy hold-out (replaces holdout_mask).  Per module, the
+    eligible candidates (tier >= 1, band b0, finite mf_energy) are ranked by
+    mf_energy descending (stable on the candidate index): ranks [0, n_max) are
+    the fit pool (never held out), the next n_hold = int(n_max * frac / (1 -
+    frac) + 0.5) ranks are held out for `check`, the rest is not held out.
+    Returns (bool mask, n_hold)."""
+    n_hold = int(n_max * frac / (1.0 - frac) + 0.5)
+    hold = np.zeros(D["midx"].size, dtype=bool)
+    E = D["mf_energy"]
+    idx = np.nonzero((D["tier"] >= 1) & D["band_b0"] & np.isfinite(E))[0]
+    if idx.size == 0:
+        return hold, n_hold
+    order = idx[np.lexsort((idx, -E[idx], D["midx"][idx]))]
+    ms = D["midx"][order]
+    start = np.searchsorted(ms, ms, side="left")
+    rank = np.arange(order.size) - start
+    hold[order[(rank >= n_max) & (rank < n_max + n_hold)]] = True
+    return hold, n_hold
 
 
 # -------------------------------------------------------- shape evaluators --
@@ -1212,7 +1797,7 @@ def _penalty(t):
     return _PEN_CACHE[key]
 
 
-def fit_spline(bs, n_pool):
+def fit_spline(bs, n_pool, pp=None, ref=None):
     """Weighted cubic B-spline through the bin medians + the tail pseudo-points
     (weights 1/sigma_bin), penalised by SMOOTH_LAMBDA * int f''^2.
 
@@ -1223,13 +1808,32 @@ def fit_spline(bs, n_pool):
     between the populated phases; the tiny penalty only acts where the data
     leave the spline undetermined.  If the solve fails every knot spacing is
     doubled (the plan's Schoenberg-Whitney retry).  Returns dict(t, c, scale,
-    tail, n_knots) on the pre-shift axis, or None."""
+    tail, n_knots) on the pre-shift axis, or None.
+
+    FIT_POINTS == "direct" (build --fit-points direct; needs pp, ref): for tau <=
+    T_data the pooled points themselves are fitted (x = tau, y = y/A, not the
+    bin-detrended value) with sigma = sqrt((sigma_pulse/A)^2 + (SIGMA_T_NS *
+    ref'(tau))^2) instead of the 0.5 ns bin medians (SHAPE_SIGMA > 0 adds
+    (SHAPE_SIGMA * ref(tau))^2 under the root); tail extension, pseudo-points
+    and their weight are the bins' (tail_extension(bs))."""
     from scipy.interpolate import BSpline
     tail = tail_extension(bs)
-    d = bs["x"] <= tail["T_data"]
-    x = np.concatenate([bs["x"][d], tail["tx"]])
-    y = np.concatenate([bs["y"][d], tail["ty"]])
-    w = np.concatenate([1.0 / bs["s"][d], np.full(tail["tx"].size, tail["w_pseudo"])])
+    if FIT_POINTS == "direct" and pp is not None:
+        dm = pp["tau"] <= tail["T_data"]
+        xd, yd_ = pp["tau"][dm], pp["y"][dm]
+        slope = (ref.eval(xd + 0.05) - ref.eval(xd - 0.05)) / 0.1
+        var = pp["sg"][dm] ** 2 + (SIGMA_T_NS * slope) ** 2
+        if SHAPE_SIGMA > 0:
+            var = var + (SHAPE_SIGMA * ref.eval(xd)) ** 2
+        sgd = np.sqrt(var)
+        x = np.concatenate([xd, tail["tx"]])
+        y = np.concatenate([yd_, tail["ty"]])
+        w = np.concatenate([1.0 / sgd, np.full(tail["tx"].size, tail["w_pseudo"])])
+    else:
+        d = bs["x"] <= tail["T_data"]
+        x = np.concatenate([bs["x"][d], tail["tx"]])
+        y = np.concatenate([bs["y"][d], tail["ty"]])
+        w = np.concatenate([1.0 / bs["s"][d], np.full(tail["tx"].size, tail["w_pseudo"])])
     o = np.argsort(x, kind="stable")
     x, y, w = x[o], y[o], w[o]
     for scale in (1, 2, 4):
@@ -1336,27 +1940,65 @@ class PulseSet:
         self.n = self.Y.shape[0]
 
 
+def _rise_width(f):
+    """(10-90 % rise time, width of the region >= 0.99 of the peak), ns, of a
+    finalised shape f on T_GRID; linear interpolation walking outward from the
+    peak (NaN if a level is not crossed inside the grid)."""
+    ip = int(np.argmax(f))
+    pk = float(f[ip])
+
+    def cross(level, step):
+        j = ip
+        while 0 <= j + step < f.size and f[j] >= level:
+            j += step
+        if f[j] >= level:
+            return np.nan
+        k = j - step                      # the point nearer the peak (>= level)
+        return float(T_GRID[j] + (level - f[j]) / (f[k] - f[j]) * (T_GRID[k] - T_GRID[j]))
+
+    rise = cross(0.9 * pk, -1) - cross(0.1 * pk, -1)
+    width = cross(0.99 * pk, 1) - cross(0.99 * pk, -1)
+    return rise, width
+
+
 def build_shape(ps, ref0, *, seed_hw=3.0, later_hw=2.0, nit=N_IT,
-                drop_first=False, shift=True, rng=None):
+                drop_first=False, shift=True, rng=None, conv_tol=None,
+                max_it=MAX_IT, diag=False):
     """Alignment / pooling / spline iterations (plan 6.2 steps 2-6) for one set.
 
     Iteration 0 aligns against `ref0` (anything with .eval; the h50 two-tau for a
     module); every later iteration against the previous spline.  From iteration 1
     on (or 0 with drop_first) the worst DROP_FRAC of ALL pulses by chi2/dof
-    (sigma = rms, no model floor) are left out of the pool.  Returns None if the
-    spline fit fails, else a dict with the final template and diagnostics.
+    (sigma = rms, no model floor) are left out of the pool; from iteration
+    FREEZE_IT (3) on the pool is frozen to iteration 2's keep mask (and the
+    current alignment's ok), later iterations only realign it.  Returns None if
+    the spline fit fails, else a dict with the final template and diagnostics.
+
+    nit iterations are run; with conv_tol (ns) the loop then continues while not
+    converged and fewer than max_it iterations are done.  Converged (evaluated
+    for every iteration k >= FREEZE_IT against k - 1): median |t0 - t_seed| over
+    the pool < conv_tol, max |f_k - f_(k-1)| on T_GRID < CONV_DF and the median
+    chi2/dof not decreasing by more than CONV_CHI2 (fraction).  diag: also return
+    hist (one row per iteration: ITER_COLS) and converged.
     """
     n = ps.n
     ref = ref0
     t_seed = ps.seed
     hw = seed_hw
-    N, shifts, chi2_it = [], [], []
+    N, shifts, chi2_it, hist = [], [], [], []
     prev = None
-    for it in range(nit):
+    keep_frozen = None
+    f_prev = None
+    converged = False
+    it = 0
+    while True:
+        t_in = t_seed
         al = align_pulses(ps.Y, ps.sig, t_seed, ref, hw)
         ok = al["ok"]
         chi2_it.append(float(np.median(al["chi2dof"][ok])) if ok.any() else np.nan)
-        if it >= 1 or drop_first:
+        if keep_frozen is not None:
+            keep = keep_frozen & ok
+        elif it >= 1 or drop_first:
             nkeep = max(int(round((1.0 - DROP_FRAC) * n)), 1)
             order = np.argsort(np.where(ok, al["chi2dof"], np.inf), kind="stable")
             keep = np.zeros(n, dtype=bool)
@@ -1364,23 +2006,41 @@ def build_shape(ps, ref0, *, seed_hw=3.0, later_hw=2.0, nit=N_IT,
             keep &= ok
         else:
             keep = ok.copy()
+        if it == FREEZE_IT - 1:
+            keep_frozen = keep.copy()
         if keep.sum() < 5:
             return None
         pp = pool_points(ps.Y, ps.sig, al["t0"], al["A"], keep, ref)
         bs = bin_stats(pp, ref)
-        sp = fit_spline(bs, int(keep.sum()))
+        sp = fit_spline(bs, int(keep.sum()), pp, ref)
         if sp is None:
             return None
         fin = finalize_spline(sp["t"], sp["c"], shift=shift)
         N.append(int(keep.sum()))
         shifts.append(fin["t_on"])
+        if diag:
+            f = spline_values(fin["t"], fin["c"], T_GRID)
+            dt0 = (float(np.median(np.abs(al["t0"] - t_in)[keep])) if it >= 1
+                   else np.nan)
+            chg = float(np.max(np.abs(f - f_prev))) if it >= 1 else np.nan
+            hist.append((dt0, chi2_it[-1], chg, *_rise_width(f), int(keep.sum())))
+            f_prev = f
+            if it >= FREEZE_IT and conv_tol is not None:
+                c1, c2 = chi2_it[-2], chi2_it[-1]
+                converged = bool(dt0 < conv_tol and chg < CONV_DF
+                                 and (c1 - c2) / c1 <= CONV_CHI2)
         prev = dict(al=al, keep=keep, pp=pp, bs=bs, sp=sp, fin=fin)
         ref = LutShape.from_spline(fin["t"], fin["c"])
         t_seed = al["t0"] + fin["t_on"]       # t0 on the new (shifted) axis
         hw = later_hw
+        it += 1
+        if it >= nit and (conv_tol is None or converged or it >= max_it):
+            break
     # final (t0, A, chi2/dof) of ALL pulses against the final template
     q = align_pulses(ps.Y, ps.sig, t_seed, ref, 0.5)
     prev.update(N=N, shifts=shifts, chi2_it=chi2_it, final=q, ref=ref)
+    if diag:
+        prev.update(hist=np.array(hist, dtype=np.float64), converged=converged)
     return prev
 
 
@@ -1419,6 +2079,10 @@ def load_candidates(files, fields=BUILD_FIELDS):
             sys.exit(f"[ERROR] {f}: schema {meta.get('schema')} != {SCHEMA}")
         n = int(z["midx"].size)
         for k in fields:
+            if k not in z.files:
+                sys.exit(f"[ERROR] {f}: no `{k}` array (--pool-order energy needs "
+                         "candidate files from `select` with --per-module-best or "
+                         "--emax-frac, which store mf_energy)")
             out[k].append(z[k])
         runs.append(np.full(n, int(z["run"]), dtype=np.int64))
         splits.append(np.full(n, int(z["split"]), dtype=np.int64))
@@ -1480,10 +2144,95 @@ def _pad(rows, n):
     return out
 
 
+def build_lambda_select(ctx, ps, ref0, idx):
+    """--lambda-select heldout: build_shape for each LAM_GRID value >= LAM_MIN on the
+    same pool; the held-out pulses (ctx['hold']) of the module are aligned against each
+    final template (seed = mf_t0 + cumulative onset shift, +-3 ns) and the lambda with
+    the lowest mean chi2/dof over the pulses ok for every lambda is kept (chi2 with
+    sigma = rms; LAM_CHI2_SIGMA == "full": _chi2_full at the alignment's A, t0).
+    Fewer than LAM_MIN_HO held-out pulses: LAM_FALLBACK.  Leaves SMOOTH_LAMBDA = the
+    chosen value.  Returns (r, lam, flag, n_ho, ho_chi2[len(LAM_GRID)], NaN for the
+    values not tried); r is None if the build failed."""
+    global SMOOTH_LAMBDA
+    D = ctx["D"]
+    grid = tuple(x for x in LAM_GRID if x >= LAM_MIN)
+    hc = np.full(len(LAM_GRID), np.nan)
+    h = idx[ctx["hold"][idx]]
+    if h.size < LAM_MIN_HO:
+        SMOOTH_LAMBDA = LAM_FALLBACK
+        return build_shape(ps, ref0, **ctx["iter_kw"]), LAM_FALLBACK, 1, 0, hc
+    hs = PulseSet(D["samples"][h], D["ped"][h], D["rms"][h], D["mf_t0"][h])
+    rs, als = [], []
+    for lam in grid:
+        SMOOTH_LAMBDA = lam
+        r = build_shape(ps, ref0, **ctx["iter_kw"])
+        rs.append(r)
+        als.append(None if r is None else align_pulses(
+            hs.Y, hs.sig, hs.seed + float(np.sum(r["shifts"])), r["ref"], 3.0))
+    good = [i for i, al in enumerate(als) if al is not None]
+    if not good:
+        return None, np.nan, 1, 0, hc
+    ok = np.all([als[i]["ok"] for i in good], axis=0)
+    n_ho = int(ok.sum())
+    if n_ho == 0:                       # nothing comparable: fixed fallback
+        k = grid.index(LAM_FALLBACK) if LAM_FALLBACK in grid \
+            and rs[grid.index(LAM_FALLBACK)] is not None else good[0]
+        flag = 1
+    else:
+        hg = np.full(len(grid), np.nan)
+        for i in good:
+            c2 = als[i]["chi2dof"] if LAM_CHI2_SIGMA == "noise" else _chi2_full(
+                hs.Y, hs.sig, als[i]["t0"], als[i]["A"], rs[i]["ref"])
+            hg[i] = float(np.mean(c2[ok]))
+        k = int(np.argmin(np.where(np.isnan(hg), np.inf, hg)))
+        for i, x in enumerate(grid):
+            hc[LAM_GRID.index(x)] = hg[i]
+        flag = 0
+    SMOOTH_LAMBDA = grid[k]
+    return rs[k], grid[k], flag, n_ho, hc
+
+
+def _phase_strat(E, t0, n_max, nb=8):
+    """--pool-order energy-phase: indices of n_max candidates taken in descending E
+    with at most ceil(n_max/nb) per bin of the sub-sample phase t0 mod DT_NS (nb equal
+    bins); if the bins cannot supply n_max, the rest is filled by descending E.
+    Returned sorted."""
+    o = np.argsort(-E, kind="stable")
+    b = np.minimum((np.mod(t0[o], DT_NS) / (DT_NS / nb)).astype(np.int64), nb - 1)
+    cap = -(-n_max // nb)
+    rank = np.zeros(o.size, dtype=np.int64)          # running count within the bin
+    for k in range(nb):
+        m = b == k
+        rank[m] = np.arange(int(m.sum()))
+    take = o[rank < cap][:n_max]
+    if take.size < n_max:
+        take = np.concatenate([take, o[rank >= cap][:n_max - take.size]])
+    return np.sort(take)
+
+
+def _osc_count(f):
+    """--osc-escalate: number of spurious extrema (maxima + minima, prominence >=
+    OSC_PROM * peak, in OSC_WIN, farther than OSC_EXCL from the main peak) of the finalised
+    shape f on T_GRID; the main peak is the largest f in OSC_PEAK_WIN."""
+    from scipy.signal import find_peaks
+    f = np.asarray(f, dtype=np.float64)
+    mp = (T_GRID >= OSC_PEAK_WIN[0]) & (T_GRID <= OSC_PEAK_WIN[1])
+    ip = int(np.flatnonzero(mp)[np.argmax(f[mp])])
+    pk, t_pk = f[ip], T_GRID[ip]
+    w = np.flatnonzero((T_GRID >= OSC_WIN[0]) & (T_GRID <= OSC_WIN[1]))
+    n = 0
+    for sg in (f[w], -f[w]):
+        j = w[find_peaks(sg, prominence=OSC_PROM * pk)[0]]
+        n += int((np.abs(T_GRID[j] - t_pk) > OSC_EXCL).sum())
+    return n
+
+
 def process_module(ctx, midx, idx):
     """One PbWO4 module: the D4 chain, three iterations, amplitude bands.
     idx = candidate indices (into ctx['D']) of this module."""
+    global SMOOTH_LAMBDA
     D, a = ctx["D"], ctx["args"]
+    heldout = a.lambda_select == "heldout"
     amp, tier = D["amp"][idx], D["tier"][idx]
     held = ctx["hold"][idx]
     p0 = (~held) & (tier >= 1) & D["band_b0"][idx]
@@ -1498,18 +2247,51 @@ def process_module(ctx, midx, idx):
     ref0 = TwoTauShape(*ctx["tau"].get(name, ctx["tau_agg"]))
     res = dict(midx=midx, fallback=2, valid=1, n_cand=int(p1.sum()),
                band=(np.nan, np.nan), n_pool=0, N=(0, 0, 0), kept_gidx=None,
-               amp_b0=amp[p0].astype(np.float64))     # H of the f(A) r_mod waveforms
+               amp_b0=amp[p0].astype(np.float64),     # H of the f(A) r_mod waveforms
+               **(dict(lam=np.nan, lam_flag=2, n_ho=0, ho_chi2=np.full(len(LAM_GRID), np.nan))
+                  if heldout else {}),
+               **(dict(osc_n_before=-1, lam_final=np.nan, osc_escalated=0, osc_fallback=0)
+                  if a.osc_escalate else {}))
     for fb, mask, band in chain:
         pool = idx[mask]
         n_cand = int(pool.size)
         if pool.size > a.n_max:
-            pool = np.sort(rng.choice(pool, a.n_max, replace=False))
+            rnd = np.sort(rng.choice(pool, a.n_max, replace=False))
+            if a.pool_order == "energy":        # rng stream kept; top n_max by E
+                o = np.argsort(-D["mf_energy"][pool], kind="stable")
+                pool = np.sort(pool[o[:a.n_max]])
+            elif a.pool_order == "energy-phase":   # top by E, <= ceil(n_max/8) per phase bin
+                pool = pool[_phase_strat(D["mf_energy"][pool], D["mf_t0"][pool], a.n_max)]
+            else:
+                pool = rnd
         ps = PulseSet(D["samples"][pool], D["ped"][pool], D["rms"][pool],
                       D["mf_t0"][pool])
-        r = build_shape(ps, ref0)
+        if heldout:
+            r, lam, lam_flag, n_ho, ho_chi2 = build_lambda_select(ctx, ps, ref0, idx)
+        else:
+            r = build_shape(ps, ref0, **ctx["iter_kw"])
         if r is None:
             continue
+        if a.osc_escalate:                  # wiggles: lambda x10 and rebuild the same pool
+            n0 = n = _osc_count(spline_values(r["fin"]["t"], r["fin"]["c"], T_GRID))
+            steps = 0
+            while n > 0 and SMOOTH_LAMBDA < 1e4:
+                SMOOTH_LAMBDA = min(1e1 if SMOOTH_LAMBDA <= 0 else SMOOTH_LAMBDA * 10, 1e4)
+                r2 = build_shape(ps, ref0, **ctx["iter_kw"])
+                steps += 1
+                if r2 is None:
+                    break
+                r = r2
+                n = _osc_count(spline_values(r["fin"]["t"], r["fin"]["c"], T_GRID))
+            res.update(osc_n_before=n0, osc_escalated=steps)
+            if n > 0:                       # still wiggly: run-type average (fallback 2)
+                res["osc_fallback"] = 1
+                break
+            res["lam_final"] = SMOOTH_LAMBDA
         fin, bs, sp = r["fin"], r["bs"], r["sp"]
+        if len(r["N"]) > 3:                 # fixed-shape arrays: iterations 0, 1, last
+            r["N"] = [r["N"][i] for i in (0, 1, -1)]
+            r["chi2_it"] = [r["chi2_it"][i] for i in (0, 1, -1)]
         shape, err, resid, bx, brs, bsig, bn, by = _row_arrays(fin, bs, sp)
         keep = r["keep"] & r["final"]["ok"]
         tail = sp["tail"]
@@ -1521,6 +2303,8 @@ def process_module(ctx, midx, idx):
         res.update(
             n_p1ok=int(D["p1_shape_ok"][pool].sum()),
             fallback=fb, valid=1, band=band, n_cand=n_cand, n_pool=int(pool.size),
+            **(dict(lam=lam, lam_flag=lam_flag, n_ho=n_ho, ho_chi2=ho_chi2)
+               if heldout else {}),
             N=tuple(r["N"]), chi2=float(np.median(r["final"]["chi2dof"][keep])),
             shape=shape, err=err, resid=resid, t=fin["t"], c=fin["c"],
             shift=float(r["shifts"][-1]), shift0=float(r["shifts"][0]),
@@ -1534,7 +2318,11 @@ def process_module(ctx, midx, idx):
                  np.float32(r["pp"]["y"][sel] / fin["vmax"])),
             bins=(bx, by, bsig, bn, brs),
             kept_gidx=pool[keep], kept_t0=t0f[keep], ref=r["ref"],
-            cum_shift=float(np.sum(r["shifts"])), chi2_it=tuple(r["chi2_it"]))
+            cum_shift=float(np.sum(r["shifts"])), chi2_it=tuple(r["chi2_it"]),
+            **({} if "hist" not in r else dict(
+                iter_hist=r["hist"], n_iterations=r["hist"].shape[0],
+                converged=(-1 if ctx["iter_kw"]["conv_tol"] is None
+                           else int(r["converged"])))))
         # amplitude bands against the module's own final template
         cand = ~held & (tier >= 1)
         # lo / hi (G1-9) first, then the f(A) bands (default mid / top, or --bands):
@@ -1559,6 +2347,8 @@ def process_module(ctx, midx, idx):
             res["spl_" + key] = (br["fin"]["t"], br["fin"]["c"])
             res["amp_" + key] = D["amp"][bp]
         break
+    if heldout or a.osc_escalate:
+        SMOOTH_LAMBDA = float(a.smooth_lambda)      # the run-type average uses --smooth-lambda
     return res
 
 
@@ -1623,7 +2413,7 @@ def write_root(path, ctx, rows, avg_fn, meta_json):
             cols["peak_sample"][i] = ROOT_ONSET_BIN + int(round(r["t_pk"] / ROOT_DT_BIN))
             cols["onset_bin"][i] = ROOT_ONSET_BIN
             cols["fallback"][i] = r["fallback"]
-            cols["n_iter"][i] = 3 if r["fallback"] < 2 else 0
+            cols["n_iter"][i] = r.get("n_iterations", 3) if r["fallback"] < 2 else 0
             cols["band_lo"][i], cols["band_hi"][i] = r["band"]
             cols["chi2_ndf"][i] = r.get("chi2", np.nan)     # median of the kept 80 % of pulses
             cols["t_pk_ns"][i] = r["t_pk"]
@@ -1640,7 +2430,7 @@ def write_root(path, ctx, rows, avg_fn, meta_json):
           flush=True)
 
 
-def write_tsv(path, rows, cutflow_names, fa_keys=None):
+def write_tsv(path, rows, cutflow_names, fa_keys=None, lam=False, osc=False):
     """fa_keys (--bands): the n_mid / n_top / r_lo / r_mid / r_top columns are
     replaced by n_<band> / r_<band> columns of the generalised f(A) bands."""
     leg = fa_keys is None
@@ -1653,7 +2443,10 @@ def write_tsv(path, rows, cutflow_names, fa_keys=None):
         + ["lohi_maxdiff", "lohi_iint_ratio", "iint_phase_pp"] \
         + (["r_lo", "r_mid", "r_top"] if leg else []) + ["r_mod"] \
         + ([] if leg else ["n_" + k for k in fa_keys] + ["r_" + k for k in fa_keys]) \
-        + ["n_p1ok"] + ["cf_" + c for c in cutflow_names[:N_SEQ]]
+        + ["n_p1ok"] + ["cf_" + c for c in cutflow_names[:N_SEQ]] \
+        + (["lam", "lam_flag", "n_ho"] + ["ho_chi2_l" + ("0" if x == 0 else f"1e{round(math.log10(x))}") for x in LAM_GRID]
+           if lam else []) \
+        + (["osc_n_before", "lam_final", "osc_escalated", "osc_fallback"] if osc else [])
 
     def fmt(v):
         if isinstance(v, (float, np.floating)):
@@ -1679,7 +2472,10 @@ def write_tsv(path, rows, cutflow_names, fa_keys=None):
                  *([] if leg else [r.get("n_" + k, 0) for k in fa_keys]
                    + [r.get("r_" + k, np.nan) for k in fa_keys]),
                  r.get("n_p1ok", -1),
-                 *[int(x) for x in r["cutflow"][:N_SEQ]]]
+                 *[int(x) for x in r["cutflow"][:N_SEQ]],
+                 *([r["lam"], r["lam_flag"], r["n_ho"], *r["ho_chi2"]] if lam else []),
+                 *([r["osc_n_before"], r["lam_final"], r["osc_escalated"], r["osc_fallback"]]
+                   if osc else [])]
             fh.write("\t".join(fmt(x) for x in v) + "\n")
 
 
@@ -1717,7 +2513,8 @@ class _Pages:
         h50 = TwoTauShape(*ctx["tau"].get(name, ctx["tau_agg"]))
         fb = r["fallback"]
         fig.suptitle(f"{name}  (module id {r['module_id']})   fallback {fb}: "
-                     f"{RELAX_TIER_RULE[fb]}   run type {ctx['run_type']}",
+                     f"{(SINGLE_TIER_RULE if ctx.get('single') else RELAX_TIER_RULE)[fb]}"
+                     f"   run type {ctx['run_type']}",
                      fontsize=11)
         if r.get("pts") is not None:
             px, py = r["pts"]
@@ -1866,11 +2663,20 @@ def cover_pages(pdf, ctx, rows, avg, avg_rule, n_avg, args):
     txt = [f"Run type {ctx['run_type']}",
            f"runs {sorted(set(int(x) for x in ctx['D']['run']))}",
            f"{len(ctx['files'])} candidate files, {ctx['D']['midx'].size} candidates",
-           f"held out for check: {int(ctx['hold'].sum())} "
-           f"({100 * ctx['hold'].mean():.1f} %, hash seed {args.seed})",
+           ("single-pulse reference per module (Wassim eq. 18): no hold-out"
+            if ctx.get("single") else
+            f"held out for check: {int(ctx['hold'].sum())} "
+            f"({100 * ctx['hold'].mean():.1f} %, hash seed {args.seed})"
+            if args.pool_order == "random" else
+            f"held out for check: {int(ctx['hold'].sum())} "
+            f"({100 * ctx['hold'].mean():.1f} %; energy rule, next "
+            f"{ctx['n_hold']} per module after the top "
+            f"{args.n_max})"),
            "", f"modules (PbWO4 rows): {len(rows)}",
-           f"  fallback 0 (tier>=1, b0, >= {args.n_min}): {nfb[0]}",
-           f"  fallback 1 (tier>=1, [100,2500], >= {args.n_min_relaxed}): {nfb[1]}",
+           (f"  fallback 0 (single reference, tier 2): {nfb[0]}" if ctx.get("single") else
+            f"  fallback 0 (tier>=1, b0, >= {args.n_min}): {nfb[0]}"),
+           (f"  fallback 1 (single reference, tier 1): {nfb[1]}" if ctx.get("single") else
+            f"  fallback 1 (tier>=1, [100,2500], >= {args.n_min_relaxed}): {nfb[1]}"),
            f"  fallback 2 (run-type average): {nfb[2]}", "",
            f"pool N (candidates), fb 0: median "
            f"{np.median(ncand[fb == 0]) if nfb[0] else float('nan'):.0f}",
@@ -1970,24 +2776,101 @@ def write_pngs(png_dir, ctx, rows, want, cover_args=None):
 
 
 # ---------------------------------------------------------------- command ----
+def _iter_kw(a):
+    """build_shape kwargs of the module templates: {} for the default
+    (3 iterations, no convergence test), else the --iterations options."""
+    if a.iterations == N_IT and a.converge_tol is None:
+        return {}
+    return dict(nit=a.iterations, conv_tol=a.converge_tol, max_it=a.max_iterations,
+                diag=True)
+
+
+def _print_iter_log(ctx, results):
+    """Per-iteration diagnostics of the module templates (non-default
+    --iterations / --converge-tol only)."""
+    a, kw = ctx["args"], ctx["iter_kw"]
+    res = [r for r in results if "iter_hist" in r]
+    if not res:
+        return
+    if a.modules:
+        for r in res:
+            for k, h in enumerate(r["iter_hist"]):
+                print(f"  [iter] {ctx['names'][r['midx']]} it {k}: dt0_med {h[0]:.4f} ns  "
+                      f"chi2/dof {h[1]:.3f}  max|df| {h[2]:.2e}  rise10-90 {h[3]:.3f} ns  "
+                      f"width>=0.99 {h[4]:.3f} ns  N {int(h[5])}"
+                      + (f"  converged {r['converged']}" if k == r["iter_hist"].shape[0] - 1
+                         else ""), flush=True)
+    m = max(r["iter_hist"].shape[0] for r in res)
+    print(f"[iter] module templates: --iterations {a.iterations}"
+          + ("" if a.converge_tol is None else
+             f" --converge-tol {a.converge_tol:g} ns --max-iterations {a.max_iterations}")
+          + f"; {len(res)} modules; medians over the modules that reached each iteration",
+          flush=True)
+    print("[iter]  it  n_mod  " + "  ".join(f"{c:>13s}" for c in ITER_COLS), flush=True)
+    for k in range(m):
+        H = np.array([r["iter_hist"][k] for r in res if r["iter_hist"].shape[0] > k])
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)       # all-NaN column
+            med = np.nanmedian(H, axis=0) if np.isfinite(H).any() else np.full(6, np.nan)
+        print(f"[iter] {k:3d}  {H.shape[0]:5d}  " + "  ".join(f"{v:13.5g}" for v in med),
+              flush=True)
+    if a.converge_tol is not None:
+        cv = np.array([r["converged"] for r in res])
+        ni = np.array([r["iter_hist"].shape[0] for r in res])
+        print(f"[iter] converged {int((cv == 1).sum())}/{len(res)}; stopped at "
+              f"--max-iterations {a.max_iterations} without converging "
+              f"{int(((cv == 0) & (ni >= a.max_iterations)).sum())}; iterations run "
+              f"min/median/max {ni.min()}/{np.median(ni):.0f}/{ni.max()}", flush=True)
+
+
 def cmd_build(a):
-    global SMOOTH_LAMBDA
+    global SMOOTH_LAMBDA, FIT_POINTS, CONV_DF, SHAPE_SIGMA, LAM_CHI2_SIGMA, LAM_MIN, LAM_FALLBACK
+    if a.single_pulse:
+        return cmd_build_single(a)
     import _common as C
     import mf_pulse
     SMOOTH_LAMBDA = float(a.smooth_lambda)       # read by fit_spline and recorded in the meta
+    FIT_POINTS = a.fit_points                    # read by fit_spline
+    CONV_DF = float(a.converge_df)               # read by build_shape, recorded in the meta
+    SHAPE_SIGMA = float(a.shape_sigma)           # read by fit_spline (direct points)
+    LAM_CHI2_SIGMA = a.lambda_chi2_sigma         # read by build_lambda_select
+    LAM_MIN = float(a.lambda_min)                # read by build_lambda_select
+    LAM_FALLBACK = float(a.lambda_fallback)      # read by build_lambda_select, recorded in the meta
+    if a.iterations < FREEZE_IT or a.max_iterations < FREEZE_IT:
+        sys.exit(f"[ERROR] --iterations and --max-iterations must be >= {FREEZE_IT}")
+    if a.converge_tol is not None and not a.converge_tol > 0:
+        sys.exit("[ERROR] --converge-tol must be > 0")
+    if not a.converge_df > 0:
+        sys.exit("[ERROR] --converge-df must be > 0")
+    if SHAPE_SIGMA < 0:
+        sys.exit("[ERROR] --shape-sigma must be >= 0")
+    if not any(x >= LAM_MIN for x in LAM_GRID):
+        sys.exit(f"[ERROR] --lambda-min {LAM_MIN:g} leaves no value of {list(LAM_GRID)}")
     t_start = time.monotonic()
     files = sorted({f for pat in a.pulses.split(",") for f in glob.glob(pat.strip())})
     if not files:
         sys.exit(f"[ERROR] no files match {a.pulses}")
     stem = Path(a.out)
     stem.parent.mkdir(parents=True, exist_ok=True)
-    D = load_candidates(files)
+    energy_pool = a.pool_order in ("energy", "energy-phase")
+    D = load_candidates(files, BUILD_FIELDS + ("mf_energy",) if energy_pool
+                        else BUILD_FIELDS)
     wave = _wave_ctx(D["metas"])
     runs = sorted(set(int(x) for x in D["run"]))
     print(f"[load] {len(files)} files, runs {runs}, {D['midx'].size} candidates "
           f"({time.monotonic() - t_start:.1f} s)", flush=True)
-    hold = holdout_mask(D["run"], D["split"], D["event_number"], D["midx"],
-                        seed=a.seed, frac=a.holdout_frac)
+    if energy_pool:
+        hold, n_hold = holdout_energy(D, a.n_max, a.holdout_frac)
+        print(f"[pool] --pool-order {a.pool_order}: fit pool = top {a.n_max} by mf_energy "
+              + ("(<= ceil(n_max/8) per 0.5 ns phase bin of mf_t0) " if a.pool_order == "energy-phase" else "")
+              + 
+              f"per module; held out for check = the next {n_hold} per module "
+              f"(tier>=1, band b0, finite mf_energy): {int(hold.sum())} candidates",
+              flush=True)
+    else:
+        n_hold = None
+        hold = holdout_mask(D["run"], D["split"], D["event_number"], D["midx"],
+                            seed=a.seed, frac=a.holdout_frac)
 
     p = C.setup_pipeline(evio_path="", run_num=runs[0])
     mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
@@ -2015,7 +2898,7 @@ def cmd_build(a):
     ys = [y - sy / 2 for x, y, sx, sy in allg] + [y + sy / 2 for x, y, sx, sy in allg]
     pm = np.array(pwo4)
     cutflow_tot = D["cutflow"][pm].sum(axis=0)
-    ctx = dict(D=D, args=a, hold=hold, names=names, tau=tau_rows, tau_agg=tau_agg,
+    ctx = dict(D=D, args=a, iter_kw=_iter_kw(a), hold=hold, n_hold=n_hold, names=names, tau=tau_rows, tau_agg=tau_agg,
                band_edges=a.bands,
                fa_bands=FA_BANDS_DEFAULT if a.bands is None else fa_bands_from_edges(a.bands),
                wave=wave, run_type=a.run_type, files=files,
@@ -2037,6 +2920,20 @@ def cmd_build(a):
             print(f"  [modules] {k + 1}/{len(rows_idx)}  fallback {nf.tolist()}  "
                   f"{time.monotonic() - t_mod:.0f} s", flush=True)
 
+    if ctx["iter_kw"]:
+        _print_iter_log(ctx, results)
+    if a.lambda_select == "heldout":
+        lam = np.array([r["lam"] for r in results])
+        fl = np.bincount([r["lam_flag"] for r in results], minlength=3)
+        print("[lambda] heldout: modules per lambda " + "  ".join(
+            f"{x:g}:{int((lam == x).sum())}" for x in sorted(set(LAM_GRID) | {LAM_FALLBACK}))
+            + f";  flag 0/1/2 = {fl[0]}/{fl[1]}/{fl[2]}", flush=True)
+    if a.osc_escalate:
+        ev = [r for r in results if r["osc_n_before"] > 0]
+        st = np.bincount([r["osc_escalated"] for r in ev], minlength=5)
+        print(f"[osc] escalate: modules flagged before {len(ev)}; escalated by 1/2/3 steps "
+              f"{st[1]}/{st[2]}/{st[3]}" + (f" (4 steps {st[4]})" if st[4:].sum() else "")
+              + f"; osc_fallback {sum(r['osc_fallback'] for r in results)}", flush=True)
     t_avg = time.monotonic()
     av, avg_rule, n_avg = run_average(ctx, results)
     if av is None:
@@ -2092,6 +2989,355 @@ def cmd_build(a):
     return finish_build(ctx)
 
 
+# ------------------------------------------- build --single-pulse (Wassim ref) --
+# One best valid PASS 1 candidate per module (over all input files, the macro's
+# betterCandidate order) -> its reference R(k) = (W(k) - bg_mean) / max_k(W - bg_mean)
+# (Wassim eq. 18, 100 samples at 4 ns) as a not-a-knot cubic INTERPOLATING spline (the
+# TSpline3 analogue; no smoothing, no pooling, no alignment iterations), in the bank
+# format.  The exponential tail extension exists only because the bank needs T_END.
+SINGLE_TIER_RULE = {0: "single best valid_p1 candidate, tier 2 (strict bg)",
+                    1: "single best valid_p1 candidate, tier 1 (loose bg)",
+                    2: "run-type average"}
+SINGLE_FIELDS = ("event_number", "midx", "samples", "ped", "rms", "amp", "tier",
+                 "peak_sample", "first_thr", "bg_mean", "bg_rms", "bg_maxabs",
+                 "roughness")
+SINGLE_AVG_STEP = 5                     # run-type average: T_GRID every 0.5 ns
+
+
+def _best_wassim(D):
+    """{module index: row of D} of the best candidate over ALL rows (all files in
+    order), the macro's betterCandidate order: tier desc, amp desc, roughness asc,
+    bg_rms asc; exact ties go to the first row (strict comparisons)."""
+    n = int(D["midx"].size)
+    if n == 0:
+        return {}
+    o = np.lexsort((np.arange(n), D["bg_rms"], D["roughness"], -D["amp"],
+                    -D["tier"].astype(np.int64), D["midx"]))
+    ms = D["midx"][o]
+    first = np.concatenate([[True], ms[1:] != ms[:-1]])
+    return {int(D["midx"][i]): int(i) for i in o[first]}
+
+
+def _interp_spline(x, y):
+    """Natural cubic interpolating spline (knots / coefficients of the BSpline)."""
+    from scipy.interpolate import make_interp_spline
+    s = make_interp_spline(np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.float64),
+                           k=3, bc_type="not-a-knot")
+    return s.t, s.c
+
+
+def wassim_template(samples, ped, bg_mean, bg_rms, ref0):
+    """Bank-format template of one reference pulse.  Returns a dict with the final
+    spline (fin: t, c; unit spline peak, onset at 0), the onset / normalisation
+    bookkeeping, the tail extension and `shift` = onset on the template axis minus the
+    onset of a two-tau (`ref0`) fit to the pulse (what `check` adds to the h50-axis
+    mf_t0)."""
+    W = samples.astype(np.float64) - ped
+    R = W - bg_mean
+    R = R / float(R.max())                              # eq. 18
+    ip = int(np.argmax(R))
+    below = np.flatnonzero(R[:ip] <= ONSET_FRAC)
+    t_est = float(TS[0])
+    if below.size:
+        j = int(below[-1])
+        fr = (ONSET_FRAC - R[j]) / (R[j + 1] - R[j]) if R[j + 1] > R[j] else 0.0
+        t_est = float(TS[j] + DT_NS * fr)
+    x0 = TS - t_est                                     # onset near 0 (finalize_spline window)
+    f0 = finalize_spline(*_interp_spline(x0, R), shift=True)    # onset of the data spline
+    x1 = x0 - f0["t_on"]
+    y1 = R / f0["vmax"]                                 # unit spline peak
+    tail = tail_extension(dict(x=x1, y=y1, s=np.ones(x1.size),
+                               n=np.full(x1.size, TAIL_BIN_MIN_PTS)))
+    t, c = _interp_spline(np.concatenate([x1, tail["tx"]]),
+                          np.concatenate([y1, tail["ty"]]))
+    fin = finalize_spline(t, c, shift=True)
+    t_on_ro = t_est + f0["t_on"] + fin["t_on"]          # onset (readout time) on the final axis
+    al = align_pulses((W - bg_mean)[None, :], np.array([max(bg_rms, SIG_MIN)]),
+                      np.array([t_on_ro]), ref0, 16.0)
+    shift = float(t_on_ro - al["t0"][0]) if al["ok"][0] else float("nan")
+    return dict(fin=fin, tail=tail, x=x1 - fin["t_on"], y=y1 / fin["vmax"],
+                t_on0=float(f0["t_on"]), t_on1=float(fin["t_on"]),
+                peak_over_sample=float(f0["vmax"] * fin["vmax"]), shift=shift,
+                t_on_ro=float(t_on_ro))
+
+
+def finalize_integrals_single(ctx):
+    """iint_wa / iint_phase_pp of every row from one in-memory SampledTemplateBank
+    (bank_integrals); no f(A), no bands."""
+    rows = ctx["rows"]
+    t0 = time.monotonic()
+    shapes, own = [], {}
+    for r in rows:
+        if r["fallback"] < 2:
+            own[r["midx"]] = len(shapes)
+            shapes.append((r["t"], r["c"]))
+    avg_i = len(shapes)
+    shapes.append((ctx["avg_fin"]["t"], ctx["avg_fin"]["c"]))
+    I, pp = bank_integrals(shapes, ctx["wave"])
+    for r in rows:
+        k = own.get(r["midx"], avg_i)
+        r["iint_wa"], r["iint_pp"] = float(I[k]), float(pp[k])
+    ctx["avg_der"]["iint_wa"] = float(I[avg_i])
+    ctx["ampcorr"] = dict(rule="none: single-pulse reference bank (f = 1)", scope="none",
+                          run_type=ctx["run_type"], n_modules=0, knots={}, f=None,
+                          logA=None, per_run_type=None)
+    n_own = len(own)
+    ctx["p1ok"] = dict(n_pool=n_own, n_ok=n_own)
+    print(f"[integrals] {len(shapes)} shapes through one in-memory bank "
+          f"({time.monotonic() - t0:.0f} s); phase p-p median "
+          f"{100 * np.median([r['iint_pp'] for r in rows]):.2f} %, max "
+          f"{100 * max(r['iint_pp'] for r in rows):.2f} %", flush=True)
+
+
+def write_tsv_single(path, rows, cutflow_names):
+    cols = ["name", "module_id", "module_index", "fallback", "valid", "tier_rule",
+            "n_cand", "run", "split", "event_number", "amp", "tier", "peak_sample",
+            "first_thr", "roughness", "bg_rms", "bg_mean", "bg_maxabs",
+            "spline_peak_over_sample", "t_pk", "t50", "iint_wa", "iint_phase_pp", "area",
+            "onset_shift_ns", "T_data", "tau_slow", "tau_used"] \
+        + ["cf_" + c for c in cutflow_names]
+    nan = np.nan
+
+    def fmt(v):
+        if isinstance(v, (float, np.floating)):
+            return "nan" if not np.isfinite(v) else f"{v:.6g}"
+        return str(v)
+
+    with open(path, "w") as fh:
+        fh.write("\t".join(cols) + "\n")
+        for r in rows:
+            c = r.get("cand")
+            cv = ((c["run"], c["split"], c["event_number"], c["amp"], c["tier"],
+                   c["peak_sample"], c["first_thr"], c["roughness"], c["bg_rms"],
+                   c["bg_mean"], c["bg_maxabs"]) if c else
+                  (-1, -1, -1, nan, -1, -1, -1, nan, nan, nan, nan))
+            v = [r["name"], r["module_id"], r["midx"], r["fallback"], r["valid"],
+                 SINGLE_TIER_RULE[r["fallback"]], r["n_cand"], *cv,
+                 r.get("peak_over_sample", nan), r["t_pk"], r["t50"], r["iint_wa"],
+                 r["iint_pp"], r["area"], r["cum_shift"], r["T_data"], r["tau_slow"],
+                 r["tau_used"], *[int(x) for x in r["cutflow"]]]
+            fh.write("\t".join(fmt(x) for x in v) + "\n")
+
+
+def _meta_json_single(ctx):
+    """_meta_json with the rules that do not apply replaced."""
+    m = json.loads(_meta_json(ctx))
+    m["mode"] = "single_pulse_wassim"
+    m["cuts"]["build"]["single_pulse"] = True
+    m["amplitude_def"] = ("none fitted: R(k) = (W(k) - bg_mean) / max_k(W(k) - bg_mean) of "
+                          "the module's reference candidate, W = samples - WaveAnalyzer ped")
+    m["pedestal_def"] = ("WaveAnalyzer pedestal (select); bg_mean = mean of the 20 samples "
+                         "before first_thr (select, stored)")
+    m["single_pulse"] = dict(
+        reference="Waveform_Wassim/best_ref_shape_fit.C, Hycal_prad_wf_analysis.pdf section "
+                  "4, eq. 18",
+        selection="per module the best valid_p1 candidate over all input files in the "
+                  "macro's betterCandidate order (tier desc, amp desc, roughness asc, "
+                  "bg_rms asc; ties: first file / first row)",
+        template="not-a-knot cubic interpolating spline (scipy make_interp_spline, "
+                 "bc_type not-a-knot, as TSpline3 with no end conditions) through R(k) at t = 4k ns, k = 0..99; "
+                 "no smoothing, no averaging, no alignment iterations, no pool",
+        bank_axis="the data spline is shifted so its 0.5 % onset is at 0 and divided by "
+                  "its fine-grid (0.01 ns) maximum (finalize_spline): the bank's unit peak "
+                  "is the SPLINE maximum, not the maximum sample; peak_over_sample = spline "
+                  "maximum / maximum sample (>= 1, overshoot between samples) is in "
+                  "summary.tsv (spline_peak_over_sample)",
+        tail_extension="the readout ends ~250 ns after the onset; a*exp(-t/tau) fitted "
+                       "(tail_extension, unweighted) on the samples in [140 ns after onset, "
+                       "T_data] and added as pseudo-points every 4 ns up to 416 ns, only "
+                       "because the bank format needs T_END = 400 ns; the spline stays "
+                       "interpolating through them",
+        onset_shift_ns="onset of the template axis minus the onset of a two-tau (h50) fit "
+                       "to the reference pulse (align_pulses, +-8 ns): check seeds "
+                       "t0 = mf_t0 (h50 axis) + onset_shift_ns",
+        average="run-type average (fallback 2): " + ctx["avg_rule"],
+        no_ampcorr="no f(A): the npz has no ampcorr_* keys (mf_pulse uses f = 1)",
+        n_modules_with_reference=int(sum(r["fallback"] < 2 for r in ctx["rows"])),
+        n_tier2=int(sum(r["fallback"] == 0 for r in ctx["rows"])))
+    m["fallback_rule"] = ("fallback 0: own single reference, tier 2; fallback 1: own single "
+                          "reference, tier 1; fallback 2: module without any valid candidate "
+                          "-> run-type average (valid stays 1, as in the normal build)")
+    m["holdout_rule"] = ("none: the bank is one candidate per module; check's holdout_mask "
+                         "(seed, frac) applies to the candidate files given to check")
+    for k in ("smoothing_rule", "iteration_rule", "band_rule", "tail_rule",
+              "fit_points_rule"):
+        m.pop(k, None)
+    m["average_rule"] = ctx["avg_rule"]
+    return json.dumps(m)
+
+
+def cmd_build_single(a):
+    import _common as C
+    import mf_pulse
+    bad = [n for n, on in (
+        ("--pool-order", a.pool_order != "random"),
+        ("--lambda-select", a.lambda_select != "fixed"), ("--osc-escalate", a.osc_escalate),
+        ("--bands", a.bands is not None), ("--converge-tol", a.converge_tol is not None),
+        ("--iterations", a.iterations != N_IT), ("--fit-points", a.fit_points != "bins"),
+        ("--max-iterations", a.max_iterations != MAX_IT)) if on]
+    if bad:
+        sys.exit(f"[ERROR] build --single-pulse cannot be combined with {', '.join(bad)}")
+    t_start = time.monotonic()
+    files = sorted({f for pat in a.pulses.split(",") for f in glob.glob(pat.strip())})
+    if not files:
+        sys.exit(f"[ERROR] no files match {a.pulses}")
+    for f in files:
+        m0 = json.loads(str(np.load(f, allow_pickle=False)["meta"]))
+        if m0.get("mode") != "wassim_ref":
+            sys.exit(f"[ERROR] {f}: mode {m0.get('mode')!r} != 'wassim_ref' (build "
+                     "--single-pulse needs `select --wassim-ref` files)")
+    stem = Path(a.out)
+    stem.parent.mkdir(parents=True, exist_ok=True)
+    D = load_candidates(files, SINGLE_FIELDS)
+    wave = _wave_ctx(D["metas"])
+    runs = sorted(set(int(x) for x in D["run"]))
+    print(f"[load] {len(files)} files, runs {runs}, {D['midx'].size} reference "
+          f"candidates ({time.monotonic() - t_start:.1f} s)", flush=True)
+
+    p = C.setup_pipeline(evio_path="", run_num=runs[0])
+    mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
+    names = [m.name for m in mods]
+    pwo4 = [bool(m.is_pwo4()) for m in mods]
+    rows_idx = [i for i, f in enumerate(pwo4) if f]
+    if a.modules:
+        want = set(s.strip() for s in a.modules.split(","))
+        rows_idx = [i for i in rows_idx if names[i] in want]
+    h50 = Path(a.h50)
+    if not h50.is_absolute():
+        h50 = HERE / h50
+    column = mf_pulse.resolve_column(str(h50), "auto", prefer="25320")
+    tau_rows, h50_sha1, agg_json = mf_pulse.load_h50(str(h50), column)
+    tau_agg = mf_pulse.load_aggregate(agg_json)
+    print(f"[setup] h50 {h50.name} column {column} (onset_shift_ns reference only)",
+          flush=True)
+
+    glass = [(m.x, m.y, m.size_x, m.size_y) for m in mods
+             if m.is_hycal() and not m.is_pwo4()]
+    geo_rows = [(mods[i].x, mods[i].y, mods[i].size_x, mods[i].size_y) for i in rows_idx]
+    allg = glass + geo_rows
+    xs = [x - sx / 2 for x, y, sx, sy in allg] + [x + sx / 2 for x, y, sx, sy in allg]
+    ys = [y - sy / 2 for x, y, sx, sy in allg] + [y + sy / 2 for x, y, sx, sy in allg]
+    pm = np.array(pwo4)
+    ctx = dict(D=D, args=a, iter_kw={}, hold=np.zeros(D["midx"].size, dtype=bool),
+               n_hold=None, names=names, tau=tau_rows, tau_agg=tau_agg, band_edges=None,
+               fa_bands=FA_BANDS_DEFAULT, wave=wave, run_type=a.run_type, files=files,
+               cutflow_names=D["cutflow_names"], cutflow_tot=D["cutflow"][pm].sum(axis=0),
+               single=True,
+               geom=dict(glass=glass, rows=geo_rows, xlim=(min(xs), max(xs)),
+                         ylim=(min(ys), max(ys))))
+
+    best = _best_wassim(D)
+    n_per_mod = np.bincount(D["midx"], minlength=len(mods))
+    nan_row = np.full(T_GRID.size, np.nan, dtype=np.float32)
+    results = []
+    for mi in rows_idx:
+        res = dict(midx=mi, fallback=2, valid=1, n_cand=0, band=(np.nan, np.nan),
+                   n_pool=0, N=(0, 0, 0), cand=None)
+        g = best.get(mi)
+        if g is not None:
+            ref0 = TwoTauShape(*tau_rows.get(names[mi], tau_agg))
+            w = wassim_template(D["samples"][g], float(D["ped"][g]), float(D["bg_mean"][g]),
+                                float(D["bg_rms"][g]), ref0)
+            fin, tail = w["fin"], w["tail"]
+            d = derived_from_spline(fin["t"], fin["c"], wave, with_iint=False)
+            amp = float(D["amp"][g])
+            bx, by = w["x"], w["y"]
+            bsg = np.full(bx.size, max(float(D["bg_rms"][g]), SIG_MIN) / amp
+                          / w["peak_over_sample"])
+            brs = by - spline_values(fin["t"], fin["c"], bx)
+            res.update(
+                fallback=0 if int(D["tier"][g]) == 2 else 1, n_cand=int(n_per_mod[mi]),
+                band=(amp, amp), n_pool=1, N=(1, 1, 1),
+                cand=dict(run=int(D["run"][g]), split=int(D["split"][g]),
+                          event_number=int(D["event_number"][g]), amp=amp,
+                          tier=int(D["tier"][g]), peak_sample=int(D["peak_sample"][g]),
+                          first_thr=int(D["first_thr"][g]),
+                          roughness=float(D["roughness"][g]), bg_rms=float(D["bg_rms"][g]),
+                          bg_mean=float(D["bg_mean"][g]),
+                          bg_maxabs=float(D["bg_maxabs"][g])),
+                shape=spline_values(fin["t"], fin["c"], T_GRID).astype(np.float32),
+                err=nan_row, resid=nan_row, t=fin["t"], c=fin["c"], shift=w["t_on1"],
+                shift0=w["t_on0"], cum_shift=w["shift"], vmax=fin["vmax"],
+                peak_over_sample=w["peak_over_sample"], T_data=tail["T_data"],
+                tau_slow=tail["tau_slow"], a_slow=tail["a_slow"],
+                tau_used=tail["tau_used"], a_used=tail["a_used"], knot_scale=0,
+                n_knots=int(fin["t"].size), n_iterations=0, **d,
+                pts=(np.float32(bx), np.float32(by)),
+                bins=(bx, by, bsg, np.ones(bx.size), brs))
+            res["rms_pre"] = float(np.sqrt(np.mean(by[bx < -2.0] ** 2))) \
+                if (bx < -2.0).any() else np.nan
+        results.append(res)
+    own_rows = [r for r in results if r["fallback"] < 2]
+    if not own_rows:
+        sys.exit("[ERROR] no module with a reference candidate: cannot build the "
+                 "run-type average")
+    sh = np.array([r["cum_shift"] for r in own_rows])
+    sh_med = float(np.median(sh[np.isfinite(sh)])) if np.isfinite(sh).any() else 0.0
+    for r in own_rows:
+        if not np.isfinite(r["cum_shift"]):
+            r["cum_shift"] = sh_med                 # two-tau fit failed: median shift
+    n_t2 = sum(r["fallback"] == 0 for r in results)
+    print(f"[single] {len(own_rows)}/{len(results)} modules with a reference "
+          f"({n_t2} tier 2, {len(own_rows) - n_t2} tier 1), "
+          f"{len(results) - len(own_rows)} without (run-type average); two-tau fit "
+          f"failed for {int((~np.isfinite(sh)).sum())}; onset_shift_ns median "
+          f"{sh_med:.2f} ns; spline peak / max sample median "
+          f"{np.median([r['peak_over_sample'] for r in own_rows]):.4f}, max "
+          f"{max(r['peak_over_sample'] for r in own_rows):.4f}", flush=True)
+
+    # run-type average: per-sample median of the own shapes (exponential beyond 400 ns)
+    tau_av = float(np.median([r["tau_used"] for r in own_rows]))
+    shp = np.nanmedian(np.stack([r["shape"] for r in own_rows]).astype(np.float64), axis=0)
+    xa = T_GRID[::SINGLE_AVG_STEP]
+    ya = np.nan_to_num(shp[::SINGLE_AVG_STEP])
+    xe = np.arange(xa[-1] + 0.5, T_AXIS_END + 1e-9, 0.5)
+    avg_fin = finalize_spline(*_interp_spline(
+        np.concatenate([xa, xe]),
+        np.concatenate([ya, ya[-1] * np.exp(-(xe - xa[-1]) / tau_av)])), shift=True)
+    avg_der = derived_from_spline(avg_fin["t"], avg_fin["c"], wave, with_iint=False)
+    avg_shape = spline_values(avg_fin["t"], avg_fin["c"], T_GRID).astype(np.float32)
+    avg_tail = dict(T_data=float(np.median([r["T_data"] for r in own_rows])),
+                    tau_slow=float(np.nanmedian([r["tau_slow"] for r in own_rows])),
+                    a_slow=float(np.nanmedian([r["a_slow"] for r in own_rows])),
+                    tau_used=tau_av,
+                    a_used=float(np.median([r["a_used"] for r in own_rows])))
+    avg_rule = ("per-sample median of the own modules' single-pulse shapes (T_GRID every "
+                "0.5 ns, exponential tail beyond 400 ns), not-a-knot cubic interpolating "
+                "spline, re-finalised to unit peak / onset 0")
+    av = dict(sp=dict(tail=avg_tail), N=(0,), shifts=[avg_fin["t_on"]],
+              final=dict(chi2dof=np.array([np.nan])), fin=avg_fin)
+    avg_t, avg_c = avg_fin["t"], avg_fin["c"]
+    ctx["avg_shape_fn"] = (lambda tt: np.where(
+        (tt > 0) & (tt < T_END),
+        spline_values(avg_t, avg_c, np.clip(tt, avg_t[3], avg_t[-4])), 0.0))
+    print(f"[average] {len(own_rows)} module shapes, onset shift {avg_fin['t_on']:.4f} ns",
+          flush=True)
+
+    rows = []
+    for r in results:
+        mi = r["midx"]
+        r["name"], r["module_id"] = names[mi], int(mods[mi].id)
+        r["cutflow"] = D["cutflow"][mi]
+        if r["fallback"] == 2:
+            r.update(shape=avg_shape, err=nan_row, resid=nan_row, t=avg_fin["t"],
+                     c=avg_fin["c"], shift=float(avg_fin["t_on"]),
+                     shift0=float(avg_fin["t_on"]), cum_shift=float(avg_fin["t_on"]),
+                     vmax=avg_fin["vmax"], T_data=avg_tail["T_data"],
+                     tau_slow=avg_tail["tau_slow"], a_slow=avg_tail["a_slow"],
+                     tau_used=avg_tail["tau_used"], a_used=avg_tail["a_used"],
+                     pts=None, bins=None, **avg_der)
+        sp_t, sp_c = r["t"], r["c"]
+        r["shape_fn"] = (lambda tt, t=sp_t, c=sp_c:
+                         np.where((tt > 0) & (tt < T_END),
+                                  spline_values(t, c, np.clip(tt, t[3], t[-4])), 0.0))
+        rows.append(r)
+    ctx.update(p=p, rows=rows, av=av, avg_rule=avg_rule, n_avg=len(own_rows),
+               avg_fin=avg_fin, avg_shape=avg_shape, avg_der=avg_der, avg_tail=avg_tail,
+               h50=h50, h50_sha1=h50_sha1, column=column, agg_json=agg_json, mods=mods,
+               pwo4=pwo4, runs=runs, t_start=t_start, stem=stem)
+    return finish_build(ctx)
+
+
 def _meta_json(ctx):
     a, D = ctx["args"], ctx["D"]
     cuts = dict(select=cut_values(), build=dict(
@@ -2102,7 +3348,43 @@ def _meta_json(ctx):
         **({} if ctx["band_edges"] is None else dict(fa_band_edges=list(ctx["band_edges"]))),
         align_window_ns=list(WIN), pool_tau_min_ns=POOL_TAU_MIN, bin_ns=BIN_W,
         drop_frac=DROP_FRAC, n_iterations=N_IT, sigma_min_adc=SIG_MIN,
-        sigma_t_ns=SIGMA_T_NS, smooth_lambda=SMOOTH_LAMBDA, onset_frac=ONSET_FRAC))
+        sigma_t_ns=SIGMA_T_NS, smooth_lambda=SMOOTH_LAMBDA, onset_frac=ONSET_FRAC,
+        **({} if not ctx["iter_kw"] else dict(iteration_config=dict(
+            iterations=a.iterations, converge_tol_ns=a.converge_tol,
+            max_iterations=a.max_iterations, freeze_from_iteration=FREEZE_IT,
+            conv_max_dshape=CONV_DF, conv_chi2_frac=CONV_CHI2,
+            applies_to="module templates (process_module); band templates (2 "
+                       "iterations) and the run-type average unchanged",
+            fixed_arrays_note="n_iter (rows, 3) and chi2_iter (rows, 4) hold "
+                              "iterations 0, 1 and the LAST iteration (chi2_iter: "
+                              "then final); iter_hist [rows, M, 6] (columns "
+                              f"{list(ITER_COLS)}, NaN-padded), n_iterations, "
+                              "converged (-1 without --converge-tol) hold all"))),
+        **({} if a.fit_points == "bins" else dict(fit_points=a.fit_points)),
+        **({} if not SHAPE_SIGMA > 0 else dict(shape_sigma=SHAPE_SIGMA)),
+        **({} if not a.osc_escalate else dict(osc_escalate=dict(
+            prominence=OSC_PROM, window=list(OSC_WIN), excl=OSC_EXCL,
+            peak_window=list(OSC_PEAK_WIN),
+            rule="per module template: count the maxima + minima of the shape on t_grid in "
+                 "window with prominence >= prominence * (largest value in peak_window), "
+                 "excluding |t - t_peak| <= excl; while count > 0 and lambda < 1e4: "
+                 "lambda = 1e1 if lambda <= 0 else 10 * lambda (cap 1e4) and rebuild the "
+                 "same pool (full re-iteration); still > 0 at 1e4 (or the rebuild failed): "
+                 "the run-type average (fallback 2); lam_final = lambda used"))),
+        **({} if a.lambda_select != "heldout" else dict(lambda_select=dict(
+            mode="heldout", grid=[x for x in LAM_GRID if x >= LAM_MIN],
+            fallback_lambda=LAM_FALLBACK, min_heldout=LAM_MIN_HO,
+            chi2_sigma=LAM_CHI2_SIGMA,
+            rule="per module, the lambda of the grid with the lowest mean chi2/dof "
+                 "(sigma per chi2_sigma) of the module's held-out pulses aligned against the "
+                 "final template (pulses ok for every lambda; ties: first); fewer than "
+                 "min_heldout held-out pulses: fallback_lambda; null lam = fallback 2 "
+                 "(run-type average, smooth_lambda); lists aligned to the npz rows",
+            lam=[None if not np.isfinite(r["lam_final" if a.osc_escalate else "lam"])
+                 else float(r["lam_final" if a.osc_escalate else "lam"])
+                 for r in ctx["rows"]],
+            lam_flag=[int(r["lam_flag"]) for r in ctx["rows"]],
+            n_ho=[int(r["n_ho"]) for r in ctx["rows"]])))))
     return json.dumps(dict(
         schema="spline_templates_v1", run_type=ctx["run_type"], runs=ctx["runs"],
         splits=[[i["run"], i["split"]] for i in D["inputs"]], inputs=D["inputs"],
@@ -2163,13 +3445,33 @@ def _meta_json(ctx):
                      "per-run-type values by one global correction in the .npz; "
                      "this copy is the per-run-type value at build time)",
         p1_shape_ok_pooled=ctx["p1ok"],
-        holdout_rule="holdout_mask(run, split, event_number, midx, seed, frac): "
-                     "splitmix64 hash of the five integers; True = held out",
+        holdout_rule=("holdout_mask(run, split, event_number, midx, seed, frac): "
+                      "splitmix64 hash of the five integers; True = held out"
+                      if a.pool_order == "random" else
+                      "energy: per module the eligible candidates (tier>=1, band "
+                      "b0, finite mf_energy) sorted by mf_energy descending "
+                      "(stable on the candidate index); ranks [0, n_max) = fit "
+                      "pool (never held out), the next holdout_n_per_module = "
+                      "int(n_max*frac/(1-frac)+0.5) ranks are held out, the "
+                      "rest is not held out; the list is the npz array "
+                      "holdout_keys (run, split, event_number, module_index)"),
+        **({} if a.pool_order == "random" else dict(
+            pool_order=a.pool_order, holdout_n_per_module=ctx["n_hold"],
+            pool_rule="fit pool = top n_max by mf_energy of the module's "
+                      "eligible candidates (the rng draw is still made)"
+                      + ("; energy-phase: taken in descending mf_energy with at most "
+                         "ceil(n_max/8) per bin of mf_t0 mod 4 ns (8 equal bins), the "
+                         "rest filled by mf_energy" if a.pool_order == "energy-phase" else ""))),
         holdout_seed=a.seed, holdout_frac=a.holdout_frac,
         root_layout=dict(nbins=ROOT_NBINS, onset_bin=ROOT_ONSET_BIN,
                          dt_bin_ns=ROOT_DT_BIN,
                          module_type=f"{ROOT_MODULE_TYPE} = EventData.h MOD_PbWO4 "
                                      "(what hycal.module_type holds in _raw.root)"),
+        **({} if a.fit_points == "bins" else dict(
+            fit_points_rule="direct: the spline is fitted to the pooled points "
+                            "(tau <= T_data; y/A, sigma = sqrt((sigma_pulse/A)^2 + "
+                            "(0.15 ns * ref'(tau))^2)) instead of the 0.5 ns bin "
+                            "medians; tail extension from the bin stats as in bins")),
         n_rows=len(ctx["rows"]), git=_git_short(),
         created=datetime.now().isoformat(timespec="seconds"),
         python=sys.version.split()[0], numpy=np.__version__,
@@ -2422,7 +3724,8 @@ def finalize_integrals(ctx):
 def finish_build(ctx):
     import mf_pulse
     a, D, rows, stem = ctx["args"], ctx["D"], ctx["rows"], ctx["stem"]
-    finalize_integrals(ctx)
+    single = bool(ctx.get("single"))
+    (finalize_integrals_single if single else finalize_integrals)(ctx)
     nr, nt = len(rows), T_GRID.size
     g = lambda k, dt=float: np.array([r.get(k, np.nan) for r in rows], dtype=dt)   # noqa: E731
     nan_row = np.full(nt, np.nan, dtype=np.float32)
@@ -2436,7 +3739,8 @@ def finish_build(ctx):
         module_index=np.array([r["midx"] for r in rows], dtype=np.int64),
         valid=np.array([r["valid"] for r in rows], dtype=np.int8),
         fallback=np.array([r["fallback"] for r in rows], dtype=np.int8),
-        tier_rule=np.array([RELAX_TIER_RULE[r["fallback"]] for r in rows]),
+        tier_rule=np.array([(SINGLE_TIER_RULE if single else RELAX_TIER_RULE)[r["fallback"]]
+                            for r in rows]),
         band_lo=np.array([r["band"][0] for r in rows]),
         band_hi=np.array([r["band"][1] for r in rows]),
         n_cand=np.array([r["n_cand"] for r in rows], dtype=np.int32),
@@ -2471,7 +3775,7 @@ def finish_build(ctx):
         lohi_maxdiff=g("lohi_maxdiff"), lohi_iint_ratio=g("lohi_iint_ratio"),
         shape_avg=ctx["avg_shape"], T_end=np.float64(T_END),
         cutflow_names=np.array(ctx["cutflow_names"]), cutflow=cf_sel,
-        meta=np.array(_meta_json(ctx)))
+        meta=np.array(_meta_json_single(ctx) if single else _meta_json(ctx)))
     if ctx["band_edges"] is None:
         # default bands: the lo / mid / top arrays (the lo / hi ones above are G1-9's)
         arr.update(
@@ -2496,6 +3800,27 @@ def finish_build(ctx):
     if ac["f"] is not None:
         arr.update(ampcorr_logA=np.array(ac["logA"]), ampcorr_f=np.array(ac["f"]),
                    ampcorr_meta=np.array(json.dumps(ac)))
+    if ctx["iter_kw"]:
+        mw = max(a.iterations, a.max_iterations) if a.converge_tol is not None \
+            else a.iterations
+        ih = np.full((nr, mw, len(ITER_COLS)), np.nan, dtype=np.float32)
+        for i, r in enumerate(rows):
+            if "iter_hist" in r:
+                ih[i, :r["iter_hist"].shape[0]] = r["iter_hist"]
+        arr.update(iter_hist=ih,
+                   n_iterations=np.array([r.get("n_iterations", 0) for r in rows],
+                                         dtype=np.int16),
+                   converged=np.array([r.get("converged", -1) for r in rows],
+                                      dtype=np.int8))
+    if a.lambda_select == "heldout":
+        arr["lam_module"] = g("lam_final" if a.osc_escalate else "lam")   # lambda used per row (NaN: fallback 2)
+    elif a.osc_escalate:
+        arr["lam_module"] = g("lam_final")
+    if a.pool_order != "random":
+        hm = ctx["hold"]
+        arr["holdout_keys"] = np.stack(
+            [D["run"][hm], D["split"][hm], D["event_number"][hm], D["midx"][hm]],
+            axis=1).astype(np.int64)
     out_npz = stem.with_suffix(".npz")
     tmp = out_npz.with_name(out_npz.name + ".tmp")
     with open(tmp, "wb") as fh:
@@ -2522,8 +3847,12 @@ def finish_build(ctx):
     meta_json = str(arr["meta"])
     write_root(str(stem.with_suffix(".root")), ctx, rows, ctx["avg_shape_fn"],
                meta_json)
-    write_tsv(str(stem.parent / "summary.tsv"), rows, ctx["cutflow_names"],
-              None if ctx["band_edges"] is None else [b["key"] for b in ctx["fa_bands"]])
+    if single:
+        write_tsv_single(str(stem.parent / "summary.tsv"), rows, ctx["cutflow_names"])
+    else:
+        write_tsv(str(stem.parent / "summary.tsv"), rows, ctx["cutflow_names"],
+                  None if ctx["band_edges"] is None else [b["key"] for b in ctx["fa_bands"]],
+                  lam=a.lambda_select == "heldout", osc=a.osc_escalate)
     print(f"[tsv] {stem.parent / 'summary.tsv'}", flush=True)
     if a.png_dir:
         want = set(s.strip() for s in a.png_modules.split(",")) if a.png_modules \
@@ -2538,6 +3867,9 @@ def finish_build(ctx):
     fb = arr["fallback"]
     print(f"[summary] rows {nr}: fallback 0/1/2 = "
           f"{int((fb == 0).sum())}/{int((fb == 1).sum())}/{int((fb == 2).sum())}")
+    if single:
+        print(f"[done] total {time.monotonic() - ctx['t_start']:.0f} s", flush=True)
+        return 0
     nu = arr["n_pool"][fb < 2]
     if nu.size:
         print(f"[summary] pool size (after n_max): min {nu.min()} median "
@@ -2546,7 +3878,7 @@ def finish_build(ctx):
         ci = arr["chi2_iter"][fb < 2]
         print("[summary] median chi2/dof: it0 (two-tau ref) "
               f"{np.nanmedian(ci[:, 0]):.1f}  it1 {np.nanmedian(ci[:, 1]):.1f}  "
-              f"it2 {np.nanmedian(ci[:, 2]):.1f}  final (kept) "
+              f"{'it2' if not ctx['iter_kw'] else 'it_last'} {np.nanmedian(ci[:, 2]):.1f}  final (kept) "
               f"{np.nanmedian(ci[:, 3]):.1f}")
         ts = arr["tau_slow"][fb < 2]
         ts = ts[np.isfinite(ts)]
@@ -3001,19 +4333,29 @@ class Gates:
 
 
 # ------------------------------------------------------------ loading ------
-def _load_check_inputs(files, seed, frac, noise_mods, noise_band, cap, rng):
+def _load_check_inputs(files, seed, frac, noise_mods, noise_band, cap, rng,
+                       hold_keys=None):
     """One pass over the candidate files.  Returns (held, ntot, nheld, pool,
     metas): `held` = dict of the held-out candidates (CHK_FIELDS + run, split),
     `pool` = non-held-out tier>=1 candidates of the modules in `noise_mods` in
-    amplitude band `noise_band` (for the G1-9 noise floor)."""
+    amplitude band `noise_band` (for the G1-9 noise floor).  hold_keys = set of
+    (run, split, event_number, midx) tuples (templates npz `holdout_keys` of a
+    --pool-order energy build) replaces holdout_mask."""
     held, pool, metas = [], [], []
     ntot = 0
     nm_set = np.array(sorted(noise_mods), dtype=np.int64)
     for f in files:
         D = load_candidates([f], CHK_FIELDS)
         metas.append(D["metas"][0])
-        h = holdout_mask(D["run"], D["split"], D["event_number"], D["midx"],
-                         seed=seed, frac=frac)
+        if hold_keys is None:
+            h = holdout_mask(D["run"], D["split"], D["event_number"], D["midx"],
+                             seed=seed, frac=frac)
+        else:
+            r0, s0 = int(D["run"][0]) if D["run"].size else 0, \
+                int(D["split"][0]) if D["split"].size else 0
+            h = np.array([(r0, s0, e, m) in hold_keys for e, m in
+                          zip(D["event_number"].tolist(), D["midx"].tolist())],
+                         dtype=bool)
         ntot += h.size
         held.append({k: D[k][h] for k in CHK_FIELDS + ("run", "split")})
         if nm_set.size:
@@ -3049,6 +4391,22 @@ def _chi2_mf(Y, sig, t0, A, shape, win=WIN):
     mdl = A[:, None] * shape.eval(tau)
     var = sig[:, None] ** 2 + (CHK_MF_FRAC * mdl) ** 2
     chi2 = (((Ys - mdl) ** 2 / var) * msk).sum(1)
+    return chi2 / np.maximum(msk.sum(1) - 2, 1)
+
+
+def _chi2_full(Y, sig, t0, A, shape, win=WIN):
+    """chi2/dof with the variance sigma^2 + (A*SIGMA_T_NS*f'(tau))^2 +
+    (A*SHAPE_SIGMA*f(tau))^2 over the `win` samples (dof = n_window - 2); the
+    held-out measure of --lambda-chi2-sigma full."""
+    cols = _align_columns(t0)
+    Ys = np.take_along_axis(Y, cols, axis=1)
+    tau = TS[cols] - t0[:, None]
+    msk = (tau >= win[0]) & (tau <= win[1])
+    f = shape.eval(tau)
+    slope = (shape.eval(tau + 0.05) - shape.eval(tau - 0.05)) / 0.1
+    var = sig[:, None] ** 2 + (A[:, None] * SIGMA_T_NS * slope) ** 2 \
+        + (A[:, None] * SHAPE_SIGMA * f) ** 2
+    chi2 = (((Ys - A[:, None] * f) ** 2 / var) * msk).sum(1)
     return chi2 / np.maximum(msk.sum(1) - 2, 1)
 
 
@@ -3660,6 +5018,10 @@ def _lohi_shift(hi, lo, win=CHK_MAXDIFF_WIN, span=1.0, step=0.02):
 
 def gate_g19(G, z, P, bank_s, wave, noise_rows, rng, outd, png, n_max):
     """Amplitude bands, the lo/hi time shift and the half-vs-half noise floor."""
+    global SMOOTH_LAMBDA
+    lam0 = SMOOTH_LAMBDA
+    lam_row = json.loads(str(z["meta"])).get("cuts", {}).get("build", {}) \
+        .get("lambda_select", {}).get("lam")      # per-module lambda (--lambda-select heldout)
     both = np.isfinite(z["lohi_maxdiff"]) & np.isfinite(z["lohi_iint_ratio"])
     nb = int(both.sum())
     md = z["lohi_maxdiff"][both]
@@ -3700,6 +5062,8 @@ def gate_g19(G, z, P, bank_s, wave, noise_rows, rng, outd, png, n_max):
         pm = P["midx"][o]
         for r in noise_rows:
             m = int(z["module_index"][r])
+            SMOOTH_LAMBDA = lam0 if lam_row is None or lam_row[r] is None \
+                else float(lam_row[r])
             lo_i, hi_i = np.searchsorted(pm, m, "left"), np.searchsorted(pm, m, "right")
             idx = o[lo_i:hi_i]
             if idx.size > n_max:
@@ -3729,6 +5093,7 @@ def gate_g19(G, z, P, bank_s, wave, noise_rows, rng, outd, png, n_max):
             nf_rows.append([z["names"][r], int(idx.size), h, mdiff, mdiff * scale,
                             float(z["lohi_maxdiff"][r]) if both[r] else float("nan"),
                             abs(sh_[0][1] / sh_[1][1] - 1.0)])
+    SMOOTH_LAMBDA = lam0
     if nf_rows:
         a = np.array([x[1:] for x in nf_rows], dtype=np.float64)
         res["noise_floor_halves"] = dict(
@@ -4211,14 +5576,25 @@ def cmd_check(a):
     run_type = tmeta.get("run_type")
     frac = float(tmeta.get("holdout_frac", HOLDOUT_FRAC))
     warn = []
-    if int(tmeta.get("holdout_seed", a.holdout_seed)) != int(a.holdout_seed):
+    hold_keys = None
+    if "holdout_keys" in z.files:               # --pool-order energy build
+        hold_keys = set(map(tuple, z["holdout_keys"].tolist()))
+        print(f"[check] templates carry holdout_keys: using the build's energy-mode "
+              f"held-out list ({len(hold_keys)} candidates, "
+              f"pool_order {tmeta.get('pool_order')}) instead of holdout_mask",
+              flush=True)
+    if hold_keys is None and \
+            int(tmeta.get("holdout_seed", a.holdout_seed)) != int(a.holdout_seed):
         warn.append(f"--holdout-seed {a.holdout_seed} differs from the build's "
                     f"{tmeta.get('holdout_seed')}: the held-out set overlaps the "
                     "training set")
         print("[WARN] " + warn[-1], flush=True)
     n_max = int(tmeta.get("cuts", {}).get("build", {}).get("n_max", 200))
-    global SMOOTH_LAMBDA                         # the noise-floor band rebuilds use the build's lambda
-    SMOOTH_LAMBDA = float(tmeta.get("cuts", {}).get("build", {}).get("smooth_lambda", SMOOTH_LAMBDA))
+    global SMOOTH_LAMBDA, FIT_POINTS, SHAPE_SIGMA  # the noise-floor band rebuilds use the build's fit settings
+    bld = tmeta.get("cuts", {}).get("build", {})
+    SMOOTH_LAMBDA = float(bld.get("smooth_lambda", SMOOTH_LAMBDA))
+    FIT_POINTS = bld.get("fit_points", "bins")
+    SHAPE_SIGMA = float(bld.get("shape_sigma", 0.0))
     rng = np.random.default_rng(CHK_RNG_SEED)
     z0 = np.load(files[0], allow_pickle=False)
     run0 = int(z0["run"])
@@ -4236,10 +5612,11 @@ def cmd_check(a):
     noise_mids = z["module_index"][noise_rows].tolist()
 
     H, ntot, nheld, P, metas = _load_check_inputs(files, a.holdout_seed, frac, noise_mids,
-                                                  BAND_HI, a.max_per_module, rng)
+                                                  BAND_HI, a.max_per_module, rng, hold_keys)
     wave = _wave_ctx(metas)
     print(f"[load] {len(files)} files: {ntot} candidates, {nheld} held out "
-          f"(seed {a.holdout_seed}, frac {frac:g}), {H['midx'].size} used "
+          + (f"(seed {a.holdout_seed}, frac {frac:g}), " if hold_keys is None else
+             "(build's energy-mode list), ") + f"{H['midx'].size} used "
           f"(<= {a.max_per_module} per module)  ({time.monotonic() - t_start:.0f} s)", flush=True)
 
     h50 = Path(a.h50)
@@ -4290,6 +5667,9 @@ def cmd_check(a):
         h50=str(h50), h50_sha1=h50_sha1, h50_column=column,
         pulses=[os.path.abspath(f) for f in files],
         holdout=dict(seed=a.holdout_seed, frac=frac, build_seed=tmeta.get("holdout_seed"),
+                     **({} if hold_keys is None else dict(
+                         source="templates npz holdout_keys (build --pool-order energy)",
+                         n_keys=len(hold_keys))),
                      n_candidates=ntot, n_heldout=nheld, n_used=int(H["midx"].size),
                      max_per_module=a.max_per_module,
                      subsample_note=("held-out pulses are subsampled to at most "
@@ -4340,6 +5720,68 @@ def main(argv=None):
                    help="max stored per module and split, applied separately "
                         "to band-b0 candidates and to the rest (first come)")
     s.add_argument("--h50", default="output/pulse_templates_h50.dat")
+    s.add_argument("--mf-bank", default="", metavar="PATH",
+                   help="matched-filter bank: a spline_templates_v1 templates_<slug>.npz "
+                        "(default '' = the h50 two-tau bank of --h50).  Used for the "
+                        "MFReconstructor (same nsigma / min_amp / kmax / r_model) and for "
+                        "the energy estimate E, where mf_pulse.pulse_energy_units also "
+                        "applies the bank's f(A) when the npz carries ampcorr.  Path, sha1 "
+                        "and kind are recorded in meta['mf'].  mf_t0 / mf_t0_min are "
+                        "converted to the h50 onset axis (t0 - onset_shift_ns of the module, "
+                        "as check does), so build/check seeds keep their convention")
+    s.add_argument("--per-module-best", type=int, default=0, metavar="K",
+                   help="keep, per module and split, the K all-cut candidates with "
+                        "the highest energy estimate E (see --calib-file) instead of "
+                        "the first-come --per-module-cap (0 = off, cap used); the stored "
+                        "set is written in event order, ties go to the earlier candidate; stored / info_p1_shape_ok / "
+                        "info_wa_npeaks_ne1 are counted on the final set; adds the "
+                        "npz array mf_energy")
+    s.add_argument("--emax-frac", type=float, default=None, metavar="F",
+                   help="keep only candidates with E < F * E_beam (E_beam = runinfo "
+                        "Ebeam of the run; also applied before the cap); E = mf_amp * "
+                        "I_int(MF bank: h50 or --mf-bank, MF onset on that bank's axis) * calibration factor (MeV); adds the "
+                        "npz array mf_energy")
+    s.add_argument("--calib-file", default="", metavar="PATH",
+                   help="calibration JSON (list of {name, factor}) for E; factor <= 0 "
+                        "or missing -> E is NaN and the candidate is dropped.  Default: "
+                        "the file module_timing_dump.RUN_CFG gives for the run")
+    s.add_argument("--mf-strict", action="store_true",
+                   help="also require exactly one matched-filter pulse (mf_npk == 1), "
+                        "applied after c3b; counted separately (n_rej_mf_strict).  With "
+                        "the h50 bank nearly every A >= 100 ADC pulse has mf_npk >= 2 "
+                        "(template mismatch); use --mf-bank")
+    s.add_argument("--max-modules-per-event", type=int, default=0, metavar="N",
+                   help="reject every channel of an event with more than N PbWO4 "
+                        "channels at A >= --module-count-height-min (0 = off; the LMS "
+                        "pulses light up the whole calorimeter).  Mirrors "
+                        "fit_pulse_template.py --max-modules-per-event / "
+                        "--module-count-height-min (same option names, event rejected "
+                        "when the count > N; the threshold there defaults to its --height-min "
+                        "(20 ADC), here --module-count-height-min 50) but counts only "
+                        "PbWO4 channels with 100 samples, uses A = raw max - "
+                        "WaveAnalyzer pedestal instead of the first WaveAnalyzer peak "
+                        "height, and applies NO quality check (pile-up, overflow and "
+                        "clipped channels count, unlike fit_pulse_template's default "
+                        "--module-count-require-clean)")
+    s.add_argument("--module-count-height-min", type=float, default=50.0, metavar="H",
+                   help="A threshold (ADC) of --max-modules-per-event (default 50)")
+    s.add_argument("--exclude-trigger-bits", type=lambda x: int(x, 0), default=0,
+                   metavar="MASK",
+                   help="reject events with (trigger_bits & MASK) != 0, under every "
+                        "--trigger choice (e.g. 0x1000000 = LMS bit); base 0, "
+                        "0x... accepted; counted as n_excl_bits")
+    s.add_argument("--wassim-ref", action="store_true",
+                   help="Wassim single-pulse reference mode (best_ref_shape_fit.C): per PbWO4 "
+                        "row only the clip veto (no sample >= 4095) and PASS 1 valid_p1 "
+                        "(macro defaults incl. the 150-170 ns peak window) on samples - "
+                        "WaveAnalyzer ped; keeps per module ONLY the best valid candidate of "
+                        "the split (macro betterCandidate: tier desc, amp desc, roughness asc, "
+                        "bg_rms asc; first come on ties).  No mf, no other cuts; adds bg_mean "
+                        "/ bg_rms / bg_maxabs / roughness to the npz, meta mode 'wassim_ref'.  "
+                        "Not combinable with --per-module-best, --mf-strict, "
+                        "--max-modules-per-event, --emax-frac, --exclude-trigger-bits, "
+                        "--mf-bank; --per-module-cap is ignored.  Input of build "
+                        "--single-pulse")
     s.set_defaults(fn=cmd_select)
 
     b = sub.add_parser("build", help="candidate npz files -> templates npz/root/pdf")
@@ -4359,13 +5801,86 @@ def main(argv=None):
     b.add_argument("--n-max", type=int, default=200)
     b.add_argument("--seed", type=int, default=1)
     b.add_argument("--holdout-frac", type=float, default=HOLDOUT_FRAC)
+    b.add_argument("--pool-order", choices=("random", "energy", "energy-phase"), default="random",
+                   help="random = n-max drawn at random, hash hold-out (default).  "
+                        "energy = the fit pool is the top n-max by the stored mf_energy "
+                        "(candidate files from select --per-module-best/--emax-frac) of "
+                        "the module's tier>=1 band-b0 candidates; the hold-out for check "
+                        "is the NEXT int(n-max*frac/(1-frac)+0.5) by energy (13 for "
+                        "n-max 50, frac 0.2), replacing the hash hold-out, and is saved "
+                        "in the npz as holdout_keys (run, split, event_number, module).  "
+                        "energy-phase = as energy, but at most ceil(n-max/8) pool pulses per "
+                        "0.5 ns bin of the sub-sample phase (mf_t0 mod 4 ns), taken by energy")
     b.add_argument("--smooth-lambda", type=float, default=SMOOTH_LAMBDA,
                    help="spline roughness penalty lam * int f''(t)^2 dt (peak units)")
+    b.add_argument("--iterations", type=int, default=N_IT, metavar="N",
+                   help="alignment / pooling / spline iterations of the MODULE templates "
+                        f"(default {N_IT}, >= {N_IT}).  The worst 20 %% drop is recomputed "
+                        "in iterations 1 and 2; from iteration 3 the pool is frozen and "
+                        "later iterations only realign it.  With N != 3 or --converge-tol "
+                        "adds the npz arrays iter_hist / n_iterations / converged and a "
+                        "per-iteration log")
+    b.add_argument("--converge-tol", type=float, default=None, metavar="T_NS",
+                   help="after --iterations keep iterating until converged or "
+                        "--max-iterations; converged (evaluated for every iteration "
+                        "k >= 3 against k-1) = median |t0 - t_seed| over the pool < T_NS "
+                        "AND max |f_k - f_(k-1)| on the 0.1 ns grid < 1e-3 (unit-peak "
+                        "shapes) AND median chi2/dof not decreasing by more than 1 %%.  "
+                        "Consistency only, no smoothness criterion (default: off, exactly "
+                        "--iterations iterations)")
+    b.add_argument("--converge-df", type=float, default=CONV_DF, metavar="X",
+                   help="convergence threshold on max |f_k - f_(k-1)| (unit-peak shapes, "
+                        f"default {CONV_DF:g}); used with --converge-tol")
+    b.add_argument("--lambda-select", choices=("fixed", "heldout"), default="fixed",
+                   help="fixed = one global --smooth-lambda (default).  heldout = per module "
+                        "the lambda in {0, 1e1, 1e2, 1e3, 1e4} with the lowest mean chi2/dof "
+                        "of the module's held-out pulses (1e2 if fewer than 5); adds lam / "
+                        "lam_flag / n_ho / ho_chi2_* to summary.tsv, lam / lam_flag / n_ho to the npz meta")
+    b.add_argument("--lambda-chi2-sigma", choices=("noise", "full"), default=LAM_CHI2_SIGMA,
+                   help="--lambda-select heldout: held-out chi2 variance.  noise = sigma = rms "
+                        "(default).  full = sigma^2 + (A*0.15 ns*f')^2 + (A*shape_sigma*f)^2 "
+                        "per sample, f = that lambda's final template")
+    b.add_argument("--lambda-min", type=float, default=LAM_MIN, metavar="X",
+                   help="--lambda-select heldout: the grid is the values >= X (default 0 = all)")
+    b.add_argument("--lambda-fallback", type=float, default=LAM_FALLBACK, metavar="Y",
+                   help="--lambda-select heldout: lambda used with fewer than 5 (or no "
+                        f"comparable) held-out pulses (default {LAM_FALLBACK:g})")
+    b.add_argument("--shape-sigma", type=float, default=SHAPE_SIGMA, metavar="S",
+                   help="--fit-points direct: adds (S*ref(tau))^2 (ref = alignment reference, "
+                        "unit peak) to the point variance (default 0 = off).  Ignored with "
+                        "--fit-points bins, whose bin sigma (MAD) already holds the shape "
+                        "variation; recorded in the meta when > 0")
+    b.add_argument("--osc-escalate", action="store_true",
+                   help="module templates with spurious wiggles (extrema of prominence >= 0.2 %% of "
+                        "the peak outside +-3 ns of it, 2-150 ns): lambda x10 and rebuild the pool "
+                        "until none; still wiggly at 1e4: the run-type average (osc_* columns)")
+    b.add_argument("--max-iterations", type=int, default=MAX_IT, metavar="M",
+                   help=f"iteration cap with --converge-tol (default {MAX_IT})")
+    b.add_argument("--fit-points", choices=("bins", "direct"), default="bins",
+                   help="bins = spline fitted to the 0.5 ns bin medians (default).  "
+                        "direct = fitted to the pooled points themselves (tau <= T_data; "
+                        "y/A with sigma = sqrt((sigma_pulse/A)^2 + (0.15 ns * ref'(tau))^2), "
+                        "weight 1/sigma); same lambda, knots, tail extension and "
+                        "pseudo-points; the bin stats still give the tail, T_data and the "
+                        "shape_err / resid outputs.  Applies to module, band and run-average templates")
     b.add_argument("--bands", type=_edges_arg, default=None, metavar="E0,E1,...,En",
                    help="f(A) amplitude bands [E_k, E_k+1) in ADC (default: the "
                         "lo / mid / top bands 100-400 / 400-1000 / 1000-2500); the npz "
                         "gets band_edges / shape_band / r_band / n_band / A_med_band "
                         "instead of the lo / mid / top arrays")
+    b.add_argument("--single-pulse", action="store_true",
+                   help="Wassim single-pulse reference bank from `select --wassim-ref` "
+                        "files: per module the best candidate over all files (betterCandidate "
+                        "order, ties: first file); template R(k) = (W - bg_mean) / max_k(W - "
+                        "bg_mean), a not-a-knot cubic interpolating spline through the 100 "
+                        "samples (no smoothing / pool / alignment iterations), exponential "
+                        "tail only to reach T_END = 400 ns, bank unit peak = spline "
+                        "maximum; modules without a candidate: run-type average "
+                        "(fallback 2); no f(A) (no ampcorr keys), no holdout_keys, band "
+                        "arrays NaN / 0.  Same outputs; not combinable with --pool-order, "
+                        "--lambda-select, --osc-escalate, --bands, --iterations, "
+                        "--converge-tol, --max-iterations, --fit-points; --n-min / --n-max / "
+                        "--smooth-lambda / --holdout-frac have no effect")
     b.add_argument("--no-pdf", action="store_true")
     b.add_argument("--modules", default="",
                    help="debug: comma-separated module names (e.g. W100,W200); "
