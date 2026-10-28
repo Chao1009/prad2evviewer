@@ -2137,7 +2137,6 @@ def main(argv=None):
 
     p = C.setup_pipeline(
         evio_path     = args.evio_path,
-        max_events    = args.max_events,
         run_num       = args.run_num,
         gem_ped_file  = args.gem_ped_file,
         gem_cm_file   = args.gem_cm_file,
