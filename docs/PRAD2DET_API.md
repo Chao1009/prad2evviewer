@@ -424,6 +424,7 @@ the largest `run_number` ≤ the requested run (or the latest if `< 0`).
 | `matching_use_square` | true | square vs circular cut |
 | `gain_data_dir` | "gain_factor" | |
 | `gain_ref_run` | 23915 | reference run for gain factors |
+| `gain_ref_pmt` | 23 | `gain_factor.ref_PMT`: PbWO4 reference PMTs to average (`1`, `2`, `3`, `12`, `13`, `23`, `123`) |
 
 ### Functions
 

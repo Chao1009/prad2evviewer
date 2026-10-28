@@ -565,8 +565,7 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
             const auto *mod = hycal.module_by_id(in->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
-            float gain = gain_corr.ModuleGain(mod->id);
-            if (gain <= 0.f || gain == 1.f) gain = in->gain_factor[j];
+            float gain = gain_corr.ModuleGain(mod->id, run_cfg.gain_ref_pmt);
 
             float time_offset = mod->time_offset;
 
@@ -615,7 +614,7 @@ bool ProcessRawFiles (const std::string &input_raw, const RunConfig &run_cfg,
         if (!mod || !mod->is_pwo4()) continue;
 
         if (fdec::test_bit(hits[0].flag, fdec::kDeadModule)) continue;
-        if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue;
+        //if (fdec::test_bit(hits[0].flag, fdec::kSplit)) continue;
 
         // require hit to be in central 3x3 of a 5x5 grid in single central module (|xd|,|yd| < 0.3)
         const auto [xd, yd] = mod->cell_offset<float>(hits[0].x, hits[0].y);

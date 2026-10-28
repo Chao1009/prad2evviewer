@@ -498,12 +498,14 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         gem_hit.y = event.mHit_gy[0][0];
 
         ApplyToHyCal(hc_hit, run_config);
-        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.5, 15.)) continue;
+        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
 
         const auto *mod = hycal.module_by_id(event.cl_center[0]);
         if (!mod) continue;
-        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y, true);
-        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y, true);
+        const int module_index = mod->id - 1001;
+        if (module_index < 0 || module_index >= 1156) continue;
+        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
+        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
 
         const float theta = std::atan2(
             std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
@@ -523,13 +525,11 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         result->h2_Erecon_theta->Fill(theta, event.cl_energy[0]);
         if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
             result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[0]);
+            result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
         } else {
             result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[0]);
         }
 
-        const int module_index = mod->id - 1001;
-        if (module_index < 0 || module_index >= 1156) continue;
-        result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
         result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
         result->h2_hit_gem->Fill(gem_hit.x, gem_hit.y);
         result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);

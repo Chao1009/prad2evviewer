@@ -68,13 +68,15 @@ public:
                             const std::string &db_dir, const std::string &recon_config_file,
                             const std::string &daq_config_file = "",
                             const std::string &gem_ped_file = "", float zerosup_override = 5.f,
-                            bool prad1 = false, bool x17 = false, bool x17_blind = false, bool random = false, bool gem_hit = false);
+                            bool prad1 = false, bool x17 = false, bool x17_blind = false, bool random = false, bool gem_hit = false,
+                            bool shower_depth_corr = true);
     
     bool ProcessRaw2Recon(const std::string &input_raw, const std::string &output_root, RunConfig &gRunConfig,
                             const std::string &db_dir, const std::string &recon_config_file,
                             const std::string &daq_config_file = "",
                             const std::string &gem_ped_file = "",
-                            bool x17 = false, bool x17_blind = false, bool random = false, bool gem_hit = false);
+                            bool x17 = false, bool x17_blind = false, bool random = false, bool gem_hit = false,
+                            bool shower_depth_corr = true);
     
     bool Process_LMSgainFactor(const std::string &input_evio, const std::string &output_root,
                                 const std::string &db_dir, const std::string &daq_config_file);

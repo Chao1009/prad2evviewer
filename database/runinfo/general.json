@@ -65,13 +65,39 @@
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},
             "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
-		{   
-            "// a calibration test with run 25319-25326, LMS reference run is 25320, PRad2_2p2_round0_1.json": "",
-			"from_run":    25200,
-			"beam_energy": 2239.51,
+
+        {
+            "// calibration period 1 of 2.2GeV": "",
+            "beam_energy": 2239.51,
+            "from_run":    25200,
             "calibration": {"file": "calibration/PRad2_2p2_round1_1.json"},
-            "gain_factor": {"data_dir": "", "ref_run":  25320}
-		},
+            "gain_factor": {"data_dir": "", "ref_run":  25213, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 2 of 2.2GeV": "",
+            "from_run":    25255,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_2.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25261, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 3 of 2.2GeV": "",
+            "from_run":    25292,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_3.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25292, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 4 of 2.2GeV": "",
+            "from_run":    25311,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_4.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25326, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 5-1-1 of 2.2GeV": "",
+            "from_run":    25349,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_5.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25353, "ref_PMT": 12}
+        },
+
 
         {
             "// from here, start the X17 experimental runs": "",
@@ -150,6 +176,7 @@
         {"from_run": 0, "dead_modules": ["W1019", "W1020", "W1124", "W691"]},
         {"from_run": 24693, "dead_modules": ["W1019", "W1020", "W1124"]},
         {"from_run": 24850, "dead_modules": ["W1019", "W1020", "W1124", "W1141"]},
+        {"from_run": 25200, "dead_modules": ["W1019", "W1020", "W1124"]},
         {"from_run": 25540, "dead_modules": ["W1019", "W1020", "W1124", "W781"]}
     ]
 }

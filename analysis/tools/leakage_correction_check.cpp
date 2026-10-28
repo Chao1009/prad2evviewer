@@ -134,7 +134,7 @@ int main(int argc, char *argv[])
             const auto *mod = hycal.module_by_id(ev->module_id[j]);
             if (!mod || !mod->is_pwo4()) continue;
 
-            const float gain = gain_corr.ModuleGain(mod->id);
+            const float gain = gain_corr.ModuleGain(mod->id, gRunConfig.gain_ref_pmt);
             float time_offset = mod->time_offset;
 
             const auto hc_win = hc_time_cuts.at(mod->index);

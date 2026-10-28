@@ -466,7 +466,7 @@ prad2ana_replay_recon <evio_or_raw_file_or_dir> [more inputs...] -o <output_dir>
     [-f max_files] [-j threads] [-m merge_size]
     [-r reconstruction.json] [-c daq_config.json]
     [-d hycal_map.json] [-g gem_pedestal.json] [-z zerosup_sigma]
-    [-prad1 | -x17 | -x17_full] [-random] [-gem_hit]
+    [-prad1 | -x17 | -x17_full] [-random] [-gem_hit] [-no_dep]
 ```
 
 ### 4.2 Arguments
@@ -484,6 +484,7 @@ prad2ana_replay_recon <evio_or_raw_file_or_dir> [more inputs...] -o <output_dir>
 | `-g <file>` | No | run-config default | GEM pedestal file. |
 | `-z <sigma>` | No | 5 | GEM zero-suppression override for direct EVIO only; unavailable for raw-to-recon. |
 | `-gem_hit` | No | off | Write individual GEM-hit branches. Matching branches are present without it. |
+| `-no_dep` | No | correction on | Disable placing HyCal clusters at shower-max depth before lab transformation and projection. Applies to EVIO and raw ROOT input; changes positions and downstream matching, not cluster energies. |
 | `-prad1` | No | off | PRad-1 map, ADC1881M pedestal, and no GEM/RF path. EVIO input only. |
 | `-x17` | No | off | X17 blind mode; uses X17 config and retains only 3-cluster events whose event number ends in 8, while retaining raw-sum events. |
 | `-x17_full` | No | off | X17 full mode without blind event-number thinning. |
