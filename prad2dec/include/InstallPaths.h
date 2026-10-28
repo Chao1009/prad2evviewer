@@ -8,8 +8,7 @@
 //
 //     1. The ``PRAD2_DATABASE_DIR`` / ``PRAD2_RESOURCE_DIR`` env var,
 //        set verbatim (what prad2_setup.sh + the bin/ wrappers configure).
-//     2. A path relative to *this module*, resolved via readlink
-//        ``/proc/self/exe`` / ``_NSGetExecutablePath`` / dladdr on POSIX
+//     2. A path relative to *this module*, resolved via dladdr on POSIX
 //        and ``GetModuleHandleExW`` on Windows.  Makes installed binaries
 //        relocatable — move the install tree and they still find data.
 //     3. The build-time ``DATABASE_DIR`` / ``RESOURCE_DIR`` constants
@@ -29,7 +28,7 @@
 namespace prad2 {
 
 /// Absolute path to the directory containing the DLL / shared object /
-/// executable that defines ``resolve_data_dir``.  Returns an empty string
+/// executable that defines ``module_dir``.  Returns an empty string
 /// if runtime resolution fails (very rare — exhausted platform APIs).
 std::string module_dir();
 
@@ -50,5 +49,25 @@ std::string module_dir();
 std::string resolve_data_dir(const char *env_name,
                              std::initializer_list<const char *> rel_candidates,
                              const char *compile_default);
+
+/// The database directory: ``resolve_data_dir("PRAD2_DATABASE_DIR",
+/// {"../share/prad2evviewer/database", "../../share/prad2evviewer/database"},
+/// DATABASE_DIR)`` with the ``DATABASE_DIR`` prad2dec was built with, so it
+/// resolves from both ``<prefix>/bin/`` and ``<prefix>/lib/prad2py/``.
+std::string database_dir();
+
+/// A database file for the command-line tools: ``database_dir()/name`` if it
+/// can be opened, else the first of ``name``, ``database/name`` and
+/// ``../database/name`` (working-directory relative, returned as written)
+/// that can be opened.  Empty if none can.
+std::string find_database_file(const std::string &name);
+
+/// True for ``/…``, ``\\…`` and Windows drive paths (``C:…``).
+bool is_absolute_path(const std::string &path);
+
+/// A database-relative config path joined to ``db_dir`` (``db_dir/path``).
+/// Empty or absolute paths, and any path when ``db_dir`` is empty, are
+/// returned unchanged.
+std::string resolve_db_path(const std::string &path, const std::string &db_dir);
 
 } // namespace prad2

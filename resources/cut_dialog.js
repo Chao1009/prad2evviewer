@@ -2,11 +2,8 @@
 // Called from init() in viewer.js.
 
 function initCutDialog(){
-    const cutBackdrop = document.getElementById('cut-backdrop');
-    const cutDialog   = document.getElementById('cut-dialog');
-    if (!cutBackdrop || !cutDialog) return;
-
     const $ = id => document.getElementById(id);
+    if (!$('cut-backdrop') || !$('cut-dialog')) return;
 
     // Build quality-bit checkbox lists from histConfig.quality_bits.
     // Always rebuilds — cheap, and avoids subtle bugs when the bit palette
@@ -14,12 +11,7 @@ function initCutDialog(){
     function buildBitList(containerId, set){
         const c = $(containerId);
         if (!c) return;
-        // `histConfig` is declared with `let` at top level of viewer.js,
-        // so it lives in the global lexical scope — NOT on `window`.
-        // Reference it directly; guard with typeof for the very first
-        // microtask before viewer.js has executed.
-        const bits = (typeof histConfig !== 'undefined'
-                      && histConfig.quality_bits) || [];
+        const bits = histConfig.quality_bits || [];
         c.innerHTML = '';
         if (!bits.length) {
             const empty = document.createElement('div');
@@ -89,15 +81,9 @@ function initCutDialog(){
     }
 
     function openCutDialog(){
-        cutBackdrop.classList.add('open');
-        cutDialog.classList.add('open');
+        setDialogOpen('cut', true);
         $('cut-status-msg').textContent = '';
-        populateForm(typeof histConfig !== 'undefined' && histConfig.waveform_filter);
-    }
-
-    function closeCutDialog(){
-        cutBackdrop.classList.remove('open');
-        cutDialog.classList.remove('open');
+        populateForm(histConfig.waveform_filter);
     }
 
     function readAxis(idMin, idMax){
@@ -130,41 +116,25 @@ function initCutDialog(){
     // without this, showHistograms() may early-return for ~1s and the
     // overlays don't update.
     function redrawAll(){
-        if (typeof lastHistModule !== 'undefined') lastHistModule = '';
-        if (typeof selectedModule !== 'undefined' && selectedModule
-            && typeof showWaveform === 'function') {
-            showWaveform(selectedModule);
-        } else if (typeof redrawGeo === 'function') {
-            redrawGeo();
-        }
+        lastHistModule = '';
+        if (selectedModule) showWaveform(selectedModule);
+        else redrawGeo();
     }
 
     // Server roundtrip + force redraw once histConfig is refreshed.
     // Used by both the Save button and the apply-toggle so changes
     // appear immediately even if the user hasn't toggled show.
     function refreshAfterServer(){
-        if (typeof fetchConfigAndApply !== 'function') return;
-        Promise.resolve(fetchConfigAndApply()).then(redrawAll, redrawAll);
+        fetchConfigAndApply().then(redrawAll, redrawAll);
     }
 
-    // --- wiring -----------------------------------------------------------
     $('cut-settings-btn').onclick = openCutDialog;
-    $('cut-dialog-close').onclick = closeCutDialog;
-    $('cut-cancel').onclick       = closeCutDialog;
-    cutBackdrop.onclick           = closeCutDialog;
-
-    document.addEventListener('keydown', e => {
-        if (e.key === 'Escape' && cutDialog.classList.contains('open'))
-            closeCutDialog();
-    });
+    const closeCutDialog = wireDialogClose('cut', 'cut-cancel');
 
     // Reset → restore the file-config filter from monitor_config.json
     // (snapshotted server-side as `waveform_filter_default`).  The user
     // still has to click Save to commit; this just repopulates the form.
-    $('cut-reset').onclick = () => {
-        populateForm(typeof histConfig !== 'undefined'
-            && histConfig.waveform_filter_default);
-    };
+    $('cut-reset').onclick = () => populateForm(histConfig.waveform_filter_default);
 
     $('cut-apply-btn').onclick = () => {
         const body = {
@@ -172,33 +142,22 @@ function initCutDialog(){
             waveform_filter_active: $('cut-apply').checked
         };
         $('cut-status-msg').textContent = 'Saving…';
-        fetch('/api/hist_config', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(body)
-        }).then(r => r.json()).then(d => {
+        postJson('/api/hist_config', body).then(d => {
             if (d.error) {
                 $('cut-status-msg').textContent = 'Error: ' + d.error;
                 return;
             }
             closeCutDialog();
-            // Refresh histConfig from /api/config, then force a redraw
-            // so the new cut overlays show up immediately (without the
-            // user having to toggle "show" off and on).
             refreshAfterServer();
         }).catch(() => {
             $('cut-status-msg').textContent = 'Request failed';
         });
     };
 
-    // "apply" toggle: immediate server POST.  Flips peak_filter.enable
-    // and forces a redraw once histConfig has been refreshed.
+    // "apply" toggle: immediate server POST (flips peak_filter.enable).
     $('cut-apply').onchange = function(){
-        fetch('/api/hist_config', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({waveform_filter_active: this.checked})
-        }).then(refreshAfterServer).catch(() => {});
+        postJson('/api/hist_config', {waveform_filter_active: this.checked})
+            .then(refreshAfterServer).catch(() => {});
     };
 
     // "show" toggle: client-side overlay only — no server roundtrip.

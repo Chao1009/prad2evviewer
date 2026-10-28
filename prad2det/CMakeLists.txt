@@ -1,6 +1,6 @@
 # prad2det/CMakeLists.txt — static library: libprad2det.a
 #
-# Analysis library: HyCal clustering, event reconstruction, hit matching.
+# Detector reconstruction: HyCal clustering, GEM strip and hit reconstruction.
 # Depends on nlohmann/json for configuration loading.
 
 cmake_minimum_required(VERSION 3.14)
@@ -12,9 +12,7 @@ if(NOT CMAKE_PROJECT_NAME)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
-# ---------------------------------------------------------------------------
 # Dependencies
-# ---------------------------------------------------------------------------
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF CACHE BOOL "" FORCE)
 
@@ -28,20 +26,19 @@ if(NOT TARGET nlohmann_json::nlohmann_json)
     FetchContent_MakeAvailable(json)
 endif()
 
-# ---------------------------------------------------------------------------
 # Library target
-# ---------------------------------------------------------------------------
 add_library(prad2det STATIC
     src/HyCalSystem.cpp
     src/HyCalCluster.cpp
     src/GemSystem.cpp
     src/GemCluster.cpp
     src/GemPedestal.cpp
+    src/GemEventJson.cpp
     src/PipelineBuilder.cpp
 )
 
 # PIC so the archive can be pulled into shared objects (pybind11 module,
-# ACLiC-compiled ROOT macros).  See prad2dec/CMakeLists.txt for details.
+# ACLiC-compiled ROOT macros).
 set_target_properties(prad2det PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(prad2det
@@ -52,18 +49,14 @@ target_include_directories(prad2det
 
 target_link_libraries(prad2det PUBLIC nlohmann_json::nlohmann_json)
 
-# PipelineBuilder calls evc::load_daq_config (declared inline in
-# prad2dec/include/load_daq_config.h), so prad2det now needs prad2dec at
-# link time too — promoted from PRIVATE to PUBLIC so any caller of
-# prad2det that uses the builder also gets prad2dec transitively.
-# (GemSystem also needs SspData.h from prad2dec; this covers it.)
+# PUBLIC: PipelineBuilder calls evc::load_daq_config (inline in
+# prad2dec/include/load_daq_config.h) and the public headers include
+# SspData.h, so callers of prad2det need prad2dec transitively.
 if(TARGET prad2dec)
     target_link_libraries(prad2det PUBLIC prad2dec)
 endif()
 
-# ---------------------------------------------------------------------------
 # Install
-# ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 
 install(TARGETS prad2det ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

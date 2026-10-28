@@ -12,10 +12,7 @@
 // the "epics" TTree (one row per EPICS event).
 //
 // For the run-scoped accumulator (channel registry, persistent values
-// across snapshots, O(log N) lookup by event_number) see EpicsStore.h —
-// they share `ParseEpicsText` but represent the data differently because
-// per-event sparse storage and run-wide indexed storage have different
-// access patterns.
+// across snapshots, O(log N) lookup by event_number) see EpicsStore.h.
 //=============================================================================
 
 #include <cstdint>
@@ -34,16 +31,9 @@ struct EpicsRecord {
                                                // most recently before this
                                                // EPICS event (-1 if none yet)
     uint64_t    timestamp_at_arrival    = 0;   // TI 48-bit tick of the same
-                                               // physics event — captured
-                                               // unconditionally at decode
-                                               // time so analysis does not
-                                               // need to look it up via the
-                                               // events tree (which may not
-                                               // contain the event if the
-                                               // replay filtered it out
-                                               // before writing).  0 if no
-                                               // physics event has been
-                                               // decoded yet on this channel.
+                                               // physics event (0 if none
+                                               // yet); see EvChannel::
+                                               // GetLastPhysicsTimestamp()
 
     // Channel readings — parallel arrays so consumers can dump them straight
     // into a TTree without per-row std::pair overhead.  Both must be the

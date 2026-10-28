@@ -4,67 +4,166 @@ EPICS Tree Viewer
 =================
 
 Pure PyQt6 viewer for the slow-control side trees in PRad-II ROOT files:
-``epics``, ``scalers`` and ``runinfo``.  The implementation intentionally
-follows the style of the scripts/ viewers: standard Qt widgets, QPainter
+``epics``, ``scalers`` and ``runinfo``.  Standard Qt widgets, QPainter
 drawing, and a background loader thread.
 
 Usage
 -----
-    python3 analysis/tools/epics_viewer.py input.root
+    python3 analysis/tools/epics_viewer.py [--uproot] [--pyroot] input.root
     python3 analysis/tools/epics_viewer.py
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import math
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
-# ---------------------------------------------------------------------------
-# Workaround for mixed Qt installations.
-#
-# Some systems load PyQt6 from ~/.local but resolve parts of Qt (for example
-# libQt6DBus.so.6) from /usr/lib.  If those Qt builds do not match, imports can
-# fail with Qt_6_PRIVATE_API undefined-symbol errors.  scripts/replay_viewer.py
-# uses the same idea: prefer PyQt6's bundled Qt6 libraries, then re-exec before
-# any PyQt shared library is loaded.
-# ---------------------------------------------------------------------------
-def _fix_qt_lib_path() -> None:
-    import site
+# ── PyROOT tree walk (Qt-free: it also runs as the --dump-tsv child process) ──
 
-    site_dirs: List[str] = []
-    try:
-        site_dirs += site.getsitepackages()
-    except AttributeError:
-        pass
-    try:
-        site_dirs.append(site.getusersitepackages())
-    except AttributeError:
-        pass
+SCALER_SCALARS = [
+    "event_number",
+    "ti_ticks",
+    "sync_counter",
+    "run_number",
+    "trigger_type",
+    "slot",
+    "gated",
+    "ungated",
+    "live_ratio",
+    "source",
+    "channel",
+    "ref_gated",
+    "ref_ungated",
+]
+SCALER_ARRAYS = ["trg_gated", "trg_ungated", "tdc_gated", "tdc_ungated"]
+RUNINFO_SCALARS = ["run_number", "run_type", "event_tag"]
 
-    for sp in site_dirs:
-        qt6_lib = Path(sp) / "PyQt6" / "Qt6" / "lib"
-        if not qt6_lib.is_dir():
-            continue
-        qt6_lib_s = str(qt6_lib)
-        current = os.environ.get("LD_LIBRARY_PATH", "")
-        if qt6_lib_s in current.split(":"):
+
+class EpicsLoadError(RuntimeError):
+    pass
+
+
+def _walk_with_pyroot(path: str, emit: Callable[[str, float, float, bool], None]) -> int:
+    """Pass every time-stamped, finite point of the epics/scalers/runinfo
+    trees in `path` to emit(channel, unix_time, value, good) and return the
+    total entry count of those trees."""
+    import ROOT  # type: ignore
+
+    ROOT.gROOT.SetBatch(True)
+    fin = ROOT.TFile.Open(path, "READ")
+    if not fin or fin.IsZombie():
+        raise EpicsLoadError(f"Cannot open ROOT file: {path}")
+
+    def branch_names(tree):
+        return {br.GetName() for br in tree.GetListOfBranches()} if tree else set()
+
+    def point(channel, unix_time, value, good=True):
+        try:
+            t = float(unix_time)
+            v = float(value)
+        except (TypeError, ValueError):
             return
-        env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = qt6_lib_s + (":" + current if current else "")
-        os.execve(sys.executable, [sys.executable] + sys.argv, env)
+        if math.isfinite(t) and t > 0 and math.isfinite(v):
+            emit(channel, t, v, good)
+
+    try:
+        trees = {name: fin.Get(name) for name in ("epics", "scalers", "runinfo")}
+        n_entries = sum(int(tree.GetEntries()) for tree in trees.values() if tree)
+
+        tree = trees["epics"]
+        branches = branch_names(tree)
+        if {"unix_time", "channel", "value"} <= branches:
+            has_good = "good" in branches
+            for i in range(int(tree.GetEntries())):
+                tree.GetEntry(i)
+                unix_time = tree.unix_time
+                good = bool(tree.good) if has_good else True
+                channels = tree.channel
+                values = tree.value
+                for j in range(min(int(channels.size()), int(values.size()))):
+                    point(str(channels[j]), unix_time, values[j], good)
+
+        tree = trees["scalers"]
+        branches = branch_names(tree)
+        if "unix_time" in branches:
+            has_good = "good" in branches
+            for i in range(int(tree.GetEntries())):
+                tree.GetEntry(i)
+                unix_time = tree.unix_time
+                good = bool(tree.good) if has_good else True
+                for name in SCALER_SCALARS:
+                    if name in branches:
+                        point(f"scalers:{name}", unix_time, getattr(tree, name), good)
+                for name in SCALER_ARRAYS:
+                    if name not in branches:
+                        continue
+                    arr = getattr(tree, name)
+                    for ch in range(16):
+                        point(f"scalers:{name}[{ch}]", unix_time, arr[ch], good)
+
+        tree = trees["runinfo"]
+        branches = branch_names(tree)
+        if "unix_time" in branches:
+            for i in range(int(tree.GetEntries())):
+                tree.GetEntry(i)
+                unix_time = tree.unix_time
+                for name in RUNINFO_SCALARS:
+                    if name in branches:
+                        point(f"runinfo:{name}", unix_time, getattr(tree, name))
+                cfg_size = 0
+                if "daq_config" in branches:
+                    cfg_size = len(str(tree.daq_config))
+                point("runinfo:has_daq_config", unix_time,
+                      1.0 if cfg_size > 0 else 0.0)
+                point("runinfo:daq_config_bytes", unix_time, float(cfg_size))
+        return n_entries
+    finally:
+        fin.Close()
+
+
+def _dump_tsv_main(input_path: str, output_path: str) -> None:
+    """`epics_viewer.py --dump-tsv IN OUT`, run by _load_with_pyroot_subprocess:
+    write the walk in the TSV format of _parse_root_cli_tsv.  The exit status
+    is 0 on success, 2 with a traceback on stderr otherwise; os._exit skips
+    the interpreter teardown, where PyROOT can crash."""
+    try:
+        with open(output_path, "w") as fout:
+            def emit(channel, unix_time, value, good):
+                fout.write("%d\t%d\t%s\t%.17g\n"
+                           % (int(unix_time), 1 if good else 0, channel, value))
+            fout.write("#entries\t%d\n" % _walk_with_pyroot(input_path, emit))
+    except Exception:
+        traceback.print_exc()
+        sys.stderr.flush()
+        os._exit(2)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    _fix_qt_lib_path()
+    # The PyROOT child exits here, before anything loads Qt.
+    if sys.argv[1:2] == ["--dump-tsv"]:
+        _dump_tsv_main(*sys.argv[2:4])
+    _scripts = str(Path(__file__).resolve().parents[2] / "scripts")
+    if _scripts not in sys.path:
+        sys.path.append(_scripts)
+    try:
+        from prad2_env import fix_qt_lib_path
+        fix_qt_lib_path()
+    except ImportError:
+        pass   # workaround only; not available outside the source tree
 
 from PyQt6.QtCore import QRectF, QThread, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
@@ -89,7 +188,6 @@ from PyQt6.QtWidgets import (
 
 BG = "#0f1419"
 PANEL = "#151b22"
-PANEL_2 = "#111820"
 BORDER = "#2f3a46"
 GRID = "#293440"
 TEXT = "#d8dee9"
@@ -98,32 +196,8 @@ ACCENT = "#53b6ff"
 POINT = "#51d18f"
 POINT_BAD = "#ff6f6f"
 
-SCALER_SCALARS = [
-    "event_number",
-    "ti_ticks",
-    "sync_counter",
-    "run_number",
-    "trigger_type",
-    "slot",
-    "gated",
-    "ungated",
-    "live_ratio",
-    "source",
-    "channel",
-    "ref_gated",
-    "ref_ungated",
-]
-SCALER_ARRAYS = ["trg_gated", "trg_ungated", "tdc_gated", "tdc_ungated"]
-RUNINFO_SCALARS = ["run_number", "run_type", "event_tag"]
 
-
-# ===========================================================================
-#  Data loading
-# ===========================================================================
-
-class EpicsLoadError(RuntimeError):
-    pass
-
+# ── Data loading ──────────────────────────────────────────────────────────
 
 class EpicsLoader(QThread):
     finished = pyqtSignal(object, str)
@@ -159,42 +233,27 @@ def load_epics_file(
     if not root_path.is_file():
         raise EpicsLoadError(f"File does not exist: {root_path}")
 
+    # (loader, enabled, whether its EpicsLoadError ends the search).  uproot
+    # finds branches by name only, so after its data errors PyROOT may still
+    # read the file.
+    loaders = (
+        (_load_with_root_cli, True, True),
+        (_load_with_pyroot_subprocess, True, True),
+        (_load_with_uproot, allow_uproot, False),
+        (_load_with_pyroot, allow_pyroot, True),
+    )
     errors: List[str] = []
-    try:
-        return _load_with_root_cli(root_path)
-    except ImportError as exc:
-        errors.append(str(exc))
-    except EpicsLoadError:
-        raise
-    except Exception as exc:
-        errors.append(f"_load_with_root_cli: {type(exc).__name__}: {exc}")
-
-    try:
-        return _load_with_pyroot_subprocess(root_path)
-    except ImportError as exc:
-        errors.append(str(exc))
-    except EpicsLoadError:
-        raise
-    except Exception as exc:
-        errors.append(f"_load_with_pyroot_subprocess: {type(exc).__name__}: {exc}")
-
-    if allow_uproot:
+    for loader, enabled, final_load_error in loaders:
+        if not enabled:
+            continue
         try:
-            return _load_with_uproot(root_path)
+            return loader(root_path)
         except ImportError as exc:
             errors.append(str(exc))
         except Exception as exc:
-            errors.append(f"_load_with_uproot: {type(exc).__name__}: {exc}")
-
-    if allow_pyroot:
-        try:
-            return _load_with_pyroot(root_path)
-        except ImportError as exc:
-            errors.append(str(exc))
-        except EpicsLoadError:
-            raise
-        except Exception as exc:
-            errors.append(f"_load_with_pyroot: {type(exc).__name__}: {exc}")
+            if final_load_error and isinstance(exc, EpicsLoadError):
+                raise
+            errors.append(f"{loader.__name__}: {type(exc).__name__}: {exc}")
 
     hint = (
         "Could not read the epics/scalers/runinfo trees. Please source a ROOT "
@@ -212,19 +271,37 @@ def load_epics_file(
     raise EpicsLoadError(hint)
 
 
-def _append_point(
-    series: Dict[str, Dict[str, List[Any]]],
-    channel: str,
-    unix_time: float,
-    value: float,
-    good: Optional[bool],
-) -> None:
-    if not math.isfinite(unix_time) or unix_time <= 0 or not math.isfinite(value):
-        return
-    rec = series.setdefault(channel, {"x": [], "y": [], "good": []})
-    rec["x"].append(float(unix_time))
-    rec["y"].append(float(value))
-    rec["good"].append(True if good is None else bool(good))
+class _Collector:
+    """Per-channel points plus the time span of a loader's input."""
+
+    def __init__(self) -> None:
+        self.series: Dict[str, Dict[str, List[Any]]] = {}
+        self.t0: Optional[float] = None
+        self.t1: Optional[float] = None
+
+    def note_time(self, unix_time: float) -> None:
+        if not math.isfinite(unix_time) or unix_time <= 0:
+            return
+        self.t0 = unix_time if self.t0 is None else min(self.t0, unix_time)
+        self.t1 = unix_time if self.t1 is None else max(self.t1, unix_time)
+
+    def add(
+        self,
+        channel: str,
+        unix_time: float,
+        value: float,
+        good: Optional[bool],
+    ) -> None:
+        self.note_time(unix_time)
+        if not math.isfinite(unix_time) or unix_time <= 0 or not math.isfinite(value):
+            return
+        rec = self.series.setdefault(channel, {"x": [], "y": [], "good": []})
+        rec["x"].append(float(unix_time))
+        rec["y"].append(float(value))
+        rec["good"].append(True if good is None else bool(good))
+
+    def finalise(self, path: Path, n_entries: int, loader: str) -> Dict[str, Any]:
+        return _finalise_payload(path, self.series, n_entries, self.t0, self.t1, loader)
 
 
 def _finalise_payload(
@@ -337,117 +414,12 @@ def _finalise_payload(
 
 def _load_with_pyroot(path: Path) -> Dict[str, Any]:
     try:
-        import ROOT  # type: ignore
+        importlib.import_module("ROOT")
     except Exception as exc:
         raise ImportError("PyROOT is not available in this Python.") from exc
-
-    ROOT.gROOT.SetBatch(True)
-    fin = ROOT.TFile.Open(str(path), "READ")
-    if not fin or fin.IsZombie():
-        raise EpicsLoadError(f"Cannot open ROOT file: {path}")
-
-    try:
-        series: Dict[str, Dict[str, List[Any]]] = {}
-        n_entries = 0
-        t0: Optional[float] = None
-        t1: Optional[float] = None
-
-        def note_time(unix_time: float) -> None:
-            nonlocal t0, t1
-            if not math.isfinite(unix_time) or unix_time <= 0:
-                return
-            t0 = unix_time if t0 is None else min(t0, unix_time)
-            t1 = unix_time if t1 is None else max(t1, unix_time)
-
-        tree = fin.Get("epics")
-        if tree:
-            branches = {br.GetName() for br in tree.GetListOfBranches()}
-            if {"unix_time", "channel", "value"} <= branches:
-                has_good = "good" in branches
-                n_epics = int(tree.GetEntries())
-                n_entries += n_epics
-                for i in range(n_epics):
-                    tree.GetEntry(i)
-                    unix_time = float(getattr(tree, "unix_time"))
-                    note_time(unix_time)
-                    good = bool(getattr(tree, "good")) if has_good else None
-                    channels = getattr(tree, "channel")
-                    values = getattr(tree, "value")
-                    n = min(int(channels.size()), int(values.size()))
-                    for j in range(n):
-                        _append_point(
-                            series, str(channels[j]), unix_time, float(values[j]), good
-                        )
-
-        tree = fin.Get("scalers")
-        if tree:
-            branches = {br.GetName() for br in tree.GetListOfBranches()}
-            if "unix_time" in branches:
-                has_good = "good" in branches
-                n_scalers = int(tree.GetEntries())
-                n_entries += n_scalers
-                for i in range(n_scalers):
-                    tree.GetEntry(i)
-                    unix_time = float(getattr(tree, "unix_time"))
-                    note_time(unix_time)
-                    good = bool(getattr(tree, "good")) if has_good else None
-                    for name in SCALER_SCALARS:
-                        if name in branches:
-                            _append_point(
-                                series,
-                                f"scalers:{name}",
-                                unix_time,
-                                float(getattr(tree, name)),
-                                good,
-                            )
-                    for name in SCALER_ARRAYS:
-                        if name not in branches:
-                            continue
-                        arr = getattr(tree, name)
-                        for ch in range(16):
-                            _append_point(
-                                series,
-                                f"scalers:{name}[{ch}]",
-                                unix_time,
-                                float(arr[ch]),
-                                good,
-                            )
-
-        tree = fin.Get("runinfo")
-        if tree:
-            branches = {br.GetName() for br in tree.GetListOfBranches()}
-            if "unix_time" in branches:
-                n_runinfo = int(tree.GetEntries())
-                n_entries += n_runinfo
-                for i in range(n_runinfo):
-                    tree.GetEntry(i)
-                    unix_time = float(getattr(tree, "unix_time"))
-                    note_time(unix_time)
-                    for name in RUNINFO_SCALARS:
-                        if name in branches:
-                            _append_point(
-                                series,
-                                f"runinfo:{name}",
-                                unix_time,
-                                float(getattr(tree, name)),
-                                None,
-                            )
-                    cfg_size = 0
-                    if "daq_config" in branches:
-                        cfg = getattr(tree, "daq_config")
-                        cfg_size = len(str(cfg))
-                    _append_point(
-                        series, "runinfo:has_daq_config", unix_time,
-                        1.0 if cfg_size > 0 else 0.0, None
-                    )
-                    _append_point(
-                        series, "runinfo:daq_config_bytes", unix_time,
-                        float(cfg_size), None
-                    )
-
-        return _finalise_payload(path, series, n_entries, t0, t1, "PyROOT")
-    finally:
-        fin.Close()
+    collector = _Collector()
+    n_entries = _walk_with_pyroot(str(path), collector.add)
+    return collector.finalise(path, n_entries, "PyROOT")
 
 
 def _root_quote(path: Path) -> str:
@@ -631,129 +603,11 @@ void dump_epics_for_viewer(const char *input, const char *output)
 
 
 def _load_with_pyroot_subprocess(path: Path) -> Dict[str, Any]:
-    helper = r'''
-import math
-import os
-import sys
-import traceback
-
-SCALER_SCALARS = __SCALER_SCALARS__
-SCALER_ARRAYS = __SCALER_ARRAYS__
-RUNINFO_SCALARS = __RUNINFO_SCALARS__
-
-
-def emit(fout, unix_time, good, name, value):
-    try:
-        t = float(unix_time)
-        v = float(value)
-    except (TypeError, ValueError):
-        return
-    if not math.isfinite(t) or t <= 0 or not math.isfinite(v):
-        return
-    fout.write("%d\t%d\t%s\t%.17g\n" % (int(t), 1 if good else 0, name, v))
-
-
-def branch_names(tree):
-    return set(br.GetName() for br in tree.GetListOfBranches())
-
-
-def main(input_path, output_path):
-    import ROOT  # noqa: F401
-
-    ROOT.gROOT.SetBatch(True)
-    fin = ROOT.TFile.Open(input_path, "READ")
-    if not fin or fin.IsZombie():
-        raise RuntimeError("cannot open %s" % input_path)
-
-    with open(output_path, "w") as fout:
-        n_entries = 0
-        for tree_name in ("epics", "scalers", "runinfo"):
-            tree = fin.Get(tree_name)
-            if tree:
-                n_entries += int(tree.GetEntries())
-        fout.write("#entries\t%d\n" % n_entries)
-
-        tree = fin.Get("epics")
-        if tree:
-            branches = branch_names(tree)
-            if {"unix_time", "channel", "value"} <= branches:
-                has_good = "good" in branches
-                for i in range(int(tree.GetEntries())):
-                    tree.GetEntry(i)
-                    unix_time = getattr(tree, "unix_time")
-                    good = bool(getattr(tree, "good")) if has_good else True
-                    channels = getattr(tree, "channel")
-                    values = getattr(tree, "value")
-                    n = min(int(channels.size()), int(values.size()))
-                    for j in range(n):
-                        emit(fout, unix_time, good, str(channels[j]), values[j])
-
-        tree = fin.Get("scalers")
-        if tree:
-            branches = branch_names(tree)
-            if "unix_time" in branches:
-                has_good = "good" in branches
-                for i in range(int(tree.GetEntries())):
-                    tree.GetEntry(i)
-                    unix_time = getattr(tree, "unix_time")
-                    good = bool(getattr(tree, "good")) if has_good else True
-                    for name in SCALER_SCALARS:
-                        if name in branches:
-                            emit(fout, unix_time, good,
-                                 "scalers:" + name, getattr(tree, name))
-                    for name in SCALER_ARRAYS:
-                        if name not in branches:
-                            continue
-                        arr = getattr(tree, name)
-                        for ch in range(16):
-                            emit(fout, unix_time, good,
-                                 "scalers:%s[%d]" % (name, ch), arr[ch])
-
-        tree = fin.Get("runinfo")
-        if tree:
-            branches = branch_names(tree)
-            if "unix_time" in branches:
-                for i in range(int(tree.GetEntries())):
-                    tree.GetEntry(i)
-                    unix_time = getattr(tree, "unix_time")
-                    for name in RUNINFO_SCALARS:
-                        if name in branches:
-                            emit(fout, unix_time, True,
-                                 "runinfo:" + name, getattr(tree, name))
-                    cfg_size = 0
-                    if "daq_config" in branches:
-                        cfg_size = len(str(getattr(tree, "daq_config")))
-                    emit(fout, unix_time, True,
-                         "runinfo:has_daq_config", 1.0 if cfg_size > 0 else 0.0)
-                    emit(fout, unix_time, True,
-                         "runinfo:daq_config_bytes", float(cfg_size))
-
-    fin.Close()
-
-
-if __name__ == "__main__":
-    try:
-        main(sys.argv[1], sys.argv[2])
-    except Exception:
-        traceback.print_exc()
-        sys.stderr.flush()
-        os._exit(2)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(0)
-'''
-    helper = helper.replace("__SCALER_SCALARS__", repr(SCALER_SCALARS))
-    helper = helper.replace("__SCALER_ARRAYS__", repr(SCALER_ARRAYS))
-    helper = helper.replace("__RUNINFO_SCALARS__", repr(RUNINFO_SCALARS))
-
     with tempfile.TemporaryDirectory(prefix="epics_viewer_pyroot_") as tmp:
-        tmp_dir = Path(tmp)
-        script_path = tmp_dir / "dump_epics_for_viewer.py"
-        out_path = tmp_dir / "epics.tsv"
-        script_path.write_text(helper)
-
+        out_path = Path(tmp) / "epics.tsv"
         proc = subprocess.run(
-            [sys.executable, str(script_path), str(path), str(out_path)],
+            [sys.executable, str(Path(__file__).resolve()), "--dump-tsv",
+             str(path), str(out_path)],
             text=True,
             capture_output=True,
             timeout=180,
@@ -774,10 +628,8 @@ def _parse_root_cli_tsv(
     out_path: Path,
     loader: str = "root command",
 ) -> Dict[str, Any]:
-    series: Dict[str, Dict[str, List[Any]]] = {}
+    collector = _Collector()
     n_entries = 0
-    t0: Optional[float] = None
-    t1: Optional[float] = None
 
     with out_path.open() as fin:
         for raw in fin:
@@ -797,12 +649,9 @@ def _parse_root_cli_tsv(
             good = parts[1] != "0"
             channel = parts[2]
             value = float(parts[3])
-            if math.isfinite(unix_time) and unix_time > 0:
-                t0 = unix_time if t0 is None else min(t0, unix_time)
-                t1 = unix_time if t1 is None else max(t1, unix_time)
-            _append_point(series, channel, unix_time, value, good)
+            collector.add(channel, unix_time, value, good)
 
-    return _finalise_payload(path, series, n_entries, t0, t1, loader)
+    return collector.finalise(path, n_entries, loader)
 
 
 def _load_with_uproot(path: Path) -> Dict[str, Any]:
@@ -812,17 +661,9 @@ def _load_with_uproot(path: Path) -> Dict[str, Any]:
     except Exception as exc:
         raise ImportError("uproot/awkward is not available.") from exc
 
-    series: Dict[str, Dict[str, List[Any]]] = {}
-    t0: Optional[float] = None
-    t1: Optional[float] = None
+    # Every row counts toward the time span, even one without valid points.
+    collector = _Collector()
     n_entries = 0
-
-    def note_time(unix_time: float) -> None:
-        nonlocal t0, t1
-        if not math.isfinite(unix_time) or unix_time <= 0:
-            return
-        t0 = unix_time if t0 is None else min(t0, unix_time)
-        t1 = unix_time if t1 is None else max(t1, unix_time)
 
     with uproot.open(str(path)) as fin:
         if "epics" in fin:
@@ -845,9 +686,9 @@ def _load_with_uproot(path: Path) -> Dict[str, Any]:
                     times, channel_rows, value_rows, good_rows
                 ):
                     unix_time = float(unix_time_raw)
-                    note_time(unix_time)
+                    collector.note_time(unix_time)
                     for channel, value in zip(channels, values):
-                        _append_point(series, str(channel), unix_time, float(value), good)
+                        collector.add(str(channel), unix_time, float(value), good)
 
         if "scalers" in fin:
             tree = fin["scalers"]
@@ -875,15 +716,15 @@ def _load_with_uproot(path: Path) -> Dict[str, Any]:
                 }
                 for i, unix_time_raw in enumerate(times):
                     unix_time = float(unix_time_raw)
-                    note_time(unix_time)
+                    collector.note_time(unix_time)
                     good = good_rows[i]
                     for name, values in scalar_data.items():
-                        _append_point(series, f"scalers:{name}", unix_time,
+                        collector.add(f"scalers:{name}", unix_time,
                                       float(values[i]), good)
                     for name, rows in array_data.items():
                         row = rows[i]
                         for ch, value in enumerate(row[:16]):
-                            _append_point(series, f"scalers:{name}[{ch}]",
+                            collector.add(f"scalers:{name}[{ch}]",
                                           unix_time, float(value), good)
 
         if "runinfo" in fin:
@@ -907,22 +748,20 @@ def _load_with_uproot(path: Path) -> Dict[str, Any]:
                 )
                 for i, unix_time_raw in enumerate(times):
                     unix_time = float(unix_time_raw)
-                    note_time(unix_time)
+                    collector.note_time(unix_time)
                     for name, values in scalar_data.items():
-                        _append_point(series, f"runinfo:{name}", unix_time,
+                        collector.add(f"runinfo:{name}", unix_time,
                                       float(values[i]), None)
                     cfg = "" if cfg_rows[i] is None else str(cfg_rows[i])
-                    _append_point(series, "runinfo:has_daq_config", unix_time,
+                    collector.add("runinfo:has_daq_config", unix_time,
                                   1.0 if cfg else 0.0, None)
-                    _append_point(series, "runinfo:daq_config_bytes", unix_time,
+                    collector.add("runinfo:daq_config_bytes", unix_time,
                                   float(len(cfg)), None)
 
-    return _finalise_payload(path, series, n_entries, t0, t1, "uproot")
+    return collector.finalise(path, n_entries, "uproot")
 
 
-# ===========================================================================
-#  Plot helpers
-# ===========================================================================
+# ── Plot helpers ──────────────────────────────────────────────────────────
 
 def _nice_ticks(lo: float, hi: float, max_ticks: int = 6) -> List[float]:
     if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
@@ -1090,11 +929,12 @@ class ScatterPlotWidget(QWidget):
     def _from_sy(sy: float, rect: QRectF, yr: Tuple[float, float]) -> float:
         return yr[0] + (rect.bottom() - sy) / rect.height() * (yr[1] - yr[0])
 
+    @staticmethod
+    def _clamp_pt(pt: Tuple[float, float], rect: QRectF) -> Tuple[float, float]:
+        return (max(rect.left(), min(rect.right(), pt[0])),
+                max(rect.top(), min(rect.bottom(), pt[1])))
+
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.MouseButton.RightButton:
-            self.reset_zoom()
-            event.accept()
-            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
@@ -1121,10 +961,8 @@ class ScatterPlotWidget(QWidget):
         if abs(end[0] - start[0]) > 8 and abs(end[1] - start[1]) > 8:
             rect = self._plot_rect()
             xr, yr = self._active_range()
-            x0 = max(rect.left(), min(rect.right(), start[0]))
-            x1 = max(rect.left(), min(rect.right(), end[0]))
-            y0 = max(rect.top(), min(rect.bottom(), start[1]))
-            y1 = max(rect.top(), min(rect.bottom(), end[1]))
+            x0, y0 = self._clamp_pt(start, rect)
+            x1, y1 = self._clamp_pt(end, rect)
             xa = self._from_sx(min(x0, x1), rect, xr)
             xb = self._from_sx(max(x0, x1), rect, xr)
             ya = self._from_sy(max(y0, y1), rect, yr)
@@ -1199,12 +1037,8 @@ class ScatterPlotWidget(QWidget):
         p.setClipping(False)
 
         if self._drag_start and self._drag_now:
-            x0, y0 = self._drag_start
-            x1, y1 = self._drag_now
-            x0 = max(rect.left(), min(rect.right(), x0))
-            x1 = max(rect.left(), min(rect.right(), x1))
-            y0 = max(rect.top(), min(rect.bottom(), y0))
-            y1 = max(rect.top(), min(rect.bottom(), y1))
+            x0, y0 = self._clamp_pt(self._drag_start, rect)
+            x1, y1 = self._clamp_pt(self._drag_now, rect)
             zr = QRectF(min(x0, x1), min(y0, y1), abs(x1 - x0), abs(y1 - y0))
             p.fillRect(zr, QColor(83, 182, 255, 45))
             p.setPen(QPen(QColor(ACCENT), 1))
@@ -1334,9 +1168,7 @@ class EpicsPlotGrid(QWidget):
         self.date_range.setText("")
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ── Main window ───────────────────────────────────────────────────────────
 
 class EpicsViewer(QMainWindow):
     def __init__(

@@ -28,6 +28,7 @@ __pycache__/
 # IDE / editor
 .vscode/
 .idea/
+.codex/
 *.swp
 *.swo
 *~

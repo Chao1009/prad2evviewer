@@ -1,6 +1,6 @@
-// test/dev/evet_diff.cpp — diff raw buffers between EvChannel (evio file)
-// and EtChannel (ET ring) for the same events, to validate that the two
-// decoder paths produce identical data.
+// test/dev/evet_diff.cpp — print the raw buffers from EvChannel (evio file)
+// and EtChannel (ET ring) side by side for the same events, to check that
+// the two reader paths deliver identical data.
 //
 // Start this program first (connects to ET), then use et_feeder to feed
 // the same evio file to the same ET system.  Set interval large enough
@@ -8,7 +8,6 @@
 //
 // Usage: evet_diff <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms]
 
-#include "EtConfigWrapper.h"
 #include "EvChannel.h"
 #include "EtChannel.h"
 #include <csignal>
@@ -51,7 +50,6 @@ int main(int argc, char* argv[])
     if (optind >= argc) { usage(argv[0]); return 1; }
     std::string evio_file = argv[optind];
 
-    // ET channel reader
     evc::EtChannel et_chan;
     if (et_chan.Connect(host, port, et_file) != evc::status::success ||
         et_chan.Open("MONITOR") != evc::status::success) {
@@ -59,14 +57,12 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    // evio file reader
     evc::EvChannel ev_chan;
     if (ev_chan.OpenAuto(evio_file) != evc::status::success) {
         std::cerr << "Failed to open coda file \"" << evio_file << "\"\n";
         return -1;
     }
 
-    // install signal handler
     std::signal(SIGINT, signal_handler);
     int count = 0;
     bool loop = true;

@@ -3,27 +3,29 @@
 //=============================================================================
 
 #include "GainCorrCompute.h"
+#include "ConfigSetup.h"
 #include "EventData.h"
 #include "EventData_io.h"
+#include "Fadc250Data.h"
+#include "InstallPaths.h"
+#include "Replay.h"
+#include "ToolUtils.h"
 
 #include <TChain.h>
 #include <TFile.h>
 
-#include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
+#include <map>
 
 namespace analysis {
 namespace {
-
-TH1F *makeH(const char *name)
-{
-    return new TH1F(name, name, kGainHistBins, kGainHistMin, kGainHistMax);
-}
 
 void resetH(TH1F *h)
 {
@@ -111,15 +113,57 @@ uint32_t batchUnixTime(const std::vector<UnixTimeAnchor> &anchors,
 
     if (!best) return 0;
 
-    constexpr double kTiTickSeconds = 4.0e-9;  // 250 MHz TI clock
     double unix_seconds = static_cast<double>(best->unix_time);
     if (batch_ti_ticks > 0 && best->ti_ticks > 0)
-        unix_seconds += (batch_ti_ticks - best->ti_ticks) * kTiTickSeconds;
+        unix_seconds += (batch_ti_ticks - best->ti_ticks) * fdec::TI_TICK_SEC;
 
     if (!std::isfinite(unix_seconds) || unix_seconds <= 0.0 ||
         unix_seconds > static_cast<double>(std::numeric_limits<uint32_t>::max()))
         return 0;
     return static_cast<uint32_t>(std::llround(unix_seconds));
+}
+
+void ensureRunGainCorr(int run_num,
+                       const std::vector<std::string> &evio_files,
+                       const std::string &db_dir,
+                       const std::string &daq_config,
+                       const std::string &daq_map,
+                       int num_threads)
+{
+    const std::string gain_corr_dir = prad2::GainCorrDir(db_dir);
+    if (!prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty())
+        return;
+
+    std::cout << "[gain_corr] No gain-correction file for run " << run_num
+              << "; launching prad2ana_replay_gainCorr...\n";
+
+    // Temporary directory for the intermediate *_lms.root files.
+    // replay_gainCorr deletes them (no -s flag); we clean up the dir itself.
+    char tmpl[] = "./prad2_lms_XXXXXX";
+    char *tmp = mkdtemp(tmpl);
+    if (!tmp) {
+        std::cerr << "[gain_corr] mkdtemp failed: " << std::strerror(errno) << "\n";
+        return;
+    }
+    const std::string tmp_dir(tmp);
+
+    std::vector<std::string> args{prad2::module_dir() + "/prad2ana_replay_gainCorr"};
+    args.insert(args.end(), evio_files.begin(), evio_files.end());
+    args.insert(args.end(), {"-o", tmp_dir, "-j", std::to_string(num_threads)});
+    if (!daq_config.empty()) args.insert(args.end(), {"-c", daq_config});
+    if (!daq_map.empty())    args.insert(args.end(), {"-d", daq_map});
+
+    const int rc = RunCommand(args);
+    std::filesystem::remove_all(tmp_dir);
+    if (rc != 0) {
+        std::cerr << "[gain_corr] replay_gainCorr exited with code " << rc << "\n";
+        return;
+    }
+    if (prad2::FindGainCorrRootFile(gain_corr_dir, run_num).empty()) {
+        std::cerr << "[gain_corr] Output not found in " << gain_corr_dir << "\n";
+        return;
+    }
+    std::cout << "[gain_corr] Gain-correction file ready.\n";
 }
 
 } // namespace
@@ -134,6 +178,13 @@ GainPlotStore::~GainPlotStore()
         for (auto *h : kv.second) delete h;
 }
 
+TH1F *MakeGainHist(const char *name)
+{
+    auto *h = new TH1F(name, name, kGainHistBins, kGainHistMin, kGainHistMax);
+    h->SetDirectory(nullptr);
+    return h;
+}
+
 std::string MakeLMSOutputFile(const std::string &evio_path)
 {
     std::string out = std::filesystem::path(evio_path).filename().string();
@@ -142,6 +193,58 @@ std::string MakeLMSOutputFile(const std::string &evio_path)
         out = out.substr(0, pos) + out.substr(pos + 5);
     out += "_lms.root";
     return out;
+}
+
+std::string GainCorrOutputPath(const std::string &db_dir, int run)
+{
+    const std::string dir = prad2::GainCorrDir(db_dir);
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (ec)
+        std::cerr << "Warning: cannot create " << dir
+                  << ": " << ec.message() << "\n";
+    return dir + "/" + Form("prad_%06d_gain_corr.root", run);
+}
+
+int ReplayLMSFiles(const std::vector<std::string> &evio_files,
+                   const std::string              &out_dir,
+                   int                             num_threads,
+                   const std::string              &daq_config,
+                   const std::string              &daq_map,
+                   const std::string              &db_dir,
+                   std::vector<std::string>       *produced)
+{
+    const auto output_for = [&](const std::string &evio) {
+        return out_dir + "/" + MakeLMSOutputFile(evio);
+    };
+    std::vector<char> ok;
+    const int errors = RunReplayPool(evio_files, num_threads, daq_config, daq_map, output_for,
+        [&](Replay &replay, const std::string &evio, const std::string &out) {
+            return replay.Process_LMSgainFactor(evio, out, db_dir, daq_config);
+        }, &ok);
+    if (produced)
+        for (size_t i = 0; i < ok.size(); ++i)
+            if (ok[i]) produced->push_back(output_for(evio_files[i]));
+    return errors;
+}
+
+void EnsureGainCorr(const std::vector<std::string> &evio_files,
+                    const std::string              &db_dir,
+                    const std::string              &daq_config,
+                    const std::string              &daq_map,
+                    int                             num_threads)
+{
+    std::map<int, std::vector<std::string>> files_by_run;
+    for (const auto &f : evio_files)
+        files_by_run[get_run_int(f)].push_back(f);
+
+    std::cout << "Detected " << files_by_run.size() << " run(s):";
+    for (const auto &[run, files] : files_by_run)
+        std::cout << " run" << run << " (" << files.size() << " file(s))";
+    std::cout << "\n";
+
+    for (const auto &[run, files] : files_by_run)
+        ensureRunGainCorr(run, files, db_dir, daq_config, daq_map, num_threads);
 }
 
 void SetupGainBranches(TTree *tree, GainBatch &b)
@@ -245,9 +348,9 @@ bool ComputeGainCorrections(const std::vector<std::string> &lms_files,
     TH1F *mod_lms  [kGainNW];
     TH1F *ref_lms  [kGainNLMS];
     TH1F *ref_alpha[kGainNLMS];
-    for (int i = 0; i < kGainNW;   ++i) mod_lms[i]   = makeH(Form("mod_lms_%d",   i + 1));
-    for (int i = 0; i < kGainNLMS; ++i) ref_lms[i]   = makeH(Form("ref_lms_%d",   i + 1));
-    for (int i = 0; i < kGainNLMS; ++i) ref_alpha[i] = makeH(Form("ref_alpha_%d", i + 1));
+    for (int i = 0; i < kGainNW;   ++i) mod_lms[i]   = MakeGainHist(Form("mod_lms_%d",   i + 1));
+    for (int i = 0; i < kGainNLMS; ++i) ref_lms[i]   = MakeGainHist(Form("ref_lms_%d",   i + 1));
+    for (int i = 0; i < kGainNLMS; ++i) ref_alpha[i] = MakeGainHist(Form("ref_alpha_%d", i + 1));
 
     TFile *outfile = TFile::Open(gain_out.c_str(), "RECREATE");
     if (!outfile || !outfile->IsOpen()) {

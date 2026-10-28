@@ -20,7 +20,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <cstdlib>
 #include <vector>
 
 using namespace fdec;
@@ -63,7 +62,6 @@ void banner(const char *name)
     std::printf("\n[T] %s\n", name);
 }
 
-// Dispatch helper: run the analyzer on a vector with the given config + PED.
 DaqWaveResult run(const std::vector<uint16_t> &raw, float PED,
                   const evc::DaqConfig::Fadc250FwConfig &cfg)
 {
@@ -359,7 +357,6 @@ void test_T7_va_on_sample()
     }
 }
 
-// ---------------------------------------------------------------------------
 int main()
 {
     test_T1_single_pulse();

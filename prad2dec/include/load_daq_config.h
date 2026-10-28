@@ -2,55 +2,54 @@
 //=============================================================================
 // load_daq_config.h — load DaqConfig from JSON file
 //
-// Utility for applications. Requires nlohmann/json.
-// Not part of prad2dec library (which has no JSON dependency).
+// Header-only utility for applications; callers need nlohmann/json on the
+// include path (prad2dec links it only PRIVATE).
 //=============================================================================
 
 #include "DaqConfig.h"
+#include "JsonUtil.h"
 #include <nlohmann/json.hpp>
-#include <fstream>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace evc
 {
 
 // parse hex string like "0xFF50" or plain integer to uint32_t
+inline uint32_t parse_hex(const std::string &s)
+{
+    return static_cast<uint32_t>(std::stoul(s, nullptr, 0));
+}
+
 inline uint32_t parse_hex(const nlohmann::json &j)
 {
     if (j.is_number()) return j.get<uint32_t>();
-    std::string s = j.get<std::string>();
-    return static_cast<uint32_t>(std::stoul(s, nullptr, 0));
+    return parse_hex(j.get<std::string>());
+}
+
+// array of tags; a single scalar tag gives a one-element list
+inline std::vector<uint32_t> parse_hex_list(const nlohmann::json &j)
+{
+    std::vector<uint32_t> out;
+    for (auto &v : j) out.push_back(parse_hex(v));
+    return out;
 }
 
 inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
 {
-    std::ifstream f(path);
-    if (!f.is_open()) {
-        std::cerr << "load_daq_config: cannot open " << path << std::endl;
-        return false;
-    }
-
     nlohmann::json j;
-    try { j = nlohmann::json::parse(f, nullptr, true, true); } // allow comments
-    catch (const nlohmann::json::parse_error &e) {
-        std::cerr << "load_daq_config: parse error: " << e.what() << std::endl;
+    std::string err;
+    if (!prad2::read_json_file(path, j, &err)) {
+        std::cerr << "load_daq_config: " << err << std::endl;
         return false;
     }
 
     // event tags
     if (j.contains("event_tags")) {
         auto &et = j["event_tags"];
-        if (et.contains("physics")) {
-            cfg.physics_tags.clear();
-            for (auto &v : et["physics"])
-                cfg.physics_tags.push_back(parse_hex(v));
-        }
-        if (et.contains("monitoring")) {
-            cfg.monitoring_tags.clear();
-            for (auto &v : et["monitoring"])
-                cfg.monitoring_tags.push_back(parse_hex(v));
-        }
+        if (et.contains("physics"))      cfg.physics_tags    = parse_hex_list(et["physics"]);
+        if (et.contains("monitoring"))   cfg.monitoring_tags = parse_hex_list(et["monitoring"]);
         if (et.contains("physics_base")) cfg.physics_base    = parse_hex(et["physics_base"]);
         if (et.contains("prestart"))     cfg.prestart_tag    = parse_hex(et["prestart"]);
         if (et.contains("go"))           cfg.go_tag          = parse_hex(et["go"]);
@@ -77,16 +76,7 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
         if (bt.contains("run_info"))       cfg.run_info_tag       = parse_hex(bt["run_info"]);
         if (bt.contains("daq_config"))     cfg.daq_config_tag     = parse_hex(bt["daq_config"]);
         if (bt.contains("epics_data"))     cfg.epics_bank_tag     = parse_hex(bt["epics_data"]);
-        if (bt.contains("ssp_raw")) {
-            cfg.ssp_bank_tags.clear();
-            auto &v = bt["ssp_raw"];
-            if (v.is_array()) {
-                for (auto &item : v)
-                    cfg.ssp_bank_tags.push_back(parse_hex(item));
-            } else {
-                cfg.ssp_bank_tags.push_back(parse_hex(v));
-            }
-        }
+        if (bt.contains("ssp_raw"))        cfg.ssp_bank_tags      = parse_hex_list(bt["ssp_raw"]);
         if (bt.contains("fadc_raw"))       cfg.fadc_raw_tag       = parse_hex(bt["fadc_raw"]);
         if (bt.contains("tdc"))            cfg.tdc_bank_tag       = parse_hex(bt["tdc"]);
     }
@@ -99,12 +89,8 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             auto &v = ds["bank_tag"];
             if (v.is_number_integer()) cfg.dsc_scaler.bank_tag = v.get<int>();
             else if (v.is_string()) {
-                std::string s = v.get<std::string>();
-                if (s.empty()) cfg.dsc_scaler.bank_tag = -1;
-                else {
-                    try { cfg.dsc_scaler.bank_tag = (int)std::stoul(s, nullptr, 0); }
-                    catch (...) { cfg.dsc_scaler.bank_tag = -1; }
-                }
+                try { cfg.dsc_scaler.bank_tag = (int)parse_hex(v); }
+                catch (...) { cfg.dsc_scaler.bank_tag = -1; }
             }
         }
         if (ds.contains("slot"))    cfg.dsc_scaler.slot    = ds["slot"].get<int>();
@@ -163,29 +149,18 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             if (an.contains("overflow"))        cfg.wave_cfg.overflow        = static_cast<uint16_t>(an["overflow"].get<int>());
             if (an.contains("clk_mhz"))         cfg.wave_cfg.clk_mhz         = an["clk_mhz"].get<float>();
 
-            // NNLS pile-up deconvolution sub-block.  Application-layer
-            // concerns (template_file, apply_to_all_peaks) are read here
-            // too so they survive a round-trip through the C++ struct,
-            // but the analyzer itself only acts on the numeric / bool
-            // gates.
+            // Pile-up deconvolution sub-block.  template_file is an
+            // application-layer concern (loaded into a PulseTemplateStore);
+            // it is read here so it survives a round-trip through the C++
+            // struct.
             if (an.contains("nnls_deconv")) {
                 auto &nd = an["nnls_deconv"];
                 auto &dc = cfg.wave_cfg.nnls_deconv;
                 if (nd.contains("enabled"))            dc.enabled            = nd["enabled"].get<bool>();
                 if (nd.contains("template_file"))      dc.template_file      = nd["template_file"].get<std::string>();
                 if (nd.contains("apply_to_all_peaks")) dc.apply_to_all_peaks = nd["apply_to_all_peaks"].get<bool>();
-                if (nd.contains("tau_r_range_ns")
-                    && nd["tau_r_range_ns"].is_array()
-                    && nd["tau_r_range_ns"].size() >= 2) {
-                    dc.tau_r_min_ns = nd["tau_r_range_ns"][0].get<float>();
-                    dc.tau_r_max_ns = nd["tau_r_range_ns"][1].get<float>();
-                }
-                if (nd.contains("tau_f_range_ns")
-                    && nd["tau_f_range_ns"].is_array()
-                    && nd["tau_f_range_ns"].size() >= 2) {
-                    dc.tau_f_min_ns = nd["tau_f_range_ns"][0].get<float>();
-                    dc.tau_f_max_ns = nd["tau_f_range_ns"][1].get<float>();
-                }
+                prad2::read_json_array(nd, "tau_r_range_ns", dc.tau_r_min_ns, dc.tau_r_max_ns);
+                prad2::read_json_array(nd, "tau_f_range_ns", dc.tau_f_min_ns, dc.tau_f_max_ns);
                 if (nd.contains("shape_window_factor")) dc.shape_window_factor = nd["shape_window_factor"].get<float>();
                 if (nd.contains("t0_window_ns"))        dc.t0_window_ns        = nd["t0_window_ns"].get<float>();
                 if (nd.contains("amp_max_factor"))      dc.amp_max_factor      = nd["amp_max_factor"].get<float>();
@@ -260,16 +235,15 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
     }
 
     // bank structure: tag → { module, product, type }
-    // This is the new authoritative source used by EvChannel's lazy accessors
-    // to dispatch decoders by data product.  Absent entries fall back to the
-    // legacy hard-coded dispatch in DecodeEvent — see EvChannel.cpp.
+    // Consumed by EvChannel's lazy accessors; tags not listed here are
+    // back-filled from the bank_tags fields in EvChannel::SetConfig.
     if (j.contains("bank_structure")) {
         auto &bs = j["bank_structure"];
         if (bs.contains("data_banks")) {
             cfg.data_banks.clear();
             for (auto it = bs["data_banks"].begin(); it != bs["data_banks"].end(); ++it) {
                 uint32_t tag;
-                try { tag = static_cast<uint32_t>(std::stoul(it.key(), nullptr, 0)); }
+                try { tag = parse_hex(it.key()); }
                 catch (...) {
                     std::cerr << "load_daq_config: bank_structure.data_banks key '"
                               << it.key() << "' is not a valid integer; skipping\n";
@@ -298,16 +272,10 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
 // Format: [{"crate":6,"slot":23,"channel":0,"mean":297.878,"rms":2.6972}, ...]
 inline bool load_pedestals(const std::string &path, DaqConfig &cfg)
 {
-    std::ifstream f(path);
-    if (!f.is_open()) {
-        std::cerr << "load_pedestals: cannot open " << path << std::endl;
-        return false;
-    }
-
     nlohmann::json j;
-    try { j = nlohmann::json::parse(f, nullptr, true, true); }
-    catch (const nlohmann::json::parse_error &e) {
-        std::cerr << "load_pedestals: parse error: " << e.what() << std::endl;
+    std::string err;
+    if (!prad2::read_json_file(path, j, &err)) {
+        std::cerr << "load_pedestals: " << err << std::endl;
         return false;
     }
 
@@ -318,7 +286,7 @@ inline bool load_pedestals(const std::string &path, DaqConfig &cfg)
         int channel = entry.value("channel", 0);
         float mean  = entry.value("mean", 0.f);
         float rms   = entry.value("rms", 0.f);
-        cfg.pedestals[DaqConfig::pack_daq_key(crate, slot, channel)] = {mean, rms};
+        cfg.pedestals[prad2::pack_daq_key(crate, slot, channel)] = {mean, rms};
     }
     return true;
 }

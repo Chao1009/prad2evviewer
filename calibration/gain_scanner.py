@@ -6,9 +6,9 @@ from prad2_server, finds the right edge of the Bremsstrahlung spectrum, and
 adjusts HV via prad2hvd until the edge aligns with a target ADC value.
 
 Classes:
-    SpectrumAnalyzer  — pure analysis (edge finding, voltage step)
+    SpectrumAnalyzer  — pure analysis (edge finding, bin ↔ ADC conversion)
     ServerClient      — HTTP client for prad2_server
-    HVClient          — WebSocket client for prad2hvd
+    HVClient          — HTTP client for prad2hvd
     GainScanEngine    — orchestrates the full scan loop
 """
 
@@ -20,28 +20,27 @@ import os
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from scan_utils import Module, module_to_ptrans, ptrans_in_limits
-from scan_epics import epics_move_to, epics_is_moving, epics_read_rbv, epics_stop, SPMG
+from scan_utils import C, Module, module_to_ptrans
+from scan_epics import epics_move_to, epics_stop, epics_wait_move_done
+from scan_engine import (
+    DEFAULT_POS_THRESHOLD, DEFAULT_BEAM_THRESHOLD, DEFAULT_VELO_X, DEFAULT_VELO_Y,
+)
 from pmt_response import PMTGainModel
 
 
-# ============================================================================
-#  Spectrum Analysis
-# ============================================================================
+# -- Spectrum analysis --------------------------------------------------------
 
 class SpectrumAnalyzer:
     """Analyse peak height histograms to find the spectrum right edge."""
 
-    def __init__(self, target_adc: float = 3200.0,
-                 bin_step: float = 10.0, bin_min: float = 0.0,
+    def __init__(self, bin_step: float = 10.0, bin_min: float = 0.0,
                  smooth_window: int = 5,
                  edge_fraction: float = 0.05,
                  use_log_cumul: bool = True,
                  pedestal_adc: float = 200.0,
                  smooth_floor: float = 1.0):
-        self.target_adc = target_adc
         self.bin_step = bin_step
         self.bin_min = bin_min
         self.smooth_window = smooth_window  # moving-average window
@@ -79,9 +78,7 @@ class SpectrumAnalyzer:
             return None
 
         # step 1: exclude pedestal
-        ped_bin = int((self.pedestal_adc - self.bin_min) / self.bin_step) \
-            if self.bin_step > 0 else 0
-        ped_bin = max(0, min(ped_bin, n))
+        ped_bin = max(0, min(self.adc_to_bin(self.pedestal_adc), n))
 
         # step 2: smooth
         hw = self.smooth_window // 2
@@ -91,12 +88,8 @@ class SpectrumAnalyzer:
             hi = min(n, i + hw + 1)
             smooth[i] = sum(bins[lo:hi]) / (hi - lo)
 
-        # step 3: skip pile-up tail — find the right boundary of the
-        # contiguous spectrum body.  Start at the peak (always inside
-        # the body for Bremsstrahlung) and walk rightward until the
-        # smoothed value drops below ``smooth_floor``.  Everything
-        # beyond that point — including isolated pile-up clusters whose
-        # smoothed values may exceed the floor — is excluded.
+        # step 3: skip pile-up tail, walking right from the peak (always
+        # inside the body for Bremsstrahlung)
         peak_bin = ped_bin
         for i in range(ped_bin + 1, n):
             if smooth[i] > smooth[peak_bin]:
@@ -150,31 +143,103 @@ class SpectrumAnalyzer:
         """Convert bin index to ADC value (centre of bin)."""
         return self.bin_min + (bin_index + 0.5) * self.bin_step
 
+    def adc_to_bin(self, adc: float) -> int:
+        """Bin index containing *adc*; -1 if the binning is invalid."""
+        return int((adc - self.bin_min) / self.bin_step) if self.bin_step > 0 else -1
 
-# ============================================================================
-#  prad2_server HTTP Client
-# ============================================================================
+
+def draw_histogram(p, ax, ay, pw, ph, bins: List[int],
+                   target_bin: Optional[int], edge_bin: Optional[int],
+                   log_y: bool, *, min_bar_w: float = 0.5,
+                   grid_pt: int = 8, grid_label_h: int = 14) -> float:
+    """Paint a peak-height histogram with the QPainter *p*.
+
+    The plot area is (*ax*, *ay*, *pw*, *ph*); y grid labels go in the
+    margin between x=0 and *ax*.  Draws the axes, the bars (log10 or
+    linear y), the target bin as a red dashed line, the edge bin as a
+    green line, and the dotted y grid (decades in log mode, fifths of
+    the maximum in linear mode).  Out-of-range or None bins are not
+    marked.  *bins* must be non-empty.  Returns the bar width in pixels.
+    """
+    from PyQt6.QtGui import QColor, QFont, QPen
+    from PyQt6.QtCore import Qt, QRectF
+
+    n = len(bins)
+    vmax = max(bins) or 1
+    log_vmax = math.log10(max(vmax, 1)) if log_y else 0
+
+    p.setPen(QPen(QColor(C.BORDER), 1))
+    p.drawLine(ax, ay, ax, ay + ph)
+    p.drawLine(ax, ay + ph, ax + pw, ay + ph)
+
+    bar_w = pw / n
+    p.setPen(Qt.PenStyle.NoPen)
+    for i, v in enumerate(bins):
+        if v <= 0:
+            continue
+        if log_y:
+            frac = math.log10(v) / log_vmax if log_vmax > 0 else 0
+        else:
+            frac = v / vmax
+        bh = frac * ph
+        p.fillRect(QRectF(ax + i * bar_w, ay + ph - bh,
+                          max(bar_w - min_bar_w, min_bar_w), bh),
+                   QColor(C.ACCENT))
+
+    if target_bin is not None and 0 <= target_bin < n:
+        tx = ax + (target_bin + 0.5) * bar_w
+        p.setPen(QPen(QColor(C.RED), 1.5, Qt.PenStyle.DashLine))
+        p.drawLine(int(tx), ay, int(tx), ay + ph)
+    if edge_bin is not None and 0 <= edge_bin < n:
+        ex = ax + (edge_bin + 0.5) * bar_w
+        p.setPen(QPen(QColor(C.GREEN), 2))
+        p.drawLine(int(ex), ay, int(ex), ay + ph)
+
+    if log_y:
+        grid = []
+        decade = 10
+        while decade < vmax:
+            grid.append((math.log10(decade) / log_vmax, decade))
+            decade *= 10
+    else:
+        grid = [(gi / 5, int(vmax * (gi / 5))) for gi in range(1, 5)]
+    for gf, label in grid:
+        gy = ay + ph - gf * ph
+        p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
+        p.drawLine(ax + 1, int(gy), ax + pw, int(gy))
+        p.setPen(QColor(C.DIM))
+        p.setFont(QFont("Consolas", grid_pt))
+        p.drawText(QRectF(0, gy - grid_label_h / 2, ax - 4, grid_label_h),
+                   Qt.AlignmentFlag.AlignRight, f"{label}")
+    return bar_w
+
+
+# -- prad2_server HTTP client -------------------------------------------------
+
+def _http_json(url: str, data: Optional[bytes] = None,
+               headers: Optional[Dict[str, str]] = None) -> Any:
+    """GET *url* (POST when *data* is given) and decode the JSON reply."""
+    import urllib.request
+    req = urllib.request.Request(url, data=data, headers=headers or {},
+                                 method="POST" if data is not None else "GET")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
 
 class ServerClient:
-    """HTTP client for prad2_server histogram and occupancy APIs."""
+    """HTTP client for the prad2_server config and histogram APIs."""
 
     def __init__(self, url: str = "http://clondaq6:5051", log_fn=None,
                  read_only: bool = False):
         self.url = url.rstrip("/")
-        self._key_map: Dict[str, str] = {}
         self._log = log_fn or (lambda msg, **kw: None)
         self._read_only = read_only
 
     def _get(self, path: str) -> Any:
-        import urllib.request
-        with urllib.request.urlopen(f"{self.url}{path}", timeout=10) as r:
-            return json.loads(r.read())
+        return _http_json(self.url + path)
 
     def _post(self, path: str) -> Any:
-        import urllib.request
-        req = urllib.request.Request(f"{self.url}{path}", method="POST", data=b"")
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read())
+        return _http_json(self.url + path, data=b"")
 
     def get_config(self) -> dict:
         self._log("Server: GET /api/config")
@@ -187,10 +252,7 @@ class ServerClient:
         self._log("Server: POST /api/hist/clear")
         return self._post("/api/hist/clear")
 
-    def get_occupancy(self) -> dict:
-        return self._get("/api/occupancy")
-
-    def get_height_histogram(self, key: str, quiet: bool = False) -> dict:
+    def get_height_histogram(self, key: str) -> dict:
         return self._get(f"/api/heighthist/{key}")
 
     def build_key_map(self) -> Dict[str, str]:
@@ -206,26 +268,13 @@ class ServerClient:
             ch = entry.get("channel", 0)
             roc = crate_roc.get(crate, crate)
             key_map[name] = f"{roc}_{slot}_{ch}"
-        self._key_map = key_map
         return key_map
 
-    def get_module_counts(self, module_name: str) -> int:
-        """Get hit count for a single module from occupancy."""
-        key = self._key_map.get(module_name, "")
-        if not key:
-            return 0
-        occ = self.get_occupancy()
-        return occ.get("occ", {}).get(key, 0)
 
-
-# ============================================================================
-#  prad2hvd HTTP Client
-# ============================================================================
+# -- prad2hvd HTTP client -----------------------------------------------------
 
 class HVClient:
-    """HTTP client for prad2hvd voltage control.
-
-    Stateless HTTP — no WebSocket, no background threads, no broken pipes.
+    """Stateless HTTP client for prad2hvd voltage control.
 
     API:
         GET  /api/voltage?name=W1124           → read voltage (no auth)
@@ -242,7 +291,7 @@ class HVClient:
 
     def connect(self, password: str = ""):
         """Verify connectivity and authenticate."""
-        import urllib.request, urllib.error
+        import urllib.error
         self._password = password
         self._log(f"HV: connecting to {self.url}")
         # test connectivity — 404 is OK (means server is up, module not found)
@@ -272,20 +321,13 @@ class HVClient:
         self._log("HV: connected")
 
     def _http_get(self, path: str) -> Any:
-        import urllib.request
-        with urllib.request.urlopen(f"{self.url}{path}", timeout=10) as r:
-            return json.loads(r.read())
+        return _http_json(self.url + path)
 
     def _http_post(self, path: str, data: dict) -> Any:
-        import urllib.request
-        body = json.dumps(data).encode()
-        req = urllib.request.Request(
-            f"{self.url}{path}", data=body, method="POST",
-            headers={"Content-Type": "application/json"})
+        headers = {"Content-Type": "application/json"}
         if self._password:
-            req.add_header("X-Auth", self._password)
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read())
+            headers["X-Auth"] = self._password
+        return _http_json(self.url + path, json.dumps(data).encode(), headers)
 
     def get_voltage(self, name: str) -> Optional[dict]:
         """Read voltage info for a module by name."""
@@ -335,9 +377,7 @@ class HVClient:
         pass  # stateless — nothing to close
 
 
-# ============================================================================
-#  Gain Scan Engine
-# ============================================================================
+# -- Gain scan engine ---------------------------------------------------------
 
 class GainScanState:
     IDLE       = "IDLE"
@@ -353,10 +393,9 @@ class GainScanState:
 class GainScanEngine:
     """Orchestrates the automatic gain equalization scan.
 
-    Each module is processed as a self-contained step: fresh server/HV
-    connections are created, the module is equalized (or fails), then
-    connections are closed.  This avoids stale WebSocket state between
-    modules.
+    Each module on the path is processed as a self-contained step: move
+    the beam onto it, then collect → analyze → adjust HV until the edge
+    converges or the module fails.
     """
 
     # defaults (configurable before start)
@@ -364,11 +403,9 @@ class GainScanEngine:
     min_counts: int = 10000
     max_iterations: int = 8
     convergence_tol: float = 50.0    # ADC units
-    hv_settle_time: float = 10.0     # seconds (legacy, unused)
-    pos_threshold: float = 0.5       # mm
-    beam_threshold: float = 0.3      # nA
-    collect_poll_sec: float = 2.0    # occupancy poll interval
-    move_timeout: float = 900.0      # seconds (15 min — long y-axis traversals)
+    pos_threshold: float = DEFAULT_POS_THRESHOLD    # mm
+    beam_threshold: float = DEFAULT_BEAM_THRESHOLD  # nA
+    collect_poll_sec: float = 2.0    # histogram poll interval (s)
     edge_adc_min: float = 500.0      # reject edges below this
     edge_adc_max: float = 3900.0     # reject edges above this
     use_log_y: bool = True           # log y scale for report snapshots
@@ -397,8 +434,8 @@ class GainScanEngine:
         self.path = list(modules)
         self.log = log_fn
         self.key_map = key_map
-        self.analyzer = SpectrumAnalyzer(target_adc=self.target_adc)
-        # current step's connections (created per module, visible to UI)
+        self.analyzer = SpectrumAnalyzer()
+        # clients created by _run and reused for every module (visible to UI)
         self.server: Optional[ServerClient] = None
         self.hv: Optional[HVClient] = None
 
@@ -413,6 +450,7 @@ class GainScanEngine:
         self.last_vmon: Optional[float] = None
         self.module_counts = 0
         self.collect_rate: float = 0.0  # Hz, updated during collection
+        self.beam_tripped = False       # True while waiting for beam recovery
 
         # PMT gain model — accumulates (vmon, edge) points for one module
         # and proposes ΔV via a power-law fit (or lookup table fallback).
@@ -470,7 +508,6 @@ class GainScanEngine:
 
         self._has_run = True
         self.state = GainScanState.MOVING
-        self.analyzer.target_adc = self.target_adc
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -523,17 +560,11 @@ class GainScanEngine:
                 # -- reset per-module state --
                 self.current_idx = i
                 self.current_iteration = 0
-                self.last_edge_adc = None
-                self.last_edge_bin = None
-                self.last_dv = None
-                self.last_bins = []
                 self.last_vset = None
                 self.last_vmon = None
                 self.module_counts = 0
                 self.collect_rate = 0.0
-                self.iteration_history = []
-                # reset PMT response model for this module
-                self._pmt_fit.clear()
+                self._reset_iteration_state()
                 mod = self.path[i]
 
                 self.log(f"── [{i+1}/{len(self.path)}] {mod.name} ──")
@@ -571,8 +602,8 @@ class GainScanEngine:
         # estimate move time from current position and motor velocities
         rx = self.ep.get("x_rbv", 0.0) or 0.0
         ry = self.ep.get("y_rbv", 0.0) or 0.0
-        vx = self.ep.get("x_velo", 50.0) or 50.0
-        vy = self.ep.get("y_velo", 5.0) or 5.0
+        vx = self.ep.get("x_velo", DEFAULT_VELO_X) or DEFAULT_VELO_X
+        vy = self.ep.get("y_velo", DEFAULT_VELO_Y) or DEFAULT_VELO_Y
         eta = max(abs(px - rx) / max(vx, 0.1), abs(py - ry) / max(vy, 0.1))
         timeout = eta + 300.0  # ETA + 5 min margin
         self.log(f"Moving to {mod.name}  ptrans({px:.3f}, {py:.3f})  "
@@ -580,10 +611,11 @@ class GainScanEngine:
         if not epics_move_to(self.ep, px, py):
             self.log(f"SKIPPED {mod.name}: outside limits", level="warn")
             return
-        if not self._wait_move_done(px, py, timeout=timeout):
-            if self._skip.is_set():
-                self._skip.clear()
-                self.log(f"Module {mod.name} skipped")
+        if not epics_wait_move_done(
+                self.ep, px, py, pos_threshold=self.pos_threshold, timeout=timeout,
+                aborted=lambda: self._stop.is_set() or self._skip.is_set(),
+                hold_if_paused=self._check_paused, log=self.log):
+            self._consume_skip(mod)
             return
 
         # check DAQ key
@@ -597,19 +629,12 @@ class GainScanEngine:
         while iteration < self.max_iterations:
             if self._stop.is_set():
                 return
-            if self._skip.is_set():
-                self._skip.clear()
-                self.log(f"Module {mod.name} skipped")
+            if self._consume_skip(mod):
                 return
             if self._redo.is_set():
                 self._redo.clear()
                 iteration = 0
-                self.iteration_history = []
-                self.last_edge_adc = None
-                self.last_edge_bin = None
-                self.last_dv = None
-                self.last_bins = []
-                self._pmt_fit.clear()
+                self._reset_iteration_state()
                 self.log(f"Module {mod.name} redo — restarting iterations")
                 continue
             iteration += 1
@@ -626,9 +651,7 @@ class GainScanEngine:
             if not self._wait_for_counts(mod, key):
                 if self._stop.is_set():
                     return
-                if self._skip.is_set():
-                    self._skip.clear()
-                    self.log(f"Module {mod.name} skipped")
+                if self._consume_skip(mod):
                     return
                 if self._redo.is_set():
                     # back off the just-incremented iteration count so the
@@ -739,6 +762,23 @@ class GainScanEngine:
                      f"(last edge={self.last_edge_adc:.0f})", level="warn")
             self._mark_failed(i, mod)
 
+    def _reset_iteration_state(self):
+        """Forget the current module's iterations and its PMT response model."""
+        self.iteration_history = []
+        self.last_edge_adc = None
+        self.last_edge_bin = None
+        self.last_dv = None
+        self.last_bins = []
+        self._pmt_fit.clear()
+
+    def _consume_skip(self, mod: Module) -> bool:
+        """Acknowledge a pending Skip request; False if there is none."""
+        if not self._skip.is_set():
+            return False
+        self._skip.clear()
+        self.log(f"Module {mod.name} skipped")
+        return True
+
     def _mark_failed(self, idx: int, mod: Module):
         self.failed.add(idx)
         self.state = GainScanState.FAILED
@@ -834,8 +874,7 @@ class GainScanEngine:
 
         p = QPainter(img)
         target_adc = self.target_adc
-        bin_step = self.analyzer.bin_step
-        bin_min = self.analyzer.bin_min
+        target_bin = self.analyzer.adc_to_bin(target_adc)
 
         for panel_idx, snap in enumerate(history):
             y0 = panel_idx * PANEL_H
@@ -843,8 +882,6 @@ class GainScanEngine:
             n = len(bins)
             if n == 0:
                 continue
-            vmax = max(bins) if bins else 1
-            if vmax == 0: vmax = 1
 
             pw = PANEL_W - PAD_L - PAD_R
             ph = PANEL_H - PAD_T - PAD_B
@@ -870,68 +907,9 @@ class GainScanEngine:
             p.drawText(QRectF(PAD_L, y0 + 4, pw, PAD_T - 4),
                        Qt.AlignmentFlag.AlignRight, info)
 
-            # axes
-            ax, ay = PAD_L, y0 + PAD_T
-            p.setPen(QPen(QColor("#30363d"), 1))
-            p.drawLine(ax, ay, ax, ay + ph)
-            p.drawLine(ax, ay + ph, ax + pw, ay + ph)
-
-            # bars (log or linear y)
-            import math as _rmath
-            use_log = self.use_log_y
-            log_vmax = _rmath.log10(max(vmax, 1)) if use_log else 0
-            bar_w = pw / n
-            p.setPen(Qt.PenStyle.NoPen)
-            for bi, v in enumerate(bins):
-                if v <= 0: continue
-                if use_log:
-                    frac = _rmath.log10(v) / log_vmax if log_vmax > 0 else 0
-                else:
-                    frac = v / vmax
-                bh = frac * ph
-                bx = ax + bi * bar_w
-                by = ay + ph - bh
-                p.fillRect(QRectF(bx, by, max(bar_w - 0.3, 0.3), bh),
-                           QColor("#58a6ff"))
-
-            # target line (red dashed)
-            target_bin = int((target_adc - bin_min) / bin_step) if bin_step > 0 else -1
-            if 0 <= target_bin < n:
-                tx = ax + (target_bin + 0.5) * bar_w
-                p.setPen(QPen(QColor("#f85149"), 1.5, Qt.PenStyle.DashLine))
-                p.drawLine(int(tx), ay, int(tx), ay + ph)
-
-            # edge line (green)
-            edge_bin = snap.get("edge_bin")
-            if edge_bin is not None and 0 <= edge_bin < n:
-                ex = ax + (edge_bin + 0.5) * bar_w
-                p.setPen(QPen(QColor("#3fb950"), 2))
-                p.drawLine(int(ex), ay, int(ex), ay + ph)
-
-            # y-axis grid
-            if use_log:
-                decade = 10
-                while decade < vmax:
-                    gf = _rmath.log10(decade) / log_vmax
-                    gy = ay + ph - gf * ph
-                    p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
-                    p.drawLine(ax + 1, int(gy), ax + pw, int(gy))
-                    p.setPen(QColor("#8b949e"))
-                    p.setFont(QFont("Consolas", 7))
-                    p.drawText(QRectF(0, gy - 5, PAD_L - 4, 10),
-                               Qt.AlignmentFlag.AlignRight, f"{decade}")
-                    decade *= 10
-            else:
-                for gi in range(1, 5):
-                    gf = gi / 5
-                    gy = ay + ph - gf * ph
-                    gval = int(vmax * gf)
-                    p.setPen(QPen(QColor("#21262d"), 1, Qt.PenStyle.DotLine))
-                    p.drawLine(ax + 1, int(gy), ax + pw, int(gy))
-                    p.setPen(QColor("#8b949e"))
-                    p.setFont(QFont("Consolas", 7))
-                    p.drawText(QRectF(0, gy - 5, PAD_L - 4, 10),
-                               Qt.AlignmentFlag.AlignRight, f"{gval}")
+            draw_histogram(p, PAD_L, y0 + PAD_T, pw, ph, bins, target_bin,
+                           snap.get("edge_bin"), self.use_log_y,
+                           min_bar_w=0.3, grid_pt=7, grid_label_h=10)
 
             # separator
             p.setPen(QPen(QColor("#30363d"), 1))
@@ -939,7 +917,6 @@ class GainScanEngine:
 
         # --- gain-fit panel: measured (VMon, edge) points + power-law line ---
         if fit_points:
-            import math as _rmath
             fp_y0 = PANEL_H * len(history)
             fp_pw = PANEL_W - PAD_L - PAD_R
             fp_ph = FIT_PANEL_H - PAD_T - PAD_B
@@ -1035,7 +1012,7 @@ class GainScanEngine:
                     except (ValueError, OverflowError):
                         prev = None
                         continue
-                    if not _rmath.isfinite(ee):
+                    if not math.isfinite(ee):
                         prev = None
                         continue
                     xx, yy = x_of(vv), y_of(ee)
@@ -1066,39 +1043,11 @@ class GainScanEngine:
         img.save(path)
         self.log(f"Report saved: {fname}")
 
-    def _wait_move_done(self, target_x: float, target_y: float,
-                        timeout: float = None) -> bool:
-        """Wait for the motor to stop and be at the target position.
-
-        "On position" requires BOTH MOVN=0 AND RBV within pos_threshold
-        of the target.  Checking only MOVN is unsafe because MOVN is
-        still 0 in the brief window after issuing a move command before
-        the IOC has processed it — a check in that window would declare
-        the move "done" before it started.
-        """
-        if timeout is None:
-            timeout = self.move_timeout
-        t0 = time.time()
-        while not self._stop.is_set() and not self._skip.is_set():
-            self._check_paused()
-            if self._stop.is_set() or self._skip.is_set():
-                return False
-            if not epics_is_moving(self.ep):
-                rx, ry = epics_read_rbv(self.ep)
-                err = math.sqrt((rx - target_x) ** 2 + (ry - target_y) ** 2)
-                if err <= self.pos_threshold:
-                    return True
-            if time.time() - t0 > timeout:
-                self.log(f"MOVE TIMEOUT after {timeout:.0f}s", level="error")
-                return False
-            time.sleep(0.1)
-        return False
-
     LOW_RATE_THRESHOLD = 10.0  # Hz — warn if collection rate drops below this
     LOW_RATE_RESET_POLLS = 10  # reset data after this many consecutive low-rate polls
 
     def _wait_for_counts(self, mod: Module, key: str) -> bool:
-        """Poll occupancy until the target module has min_counts hits."""
+        """Poll the module's height histogram until it has min_counts hits."""
         retries = 0
         prev_counts = 0
         prev_time = time.time()
@@ -1113,11 +1062,13 @@ class GainScanEngine:
                 bc = self.ep.get("beam_cur", None)
                 if bc is not None and bc < self.beam_threshold:
                     self.log(f"BEAM TRIP: {bc:.3f} nA — waiting", level="warn")
+                    self.beam_tripped = True
                     while not self._stop.is_set():
                         bc2 = self.ep.get("beam_cur", 0.0)
                         if bc2 is not None and bc2 >= self.beam_threshold:
                             break
                         time.sleep(0.5)
+                    self.beam_tripped = False
                     if self._stop.is_set():
                         return False
                     self.log("BEAM RECOVERED — restarting collection", level="warn")
@@ -1127,10 +1078,9 @@ class GainScanEngine:
                         pass
                     prev_counts = 0; prev_time = time.time(); low_rate_streak = 0
             try:
-                hist = self.server.get_height_histogram(key, quiet=True)
+                hist = self.server.get_height_histogram(key)
                 counts = sum(hist.get("bins", []))
                 self.module_counts = counts
-                # compute rate
                 now = time.time()
                 dt = now - prev_time
                 if dt > 0.5:

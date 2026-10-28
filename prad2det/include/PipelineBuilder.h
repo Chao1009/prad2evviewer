@@ -2,12 +2,10 @@
 //=============================================================================
 // PipelineBuilder.h — one-stop wiring for HyCal + GEM detector setup.
 //
-// Three callers used to hand-wire the same Init / LoadCalibration /
-// LoadPedestals / LoadCommonModeRange / SetReconConfigs sequence — analysis
-// scripts, the C++ server, and the Python bindings.  Forgetting any step
-// (most painfully the GEM crate remap from daq_cfg.roc_tags) silently
-// dropped data.  PipelineBuilder consolidates all of it so the wiring is
-// impossible to forget.
+// Runs the Init / LoadCalibration / LoadPedestals / LoadCommonModeRange /
+// SetReconConfigs sequence (including the GEM crate remap from
+// daq_cfg.roc_tags) shared by analysis scripts, the C++ server, and the
+// Python bindings; a missed step silently drops data.
 //
 // Boundary: the builder owns "detectors ready" — initialized + calibrated
 // HyCalSystem + GemSystem, prepared DetectorTransforms, and the resolved
@@ -29,10 +27,11 @@
 //=============================================================================
 
 #include "DetectorTransform.h"
-#include "GemCluster.h"      // gem::ClusterConfig (per-detector knobs)
+#include "GemCluster.h"      // gem::GemCluster (callers' per-event clusterer)
 #include "GemSystem.h"
 #include "HyCalCluster.h"    // fdec::ClusterConfig (HyCal clusterer knobs)
 #include "HyCalDeadModules.h" // prad2::ApplyHyCalDeadModules (applies layout flags)
+#include "HyCalEnergyBias.h" // fdec::HyCalEnergyBias (position-dependent energy correction)
 #include "HyCalSystem.h"
 #include "HyCalTimeCalib.h"  // prad2::LoadHyCalTimeCalib (applies mod.time_offset)
 #include "HyCalTimeCuts.h"   // prad2::HyCalTimeCuts (per-module time window)
@@ -72,7 +71,9 @@ struct Pipeline {
     // already installed inside `gem` via SetReconConfigs.
     fdec::ClusterConfig                hycal_cluster_cfg;
     std::shared_ptr<const fdec::IClusterProfile> hycal_profile;
+    std::shared_ptr<const fdec::HyCalEnergyBias> hycal_energy_bias;
     std::array<float, 3>               hycal_energy_res = {3.3f, 0.f, 0.f};
+    float                              hycal_energy_bias_nominal = 0.f;
 
     // Per-module HyCal peak-time windows.  Always sized to hycal.module_count()
     // when build() succeeds (uniform default when no per-module file).  Use
@@ -108,6 +109,8 @@ struct Pipeline {
     std::string                        hycal_map_path;
     std::string                        gem_map_path;
     std::string                        hycal_calib_path;
+    std::string                        hycal_energy_bias_ee_path;
+    std::string                        hycal_energy_bias_ep_path;
     std::string                        hycal_time_calib_path;   // optional per-module raw-time offset file
     std::string                        hycal_time_cut_path;     // optional per-module window file
     std::string                        hycal_rf_offset_path;    // optional per-module RF offset file
@@ -126,6 +129,8 @@ struct Pipeline {
 // Fluent — every setter returns *this so calls chain.  Empty path strings
 // fall back to defaults; non-empty paths go through the path resolver
 // (default: "{database_dir}/{relative}", or absolute pass-through).
+// database_dir defaults to PRAD2_DATABASE_DIR, else the install/build
+// database dir (prad2::database_dir()).
 class PipelineBuilder {
 public:
     PipelineBuilder() = default;
@@ -169,7 +174,7 @@ public:
 
     // --- path resolver ---------------------------------------------------
     // Optional override for resolving relative paths.  Default joins with
-    // database_dir (matches analysis scripts' resolve_db_path).  Server
+    // database_dir (prad2::resolve_db_path).  Server
     // plugs in findFile(p, db_dir) for multi-dir search.  Receives any
     // non-absolute path; expected to return an absolute path or "" if not
     // found.
@@ -177,10 +182,10 @@ public:
         std::function<std::string(const std::string &)> resolver);
 
     // --- build -----------------------------------------------------------
-    // Throws std::runtime_error on hard failures (missing daq_config,
-    // recon_config, runinfo, hycal_map, gem_map).  Soft failures (missing
-    // calib / pedestal / CM) emit warnings via log_stream and leave the
-    // corresponding fields empty.
+    // Throws std::runtime_error only when the DAQ config cannot be loaded.
+    // Everything else (recon_config, runinfo, maps, calib / pedestal / CM)
+    // is soft: a warning via log_stream, and the corresponding fields keep
+    // their defaults / stay empty.
     Pipeline build();
 
 private:

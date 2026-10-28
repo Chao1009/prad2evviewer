@@ -30,11 +30,8 @@
 //   PRAD2_ROOTLOGON_QUIET  — suppress the per-probe lines
 
 {
-    // -------------------------------------------------------------------------
     // Verbose probe helpers — VLOG is a macro (not a generic lambda) so this
-    // file works under every cling version since ROOT 6.0.  Set
-    // PRAD2_ROOTLOGON_QUIET=1 to suppress the per-probe lines.
-    // -------------------------------------------------------------------------
+    // file works under every cling version since ROOT 6.0.
     bool gQuiet = !TString(gSystem->Getenv("PRAD2_ROOTLOGON_QUIET")).IsNull();
 
     #define VLOG(...)  do { if (!gQuiet) Printf(__VA_ARGS__); } while (0)
@@ -47,19 +44,14 @@
     };
     // Walk the candidate list, log each with [+|-], return the first hit.
     auto pickFirst = [&](const char *tag,
-                         std::initializer_list<TString> candidates) -> TString {
+                         const std::vector<TString> &candidates) -> TString {
         TString winner;
-        for (const auto &p : candidates) {
-            bool ok = !p.IsNull() && !gSystem->AccessPathName(p);
-            VLOG("  [%s] %-14s %s", ok ? "+" : "-", tag, p.Data());
-            if (ok && winner.IsNull()) winner = p;
-        }
+        for (const auto &p : candidates)
+            if (probe(tag, p) && winner.IsNull()) winner = p;
         return winner;
     };
 
-    // -------------------------------------------------------------------------
-    // Mode probe
-    // -------------------------------------------------------------------------
+    // ---- Mode probe
     TString buildDir = gSystem->Getenv("PRAD2_BUILD_DIR");
     if (buildDir.IsNull()) buildDir = gSystem->pwd();
 
@@ -75,25 +67,27 @@
     TString modeLabel = inBuildMode ? "build" : "install";
 
     if (inBuildMode) {
-        // ---------------------------------------------------------------------
-        // BUILD MODE
-        // ---------------------------------------------------------------------
+        // ---- BUILD MODE
         Printf("[mode]  build-tree at %s", buildDir.Data());
 
-        // --- source dir from CMakeCache.txt ---
-        VLOG("[probe] source dir from CMakeCache.txt");
+        // --- source dir and CODA / evio entries from CMakeCache.txt ---
+        TString codaLibDir, evioLibPath;
         std::ifstream cache(Form("%s/CMakeCache.txt", buildDir.Data()));
         std::string line;
         while (std::getline(cache, line)) {
-            if (line.find("CMAKE_HOME_DIRECTORY") != std::string::npos ||
-                line.find("prad2evviewer_SOURCE_DIR") != std::string::npos) {
-                auto eq = line.find('=');
-                if (eq != std::string::npos) {
-                    sourceDir = line.substr(eq + 1).c_str();
-                    break;
-                }
-            }
+            auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            TString val = line.substr(eq + 1).c_str();
+            if (sourceDir.IsNull() &&
+                (line.find("CMAKE_HOME_DIRECTORY") != std::string::npos ||
+                 line.find("prad2evviewer_SOURCE_DIR") != std::string::npos))
+                sourceDir = val;
+            if (line.find("CODA_INCLUDE_DIR:") != std::string::npos) incCoda = val;
+            else if (line.find("CODA_LIB_DIR:")  != std::string::npos) codaLibDir = val;
+            else if (line.find("EVIO_LIB:")       != std::string::npos) evioLibPath = val;
         }
+
+        VLOG("[probe] source dir from CMakeCache.txt");
         if (sourceDir.IsNull()) {
             VLOG("  [-] CMAKE_HOME_DIRECTORY not in CMakeCache.txt — guessing");
             sourceDir = gSystem->DirName(gSystem->DirName(
@@ -102,21 +96,7 @@
         }
         VLOG("  [+] %-14s %s", "sourceDir", sourceDir.Data());
 
-        // --- CODA paths from CMakeCache.txt ---
         VLOG("[probe] CODA / evio entries in CMakeCache.txt");
-        TString codaLibDir, evioLibPath;
-        {
-            std::ifstream cache2(Form("%s/CMakeCache.txt", buildDir.Data()));
-            std::string ln;
-            while (std::getline(cache2, ln)) {
-                auto eq = ln.find('=');
-                if (eq == std::string::npos) continue;
-                TString val = ln.substr(eq + 1).c_str();
-                if (ln.find("CODA_INCLUDE_DIR:") != std::string::npos) incCoda = val;
-                else if (ln.find("CODA_LIB_DIR:")  != std::string::npos) codaLibDir = val;
-                else if (ln.find("EVIO_LIB:")       != std::string::npos) evioLibPath = val;
-            }
-        }
         VLOG("  [%s] %-14s %s",
              incCoda.IsNull()  ? "-" : "+", "CODA_INCLUDE",
              incCoda.IsNull()  ? "(not set)"  : incCoda.Data());
@@ -140,27 +120,18 @@
         });
 
         // --- find archives in the build tree (or fall back to CODA) ---
-        VLOG("[probe] libprad2dec.a");
-        libDec = pickFirst("prad2dec.a", {
-            Form("%s/lib/lib%s.a",       buildDir.Data(), "prad2dec"),
-            Form("%s/lib%s.a",           buildDir.Data(), "prad2dec"),
-            Form("%s/prad2dec/lib%s.a",  buildDir.Data(), "prad2dec"),
-            Form("%s/lib/lib%s.so",      buildDir.Data(), "prad2dec"),
-        });
-        VLOG("[probe] libprad2det.a");
-        libDet = pickFirst("prad2det.a", {
-            Form("%s/lib/lib%s.a",       buildDir.Data(), "prad2det"),
-            Form("%s/lib%s.a",           buildDir.Data(), "prad2det"),
-            Form("%s/prad2det/lib%s.a",  buildDir.Data(), "prad2det"),
-            Form("%s/lib/lib%s.so",      buildDir.Data(), "prad2det"),
-        });
-        VLOG("[probe] libprad2ana.a");
-        libAna = pickFirst("prad2ana.a", {
-            Form("%s/lib/lib%s.a",       buildDir.Data(), "prad2ana"),
-            Form("%s/lib%s.a",           buildDir.Data(), "prad2ana"),
-            Form("%s/analysis/lib%s.a",  buildDir.Data(), "prad2ana"),
-            Form("%s/lib/lib%s.so",      buildDir.Data(), "prad2ana"),
-        });
+        auto buildLib = [&](const char *name, const char *subdir) -> TString {
+            VLOG("[probe] lib%s.a", name);
+            return pickFirst(TString::Format("%s.a", name), {
+                Form("%s/lib/lib%s.a",   buildDir.Data(), name),
+                Form("%s/lib%s.a",       buildDir.Data(), name),
+                Form("%s/%s/lib%s.a",    buildDir.Data(), subdir, name),
+                Form("%s/lib/lib%s.so",  buildDir.Data(), name),
+            });
+        };
+        libDec = buildLib("prad2dec", "prad2dec");
+        libDet = buildLib("prad2det", "prad2det");
+        libAna = buildLib("prad2ana", "analysis");
         // libevio.a — same Hall-B-first-then-fetch shape that
         // prad2dec/CMakeLists.txt uses at configure time, repeated here so
         // ACLiC can resolve the link target whichever path the build took:
@@ -199,11 +170,7 @@
                                         buildDir.Data()));
             evCandidates.push_back(Form("%s/lib/libevio.a", buildDir.Data()));
             evCandidates.push_back(Form("%s/libevio.a",     buildDir.Data()));
-            for (const auto &p : evCandidates) {
-                bool ok = !p.IsNull() && !gSystem->AccessPathName(p);
-                VLOG("  [%s] %-14s %s", ok ? "+" : "-", "evio.a", p.Data());
-                if (ok && libEvio.IsNull()) libEvio = p;
-            }
+            libEvio = pickFirst("evio.a", evCandidates);
             // Last resort — recursive scan under _deps/evio-build/ for any
             // libevio.a we missed.  Bounded depth, executed only when the
             // enumerated candidates all failed, so this is cheap.
@@ -227,9 +194,7 @@
         }
     }
     else {
-        // ---------------------------------------------------------------------
-        // INSTALL MODE
-        // ---------------------------------------------------------------------
+        // ---- INSTALL MODE
         TString dbDir = gSystem->Getenv("PRAD2_DATABASE_DIR");
         if (dbDir.IsNull()) {
             Printf("[ERROR] no CMakeCache.txt at %s and PRAD2_DATABASE_DIR is",
@@ -252,21 +217,18 @@
             incJson = Form("%s/include",               prefix.Data());
 
             // --- libs in <prefix>/lib or lib64 (RHEL convention) ---
+            auto instLib = [&](const char *name) -> TString {
+                return pickFirst(TString::Format("%s.a", name), {
+                    Form("%s/lib/lib%s.a",   prefix.Data(), name),
+                    Form("%s/lib64/lib%s.a", prefix.Data(), name),
+                });
+            };
             VLOG("[probe] libprad2dec.a");
-            libDec = pickFirst("prad2dec.a", {
-                Form("%s/lib/libprad2dec.a",   prefix.Data()),
-                Form("%s/lib64/libprad2dec.a", prefix.Data()),
-            });
+            libDec = instLib("prad2dec");
             VLOG("[probe] libprad2det.a");
-            libDet = pickFirst("prad2det.a", {
-                Form("%s/lib/libprad2det.a",   prefix.Data()),
-                Form("%s/lib64/libprad2det.a", prefix.Data()),
-            });
+            libDet = instLib("prad2det");
             VLOG("[probe] libprad2ana.a");
-            libAna = pickFirst("prad2ana.a", {
-                Form("%s/lib/libprad2ana.a",   prefix.Data()),
-                Form("%s/lib64/libprad2ana.a", prefix.Data()),
-            });
+            libAna = instLib("prad2ana");
 
             // libevio: PRAD2_EVIO_LIB override > install prefix (covers both
             // FetchContent-bundled evio and CODA-installed) > Hall-B CODA
@@ -277,10 +239,7 @@
             if (envEvio && *envEvio && probe("evio (env)", envEvio)) {
                 libEvio = envEvio;
             } else {
-                libEvio = pickFirst("evio.a", {
-                    Form("%s/lib/libevio.a",   prefix.Data()),
-                    Form("%s/lib64/libevio.a", prefix.Data()),
-                });
+                libEvio = instLib("evio");
                 if (libEvio.IsNull()) {
                     const char *codaRoot = gSystem->Getenv("PRAD2_CODA_ROOT");
                     if (!codaRoot || !*codaRoot)
@@ -294,8 +253,7 @@
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Apply include paths (verbose).
+    // ---- Apply include paths (verbose).
     //
     // ACLiC compiles the .C with gcc *and* runs cling to generate a
     // dictionary.  The two see different include lists:
@@ -305,16 +263,11 @@
     //   "fatal error: 'EvChannel.h' file not found"
     // even though the actual gcc compile would succeed.  We add to both so
     // every header reachable at gcc time is also reachable at dict time.
-    // -------------------------------------------------------------------------
     Printf("[probe] include paths");
     auto addInc = [&](const char *tag, const TString &p) {
         if (p.IsNull()) {
             VLOG("  [-] %-14s (not resolved)", tag);
-            return;
-        }
-        bool exists = !gSystem->AccessPathName(p);
-        VLOG("  [%s] %-14s %s", exists ? "+" : "-", tag, p.Data());
-        if (exists) {
+        } else if (probe(tag, p)) {
             gSystem->AddIncludePath(Form("-I%s", p.Data()));
             gInterpreter->AddIncludePath(p.Data());
         }
@@ -329,9 +282,7 @@
         addInc("server src",  srcInc);
     }
 
-    // -------------------------------------------------------------------------
-    // Apply linker line.
-    // -------------------------------------------------------------------------
+    // ---- Apply linker line.
     if (libDec.IsNull() || libDet.IsNull()) {
         Printf("\n[WARN] could not find libprad2dec.a or libprad2det.a.");
         if (inBuildMode)
@@ -356,10 +307,8 @@
                    "fail to link.  Build the analysis target.");
     }
 
-    // -------------------------------------------------------------------------
-    // Database path — honour an explicit override; otherwise fall back to
+    // ---- Database path — honour an explicit override; otherwise fall back to
     // the build-tree database/ in build mode (install mode already had it).
-    // -------------------------------------------------------------------------
     TString dbDir = gSystem->Getenv("PRAD2_DATABASE_DIR");
     if (dbDir.IsNull()) {
         if (inBuildMode) dbDir = Form("%s/database", sourceDir.Data());
@@ -370,5 +319,5 @@
     Printf("[db]    %s", dbDir.Data());
 
     Printf("==== ready (%s mode) ====", modeLabel.Data());
-    Printf("Example: .x gem_clusters_to_root.C+(\"/data/run.evio\", \"out.root\")");
+    Printf("Example: .x gem_hycal_matching.C+(\"/data/run.evio\", \"out.root\")");
 }

@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace evc
 {
@@ -36,6 +37,11 @@ inline bool IsContainer(uint32_t type)
     return type == DATA_BANK  || type == DATA_BANK2 ||
            type == DATA_SEGMENT || type == DATA_SEGMENT2 ||
            type == DATA_TAGSEGMENT;
+}
+
+inline bool IsString(uint32_t type)
+{
+    return type == DATA_CHARSTAR8 || type == DATA_CHAR8;
 }
 
 inline const char *TypeName(uint32_t type)
@@ -109,5 +115,27 @@ struct EvNode {
     size_t   child_first;
     size_t   child_count;
 };
+
+// --- flat bank list ---------------------------------------------------------
+// Replay-tree encoding of a set of leaf banks: bank i came from ROC
+// roc_tags[i] and occupies the next nwords[i] entries of words.  Calls
+// fn(roc_tag, data, nwords) per bank.  Returns false when the lists are
+// inconsistent (nothing is visited on a size mismatch; the walk stops at the
+// first bank that overruns words).
+template <class Fn>
+bool ForEachFlatBank(const std::vector<uint32_t> &roc_tags,
+                     const std::vector<uint32_t> &nwords,
+                     const std::vector<uint32_t> &words, Fn &&fn)
+{
+    if (roc_tags.size() != nwords.size()) return false;
+    size_t off = 0;
+    for (size_t i = 0; i < roc_tags.size(); ++i) {
+        const size_t n = nwords[i];
+        if (n > words.size() - off) return false;
+        fn(roc_tags[i], words.data() + off, n);
+        off += n;
+    }
+    return true;
+}
 
 } // namespace evc

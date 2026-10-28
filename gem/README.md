@@ -5,11 +5,9 @@ Tools, scripts, and reference notes for the PRad-II GEM tracker.
 | File | Purpose |
 |---|---|
 | `gem_dump.cpp` | C++ CLI: `raw` / `hits` / `clusters` / `evdump` / `summary` / `ped` modes. |
-| `gem_event_viewer.py` | PyQt6 event-by-event GUI (EVIO file → live reconstruction). |
-| `gem_cluster_view.py` | Static plotter for `gem_dump -m evdump` JSON output. |
-| `gem_layout.py` | Visualises the strip geometry from `gem_map.json`. |
+| `gem_event_viewer.py` | PyQt6 event-by-event GUI (EVIO file → live reconstruction); `--json` / `--layout` render PNGs headless (installed aliases `gem_cluster_view`, `gem_layout`). |
 | `gem_strip_map.py` | Thin wrapper over `prad2py.det.map_strip` (library). |
-| `gem_view.py` | Matplotlib rendering and `GemSystem` adapters (library). |
+| `gem_view.py` | QPainter rendering and `GemSystem` adapters (library). |
 | `check_strip_map.py` | Dev: cross-validates the pipeline against PRadAnalyzer and `mpd_gem_view_ssp`. |
 | `CMakeLists.txt` | Builds `gem_dump`; installs the binary and the Python scripts. |
 
@@ -21,13 +19,13 @@ Every tool here takes the same short / long flag pairs for configuration files:
 |---|---|---|
 | `-D` | `--daq-config` | `daq_config.json` (`gem_dump`). |
 | `-G` | `--gem-map` | `gem_map.json` (all tools). |
-| `-P` | `--gem-ped` | `gem_ped.json` (`gem_dump`, `gem_event_viewer`). |
-| `-o` | `--output` | output file (`gem_dump`, `gem_cluster_view`). |
+| `-P` | `--gem-ped` | GEM pedestal text file, APV-block format, e.g. `gem_ped.txt` (`gem_dump`, `gem_event_viewer`). |
+| `-o` | `--output` | output file (`gem_dump`, `gem_event_viewer`). |
 
 When a flag is omitted, the Python tools look in `$PRAD2_DATABASE_DIR`
 first (set by `prad2_setup.sh` / `prad2_setup.csh`), then next to the
 script, then in CWD-relative fallbacks.  `gem_dump`'s C++ resolver
-applies the same policy via `prad2::resolve_data_dir()`.
+applies the same policy via `prad2::find_database_file()`.
 
 ## Detector facts (as of 2026-04-18)
 
@@ -95,7 +93,7 @@ knob.
 
 ```bash
 # Pick up to 10 matching events; each is written to <stem>_<evnum>.json.
-gem_dump -m evdump run.evio.00000 -P gem_ped.json \
+gem_dump -m evdump run.evio.00000 -P gem_ped.txt \
          -n 10 -f clusters=2:3 -o /tmp/evt.json
 # produces /tmp/evt_3.json, /tmp/evt_6.json, /tmp/evt_15.json, ...
 
@@ -103,6 +101,10 @@ gem_dump -m evdump run.evio.00000 -P gem_ped.json \
 gem_cluster_view /tmp/evt_*.json             # bash / zsh: shell expansion
 gem_cluster_view "/tmp/evt_*.json"           # tcsh: quote so we expand
 ```
+
+The installed `gem_cluster_view` and `gem_layout` commands run
+`gem_event_viewer --json` and `gem_event_viewer --layout`; from the
+source tree use `python gem/gem_event_viewer.py --json|--layout`.
 
 `-f` is a boolean filter — `clusters=2:3` reads "≥ 2 clusters in ≥ 3
 detectors".  See `gem_dump --help` for the full grammar.  `-n` rules:
@@ -120,26 +122,31 @@ detectors".  See `gem_dump --help` for the full grammar.  `-n` rules:
 ```bash
 # 1. Compute per-strip pedestals from a full-readout run.
 gem_dump -m ped /volatile/.../gem0gem1_001137.evio.00000 \
-         -o /volatile/.../gem0gem1_001137/gem_ped.json
+         -o /volatile/.../gem0gem1_001137/gem_ped.txt
 
 # 2. Run any downstream analysis with those pedestals loaded.
 gem_dump -m clusters /volatile/.../gem0gem1_001137.evio.00000 \
-         -P /volatile/.../gem0gem1_001137/gem_ped.json -n 20
+         -P /volatile/.../gem0gem1_001137/gem_ped.txt -n 20
 
 # gem_event_viewer takes the same file via --gem-ped:
 gem_event_viewer /volatile/.../gem0gem1_001137.evio.00000 \
-                 --gem-ped /volatile/.../gem0gem1_001137/gem_ped.json
+                 --gem-ped /volatile/.../gem0gem1_001137/gem_ped.txt
 ```
 
 Production runs with online ZS skip step 1 — `processApv` bypasses
 the offline pedestal/CM chain automatically.
 
-**No auto-discovery.** Pedestals are per-run calibration products,
-and a wrong file is worse than none.  Both `gem_dump` and
-`gem_event_viewer` require the pedestal path to be passed explicitly
-(`-P` / `--gem-ped`).  When run against full-readout data without
-one, they emit a loud warning to stderr or a modal dialog rather than
-silently reconstructing empty events.
+**Runinfo default.** Without `-P` / `--gem-ped`, `gem_dump` and
+`gem_event_viewer` load the pedestal and common-mode files that
+`database/runinfo/general.json` (`gem_pedestals`) assigns to the run
+number parsed from the EVIO file name (entry with the largest
+`from_run` <= run); `-P` overrides the pedestal file.  The `from_run: 0`
+entry also covers test-stand runs such as `gem0gem1_001137`, so
+full-readout test-stand data needs an explicit `-P` with pedestals
+computed from that data (step 1 above).  Only when no pedestal file is
+resolved do the tools flag full-readout data: a warning on stderr
+(`gem_dump`) or a dialog offering to auto-generate pedestals from the
+open file (`gem_event_viewer`).
 
 ### Summary diagnostics
 
@@ -170,9 +177,11 @@ python $PRAD2_DIR/share/prad2evviewer/gem/check_strip_map.py             # from 
 ```
 
 For every APV in `gem_map.json`, the script maps all 128 channels
-through the reference implementations from `mpd_gem_view_ssp` and
-`PRadAnalyzer` and through our own pipeline, and asserts that the
-three agree.  Run after any change to the strip-mapping pipeline.
+through the `mpd_gem_view_ssp` reference (MPD, hybrid board), the
+`PRadAnalyzer` reference (SRS, no hybrid board, compared with the
+PRad-I plane-orientation convention inverted) and our own pipeline, and
+fails (non-zero exit) unless all three agree.  Run after any change to
+the strip-mapping pipeline.
 
 ## References
 

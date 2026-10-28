@@ -30,10 +30,6 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 
-# ----------------------------------------------------------------------
-#  Power-law fit result (immutable)
-# ----------------------------------------------------------------------
-
 @dataclass(frozen=True)
 class PMTFitResult:
     """Result of a power-law fit ``edge = A * V^k`` (linear in log-log).
@@ -71,16 +67,12 @@ class PMTFitResult:
         ValueError
             If the fit slope ``k`` is zero (a horizontal line cannot
             be inverted).  Callers should reject ``k <= 0`` fits via
-            :meth:`PMTGainModel.is_good_fit` before calling this.
+            :meth:`PMTGainModel._fit_rejection_reason` before calling this.
         """
         if self.k == 0:
             raise ValueError("predict_voltage: fit slope k is 0 (not invertible)")
         return math.exp((math.log(edge) - self.log_a) / self.k)
 
-
-# ----------------------------------------------------------------------
-#  Static lookup table (used when only one point is available)
-# ----------------------------------------------------------------------
 
 #: Step rules ``(min_diff_strict, dv_volts)`` checked top-down.  An
 #: entry matches when ``|target - current| > min_diff_strict``.  The
@@ -119,10 +111,6 @@ def lookup_delta_v(target_edge: float, current_edge: float) -> float:
     return 0.0  # unreachable; satisfies the type checker
 
 
-# ----------------------------------------------------------------------
-#  PMT gain model
-# ----------------------------------------------------------------------
-
 class PMTGainModel:
     """Accumulate ``(Vmon, edge)`` measurements and propose ΔV.
 
@@ -145,10 +133,6 @@ class PMTGainModel:
         self._points: List[Tuple[float, float]] = []
         self._fit: Optional[PMTFitResult] = None
         self.r2_min: float = r2_min
-
-    # =====================================================================
-    #  Data point management
-    # =====================================================================
 
     def add_point(self, vmon: float, edge: float) -> bool:
         """Record one ``(vmon, edge)`` measurement.
@@ -173,41 +157,13 @@ class PMTGainModel:
         return True
 
     def clear(self) -> None:
-        """Forget all measurements and the cached fit."""
         self._points.clear()
         self._fit = None
-
-    # =====================================================================
-    #  Read access (no computation)
-    # =====================================================================
 
     @property
     def points(self) -> List[Tuple[float, float]]:
         """All recorded ``(vmon, edge)`` measurements (defensive copy)."""
         return list(self._points)
-
-    @property
-    def n_points(self) -> int:
-        return len(self._points)
-
-    @property
-    def latest(self) -> Optional[Tuple[float, float]]:
-        """The most recent ``(vmon, edge)`` point, or ``None`` if empty."""
-        return self._points[-1] if self._points else None
-
-    @property
-    def fit(self) -> Optional[PMTFitResult]:
-        """The cached fit, or ``None`` if none has been computed.
-
-        Touching this property does **not** trigger a fit — call
-        :meth:`linear_fit` if you need one computed on demand.  The
-        cache is invalidated by :meth:`add_point` and :meth:`clear`.
-        """
-        return self._fit
-
-    # =====================================================================
-    #  Fitting
-    # =====================================================================
 
     def linear_fit(self) -> Optional[PMTFitResult]:
         """Fit the power law to the recorded points.
@@ -251,18 +207,9 @@ class PMTGainModel:
         )
         return self._fit
 
-    # =====================================================================
-    #  Fit diagnostics
-    # =====================================================================
-
     def _fit_rejection_reason(self,
                               fit: Optional[PMTFitResult]) -> Optional[str]:
-        """Return a short rejection string, or ``None`` if the fit is OK.
-
-        This is the single source of truth for fit acceptance — both
-        :meth:`is_good_fit` and :meth:`delta_v_to_target` route through
-        it so the rules cannot drift apart.
-        """
+        """Return a short rejection string, or ``None`` if the fit is OK."""
         if fit is None:
             return "degenerate fit"
         if fit.k <= 0:
@@ -271,20 +218,6 @@ class PMTGainModel:
             return (f"poor fit R²={fit.r_squared:.3f} "
                     f"< {self.r2_min:.2f}")
         return None
-
-    def is_good_fit(self,
-                    fit: Optional[PMTFitResult] = None) -> bool:
-        """Return ``True`` if ``fit`` (or the cached fit) is usable.
-
-        See :meth:`_fit_rejection_reason` for the precise rules.
-        """
-        if fit is None:
-            fit = self._fit
-        return self._fit_rejection_reason(fit) is None
-
-    # =====================================================================
-    #  ΔV proposal
-    # =====================================================================
 
     def delta_v_to_target(self,
                           target_edge: float,
@@ -320,17 +253,14 @@ class PMTGainModel:
 
         Selection rule (based on the model's recorded points):
 
-        * ``n_points >= 2`` with a fit accepted by
-          :meth:`is_good_fit` → invert the fit at ``target_edge``
-          and subtract ``current_vmon``.
+        * ``n_points >= 2`` → invert the fit at ``target_edge`` and
+          subtract ``current_vmon``; a fit rejected by
+          :meth:`_fit_rejection_reason` falls back to the lookup table,
+          with ``mode_tag`` carrying the reason.
         * ``n_points == 1`` → static lookup table on the
           ``(target_edge, current_edge)`` ADC error.
         * ``n_points == 0`` → :class:`RuntimeError`.  Callers must
           record at least one measurement first.
-
-        A multi-point fit that fails :meth:`is_good_fit` (degenerate,
-        non-physical, or poor R²) falls back to the lookup table,
-        with ``mode_tag`` carrying the reason.
         """
         n = len(self._points)
         if n == 0:
@@ -353,16 +283,6 @@ class PMTGainModel:
         dv = round(v_target - current_vmon, 1)
         return dv, (f"fit n={n} k={fit.k:.2f} "
                     f"A={fit.a:.3g} R²={fit.r_squared:.3f}")
-
-    # =====================================================================
-    #  Dunder
-    # =====================================================================
-
-    def __len__(self) -> int:
-        return len(self._points)
-
-    def __bool__(self) -> bool:
-        return bool(self._points)
 
     def __repr__(self) -> str:
         if self._fit is not None:

@@ -17,10 +17,8 @@ namespace fdec
 class Fadc250RawDecoder
 {
 public:
-    // Decode one ROC's FADC250 hardware-format raw data bank.
-    // data: 32-bit words from the 0xE109 bank payload.
-    // nwords: number of 32-bit words.
-    // Returns number of slots decoded, or -1 on fatal error.
+    // Decode one ROC's FADC250 hardware-format raw data bank (0xE109
+    // payload words).  Returns number of slots decoded.
     static int DecodeRoc(const uint32_t *data, size_t nwords, RocData &roc);
 };
 

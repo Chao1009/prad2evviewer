@@ -34,29 +34,14 @@ function gemApvTint(detId) {
     return GEM_APV_TINTS[detId % GEM_APV_TINTS.length];
 }
 
-// Time-sample trace colours: HSV blue→red, matches ApvPanel._paint.
-const GEM_APV_TS_COLORS = (() => {
-    const out = [];
-    for (let t = 0; t < 6; t++) {
-        const frac = t / 5;
-        // hue 0.66 (blue) → 0 (red)
-        const h = 0.66 * (1 - frac);
-        out.push(hsv2rgb(h, 0.85, 0.95));
-    }
-    return out;
-})();
-// CM overlay colours — same hue as the trace but desaturated so the
-// firmware CM line reads as related to the matching time sample without
-// fighting the data trace for visibility.
-const GEM_APV_CM_COLORS = (() => {
-    const out = [];
-    for (let t = 0; t < 6; t++) {
-        const frac = t / 5;
-        const h = 0.66 * (1 - frac);
-        out.push(hsv2rgb(h, 0.6, 1.0));
-    }
-    return out;
-})();
+// Time-sample colours: HSV hue 0.66 (blue) → 0 (red) over the 6 samples,
+// matching ApvPanel._paint.  The CM overlay uses the same hues desaturated
+// so each CM line reads as its sample's without fighting the data trace.
+function gemApvHueRamp(s, v) {
+    return Array.from({ length: 6 }, (_, t) => hsv2rgb(0.66 * (1 - t / 5), s, v));
+}
+const GEM_APV_TS_COLORS = gemApvHueRamp(0.85, 0.95);
+const GEM_APV_CM_COLORS = gemApvHueRamp(0.6, 1.0);
 function hsv2rgb(h, s, v) {
     const i = Math.floor(h * 6);
     const f = h * 6 - i;
@@ -91,8 +76,6 @@ function gemApvPrefSet(key, v) {
 let gemApvData = null;          // last fetched per-event payload
 let gemApvCurrentEvent = -1;
 // Cached calibration: { rev, zs_sigma, noise: Map<id, Float32Array(128)> }.
-// Populated lazily by ensureGemApvCalib(); refetched when a per-event
-// payload arrives with calib_rev != gemApvCalib.rev.
 let gemApvCalib = null;
 let gemApvCalibInflight = false;
 let gemApvShowProcessed = true;
@@ -109,9 +92,7 @@ let gemApvDetMask = [true, true, true, true];
 
 // Layout — 'sequential' (default; prad1 style, 128×6 = 768 points laid out
 // in time order) or 'overlay' (6 TS stacked on the same channel axis).
-// Defaults to the RC monitoring view so Ashot/Kondo see the expected plot
-// without flipping a toggle; operators can still switch via the Layout
-// select and the choice persists in localStorage.
+// The Layout select choice persists in localStorage.
 let gemApvLayout = gemApvPrefGet('layout', 'sequential');
 // Source — 'full' (default; locks onto the most recent full-readout
 // monitoring event, served from a separate server-side snapshot via
@@ -119,9 +100,9 @@ let gemApvLayout = gemApvPrefGet('layout', 'sequential');
 // 'full' is the requested RC monitoring view — bypasses online ZS so the
 // entire pedestal/noise spectrum is visible across all 128 channels.
 let gemApvSource = gemApvPrefGet('source', 'full');
-// Normalize — older builds or a corrupted localStorage entry could leave
-// these as anything; an unknown gemApvSource value would silently freeze
-// the WS gate (both 'event' and 'full_event' branches would return).
+// Normalize — a stale or corrupted localStorage entry could leave these as
+// anything; an unknown gemApvSource value would silently freeze the WS gate
+// (both 'event' and 'full_event' branches would return).
 if (gemApvLayout !== 'overlay' && gemApvLayout !== 'sequential') gemApvLayout = 'sequential';
 if (gemApvSource !== 'current' && gemApvSource !== 'full')       gemApvSource = 'full';
 // Pause — freezes auto-refresh on this tab.  WS new_event /
@@ -147,14 +128,9 @@ const GEM_APV_HIT_ROW_H = 6;
 // at all times so toggling FW Hits doesn't reflow the plot region.
 const GEM_APV_HIT_BLOCK_H = 2 * GEM_APV_HIT_ROW_H + 1;
 
-// =====================================================================
-// Fetch + section build
-// =====================================================================
-
+// ── Fetch + section build ─────────────────────────────────────────────
 // Apply a successfully-fetched APV payload: cache it, sync σ input, rebuild
 // section skeleton if needed, refresh calib on rev mismatch, then redraw.
-// Shared by per-event fetch and latest-full snapshot fetch so both paths
-// stay consistent on calib_rev handling and σ display.
 function applyGemApvData(data) {
     gemApvData = data;
     // Pull the event from the payload — the server stamps it and it's the
@@ -179,9 +155,8 @@ function applyGemApvData(data) {
     }
 }
 
-function fetchGemApvData(evnum) {
-    if (typeof evnum !== 'number' || evnum <= 0) return Promise.resolve();
-    return fetch(`/api/gem/apv/${evnum}`)
+function fetchGemApv(url) {
+    return fetch(url)
         .then(r => {
             if (!r.ok) throw new Error('http ' + r.status);
             return r.json();
@@ -193,21 +168,17 @@ function fetchGemApvData(evnum) {
         .catch(err => gemApvSetStatus('Fetch error: ' + err));
 }
 
+function fetchGemApvData(evnum) {
+    if (typeof evnum !== 'number' || evnum <= 0) return Promise.resolve();
+    return fetchGemApv(`/api/gem/apv/${evnum}`);
+}
+
 // Fetch the server's "latest full-readout" snapshot — the most recent
 // monitoring event where firmware ZS was bypassed (so the entire pedestal
 // spectrum is visible across all 128 channels per APV).  The server stamps
 // the payload with the snapshot's event seq, which applyGemApvData picks up.
 function fetchGemApvLatestFull() {
-    return fetch('/api/gem/apv/latest_full')
-        .then(r => {
-            if (!r.ok) throw new Error('http ' + r.status);
-            return r.json();
-        })
-        .then(data => {
-            if (data.error) { gemApvSetStatus(data.error); return; }
-            applyGemApvData(data);
-        })
-        .catch(err => gemApvSetStatus('Fetch error: ' + err));
+    return fetchGemApv('/api/gem/apv/latest_full');
 }
 
 // Entry point for the source-aware refresh used by tab-activation,
@@ -230,8 +201,6 @@ function refreshGemApv(currentEventNum) {
 // arrow keys / prev-next, online ring-buffer nav) passes manual=true so
 // the operator's deliberate "show me this event" still goes through.
 // 'full_event' always comes from the WS push and is never manual.
-// Pre-update viewers without this function defined fall back to the
-// existing direct fetchGemApvData call in viewer.js.
 function gemApvOnLiveEvent(evnum, kind /* 'event' | 'full_event' */, manual) {
     if (kind === 'full_event' && gemApvSource !== 'full') return;
     if (kind === 'event'      && gemApvSource !== 'current') return;
@@ -280,7 +249,7 @@ function ensureGemApvCalib(force) {
 function syncGemApvZsSigmaInput(sigma) {
     const el = document.getElementById('gem-apv-zs-sigma');
     if (!el || sigma == null) return;
-    if (document.activeElement === el) return;   // don't clobber typing
+    if (document.activeElement === el) return;
     const v = (+sigma).toFixed(1);
     if (el.value !== v) el.value = v;
 }
@@ -364,19 +333,14 @@ function buildGemApvSections() {
     });
 }
 
-// =====================================================================
-// Render — called whenever data or controls change
-// =====================================================================
-
+// ── Render — called whenever data or controls change ──────────────────
 function renderGemApvPanels() {
     if (!gemApvData || !gemApvData.enabled) return;
     const apvs  = gemApvData.apvs || [];
     const field = gemApvShowProcessed ? 'processed' : 'raw';
 
-    // Section visibility — toggle whole sections (header + grid + tint
-    // background) for GEMs the user has unchecked.  The topmost visible
-    // section gets .first-visible so its top border (which acts as the
-    // separator above it) is hidden.
+    // Section visibility — hide whole sections (header + grid + tint) for
+    // unchecked GEMs, then mark the topmost visible one .first-visible.
     const body = document.getElementById('gem-apv-body');
     let firstVisibleSection = null;
     if (body) {
@@ -390,44 +354,14 @@ function renderGemApvPanels() {
         if (firstVisibleSection) firstVisibleSection.classList.add('first-visible');
     }
 
-    // Compute global Y range across visible (non-filtered) APVs.  Skip
-    // APVs that didn't show up in this event — their frame is all zeros
-    // and would otherwise pull the shared scale toward the origin.
-    let yLo = Infinity, yHi = -Infinity;
-    if (gemApvSharedY) {
-        for (const apv of apvs) {
-            if (!gemApvDetVisible(apv.det_id)) continue;
-            if (!apv.present) continue;
-            if (gemApvShowSignalOnly && !apvHasSignal(apv)) continue;
-            const f = apv[field];
-            if (!f) continue;
-            for (let s = 0; s < f.length; s++) {
-                for (let t = 0; t < 6; t++) {
-                    if (!gemApvSampleMask[t]) continue;
-                    const v = f[s][t];
-                    if (v < yLo) yLo = v;
-                    if (v > yHi) yHi = v;
-                }
-            }
-        }
-    }
-    if (!isFinite(yLo) || !isFinite(yHi)) { yLo = 0; yHi = 1; }
-    // In Process mode, force the Y axis symmetric around zero so the dashed
-    // zero line is always centered and the threshold band reads as a
-    // mirrored pair.  Raw mode keeps the auto-fit range — pedestal-level
-    // traces (~1500-2500 ADC) all positive, so symmetric would waste half
-    // the panel.
-    if (gemApvShowProcessed) {
-        const m = Math.max(Math.abs(yLo), Math.abs(yHi));
-        yLo = -m; yHi = m;
-    }
-    if (yHi - yLo < 8) {
-        const m = 0.5 * (yLo + yHi);
-        yLo = m - 4; yHi = m + 4;
-    }
-    const pad = 0.08 * (yHi - yLo);
-    yLo -= pad; yHi += pad;
-    const sharedRange = gemApvSharedY ? [yLo, yHi] : null;
+    // Shared Y range across visible (non-filtered) APVs.  Skip APVs that
+    // didn't show up in this event — their frame is all zeros and would
+    // otherwise pull the shared scale toward the origin.
+    const sharedRange = gemApvSharedY
+        ? apvYRange(apvs.filter(a => gemApvDetVisible(a.det_id) && a.present &&
+                                     !(gemApvShowSignalOnly && !apvHasSignal(a)))
+                        .map(a => a[field]))
+        : null;
 
     let total = 0, shown = 0;
     for (const apv of apvs) {
@@ -456,6 +390,38 @@ function renderGemApvPanels() {
         ? `  PAUSED${gemApvSkippedSincePause ? ` (skipped ${gemApvSkippedSincePause})` : ''}`
         : '';
     gemApvSetStatus(`${shown}/${total} APVs  [${mode}${layoutLbl}${srcLbl}]  ${evlbl}${pauseLbl}`);
+}
+
+// Y range over the enabled time samples of the given frames, padded by 8%
+// and at least 8 ADC wide.  In Process mode the range is forced symmetric
+// around zero so the dashed zero line is always centered and the threshold
+// band reads as a mirrored pair.  Raw mode keeps the auto-fit range —
+// pedestal-level traces (~1500-2500 ADC) all positive, so symmetric would
+// waste half the panel.
+function apvYRange(frames) {
+    let lo = Infinity, hi = -Infinity;
+    for (const f of frames) {
+        if (!f) continue;
+        for (let s = 0; s < f.length; s++) {
+            for (let t = 0; t < 6; t++) {
+                if (!gemApvSampleMask[t]) continue;
+                const v = f[s][t];
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+        }
+    }
+    if (!isFinite(lo) || !isFinite(hi)) { lo = 0; hi = 1; }
+    if (gemApvShowProcessed) {
+        const m = Math.max(Math.abs(lo), Math.abs(hi));
+        lo = -m; hi = m;
+    }
+    if (hi - lo < 8) {
+        const m = 0.5 * (lo + hi);
+        lo = m - 4; hi = m + 4;
+    }
+    const pad = 0.08 * (hi - lo);
+    return [lo - pad, hi + pad];
 }
 
 function apvHasSignal(apv) {
@@ -493,24 +459,22 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     // present APVs use a desaturated tile so a missing chip stands out
     // against the bright tiles around it.
     const isMissing = !apv.present;
-    ctx.fillStyle = isMissing
-        ? (THEME && THEME.bgDim ? THEME.bgDim : '#0a0a14')
-        : (THEME && THEME.canvas ? THEME.canvas : '#11112a');
+    ctx.fillStyle = isMissing ? '#0a0a14' : THEME.canvas;
     ctx.fillRect(0, 0, W, H);
 
     // Border — red if firmware reported full readout but no ZS hits,
     // accent if any ZS survivors, dim/dashed if APV didn't show up this
     // event, otherwise neutral.
-    let borderCol = THEME && THEME.border ? THEME.border : '#333';
+    let borderCol = THEME.border;
     let borderW = 1;
     let borderDash = null;
     if (isMissing) {
-        borderCol = THEME && THEME.textDim ? THEME.textDim : '#666';
+        borderCol = THEME.textDim;
         borderDash = [3, 3];
     } else if (apv.no_hit_fr) {
-        borderCol = THEME && THEME.danger ? THEME.danger : '#ff6b6b';
+        borderCol = THEME.danger;
     } else if (apvHasSignal(apv) && !gemApvShowSignalOnly) {
-        borderCol = THEME && THEME.accent ? THEME.accent : '#ffd166';
+        borderCol = THEME.accent;
         borderW = 2;
     }
     ctx.strokeStyle = borderCol;
@@ -522,15 +486,13 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     // Title row.  Dim the title for missing APVs so the eye groups them
     // with the dashed border / dim background.
     const titleH = GEM_APV_TITLE_H;
-    ctx.fillStyle = isMissing
-        ? (THEME && THEME.textDim ? THEME.textDim : '#888')
-        : (THEME && THEME.text ? THEME.text : '#e0e0e0');
+    ctx.fillStyle = isMissing ? THEME.textDim : THEME.text;
     ctx.font = 'bold 10px ui-monospace, monospace';
     ctx.textBaseline = 'middle';
     const title = `c${apv.crate} m${apv.mpd} a${apv.adc}  ${apv.plane} p${apv.det_pos}`;
     ctx.fillText(title, 4, titleH / 2);
     if (isMissing) {
-        ctx.fillStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.fillStyle = THEME.textDim;
         ctx.textAlign = 'right';
         ctx.fillText('no data', W - 4, titleH / 2);
         ctx.textAlign = 'start';
@@ -538,54 +500,27 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
         return;   // skip plot/hit-rows — there is nothing to draw
     }
     if (apv.no_hit_fr) {
-        ctx.fillStyle = THEME && THEME.danger ? THEME.danger : '#ff6b6b';
+        ctx.fillStyle = THEME.danger;
         ctx.textAlign = 'right';
         ctx.fillText('no hits', W - 4, titleH / 2);
         ctx.textAlign = 'start';
     }
 
-    // Plot region — reserve two stacked hit rows (fw + sw) at the bottom
-    // so toggling FW Hits doesn't reflow the trace area.
+    // Plot region — the two stacked hit rows (fw + sw) sit at the bottom.
     const hitH = GEM_APV_HIT_ROW_H;
     const hitBlockH = GEM_APV_HIT_BLOCK_H;
     const plotX = 4, plotY = titleH + 2;
     const plotW = W - 8, plotH = H - titleH - hitBlockH - 6;
     if (plotW <= 0 || plotH <= 0) return;
 
-    // Y range.
     const frame = apv[field];
-    let yLo, yHi;
-    if (sharedRange) {
-        yLo = sharedRange[0]; yHi = sharedRange[1];
-    } else {
-        yLo = Infinity; yHi = -Infinity;
-        if (frame) {
-            for (let s = 0; s < frame.length; s++) {
-                for (let t = 0; t < 6; t++) {
-                    if (!gemApvSampleMask[t]) continue;
-                    const v = frame[s][t];
-                    if (v < yLo) yLo = v;
-                    if (v > yHi) yHi = v;
-                }
-            }
-        }
-        if (!isFinite(yLo) || !isFinite(yHi)) { yLo = 0; yHi = 1; }
-        // Process mode: clamp to a symmetric band around zero (see the
-        // matching comment in renderGemApvPanels for rationale).
-        if (gemApvShowProcessed) {
-            const m = Math.max(Math.abs(yLo), Math.abs(yHi));
-            yLo = -m; yHi = m;
-        }
-        if (yHi - yLo < 8) { const m = 0.5*(yLo+yHi); yLo = m-4; yHi = m+4; }
-        const pad = 0.08 * (yHi - yLo);
-        yLo -= pad; yHi += pad;
-    }
+    const [yLo, yHi] = sharedRange || apvYRange([frame]);
     const ySpan = (yHi - yLo) || 1;
     const toY = v => plotY + plotH - (v - yLo) / ySpan * plotH;
 
     // Zero line if it's in range.
     if (yLo < 0 && yHi > 0) {
-        ctx.strokeStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.strokeStyle = THEME.textDim;
         ctx.lineWidth = 0.5;
         ctx.setLineDash([2, 2]);
         ctx.beginPath();
@@ -622,7 +557,7 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     const noise = (gemApvCalib && gemApvCalib.noise) ? gemApvCalib.noise.get(apv.id) : null;
     if (gemApvShowThreshold && gemApvShowProcessed && noise && zsSigma > 0) {
         const noiseN = Math.min(nStrips, noise.length);
-        ctx.strokeStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.strokeStyle = THEME.textDim;
         ctx.lineWidth = 0.8;
         ctx.setLineDash([4, 3]);
         const drawBand = (sign, t) => {
@@ -661,7 +596,7 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
     // Drawn after traces so they're visible on top, but kept dim so they
     // read as separators rather than data.
     if (seq) {
-        ctx.strokeStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+        ctx.strokeStyle = THEME.textDim;
         ctx.lineWidth = 0.4;
         ctx.setLineDash([1, 3]);
         for (let t = 1; t < N_TS; t++) {
@@ -704,43 +639,29 @@ function drawApvCanvas(canvas, apv, field, sharedRange) {
 
     // Hit tick rows — bottom row = software-cut survivors (bright accent),
     // top row = firmware survivors (dim, gated by FW Hits checkbox).
-    // Both rows reserved at all times so toggling FW Hits doesn't reflow.
     // hits[] / fw_hits[] are per-channel only (no TS dimension); in
     // sequential layout we repeat the same per-channel tick pattern under
     // each TS block so traces and ticks stay column-aligned.
     const swRowY = H - hitH - 2;
     const fwRowY = swRowY - hitH - 1;
-    const accent = (THEME && THEME.accent) ? THEME.accent : '#ffd166';
-    if (gemApvShowFwHits && Array.isArray(apv.fw_hits) && apv.fw_hits.length > 0) {
-        const nS = Math.min(nStrips, apv.fw_hits.length);
-        ctx.globalAlpha = 0.45;
-        ctx.fillStyle = accent;
+    const drawHitRow = (flags, y, alpha) => {
+        if (!Array.isArray(flags) || flags.length === 0) return;
+        const nS = Math.min(nStrips, flags.length);
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = THEME.accent;
         for (const t of tsBlocks) {
             for (let s = 0; s < nS; s++) {
-                if (apv.fw_hits[s]) {
-                    const x = xAt(s, t);
-                    ctx.fillRect(x - 0.8, fwRowY, 1.6, hitH);
-                }
+                if (flags[s]) ctx.fillRect(xAt(s, t) - 0.8, y, 1.6, hitH);
             }
         }
         ctx.globalAlpha = 1.0;
-    }
-    if (Array.isArray(apv.hits) && apv.hits.length > 0) {
-        const nS = Math.min(nStrips, apv.hits.length);
-        ctx.fillStyle = accent;
-        for (const t of tsBlocks) {
-            for (let s = 0; s < nS; s++) {
-                if (apv.hits[s]) {
-                    const x = xAt(s, t);
-                    ctx.fillRect(x - 0.8, swRowY, 1.6, hitH);
-                }
-            }
-        }
-    }
+    };
+    if (gemApvShowFwHits) drawHitRow(apv.fw_hits, fwRowY, 0.45);
+    drawHitRow(apv.hits, swRowY, 1.0);
 
     // Tiny Y-range labels in the plot corners — useful when shared Y is
     // off so each panel's auto-scale is visible at a glance.
-    ctx.fillStyle = THEME && THEME.textDim ? THEME.textDim : '#888';
+    ctx.fillStyle = THEME.textDim;
     ctx.font = '8px ui-monospace, monospace';
     ctx.textBaseline = 'top';
     ctx.fillText(fmtCompact(yHi), plotX + 2, plotY + 1);
@@ -754,10 +675,7 @@ function fmtCompact(v) {
     return (v / 1000).toFixed(1) + 'k';
 }
 
-// =====================================================================
-// Controls
-// =====================================================================
-
+// ── Controls ──────────────────────────────────────────────────────────
 function setupGemApvControls() {
     const cb = (id, on) => {
         const el = document.getElementById(id);
@@ -791,8 +709,7 @@ function setupGemApvControls() {
     cb('gem-apv-cm',          gemApvShowCm);
     syncGemApvControlEnables();
 
-    // Layout select — overlay (default) vs sequential (prad1 style).
-    // Pure render-side toggle, no refetch needed.
+    // Layout select — pure render-side toggle, no refetch needed.
     const layoutEl = document.getElementById('gem-apv-layout');
     if (layoutEl) {
         layoutEl.value = gemApvLayout;
@@ -872,8 +789,7 @@ function setupGemApvControls() {
     // Pre-fetch calibration so the threshold band is ready by the time
     // the first event renders (the band wouldn't draw without noise[]).
     ensureGemApvCalib(false);
-    // Per-GEM filter (gem0…gem3) — hides whole sections, including the
-    // separator above (which is a top border on the section itself).
+    // Per-GEM filter (gem0…gem3) — hides whole sections.
     for (let d = 0; d < gemApvDetMask.length; d++) {
         const el = document.getElementById('gem-apv-d' + d);
         if (!el) continue;
@@ -911,12 +827,7 @@ function syncGemApvControlEnables() {
 // (noise[] hasn't changed).  Other viewers pick the change up through
 // the per-event zs_sigma echoed by the server in subsequent events.
 function postGemApvZsSigma(v) {
-    fetch('/api/gem/threshold', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ zs_sigma: v }),
-    })
-        .then(r => r.ok ? r.json() : Promise.reject('http ' + r.status))
+    postJson('/api/gem/threshold', { zs_sigma: v })
         .then(j => {
             if (j.error) throw new Error(j.error);
             if (gemApvCalib) gemApvCalib.zs_sigma = j.zs_sigma;
@@ -944,11 +855,7 @@ function resizeGemApv() {
     renderGemApvPanels();
 }
 
-// Theme flip — every per-APV canvas reads THEME at draw time for the
-// background tile, border, title, zero/threshold lines, and Y-range labels.
-// Replay the full render so all of those pick up the new palette.
-if (typeof onThemeChange === 'function') {
-    onThemeChange(() => {
-        if (gemApvData && gemApvData.enabled) renderGemApvPanels();
-    });
-}
+// Canvases read THEME at draw time — replay the render on a theme flip.
+onThemeChange(() => {
+    if (gemApvData && gemApvData.enabled) renderGemApvPanels();
+});

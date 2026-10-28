@@ -1,36 +1,18 @@
-// =========================================================================
-// evio_data_source.cpp — EVIO file data source implementation
-// =========================================================================
-
 #include "evio_data_source.h"
 
-#include <iostream>
 #include <memory>
 
 using namespace evc;
-
-// =========================================================================
-// Open / Close
-// =========================================================================
 
 std::string EvioDataSource::open(const std::string &path)
 {
     close();
     filepath_ = path;
 
-    // Open via EvChannel::OpenAuto — picks RA when the file supports it,
-    // sequential otherwise.  Either mode builds the same index_ of
-    // {evio_event, sub_event} pairs; decodeEvent() later dispatches on
-    // reader_.IsRandomAccess().
-    reader_.SetConfig(cfg_);
-    if (reader_.OpenAuto(path) != status::success) {
-        invalidateReader();
+    if (!reopenReader()) {
         filepath_.clear();
         return "cannot open file";
     }
-    reader_path_ = path;
-    reader_pos_ = -1;
-    last_decoded_index_ = -1;
 
     // Index every non-monitoring event so the EPICS tab + control-event
     // bookkeeping see them.  The viewer's HTTP layer tags non-Physics samples
@@ -38,28 +20,14 @@ std::string EvioDataSource::open(const std::string &path)
     // instead of showing "0 channels, no trigger".
     if (reader_.IsRandomAccess()) {
         int n_evio = reader_.GetRandomAccessEventCount();
-        for (int ei = 0; ei < n_evio; ++ei) {
-            if (reader_.ReadEventByIndex(ei) != status::success) continue;
-            if (!reader_.Scan()) continue;
-            if (cfg_.is_monitoring(reader_.GetEvHeader().tag)) continue;
-            EventType et = reader_.GetEventType();
-            for (int si = 0; si < reader_.GetNEvents(); ++si)
-                index_.push_back({ei, si, et});
-        }
+        for (int ei = 0; ei < n_evio; ++ei)
+            if (reader_.ReadEventByIndex(ei) == status::success) indexRecord(ei);
     } else {
-        int ei = 0;
-        while (reader_.Read() == status::success) {
+        for (int ei = 0; reader_.Read() == status::success; ++ei) {
             reader_pos_ = ei;
-            bool scanned = reader_.Scan();
-            if (scanned && !cfg_.is_monitoring(reader_.GetEvHeader().tag)) {
-                EventType et = reader_.GetEventType();
-                for (int si = 0; si < reader_.GetNEvents(); ++si)
-                    index_.push_back({ei, si, et});
-            }
-            ++ei;
+            indexRecord(ei);
         }
     }
-    last_decoded_index_ = -1;
     return "";
 }
 
@@ -70,11 +38,15 @@ void EvioDataSource::close()
     filepath_.clear();
 }
 
-// =========================================================================
-// Capabilities
-// =========================================================================
+void EvioDataSource::indexRecord(int ei)
+{
+    if (!reader_.Scan() || cfg_.is_monitoring(reader_.GetEvHeader().tag)) return;
+    const EventType et = reader_.GetEventType();
+    for (int si = 0; si < reader_.GetNEvents(); ++si)
+        index_.push_back({ei, si, et});
+}
 
-DataSourceCaps EvioDataSource::capabilities() const
+DataSourceCaps EvioDataSource::nativeCaps()
 {
     return {
         true,   // has_waveforms
@@ -89,10 +61,6 @@ DataSourceCaps EvioDataSource::capabilities() const
     };
 }
 
-// =========================================================================
-// Random-access event decoding
-// =========================================================================
-
 void EvioDataSource::invalidateReader()
 {
     reader_.Close();
@@ -101,20 +69,23 @@ void EvioDataSource::invalidateReader()
     last_decoded_index_ = -1;
 }
 
-// Sequential-mode positioning helper: close/reopen on backward jumps,
-// then Read() forward until reader_pos_ == evio_target.
+bool EvioDataSource::reopenReader()
+{
+    // OpenAuto closes a still-open handle itself.
+    if (reader_.OpenAuto(filepath_) != status::success) {
+        invalidateReader();
+        return false;
+    }
+    reader_path_ = filepath_;
+    reader_pos_ = -1;
+    return true;
+}
+
 std::string EvioDataSource::seekTo(int evio_target)
 {
-    if (reader_pos_ > evio_target) {
-        // Target is behind us — reopen and walk forward from the start.
-        reader_.Close();
-        reader_.SetConfig(cfg_);
-        if (reader_.OpenAuto(filepath_) != status::success) {
-            invalidateReader();
-            return "cannot reopen file";
-        }
-        reader_pos_ = -1;
-    }
+    // Target is behind us — reopen and walk forward from the start.
+    if (reader_pos_ > evio_target && !reopenReader())
+        return "cannot reopen file";
     while (reader_pos_ < evio_target) {
         if (reader_.Read() != status::success) {
             invalidateReader();
@@ -137,15 +108,8 @@ std::string EvioDataSource::decodeEvent(int index, fdec::EventData &evt,
     // already valid, skip Scan + decode and just copy out.
     if (index != last_decoded_index_) {
         // Recover the reader if something invalidated it (e.g. prior error).
-        if (reader_path_ != filepath_) {
-            reader_.SetConfig(cfg_);
-            if (reader_.OpenAuto(filepath_) != status::success) {
-                invalidateReader();
-                return "cannot open file";
-            }
-            reader_path_ = filepath_;
-            reader_pos_ = -1;
-        }
+        if (reader_path_ != filepath_ && !reopenReader())
+            return "cannot open file";
         const auto &ei = index_[index];
         if (reader_.IsRandomAccess()) {
             if (reader_.ReadEventByIndex(ei.evio_event) != status::success) {
@@ -165,10 +129,6 @@ std::string EvioDataSource::decodeEvent(int index, fdec::EventData &evt,
     if (ssp) *ssp = reader_.Gem();             // returns cached ref thereafter
     return "";
 }
-
-// =========================================================================
-// Full iteration (for histogram building)
-// =========================================================================
 
 void EvioDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb*/,
                                 ControlCallback ctrl_cb, EpicsCallback epics_cb,
@@ -201,17 +161,15 @@ void EvioDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb*/,
             }
         }
 
-        // EPICS events
         if (epics_cb && ch.GetEventType() == EventType::Epics) {
             std::string text = ch.ExtractEpicsText();
             if (!text.empty())
                 epics_cb(text, 0, last_ti_ts);
         }
 
-        // DSC2 scaler bank — Sync events typically; some sites also embed it
-        // in physics events.  Bank-format detection + (source, channel)
-        // selection live in EvChannel::Dsc() (dsc::Dsc2Decoder under the
-        // hood); we only fire the callback when a configured slot matched.
+        // DSC2 scaler bank.  Bank-format detection + (source, channel)
+        // selection live in EvChannel::Dsc(); fire only when a configured
+        // slot matched.
         if (dsc_cb && dsc_bank_tag >= 0) {
             auto et = ch.GetEventType();
             if (et == EventType::Sync || et == EventType::Physics) {

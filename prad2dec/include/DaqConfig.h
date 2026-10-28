@@ -3,14 +3,16 @@
 // DaqConfig.h — configurable DAQ bank tags and event type identification
 //
 // All tags are configurable to accommodate DAQ format changes.
-// No defaults — a DAQ config JSON must be loaded before use.
+// Most fields have no defaults — a DAQ config JSON must be loaded before use.
 //
 // This is a plain struct — no JSON dependency. Loading from JSON is handled
 // by the application layer (see load_daq_config.h).
 //=============================================================================
 
 #include "WaveAnalyzer.h"   // fdec::WaveConfig — analyzer parameters live here
+#include "DaqKey.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -92,12 +94,10 @@ struct DaqConfig
     uint32_t tdc_bank_tag = 0;
 
     // --- DSC2 scaler bank (livetime measurement) ----------------------------
-    // 67 32-bit words per slot, header 0xDCA00000|(slot<<8)|rflag, then
-    // [16 TRG gated, 16 TDC gated, 16 TRG ungated, 16 TDC ungated, ref gated,
-    //  ref ungated].  Live time = 1 - gated/ungated for the chosen counter:
+    // Bank layout and the live = gated/ungated convention: see DscData.h.
     //   Source::Ref   — 125 MHz reference clock (time-based livetime)
     //   Source::Trg   — TRG channel input        (trigger-based)
-    //   Source::Tdc   — TDC channel input
+    //   Source::Tdc   — group 2/4 counters (duplicates of Trg)
     // bank_tag<0 or slot<0 disables the measurement entirely.
     struct DscScaler {
         enum class Source { Ref, Trg, Tdc };
@@ -194,6 +194,41 @@ struct DaqConfig
     };
     std::vector<RocEntry> roc_tags;
 
+    // Data ROCs carry the FADC/SSP banks.  TI slaves share crate numbers with
+    // them, so a crate → tag map must be built from data ROCs only.
+    static bool is_data_roc(const RocEntry &re)
+    {
+        return re.crate >= 0 &&
+               (re.type.empty() || re.type == "roc" || re.type == "gem");
+    }
+
+    // Crate of the first roc_tags entry with this tag, -1 if none.
+    int crate_of(uint32_t tag) const
+    {
+        for (const auto &re : roc_tags)
+            if (re.tag == tag) return re.crate;
+        return -1;
+    }
+
+    // tag → crate over every roc_tags entry (crate -1 kept), or over data
+    // ROCs only.
+    std::unordered_map<uint32_t, int> roc_crate_map(bool data_rocs_only = false) const
+    {
+        std::unordered_map<uint32_t, int> out;
+        for (const auto &re : roc_tags)
+            if (!data_rocs_only || is_data_roc(re)) out[re.tag] = re.crate;
+        return out;
+    }
+
+    // crate → tag over data ROCs; a later entry wins a shared crate.
+    std::unordered_map<int, uint32_t> crate_roc_map() const
+    {
+        std::unordered_map<int, uint32_t> out;
+        for (const auto &re : roc_tags)
+            if (is_data_roc(re)) out[re.crate] = re.tag;
+        return out;
+    }
+
     // TI master crate tag (contains run info bank)
     uint32_t ti_master_tag;
 
@@ -220,19 +255,16 @@ struct DaqConfig
     int      sync_control_run_type_word     = 2;
 
     // --- bank structure: data-bank → decoder module / data product ----------
-    // Populated from the "bank_structure.data_banks" JSON section.  EvChannel
-    // uses this to dispatch lazy data-product accessors (Fadc/Gem/Tdc/Vtp/...):
-    // each accessor iterates the tag-index for every bank whose `product`
-    // matches and invokes the registered decoder for that `module`.
-    //
-    // `module` names are resolved in C++ to the built-in decoder functions —
-    // adding a new module requires matching code in EvChannel.  `product` is
-    // a free-form string whose values must agree with the C++ accessor names
-    // (see `product_*` constants below and EvChannel::Get*).
+    // Populated from the "bank_structure.data_banks" JSON section; tags it
+    // omits are back-filled from the bank-tag fields by EvChannel::SetConfig.
+    // The lazy accessors (Fadc/Gem/Tdc/Vtp) visit every bank whose `product`
+    // matches; Fadc() also picks the decoder by `module` (FADC250 composite,
+    // FADC250 raw or ADC1881M), so a new module needs matching code in
+    // EvChannel.  `product` values must agree with the `product_*` constants.
     struct DataBankInfo {
         std::string module;   // decoder-module key (e.g. "fadc250_composite")
         std::string product;  // data-product name  (e.g. "fadc")
-        std::string type;     // expected evio type for validation (optional)
+        std::string type;     // evio type from the JSON (not validated)
     };
     std::unordered_map<uint32_t, DataBankInfo> data_banks;
 
@@ -246,7 +278,6 @@ struct DaqConfig
     static constexpr const char *product_epics      = "epics";
     static constexpr const char *product_daq_config = "daq_config";
 
-    // Lookup helpers.
     const DataBankInfo *find_data_bank(uint32_t tag) const {
         auto it = data_banks.find(tag);
         return it != data_banks.end() ? &it->second : nullptr;
@@ -263,44 +294,33 @@ struct DaqConfig
     }
 
     // --- diagnostics -----------------------------------------------------------
-    bool verbose_decode = false;   // log unmatched bank tags in DecodeEvent
+    bool verbose_decode = false;   // not read by the decoder
 
     // --- per-channel pedestals (ADC1881M) ------------------------------------
     struct PedEntry { float mean = 0.f; float rms = 0.f; };
 
-    // pedestal lookup: packed key (crate<<32 | slot<<16 | channel) → PedEntry
+    // pedestal lookup: prad2::pack_daq_key(crate, slot, channel) → PedEntry
     std::unordered_map<uint64_t, PedEntry> pedestals;
-
-    static uint64_t pack_daq_key(int crate, int slot, int ch)
-    {
-        return (static_cast<uint64_t>(crate) << 32) |
-               (static_cast<uint64_t>(slot)  << 16) |
-               static_cast<uint64_t>(ch);
-    }
 
     const PedEntry *get_pedestal(int crate, int slot, int ch) const
     {
-        auto it = pedestals.find(pack_daq_key(crate, slot, ch));
+        auto it = pedestals.find(prad2::pack_daq_key(crate, slot, ch));
         return (it != pedestals.end()) ? &it->second : nullptr;
     }
 
     // --- helpers ------------------------------------------------------------
     bool is_physics(uint32_t tag) const
     {
-        // built-in trigger range for physics (0xFF50-0xFF8F, 0x00A0-0x00BF)
-        if ((tag >= 0x00A0 && tag <= 0x00BF) || (tag >= 0xFF50 && tag <= 0xFF8F))
+        // built-in physics ranges (0x00A0-0x00BF, built-trigger 0xFF50-0xFF8F)
+        if ((tag >= 0x00A0 && tag <= 0x00BF) || is_built_physics_event(tag))
             return true;
         // single-event tags
-        for (auto t : physics_tags)
-            if (tag == t) return true;
-        return false;
+        return std::find(physics_tags.begin(), physics_tags.end(), tag) != physics_tags.end();
     }
 
     bool is_monitoring(uint32_t tag) const
     {
-        for (auto t : monitoring_tags)
-            if (tag == t) return true;
-        return false;
+        return std::find(monitoring_tags.begin(), monitoring_tags.end(), tag) != monitoring_tags.end();
     }
 
     bool is_control(uint32_t tag) const
@@ -320,9 +340,7 @@ struct DaqConfig
 
     bool is_ssp_bank(uint32_t tag) const
     {
-        for (auto t : ssp_bank_tags)
-            if (t == tag) return true;
-        return false;
+        return std::find(ssp_bank_tags.begin(), ssp_bank_tags.end(), tag) != ssp_bank_tags.end();
     }
 
     // CODA trigger bank identification (spec pages 21, 26, 31)
@@ -331,6 +349,9 @@ struct DaqConfig
     static bool is_built_trigger_bank(uint32_t tag) { return tag >= 0xFF20 && tag <= 0xFF2F; }
     static bool is_raw_trigger_bank(uint32_t tag)   { return tag >= 0xFF10 && tag <= 0xFF1F; }
     static bool is_trigger_bank(uint32_t tag)       { return tag >= 0xFF10 && tag <= 0xFF4F; }
+
+    // CODA built-trigger physics event: 0xFF50-0xFF8F (header num = event count)
+    static bool is_built_physics_event(uint32_t tag) { return tag >= 0xFF50 && tag <= 0xFF8F; }
 
     // Trigger bank tag encodes what data is present (page 26):
     //   bit 0: has timestamps

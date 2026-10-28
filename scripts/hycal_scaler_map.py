@@ -9,6 +9,8 @@ Usage
 -----
     python scripts/hycal_scaler_map.py              # real EPICS
     python scripts/hycal_scaler_map.py --sim         # simulation (random)
+
+Options: --database FILE (default database/hycal_map.json), --theme THEME.
 """
 
 from __future__ import annotations
@@ -19,9 +21,6 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-#local path for testing on farm
-#sys.path.append('/home/wrightso/.local/bin/*')
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel,
@@ -30,27 +29,25 @@ from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QFont, QColor, QPen
 
 from hycal_geoview import (
-    Module, load_modules, HyCalMapWidget, PALETTES,
+    Module, load_modules, HyCalMapWidget,
     apply_theme_palette, set_theme, available_themes, THEME,
-    ColorRangeControl,
+    ColorRangeControl, make_info_label,
 )
 
 
-# ===========================================================================
-#  Paths & constants
-# ===========================================================================
+# ---- Paths & constants -----------------------------------------------------
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_map.json"
 
 SCALER_PV = "B_DET_HYCAL_FADC_{label}:c"
-POLL_INTERVAL_MS = 2_500   # 1 seconds
+# Module types that have a scaler PV; Veto (V1-V4) has none.
+SCALER_TYPES = ("PbWO4", "PbGlass", "LMS")
+POLL_INTERVAL_MS = 2_500
 
 
-# ===========================================================================
-#  EPICS interfaces
-# ===========================================================================
+# ---- EPICS interfaces ------------------------------------------------------
 
 class RealScalerEPICS:
     """Read scaler PVs via pyepics."""
@@ -59,9 +56,8 @@ class RealScalerEPICS:
         import epics as _epics
         self._pvs: Dict[str, object] = {}
         for m in modules:
-            if m.mod_type in ("PbWO4", "PbGlass", "LMS"):
-                pv = _epics.PV(SCALER_PV.format(label=m.name), connection_timeout=2.0)
-                self._pvs[m.name] = pv
+            pv = _epics.PV(SCALER_PV.format(label=m.name), connection_timeout=2.0)
+            self._pvs[m.name] = pv
 
     def get(self, name: str) -> Optional[float]:
         pv = self._pvs.get(name)
@@ -79,8 +75,7 @@ class SimulatedScalerEPICS:
 
     def __init__(self, modules: List[Module]):
         self._rng = random.Random(0)
-        self._names = [m.name for m in modules
-                       if m.mod_type in ("PbWO4", "PbGlass", "LMS")]
+        self._names = [m.name for m in modules]
 
     def get(self, name: str) -> Optional[float]:
         return self._rng.uniform(0, 1000)
@@ -89,9 +84,7 @@ class SimulatedScalerEPICS:
         return len(self._names), len(self._names)
 
 
-# ===========================================================================
-#  HyCal map widget  (subclass customises min size + vmax default)
-# ===========================================================================
+# ---- HyCal map widget (CoG crosshair overlay) ------------------------------
 
 class ScalerMapWidget(HyCalMapWidget):
     """Simple value → colour map with palette cycle and log scale.
@@ -103,7 +96,7 @@ class ScalerMapWidget(HyCalMapWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent, min_size=(500, 500), include_lms=True)
-        self._vmax = 1000.0   # sensible default for kHz rates
+        self._vmax = 1000.0
         self._cog: Optional[Tuple[float, float]] = None
 
     def _fmt_value(self, v: float) -> str:
@@ -120,8 +113,8 @@ class ScalerMapWidget(HyCalMapWidget):
             return
         cx, cy = self.geo_to_canvas(self._cog[0], self._cog[1]).x(), \
                  self.geo_to_canvas(self._cog[0], self._cog[1]).y()
-        # Crosshair: white outline + ACCENT inner so it's readable on any
-        # palette.  Length = 18 px arms; small filled center dot.
+        # Crosshair: black outline + ACCENT inner so it's readable on any
+        # palette.
         L = 18
         for color, width in ((QColor("#000000"), 4.0),
                              (QColor(THEME.ACCENT), 2.0)):
@@ -134,9 +127,7 @@ class ScalerMapWidget(HyCalMapWidget):
         p.drawEllipse(int(cx - 3), int(cy - 3), 6, 6)
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ---- Main window -----------------------------------------------------------
 
 class ScalerMapWindow(QMainWindow):
 
@@ -145,11 +136,8 @@ class ScalerMapWindow(QMainWindow):
         self._modules = modules
         self._ep = epics_source
         self._simulation = simulation
-        self._scalable = [m for m in modules
-                          if m.mod_type in ("PbWO4", "PbGlass", "LMS")]
         self._values: Dict[str, float] = {}
         self._polling = True
-        self._palette_idx = 0
 
         self._build_ui()
 
@@ -194,19 +182,15 @@ class ScalerMapWindow(QMainWindow):
         root.addLayout(top)
 
         # -- map --
-        # Only show modules that actually have scaler PVs; Veto (V1–V4)
-        # has no scaler rate, so rendering them here would misleadingly
-        # grey them out. LMS is still filtered by include_lms=False.
         self._map = ScalerMapWidget()
-        self._map.set_modules(self._scalable)
+        self._map.set_modules(self._modules)
         self._map.moduleHovered.connect(self._on_hover)
-        self._map.paletteClicked.connect(self._cycle_palette)
+        self._map.paletteClicked.connect(self._map.cycle_palette)
         root.addWidget(self._map, stretch=1)
 
         # -- range controls --
-        # Reusable widget from hycal_geoview: min/max edits + Auto button +
-        # Log toggle.  Starts pinned so the colormap tracks live EPICS data
-        # until the user opts out (single-click Auto, or edit a field).
+        # Starts pinned so the colormap tracks live EPICS data until the
+        # user opts out (single-click Auto, or edit a field).
         ctrl = QHBoxLayout()
         self._range_ctrl = ColorRangeControl(
             self._map,
@@ -224,16 +208,8 @@ class ScalerMapWindow(QMainWindow):
         root.addLayout(ctrl)
 
         # -- info bar --
-        self._info = QLabel("Hover over a module")
-        self._info.setFont(QFont("Monospace", 11))
-        self._info.setStyleSheet(
-            f"QLabel{{background:{THEME.PANEL};color:{THEME.TEXT};"
-            f"padding:4px 8px;border:1px solid {THEME.BORDER};"
-            f"border-radius:8px;}}")
-        self._info.setFixedHeight(28)
+        self._info = make_info_label("Hover over a module")
         root.addWidget(self._info)
-
-    # -- helpers --
 
     def _make_btn(self, text: str, fg: str, slot) -> QPushButton:
         btn = QPushButton(text)
@@ -245,15 +221,6 @@ class ScalerMapWindow(QMainWindow):
         btn.clicked.connect(slot)
         return btn
 
-    def _styled_label(self, text: str) -> QLabel:
-        lbl = QLabel(text)
-        lbl.setFont(QFont("Monospace", 11))
-        lbl.setStyleSheet(f"color:{THEME.TEXT};")
-        return lbl
-
-
-    # -- actions --
-
     def _refresh(self):
         # Collect rates and compute the rate-weighted center of gravity
         # over all calorimeter crystals (PbWO4 + PbGlass).  LMS pulses
@@ -262,7 +229,7 @@ class ScalerMapWindow(QMainWindow):
         cog_w  = 0.0               # weight sum (Σ rate)
         cog_xw = 0.0               # Σ rate · x
         cog_yw = 0.0               # Σ rate · y
-        for m in self._scalable:
+        for m in self._modules:
             v = self._ep.get(m.name)
             if v is None:
                 continue
@@ -321,10 +288,6 @@ class ScalerMapWindow(QMainWindow):
             self._poll_btn.setStyleSheet(
                 self._poll_btn.styleSheet().replace(THEME.SUCCESS, THEME.DANGER))
 
-    def _cycle_palette(self):
-        self._palette_idx = (self._palette_idx + 1) % len(PALETTES)
-        self._map.set_palette(self._palette_idx)
-
     def _on_hover(self, name: str):
         parts = [name]
         for m in self._modules:
@@ -337,9 +300,7 @@ class ScalerMapWindow(QMainWindow):
         self._info.setText("    ".join(parts))
 
 
-# ===========================================================================
-#  Main
-# ===========================================================================
+# ---- Main ------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="HyCal FADC Scaler Map")
@@ -355,6 +316,9 @@ def main():
 
     modules = load_modules(args.database)
     print(f"Loaded {len(modules)} modules")
+    # Poll and draw only modules with a scaler PV; a Veto tile would only
+    # ever show no data.
+    modules = [m for m in modules if m.mod_type in SCALER_TYPES]
 
     if args.sim:
         ep = SimulatedScalerEPICS(modules)

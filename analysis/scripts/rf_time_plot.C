@@ -23,14 +23,12 @@
 #include <TFile.h>
 #include <TH1F.h>
 #include <TLatex.h>
-#include <TLegend.h>
 #include <TLine.h>
 #include <TStyle.h>
 #include <TTree.h>
 
 #include <cmath>
 #include <iostream>
-#include <string>
 
 void rf_time_plot(const char *infile,
                   const char *outfile = "rf_plot.pdf",
@@ -61,15 +59,8 @@ void rf_time_plot(const char *infile,
                     "cl_dt_rf", "rf_n_a", "rf_ns_a"}) {
         t->SetBranchStatus(b, 1);
     }
-    t->SetBranchAddress("n_clusters", &ev.n_clusters);
-    t->SetBranchAddress("cl_energy",  ev.cl_energy);
-    t->SetBranchAddress("cl_center",  ev.cl_center);
-    t->SetBranchAddress("cl_time",    ev.cl_time);
-    t->SetBranchAddress("cl_dt_rf",   ev.cl_dt_rf);
-    t->SetBranchAddress("rf_n_a",     &ev.rf_n_a);
-    t->SetBranchAddress("rf_ns_a",    ev.rf_ns_a);
+    prad2::SetReconReadBranches(t, ev);
 
-    // Histograms.
     const float T_RF  = prad2::RF_PERIOD_NS;
     TH1F h_fold("h_fold",
                 "Folded #Deltat (cl_time #minus nearest RF, with per-module offsets);"
@@ -114,7 +105,6 @@ void rf_time_plot(const char *infile,
               << " RMS=" << h_unfold.GetRMS()
               << " N=" << (Long64_t)h_unfold.GetEntries() << "\n";
 
-    // Draw.
     gStyle->SetOptStat(2200);
     TCanvas c("c_rf", "RF folding", 1200, 800);
     c.Divide(2, 2);

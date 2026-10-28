@@ -1,7 +1,4 @@
 #pragma once
-// =========================================================================
-// evio_data_source.h — EVIO file data source for the event viewer
-// =========================================================================
 
 #include "data_source.h"
 #include "EvChannel.h"
@@ -13,11 +10,13 @@
 
 class EvioDataSource : public DataSource {
 public:
-    explicit EvioDataSource(const evc::DaqConfig &cfg) : cfg_(cfg) {}
+    explicit EvioDataSource(const evc::DaqConfig &cfg) : cfg_(cfg) { reader_.SetConfig(cfg_); }
 
     std::string open(const std::string &path) override;
     void close() override;
-    DataSourceCaps capabilities() const override;
+    // What an EVIO stream provides, whether read from a file or from ET.
+    static DataSourceCaps nativeCaps();
+    DataSourceCaps capabilities() const override { return nativeCaps(); }
     int eventCount() const override { return (int)index_.size(); }
 
     std::string decodeEvent(int index, fdec::EventData &evt,
@@ -66,4 +65,9 @@ private:
     // failure, empty on success.
     std::string seekTo(int evio_target);
     void invalidateReader();
+    // (Re)open filepath_ from the start; false (reader invalidated) on failure.
+    bool reopenReader();
+    // Append the sub-events of the record just read as evio event ei to
+    // index_; monitoring records and records that fail Scan() are skipped.
+    void indexRecord(int ei);
 };

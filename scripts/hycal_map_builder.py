@@ -29,6 +29,8 @@ Usage
     python scripts/hycal_map_builder.py                        # empty map
     python scripts/hycal_map_builder.py mydata.json            # auto-load
     python scripts/hycal_map_builder.py mydata.txt --field rms
+
+Options: --modules FILE (default database/hycal_map.json), --theme THEME.
 """
 
 from __future__ import annotations
@@ -52,35 +54,20 @@ from PyQt6.QtCore import Qt, QRectF
 from PyQt6.QtGui import QColor, QFont, QPen
 
 from hycal_geoview import (
-    Module, load_modules, HyCalMapWidget, cmap_qcolor,
-    PALETTE_NAMES, apply_theme_palette, set_theme,
-    available_themes, THEME, ColorRangeControl,
+    Module, load_modules, HyCalMapWidget, cmap_qcolor, fmt_value,
+    apply_theme_palette, set_theme, available_themes, THEME,
+    ColorRangeControl, make_info_label,
 )
+from prad2_env import database_dir, find_database_file
 
 
-# ===========================================================================
-#  Paths
-# ===========================================================================
+# ---- Paths -----------------------------------------------------------------
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-def _find_modules_json() -> Path:
-    candidates = [
-        SCRIPT_DIR / ".." / "database" / "hycal_map.json",
-        Path.cwd() / "database" / "hycal_map.json",
-        Path.cwd() / "hycal_map.json",
-    ]
-    for c in candidates:
-        if c.is_file():
-            return c.resolve()
-    return (SCRIPT_DIR / ".." / "database" / "hycal_map.json").resolve()
-
-MODULES_JSON = _find_modules_json()
+MODULES_JSON = (find_database_file("hycal_map.json", use_env=False)
+                or database_dir(use_env=False) / "hycal_map.json")
 
 
-# ===========================================================================
-#  Data loading
-# ===========================================================================
+# ---- Data loading ----------------------------------------------------------
 
 def load_data_file(path: Path) -> Tuple[Dict[str, Dict[str, float]], List[str]]:
     """
@@ -182,7 +169,6 @@ def _data_from_text(text: str) -> Tuple[Dict[str, Dict[str, float]], List[str]]:
         fields = [f"col{i+1}" for i in range(ncols)]
         data_rows = rows
 
-    # pad/trim field list to ncols
     while len(fields) < ncols:
         fields.append(f"col{len(fields)+1}")
     fields = fields[:ncols]
@@ -203,20 +189,10 @@ def _data_from_text(text: str) -> Tuple[Dict[str, Dict[str, float]], List[str]]:
     return data, fields
 
 
-# ===========================================================================
-#  HyCal map widget  (PbGlass alpha overlay + zoom/pan)
-# ===========================================================================
-
-def _fmt(v) -> str:
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return "\u2014"
-    if v == 0:
-        return "0"
-    return f"{v:.6g}"
-
+# ---- HyCal map widget (PbGlass alpha overlay + zoom/pan) -------------------
 
 class MapBuilderWidget(HyCalMapWidget):
-    """HyCal map with adjustable PbGlass transparency and field-name colourbar.
+    """HyCal map with adjustable PbGlass transparency.
 
     LMS and Veto modules are partitioned from the loaded module list and can
     be toggled independently via :meth:`set_lms_visible` /
@@ -236,7 +212,6 @@ class MapBuilderWidget(HyCalMapWidget):
         self._show_scint = False
         self._pbglass_names: set = set()
         self._pbglass_alpha: float = 1.0
-        self._field_label = ""
 
     def set_modules(self, modules: List[Module]):
         self._hycal = [m for m in modules if m.mod_type in self._BOUNDS_TYPES]
@@ -276,24 +251,9 @@ class MapBuilderWidget(HyCalMapWidget):
         self._layout_dirty = True
         self.update()
 
-    def set_values(self, values: Dict[str, float], label: str = ""):
-        self._field_label = label
-        super().set_values(values)
-
     def set_pbglass_alpha(self, a: float):
         self._pbglass_alpha = max(0.0, min(1.0, a))
         self.update()
-
-    def _fmt_value(self, v: float) -> str:
-        return _fmt(v)
-
-    def _colorbar_center_text(self) -> str:
-        mid = PALETTE_NAMES[self._palette_idx]
-        if self._log_scale:
-            mid += "  [log]"
-        if self._field_label:
-            mid = self._field_label + "  \u2014  " + mid
-        return mid
 
     def _paint_empty(self, p, w, h):
         p.setPen(self.EMPTY_TEXT)
@@ -303,13 +263,7 @@ class MapBuilderWidget(HyCalMapWidget):
 
     def _paint_modules(self, p):
         stops = self.palette_stops()
-        vmin, vmax = self._vmin, self._vmax
         no_data = self.NO_DATA_COLOR
-        log_scale = self._log_scale
-        if log_scale:
-            log_lo = math.log10(max(vmin, 1e-9))
-            log_hi = math.log10(max(vmax, vmin * 10, 1e-8))
-
         glass_alpha = self._pbglass_alpha
         # Module frame — TEXT_DIM is defined to be readable on the active
         # theme's canvas, so it's visible in both dark and light modes.
@@ -324,12 +278,7 @@ class MapBuilderWidget(HyCalMapWidget):
             if v is None or (isinstance(v, float) and math.isnan(v)):
                 fill = QColor(no_data)
             else:
-                if log_scale:
-                    lv = math.log10(max(v, 1e-9))
-                    t = (lv - log_lo) / (log_hi - log_lo) if log_hi > log_lo else 0.5
-                else:
-                    t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                fill = cmap_qcolor(t, stops)
+                fill = cmap_qcolor(self.value_to_t(v), stops)
 
             if a < 1.0:
                 fill = QColor(fill)
@@ -343,9 +292,7 @@ class MapBuilderWidget(HyCalMapWidget):
                 p.drawRect(rect)
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ---- Main window -----------------------------------------------------------
 
 class MapBuilderWindow(QMainWindow):
 
@@ -364,8 +311,6 @@ class MapBuilderWindow(QMainWindow):
 
         if data_file is not None:
             self._load_file(data_file, preferred_field=initial_field)
-
-    # -- ui --
 
     def _build_ui(self):
         self.setWindowTitle("HyCal Map Builder")
@@ -398,7 +343,7 @@ class MapBuilderWindow(QMainWindow):
 
         # -- map --
         self._map = MapBuilderWidget()
-        self._map.paletteClicked.connect(self._cycle_palette)
+        self._map.paletteClicked.connect(self._map.cycle_palette)
         self._map.moduleHovered.connect(self._on_hover)
         root.addWidget(self._map, stretch=1)
 
@@ -419,13 +364,12 @@ class MapBuilderWindow(QMainWindow):
 
         ctrl.addSpacing(12)
         ctrl.addWidget(self._make_btn("Palette \u25B6", THEME.TEXT,
-                                      self._cycle_palette))
+                                      self._map.cycle_palette))
 
         ctrl.addSpacing(12)
-        # Reusable control: min/max edits, Auto button (single-click=oneshot,
-        # double-click=pin), Log toggle.  auto_fit="percentile" with (2, 98)
-        # matches the long-tail distributions in calibration histograms.
-        # Starts pinned so switching fields auto-rescales until the user opts out.
+        # auto_fit="percentile" with (2, 98) matches the long-tail
+        # distributions in calibration histograms.  Starts pinned so switching
+        # fields auto-rescales until the user opts out.
         self._range_ctrl = ColorRangeControl(
             self._map,
             auto_fit="percentile",
@@ -467,20 +411,10 @@ class MapBuilderWindow(QMainWindow):
         # -- info / stats --
         info_row = QHBoxLayout()
         info_row.setSpacing(6)
-        self._info = QLabel("Hover over a module")
-        self._info.setFont(QFont("Monospace", 11))
-        self._info.setStyleSheet(
-            f"QLabel{{background:{THEME.PANEL};color:{THEME.TEXT};padding:4px 8px;"
-            f"border:1px solid {THEME.BORDER};border-radius:8px;}}")
-        self._info.setFixedHeight(28)
+        self._info = make_info_label("Hover over a module")
         info_row.addWidget(self._info, stretch=1)
 
-        self._stats_lbl = QLabel("")
-        self._stats_lbl.setFont(QFont("Monospace", 11))
-        self._stats_lbl.setStyleSheet(
-            f"QLabel{{background:{THEME.PANEL};color:{THEME.TEXT_DIM};padding:4px 8px;"
-            f"border:1px solid {THEME.BORDER};border-radius:8px;}}")
-        self._stats_lbl.setFixedHeight(28)
+        self._stats_lbl = make_info_label("", dim=True)
         info_row.addWidget(self._stats_lbl)
         root.addLayout(info_row)
 
@@ -515,8 +449,6 @@ class MapBuilderWindow(QMainWindow):
             f"border:1px solid {THEME.ACCENT};}}")
         cb.toggled.connect(slot)
         return cb
-
-    # -- actions --
 
     def _open_file(self):
         start_dir = str(self._data_path.parent) if self._data_path else str(Path.cwd())
@@ -561,7 +493,7 @@ class MapBuilderWindow(QMainWindow):
         if not self._current_field:
             return
         values = self._data.get(self._current_field, {})
-        self._map.set_values(values, label=self._current_field)
+        self._map.set_values(values)
         # Pin handles re-fit when on; otherwise the user's manual range stays.
         self._range_ctrl.notify_values_changed(values)
         self._update_stats()
@@ -577,11 +509,8 @@ class MapBuilderWindow(QMainWindow):
             return
         arr = np.asarray(vals, dtype=float)
         self._stats_lbl.setText(
-            f"N={arr.size}  mean={_fmt(float(arr.mean()))}"
-            f"  rms={_fmt(float(arr.std()))}")
-
-    def _cycle_palette(self):
-        self._map.set_palette(self._map.palette_idx() + 1)
+            f"N={arr.size}  mean={fmt_value(float(arr.mean()))}"
+            f"  rms={fmt_value(float(arr.std()))}")
 
     def _on_alpha_changed(self, v: int):
         self._map.set_pbglass_alpha(v / 100.0)
@@ -602,13 +531,11 @@ class MapBuilderWindow(QMainWindow):
         if self._current_field:
             v = self._data.get(self._current_field, {}).get(name)
             if v is not None:
-                parts.append(f"{self._current_field} = {_fmt(v)}")
+                parts.append(f"{self._current_field} = {fmt_value(v)}")
         self._info.setText("    ".join(parts))
 
 
-# ===========================================================================
-#  Main
-# ===========================================================================
+# ---- Main ------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="HyCal geo-view map builder")

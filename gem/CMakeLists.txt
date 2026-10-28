@@ -1,19 +1,6 @@
-# gem/CMakeLists.txt — GEM diagnostic tools and helper scripts.
-#
-# Contents:
-#   gem_dump.cpp           — C++ command-line inspector (installed)
-#   gem_event_viewer.py    — PyQt6 event-by-event viewer (installed via wrapper)
-#   gem_cluster_view.py    — static cluster plotter for evdump JSON (wrapper)
-#   gem_layout.py          — strip-layout visualizer (wrapper)
-#   gem_strip_map.py       — thin wrapper over prad2py.det.map_strip
-#   gem_view.py            — rendering library used by the above
-#   check_strip_map.py     — cross-check against reference implementations
-#   README.md              — overview + GEM detector facts
+# gem/CMakeLists.txt — GEM diagnostic tools and helper scripts (see README.md).
 
 # --- C++ binary --------------------------------------------------------------
-# add_prad_tool() links prad2dec, adds DATABASE_DIR compile-def, sends the
-# binary to <build>/bin/.  Defaults SRC to <name>.cpp relative to this
-# CMakeLists — here that's gem/gem_dump.cpp.
 add_prad_tool(gem_dump LINKS prad2det nlohmann_json::nlohmann_json)
 
 install(TARGETS gem_dump RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

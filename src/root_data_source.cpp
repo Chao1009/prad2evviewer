@@ -1,22 +1,14 @@
-// =========================================================================
-// root_data_source.cpp — ROOT file data source implementations
-// =========================================================================
-
 #ifdef WITH_ROOT
 
 #include "root_data_source.h"
 #include "EventData_io.h"
+#include "EvioFiles.h"
 
 #include <TFile.h>
 #include <TTree.h>
-#include <TBranch.h>
 
 #include <iostream>
 #include <algorithm>
-
-// =========================================================================
-// Factory: detect tree type
-// =========================================================================
 
 std::unique_ptr<DataSource> createRootDataSource(
     const std::string &path,
@@ -33,10 +25,6 @@ std::unique_ptr<DataSource> createRootDataSource(
 
     return nullptr;
 }
-
-// =========================================================================
-// RootRawDataSource
-// =========================================================================
 
 std::string RootRawDataSource::open(const std::string &path)
 {
@@ -111,7 +99,6 @@ void RootRawDataSource::fillEventData(fdec::EventData &evt) const
         int ch    = mod->daq.channel;
         if (sl < 0 || sl >= fdec::MAX_SLOTS || ch < 0 || ch >= fdec::MAX_CHANNELS) continue;
 
-        // translate crate ID → ROC tag
         uint32_t roc_tag = static_cast<uint32_t>(crate);
         auto it = crate_to_roc_.find(crate);
         if (it != crate_to_roc_.end()) roc_tag = it->second;
@@ -163,10 +150,6 @@ void RootRawDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb
     }
 }
 
-// =========================================================================
-// RootReconDataSource
-// =========================================================================
-
 std::string RootReconDataSource::open(const std::string &path)
 {
     close();
@@ -182,24 +165,10 @@ std::string RootReconDataSource::open(const std::string &path)
 
     prad2::SetReconReadBranches(tree_, ev_);
 
-    // Run number — recon trees don't carry it per-event, but the standard
-    // filename layout is "prad_NNNNNN.*_recon.root" or "prad_NNNNNN.root";
-    // pull the first numeric token after the last "prad_" if present.
-    run_number_ = 0;
-    const std::string &p = path;
-    size_t slash = p.find_last_of("/\\");
-    std::string base = (slash == std::string::npos) ? p : p.substr(slash + 1);
-    const std::string prefix = "prad_";
-    size_t pi = base.find(prefix);
-    if (pi != std::string::npos) {
-        size_t i = pi + prefix.size();
-        uint32_t v = 0;
-        while (i < base.size() && base[i] >= '0' && base[i] <= '9') {
-            v = v * 10 + (base[i] - '0');
-            ++i;
-        }
-        if (i > pi + prefix.size()) run_number_ = v;
-    }
+    // Recon trees don't carry the run number per event; take it from the
+    // file name ("prad_NNNNNN.*_recon.root").
+    const int run = prad2::run_number_from_path(path);
+    run_number_ = run > 0 ? static_cast<uint32_t>(run) : 0;
 
     std::cerr << "ROOT recon: " << n_entries_ << " events";
     if (run_number_) std::cerr << "  run=" << run_number_;
@@ -245,34 +214,12 @@ std::string RootReconDataSource::decodeEvent(int index, fdec::EventData &evt,
     return "";
 }
 
-void RootReconDataSource::fillRecon(ReconEventData &recon) const
-{
-    recon.event_num = ev_.event_num;
-    recon.trigger_type = ev_.trigger_type;
-    recon.trigger_bits = ev_.trigger_bits;
-    recon.run_number = run_number_;
-    recon.timestamp = static_cast<uint64_t>(ev_.timestamp);
-    recon.clusters.clear();
-    for (int i = 0; i < ev_.n_clusters && i < prad2::kMaxClusters; ++i)
-        recon.clusters.push_back({ev_.cl_x[i], ev_.cl_y[i], ev_.cl_energy[i],
-                                   static_cast<int>(ev_.cl_nblocks[i]),
-                                   static_cast<int>(ev_.cl_center[i])});
-    recon.gem_hits.clear();
-    for (int i = 0; i < ev_.n_gem_hits && i < prad2::kMaxGemHits; ++i)
-        recon.gem_hits.push_back({static_cast<int>(ev_.det_id[i]),
-                                   ev_.gem_x[i], ev_.gem_y[i],
-                                   ev_.gem_x_charge[i], ev_.gem_y_charge[i],
-                                   ev_.gem_x_peak[i], ev_.gem_y_peak[i],
-                                   static_cast<int>(ev_.gem_x_size[i]),
-                                   static_cast<int>(ev_.gem_y_size[i])});
-}
-
-bool RootReconDataSource::decodeReconEvent(int index, ReconEventData &recon)
+bool RootReconDataSource::decodeReconEvent(int index, prad2::ReconEventData &recon)
 {
     if (index < 0 || index >= n_entries_) return false;
     std::lock_guard<std::mutex> lk(mtx_);
     tree_->GetEntry(index);
-    fillRecon(recon);
+    recon = ev_;
     return true;
 }
 
@@ -283,11 +230,9 @@ void RootReconDataSource::iterateAll(EventCallback /*ev_cb*/, ReconCallback reco
     if (!tree_ || !recon_cb) return;
 
     std::lock_guard<std::mutex> lk(mtx_);  // block concurrent decodeReconEvent calls
-    ReconEventData recon;
     for (int i = 0; i < n_entries_; ++i) {
         tree_->GetEntry(i);
-        fillRecon(recon);
-        recon_cb(i, recon);
+        recon_cb(i, ev_);
     }
 }
 

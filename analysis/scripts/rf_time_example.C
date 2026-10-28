@@ -10,8 +10,8 @@
 //   tdc_nwords     word count per bank, parallel to tdc_roc_tags
 //   tdc_words      concatenated TDC hit words
 //
-// (The recon tree intentionally does NOT carry these — RF-time
-// reconstruction will land there as a decoded scalar in a future change.)
+// (The recon tree does NOT carry these raw words, only the decoded
+// rf_n_a/b, rf_ns_a/b and per-cluster cl_dt_rf.)
 //
 // The bit fields inside each tdc_words element (slot/edge/channel/value)
 // are decoded by tdc::RfTimeDecoder::DecodeReplay() — analysis code
@@ -30,7 +30,7 @@
 //       "prad_024386.00000_raw.root", 5)
 //
 // Args:
-//   1) infile      — replayed *.root (raw or recon, auto-detected by tree)
+//   1) infile      — replayed *_raw.root (reads its `events` tree)
 //   2) max_events  — print at most this many events (default 5)
 //
 // Output: one block per event with the decoded ns arrays for both RF
@@ -39,8 +39,6 @@
 //============================================================================
 
 #include "TdcDecoder.h"
-#include "EventData.h"
-#include "EventData_io.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -52,7 +50,7 @@
 
 void rf_time_example(const char *infile, Long64_t max_events = 5)
 {
-    // ─── open file + auto-detect tree ─────────────────────────────────────
+    // ─── open file + raw tree ─────────────────────────────────────────────
     TFile *fin = TFile::Open(infile, "READ");
     if (!fin || fin->IsZombie()) {
         std::cerr << "[rf_time_example] cannot open " << infile << "\n";
@@ -73,8 +71,8 @@ void rf_time_example(const char *infile, Long64_t max_events = 5)
     std::cout << "[rf_time_example] reading 'events' tree from " << infile << "\n";
 
     // ─── bind the event-id field + the three RF vector branches ───────────
-    // event_num exists on both trees; the rest of the per-event payload is
-    // ignored here since we only need the TDC vectors.
+    // The rest of the per-event payload is switched off; only the TDC
+    // vectors are needed.
     int event_num = 0;
     t->SetBranchStatus("*", 0);
     t->SetBranchStatus("event_num", 1);

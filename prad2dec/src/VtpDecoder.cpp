@@ -1,4 +1,5 @@
 #include "VtpDecoder.h"
+#include "EvStruct.h"
 
 using namespace vtp;
 
@@ -195,9 +196,8 @@ int VtpDecoder::DecodeRoc(const uint32_t *data, size_t nwords,
                 break;
             }
 
-            // For other types, continuation words are stepped over without
-            // interpretation — we stay in the current type until the next
-            // defining word flips it.
+            // Other types: continuation words are skipped until the next
+            // defining word.
             default:
                 break;
             }
@@ -205,4 +205,16 @@ int VtpDecoder::DecodeRoc(const uint32_t *data, size_t nwords,
     }
 
     return records_decoded;
+}
+
+bool VtpDecoder::DecodeReplay(const std::vector<uint32_t> &roc_tags,
+                              const std::vector<uint32_t> &nwords,
+                              const std::vector<uint32_t> &words,
+                              VtpEventData &evt)
+{
+    evt.clear();
+    return evc::ForEachFlatBank(roc_tags, nwords, words,
+        [&](uint32_t roc_tag, const uint32_t *data, size_t n) {
+            DecodeRoc(data, n, roc_tag, evt);
+        });
 }

@@ -15,146 +15,22 @@
 //   keep one-script-only helpers private to that script.
 //============================================================================
 
-#include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include <filesystem>
-#include <fstream>
-#include <regex>
+#include "EvChannel.h"
+#include "EventData.h"         // prad2::TBIT_sum
+#include "Fadc250Data.h"
+#include "HyCalCluster.h"
+#include "HyCalSystem.h"
+#include "PipelineBuilder.h"
+#include "SspData.h"
+#include "WaveAnalyzer.h"
+
+#include <TString.h>           // Printf() — line-flushed message output
+
+#include <exception>
+#include <memory>
 #include <string>
-#include <system_error>
-#include <utility>
+#include <unordered_map>
 #include <vector>
-
-// Resolve a possibly-relative database path to an absolute one using
-// PRAD2_DATABASE_DIR.  Empty / already-absolute paths pass through.
-inline std::string resolve_db_path(const std::string &p)
-{
-    if (p.empty()) return p;
-    if (p[0] == '/' || p[0] == '\\') return p;
-    if (p.size() >= 2 && p[1] == ':') return p;       // Windows drive letter
-    const char *db = std::getenv("PRAD2_DATABASE_DIR");
-    if (!db) return p;
-    return std::string(db) + "/" + p;
-}
-
-// Sniff the run number out of a path like "prad_NNNNNN.evio.*".  Returns
-// -1 if no plausible match is found.  Used internally by
-// discover_split_files; the per-script run-number resolution now goes
-// through prad2::PipelineBuilder::set_run_number_from_evio.
-inline int extract_run_number_from_path(const std::string &path)
-{
-    static const std::regex pat(R"((?:prad|run)_0*(\d+))",
-                                std::regex_constants::icase);
-    std::smatch m;
-    if (std::regex_search(path, m, pat)) {
-        try { return std::stoi(m[1].str()); } catch (...) {}
-    }
-    return -1;
-}
-
-// Resolve an EVIO input path to the list of files to process.
-//
-// Modes (chosen by the input path):
-//   * Glob mode — path contains `*` (e.g. `.../prad_023881.evio.*`):
-//       enumerate every sibling `prad_<run>.evio.<digits>` in the
-//       enclosing directory, sort by suffix, and warn (to stderr) about
-//       any gaps in the suffix sequence — including suffixes < the
-//       lowest one found, since splits are expected to start at .00000.
-//   * Directory mode — path is a directory:
-//       same enumeration as glob mode, sniffing the run number from the
-//       directory's name.
-//   * Single-file mode — anything else:
-//       return just `{ any_path }` unchanged.  Use this to process one
-//       specific split (e.g. for debugging a single segment).
-//
-// File pattern: `prad_<run>.evio.<digits>`.  The run number in the name
-// can be unpadded (`prad_1234.evio.0`) or zero-padded to any width
-// (`prad_023881.evio.00000`); both forms are accepted on either side.
-inline std::vector<std::string>
-discover_split_files(const std::string &any_path)
-{
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    fs::path p(any_path);
-
-    const bool wants_glob = (any_path.find('*') != std::string::npos);
-    const bool is_dir     = fs::is_directory(p, ec);
-
-    // Single-file mode: pass through unchanged.
-    if (!wants_glob && !is_dir) return { any_path };
-
-    // Discovery mode: figure out the search dir + run number.
-    fs::path dir;
-    int run = -1;
-    if (is_dir) {
-        dir = p;
-        run = extract_run_number_from_path(p.filename().string());
-    } else {
-        // Glob: strip the glob suffix, work in the parent directory.
-        dir = p.parent_path();
-        if (dir.empty()) dir = ".";
-        run = extract_run_number_from_path(p.filename().string());
-        if (run < 0)
-            run = extract_run_number_from_path(dir.filename().string());
-    }
-    if (run < 0 || !fs::is_directory(dir, ec)) {
-        std::fprintf(stderr,
-            "[WARN] discover_split_files: cannot resolve run/dir from '%s' — "
-            "passing through as a single file.\n", any_path.c_str());
-        return { any_path };
-    }
-
-    std::regex pat("^prad_0*" + std::to_string(run) + R"(\.evio\.(\d+)$)",
-                   std::regex_constants::icase);
-
-    // Collect (suffix_int, full_path) so we can sort numerically and detect
-    // gaps in one pass.
-    std::vector<std::pair<int, std::string>> matched;
-    for (const auto &entry : fs::directory_iterator(dir, ec)) {
-        std::string name = entry.path().filename().string();
-        std::smatch m;
-        if (std::regex_match(name, m, pat)) {
-            try {
-                matched.emplace_back(std::stoi(m[1].str()),
-                                     entry.path().string());
-            } catch (...) {}
-        }
-    }
-    std::sort(matched.begin(), matched.end());
-
-    // Gap warning: expected sequence is .00000, .00001, ..., contiguous.
-    // Report missing suffixes from 0 to the highest found (so the user
-    // notices both internal gaps AND a missing-from-the-start situation).
-    if (!matched.empty()) {
-        int last = matched.back().first;
-        std::vector<int> missing;
-        size_t k = 0;
-        for (int i = 0; i <= last; ++i) {
-            if (k < matched.size() && matched[k].first == i) { ++k; continue; }
-            missing.push_back(i);
-        }
-        if (!missing.empty()) {
-            std::fprintf(stderr,
-                "[WARN] split-file gaps in run %d (found %zu file(s), "
-                "max suffix .%05d): missing",
-                run, matched.size(), last);
-            for (int i : missing) std::fprintf(stderr, " .%05d", i);
-            std::fprintf(stderr, "\n");
-        }
-    }
-
-    std::vector<std::string> out;
-    out.reserve(matched.size());
-    for (auto &pr : matched) out.push_back(std::move(pr.second));
-    if (out.empty()) {
-        std::fprintf(stderr,
-            "[WARN] discover_split_files: no files matched 'prad_%d.evio.*' "
-            "in %s\n", run, dir.string().c_str());
-        return { any_path };
-    }
-    return out;
-}
 
 // Strip the extension off a path so "out.pdf" becomes "out".  Used by
 // scripts that derive a sibling .root output from a user-supplied
@@ -166,4 +42,148 @@ inline std::string strip_extension(const std::string &p)
     if (dot == std::string::npos) return p;
     if (slash != std::string::npos && dot < slash) return p;
     return p.substr(0, dot);
+}
+
+// Build a script's detector pipeline (DAQ config, runinfo, HyCal, GEM,
+// transforms) from its file arguments, nullptr or "" meaning auto-discover
+// from runinfo.  A run_num <= 0 is sniffed from the EVIO file name.  Prints
+// "[ERROR] <what>" and returns false when the builder throws.
+inline bool build_script_pipeline(prad2::Pipeline &pipeline,
+                                  const char *evio_path, int run_num,
+                                  const char *daq_config, const char *hc_calib_file,
+                                  const char *gem_ped_file, const char *gem_cm_file,
+                                  const char *hc_map_file, const char *gem_map_file)
+{
+    const auto arg = [](const char *s) { return std::string(s ? s : ""); };
+    try {
+        pipeline = prad2::PipelineBuilder()
+            .set_daq_config(arg(daq_config))
+            .set_hycal_calib(arg(hc_calib_file))
+            .set_gem_pedestal(arg(gem_ped_file))
+            .set_gem_common_mode(arg(gem_cm_file))
+            .set_hycal_map(arg(hc_map_file))
+            .set_gem_map(arg(gem_map_file))
+            .set_run_number(run_num > 0 ? run_num : -1)
+            .set_run_number_from_evio(arg(evio_path))
+            .build();
+    } catch (const std::exception &e) {
+        Printf("[ERROR] %s", e.what());
+        return false;
+    }
+    return true;
+}
+
+// HyCal clusters of one event, the scripts' quick way: for every HyCal
+// channel the largest-height peak with t_lo < time < t_hi, energized without
+// gain correction or time offsets and fed at time 0 (no multi-pulse mode).
+// crate_map is DaqConfig::roc_crate_map() (ROC bank tag -> logical crate).
+inline std::vector<fdec::ClusterHit>
+reconstruct_hycal_event(const fdec::EventData &fadc,
+                        const std::unordered_map<uint32_t, int> &crate_map,
+                        const fdec::HyCalSystem &hycal, fdec::WaveAnalyzer &ana,
+                        fdec::HyCalCluster &clusterer, float t_lo, float t_hi)
+{
+    clusterer.Clear();
+    fdec::WaveResult wres;
+    for (int r = 0; r < fadc.nrocs; ++r) {
+        const auto &roc = fadc.rocs[r];
+        if (!roc.present) continue;
+        const auto cit = crate_map.find(roc.tag);
+        if (cit == crate_map.end()) continue;     // not in roc_tags
+        const int crate = cit->second;
+        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+            const auto &slot = roc.slots[s];
+            if (!slot.present) continue;
+            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
+                if (!(slot.channel_mask & (1ull << c))) continue;
+                const auto *mod = hycal.module_by_daq(crate, s, c);
+                if (!mod || !mod->is_hycal()) continue;
+                const auto &cd = slot.channels[c];
+                if (cd.nsamples <= 0) continue;
+                ana.Analyze(cd.samples, cd.nsamples, wres);
+                int   best = -1;
+                float best_h = -1.f;
+                for (int p = 0; p < wres.npeaks; ++p) {
+                    const auto &pk = wres.peaks[p];
+                    if (pk.time > t_lo && pk.time < t_hi && pk.height > best_h) {
+                        best_h = pk.height; best = p;
+                    }
+                }
+                if (best < 0) continue;
+                float energy = static_cast<float>(mod->energize(wres.peaks[best].integral));
+                clusterer.AddHit(mod->index, energy, 0.f);
+            }
+        }
+    }
+    clusterer.FormClusters();
+    std::vector<fdec::ClusterHit> hits;
+    clusterer.ReconstructHits(hits);
+    return hits;
+}
+
+// Counters of for_each_physics_event.
+struct EvioScanStats {
+    long n_files_open = 0;   // EVIO files opened
+    long n_read       = 0;   // EVIO records read
+    long n_phys       = 0;   // physics events decoded
+    long n_kept       = 0;   // of those, passed to the callback
+};
+
+// Decode the physics events of evio_files in order, printing "[file i/N]"
+// per file and "[progress]" every 5000 physics events.  Only events with
+// trigger_bits exactly 0x100 (the production physics trigger; LMS, alpha,
+// cosmic etc. are skipped) are passed to on_event(fadc, ssp).  Stops, without
+// closing the current file, once n_phys reaches max_events (> 0), counting
+// every physics event so the scanned extent does not depend on the cut.
+template <class OnEvent>
+inline void for_each_physics_event(const evc::DaqConfig &cfg,
+                                   const std::vector<std::string> &evio_files,
+                                   long max_events, EvioScanStats &stats, OnEvent &&on_event)
+{
+    evc::EvChannel ch;
+    ch.SetConfig(cfg);
+    // Heap-allocated: the decoder structs hold large fixed-size sample
+    // arrays, and on the stack they overflow the guard page at function
+    // entry (the SEGV comes before any line of the body runs).
+    auto fadc_evt = std::make_unique<fdec::EventData>();
+    auto ssp_evt  = std::make_unique<ssp::SspEventData>();
+
+    for (const auto &path : evio_files) {
+        if (ch.OpenAuto(path) != evc::status::success) {
+            Printf("[WARN] skip (cannot open): %s", path.c_str());
+            continue;
+        }
+        ++stats.n_files_open;
+        Printf("[file %ld/%zu] %s", stats.n_files_open, evio_files.size(), path.c_str());
+
+        while (ch.Read() == evc::status::success) {
+            ++stats.n_read;
+            if (!ch.Scan()) continue;
+            if (ch.GetEventType() != evc::EventType::Physics) continue;
+
+            for (int i = 0; i < ch.GetNEvents(); ++i) {
+                ssp_evt->clear();
+                if (!ch.DecodeEvent(i, *fadc_evt, ssp_evt.get())) continue;
+                ++stats.n_phys;
+                if (fadc_evt->info.trigger_bits == prad2::TBIT_sum) {
+                    ++stats.n_kept;
+                    on_event(*fadc_evt, *ssp_evt);
+                }
+                if (max_events > 0 && stats.n_phys >= max_events) return;
+            }
+            if (stats.n_phys > 0 && stats.n_phys % 5000 == 0)
+                Printf("[progress] %ld physics events", stats.n_phys);
+        }
+        ch.Close();
+    }
+}
+
+// The scan lines that open a script's summary.
+inline void print_scan_summary(const EvioScanStats &stats, size_t n_files)
+{
+    Printf("--- summary ---");
+    Printf("  EVIO files opened     : %ld / %zu", stats.n_files_open, n_files);
+    Printf("  EVIO records          : %ld", stats.n_read);
+    Printf("  physics events        : %ld", stats.n_phys);
+    Printf("  passed trig cut 0x100 : %ld", stats.n_kept);
 }

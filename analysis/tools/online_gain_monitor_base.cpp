@@ -8,62 +8,24 @@
 // replay_gainCorr.
 //=============================================================================
 
-#include "Replay.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
 #include "GainCorrCompute.h"
+#include "ToolUtils.h"
 
-#include <TClass.h>
 #include <TFile.h>
-#include <TROOT.h>
 #include <TTree.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <getopt.h>
 #include <iostream>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 using namespace analysis;
-
-static std::vector<std::string> collectEvioFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (std::filesystem::is_directory(path)) {
-        for (auto &e : std::filesystem::directory_iterator(path)) {
-            if (e.is_regular_file() &&
-                e.path().filename().string().find(".evio") != std::string::npos)
-                files.push_back(e.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
-
-static std::vector<std::string> collectLMSFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    std::error_code ec;
-    for (auto &e : std::filesystem::directory_iterator(path, ec)) {
-        if (e.is_regular_file() &&
-            e.path().filename().string().find("_lms.root") != std::string::npos)
-            files.push_back(e.path().string());
-    }
-    std::sort(files.begin(), files.end());
-    return files;
-}
 
 static bool reportBatchTimeCoverage(const std::string &path)
 {
@@ -109,15 +71,9 @@ static void usage()
 
 int main(int argc, char *argv[])
 {
-    ROOT::EnableThreadSafety();
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
+    analysis::InitRootThreading();
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string db_dir = prad2::database_dir();
 
     std::string daq_config = db_dir + "/daq_config.json";
     std::string daq_map;
@@ -125,7 +81,7 @@ int main(int argc, char *argv[])
     std::string gain_out;
     int max_files   = -1;
     int num_threads = 4;
-    int batch_size  = 1000;
+    int batch_size  = kGainBatchSizeOnline;
     int ref_run     = -1;
     std::string ref_gain_file;
     bool reanalyze_only = false;
@@ -149,11 +105,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    std::vector<std::string> evio_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectEvioFiles(argv[i]);
-        evio_files.insert(evio_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> evio_files = CollectInputs(argc, argv, optind, IsEvioName);
     std::sort(evio_files.begin(), evio_files.end());
 
     if (work_dir.empty() || (!reanalyze_only && evio_files.empty())) {
@@ -177,7 +129,7 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    auto lms_files = collectLMSFiles(work_dir);
+    auto lms_files = ExpandInputPath(work_dir, IsLmsRootName);
     if (reanalyze_only && lms_files.empty()) {
         std::cerr << "No LMS files found in " << work_dir
                   << "; cannot re-analyze.\n";
@@ -195,13 +147,7 @@ int main(int argc, char *argv[])
     if (ref_run < 0) ref_run = gRunConfig.gain_ref_run;
 
     if (gain_out.empty()) {
-        std::string gain_corr_dir = db_dir + "/gain_factor/gain_correction";
-        std::filesystem::create_directories(gain_corr_dir, ec);
-        if (ec)
-            std::cerr << "Warning: cannot create " << gain_corr_dir
-                      << ": " << ec.message() << "\n";
-        gain_out = gain_corr_dir + "/" +
-            std::string(Form("prad_%06d_gain_corr.root", run_num));
+        gain_out = GainCorrOutputPath(db_dir, run_num);
     } else {
         auto parent = std::filesystem::path(gain_out).parent_path();
         if (!parent.empty())
@@ -217,8 +163,7 @@ int main(int argc, char *argv[])
                 todo.push_back(evio);
         }
     }
-    // Do not construct idle Replay workers. Replay setup is relatively heavy,
-    // and only todo.size() workers can make progress at the same time. The -j
+    // Only todo.size() workers can make progress at the same time; the -j
     // value remains the configured upper bound.
     if (!todo.empty())
         num_threads = std::max(1, std::min(num_threads, static_cast<int>(todo.size())));
@@ -233,55 +178,23 @@ int main(int argc, char *argv[])
               << "  DAQ cfg    : " << daq_config << "\n"
               << "  HyCal      : " << daq_map << "\n";
 
-    std::atomic<int> next_file{0};
-    std::atomic<int> replay_errors{0};
-    std::mutex io_mtx;
+    const int replay_errors = ReplayLMSFiles(todo, work_dir, num_threads,
+                                             daq_config, daq_map, db_dir);
 
-    auto worker = [&]() {
-        analysis::Replay replay;
-        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadHyCalMap(daq_map);
-
-        while (true) {
-            int idx = next_file.fetch_add(1);
-            if (idx >= static_cast<int>(todo.size())) break;
-
-            std::string out = work_dir + "/" + MakeLMSOutputFile(todo[idx]);
-            bool ok = replay.Process_LMSgainFactor(todo[idx], out, db_dir, daq_config);
-            std::lock_guard<std::mutex> lk(io_mtx);
-            if (ok) {
-                std::cout << "  [" << (idx + 1) << "/" << todo.size() << "] "
-                          << todo[idx] << " -> " << out << "\n";
-            } else {
-                std::cerr << "  [" << (idx + 1) << "/" << todo.size() << "] FAILED: "
-                          << todo[idx] << "\n";
-                ++replay_errors;
-            }
-        }
-    };
-
-    if (!todo.empty()) {
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads);
-        for (int i = 0; i < num_threads; ++i)
-            threads.emplace_back(worker);
-        for (auto &t : threads) t.join();
-    }
-
-    lms_files = collectLMSFiles(work_dir);
+    lms_files = ExpandInputPath(work_dir, IsLmsRootName);
     if (lms_files.empty()) {
         std::cerr << "No LMS files found in " << work_dir
                   << "; skipping gain calculation.\n";
-        return replay_errors.load() > 0 ? 1 : 0;
+        return replay_errors > 0 ? 1 : 0;
     }
 
     auto ref_tbl = ref_gain_file.empty()
-        ? prad2::LoadRefGain(gRunConfig.gain_data_dir + "/ref_gain", ref_run)
+        ? prad2::LoadRefGain(prad2::RefGainDir(db_dir), ref_run)
         : prad2::LoadRefGainFile(ref_gain_file);
     if (!ref_tbl.loaded) {
         std::cerr << "Warning: reference gain table not loaded"
                   << " (ref_run=" << ref_run
-                  << ", dir=" << gRunConfig.gain_data_dir
+                  << ", dir=" << prad2::RefGainDir(db_dir)
                   << ", file=" << ref_gain_file << ")\n";
     }
     if (!ref_gain_file.empty() && ref_tbl.run_number >= 0)
@@ -297,5 +210,5 @@ int main(int argc, char *argv[])
     bool ok = ComputeGainCorrections(lms_files, gain_out, batch_size, ref_run, ref_tbl);
     if (ok) ok = reportBatchTimeCoverage(gain_out);
     std::cout << "All done.\n";
-    return (!ok || replay_errors.load() > 0) ? 1 : 0;
+    return (!ok || replay_errors > 0) ? 1 : 0;
 }

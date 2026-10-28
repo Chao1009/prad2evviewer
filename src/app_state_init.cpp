@@ -1,13 +1,11 @@
 #include "app_state.h"
-#include "data_source.h"
 #include "load_daq_config.h"
+#include "JsonUtil.h"
 #include "PipelineBuilder.h"
 #include "RunInfoConfig.h"
 
 #include <fstream>
-#include <iomanip>
 #include <iostream>
-#include <cmath>
 #include <cstdlib>
 #include <sstream>
 
@@ -58,9 +56,6 @@ static bool parse_lms_dat(const std::string &path,
 
 } // namespace
 
-//=============================================================================
-// Initialization
-//
 // Three top-level configs are involved:
 //   daq_config.json            DAQ + raw decoding (event tags, bank tags,
 //                              ROC layout, sync format, file pointers).
@@ -74,11 +69,11 @@ static bool parse_lms_dat(const std::string &path,
 //   reconstruction_config.json runinfo pointer + cluster/hit reco knobs
 //                              (hycal clustering, gem per-detector
 //                              ClusterConfig with default + per-id overrides).
-//=============================================================================
 
 void AppState::init(const std::string &db_dir,
                     const std::string &daq_config_file,
-                    const std::string &monitor_config_file,
+                    const std::string &monitor_path,
+                    const json &monitor_cfg,
                     const std::string &recon_config_file)
 {
     // --- DAQ config (required, single source of truth for file pointers) ---
@@ -103,10 +98,8 @@ void AppState::init(const std::string &db_dir,
                       << " (" << daq_cfg.pedestals.size() << " channels)\n";
     }
 
-    // optional NNLS pile-up deconv template store.  Loaded only when the
-    // analyzer config has nnls_deconv.enabled and a template_file path —
-    // otherwise the store stays invalid() and every WaveAnalyzer that
-    // borrows it falls back to local-maxima peak heights silently.
+    // optional NNLS pile-up deconv template store, resolved like the other
+    // database files; without it analyzers fall back to local maxima.
     if (daq_cfg.wave_cfg.nnls_deconv.enabled
         && !daq_cfg.wave_cfg.nnls_deconv.template_file.empty()) {
         std::string tmpl_path = findFile(
@@ -117,21 +110,15 @@ void AppState::init(const std::string &db_dir,
         template_store.LoadFromFile(tmpl_path, daq_cfg.wave_cfg);
     }
 
-    // --- resolve monitor + reconstruction config paths ---------------------
-    std::string monitor_path = monitor_config_file;
-    if (monitor_path.empty())
-        monitor_path = findFile("monitor_config.json", db_dir);
-
+    // --- resolve reconstruction config path --------------------------------
     std::string recon_path = recon_config_file;
     if (recon_path.empty())
         recon_path = findFile("reconstruction_config.json", db_dir);
 
     // --- trigger definitions (needed for trigger filter parsing) -----------
     {
-        std::string tbpath = findFile("trigger_bits.json", db_dir);
-        std::string tbs = readFile(tbpath);
-        if (!tbs.empty()) {
-            auto tb = json::parse(tbs, nullptr, false);
+        json tb;
+        if (prad2::read_json_file(findFile("trigger_bits.json", db_dir), tb)) {
             if (tb.is_array()) {
                 trigger_bits_def = tb;
             } else if (tb.is_object()) {
@@ -143,21 +130,12 @@ void AppState::init(const std::string &db_dir,
         }
     }
 
-    // --- load monitor config -----------------------------------------------
-    json mcfg = json::object();
-    if (!monitor_path.empty()) {
-        std::string s = readFile(monitor_path);
-        if (!s.empty()) {
-            auto j = json::parse(s, nullptr, false);
-            if (!j.is_discarded()) mcfg = std::move(j);
-        }
-    }
+    // Local copy: the section lookups below use the non-const operator[].
+    json mcfg = monitor_cfg;
 
     // Per-peak quality bit palette (mirrors Q_PEAK_* in Fadc250Data.h).
     // Exposed via /api/config so the GUI populates the Cut-Settings dialog
-    // dropdowns from a single source of truth.  Each push_back arg is a
-    // 3-pair brace-init: nlohmann's auto-detector sees 3 string-keyed pairs
-    // and builds an object, then push_back appends it to the array.
+    // dropdowns from a single source of truth.
     peak_quality_bits_def = json::array();
     peak_quality_bits_def.push_back({{"bit", 0}, {"name", "PILED"},       {"label", "Pile-up"}});
     peak_quality_bits_def.push_back({{"bit", 1}, {"name", "DECONVOLVED"}, {"label", "Deconvolved"}});
@@ -172,27 +150,9 @@ void AppState::init(const std::string &db_dir,
         // to true so Reset both restores the JSON ranges and re-arms the
         // apply toggle (matches startup state).
         peak_filter_default = peak_filter;
-        if (w.contains("integral_hist")) {
-            auto &ih = w["integral_hist"];
-            if (ih.contains("min"))  hist_cfg.bin_min  = ih["min"];
-            if (ih.contains("max"))  hist_cfg.bin_max  = ih["max"];
-            if (ih.contains("step")) hist_cfg.bin_step = ih["step"];
-        }
-        if (w.contains("time_hist")) {
-            auto &th = w["time_hist"];
-            if (th.contains("min"))  hist_cfg.pos_min  = th["min"];
-            if (th.contains("max"))  hist_cfg.pos_max  = th["max"];
-            if (th.contains("step")) hist_cfg.pos_step = th["step"];
-        }
-        if (w.contains("height_hist")) {
-            auto &hh = w["height_hist"];
-            if (hh.contains("min"))  hist_cfg.height_min  = hh["min"];
-            if (hh.contains("max"))  hist_cfg.height_max  = hh["max"];
-            if (hh.contains("step")) hist_cfg.height_step = hh["step"];
-        }
-        // Note: peak detection thresholds (peak_nsigma, min_peak_height,
-        // min_peak_ratio) live in daq_config.json `fadc250_waveform.analyzer`
-        // and are loaded into wave_cfg by the prad2dec config loader.
+        if (w.contains("integral_hist")) hist_cfg.integral.parse(w["integral_hist"]);
+        if (w.contains("time_hist"))     hist_cfg.time.parse(w["time_hist"]);
+        if (w.contains("height_hist"))   hist_cfg.height.parse(w["height_hist"]);
     }
     // ref_lines: assemble the flat key→[lines] map the frontend expects
     // (`refShapes(key)` consumes it).  Two sources, in order:
@@ -216,12 +176,6 @@ void AppState::init(const std::string &db_dir,
         for (auto it = mcfg["ref_lines"].begin(); it != mcfg["ref_lines"].end(); ++it)
             ref_lines[it.key()] = it.value();
 
-    hist_nbins = std::max(1, (int)std::ceil(
-        (hist_cfg.bin_max - hist_cfg.bin_min) / hist_cfg.bin_step));
-    pos_nbins = std::max(1, (int)std::ceil(
-        (hist_cfg.pos_max - hist_cfg.pos_min) / hist_cfg.pos_step));
-    height_nbins = std::max(1, (int)std::ceil(
-        (hist_cfg.height_max - hist_cfg.height_min) / hist_cfg.height_step));
     {
         std::cerr << "Waveform  : peak_nsigma=" << daq_cfg.wave_cfg.peak_nsigma
                   << " min_peak_height=" << daq_cfg.wave_cfg.min_peak_height
@@ -231,13 +185,10 @@ void AppState::init(const std::string &db_dir,
     }
 
     // --- detector pipeline (HyCal + GEM, runinfo, recon config) -----------
-    // PipelineBuilder consolidates HyCal/GEM Init + LoadCalibration +
-    // LoadPedestals + LoadCommonModeRange + per-detector ClusterConfig +
-    // DetectorTransform construction + matching parameters into one call.
-    // We hand it our already-loaded daq_cfg (the legacy ADC pedestal +
-    // NNLS template store steps above need it earlier than the builder).
-    // findFile is wired in as the path resolver so the multi-dir search
-    // semantics are preserved for non-default file locations.
+    // We hand PipelineBuilder our already-loaded daq_cfg (the legacy ADC
+    // pedestal + NNLS template store steps above need it earlier than the
+    // builder).  findFile is wired in as the path resolver so the multi-dir
+    // search semantics are preserved for non-default file locations.
     {
         // Capture daq_cfg-sourced overrides before the std::move below.
         std::string hycal_map_override = daq_cfg.hycal_map_file;
@@ -255,7 +206,6 @@ void AppState::init(const std::string &db_dir,
             .set_log_stream(&std::cerr)
             .build();
 
-        // Move pipeline contents into AppState members.
         daq_cfg              = std::move(pipeline.daq_cfg);
         hycal                = std::move(pipeline.hycal);
         gem_sys              = std::move(pipeline.gem);
@@ -281,6 +231,12 @@ void AppState::init(const std::string &db_dir,
             gem_occupancy.assign(gem_sys.GetNDetectors(), Histogram2D{});
             for (auto &h : gem_occupancy) h.init(GEM_OCC_NX, GEM_OCC_NY);
         }
+        gem_active_ext.clear();
+        for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+            auto xr = gem_sys.GetActiveExtent(d, 0);
+            auto yr = gem_sys.GetActiveExtent(d, 1);
+            gem_active_ext.push_back({xr.first, xr.second, yr.first, yr.second});
+        }
         std::cerr << "HyCal     : " << hycal.module_count() << " modules\n";
         if (gem_enabled)
             std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
@@ -288,13 +244,8 @@ void AppState::init(const std::string &db_dir,
 
     // --- crate_roc map (directly from daq_cfg.roc_tags) -------------------
     crate_roc_json = json::object();
-    for (const auto &re : daq_cfg.roc_tags) {
-        // only data ROCs (type "roc"/"gem"); ti_slaves share crate numbers
-        // but have different tags and must not overwrite the data ROC entry.
-        if (!re.type.empty() && re.type != "roc" && re.type != "gem") continue;
-        if (re.crate < 0) continue;
-        crate_roc_json[std::to_string(re.crate)] = re.tag;
-    }
+    for (const auto &[crate, tag] : daq_cfg.crate_roc_map())
+        crate_roc_json[std::to_string(crate)] = tag;
     if (crate_roc_json.empty())
         crate_roc_json = {{"0",0x80},{"1",0x82},{"2",0x84},{"3",0x86},{"4",0x88},{"5",0x8a},{"6",0x8c}};
 
@@ -316,34 +267,14 @@ void AppState::init(const std::string &db_dir,
 
     // hycal_hist: trigger filter + display-histogram binning for the cluster
     // monitor.  Cluster-reco knobs (min_*_energy, split_iter, ...) come from
-    // reconstruction_config.json:hycal further below.
+    // reconstruction_config.json:hycal via the pipeline above.
     if (mcfg.contains("hycal_hist")) {
         auto &hh = mcfg["hycal_hist"];
         cluster_trigger.parse(hh, trigger_bits_def);
-        if (hh.contains("energy_hist")) {
-            auto &eh = hh["energy_hist"];
-            if (eh.contains("min"))  cl_hist_min  = eh["min"];
-            if (eh.contains("max"))  cl_hist_max  = eh["max"];
-            if (eh.contains("step")) cl_hist_step = eh["step"];
-        }
-        if (hh.contains("nclusters_hist")) {
-            auto &nh = hh["nclusters_hist"];
-            if (nh.contains("min"))  nclusters_hist_min  = nh["min"];
-            if (nh.contains("max"))  nclusters_hist_max  = nh["max"];
-            if (nh.contains("step")) nclusters_hist_step = nh["step"];
-        }
-        if (hh.contains("nblocks_hist")) {
-            auto &bh = hh["nblocks_hist"];
-            if (bh.contains("min"))  nblocks_hist_min  = bh["min"];
-            if (bh.contains("max"))  nblocks_hist_max  = bh["max"];
-            if (bh.contains("step")) nblocks_hist_step = bh["step"];
-        }
-        if (hh.contains("raw_energy_hist")) {
-            auto &rh = hh["raw_energy_hist"];
-            if (rh.contains("min"))  raw_energy_hist_min  = rh["min"];
-            if (rh.contains("max"))  raw_energy_hist_max  = rh["max"];
-            if (rh.contains("step")) raw_energy_hist_step = rh["step"];
-        }
+        if (hh.contains("energy_hist"))     cluster_energy_axis.parse(hh["energy_hist"]);
+        if (hh.contains("nclusters_hist"))  nclusters_axis.parse(hh["nclusters_hist"]);
+        if (hh.contains("nblocks_hist"))    nblocks_axis.parse(hh["nblocks_hist"]);
+        if (hh.contains("raw_energy_hist")) raw_energy_axis.parse(hh["raw_energy_hist"]);
     }
 
     if (mcfg.contains("lms_monitor")) {
@@ -470,9 +401,7 @@ void AppState::init(const std::string &db_dir,
         auto &ms = mcfg["monitor_status"];
         if (ms.contains("livetime")) {
             auto &lt = ms["livetime"];
-            if (lt.contains("command"))  livetime_cmd      = lt["command"].get<std::string>();
-            if (lt.contains("unit"))     livetime_unit     = lt["unit"].get<std::string>();
-            if (lt.contains("poll_sec")) livetime_poll_sec = std::max(1, (int)lt["poll_sec"]);
+            parse_shell_metric(lt, livetime_status);
             if (lt.contains("healthy"))  livetime_healthy  = lt["healthy"];
             if (lt.contains("warning"))  livetime_warning  = lt["warning"];
         }
@@ -488,9 +417,9 @@ void AppState::init(const std::string &db_dir,
     const char *src_name = (ds.source == DSrc::Ref) ? "ref"
                          : (ds.source == DSrc::Trg) ? "trg" : "tdc";
     std::cerr << "Livetime  : "
-              << (livetime_cmd.empty() ? "disabled"
-                                       : ("'" + livetime_cmd + "' every "
-                                          + std::to_string(livetime_poll_sec) + "s"))
+              << (livetime_status.command.empty() ? "disabled"
+                  : ("'" + livetime_status.command + "' every "
+                     + std::to_string(livetime_status.poll_sec) + "s"))
               << " healthy>=" << livetime_healthy
               << " warn>=" << livetime_warning;
     if (ds.enabled()) {
@@ -524,9 +453,7 @@ void AppState::init(const std::string &db_dir,
         std::cerr << "Color ranges: " << color_range_defaults.size() << " entries\n";
     }
 
-    // Auto-report config (the elog block lives nested under auto_report
-    // since elog writes are now driven exclusively by the auto-report
-    // pipeline — no manual Post-to-Elog dialog).
+    // Auto-report config; the elog settings are nested under auto_report.elog.
     if (mcfg.contains("auto_report")) {
         auto &ar = mcfg["auto_report"];
         if (ar.contains("enabled"))
@@ -582,12 +509,8 @@ void AppState::init(const std::string &db_dir,
         }
         if (ph.contains("energy_angle_hist")) {
             auto &ea = ph["energy_angle_hist"];
-            if (ea.contains("angle_min"))   ea_angle_min   = ea["angle_min"];
-            if (ea.contains("angle_max"))   ea_angle_max   = ea["angle_max"];
-            if (ea.contains("angle_step"))  ea_angle_step  = ea["angle_step"];
-            if (ea.contains("energy_min"))  ea_energy_min  = ea["energy_min"];
-            if (ea.contains("energy_max"))  ea_energy_max  = ea["energy_max"];
-            if (ea.contains("energy_step")) ea_energy_step = ea["energy_step"];
+            ea_angle_axis.parse(ea, "angle_");
+            ea_energy_axis.parse(ea, "energy_");
         }
         if (ph.contains("moller")) {
             auto &ml = ph["moller"];
@@ -600,13 +523,8 @@ void AppState::init(const std::string &db_dir,
             if (ml.contains("angle_min"))        moller_angle_min  = ml["angle_min"];
             if (ml.contains("angle_max"))        moller_angle_max  = ml["angle_max"];
             if (ml.contains("xy_hist")) {
-                auto &xy = ml["xy_hist"];
-                if (xy.contains("x_min"))  moller_xy_x_min  = xy["x_min"];
-                if (xy.contains("x_max"))  moller_xy_x_max  = xy["x_max"];
-                if (xy.contains("x_step")) moller_xy_x_step = xy["x_step"];
-                if (xy.contains("y_min"))  moller_xy_y_min  = xy["y_min"];
-                if (xy.contains("y_max"))  moller_xy_y_max  = xy["y_max"];
-                if (xy.contains("y_step")) moller_xy_y_step = xy["y_step"];
+                moller_x_axis.parse(ml["xy_hist"], "x_");
+                moller_y_axis.parse(ml["xy_hist"], "y_");
             }
         }
         if (ph.contains("hycal_cluster_hit")) {
@@ -616,13 +534,8 @@ void AppState::init(const std::string &db_dir,
             if (hc.contains("nblocks_min"))     hxy_nblocks_min     = hc["nblocks_min"];
             if (hc.contains("nblocks_max"))     hxy_nblocks_max     = hc["nblocks_max"];
             if (hc.contains("xy_hist")) {
-                auto &xy = hc["xy_hist"];
-                if (xy.contains("x_min"))  hxy_x_min  = xy["x_min"];
-                if (xy.contains("x_max"))  hxy_x_max  = xy["x_max"];
-                if (xy.contains("x_step")) hxy_x_step = xy["x_step"];
-                if (xy.contains("y_min"))  hxy_y_min  = xy["y_min"];
-                if (xy.contains("y_max"))  hxy_y_max  = xy["y_max"];
-                if (xy.contains("y_step")) hxy_y_step = xy["y_step"];
+                hxy_x_axis.parse(hc["xy_hist"], "x_");
+                hxy_y_axis.parse(hc["xy_hist"], "y_");
             }
         }
         std::cerr << "Physics   : " << physics_trigger
@@ -662,12 +575,7 @@ void AppState::init(const std::string &db_dir,
             auto &gm = gemcfg["hycal_match"];
             if (gm.contains("require_ep_candidate")) gem_match_require_ep = gm["require_ep_candidate"];
             if (gm.contains("match_nsigma"))         gem_match_nsigma     = gm["match_nsigma"];
-            if (gm.contains("residual_hist")) {
-                auto &rh = gm["residual_hist"];
-                if (rh.contains("min"))  gem_resid_min  = rh["min"];
-                if (rh.contains("max"))  gem_resid_max  = rh["max"];
-                if (rh.contains("step")) gem_resid_step = rh["step"];
-            }
+            if (gm.contains("residual_hist")) gem_resid_axis.parse(gm["residual_hist"]);
         }
         if (gemcfg.contains("efficiency")) {
             auto &ge = gemcfg["efficiency"];
@@ -686,12 +594,7 @@ void AppState::init(const std::string &db_dir,
                 else std::cerr << "[WARN] gem.efficiency.loo_mode='" << m
                                << "' unknown; falling back to loo-target-seed\n";
             }
-            if (ge.contains("z_target_hist")) {
-                auto &zh = ge["z_target_hist"];
-                if (zh.contains("min"))  gem_eff_z_target_min  = zh["min"];
-                if (zh.contains("max"))  gem_eff_z_target_max  = zh["max"];
-                if (zh.contains("step")) gem_eff_z_target_step = zh["step"];
-            }
+            if (ge.contains("z_target_hist")) gem_eff_z_target_axis.parse(ge["z_target_hist"]);
             if (ge.contains("local_grid")) {
                 auto &lg = ge["local_grid"];
                 if (lg.contains("nx")) gem_eff_grid_nx = lg["nx"];
@@ -710,46 +613,30 @@ void AppState::init(const std::string &db_dir,
               << " min_center=" << cluster_cfg.min_center_energy
               << " min_cluster=" << cluster_cfg.min_cluster_energy
               << " " << cluster_trigger
-              << " hist=[" << cl_hist_min << "," << cl_hist_max
-              << "]/" << cl_hist_step << "\n";
+              << " hist=[" << cluster_energy_axis.min << "," << cluster_energy_axis.max
+              << "]/" << cluster_energy_axis.step << "\n";
     std::cerr << "Reco      : " << (recon_path.empty() ? "(none)" : recon_path)
               << " (adc_to_mev=" << adc_to_mev << ")\n";
 
     // --- init derived histograms ------------------------------------------
-    int cl_nbins = std::max(1, (int)std::ceil((cl_hist_max - cl_hist_min) / cl_hist_step));
-    cluster_energy_hist.init(cl_nbins);
-    int nb_nclusters = std::max(1, (int)std::ceil(
-        (nclusters_hist_max - nclusters_hist_min) / nclusters_hist_step));
-    nclusters_hist.init(nb_nclusters);
-    int nb_blocks = std::max(1, (nblocks_hist_max - nblocks_hist_min) / nblocks_hist_step);
-    nblocks_hist.init(nb_blocks);
-    int re_nbins = std::max(1, (int)std::ceil(
-        (raw_energy_hist_max - raw_energy_hist_min) / raw_energy_hist_step));
-    raw_energy_hist.init(re_nbins);
-    cluster_energy_hist_by_ncl.assign(nb_nclusters, Histogram{});
-    nblocks_hist_by_ncl.assign(nb_nclusters, Histogram{});
-    for (auto &h : cluster_energy_hist_by_ncl) h.init(cl_nbins);
-    for (auto &h : nblocks_hist_by_ncl)        h.init(nb_blocks);
-    int ea_nx = std::max(1, (int)std::ceil((ea_angle_max - ea_angle_min) / ea_angle_step));
-    int ea_ny = std::max(1, (int)std::ceil((ea_energy_max - ea_energy_min) / ea_energy_step));
-    energy_angle_hist.init(ea_nx, ea_ny);
-    int ml_nx = std::max(1, (int)std::ceil((moller_xy_x_max - moller_xy_x_min) / moller_xy_x_step));
-    int ml_ny = std::max(1, (int)std::ceil((moller_xy_y_max - moller_xy_y_min) / moller_xy_y_step));
-    moller_xy_hist.init(ml_nx, ml_ny);
-    int hxy_nx = std::max(1, (int)std::ceil((hxy_x_max - hxy_x_min) / hxy_x_step));
-    int hxy_ny = std::max(1, (int)std::ceil((hxy_y_max - hxy_y_min) / hxy_y_step));
-    hycal_xy_hist.init(hxy_nx, hxy_ny);
+    cluster_energy_hist.init(cluster_energy_axis);
+    nclusters_hist.init(nclusters_axis);
+    nblocks_hist.init(nblocks_axis);
+    raw_energy_hist.init(raw_energy_axis);
+    cluster_energy_hist_by_ncl.assign(nclusters_hist.bins.size(), Histogram{});
+    nblocks_hist_by_ncl.assign(nclusters_hist.bins.size(), Histogram{});
+    for (auto &h : cluster_energy_hist_by_ncl) h.init(cluster_energy_axis);
+    for (auto &h : nblocks_hist_by_ncl)        h.init(nblocks_axis);
+    energy_angle_hist.init(ea_angle_axis, ea_energy_axis);
+    moller_xy_hist.init(moller_x_axis, moller_y_axis);
+    hycal_xy_hist.init(hxy_x_axis, hxy_y_axis);
     {
         int n_gem = gem_enabled ? (int)gem_transforms.size() : 0;
-        int resid_nbins = std::max(1, (int)std::ceil((gem_resid_max - gem_resid_min) / gem_resid_step));
         gem_dx_hist.assign(n_gem, Histogram{});
         gem_dy_hist.assign(n_gem, Histogram{});
         gem_match_hits.assign(n_gem, 0);
-        for (auto &h : gem_dx_hist) h.init(resid_nbins);
-        for (auto &h : gem_dy_hist) h.init(resid_nbins);
+        for (auto &h : gem_dx_hist) h.init(gem_resid_axis);
+        for (auto &h : gem_dy_hist) h.init(gem_resid_axis);
     }
     initGemEfficiency();
-    // hycal_transform is already prepared by setTransform() above (or, if
-    // runinfo wasn't loaded, will lazy-prepare on first toLab/rotate/matrix
-    // call) — no eager prepare needed here.
 }

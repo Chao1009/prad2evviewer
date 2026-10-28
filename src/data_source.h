@@ -1,10 +1,6 @@
 #pragma once
-// =========================================================================
-// data_source.h — Abstract data source interface for the event viewer
-//
-// Allows the viewer to read events from EVIO files, ROOT raw replay files,
-// or ROOT recon files through a uniform interface.
-// =========================================================================
+// Abstract data source: lets the viewer read events from EVIO files, ROOT raw
+// replay files, or ROOT recon files through a uniform interface.
 
 #include "Fadc250Data.h"
 #include "SspData.h"
@@ -15,11 +11,9 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <vector>
 
 namespace fdec { class HyCalSystem; }
-
-// ── Capabilities ─────────────────────────────────────────────────────────
+namespace prad2 { struct ReconEventData; }
 
 struct DataSourceCaps {
     bool has_waveforms  = false;   // raw ADC samples per channel
@@ -33,33 +27,6 @@ struct DataSourceCaps {
     std::string source_type;       // "evio", "root_raw", "root_recon"
 };
 
-// ── Pre-computed reconstruction data (ROOT recon files) ──────────────────
-
-struct ReconCluster {
-    float x, y, energy;
-    int nblocks, center_id;
-};
-
-struct ReconGemHit {
-    int det_id;
-    float x, y;
-    float x_charge, y_charge;
-    float x_peak, y_peak;
-    int x_size, y_size;
-};
-
-struct ReconEventData {
-    int      event_num    = 0;
-    uint8_t  trigger_type = 0;
-    uint32_t trigger_bits = 0;
-    uint32_t run_number   = 0;
-    uint64_t timestamp    = 0;
-    std::vector<ReconCluster> clusters;
-    std::vector<ReconGemHit>  gem_hits;
-};
-
-// ── DataSource interface ─────────────────────────────────────────────────
-
 class DataSource {
 public:
     virtual ~DataSource() = default;
@@ -68,10 +35,9 @@ public:
     virtual std::string open(const std::string &path) = 0;
     virtual void close() = 0;
 
-    // Capabilities of this data source.
     virtual DataSourceCaps capabilities() const = 0;
 
-    // Total number of physics events (available after open).
+    // Number of indexed events (available after open).
     virtual int eventCount() const = 0;
 
     // Decode event by 0-based index into EventData.
@@ -93,7 +59,11 @@ public:
 
     // Decode pre-computed cluster/GEM data (recon sources only).
     // Returns false if not supported or index out of range.
-    virtual bool decodeReconEvent(int index, ReconEventData &recon) { return false; }
+    virtual bool decodeReconEvent(int index, prad2::ReconEventData &recon) { return false; }
+
+    // Run number of the open file when the source knows it (recon files:
+    // parsed from the file name), else 0.
+    virtual uint32_t runNumber() const { return 0; }
 
     // Iterate all events for histogram/LMS accumulation.
     // EVIO/ROOT raw sources call ev_cb for each physics event.
@@ -101,7 +71,7 @@ public:
     // EVIO sources also call ctrl_cb (sync/control) and epics_cb.
     using EventCallback   = std::function<void(int idx, fdec::EventData &evt,
                                                 ssp::SspEventData *ssp)>;
-    using ReconCallback   = std::function<void(int idx, const ReconEventData &recon)>;
+    using ReconCallback   = std::function<void(int idx, const prad2::ReconEventData &recon)>;
     using ControlCallback = std::function<void(uint32_t unix_time, uint64_t last_ti_ts)>;
     using EpicsCallback   = std::function<void(const std::string &text,
                                                 int32_t ev_num, uint64_t timestamp)>;
@@ -118,8 +88,6 @@ public:
                             DscCallback dsc_cb = nullptr,
                             int dsc_bank_tag = -1) = 0;
 };
-
-// ── Factory ──────────────────────────────────────────────────────────────
 
 // Create the appropriate DataSource for a file path.
 // Auto-detects by extension (.evio → EVIO, .root → ROOT) and tree name.

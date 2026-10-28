@@ -1,7 +1,8 @@
 // gem.js — GEM detector visualization tab
 //
 // Left:  per-detector cluster occupancy heatmaps (2×2 grid)
-// Right: tracking-efficiency cards + last-good-event ZX/ZY display
+// Right: tracking-efficiency cards, per-GEM efficiency grids, projected
+//        vertex-z histogram and the last-good-event Z-Y side view
 //        (HyCal-anchored 4-point line fits, see runGemEfficiency in
 //         app_state.cpp).  No per-event refresh on the right panel —
 //         the snapshot is server-side and only changes when a new event
@@ -14,20 +15,8 @@ const GEM_COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'];
 let gemEffData = null;        // last /api/gem/efficiency response
 let gemOccupancyData = null;  // last /api/gem/occupancy response — cached for theme flips
 
-// Theme-aware layout factories (read from the active THEME at call time).
-function PL_GEM_OCC() {
-    return {
-        ...plotlyLayout(),
-        paper_bgcolor: 'rgba(0,0,0,0)',
-        plot_bgcolor:  THEME.canvas,
-        font: { color: THEME.text, size: 10 },
-        margin: { l: 45, r: 10, t: 28, b: 32 },
-        hovermode: 'closest',
-        showlegend: false,
-    };
-}
-
-function PL_GEM_EFF() {
+// Theme-aware layout factory (reads the active THEME at call time).
+function PL_GEM() {
     return {
         ...plotlyLayout(),
         paper_bgcolor: 'rgba(0,0,0,0)',
@@ -37,6 +26,63 @@ function PL_GEM_EFF() {
         hovermode: 'closest',
         showlegend: false,
     };
+}
+
+// Layout of one cell of the 2x2 per-GEM heatmap grids.  A dashed frame
+// outlines the active area even before any event arrives: x_active/y_active
+// when the API provides them (true mapped strip extent, tighter than the bbox
+// on the beam-hole side), else ±size/2.  The axes are padded 4% around it and
+// scaleanchor draws it at its true geometric ratio.  The right column (odd
+// idx) leaves room for the colour bar.  Also returns the frame edges (null
+// when the geometry is unknown) for the bin centres.
+function gemCellLayout(det, idx, title, titleColor) {
+    const frameColor = GEM_COLORS[idx] || THEME.text;
+    const xa = det && det.x_active;
+    const ya = det && det.y_active;
+    const xLo = (xa && xa.length === 2) ? xa[0]
+              : (det && det.x_size) ? -det.x_size / 2 : null;
+    const xHi = (xa && xa.length === 2) ? xa[1]
+              : (det && det.x_size) ?  det.x_size / 2 : null;
+    const yLo = (ya && ya.length === 2) ? ya[0]
+              : (det && det.y_size) ? -det.y_size / 2 : null;
+    const yHi = (ya && ya.length === 2) ? ya[1]
+              : (det && det.y_size) ?  det.y_size / 2 : null;
+    const shapes = [];
+    let xRange = null, yRange = null;
+    if (xLo != null && xHi != null && yLo != null && yHi != null) {
+        shapes.push({
+            type: 'rect', xref: 'x', yref: 'y',
+            x0: xLo, x1: xHi, y0: yLo, y1: yHi,
+            line: { color: frameColor, width: 1.2, dash: 'dash' },
+            fillcolor: 'rgba(0,0,0,0)',
+        });
+        const padX = (xHi - xLo) * 0.04;
+        const padY = (yHi - yLo) * 0.04;
+        xRange = [xLo - padX, xHi + padX];
+        yRange = [yLo - padY, yHi + padY];
+    }
+    const layout = Object.assign({}, PL_GEM(), {
+        title: { text: title, font: { size: 11, color: titleColor } },
+        xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                 ticks: 'outside', ticklen: 3,
+                 range: xRange, autorange: xRange ? false : true,
+                 constrain: 'domain' },
+        yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                 ticks: 'outside', ticklen: 3,
+                 range: yRange, autorange: yRange ? false : true,
+                 scaleanchor: 'x', scaleratio: 1, constrain: 'domain' },
+        margin: (idx % 2) === 1 ? { l: 28, r: 42, t: 18, b: 20 }
+                                : { l: 28, r: 8,  t: 18, b: 20 },
+        shapes: shapes,
+    });
+    return { layout, xLo, xHi, yLo, yHi };
+}
+
+function gemNotEnabled(divIds) {
+    divIds.forEach(id => {
+        const div = document.getElementById(id);
+        if (div) div.innerHTML = '<div style="color:var(--dim);padding:20px;text-align:center">GEM not enabled</div>';
+    });
 }
 
 // --- fetch + render ---------------------------------------------------------
@@ -56,13 +102,7 @@ function fetchGemAccum() {
 const GEM_OCC_IDS = ['gem-occ-0', 'gem-occ-1', 'gem-occ-2', 'gem-occ-3'];
 
 function plotGemOccupancy(data) {
-    if (!data || !data.enabled) {
-        GEM_OCC_IDS.forEach(id => {
-            const div = document.getElementById(id);
-            if (div) div.innerHTML = '<div style="color:var(--dim);padding:20px;text-align:center">GEM not enabled</div>';
-        });
-        return;
-    }
+    if (!data || !data.enabled) { gemNotEnabled(GEM_OCC_IDS); return; }
 
     const detectors = data.detectors || [];
     const total = data.total || 0;
@@ -93,93 +133,38 @@ function plotGemOccupancy(data) {
     // empty == "we received the response, but every bin is zero".  Without
     // this branch we'd clamp to 1e-6 with a 'Hot' colorscale, which paints
     // every cell at the very bottom of the scale (solid black) and reads
-    // like a broken display in auto-report screenshots — see run_024790
-    // tab_gem.png.  In the empty case we switch to a flat neutral grey and
-    // attach a centered "No GEM data" annotation on the first panel.
+    // like a broken display in auto-report screenshots.  In the empty case
+    // we switch to a flat neutral grey and attach a centered "No GEM data"
+    // annotation on the first panel.
     const empty = (zmax <= 0);
     if (empty) zmax = 1e-6;
 
-    // Compact per-heatmap layout: thin colourbar only on the right column
-    // (cells 1 and 3), no axis titles, small title font.
-    const compactMargin  = { l: 28, r: 8,  t: 18, b: 20 };
-    const compactMarginR = { l: 28, r: 42, t: 18, b: 20 };
-
     GEM_OCC_IDS.forEach((divId, idx) => {
         const g = grids[idx];
-        const onRightCol = (idx % 2) === 1;
-        const showBar = onRightCol;
+        const showBar = (idx % 2) === 1;
         const det = g && g.det;
         const titleText = det
             ? det.name + (total > 0 ? ` (${total})` : '')
             : 'GEM' + idx;
-        const frameColor = GEM_COLORS[idx] || THEME.text;
-
-        // Dashed detector frame outline — visible even when no events have
-        // accumulated yet (heatmap is uniformly zero), so the active area is
-        // always shown.  Use x_active/y_active when the API provides them
-        // (true mapped strip extent; tighter than the bbox on the beam-hole
-        // side).  Falls back to ±size/2 for older responses.
-        const shapes = [];
-        let xRange = null, yRange = null;
-        const xa = det && det.x_active;
-        const ya = det && det.y_active;
-        const xLo = (xa && xa.length === 2) ? xa[0]
-                  : (det && det.x_size) ? -det.x_size / 2 : null;
-        const xHi = (xa && xa.length === 2) ? xa[1]
-                  : (det && det.x_size) ?  det.x_size / 2 : null;
-        const yLo = (ya && ya.length === 2) ? ya[0]
-                  : (det && det.y_size) ? -det.y_size / 2 : null;
-        const yHi = (ya && ya.length === 2) ? ya[1]
-                  : (det && det.y_size) ?  det.y_size / 2 : null;
-        if (xLo != null && xHi != null && yLo != null && yHi != null) {
-            shapes.push({
-                type: 'rect', xref: 'x', yref: 'y',
-                x0: xLo, x1: xHi, y0: yLo, y1: yHi,
-                line: { color: frameColor, width: 1.2, dash: 'dash' },
-                fillcolor: 'rgba(0,0,0,0)',
-            });
-            const padX = (xHi - xLo) * 0.04;
-            const padY = (yHi - yLo) * 0.04;
-            xRange = [xLo - padX, xHi + padX];
-            yRange = [yLo - padY, yHi + padY];
-        }
+        const { layout, xLo, xHi, yLo, yHi } = gemCellLayout(det, idx, titleText, THEME.text);
 
         // Centered "no data" annotation only on idx===0 — four copies would
         // clutter the screenshot for no extra information.
-        const annotations = (empty && idx === 0) ? [{
+        layout.annotations = (empty && idx === 0) ? [{
             xref: 'paper', yref: 'paper', x: 0.5, y: 0.5,
             text: 'No GEM data', showarrow: false,
-            font: { size: 14, color: THEME.textMuted || THEME.text },
+            font: { size: 14, color: THEME.textMuted },
         }] : [];
-
-        // scaleanchor keeps mm in x and y at the same screen scale, so the
-        // detector frame is drawn at its true geometric ratio (matches the
-        // efficiency-grid panel on the right).
-        const layout = Object.assign({}, PL_GEM_OCC(), {
-            title: { text: titleText, font: { size: 11, color: THEME.text } },
-            xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                     ticks: 'outside', ticklen: 3,
-                     range: xRange, autorange: xRange ? false : true,
-                     constrain: 'domain' },
-            yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                     ticks: 'outside', ticklen: 3,
-                     range: yRange, autorange: yRange ? false : true,
-                     scaleanchor: 'x', scaleratio: 1, constrain: 'domain' },
-            margin: showBar ? compactMarginR : compactMargin,
-            shapes: shapes,
-            annotations: annotations,
-        });
 
         if (!g) {
             Plotly.react(divId,
                 [{ x: [], y: [], z: [[]], type: 'heatmap' }],
-                layout, { responsive: true, displayModeBar: false });
+                layout, PC2);
             return;
         }
 
-        // Bin midpoints over the *active* extent the server filled with.
-        // `xLo/xHi/yLo/yHi` are computed above (from x_active/y_active or
-        // the bbox fallback).
+        // Bin midpoints over the *active* extent the server filled with
+        // (the gemCellLayout frame edges).
         const nx = det.nx, ny = det.ny;
         const occxLo = (xLo != null) ? xLo : -det.x_size / 2;
         const occxHi = (xHi != null) ? xHi :  det.x_size / 2;
@@ -190,9 +175,6 @@ function plotGemOccupancy(data) {
         const xArr = Array.from({length: nx}, (_, i) => occxLo + (i + 0.5) * xStep);
         const yArr = Array.from({length: ny}, (_, i) => occyLo + (i + 0.5) * yStep);
 
-        // Flat neutral grey when we have no data — beats 'Hot'-at-zero
-        // (solid black, looks broken).  Stops being neutral as soon as
-        // any bin gets a fill, since `empty` is recomputed each call.
         const cs = empty
             ? [[0, 'rgba(140,140,140,0.18)'], [1, 'rgba(140,140,140,0.18)']]
             : 'Hot';
@@ -209,7 +191,7 @@ function plotGemOccupancy(data) {
             trace.colorbar = { thickness: 6, tickfont: { size: 8 }, tickformat: '.2f', len: 0.92 };
         }
 
-        Plotly.react(divId, [trace], layout, { responsive: true, displayModeBar: false });
+        Plotly.react(divId, [trace], layout, PC2);
     });
 }
 
@@ -221,7 +203,7 @@ function updateGemEfficiency(data) {
         if (c) c.innerHTML = '<span style="color:var(--dim);grid-column:1/-1;align-self:center;text-align:center">GEM not enabled</span>';
         const info = document.getElementById('gem-eff-info');
         if (info) info.textContent = '';
-        plotGemEffEmpty();
+        plotGemEffView(null);
         plotGemEffGrid(null);
         plotGemZTargetHist(null);
         return;
@@ -267,7 +249,7 @@ function renderGemEffCards() {
 
 function renderGemEffSnapshot() {
     const info = document.getElementById('gem-eff-info');
-    if (!gemEffData) { plotGemEffEmpty(); return; }
+    if (!gemEffData) { plotGemEffView(null); return; }
     const snap = gemEffData.snapshot;
     if (!snap) {
         if (info) info.innerHTML = 'Waiting for matched event…';
@@ -303,11 +285,6 @@ function renderGemEffSnapshot() {
     }
     plotGemEffView(snap);
     plotGemZTargetHist(gemEffData.z_target_hist);
-}
-
-// Empty wrapper used when /api/gem/efficiency hasn't been fetched yet.
-function plotGemEffEmpty() {
-    plotGemEffView(null);
 }
 
 // Compute lab-frame Z-Y axis ranges from the detector geometry alone, so
@@ -386,12 +363,8 @@ function plotGemEffView(snap) {
         });
 
         // Per-detector overlays: filled circle at the hit, star at the
-        // prediction.  Gated by hit_present so a GEM with no hit on the
-        // track leaves the Z-Y plane blank — matches the ✓/✗ flag above
-        // the plot.  hit_present is the detection criterion the user
-        // cares about (a hit consistent with the fit = efficient
-        // detection); used_in_fit is an algorithmic detail of which
-        // detector was held out as the LOO test, not whether it fired.
+        // prediction.  Gated by hit_present, like the ✓/✗ flags above the
+        // plot, so a GEM with no hit on the track leaves the plane blank.
         (snap.dets || []).forEach(d => {
             if (!d.hit_present) return;
             const R = d.id;
@@ -427,14 +400,14 @@ function plotGemEffView(snap) {
         });
     }
 
-    Plotly.react('gem-eff-zy', tracesZY, Object.assign({}, PL_GEM_EFF(), {
+    Plotly.react('gem-eff-zy', tracesZY, Object.assign({}, PL_GEM(), {
         title: { text: 'Side view (Z–Y)', font: { size: 10, color: THEME.text } },
         xaxis: { title: 'z (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border,
                  range: ranges.zy.z },
         yaxis: { title: 'y (mm)', gridcolor: THEME.grid, zerolinecolor: THEME.border,
                  range: ranges.zy.y },
         shapes: shapesZY,
-    }), { responsive: true, displayModeBar: false });
+    }), PC2);
 }
 
 // --- per-detector efficiency-vs-position grid (left of the side view) -------
@@ -446,16 +419,7 @@ const GEM_EFF_GRID_IDS = ['gem-eff-grid-0', 'gem-eff-grid-1',
                           'gem-eff-grid-2', 'gem-eff-grid-3'];
 
 function plotGemEffGrid(data) {
-    const compactMargin  = { l: 28, r: 8,  t: 18, b: 20 };
-    const compactMarginR = { l: 28, r: 42, t: 18, b: 20 };
-
-    if (!data || !data.enabled) {
-        GEM_EFF_GRID_IDS.forEach(id => {
-            const div = document.getElementById(id);
-            if (div) div.innerHTML = '<div style="color:var(--dim);padding:20px;text-align:center">GEM not enabled</div>';
-        });
-        return;
-    }
+    if (!data || !data.enabled) { gemNotEnabled(GEM_EFF_GRID_IDS); return; }
 
     const detectors = data.detectors || [];
     const dets = GEM_EFF_GRID_IDS.map((_, detId) =>
@@ -463,70 +427,22 @@ function plotGemEffGrid(data) {
 
     GEM_EFF_GRID_IDS.forEach((divId, idx) => {
         const det = dets[idx];
-        const onRightCol = (idx % 2) === 1;
-        const showBar = onRightCol;
-        const frameColor = GEM_COLORS[idx] || THEME.text;
+        const showBar = (idx % 2) === 1;
         const detName = det && det.name ? det.name : ('GEM' + idx);
-
-        // Always-on dashed detector frame so the active area is visible
-        // even before any event arrives.  Use x_active/y_active (true mapped
-        // strip extent) when available — tighter than the bbox on the
-        // beam-hole side.  Falls back to ±size/2 for older API responses.
-        const shapes = [];
-        let xRange = null, yRange = null;
-        const xa = det && det.x_active;
-        const ya = det && det.y_active;
-        const xLo = (xa && xa.length === 2) ? xa[0]
-                  : (det && det.x_size) ? -det.x_size / 2 : null;
-        const xHi = (xa && xa.length === 2) ? xa[1]
-                  : (det && det.x_size) ?  det.x_size / 2 : null;
-        const yLo = (ya && ya.length === 2) ? ya[0]
-                  : (det && det.y_size) ? -det.y_size / 2 : null;
-        const yHi = (ya && ya.length === 2) ? ya[1]
-                  : (det && det.y_size) ?  det.y_size / 2 : null;
-        if (xLo != null && xHi != null && yLo != null && yHi != null) {
-            shapes.push({
-                type: 'rect', xref: 'x', yref: 'y',
-                x0: xLo, x1: xHi, y0: yLo, y1: yHi,
-                line: { color: frameColor, width: 1.2, dash: 'dash' },
-                fillcolor: 'rgba(0,0,0,0)',
-            });
-            const padX = (xHi - xLo) * 0.04;
-            const padY = (yHi - yLo) * 0.04;
-            xRange = [xLo - padX, xHi + padX];
-            yRange = [yLo - padY, yHi + padY];
-        }
-
-        // scaleanchor keeps mm in x and y at the same screen scale so the
-        // detector frame is drawn at its true geometric ratio.  GEM frames
-        // are ~1:2 portrait, so a wider cell will leave horizontal margin
-        // around the data area — that's the correct trade-off for accuracy.
-        const layout = Object.assign({}, PL_GEM_EFF(), {
-            title: { text: detName, font: { size: 11, color: frameColor } },
-            xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                     ticks: 'outside', ticklen: 3,
-                     range: xRange, autorange: xRange ? false : true,
-                     constrain: 'domain' },
-            yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
-                     ticks: 'outside', ticklen: 3,
-                     range: yRange, autorange: yRange ? false : true,
-                     scaleanchor: 'x', scaleratio: 1, constrain: 'domain' },
-            margin: showBar ? compactMarginR : compactMargin,
-            shapes: shapes,
-        });
+        const { layout, xLo, xHi, yLo, yHi } =
+            gemCellLayout(det, idx, detName, GEM_COLORS[idx] || THEME.text);
 
         const grid = det && det.eff_grid;
         if (!grid || !grid.nx || !grid.ny || !grid.den || !grid.num) {
             Plotly.react(divId,
                 [{ x: [], y: [], z: [[]], type: 'heatmap' }],
-                layout, { responsive: true, displayModeBar: false });
+                layout, PC2);
             return;
         }
 
         // Bin axis arrays: midpoints over the *active* strip extent that
-        // the server filled with.  Older responses without x_min/x_max
-        // fall back to ±size/2 (legacy behaviour, may leave inner-edge
-        // empty space).
+        // the server filled with (grid x_min/x_max/y_min/y_max, else the
+        // gemCellLayout frame, else ±size/2).
         const nx = grid.nx, ny = grid.ny;
         const gxLo = (typeof grid.x_min === 'number') ? grid.x_min
                    : (xLo != null) ? xLo
@@ -588,8 +504,7 @@ function plotGemEffGrid(data) {
                                tickformat: '.1f', len: 0.92 };
         }
 
-        Plotly.react(divId, [trace], layout,
-                     { responsive: true, displayModeBar: false });
+        Plotly.react(divId, [trace], layout, PC2);
     });
 }
 
@@ -599,7 +514,7 @@ function plotGemEffGrid(data) {
 function plotGemZTargetHist(hist) {
     const div = document.getElementById('gem-eff-zhist');
     if (!div) return;
-    const layout = Object.assign({}, PL_GEM_EFF(), {
+    const layout = Object.assign({}, PL_GEM(), {
         title: { text: 'Projected vertex z − target z (mm)',
                  font: { size: 10, color: THEME.text } },
         margin: { l: 42, r: 8, t: 22, b: 32 },
@@ -612,14 +527,14 @@ function plotGemZTargetHist(hist) {
         bargap: 0.05,
     });
     if (!hist || !hist.bins || !hist.bins.length) {
-        Plotly.react(div, [], layout, { responsive: true, displayModeBar: false });
+        Plotly.react(div, [], layout, PC2);
         return;
     }
     const min = hist.min, step = hist.step;
     const x = hist.bins.map((_, i) => min + (i + 0.5) * step);
     const trace = {
         x: x, y: hist.bins, type: 'bar',
-        marker: { color: THEME.accent || '#3aa0ff', line: { width: 0 } },
+        marker: { color: THEME.accent, line: { width: 0 } },
         hovertemplate: 'z=%{x:.1f} mm<br>count=%{y}<extra></extra>',
     };
     layout.xaxis.range = [hist.min, hist.max];
@@ -632,38 +547,20 @@ function plotGemZTargetHist(hist) {
             line: { color: THEME.text, width: 1.2, dash: 'dot' },
         }];
     }
-    Plotly.react(div, [trace], layout, { responsive: true, displayModeBar: false });
+    Plotly.react(div, [trace], layout, PC2);
 }
 
-// --- resize -----------------------------------------------------------------
-
-function resizeGem() {
-    GEM_OCC_IDS.forEach(id => {
-        try { Plotly.Plots.resize(id); } catch (e) {}
-    });
-    GEM_EFF_GRID_IDS.forEach(id => {
-        try { Plotly.Plots.resize(id); } catch (e) {}
-    });
-    ['gem-eff-zy', 'gem-eff-zhist'].forEach(id => {
-        try { Plotly.Plots.resize(id); } catch (e) {}
-    });
-}
-
-// Theme flip — every GEM plot embeds THEME values in titles, frame outlines,
-// fit lines, and marker/edge colors at draw time.  Replay both occupancy
-// (from cached /api/gem/occupancy) and efficiency (from gemEffData) so the
-// new theme reaches every text/marker, not just the chrome.
-if (typeof onThemeChange === 'function') {
-    onThemeChange(() => {
-        if (gemOccupancyData) plotGemOccupancy(gemOccupancyData);
-        if (gemEffData) {
-            renderGemEffCards();
-            renderGemEffSnapshot();
-            plotGemEffGrid(gemEffData);
-        } else {
-            plotGemEffEmpty();
-            plotGemEffGrid(null);
-            plotGemZTargetHist(null);
-        }
-    });
-}
+// Plots bake THEME at draw time — replay them from the cached data on a
+// theme flip.
+onThemeChange(() => {
+    if (gemOccupancyData) plotGemOccupancy(gemOccupancyData);
+    if (gemEffData) {
+        renderGemEffCards();
+        renderGemEffSnapshot();
+        plotGemEffGrid(gemEffData);
+    } else {
+        plotGemEffView(null);
+        plotGemEffGrid(null);
+        plotGemZTargetHist(null);
+    }
+});

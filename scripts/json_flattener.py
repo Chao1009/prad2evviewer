@@ -33,6 +33,7 @@ Usage
     python scripts/json_flattener.py input.json --max-depth 2
     python scripts/json_flattener.py input.json --separator /
     python scripts/json_flattener.py input.json --csv > out.csv
+    python scripts/json_flattener.py input.json --no-header
     cat input.json | python scripts/json_flattener.py
 """
 

@@ -1,6 +1,6 @@
 # cmake/PradHelpers.cmake — shared helpers for the prad2evviewer build
 #
-# Provides three tiny utilities used throughout the top-level CMakeLists:
+# Provides three tiny utilities used throughout the build:
 #
 #   prad_option(NAME DEFAULT DESCRIPTION)
 #       Drop-in replacement for option() that also records whether the user
@@ -14,16 +14,14 @@
 #         - otherwise                → WARNING + set ${NAME} OFF in cache.
 #
 #   add_prad_tool(NAME [SRC <path>] [LINKS <libs…>])
-#       Build a small test/analysis executable that lives under test/.
+#       Build a command-line tool executable (test/, gem/, analysis/).
 #       Links prad2dec by default, adds DATABASE_DIR compile definition,
 #       and drops the binary in ${CMAKE_BINARY_DIR}/bin.
 
 include_guard(GLOBAL)
 
 
-# ---------------------------------------------------------------------------
 # prad_option — option() + remember explicit cmdline usage
-# ---------------------------------------------------------------------------
 macro(prad_option _name _default)
     # Remaining args are the human-readable description.
     set(_desc "${ARGN}")
@@ -40,9 +38,7 @@ macro(prad_option _name _default)
 endmacro()
 
 
-# ---------------------------------------------------------------------------
 # prad_optional_probe — fail-or-disable based on find_package result
-# ---------------------------------------------------------------------------
 macro(prad_optional_probe _name)
     # HINT is multiValue so callers can supply several "…\n" fragments
     # without worrying about semicolon handling.
@@ -76,9 +72,7 @@ macro(prad_optional_probe _name)
 endmacro()
 
 
-# ---------------------------------------------------------------------------
-# add_prad_tool — one-liner executable for test/*.cpp tools
-# ---------------------------------------------------------------------------
+# add_prad_tool — one-liner executable for command-line tools
 function(add_prad_tool _name)
     set(_oneValue SRC)
     set(_multiValue LINKS)

@@ -4,19 +4,16 @@
 
 using json = nlohmann::json;
 
-// Serialize a Histogram to JSON.
-static json histToJson(const Histogram &h, float mn, float mx, float st)
+static json histToJson(const Histogram &h, const HistAxis &ax)
 {
-    if (h.bins.empty())
-        return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
-                {"min", mn}, {"max", mx}, {"step", st}};
-    return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
-            {"min", mn}, {"max", mx}, {"step", st}};
+    json j = h.bins.empty()
+        ? json{{"bins", json::array()}, {"underflow", 0}, {"overflow", 0}}
+        : json{{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow}};
+    ax.toJson(j, "");
+    return j;
 }
 
-//=============================================================================
-// API response builders
-//=============================================================================
+// ---- API response builders -------------------------------------------------
 
 json AppState::apiColorRanges() const
 {
@@ -30,10 +27,10 @@ json AppState::apiHist(int type, const std::string &key) const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
     auto &hmap = (type == 0) ? histograms : (type == 1) ? pos_histograms : height_histograms;
-    int nbins  = (type == 0) ? hist_nbins : (type == 1) ? pos_nbins : height_nbins;
+    auto &axis = (type == 0) ? hist_cfg.integral : (type == 1) ? hist_cfg.time : hist_cfg.height;
     auto it = hmap.find(key);
     if (it == hmap.end())
-        return {{"bins", std::vector<int>(nbins, 0)}, {"underflow", 0}, {"overflow", 0},
+        return {{"bins", std::vector<int>(axis.nbins(), 0)}, {"underflow", 0}, {"overflow", 0},
                 {"events", events_processed.load()}};
     auto &h = it->second;
     return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
@@ -43,18 +40,13 @@ json AppState::apiHist(int type, const std::string &key) const
 json AppState::apiClusterHist() const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
-    json r = histToJson(cluster_energy_hist, cl_hist_min, cl_hist_max, cl_hist_step);
+    json r = histToJson(cluster_energy_hist, cluster_energy_axis);
     r["events"] = cluster_events_processed.load();
-    r["nclusters"] = histToJson(nclusters_hist,
-        nclusters_hist_min, nclusters_hist_max, nclusters_hist_step);
-    r["nblocks"] = histToJson(nblocks_hist,
-        (float)nblocks_hist_min, (float)nblocks_hist_max, (float)nblocks_hist_step);
-    r["raw_energy"] = histToJson(raw_energy_hist,
-        raw_energy_hist_min, raw_energy_hist_max, raw_energy_hist_step);
-    // Per-Ncl bucket dependent histograms — bins_by_ncl[i] is the
-    // bins array of the i-th bucket (same indexing as nclusters_hist).
-    // Frontend uses these to redraw the energy / blocks histos when the
-    // user clicks a particular Ncl bar.
+    r["nclusters"] = histToJson(nclusters_hist, nclusters_axis);
+    r["nblocks"] = histToJson(nblocks_hist, {(float)nblocks_axis.min,
+        (float)nblocks_axis.max, (float)nblocks_axis.step});
+    r["raw_energy"] = histToJson(raw_energy_hist, raw_energy_axis);
+    // bins_by_ncl[i]: bins of the i-th Ncl bucket (see cluster_energy_hist_by_ncl).
     json energy_by_ncl = json::array();
     json blocks_by_ncl = json::array();
     for (auto &h : cluster_energy_hist_by_ncl) energy_by_ncl.push_back(h.bins);
@@ -67,47 +59,50 @@ json AppState::apiClusterHist() const
 json AppState::apiEnergyAngle() const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
-    return {{"bins", energy_angle_hist.bins},
-            {"nx", energy_angle_hist.nx}, {"ny", energy_angle_hist.ny},
-            {"angle_min", ea_angle_min}, {"angle_max", ea_angle_max}, {"angle_step", ea_angle_step},
-            {"energy_min", ea_energy_min}, {"energy_max", ea_energy_max}, {"energy_step", ea_energy_step},
-            {"target", {target_x, target_y, target_z}},
-            {"hycal_z", hycal_transform.z},
-            {"beam_energy", beam_energy.load()},
-            {"events", cluster_events_processed.load()}};
+    json r = {{"bins", energy_angle_hist.bins},
+              {"nx", energy_angle_hist.nx}, {"ny", energy_angle_hist.ny},
+              {"target", {target_x, target_y, target_z}},
+              {"hycal_z", hycal_transform.z},
+              {"beam_energy", beam_energy.load()},
+              {"events", cluster_events_processed.load()}};
+    ea_angle_axis.toJson(r, "angle_");
+    ea_energy_axis.toJson(r, "energy_");
+    return r;
 }
 
 json AppState::apiMoller() const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
-    return {{"xy_bins", moller_xy_hist.bins},
-            {"xy_nx", moller_xy_hist.nx}, {"xy_ny", moller_xy_hist.ny},
-            {"xy_x_min", moller_xy_x_min}, {"xy_x_max", moller_xy_x_max}, {"xy_x_step", moller_xy_x_step},
-            {"xy_y_min", moller_xy_y_min}, {"xy_y_max", moller_xy_y_max}, {"xy_y_step", moller_xy_y_step},
-            {"moller_events", moller_events},
-            {"total_events", cluster_events_processed.load()},
-            {"target",  {target_x, target_y, target_z}},
-            {"hycal_z", hycal_transform.z},
-            {"trigger", moller_trigger.toJson()},
-            {"trigger_accept_names", bitsMaskToNames(moller_trigger.accept, trigger_bits_def)},
-            {"cuts", {{"energy_tolerance", moller_energy_tol},
-                      {"angle_min", moller_angle_min}, {"angle_max", moller_angle_max}}}};
+    json r = {{"xy_bins", moller_xy_hist.bins},
+              {"xy_nx", moller_xy_hist.nx}, {"xy_ny", moller_xy_hist.ny},
+              {"moller_events", moller_events},
+              {"total_events", cluster_events_processed.load()},
+              {"target",  {target_x, target_y, target_z}},
+              {"hycal_z", hycal_transform.z},
+              {"trigger", moller_trigger.toJson()},
+              {"trigger_accept_names", bitsMaskToNames(moller_trigger.accept, trigger_bits_def)},
+              {"cuts", {{"energy_tolerance", moller_energy_tol},
+                        {"angle_min", moller_angle_min}, {"angle_max", moller_angle_max}}}};
+    moller_x_axis.toJson(r, "xy_x_");
+    moller_y_axis.toJson(r, "xy_y_");
+    return r;
 }
 
 json AppState::apiHycalXY() const
 {
     std::lock_guard<std::mutex> lk(data_mtx);
-    return {{"xy_bins", hycal_xy_hist.bins},
-            {"xy_nx", hycal_xy_hist.nx}, {"xy_ny", hycal_xy_hist.ny},
-            {"xy_x_min", hxy_x_min}, {"xy_x_max", hxy_x_max}, {"xy_x_step", hxy_x_step},
-            {"xy_y_min", hxy_y_min}, {"xy_y_max", hxy_y_max}, {"xy_y_step", hxy_y_step},
-            {"events", hycal_xy_events},
-            {"total_events", cluster_events_processed.load()},
-            {"beam_energy", beam_energy.load()},
-            {"cuts", {{"n_clusters", hxy_n_clusters},
-                      {"energy_frac_min", hxy_energy_frac_min},
-                      {"nblocks_min", hxy_nblocks_min},
-                      {"nblocks_max", hxy_nblocks_max}}}};
+    json r = {{"xy_bins", hycal_xy_hist.bins},
+              {"xy_nx", hycal_xy_hist.nx}, {"xy_ny", hycal_xy_hist.ny},
+              {"events", hycal_xy_events},
+              {"total_events", cluster_events_processed.load()},
+              {"beam_energy", beam_energy.load()},
+              {"cuts", {{"n_clusters", hxy_n_clusters},
+                        {"energy_frac_min", hxy_energy_frac_min},
+                        {"nblocks_min", hxy_nblocks_min},
+                        {"nblocks_max", hxy_nblocks_max}}}};
+    hxy_x_axis.toJson(r, "xy_x_");
+    hxy_y_axis.toJson(r, "xy_y_");
+    return r;
 }
 
 json AppState::apiGemResiduals() const
@@ -115,16 +110,12 @@ json AppState::apiGemResiduals() const
     std::lock_guard<std::mutex> lk(data_mtx);
     json dets = json::array();
     int n = (int)gem_dx_hist.size();
-    int n_dets_runtime = std::min(n, gem_sys.GetNDetectors());
     for (int d = 0; d < n; ++d) {
-        std::string name = (d < n_dets_runtime)
-            ? gem_sys.GetDetectors()[d].name
-            : ("GEM" + std::to_string(d));
         dets.push_back({
             {"id", d},
-            {"name", name},
-            {"dx_hist", histToJson(gem_dx_hist[d], gem_resid_min, gem_resid_max, gem_resid_step)},
-            {"dy_hist", histToJson(gem_dy_hist[d], gem_resid_min, gem_resid_max, gem_resid_step)},
+            {"name", gemDetName(d)},
+            {"dx_hist", histToJson(gem_dx_hist[d], gem_resid_axis)},
+            {"dy_hist", histToJson(gem_dy_hist[d], gem_resid_axis)},
             {"matched_hits", gem_match_hits[d]},
         });
     }
@@ -141,67 +132,36 @@ json AppState::apiGemEfficiency() const
     int n = (int)gem_eff_num.size();
     int n_dets_runtime = std::min(n, gem_sys.GetNDetectors());
 
-    auto loo_mode_name = [](GemEffLooMode m) -> const char* {
-        switch (m) {
-            case GemEffLooMode::Loo:           return "loo";
-            case GemEffLooMode::LooTargetIn:   return "loo-target-in";
-            case GemEffLooMode::TargetSeed:    return "loo-target-seed";
-        }
-        return "loo-target-seed";
-    };
-
     json counters = json::array();
     json detectors = json::array();
     for (int d = 0; d < n; ++d) {
-        std::string name = (d < n_dets_runtime)
-            ? gem_sys.GetDetectors()[d].name
-            : ("GEM" + std::to_string(d));
+        std::string name = gemDetName(d);
         int num = gem_eff_num[d];
         int den = (d < (int)gem_eff_den.size()) ? gem_eff_den[d] : 0;
         float eff_pct = (den > 0) ? (100.f * num / den) : 0.f;
-        // Per-detector LOO: each card has its own denominator (anchors that
-        // succeeded with detector d as the test detector).
         counters.push_back({
             {"id", d}, {"name", name},
             {"num", num}, {"den", den}, {"eff_pct", eff_pct},
         });
-        json info = {{"id", d}, {"name", name}};
-        if (d < n_dets_runtime) {
-            const auto &det = gem_sys.GetDetectors()[d];
-            info["x_size"] = det.planes[0].size;
-            info["y_size"] = det.planes[1].size;
-            // Active strip extent in detector-local coords (mm).  Tighter
-            // than the bbox on the inner-edge side because pos=11 shares
-            // strip numbers with pos=10 via shared_pos and doesn't extend
-            // the readout — frontend uses these to draw the dashed frame
-            // so the heatmap fits flush against it.
-            auto xr = gem_sys.GetActiveExtent(d, 0);
-            auto yr = gem_sys.GetActiveExtent(d, 1);
-            info["x_active"] = json::array({xr.first, xr.second});
-            info["y_active"] = json::array({yr.first, yr.second});
-        }
+        json info = gemDetJson(d);
         if (d < (int)gem_transforms.size()) {
             const auto &t = gem_transforms[d];
             info["position"] = json::array({t.x, t.y, t.z});
             info["tilting"]  = json::array({t.rx, t.ry, t.rz});
         }
-        // Per-detector efficiency-vs-position grid: bins of predicted local
-        // (x,y) at this detector when it served as the LOO test.  Frontend
-        // computes per-bin eff = num/den (masking 0-den bins).
         if (d < n_dets_runtime
             && d < (int)gem_eff_grid_num.size()
             && d < (int)gem_eff_grid_den.size()) {
             const auto &gn  = gem_eff_grid_num[d];
             const auto &gd  = gem_eff_grid_den[d];
-            auto xr = gem_sys.GetActiveExtent(d, 0);
-            auto yr = gem_sys.GetActiveExtent(d, 1);
+            const auto &e   = gem_active_ext[d];
             info["eff_grid"] = {
                 {"nx",     gn.nx},
                 {"ny",     gn.ny},
-                {"x_min",  xr.first},
-                {"x_max",  xr.second},
-                {"y_min",  yr.first},
-                {"y_max",  yr.second},
+                {"x_min",  e[0]},
+                {"x_max",  e[1]},
+                {"y_min",  e[2]},
+                {"y_max",  e[3]},
                 {"num",    gn.bins},
                 {"den",    gd.bins},
             };
@@ -209,13 +169,14 @@ json AppState::apiGemEfficiency() const
         detectors.push_back(info);
     }
     json diag = json::array();
-    for (int d = 0; d < 4; ++d) {
+    for (int d = 0; d < GEM_EFF_MAX_DETS; ++d) {
+        const auto &g = gem_eff_diag[d];
         diag.push_back({
             {"test_d",       d},
-            {"n_call",       gem_eff_diag_call[d]},
-            {"n_3matched",   gem_eff_diag_3matched[d]},
-            {"n_pass_chi2",  gem_eff_diag_pass_chi2[d]},
-            {"n_pass_resid", gem_eff_diag_pass_resid[d]},
+            {"n_call",       g.n_call},
+            {"n_3matched",   g.n_3matched},
+            {"n_pass_chi2",  g.n_pass_chi2},
+            {"n_pass_resid", g.n_pass_resid},
         });
     }
     return {
@@ -226,23 +187,31 @@ json AppState::apiGemEfficiency() const
         {"snapshot",  gemEffSnapshotJson()},
         {"hycal_z",   hycal_transform.z},
         {"target_z",  target_z},
-        {"z_target_hist", histToJson(gem_eff_z_target_hist,
-                                     gem_eff_z_target_min,
-                                     gem_eff_z_target_max,
-                                     gem_eff_z_target_step)},
-        {"config", {
-            {"loo_mode",              loo_mode_name(gem_eff_loo_mode)},
-            {"min_cluster_energy",    gem_eff_min_cluster_energy},
-            {"match_nsigma",          gem_eff_match_nsigma},
-            {"max_chi2_per_dof",      gem_eff_max_chi2},
-            {"max_hits_per_detector", gem_eff_max_hits_per_det},
-            {"min_denom_for_eff",     gem_eff_min_denom},
-            {"healthy",               gem_eff_healthy},
-            {"warning",               gem_eff_warning},
-            {"target_sigma",          {gem_eff_target_sigma_x,
-                                       gem_eff_target_sigma_y,
-                                       gem_eff_target_sigma_z}},
-        }},
+        {"z_target_hist", histToJson(gem_eff_z_target_hist, gem_eff_z_target_axis)},
+        {"config",    gemEffConfigJson()},
+    };
+}
+
+json AppState::gemEffConfigJson() const
+{
+    const char *loo_mode = "loo-target-seed";
+    switch (gem_eff_loo_mode) {
+        case GemEffLooMode::Loo:           loo_mode = "loo"; break;
+        case GemEffLooMode::LooTargetIn:   loo_mode = "loo-target-in"; break;
+        case GemEffLooMode::TargetSeed:    break;
+    }
+    return {
+        {"loo_mode",              loo_mode},
+        {"min_cluster_energy",    gem_eff_min_cluster_energy},
+        {"match_nsigma",          gem_eff_match_nsigma},
+        {"max_chi2_per_dof",      gem_eff_max_chi2},
+        {"max_hits_per_detector", gem_eff_max_hits_per_det},
+        {"min_denom_for_eff",     gem_eff_min_denom},
+        {"healthy",               gem_eff_healthy},
+        {"warning",               gem_eff_warning},
+        {"target_sigma",          json::array({gem_eff_target_sigma_x,
+                                               gem_eff_target_sigma_y,
+                                               gem_eff_target_sigma_z})},
     };
 }
 
@@ -287,7 +256,6 @@ static RefCorrection buildRefCorrection(
     return rc;
 }
 
-// Apply correction: returns signal * factor (uniform across history).
 static float applyRefCorrection(float val, const RefCorrection &rc)
 {
     if (!rc.active) return val;
@@ -300,13 +268,8 @@ json AppState::apiLmsSummary(int ref_index) const
     auto rc = buildRefCorrection(latest_lms_integral, latest_alpha_integral,
                                   lms_ref_channels, ref_index);
 
-    // ---- Gain-drift lamp scale --------------------------------------------
-    // lamp_scale = current_LMS_mean[ref] / baseline_LMS_peak[ref], using the
-    // ref channel named in lms_drift_ref_channel (falls back to the first
-    // ref channel that has both a current history and a baseline entry).
-    // This cancels the LMS pulser / FADC scale change between baseline and
-    // current run so the drift ratio reflects PMT gain only.  Computed once
-    // per request and shared across modules.
+    // ---- Gain-drift lamp scale (formula in app_state.h) --------------------
+    // Computed once per request and shared across modules.
     bool drift_enabled = driftEnabled();
     double lamp_scale = 0.;
     std::string lamp_ref_used;
@@ -358,7 +321,6 @@ json AppState::apiLmsSummary(int ref_index) const
                     (mean < lms_warn_min_mean);
 
         // ---- drift-from-baseline (gain monitor) ----
-        // drift = current mean / (baseline_lms_peak * lamp_scale)
         // Use the UNCORRECTED current mean (independent of the ref-correction
         // toggle) so the drift state never changes when the user flips the
         // LMS-tab Ref dropdown for visual normalization.
@@ -396,10 +358,7 @@ json AppState::apiLmsSummary(int ref_index) const
                     if (drift_val < lo || drift_val > hi)
                         drift_flag = true;
                     // Suppress the WARN (not the value) for whole module
-                    // types listed in lms_drift_suppress_types.  Operators
-                    // can still see the drift number in the table column;
-                    // it just doesn't escalate state to "drift" or move
-                    // the row to the top.
+                    // types listed in lms_drift_suppress_types.
                     if (drift_flag &&
                         lms_drift_suppress_types.count(static_cast<int>(mod.type)))
                     {
@@ -412,8 +371,7 @@ json AppState::apiLmsSummary(int ref_index) const
 
         // Tri-state, top-priority first: drift > warn > ok.  The single
         // 'state' string is what the GUI / report sort and color on; the
-        // legacy 'warn' bool stays true for warn OR drift so any older UI
-        // stops on a problem.
+        // 'warn' bool is true for warn OR drift.
         const char *state = drift_flag ? "drift"
                           : (warn ? "warn" : "ok");
 
@@ -490,9 +448,7 @@ json AppState::apiLmsRefChannels() const
     return arr;
 }
 
-//=============================================================================
-// EPICS
-//=============================================================================
+// ---- EPICS -----------------------------------------------------------------
 
 void AppState::processEpics(const std::string &text, int32_t event_number, uint64_t timestamp)
 {
@@ -525,24 +481,18 @@ void AppState::clearEpics()
     epics_events = 0;
 }
 
-// ---------- DSC2 scaler bank → measured livetime --------------------------
-// Bank parsing + (source, channel) selection live in dsc::Dsc2Decoder
-// (see prad2dec/include/Dsc2Decoder.h).  This method only adds the
-// AppState-side concern: convert two consecutive cumulative readings into a
-// realtime live-time fraction and broadcast it.  Convention: gated counts
-// LIVE time in this DAQ (Group A enabled while NOT busy), so
-// live = gated / ungated.  Until a second read arrives we display the
-// cumulative ratio.
+// DSC2 → measured livetime from two consecutive cumulative readings.
+// Convention: gated counts LIVE time in this DAQ (Group A enabled while NOT
+// busy), so live = gated / ungated.  Until a second read arrives we display
+// the cumulative ratio.
 void AppState::processDsc(const dsc::DscEventData &dsc)
 {
     if (!dsc.present || dsc.ungated == 0) return;
 
     const uint32_t prev_g = dsc_prev_gated.load();
     const uint32_t prev_u = dsc_prev_ungated.load();
-    const double lt = (dsc.gated >= prev_g && dsc.ungated > prev_u)
-        ? (double)(dsc.gated   - prev_g) /
-          (double)(dsc.ungated - prev_u) * 100.0
-        : (double)dsc.gated / (double)dsc.ungated * 100.0;
+    const double d = dsc::delta_live_ratio(dsc.gated, dsc.ungated, prev_g, prev_u);
+    const double lt = (d >= 0 ? d : dsc.live_ratio()) * 100.0;
     measured_livetime.store(lt);
     dsc_prev_gated.store(dsc.gated);
     dsc_prev_ungated.store(dsc.ungated);
@@ -559,15 +509,11 @@ json AppState::apiEpicsChannels() const
             {"events", epics_events.load()}};
 }
 
-// Time anchor for EPICS snapshots.  We pick the EARLIEST snapshot that
-// actually carries a TI tick (timestamp != 0) — snapshots with timestamp == 0
-// are EPICS events that arrived before any physics event (typical at the
-// start of a run, or right after an ET reconnect when last_ti_ts is reset
-// to 0 and EPICS comes through before any new physics event).  Using the
-// first non-zero snapshot guarantees ti_delta_sec never has to special-case
-// "anchor came later than data"; combined with ti_delta_sec's own guards
-// against now==0 and now<base, this is the fix for the famous
-// 73,786,976,288 s underflow displayed in the EPICS monitor.
+// Time anchor for EPICS snapshots: the EARLIEST snapshot that carries a TI
+// tick (timestamp != 0).  Snapshots with timestamp == 0 are EPICS events
+// that arrived before any physics event (start of a run, or right after an
+// ET reconnect resets last_ti_ts), so ti_delta_sec never sees an anchor
+// later than the data.
 static uint64_t epics_anchor_ts(const epics::EpicsStore &store)
 {
     int n = store.GetSnapshotCount();
@@ -578,25 +524,14 @@ static uint64_t epics_anchor_ts(const epics::EpicsStore &store)
     return 0;
 }
 
+// Single-channel form of apiEpicsBatch; an unknown channel gets an empty time axis.
 json AppState::apiEpicsChannel(const std::string &name) const
 {
-    std::lock_guard<std::mutex> lk(epics_mtx);
-    int id = epics.GetChannelId(name);
-    if (id < 0)
-        return {{"name", name}, {"time", json::array()}, {"value", json::array()}, {"count", 0}};
-
-    int nsnap = epics.GetSnapshotCount();
-    json t_arr = json::array(), v_arr = json::array();
-
-    uint64_t t0 = epics_anchor_ts(epics);
-    for (int i = 0; i < nsnap; ++i) {
-        auto &snap = epics.GetSnapshot(i);
-        double t_sec = ti_delta_sec(snap.timestamp, t0);
-        float val = (id < (int)snap.values.size()) ? snap.values[id] : 0.f;
-        t_arr.push_back(std::round(t_sec * 100) / 100);
-        v_arr.push_back(val);
-    }
-    return {{"name", name}, {"time", t_arr}, {"value", v_arr}, {"count", nsnap}};
+    json b = apiEpicsBatch({name});
+    json &c = b["channels"][0];
+    const int n = c["count"];
+    return {{"name", name}, {"time", n ? b["time"] : json::array()},
+            {"value", c["value"]}, {"count", n}};
 }
 
 json AppState::apiEpicsBatch(const std::vector<std::string> &names) const
@@ -665,20 +600,13 @@ json AppState::apiEpicsLatest() const
     return {{"channels", channels}, {"events", epics_events.load()}};
 }
 
-//=============================================================================
-// Shared config + API routing (used by both viewer and monitor)
-//=============================================================================
+// ---- Shared config + API routing (used by both viewer and monitor) ---------
 
 void AppState::fillConfigJson(json &cfg) const
 {
-    cfg["hist"] = {
-        {"bin_min", hist_cfg.bin_min}, {"bin_max", hist_cfg.bin_max},
-        {"bin_step", hist_cfg.bin_step},
-        {"pos_min", hist_cfg.pos_min}, {"pos_max", hist_cfg.pos_max},
-        {"pos_step", hist_cfg.pos_step},
-        {"height_min", hist_cfg.height_min}, {"height_max", hist_cfg.height_max},
-        {"height_step", hist_cfg.height_step},
-    };
+    hist_cfg.integral.toJson(cfg["hist"], "bin_");
+    hist_cfg.time.toJson(cfg["hist"], "pos_");
+    hist_cfg.height.toJson(cfg["hist"], "height_");
     cfg["waveform_filter"]         = peak_filter.toJson(peak_quality_bits_def);
     cfg["waveform_filter_active"]  = peak_filter.enable;
     cfg["waveform_filter_default"] = peak_filter_default.toJson(peak_quality_bits_def);
@@ -693,10 +621,10 @@ void AppState::fillConfigJson(json &cfg) const
         {"physics", physics_trigger.toJson()},
         {"moller",  moller_trigger.toJson()},
     };
-    cfg["cluster_hist"] = {{"min", cl_hist_min}, {"max", cl_hist_max}, {"step", cl_hist_step}};
-    cfg["nclusters_hist"] = {{"min", nclusters_hist_min}, {"max", nclusters_hist_max}, {"step", nclusters_hist_step}};
-    cfg["nblocks_hist"] = {{"min", nblocks_hist_min}, {"max", nblocks_hist_max}, {"step", nblocks_hist_step}};
-    cfg["raw_energy_hist"] = {{"min", raw_energy_hist_min}, {"max", raw_energy_hist_max}, {"step", raw_energy_hist_step}};
+    cfg["cluster_hist"]    = cluster_energy_axis.toJson();
+    cfg["nclusters_hist"]  = nclusters_axis.toJson();
+    cfg["nblocks_hist"]    = nblocks_axis.toJson();
+    cfg["raw_energy_hist"] = raw_energy_axis.toJson();
     cfg["color_ranges"] = apiColorRanges();
     cfg["refresh_ms"] = {{"event", refresh_event_ms}, {"ring", refresh_ring_ms},
                          {"histogram", refresh_hist_ms}, {"lms", refresh_lms_ms}};
@@ -722,15 +650,12 @@ void AppState::fillConfigJson(json &cfg) const
         if (m.has_trip_warn) j["trip_warn_below"] = m.trip_warn_below;
         return j;
     };
+    json livetime = metric_cfg(livetime_status);
+    livetime["measured_enabled"] = daq_cfg.dsc_scaler.enabled();
+    livetime["healthy"]          = livetime_healthy;
+    livetime["warning"]          = livetime_warning;
     cfg["monitor_status"] = {
-        {"livetime", {
-            {"enabled",          !livetime_cmd.empty()},
-            {"measured_enabled", daq_cfg.dsc_scaler.enabled()},
-            {"unit",             livetime_unit},
-            {"poll_sec",         livetime_poll_sec},
-            {"healthy",          livetime_healthy},
-            {"warning",          livetime_warning},
-        }},
+        {"livetime", livetime},
         {"beam", {
             {"energy",  metric_cfg(beam_energy_status)},
             {"current", metric_cfg(beam_current_status)},
@@ -752,10 +677,6 @@ void AppState::fillConfigJson(json &cfg) const
             {"epics_channel", beam_energy_epics_channel},
             {"min_valid", beam_energy_min_valid},
         }},
-        {"energy_angle_hist", {
-            {"angle_min", ea_angle_min}, {"angle_max", ea_angle_max}, {"angle_step", ea_angle_step},
-            {"energy_min", ea_energy_min}, {"energy_max", ea_energy_max}, {"energy_step", ea_energy_step},
-        }},
         {"moller", {
             {"trigger", moller_trigger.toJson()},
             {"energy_tolerance", moller_energy_tol},
@@ -768,15 +689,15 @@ void AppState::fillConfigJson(json &cfg) const
             {"nblocks_max", hxy_nblocks_max},
         }},
     };
+    ea_angle_axis.toJson(cfg["physics"]["energy_angle_hist"], "angle_");
+    ea_energy_axis.toJson(cfg["physics"]["energy_angle_hist"], "energy_");
     cfg["auto_report"] = {
         {"enabled",                  auto_report_enabled},
         {"post_to_elog",             auto_report_post_to_elog},
         {"local_save_dir",           auto_report_local_save_dir},
         {"min_interval_ms",          auto_report_min_interval_ms},
         {"schedule_minutes",         auto_report_schedule_minutes},
-        // Surfaced to the client so report.js can flag low/partial-data
-        // reports inline; report.js falls back to its own defaults if
-        // missing, so the client and server stay backward-compatible.
+        // Surfaced so the client can flag low/partial-data reports.
         {"min_events_for_schedule",  auto_report_min_events_for_schedule},
         {"schedule_max_wait_min",    auto_report_schedule_max_wait_min},
         {"partial_threshold_events", auto_report_partial_threshold_events},
@@ -791,37 +712,15 @@ void AppState::fillConfigJson(json &cfg) const
         {"min_avg_points", epics_min_avg_pts}, {"mean_window", epics_mean_window},
         {"slots", epics_default_slots},
     };
-    // GEM tab owns its configuration: detector geometry (from apiGemConfig)
-    // plus the diagnostic configs that used to live under physics.
+    // GEM tab config: detector geometry (from apiGemConfig) plus the
+    // HyCal-matching / efficiency diagnostic configs.
     cfg["gem"] = apiGemConfig();
     cfg["gem"]["hycal_match"] = {
         {"require_ep_candidate", gem_match_require_ep},
         {"match_nsigma",         gem_match_nsigma},
-        {"residual_hist", {
-            {"min", gem_resid_min}, {"max", gem_resid_max}, {"step", gem_resid_step},
-        }},
+        {"residual_hist",        gem_resid_axis.toJson()},
     };
-    {
-        const char *loo_name = "loo-target-seed";
-        switch (gem_eff_loo_mode) {
-            case GemEffLooMode::Loo:           loo_name = "loo"; break;
-            case GemEffLooMode::LooTargetIn:   loo_name = "loo-target-in"; break;
-            case GemEffLooMode::TargetSeed:    loo_name = "loo-target-seed"; break;
-        }
-        cfg["gem"]["efficiency"] = {
-            {"loo_mode",              loo_name},
-            {"min_cluster_energy",    gem_eff_min_cluster_energy},
-            {"match_nsigma",          gem_eff_match_nsigma},
-            {"max_chi2_per_dof",      gem_eff_max_chi2},
-            {"max_hits_per_detector", gem_eff_max_hits_per_det},
-            {"min_denom_for_eff",     gem_eff_min_denom},
-            {"healthy",               gem_eff_healthy},
-            {"warning",               gem_eff_warning},
-            {"target_sigma",          json::array({gem_eff_target_sigma_x,
-                                                   gem_eff_target_sigma_y,
-                                                   gem_eff_target_sigma_z})},
-        };
-    }
+    cfg["gem"]["efficiency"] = gemEffConfigJson();
     cfg["gem"]["pos_res"] = gem_pos_res;
     cfg["gem"]["hycal_pos_res"] = json::array({
         hycal.GetPositionResolutionA(),
@@ -855,13 +754,9 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
     if (uri == "/api/lms/refs")
         return {true, apiLmsRefChannels().dump()};
     if (uri.rfind("/api/lms/", 0) == 0) {
-        int ref = -1;
         auto qpos = uri.find('?');
         std::string path = (qpos != std::string::npos) ? uri.substr(9, qpos - 9) : uri.substr(9);
-        if (qpos != std::string::npos) {
-            std::string q = uri.substr(qpos + 1);
-            if (q.rfind("ref=", 0) == 0) ref = std::atoi(q.c_str() + 4);
-        }
+        int ref = std::atoi(queryValue(uri, "ref", "-1").c_str());
         if (path == "summary") return {true, apiLmsSummary(ref).dump()};
         if (path == "clear")   return {false, ""};  // clear handled by caller
         return {true, apiLmsModule(std::atoi(path.c_str()), ref).dump()};
@@ -870,51 +765,12 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
         std::string path = uri.substr(11);
         if (path == "channels") return {true, apiEpicsChannels().dump()};
         if (path == "latest")   return {true, apiEpicsLatest().dump()};
-        if (path == "clear")    return {false, ""};  // clear handled by caller
-        if (path.rfind("batch?", 0) == 0) {
-            // /api/epics/batch?ch=name1&ch=name2&...
-            std::string query = path.substr(6);
-            std::vector<std::string> names;
-            for (size_t pos = 0; pos < query.size();) {
-                size_t amp = query.find('&', pos);
-                if (amp == std::string::npos) amp = query.size();
-                std::string kv = query.substr(pos, amp - pos);
-                if (kv.rfind("ch=", 0) == 0) {
-                    // URL-decode
-                    std::string raw = kv.substr(3), name;
-                    for (size_t i = 0; i < raw.size(); ++i) {
-                        if (raw[i] == '%' && i + 2 < raw.size()) {
-                            int hi = 0, lo = 0;
-                            if (std::sscanf(raw.c_str() + i + 1, "%1x%1x", &hi, &lo) == 2) {
-                                name += static_cast<char>((hi << 4) | lo);
-                                i += 2; continue;
-                            }
-                        }
-                        if (raw[i] == '+') name += ' ';
-                        else name += raw[i];
-                    }
-                    names.push_back(name);
-                }
-                pos = amp + 1;
-            }
-            return {true, apiEpicsBatch(names).dump()};
-        }
-        if (path.rfind("channel/", 0) == 0) {
-            // URL-decode the channel name (e.g. %3A → :)
-            std::string raw = path.substr(8), name;
-            for (size_t i = 0; i < raw.size(); ++i) {
-                if (raw[i] == '%' && i + 2 < raw.size()) {
-                    int hi = 0, lo = 0;
-                    if (std::sscanf(raw.c_str() + i + 1, "%1x%1x", &hi, &lo) == 2) {
-                        name += static_cast<char>((hi << 4) | lo);
-                        i += 2;
-                        continue;
-                    }
-                }
-                name += raw[i];
-            }
-            return {true, apiEpicsChannel(name).dump()};
-        }
+        // /api/epics/batch?ch=name1&ch=name2&...
+        if (path.rfind("batch?", 0) == 0)
+            return {true, apiEpicsBatch(queryValues(uri, "ch")).dump()};
+        // channel name is a path segment: '+' stays literal (e.g. %3A → :)
+        if (path.rfind("channel/", 0) == 0)
+            return {true, apiEpicsChannel(urlDecode(path.substr(8), false)).dump()};
     }
     if (uri == "/api/gem/hits")
         return {true, apiGemHits().dump()};

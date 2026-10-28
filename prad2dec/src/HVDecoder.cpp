@@ -1,10 +1,5 @@
 // HVDecoder.cpp — VMDF v2 archive parser, windowed segment, lookup helpers.
 //
-// The on-disk layout this file walks is owned by prad2hvmon (see
-// prad2hvmon/scripts/vmon_reader.py for the canonical Python implementation).
-// Treat it as the authoritative reference for record sizes / tags; this
-// file mirrors them under HV_FORMAT_*.
-//
 // Parsing strategy: mmap the file (POSIX) then walk records in two
 // conceptual passes.  Pass 1 collects (timestamp, byte-offset) for every
 // DV / BOOSTER record whose timestamp falls in the requested window plus
@@ -15,12 +10,9 @@
 #include "HVDecoder.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cerrno>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <fcntl.h>
@@ -42,7 +34,8 @@ namespace hv {
 namespace {
 
 // ── on-disk constants ────────────────────────────────────────────────────
-// Mirror of prad2hvmon/scripts/vmon_reader.py — keep them lock-step.
+// Mirror of prad2hvmon/scripts/vmon_reader.py (the canonical reference for
+// record sizes / tags) — keep them lock-step.
 constexpr char     HV_MAGIC[4]          = {'V','M','D','2'};
 constexpr uint8_t  HV_TAG_CHTABLE       = 0x01;
 constexpr uint8_t  HV_TAG_DV            = 0x02;
@@ -52,10 +45,6 @@ constexpr int      HV_NAME_LEN          = 12;
 constexpr int      HV_CHREC_BYTES       = HV_NAME_LEN + 4;          // name + V0Set
 constexpr int      HV_BST_TABLE_BYTES   = HV_NAME_LEN + 4 + 4;      // name + VSet + ISet
 constexpr int      HV_BST_SNAP_BYTES    = 4 + 4;                    // VMon + IMon
-
-// HVSegment::save() / load() write VMDF v2 itself (same format the recorder
-// produces) — so a saved segment is a valid drop-in for vmon_reader.py and
-// any other VMDF-aware tool, just smaller.
 
 // ── little-endian readers (the recorder writes LE) ───────────────────────
 inline uint16_t rd_u16(const uint8_t *p) {
@@ -130,12 +119,8 @@ private:
 // ── per-file scan result (intermediate; never exposed) ───────────────────
 struct FileChunk {
     int                       interval_ms = 0;
-    int                       n_ch_in_file = 0;
-    int                       n_bst_in_file = 0;
 
-    std::vector<std::string>  all_channels;       // canonical order in this file
     std::vector<std::string>  booster_names;
-    std::vector<int>          col_idx_in_file;    // kept_channels[i] → column in file
     std::vector<std::string>  kept_channels;
 
     std::vector<int64_t>      timestamps_ms;
@@ -143,19 +128,25 @@ struct FileChunk {
     std::vector<ChEvent>      ch_events;
 
     std::vector<int64_t>      booster_timestamps_ms;
-    std::vector<float>        booster_vmon;       // n_bsnap × n_bst_in_file
+    std::vector<float>        booster_vmon;       // n_bsnap × booster_names.size()
     std::vector<float>        booster_imon;
     std::vector<BstEvent>     booster_events;
 };
 
-// Read the canonical channel-name list from a CHTABLE record's data area.
+// (timestamp ms, data offset) of each record of one kind in a mapped file.
+using RecOffsets = std::vector<std::pair<int64_t, std::size_t>>;
+
+// Names from the latest CHTABLE / BOOSTER_TABLE record in `tbls` (per-entry
+// stride `stride`), or "<prefix>0", "<prefix>1", ... when the file has none.
 std::vector<std::string>
-decode_name_table(const uint8_t *p, int n, int stride)
+table_names(const uint8_t *base, const RecOffsets &tbls, int n, int stride,
+            const char *prefix)
 {
     std::vector<std::string> out;
     out.reserve(n);
     for (int i = 0; i < n; ++i)
-        out.push_back(decode_name(p + i * stride));
+        out.push_back(tbls.empty() ? prefix + std::to_string(i)
+                                   : decode_name(base + tbls.back().second + i * stride));
     return out;
 }
 
@@ -171,10 +162,8 @@ inline void project_row(const float *src,
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Parse one VMDF file, keeping only DV/booster records in [t0_ms, t1_ms),
 // projected onto the requested channel filter (empty = keep all).
-// ─────────────────────────────────────────────────────────────────────────
 FileChunk read_window(const std::string &path,
                       int64_t t0_ms, int64_t t1_ms,
                       const std::vector<std::string> &channel_filter)
@@ -205,67 +194,35 @@ FileChunk read_window(const std::string &path,
     const std::size_t bst_snap_size  = 1 + 4 + std::size_t(n_bst) * HV_BST_SNAP_BYTES;
 
     // Pass 1: walk every record, capturing offsets for things we'll keep.
-    std::vector<std::pair<int64_t, std::size_t>> dv_recs;     // (ts_ms, data_off)
-    std::vector<std::pair<int64_t, std::size_t>> bst_recs;
-    std::vector<std::pair<int64_t, std::size_t>> ch_tbls;     // every CHTABLE
-    std::vector<std::pair<int64_t, std::size_t>> bst_tbls;    // every BOOSTER_TABLE
-
-    std::size_t pos = 20;
-    while (pos < size) {
-        uint8_t tag = base[pos];
-        if (tag == HV_TAG_CHTABLE) {
-            if (pos + chtable_size > size) break;
-            uint32_t dt = rd_u32(base + pos + 1);
-            ch_tbls.emplace_back(t0_epoch + int64_t(dt), pos + 5);
-            pos += chtable_size;
-        }
-        else if (tag == HV_TAG_DV) {
-            if (pos + dv_size > size) break;
-            uint32_t dt = rd_u32(base + pos + 1);
-            int64_t  ts = t0_epoch + int64_t(dt);
-            if (ts >= t0_ms && ts < t1_ms)
-                dv_recs.emplace_back(ts, pos + 5);
-            pos += dv_size;
-        }
-        else if (tag == HV_TAG_BOOSTER_TABLE) {
-            if (pos + bst_table_size > size) break;
-            uint32_t dt = rd_u32(base + pos + 1);
-            bst_tbls.emplace_back(t0_epoch + int64_t(dt), pos + 5);
-            pos += bst_table_size;
-        }
-        else if (tag == HV_TAG_BOOSTER) {
-            if (pos + bst_snap_size > size) break;
-            uint32_t dt = rd_u32(base + pos + 1);
-            int64_t  ts = t0_epoch + int64_t(dt);
-            if (ts >= t0_ms && ts < t1_ms)
-                bst_recs.emplace_back(ts, pos + 5);
-            pos += bst_snap_size;
-        }
-        else {
-            // Unknown tag = corruption / EOF; bail without a hard error.
-            break;
-        }
+    RecOffsets dv_recs, bst_recs, ch_tbls, bst_tbls;
+    struct RecKind {
+        uint8_t     tag;
+        std::size_t size;
+        RecOffsets *out;
+        bool        windowed;
+    };
+    const RecKind kinds[] = {
+        {HV_TAG_CHTABLE,       chtable_size,   &ch_tbls,  false},
+        {HV_TAG_DV,            dv_size,        &dv_recs,  true},
+        {HV_TAG_BOOSTER_TABLE, bst_table_size, &bst_tbls, false},
+        {HV_TAG_BOOSTER,       bst_snap_size,  &bst_recs, true},
+    };
+    for (std::size_t pos = 20; pos < size;) {
+        const RecKind *k = nullptr;
+        for (const auto &r : kinds)
+            if (r.tag == base[pos]) { k = &r; break; }
+        // Unknown tag or truncated record = corruption / EOF; bail without
+        // a hard error.
+        if (!k || pos + k->size > size) break;
+        const int64_t ts = t0_epoch + int64_t(rd_u32(base + pos + 1));
+        if (!k->windowed || (ts >= t0_ms && ts < t1_ms))
+            k->out->emplace_back(ts, pos + 5);
+        pos += k->size;
     }
 
     // Resolve channel + booster names from the latest tables.
-    std::vector<std::string> all_channels;
-    if (!ch_tbls.empty())
-        all_channels = decode_name_table(base + ch_tbls.back().second,
-                                         n_ch, HV_CHREC_BYTES);
-    else {
-        all_channels.reserve(n_ch);
-        for (int i = 0; i < n_ch; ++i)
-            all_channels.push_back("ch" + std::to_string(i));
-    }
-    std::vector<std::string> booster_names;
-    if (!bst_tbls.empty())
-        booster_names = decode_name_table(base + bst_tbls.back().second,
-                                          n_bst, HV_BST_TABLE_BYTES);
-    else {
-        booster_names.reserve(n_bst);
-        for (int i = 0; i < n_bst; ++i)
-            booster_names.push_back("bst" + std::to_string(i));
-    }
+    auto all_channels  = table_names(base, ch_tbls,  n_ch,  HV_CHREC_BYTES,     "ch");
+    auto booster_names = table_names(base, bst_tbls, n_bst, HV_BST_TABLE_BYTES, "bst");
 
     // Resolve channel filter to file-local column indices.
     std::vector<int>         col_idx;
@@ -285,11 +242,7 @@ FileChunk read_window(const std::string &path,
 
     FileChunk chunk;
     chunk.interval_ms     = interval;
-    chunk.n_ch_in_file    = n_ch;
-    chunk.n_bst_in_file   = n_bst;
-    chunk.all_channels    = std::move(all_channels);
     chunk.booster_names   = std::move(booster_names);
-    chunk.col_idx_in_file = col_idx;
     chunk.kept_channels   = kept;
 
     // ── Pass 2: copy / project ──────────────────────────────────────────
@@ -303,7 +256,7 @@ FileChunk read_window(const std::string &path,
         const float *row_src = reinterpret_cast<const float *>(
                                    base + dv_recs[i].second);
         float *row_dst = chunk.dv.data() + std::size_t(i) * n_keep_ch;
-        if (n_keep_ch == n_ch) {
+        if (channel_filter.empty()) {
             std::memcpy(row_dst, row_src, std::size_t(n_ch) * 4);
         } else {
             for (int j = 0; j < n_keep_ch; ++j)
@@ -359,9 +312,7 @@ FileChunk read_window(const std::string &path,
     return chunk;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Merge per-file chunks into one segment.
-// ─────────────────────────────────────────────────────────────────────────
 HVSegment merge_chunks(const std::vector<FileChunk> &chunks_in,
                        const std::vector<std::string> &channel_filter)
 {
@@ -383,27 +334,23 @@ HVSegment merge_chunks(const std::vector<FileChunk> &chunks_in,
                   return ta < tb;
               });
 
-    // Canonical channel order.
-    std::vector<std::string> canon;
-    if (!channel_filter.empty()) {
-        canon = channel_filter;
-    } else {
+    // Union of a per-chunk name list across chunks, in first-seen order.
+    auto union_names = [&](std::vector<std::string> FileChunk::*names) {
+        std::vector<std::string> out;
         std::set<std::string> seen;
         for (const auto *c : chunks)
-            for (const auto &n : c->kept_channels)
-                if (seen.insert(n).second) canon.push_back(n);
-    }
+            for (const auto &n : c->*names)
+                if (seen.insert(n).second) out.push_back(n);
+        return out;
+    };
+
+    // Canonical channel order.
+    const std::vector<std::string> canon =
+        channel_filter.empty() ? union_names(&FileChunk::kept_channels) : channel_filter;
     seg.channels = canon;
     const int n_canon = int(canon.size());
 
-    // Booster canonical order = union (preserving first-seen).
-    std::vector<std::string> bst_canon;
-    {
-        std::set<std::string> seen;
-        for (const auto *c : chunks)
-            for (const auto &n : c->booster_names)
-                if (seen.insert(n).second) bst_canon.push_back(n);
-    }
+    const std::vector<std::string> bst_canon = union_names(&FileChunk::booster_names);
     seg.booster_names = bst_canon;
     const int n_bcanon = int(bst_canon.size());
 
@@ -493,65 +440,38 @@ HVSegment merge_chunks(const std::vector<FileChunk> &chunks_in,
     }
 
     // Sort each block by timestamp (handles overlapping daily files).
-    auto reorder_2d = [](std::vector<float> &flat,
-                         std::size_t n_rows, std::size_t row_stride,
-                         const std::vector<std::size_t> &order)
+    // sort_rows stably sorts `ts` and permutes the matching rows (row
+    // stride `stride`) of every matrix in `mats` alongside it.
+    auto sort_rows = [](std::vector<int64_t> &ts, std::size_t stride,
+                        std::initializer_list<std::vector<float> *> mats)
     {
-        std::vector<float> tmp(flat.size());
-        for (std::size_t i = 0; i < n_rows; ++i) {
-            const float *src = flat.data() + order[i] * row_stride;
-            float       *dst = tmp.data()  + i        * row_stride;
-            std::memcpy(dst, src, row_stride * sizeof(float));
+        std::vector<std::size_t> order(ts.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return ts[a] < ts[b]; });
+        std::vector<int64_t> ts_sorted(order.size());
+        for (std::size_t i = 0; i < order.size(); ++i)
+            ts_sorted[i] = ts[order[i]];
+        ts = std::move(ts_sorted);
+        for (auto *flat : mats) {
+            std::vector<float> tmp(flat->size());
+            for (std::size_t i = 0; i < order.size(); ++i)
+                std::memcpy(tmp.data() + i * stride, flat->data() + order[i] * stride,
+                            stride * sizeof(float));
+            *flat = std::move(tmp);
         }
-        flat = std::move(tmp);
     };
+    auto by_ts = [](const auto &a, const auto &b) { return a.abs_ts_ms < b.abs_ts_ms; };
 
-    if (!seg.timestamps_ms.empty()) {
-        std::vector<std::size_t> order(seg.timestamps_ms.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::stable_sort(order.begin(), order.end(),
-                         [&](std::size_t a, std::size_t b) {
-                             return seg.timestamps_ms[a] < seg.timestamps_ms[b];
-                         });
-        std::vector<int64_t> ts_sorted(order.size());
-        for (std::size_t i = 0; i < order.size(); ++i)
-            ts_sorted[i] = seg.timestamps_ms[order[i]];
-        seg.timestamps_ms = std::move(ts_sorted);
-        reorder_2d(seg.dv, order.size(), n_canon, order);
-    }
-    if (!seg.ch_events.empty()) {
-        std::stable_sort(seg.ch_events.begin(), seg.ch_events.end(),
-                         [](const ChEvent &a, const ChEvent &b) {
-                             return a.abs_ts_ms < b.abs_ts_ms;
-                         });
-    }
-    if (!seg.booster_timestamps_ms.empty()) {
-        std::vector<std::size_t> order(seg.booster_timestamps_ms.size());
-        std::iota(order.begin(), order.end(), 0);
-        std::stable_sort(order.begin(), order.end(),
-                         [&](std::size_t a, std::size_t b) {
-                             return seg.booster_timestamps_ms[a]
-                                  < seg.booster_timestamps_ms[b];
-                         });
-        std::vector<int64_t> ts_sorted(order.size());
-        for (std::size_t i = 0; i < order.size(); ++i)
-            ts_sorted[i] = seg.booster_timestamps_ms[order[i]];
-        seg.booster_timestamps_ms = std::move(ts_sorted);
-        reorder_2d(seg.booster_vmon, order.size(), n_bcanon, order);
-        reorder_2d(seg.booster_imon, order.size(), n_bcanon, order);
-    }
-    if (!seg.booster_events.empty()) {
-        std::stable_sort(seg.booster_events.begin(), seg.booster_events.end(),
-                         [](const BstEvent &a, const BstEvent &b) {
-                             return a.abs_ts_ms < b.abs_ts_ms;
-                         });
-    }
+    sort_rows(seg.timestamps_ms, n_canon, {&seg.dv});
+    std::stable_sort(seg.ch_events.begin(), seg.ch_events.end(), by_ts);
+    sort_rows(seg.booster_timestamps_ms, n_bcanon,
+              {&seg.booster_vmon, &seg.booster_imon});
+    std::stable_sort(seg.booster_events.begin(), seg.booster_events.end(), by_ts);
     return seg;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
 // Centered rolling population-std with NaN-aware count.
-// ─────────────────────────────────────────────────────────────────────────
 std::vector<float> rolling_std(const std::vector<float> &x, int win)
 {
     const int n = int(x.size());
@@ -600,9 +520,17 @@ int pick_index(const std::vector<int64_t> &ts, int64_t ut_ms, Side side)
     return (d_prev <= d_next) ? (j - 1) : j;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// VMDF v2 writer helpers (used by HVSegment::save).
-// ─────────────────────────────────────────────────────────────────────────
+// Latest CHTABLE / BOOSTER_TABLE event at or before ts_ms (events sorted by
+// abs_ts_ms); the first one when ts_ms precedes them all.  evs is non-empty.
+template <class Ev>
+const Ev &latest_at_or_before(const std::vector<Ev> &evs, int64_t ts_ms)
+{
+    auto it = std::upper_bound(evs.begin(), evs.end(), ts_ms,
+                               [](int64_t t, const Ev &e) { return t < e.abs_ts_ms; });
+    return (it == evs.begin()) ? evs.front() : *(it - 1);
+}
+
+// ── VMDF v2 writer helpers (used by HVSegment::save) ────────────────────
 template <class T>
 inline void write_pod(std::ostream &os, const T &v)
 {
@@ -621,9 +549,7 @@ inline void write_name(std::ostream &os, const std::string &name)
     os.write(buf, HV_NAME_LEN);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Filename helpers (vmon_YYYYMMDD.dat date pruning).
-// ─────────────────────────────────────────────────────────────────────────
+// ── Filename helpers (vmon_YYYYMMDD.dat date pruning) ───────────────────
 const std::regex &filename_re()
 {
     static const std::regex re(R"(^vmon_(\d{8})\.dat$)",
@@ -658,10 +584,7 @@ int compare_filename_date(int fy, int fm, int fd, int64_t unix_ms)
 
 } // namespace
 
-
-// =========================================================================
-// HVSegment members
-// =========================================================================
+// === HVSegment members ===================================================
 
 int HVSegment::channel_index(const std::string &name) const
 {
@@ -683,19 +606,8 @@ std::vector<float> HVSegment::v0set_trace(int ch_idx) const
         ch_idx < 0 || ch_idx >= n_channels())
         return out;
 
-    std::vector<int64_t> ev_ts;
-    ev_ts.reserve(ch_events.size());
-    for (const auto &ev : ch_events) ev_ts.push_back(ev.abs_ts_ms);
-
-    for (int i = 0; i < n; ++i) {
-        // searchsorted(ts, side=right) - 1
-        auto it = std::upper_bound(ev_ts.begin(), ev_ts.end(),
-                                   timestamps_ms[i]);
-        int idx = int(it - ev_ts.begin()) - 1;
-        if (idx < 0) idx = 0;
-        if (idx >= int(ev_ts.size())) idx = int(ev_ts.size()) - 1;
-        out[i] = ch_events[idx].v0sets[ch_idx];
-    }
+    for (int i = 0; i < n; ++i)
+        out[i] = latest_at_or_before(ch_events, timestamps_ms[i]).v0sets[ch_idx];
     return out;
 }
 
@@ -721,17 +633,8 @@ LookupResult HVSegment::value_at(const std::string &name,
         } else if (kind == Kind::V0Set || kind == Kind::VMon) {
             // Look up V0Set at this snapshot's time via ch_events.
             float v0 = std::numeric_limits<float>::quiet_NaN();
-            if (!ch_events.empty()) {
-                int64_t ts = timestamps_ms[j];
-                int lo = 0, hi = int(ch_events.size()) - 1, k = 0;
-                // upper_bound + step back
-                while (lo <= hi) {
-                    int m = (lo + hi) / 2;
-                    if (ch_events[m].abs_ts_ms <= ts) { k = m; lo = m + 1; }
-                    else { hi = m - 1; }
-                }
-                v0 = ch_events[k].v0sets[hv_i];
-            }
+            if (!ch_events.empty())
+                v0 = latest_at_or_before(ch_events, timestamps_ms[j]).v0sets[hv_i];
             if (kind == Kind::V0Set) val = v0;
             else                     val = dv_v + v0;
         } else {
@@ -752,15 +655,9 @@ LookupResult HVSegment::value_at(const std::string &name,
     else if (kind == Kind::BoosterIMon) val = booster_imon[std::size_t(j) * n_b + b_i];
     else if (kind == Kind::BoosterVSet || kind == Kind::BoosterISet) {
         if (!booster_events.empty()) {
-            int64_t ts = booster_timestamps_ms[j];
-            int lo = 0, hi = int(booster_events.size()) - 1, k = 0;
-            while (lo <= hi) {
-                int m = (lo + hi) / 2;
-                if (booster_events[m].abs_ts_ms <= ts) { k = m; lo = m + 1; }
-                else { hi = m - 1; }
-            }
-            val = (kind == Kind::BoosterVSet) ? booster_events[k].vsets[b_i]
-                                              : booster_events[k].isets[b_i];
+            const BstEvent &ev =
+                latest_at_or_before(booster_events, booster_timestamps_ms[j]);
+            val = (kind == Kind::BoosterVSet) ? ev.vsets[b_i] : ev.isets[b_i];
         }
     } else {
         return miss; // HV kind on booster
@@ -884,29 +781,11 @@ HVSegment::find_stable_intervals(const std::vector<std::string> &cn_check,
     return out;
 }
 
-// =========================================================================
-// VMDF v2 export — write the segment as a real VMDF file.
-//
-// What goes where:
-//   * 20-byte header: magic "VMD2", version=2, n_channels (= projected
-//     count), interval_ms, n_boosters, t0_epoch_ms (chosen as the
-//     minimum across all kept records so every record's dt fits in
-//     uint32 ms — VMDF's record timestamps are int64-equivalent only
-//     via t0+dt).  The format itself does NOT carry an explicit
-//     snapshot count — readers walk records to count them.
-//   * One CHTABLE per ChEvent.  Each CHTABLE carries the projected
-//     channel names + V0Set vector.  When the segment is empty of
-//     CHTABLEs (no source CHTABLE was kept) we synthesize one at t0
-//     so the reader still gets channel names; V0Set is then NaN.
-//   * One DV record per snapshot, with float32 dV per kept channel.
-//   * One BOOSTER_TABLE per BstEvent (synth at t0 if empty), one
-//     BOOSTER record per booster snapshot.
-//
-// Records are written in chronological order with stable sort, so a
-// CHTABLE update at the same instant as a DV gets emitted first (matches
-// the recorder's own convention and lets the reader's `names` reflect
-// the new V0Set before the DV is consumed).
-// =========================================================================
+// VMDF v2 export: 20-byte header (magic "VMD2", version=2, n_channels,
+// interval_ms, n_boosters, t0_epoch_ms), then one CHTABLE per ChEvent, one
+// BOOSTER_TABLE per BstEvent, one DV record per snapshot and one BOOSTER
+// record per booster snapshot.  The format carries no explicit snapshot
+// count — readers walk records to count them.
 void HVSegment::save(const std::string &path) const
 {
     if (n_channels() == 0 && n_boosters() == 0)
@@ -960,8 +839,8 @@ void HVSegment::save(const std::string &path) const
 
     // Build a chronologically-sorted record list.  Stable sort on
     // (ts, type) puts CHTABLE/BOOSTER_TABLE before DV/BOOSTER at the same
-    // instant — ensures the reader's `names` is current when the DV
-    // arrives.
+    // instant (the recorder's own convention) — ensures the reader's
+    // `names` is current when the DV arrives.
     enum class Rec : uint8_t {
         ChTable    = 0,
         BstTable   = 1,
@@ -1047,13 +926,6 @@ void HVSegment::save(const std::string &path) const
     if (!os) throw std::runtime_error("HVSegment::save: write failed " + path);
 }
 
-// =========================================================================
-// VMDF v2 load — return a segment populated from the entire file.
-//
-// load_window already does the heavy lifting (mmap, walk records, project
-// columns, merge across files).  Here we just route a single-file path
-// through it with an unbounded time window and no channel filter.
-// =========================================================================
 HVSegment HVSegment::load(const std::string &path)
 {
     if (!std::filesystem::exists(path))
@@ -1067,10 +939,7 @@ HVSegment HVSegment::load(const std::string &path)
     return seg;
 }
 
-
-// =========================================================================
-// HVDecoder members
-// =========================================================================
+// === HVDecoder members ===================================================
 
 HVDecoder::HVDecoder(const std::string &source)
     : files_(discover_files(source))

@@ -2,7 +2,7 @@
 // prad2_server — CLI entry point for PRad-II event viewer/monitor server
 //
 // Usage:
-//   prad2_server [evio_file] [-p port] [-H]
+//   prad2_server [evio_file] [-p port] [-H] [-i] [-f filter.json]
 //                [-c monitor_config.json] [-r reconstruction_config.json]
 //                [-D daq_config.json] [-d data_dir] [--et]
 //
@@ -22,9 +22,6 @@
 #include <cstdlib>
 #include <getopt.h>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 #ifndef RESOURCE_DIR
 #define RESOURCE_DIR "."
 #endif
@@ -37,10 +34,7 @@ int main(int argc, char *argv[])
     // Runtime resolution: env var → <exe_dir>/../share/… → compile-time
     // fallback.  Makes installed binaries relocatable without requiring a
     // sourced prad2_setup.sh.
-    cfg.database_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    cfg.database_dir = prad2::database_dir();
     cfg.resource_dir = prad2::resolve_data_dir(
         "PRAD2_RESOURCE_DIR",
         {"../share/prad2evviewer/resources"},

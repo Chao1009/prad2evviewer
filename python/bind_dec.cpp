@@ -1,25 +1,24 @@
 // bind_dec.cpp — pybind11 bindings for prad2dec (prad2py.dec submodule)
 //
 // Exposes:
-//   prad2py.dec.EventType            (enum)
-//   prad2py.dec.Status               (enum)
-//   prad2py.dec.DaqConfig            (config struct)
-//   prad2py.dec.EventInfo            (per-event metadata)
+//   prad2py.dec.EventType / Status                            (enums)
+//   prad2py.dec.DaqConfig / RocEntry, load_daq_config(path)   (config)
+//   prad2py.dec.EventInfo / SyncInfo                          (per-event metadata)
 //   prad2py.dec.ChannelData / SlotData / RocData / EventData  (fdec)
+//   prad2py.dec.WaveAnalyzer / WaveConfig / PulseTemplateStore / ...  (soft analyzer)
+//   prad2py.dec.Fadc250FwAnalyzer / Fadc250FwConfig / DaqPeak (firmware emulation)
 //   prad2py.dec.ApvAddress / ApvData / MpdData / SspEventData (ssp)
 //   prad2py.dec.EcPeak / EcCluster / PradCluster / VtpBlock / VtpEventData  (vtp)
-//   prad2py.dec.TdcHit / TdcEventData                         (tdc)
-//   prad2py.dec.SyncInfo                                      (sync)
+//   prad2py.dec.TdcHit / TdcEventData / RfTimeData            (tdc)
 //   prad2py.dec.EpicsStore / EpicsSnapshot                    (slow control)
-//   prad2py.dec.EvChannel            (evio reader)
-//   prad2py.dec.load_daq_config(path) -> DaqConfig
+//   prad2py.dec.HVDecoder / HVSegment / ...                   (HV archive)
+//   prad2py.dec.EvChannel                                     (evio reader)
 //
 // The bulk per-channel arrays (ChannelData.samples, ApvData.strips, etc.)
-// are returned as numpy arrays — copies by default so the buffer stays
-// valid after the next DecodeEvent call.
+// are returned as numpy copies, so they stay valid after the next decode.
 
-#include <pybind11/pybind11.h>
-#include <pybind11/numpy.h>
+#include "bind_common.h"
+
 #include <pybind11/stl.h>
 
 #include "EvChannel.h"
@@ -31,63 +30,58 @@
 #include "Fadc250FwAnalyzer.h"
 #include "SspData.h"
 #include "VtpData.h"
+#include "VtpDecoder.h"
 #include "TdcData.h"
 #include "TdcDecoder.h"
 #include "SyncData.h"
 #include "EpicsStore.h"
 #include "HVDecoder.h"
 
-#include <cstdlib>
 #include <memory>
 #include <string>
 
-#include "InstallPaths.h"
-
-namespace py = pybind11;
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 namespace {
 
-std::string default_daq_config_path()
+// 1-D uint16 sample input.  c_style makes pybind11 copy strided views
+// (arr[::2], arr2d[:, k]) into contiguous memory before the raw pointer is
+// read.
+using U16Array = py::array_t<uint16_t, py::array::c_style | py::array::forcecast>;
+
+struct U16Span { const uint16_t *p; int n; };
+
+U16Span u16_span(const U16Array &a, const char *what = "samples")
 {
-    // Same lookup policy as prad2py.cpp's copy (these two TUs each have
-    // a `load_daq_config("")` overload that needs the default path).
-    std::string dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../../share/prad2evviewer/database",
-         "../share/prad2evviewer/database"},
-        DATABASE_DIR);
-    return dir + "/daq_config.json";
+    if (a.ndim() != 1)
+        throw py::value_error(std::string(what) + " must be a 1-D uint16 array");
+    return {a.data(), static_cast<int>(a.shape(0))};
 }
 
-// -------------------------------------------------------------------------
-// FADC250 data types (fdec::)
-// -------------------------------------------------------------------------
+fdec::WaveResult run_analyze(const fdec::WaveAnalyzer &self, const U16Array &samples)
+{
+    const U16Span s = u16_span(samples);
+    fdec::WaveResult res;
+    py::gil_scoped_release rel;
+    self.Analyze(s.p, s.n, res);
+    return res;
+}
+
+template <class R, R (*Fit)(const uint16_t *, int, int, float, float, float, float)>
+R fit_slice(const U16Array &slice, int peak_idx, float ped, float ped_rms,
+            float clk_ns, float model_err_floor)
+{
+    const U16Span s = u16_span(slice, "slice");
+    py::gil_scoped_release rel;
+    return Fit(s.p, s.n, peak_idx, ped, ped_rms, clk_ns, model_err_floor);
+}
+
+// ---- FADC250 data types (fdec::) ----------------------------------------
 void bind_fadc(py::module_ &m)
 {
-    // ChannelData — bulk samples are exposed as a numpy view over the
-    // first `nsamples` elements.  The buffer belongs to the owning event,
-    // so callers must copy (default) to keep data across DecodeEvent calls.
     py::class_<fdec::ChannelData>(m, "ChannelData",
         "Per-channel FADC250 samples (nsamples uint16 values).")
         .def_readonly("nsamples", &fdec::ChannelData::nsamples)
         .def_property_readonly("samples",
-            [](const fdec::ChannelData &c) {
-                // Always copy — the owning EventData may be reused/overwritten.
-                // Explicit copy: allocate a fresh numpy array with no base
-                // pointer, then std::copy_n into it.  The (shape,strides,ptr)
-                // constructor without a base is interpreted by pybind11 as
-                // "wrap this pointer", which silently corrupts memory when the
-                // C++ object is freed (we hit this exact bug — accessing
-                // .samples poisoned unrelated SspEventData buffers stored
-                // alongside).  Allocating-then-copying is unambiguously safe.
-                py::array_t<uint16_t> arr(c.nsamples);
-                std::copy_n(c.samples, c.nsamples, arr.mutable_data());
-                return arr;
-            },
+            [](const fdec::ChannelData &c) { return to_numpy(c.samples, c.nsamples); },
             "16-bit ADC samples as a fresh numpy array (copy of nsamples values).");
 
     py::class_<fdec::SlotData>(m, "SlotData",
@@ -99,9 +93,7 @@ void bind_fadc(py::module_ &m)
         .def_readonly("channel_mask", &fdec::SlotData::channel_mask)
         .def("channel",
             [](const fdec::SlotData &s, int ch) -> const fdec::ChannelData& {
-                if (ch < 0 || ch >= fdec::MAX_CHANNELS)
-                    throw py::index_error("channel out of range");
-                return s.channels[ch];
+                return s.channels[checked_index(ch, fdec::MAX_CHANNELS, "channel out of range")];
             },
             py::arg("channel"),
             py::return_value_policy::reference_internal,
@@ -123,9 +115,7 @@ void bind_fadc(py::module_ &m)
         .def_readonly("nslots",  &fdec::RocData::nslots)
         .def("slot",
             [](const fdec::RocData &r, int sl) -> const fdec::SlotData& {
-                if (sl < 0 || sl >= fdec::MAX_SLOTS)
-                    throw py::index_error("slot out of range");
-                return r.slots[sl];
+                return r.slots[checked_index(sl, fdec::MAX_SLOTS, "slot out of range")];
             },
             py::arg("slot"),
             py::return_value_policy::reference_internal)
@@ -184,9 +174,7 @@ void bind_fadc(py::module_ &m)
         .def_readonly("nrocs",  &fdec::EventData::nrocs)
         .def("roc",
             [](const fdec::EventData &e, int i) -> const fdec::RocData& {
-                if (i < 0 || i >= e.nrocs)
-                    throw py::index_error("ROC index out of range");
-                return e.rocs[e.roc_index[i]];
+                return e.rocs[e.roc_index[checked_index(i, e.nrocs, "ROC index out of range")]];
             },
             py::arg("index"),
             py::return_value_policy::reference_internal,
@@ -205,7 +193,7 @@ void bind_fadc(py::module_ &m)
         "One FADC pulse found by WaveAnalyzer.\n\n"
         "  left / right — INCLUSIVE integration bounds (both samples are in `integral`)\n"
         "  pos          — raw-sample maximum near the smoothed peak\n"
-        "  quality      — Q_PEAK_* bitmask (currently just Q_PEAK_PILED)")
+        "  quality      — Q_PEAK_* bitmask (Q_PEAK_PILED, Q_PEAK_DECONVOLVED)")
         .def(py::init<>())
         .def_readwrite("height",   &fdec::Peak::height)
         .def_readwrite("integral", &fdec::Peak::integral)
@@ -260,10 +248,9 @@ void bind_fadc(py::module_ &m)
              "Load per-type templates from the JSON's `_by_type` block "
              "and the (roc_tag, slot, channel) → module_type lookup from "
              "the per-channel records.  wave_cfg's `nnls_deconv` τ-range "
-             "gates are applied to each per-type entry; `clk_mhz` sets "
-             "the precomputed grid period.  Returns False on file-not-"
-             "found / parse error / empty contents (caller falls back to "
-             "non-deconv mode).")
+             "gates are applied to each per-type entry.  Returns False on "
+             "file-not-found / parse error / empty contents (caller falls "
+             "back to non-deconv mode).")
         .def("lookup",
              [](const fdec::PulseTemplateStore &self,
                 int roc_tag, int slot, int channel) -> py::object {
@@ -313,6 +300,8 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("ped_max_iter",   &fdec::WaveConfig::ped_max_iter)
         .def_readwrite("overflow",       &fdec::WaveConfig::overflow)
         .def_readwrite("clk_mhz",        &fdec::WaveConfig::clk_mhz)
+        .def_property_readonly("clk_ns", &fdec::WaveConfig::clk_ns,
+             "Sample period in ns (1000/clk_mhz; 4 when clk_mhz <= 0).")
         .def_readwrite("nnls_deconv",    &fdec::WaveConfig::nnls_deconv);
 
     py::class_<fdec::PulseTemplate>(m, "PulseTemplate",
@@ -365,9 +354,7 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("ped",    &fdec::WaveResult::ped)
         .def_readonly("npeaks",  &fdec::WaveResult::npeaks)
         .def_property_readonly("peaks", [](const fdec::WaveResult &self) {
-            py::list out;
-            for (int i = 0; i < self.npeaks; ++i) out.append(self.peaks[i]);
-            return out;
+            return list_of(self.peaks, self.npeaks);
         });
 
     py::class_<fdec::DeconvOutput>(m, "DeconvOutput",
@@ -405,20 +392,9 @@ void bind_fadc(py::module_ &m)
              py::arg("cfg") = fdec::WaveConfig{})
         .def_readwrite("cfg", &fdec::WaveAnalyzer::cfg)
         .def("analyze",
-            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                fdec::WaveResult res;
-                {
-                    py::gil_scoped_release rel;
-                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
-                                 static_cast<int>(buf.shape[0]), res);
-                }
-                py::list peaks;
-                for (int i = 0; i < res.npeaks; ++i)
-                    peaks.append(res.peaks[i]);
-                return py::make_tuple(res.ped.mean, res.ped.rms, peaks);
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
+                const fdec::WaveResult r = run_analyze(self, samples);
+                return py::make_tuple(r.ped.mean, r.ped.rms, list_of(r.peaks, r.npeaks));
             },
             py::arg("samples"),
             "Analyze one channel's FADC waveform (uint16 numpy array). "
@@ -426,20 +402,9 @@ void bind_fadc(py::module_ &m)
             "above ``max(cfg.peak_nsigma × ped.rms, cfg.min_peak_height)`` "
             "are kept; up to ``MAX_PEAKS`` per call.")
         .def("analyze_full",
-            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                fdec::WaveResult res;
-                {
-                    py::gil_scoped_release rel;
-                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
-                                 static_cast<int>(buf.shape[0]), res);
-                }
-                py::list peaks;
-                for (int i = 0; i < res.npeaks; ++i)
-                    peaks.append(res.peaks[i]);
-                return py::make_tuple(res.ped, peaks);
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
+                const fdec::WaveResult r = run_analyze(self, samples);
+                return py::make_tuple(r.ped, list_of(r.peaks, r.npeaks));
             },
             py::arg("samples"),
             "Like analyze() but returns the full (Pedestal, [Peak, ...]) "
@@ -447,18 +412,15 @@ void bind_fadc(py::module_ &m)
             "exposes its quality bitmask.  Use this when documenting the "
             "analyzer or when downstream code needs the quality flags.")
         .def("smooth",
-            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                const int n = static_cast<int>(buf.shape[0]);
-                if (n > fdec::MAX_SAMPLES)
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
+                const U16Span s = u16_span(samples);
+                if (s.n > fdec::MAX_SAMPLES)
                     throw py::value_error("samples length exceeds MAX_SAMPLES");
-                py::array_t<float> out(n);
+                py::array_t<float> out(s.n);
+                float *dst = out.mutable_data();
                 {
                     py::gil_scoped_release rel;
-                    self.smooth(static_cast<const uint16_t*>(buf.ptr), n,
-                                static_cast<float*>(out.request().ptr));
+                    self.smooth(s.p, s.n, dst);
                 }
                 return out;
             },
@@ -468,23 +430,8 @@ void bind_fadc(py::module_ &m)
             "numpy array — useful for plotting the curve the peak finder "
             "actually sees.")
         .def_static("fit_pulse_shape",
-            [](py::array_t<uint16_t> slice, int peak_idx,
-               float ped, float ped_rms, float clk_ns,
-               float model_err_floor) {
-                py::buffer_info buf = slice.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("slice must be a 1-D uint16 array");
-                fdec::WaveAnalyzer::PulseFitResult res;
-                {
-                    py::gil_scoped_release rel;
-                    res = fdec::WaveAnalyzer::FitPulseShape(
-                        static_cast<const uint16_t*>(buf.ptr),
-                        static_cast<int>(buf.shape[0]),
-                        peak_idx, ped, ped_rms, clk_ns,
-                        model_err_floor);
-                }
-                return res;
-            },
+            &fit_slice<fdec::WaveAnalyzer::PulseFitResult,
+                       &fdec::WaveAnalyzer::FitPulseShape>,
             py::arg("slice"), py::arg("peak_idx"),
             py::arg("ped"), py::arg("ped_rms"), py::arg("clk_ns"),
             py::arg("model_err_floor") = 0.01f,
@@ -497,23 +444,8 @@ void bind_fadc(py::module_ &m)
             "WaveAnalyzer pass that produced the peak.  Returns a "
             "PulseFitResult; check `.ok` before reading the params.")
         .def_static("fit_pulse_shape_two_tau_p",
-            [](py::array_t<uint16_t> slice, int peak_idx,
-               float ped, float ped_rms, float clk_ns,
-               float model_err_floor) {
-                py::buffer_info buf = slice.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("slice must be a 1-D uint16 array");
-                fdec::WaveAnalyzer::PulseFitTwoTauPResult res;
-                {
-                    py::gil_scoped_release rel;
-                    res = fdec::WaveAnalyzer::FitPulseShapeTwoTauP(
-                        static_cast<const uint16_t*>(buf.ptr),
-                        static_cast<int>(buf.shape[0]),
-                        peak_idx, ped, ped_rms, clk_ns,
-                        model_err_floor);
-                }
-                return res;
-            },
+            &fit_slice<fdec::WaveAnalyzer::PulseFitTwoTauPResult,
+                       &fdec::WaveAnalyzer::FitPulseShapeTwoTauP>,
             py::arg("slice"), py::arg("peak_idx"),
             py::arg("ped"), py::arg("ped_rms"), py::arg("clk_ns"),
             py::arg("model_err_floor") = 0.01f,
@@ -539,38 +471,18 @@ void bind_fadc(py::module_ &m)
             "for, so the bound PulseTemplateStore can look up the right "
             "template.  Pass any negative value to disable deconv.")
         .def("clear_channel_key", &fdec::WaveAnalyzer::ClearChannelKey)
-        .def("analyze_result",
-            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                fdec::WaveResult res;
-                {
-                    py::gil_scoped_release rel;
-                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
-                                 static_cast<int>(buf.shape[0]), res);
-                }
-                return res;
-            },
+        .def("analyze_result", &run_analyze,
             py::arg("samples"),
             "Like analyze() but returns the full WaveResult object — pass "
             "this back to deconvolve() so the deconvolver sees the same "
             "pedestal and peak set the analyzer found.")
         .def("deconvolve",
-            [](const fdec::WaveAnalyzer &self,
-               py::array_t<uint16_t> samples,
-               const fdec::WaveResult &wres,
-               const fdec::PulseTemplate &tmpl) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples,
+               const fdec::WaveResult &wres, const fdec::PulseTemplate &tmpl) {
+                const U16Span s = u16_span(samples);
                 fdec::DeconvOutput out;
-                {
-                    py::gil_scoped_release rel;
-                    self.Deconvolve(static_cast<const uint16_t*>(buf.ptr),
-                                    static_cast<int>(buf.shape[0]),
-                                    wres, tmpl, out);
-                }
+                py::gil_scoped_release rel;
+                self.Deconvolve(s.p, s.n, wres, tmpl, out);
                 return out;
             },
             py::arg("samples"), py::arg("wres"), py::arg("template_"),
@@ -590,8 +502,7 @@ void bind_fadc(py::module_ &m)
     m.attr("Q_DAQ_NSA_TRUNCATED")    = py::int_(fdec::Q_DAQ_NSA_TRUNCATED);
     m.attr("Q_DAQ_VA_OUT_OF_RANGE")  = py::int_(fdec::Q_DAQ_VA_OUT_OF_RANGE);
 
-    // Soft-analyzer peak quality bitmask — currently just the pile-up
-    // flag.  Both peaks in a piled-up pair get the bit set.
+    // Soft-analyzer peak quality bitmask (see Fadc250Data.h).
     m.attr("Q_PEAK_GOOD")            = py::int_(fdec::Q_PEAK_GOOD);
     m.attr("Q_PEAK_PILED")           = py::int_(fdec::Q_PEAK_PILED);
     m.attr("Q_PEAK_DECONVOLVED")     = py::int_(fdec::Q_PEAK_DECONVOLVED);
@@ -648,6 +559,17 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("MAXPED",     &evc::DaqConfig::Fadc250FwConfig::MAXPED)
         .def_readwrite("CLK_NS",     &evc::DaqConfig::Fadc250FwConfig::CLK_NS);
 
+    auto fw_analyze = [](const fdec::Fadc250FwAnalyzer &self,
+                         const U16Array &samples, float ped) {
+        const U16Span s = u16_span(samples);
+        fdec::DaqWaveResult res;
+        {
+            py::gil_scoped_release rel;
+            self.Analyze(s.p, s.n, ped, res);
+        }
+        return py::make_tuple(res.vnoise, list_of(res.peaks, res.npeaks));
+    };
+
     py::class_<fdec::Fadc250FwAnalyzer>(m, "Fadc250FwAnalyzer",
         "Firmware-faithful FADC250 Mode 1/2/3 emulator.  Mirrors the on-board "
         "TDC + pulse-windowing exactly (per FADC250 User's Manual).  Use this "
@@ -656,55 +578,19 @@ void bind_fadc(py::module_ &m)
         .def(py::init<const evc::DaqConfig::Fadc250FwConfig &>(),
              py::arg("cfg") = evc::DaqConfig::Fadc250FwConfig{})
         .def_readwrite("cfg", &fdec::Fadc250FwAnalyzer::cfg)
-        .def("analyze",
-            [](const fdec::Fadc250FwAnalyzer &self,
-               py::array_t<uint16_t> samples, float ped) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                fdec::DaqWaveResult res;
-                {
-                    py::gil_scoped_release rel;
-                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
-                                 static_cast<int>(buf.shape[0]), ped, res);
-                }
-                py::list peaks;
-                for (int i = 0; i < res.npeaks; ++i)
-                    peaks.append(res.peaks[i]);
-                return py::make_tuple(res.vnoise, peaks);
-            },
+        .def("analyze", fw_analyze,
             py::arg("samples"), py::arg("ped"),
             "Run firmware Mode 3 (TDC) → Mode 1 + Mode 2 windowing on a "
             "uint16 sample array.  Returns (vnoise, [DaqPeak, ...]).  ``ped`` "
             "is the per-channel pedestal (firmware register or soft-analyzer "
             "estimate); samples have not been pedestal-subtracted.")
-        .def("analyze_full",
-            [](const fdec::Fadc250FwAnalyzer &self,
-               py::array_t<uint16_t> samples, float ped) {
-                py::buffer_info buf = samples.request();
-                if (buf.ndim != 1)
-                    throw py::value_error("samples must be a 1-D uint16 array");
-                fdec::DaqWaveResult res;
-                {
-                    py::gil_scoped_release rel;
-                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
-                                 static_cast<int>(buf.shape[0]), ped, res);
-                }
-                py::list peaks;
-                for (int i = 0; i < res.npeaks; ++i)
-                    peaks.append(res.peaks[i]);
-                return py::make_tuple(res.vnoise, peaks);
-            },
+        .def("analyze_full", fw_analyze,
             py::arg("samples"), py::arg("ped"),
-            "Same return shape as analyze() — provided for parity with "
-            "WaveAnalyzer.analyze_full().  DaqPeak already exposes every "
-            "field including quality, so there's no extra info to surface "
-            "here today.");
+            "Alias of analyze(), kept for parity with "
+            "WaveAnalyzer.analyze_full().");
 }
 
-// -------------------------------------------------------------------------
-// SSP / MPD / APV (ssp::)
-// -------------------------------------------------------------------------
+// ---- SSP / MPD / APV (ssp::) --------------------------------------------
 void bind_ssp(py::module_ &m)
 {
     py::class_<ssp::ApvAddress>(m, "ApvAddress",
@@ -728,27 +614,16 @@ void bind_ssp(py::module_ &m)
         .def_readonly("nstrips",       &ssp::ApvData::nstrips)
         .def_readonly("flags",         &ssp::ApvData::flags)
         .def_readonly("has_online_cm", &ssp::ApvData::has_online_cm)
+        .def_property_readonly("full_readout", &ssp::ApvData::isFullReadout,
+            "True when the firmware sent all 128 strips (no online zero suppression).")
         .def_property_readonly("strips",
             [](const ssp::ApvData &a) {
-                // [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 — explicit
-                // allocate-then-copy.  The 3-arg array_t(shape,strides,ptr)
-                // constructor has ambiguous ownership and was observed to
-                // poison unrelated buffers (see ChannelData.samples note).
-                py::array_t<int16_t> arr({
-                    static_cast<py::ssize_t>(ssp::APV_STRIP_SIZE),
-                    static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)});
-                std::copy_n(&a.strips[0][0],
-                            ssp::APV_STRIP_SIZE * ssp::SSP_TIME_SAMPLES,
-                            arr.mutable_data());
-                return arr;
+                return to_numpy2d(&a.strips[0][0], ssp::APV_STRIP_SIZE,
+                                  ssp::SSP_TIME_SAMPLES);
             },
             "(128, 6) int16 numpy array of raw ADC samples (fresh copy).")
         .def_property_readonly("online_cm",
-            [](const ssp::ApvData &a) {
-                py::array_t<int16_t> arr(static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES));
-                std::copy_n(a.online_cm, ssp::SSP_TIME_SAMPLES, arr.mutable_data());
-                return arr;
-            },
+            [](const ssp::ApvData &a) { return to_numpy(a.online_cm, ssp::SSP_TIME_SAMPLES); },
             "6-element online common-mode values (fresh copy).")
         .def("has_strip", &ssp::ApvData::hasStrip);
 
@@ -760,9 +635,7 @@ void bind_ssp(py::module_ &m)
         .def_readonly("napvs",    &ssp::MpdData::napvs)
         .def("apv",
             [](const ssp::MpdData &m, int adc) -> const ssp::ApvData& {
-                if (adc < 0 || adc >= ssp::MAX_APVS_PER_MPD)
-                    throw py::index_error("APV index out of range");
-                return m.apvs[adc];
+                return m.apvs[checked_index(adc, ssp::MAX_APVS_PER_MPD, "APV index out of range")];
             },
             py::return_value_policy::reference_internal);
 
@@ -772,9 +645,7 @@ void bind_ssp(py::module_ &m)
         .def_readonly("nmpds", &ssp::SspEventData::nmpds)
         .def("mpd",
             [](const ssp::SspEventData &e, int i) -> const ssp::MpdData& {
-                if (i < 0 || i >= e.nmpds)
-                    throw py::index_error("MPD index out of range");
-                return e.mpds[i];
+                return e.mpds[checked_index(i, e.nmpds, "MPD index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def("find_apv",
@@ -789,12 +660,12 @@ void bind_ssp(py::module_ &m)
             },
             py::arg("crate"), py::arg("mpd"), py::arg("adc"),
             py::return_value_policy::reference_internal)
+        .def("has_full_readout", &ssp::SspEventData::hasFullReadout,
+            "True if any APV in the event is a full readout.")
         .def("clear", &ssp::SspEventData::clear);
 }
 
-// -------------------------------------------------------------------------
-// VTP (vtp::)
-// -------------------------------------------------------------------------
+// ---- VTP (vtp::) --------------------------------------------------------
 void bind_vtp(py::module_ &m)
 {
     py::class_<vtp::EcPeak>(m, "EcPeak")
@@ -851,38 +722,42 @@ void bind_vtp(py::module_ &m)
         .def_readonly("n_blocks",        &vtp::VtpEventData::n_blocks)
         .def("peak",
             [](const vtp::VtpEventData &e, int i) -> const vtp::EcPeak& {
-                if (i < 0 || i >= e.n_peaks)
-                    throw py::index_error("peak index out of range");
-                return e.peaks[i];
+                return e.peaks[checked_index(i, e.n_peaks, "peak index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def("cluster",
             [](const vtp::VtpEventData &e, int i) -> const vtp::EcCluster& {
-                if (i < 0 || i >= e.n_clusters)
-                    throw py::index_error("cluster index out of range");
-                return e.clusters[i];
+                return e.clusters[checked_index(i, e.n_clusters, "cluster index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def("prad_cluster",
             [](const vtp::VtpEventData &e, int i) -> const vtp::PradCluster& {
-                if (i < 0 || i >= e.n_prad_clusters)
-                    throw py::index_error("prad_cluster index out of range");
-                return e.prad_clusters[i];
+                return e.prad_clusters[checked_index(i, e.n_prad_clusters, "prad_cluster index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def("block",
             [](const vtp::VtpEventData &e, int i) -> const vtp::VtpBlock& {
-                if (i < 0 || i >= e.n_blocks)
-                    throw py::index_error("block index out of range");
-                return e.blocks[i];
+                return e.blocks[checked_index(i, e.n_blocks, "block index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def("clear", &vtp::VtpEventData::clear);
+
+    m.def("decode_vtp_replay",
+        [](const std::vector<uint32_t> &roc_tags,
+           const std::vector<uint32_t> &nwords,
+           const std::vector<uint32_t> &words,
+           vtp::VtpEventData &out) {
+            return vtp::VtpDecoder::DecodeReplay(roc_tags, nwords, words, out);
+        },
+        py::arg("roc_tags"), py::arg("nwords"),
+        py::arg("words"),    py::arg("out"),
+        "Decode the replay tree's flat-triple VTP representation "
+        "(vtp_roc_tags / vtp_nwords / vtp_words) into a VtpEventData. "
+        "`out` is cleared first; returns False if the three lists are "
+        "inconsistent (banks decoded before that point are kept).");
 }
 
-// -------------------------------------------------------------------------
-// TDC (tdc::)
-// -------------------------------------------------------------------------
+// ---- TDC (tdc::) --------------------------------------------------------
 void bind_tdc(py::module_ &m)
 {
     py::class_<tdc::TdcHit>(m, "TdcHit")
@@ -904,19 +779,14 @@ void bind_tdc(py::module_ &m)
         .def_readonly("n_hits", &tdc::TdcEventData::n_hits)
         .def("hit",
             [](const tdc::TdcEventData &e, int i) -> const tdc::TdcHit& {
-                if (i < 0 || i >= e.n_hits)
-                    throw py::index_error("hit index out of range");
-                return e.hits[i];
+                return e.hits[checked_index(i, e.n_hits, "hit index out of range")];
             },
             py::return_value_policy::reference_internal)
         .def_property_readonly("hits_numpy",
             [](const tdc::TdcEventData &e) {
-                // Bulk accessor used by tight Python loops: returns the
-                // first n_hits entries of the hits[] buffer as a numpy
-                // structured array (copy).  Layout matches the in-memory
-                // tdc::TdcHit struct exactly — 12 bytes per row, with one
-                // byte of padding between ``edge`` and ``value`` so the
-                // uint32 stays 4-byte aligned.
+                // Layout matches the in-memory tdc::TdcHit struct exactly —
+                // 12 bytes per row, with one byte of padding between
+                // ``edge`` and ``value`` so the uint32 stays 4-byte aligned.
                 py::list fields;
                 fields.append(py::make_tuple("roc_tag", "<u4"));
                 fields.append(py::make_tuple("slot",    "u1"));
@@ -951,22 +821,20 @@ void bind_tdc(py::module_ &m)
         .def(py::init<>())
         .def_readonly("n_a", &tdc::RfTimeData::n_a)
         .def_readonly("n_b", &tdc::RfTimeData::n_b)
-        .def_property_readonly("ns_a", [](const tdc::RfTimeData &r) {
-            return py::array(py::dtype("<f4"), (py::ssize_t)r.n_a, r.ns_a);
-        }, "Leading-edge times (ns) on RF_CH_A — fresh copy, length n_a.")
-        .def_property_readonly("ns_b", [](const tdc::RfTimeData &r) {
-            return py::array(py::dtype("<f4"), (py::ssize_t)r.n_b, r.ns_b);
-        }, "Leading-edge times (ns) on RF_CH_B — fresh copy, length n_b.")
+        .def_property_readonly("ns_a",
+            [](const tdc::RfTimeData &r) { return to_numpy(r.ns_a, r.n_a); },
+            "Leading-edge times (ns) on RF_CH_A — fresh copy, length n_a.")
+        .def_property_readonly("ns_b",
+            [](const tdc::RfTimeData &r) { return to_numpy(r.ns_b, r.n_b); },
+            "Leading-edge times (ns) on RF_CH_B — fresh copy, length n_b.")
         .def("nearest_a", &tdc::RfTimeData::nearest_a, py::arg("t_ref_ns"),
              "RF_CH_A tick nearest the reference time (ns); NaN if no hits.")
         .def("nearest_b", &tdc::RfTimeData::nearest_b, py::arg("t_ref_ns"),
              "RF_CH_B tick nearest the reference time (ns); NaN if no hits.")
         .def("clear", &tdc::RfTimeData::clear);
 
-    // Free helpers — use as `prad2py.dec.decode_tdc_replay(roc_tags, nwords,
-    // words, evt)` and `prad2py.dec.decode_rf_replay(roc_tags, nwords,
-    // words, rf)`. Inputs are array-likes of uint32 (numpy is fine — we
-    // copy into vectors at the C++ boundary).
+    // Inputs are array-likes of uint32 (numpy is fine — copied into vectors
+    // at the C++ boundary).
     m.def("decode_tdc_replay",
         [](std::vector<uint32_t> roc_tags,
            std::vector<uint32_t> nwords,
@@ -992,9 +860,7 @@ void bind_tdc(py::module_ &m)
         "(filtered to RF_ROC_TAG / RF_SLOT, leading edges only).");
 }
 
-// -------------------------------------------------------------------------
-// DaqConfig + helpers
-// -------------------------------------------------------------------------
+// ---- DaqConfig + helpers ------------------------------------------------
 void bind_config(py::module_ &m)
 {
     py::class_<evc::DaqConfig::RocEntry>(m, "RocEntry")
@@ -1027,6 +893,11 @@ void bind_config(py::module_ &m)
         .def_readwrite("fadc_raw_tag",      &evc::DaqConfig::fadc_raw_tag)
         .def_readwrite("tdc_bank_tag",      &evc::DaqConfig::tdc_bank_tag)
         .def_readwrite("roc_tags",          &evc::DaqConfig::roc_tags)
+        .def("roc_crate_map", &evc::DaqConfig::roc_crate_map,
+             py::arg("data_rocs_only") = false,
+             "{roc_tag: crate}; data_rocs_only keeps crate>=0 roc/gem entries")
+        .def("crate_of", &evc::DaqConfig::crate_of, py::arg("tag"),
+             "Crate of the first roc_tags entry with this tag, -1 if none.")
         .def_readwrite("ti_master_tag",     &evc::DaqConfig::ti_master_tag)
         .def_readwrite("verbose_decode",    &evc::DaqConfig::verbose_decode)
         .def_readwrite("fadc250_fw",        &evc::DaqConfig::fadc250_fw)
@@ -1050,9 +921,7 @@ void bind_config(py::module_ &m)
         "Load a DaqConfig from JSON. Empty path uses the installed default.");
 }
 
-// -------------------------------------------------------------------------
-// EventType / Status enums
-// -------------------------------------------------------------------------
+// ---- EventType / Status enums -------------------------------------------
 void bind_enums(py::module_ &m)
 {
     py::enum_<evc::EventType>(m, "EventType")
@@ -1073,9 +942,7 @@ void bind_enums(py::module_ &m)
         .value("eof",        evc::status::eof);
 }
 
-// -------------------------------------------------------------------------
-// EvChannel
-// -------------------------------------------------------------------------
+// ---- EvChannel ----------------------------------------------------------
 void bind_channel(py::module_ &m)
 {
     py::class_<evc::EvChannel>(m, "EvChannel",
@@ -1086,29 +953,17 @@ void bind_channel(py::module_ &m)
         .def("set_config", &evc::EvChannel::SetConfig, py::arg("cfg"))
         .def("get_config", &evc::EvChannel::GetConfig,
              py::return_value_policy::reference_internal)
-        .def("open_sequential",
-            [](evc::EvChannel &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                return self.OpenSequential(path);
-            },
-            py::arg("path"),
+        .def("open_sequential", &evc::EvChannel::OpenSequential,
+            py::arg("path"), release_gil(),
             "Open an evio file in sequential mode.  Pairs with "
             "open_random_access() and open_auto() — most callers should "
             "prefer open_auto() which picks the best mode automatically.")
         .def("close", &evc::EvChannel::Close)
-        .def("read",
-            [](evc::EvChannel &self) {
-                py::gil_scoped_release rel;
-                return self.Read();
-            },
+        .def("read", &evc::EvChannel::Read, release_gil(),
             "Read the next record into the internal buffer. Returns Status.")
         // ---- Random-access mode (evio "ra") -------------------------------
-        .def("open_random_access",
-            [](evc::EvChannel &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                return self.OpenRandomAccess(path);
-            },
-            py::arg("path"),
+        .def("open_random_access", &evc::EvChannel::OpenRandomAccess,
+            py::arg("path"), release_gil(),
             "Open an evio file in random-access mode.  evio mmaps the file "
             "and builds an event pointer table during open — after this you "
             "can jump to any event via read_event_by_index().  Use "
@@ -1117,21 +972,13 @@ void bind_channel(py::module_ &m)
             &evc::EvChannel::GetRandomAccessEventCount,
             "Total number of events in the random-access table.  Returns 0 "
             "if not opened in random-access mode.")
-        .def("read_event_by_index",
-            [](evc::EvChannel &self, int i) {
-                py::gil_scoped_release rel;
-                return self.ReadEventByIndex(i);
-            },
-            py::arg("index"),
+        .def("read_event_by_index", &evc::EvChannel::ReadEventByIndex,
+            py::arg("index"), release_gil(),
             "Read the event at 0-based evio index `i` into the internal "
             "buffer.  scan() / select_event() / info() / fadc() / ... then "
             "work identically to the sequential path.  Returns Status.")
-        .def("open_auto",
-            [](evc::EvChannel &self, const std::string &path) {
-                py::gil_scoped_release rel;
-                return self.OpenAuto(path);
-            },
-            py::arg("path"),
+        .def("open_auto", &evc::EvChannel::OpenAuto,
+            py::arg("path"), release_gil(),
             "Open ``path`` with random-access mode if the file supports it, "
             "otherwise fall back to the sequential mode.  After success, "
             "``is_random_access()`` reports which mode was selected; callers "
@@ -1144,64 +991,32 @@ void bind_channel(py::module_ &m)
             "Scan the currently-held record. Call after a successful Read().")
         .def("get_event_type", &evc::EvChannel::GetEventType)
         .def("get_n_events",   &evc::EvChannel::GetNEvents)
-        // ---- Lazy per-product accessors (new API) -------------------------
+        // ---- Lazy per-product accessors ----------------------------------
         // select_event() picks the sub-event; info/fadc/gem/tdc/vtp each
         // decode on first call and return the cached result on repeat calls.
         .def("select_event", &evc::EvChannel::SelectEvent, py::arg("i") = 0,
             "Select the sub-event index for subsequent info/fadc/gem/tdc/vtp "
             "calls.  Clears the product cache if the index changed.  Must be "
             "called after scan(); for PRad-II single-event data use i=0.")
-        .def("info",
-            [](const evc::EvChannel &self) {
-                fdec::EventInfo out;
-                {
-                    py::gil_scoped_release rel;
-                    out = self.Info();
-                }
-                return out;
-            },
+        .def("info", [](const evc::EvChannel &s) { return s.Info(); }, release_gil(),
             "Decode (or return cached) event info for the currently-selected "
             "sub-event.  Cheapest accessor — skips FADC/SSP/VTP/TDC work.")
         .def("fadc",
-            [](const evc::EvChannel &self) {
-                auto evt = std::make_shared<fdec::EventData>();
-                {
-                    py::gil_scoped_release rel;
-                    *evt = self.Fadc();
-                }
-                return evt;
-            },
+            [](const evc::EvChannel &s) { return std::make_shared<fdec::EventData>(s.Fadc()); },
+            release_gil(),
             "Decode (or return cached) FADC250/ADC1881M waveforms as "
             "EventData (contains event info + per-ROC/slot/channel samples).")
         .def("gem",
-            [](const evc::EvChannel &self) {
-                auto evt = std::make_shared<ssp::SspEventData>();
-                {
-                    py::gil_scoped_release rel;
-                    *evt = self.Gem();
-                }
-                return evt;
-            },
+            [](const evc::EvChannel &s) { return std::make_shared<ssp::SspEventData>(s.Gem()); },
+            release_gil(),
             "Decode (or return cached) SSP/MPD GEM strip data as SspEventData.")
         .def("tdc",
-            [](const evc::EvChannel &self) {
-                auto evt = std::make_shared<tdc::TdcEventData>();
-                {
-                    py::gil_scoped_release rel;
-                    *evt = self.Tdc();
-                }
-                return evt;
-            },
+            [](const evc::EvChannel &s) { return std::make_shared<tdc::TdcEventData>(s.Tdc()); },
+            release_gil(),
             "Decode (or return cached) V1190 TDC tagger hits as TdcEventData.")
         .def("vtp",
-            [](const evc::EvChannel &self) {
-                auto evt = std::make_shared<vtp::VtpEventData>();
-                {
-                    py::gil_scoped_release rel;
-                    *evt = self.Vtp();
-                }
-                return evt;
-            },
+            [](const evc::EvChannel &s) { return std::make_shared<vtp::VtpEventData>(s.Vtp()); },
+            release_gil(),
             "Decode (or return cached) VTP ECAL peaks/clusters as VtpEventData.")
         .def("decode_event",
             [](const evc::EvChannel &self, int i,
@@ -1234,15 +1049,7 @@ void bind_channel(py::module_ &m)
             py::arg("with_tdc") = false,
             "Full decode. Returns {'ok': bool, 'event': EventData, "
             "'ssp': SspEventData|None, 'vtp': ..., 'tdc': ...}.")
-        .def("sync",
-            [](const evc::EvChannel &self) {
-                psync::SyncInfo out;
-                {
-                    py::gil_scoped_release rel;
-                    out = self.Sync();
-                }
-                return out;
-            },
+        .def("sync", [](const evc::EvChannel &s) { return s.Sync(); }, release_gil(),
             "Absolute-time / run-state snapshot.  Persists across events — "
             "refreshed only when the channel lands on a SYNC/EPICS or "
             "control event (PRESTART/GO/END), otherwise returns the prior "
@@ -1252,12 +1059,8 @@ void bind_channel(py::module_ &m)
             "Raw EPICS payload for the current event (empty if not EPICS).");
 }
 
-// -------------------------------------------------------------------------
-// EpicsStore — slow-control snapshot accumulator.  Fed via Feed() with the
-// raw text from EvChannel::ExtractEpicsText() (or the higher-level
-// EvChannel::Epics() result), then queried by event_number for the most
-// recent value of a channel.  See prad2dec/include/EpicsStore.h.
-// -------------------------------------------------------------------------
+// ---- EpicsStore (epics::) -----------------------------------------------
+// Fed with the raw text from EvChannel::ExtractEpicsText(); see EpicsStore.h.
 void bind_epics(py::module_ &m)
 {
     py::class_<epics::EpicsStore::Snapshot>(m, "EpicsSnapshot",
@@ -1311,9 +1114,29 @@ void bind_epics(py::module_ &m)
         .def("clear", &epics::EpicsStore::Clear);
 }
 
-// -------------------------------------------------------------------------
-// HV archive (hv::HVDecoder, HVSegment)
-// -------------------------------------------------------------------------
+// ---- HV archive (hv::HVDecoder, HVSegment) ------------------------------
+
+// (timestamps_ms, y) for HV channel `name`: y is its dV column, plus the
+// V0Set trace (= reconstructed VMon) when add_v0set.
+py::tuple hv_channel_trace(const hv::HVSegment &s, const std::string &name,
+                           bool add_v0set)
+{
+    const int ci = s.channel_index(name);
+    if (ci < 0)
+        throw py::key_error("HV channel not found: " + name);
+    const std::size_t n = s.timestamps_ms.size();
+    const int n_ch = s.n_channels();
+    std::vector<float> y(n);
+    for (std::size_t k = 0; k < n; ++k)
+        y[k] = s.dv[k * n_ch + ci];
+    if (add_v0set) {
+        const std::vector<float> v0 = s.v0set_trace(ci);
+        for (std::size_t k = 0; k < n; ++k)
+            y[k] += v0[k];
+    }
+    return py::make_tuple(to_numpy(s.timestamps_ms), to_numpy(y));
+}
+
 void bind_hv(py::module_ &m)
 {
     // Lookup descriptor enums.  Bound as nested-style attributes so the
@@ -1371,35 +1194,18 @@ void bind_hv(py::module_ &m)
         "(projected to the segment's kept-channel order).")
         .def_readonly("abs_ts_ms", &hv::ChEvent::abs_ts_ms)
         .def_property_readonly("v0sets",
-            [](const hv::ChEvent &e) {
-                py::array_t<float> arr(e.v0sets.size());
-                std::copy(e.v0sets.begin(), e.v0sets.end(), arr.mutable_data());
-                return arr;
-            },
+            [](const hv::ChEvent &e) { return to_numpy(e.v0sets); },
             "V0Set per channel as a fresh numpy array.");
 
     py::class_<hv::BstEvent>(m, "HVBstEvent",
         "One BOOSTER_TABLE event: timestamp + setpoints (VSet / ISet).")
         .def_readonly("abs_ts_ms", &hv::BstEvent::abs_ts_ms)
         .def_property_readonly("vsets",
-            [](const hv::BstEvent &e) {
-                py::array_t<float> arr(e.vsets.size());
-                std::copy(e.vsets.begin(), e.vsets.end(), arr.mutable_data());
-                return arr;
-            })
+            [](const hv::BstEvent &e) { return to_numpy(e.vsets); })
         .def_property_readonly("isets",
-            [](const hv::BstEvent &e) {
-                py::array_t<float> arr(e.isets.size());
-                std::copy(e.isets.begin(), e.isets.end(), arr.mutable_data());
-                return arr;
-            });
+            [](const hv::BstEvent &e) { return to_numpy(e.isets); });
 
     // ── HVSegment ────────────────────────────────────────────────────────
-    // Bulk arrays go through allocate-then-copy (fresh numpy buffers, no
-    // base pointer).  This is the same pattern ChannelData.samples uses;
-    // exposing a pybind11 view onto the underlying C++ vector silently
-    // corrupts memory once the segment is freed (see the codebase
-    // "py::array_t binding ownership trap" memory).
     py::class_<hv::HVSegment>(m, "HVSegment",
         "Time-windowed HV + booster snapshot block.\n\n"
         "Numeric arrays returned as fresh numpy copies — the underlying "
@@ -1431,49 +1237,27 @@ void bind_hv(py::module_ &m)
 
         // 1-D numpy arrays
         .def_property_readonly("timestamps_ms",
-            [](const hv::HVSegment &s) {
-                py::array_t<int64_t> arr(s.timestamps_ms.size());
-                std::copy(s.timestamps_ms.begin(), s.timestamps_ms.end(),
-                          arr.mutable_data());
-                return arr;
-            },
+            [](const hv::HVSegment &s) { return to_numpy(s.timestamps_ms); },
             "Per-snapshot epoch-ms timestamps (int64).")
         .def_property_readonly("booster_timestamps_ms",
-            [](const hv::HVSegment &s) {
-                py::array_t<int64_t> arr(s.booster_timestamps_ms.size());
-                std::copy(s.booster_timestamps_ms.begin(),
-                          s.booster_timestamps_ms.end(), arr.mutable_data());
-                return arr;
-            })
+            [](const hv::HVSegment &s) { return to_numpy(s.booster_timestamps_ms); })
 
         // 2-D numpy arrays — row-major (n_rows, n_cols)
         .def_property_readonly("dv",
             [](const hv::HVSegment &s) {
-                py::array_t<float> arr({(py::ssize_t)s.n_snapshots(),
-                                        (py::ssize_t)s.n_channels()});
-                if (!s.dv.empty())
-                    std::copy(s.dv.begin(), s.dv.end(), arr.mutable_data());
-                return arr;
+                return to_numpy2d(s.dv.data(), s.n_snapshots(), s.n_channels());
             },
             "VMon - V0Set per (snapshot, channel) as a fresh (N_snap × N_ch) "
             "float32 array.")
         .def_property_readonly("booster_vmon",
             [](const hv::HVSegment &s) {
-                py::array_t<float> arr({(py::ssize_t)s.n_booster_snapshots(),
-                                        (py::ssize_t)s.n_boosters()});
-                if (!s.booster_vmon.empty())
-                    std::copy(s.booster_vmon.begin(), s.booster_vmon.end(),
-                              arr.mutable_data());
-                return arr;
+                return to_numpy2d(s.booster_vmon.data(), s.n_booster_snapshots(),
+                                  s.n_boosters());
             })
         .def_property_readonly("booster_imon",
             [](const hv::HVSegment &s) {
-                py::array_t<float> arr({(py::ssize_t)s.n_booster_snapshots(),
-                                        (py::ssize_t)s.n_boosters()});
-                if (!s.booster_imon.empty())
-                    std::copy(s.booster_imon.begin(), s.booster_imon.end(),
-                              arr.mutable_data());
-                return arr;
+                return to_numpy2d(s.booster_imon.data(), s.n_booster_snapshots(),
+                                  s.n_boosters());
             })
 
         // Tables (lists of HVChEvent / HVBstEvent — each event already
@@ -1491,47 +1275,20 @@ void bind_hv(py::module_ &m)
 
         // Reconstructed traces
         .def("v0set_trace",
-            [](const hv::HVSegment &s, int ch_idx) {
-                std::vector<float> v = s.v0set_trace(ch_idx);
-                py::array_t<float> arr(v.size());
-                std::copy(v.begin(), v.end(), arr.mutable_data());
-                return arr;
-            },
+            [](const hv::HVSegment &s, int ch_idx) { return to_numpy(s.v0set_trace(ch_idx)); },
             py::arg("ch_idx"),
             "V0Set per snapshot for kept channel `ch_idx` (NaN if no "
             "CHTABLE seen for this channel).")
         .def("vmon_trace",
             [](const hv::HVSegment &s, const std::string &name) {
-                int i = s.channel_index(name);
-                if (i < 0)
-                    throw py::key_error("HV channel not found: " + name);
-                std::vector<float> v0 = s.v0set_trace(i);
-                py::array_t<int64_t> ts(s.timestamps_ms.size());
-                py::array_t<float>   vmon(v0.size());
-                std::copy(s.timestamps_ms.begin(), s.timestamps_ms.end(),
-                          ts.mutable_data());
-                const int n_ch = s.n_channels();
-                for (std::size_t k = 0; k < v0.size(); ++k)
-                    vmon.mutable_data()[k] =
-                        s.dv[k * n_ch + i] + v0[k];
-                return py::make_tuple(ts, vmon);
+                return hv_channel_trace(s, name, true);
             },
             py::arg("name"),
             "Return (timestamps_ms, vmon) numpy arrays for HV channel `name`. "
             "VMon is reconstructed via the most-recent CHTABLE V0Set.")
         .def("dv_trace",
             [](const hv::HVSegment &s, const std::string &name) {
-                int i = s.channel_index(name);
-                if (i < 0)
-                    throw py::key_error("HV channel not found: " + name);
-                py::array_t<int64_t> ts(s.timestamps_ms.size());
-                py::array_t<float>   dv(s.timestamps_ms.size());
-                std::copy(s.timestamps_ms.begin(), s.timestamps_ms.end(),
-                          ts.mutable_data());
-                const int n_ch = s.n_channels();
-                for (std::size_t k = 0; k < s.timestamps_ms.size(); ++k)
-                    dv.mutable_data()[k] = s.dv[k * n_ch + i];
-                return py::make_tuple(ts, dv);
+                return hv_channel_trace(s, name, false);
             },
             py::arg("name"),
             "Return (timestamps_ms, dV) numpy arrays for HV channel `name`.")
@@ -1582,13 +1339,8 @@ void bind_hv(py::module_ &m)
                     snaps, ens, tts,
                     anchor_ti_ticks, anchor_unix_time_ms);
 
-                py::array_t<int32_t> ev_arr(assoc.event_number.size());
-                py::array_t<int64_t> tk_arr(assoc.ti_ticks.size());
-                std::copy(assoc.event_number.begin(),
-                          assoc.event_number.end(),  ev_arr.mutable_data());
-                std::copy(assoc.ti_ticks.begin(),
-                          assoc.ti_ticks.end(),      tk_arr.mutable_data());
-                return py::make_tuple(ev_arr, tk_arr);
+                return py::make_tuple(to_numpy(assoc.event_number),
+                                      to_numpy(assoc.ti_ticks));
             },
             py::arg("snapshot_ts_ms"),
             py::arg("event_num"),
@@ -1686,9 +1438,7 @@ void bind_hv(py::module_ &m)
 
 } // anonymous namespace
 
-// -------------------------------------------------------------------------
-// Entry point for the main module (prad2py.cpp calls this).
-// -------------------------------------------------------------------------
+// Entry point called from prad2py.cpp.
 void register_dec(py::module_ &m)
 {
     auto dec = m.def_submodule("dec",

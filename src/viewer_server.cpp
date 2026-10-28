@@ -5,31 +5,17 @@
 // =========================================================================
 
 #include "viewer_server.h"
-
-#ifdef WITH_ET
-#include "EtChannel.h"
-#endif
+#include "EventData.h"
+#include "JsonUtil.h"
 
 #include <nlohmann/json.hpp>
 
-#include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <sstream>
-#include <algorithm>
-#include <cstdlib>
-#include <cstdio>
-#include <cmath>
-#include <ctime>
-#include <chrono>
 
 using json = nlohmann::json;
-namespace fs = std::filesystem;
-using namespace evc;
 
-// =========================================================================
-// Progress
-// =========================================================================
+// ── Progress ──────────────────────────────────────────────────────────────
 
 json Progress::toJson() const
 {
@@ -45,10 +31,7 @@ void Progress::setFile(const std::string &f)
     target_file = f;
 }
 
-
-// =========================================================================
-// ViewerServer — lifecycle
-// =========================================================================
+// ── ViewerServer — lifecycle ──────────────────────────────────────────────
 
 ViewerServer::ViewerServer() = default;
 
@@ -66,7 +49,6 @@ void ViewerServer::joinAll()
 #endif
     { std::lock_guard<std::mutex> lk(load_mtx_);
       if (load_thread_.joinable()) load_thread_.join(); }
-    if (server_thread_.joinable()) server_thread_.join();
 }
 
 void ViewerServer::init(const Config &cfg)
@@ -77,61 +59,42 @@ void ViewerServer::init(const Config &cfg)
 
     const auto &db_dir = cfg.database_dir;
 
-    // --- resolve DAQ config path ---
-    std::string daq_cfg_file = cfg.daq_config_file;
-    if (daq_cfg_file.empty())
-        daq_cfg_file = findFile("daq_config.json", db_dir);
-
-    // --- load ET config from monitor_config.json "online" section ---
+    // --- monitor_config.json: parsed once, shared by both AppStates ---
+    std::string mon_path = cfg.monitor_config_file.empty()
+        ? findFile("monitor_config.json", db_dir) : cfg.monitor_config_file;
+    json mcfg = json::object();
+    prad2::read_json_file(mon_path, mcfg);   // stays {} when missing or unparsable
 #ifdef WITH_ET
-    {
-        std::string cf = cfg.monitor_config_file;
-        if (cf.empty()) cf = findFile("monitor_config.json", db_dir);
-        std::string s = readFile(cf);
-        if (!s.empty()) {
-            auto j = json::parse(s, nullptr, false);
-            if (j.contains("online")) {
-                auto &e = j["online"];
-                if (e.contains("et_host"))    et_cfg_.host    = e["et_host"];
-                if (e.contains("et_port"))    et_cfg_.port    = e["et_port"];
-                if (e.contains("et_file"))    et_cfg_.et_file = e["et_file"];
-                if (e.contains("et_station")) et_cfg_.station = e["et_station"];
-                if (e.contains("ring_buffer_size")) ring_size_ = e["ring_buffer_size"];
-            }
-        }
+    // ET connection settings live in its "online" section
+    if (mcfg.contains("online")) {
+        auto &e = mcfg["online"];
+        if (e.contains("et_host"))    et_cfg_.host    = e["et_host"];
+        if (e.contains("et_port"))    et_cfg_.port    = e["et_port"];
+        if (e.contains("et_file"))    et_cfg_.et_file = e["et_file"];
+        if (e.contains("et_station")) et_cfg_.station = e["et_station"];
+        if (e.contains("ring_buffer_size")) ring_size_ = e["ring_buffer_size"];
     }
 #endif
 
     // --- initialize both AppState instances (same config, separate accumulators) ---
-    app_file_.init(db_dir, daq_cfg_file,
-                   cfg.monitor_config_file, cfg.reconstruction_config_file);
-    app_online_.init(db_dir, daq_cfg_file,
-                     cfg.monitor_config_file, cfg.reconstruction_config_file);
+    app_file_.init(db_dir, cfg.daq_config_file, mon_path, mcfg,
+                   cfg.reconstruction_config_file);
+    app_online_.init(db_dir, cfg.daq_config_file, mon_path, mcfg,
+                     cfg.reconstruction_config_file);
 
     // --- load external filter file if specified ---
     if (!cfg.filter_file.empty()) {
-        std::string s = readFile(cfg.filter_file);
-        if (!s.empty()) {
-            auto fj = json::parse(s, nullptr, false);
-            if (!fj.is_discarded()) {
-                app_file_.loadFilter(fj);
-                app_online_.loadFilter(fj);
-            } else {
-                std::cerr << "Warning: failed to parse filter file: " << cfg.filter_file << "\n";
-            }
-        } else {
-            std::cerr << "Warning: cannot read filter file: " << cfg.filter_file << "\n";
-        }
+        std::string err = loadFilterFile(cfg.filter_file);
+        if (!err.empty()) std::cerr << "Warning: filter file: " << err << "\n";
     }
 
     // --- build base_config JSON for /api/config ---
     // File pointers come from the parsed daq_cfg (already loaded by AppState::init).
-    json hycal_map_j = json::array();
+    json hycal_map_j = json::array();   // stays [] when missing or unparsable
     {
         const std::string map_name = app_file_.daq_cfg.hycal_map_file.empty()
             ? std::string("hycal_map.json") : app_file_.daq_cfg.hycal_map_file;
-        std::string s = readFile(findFile(map_name, db_dir));
-        if (!s.empty()) hycal_map_j = json::parse(s, nullptr, false);
+        prad2::read_json_file(findFile(map_name, db_dir), hycal_map_j);
     }
     json base_cfg = {
         {"hycal_map", hycal_map_j}, {"crate_roc", app_file_.crate_roc_json},
@@ -157,9 +120,7 @@ void ViewerServer::init(const Config &cfg)
 #endif
 }
 
-// =========================================================================
-// Server setup & run
-// =========================================================================
+// ── Server setup & run ────────────────────────────────────────────────────
 
 void ViewerServer::setupServer(int port)
 {
@@ -216,7 +177,7 @@ void ViewerServer::run()
     // start ET reader thread (sleeps until et_active_)
 #ifdef WITH_ET
     et_thread_ = std::thread([this]() { etReaderThread(); });
-    // Always spawn the poll thread — it now also drives the auto-report
+    // Always spawn the poll thread — it also drives the auto-report
     // watchdog, which must run even if no shell metrics are configured.
     monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
 #endif
@@ -236,8 +197,7 @@ void ViewerServer::run()
 #endif
     }
 
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
+    auto data = fileData();
     std::cout << "Server at http://localhost:" << port_ << "\n"
               << "  Mode: " << mode() << "\n"
               << "  " << (data ? data->event_count : 0) << " events"
@@ -257,37 +217,6 @@ void ViewerServer::run()
     joinAll();
 }
 
-int ViewerServer::startAsync(int port)
-{
-    if (port != 0) cfg_.port = port;
-    setupServer(cfg_.port);
-    checkSaveDirWritable();
-
-    // start ET reader thread
-#ifdef WITH_ET
-    et_thread_ = std::thread([this]() { etReaderThread(); });
-    // Always spawn the poll thread — it now also drives the auto-report
-    // watchdog, which must run even if no shell metrics are configured.
-    monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
-#endif
-
-    // load initial file (async)
-    if (!cfg_.initial_file.empty())
-        loadFile(cfg_.initial_file, cfg_.hist_enabled);
-
-    // start online if requested
-    if (cfg_.start_online) {
-        mode_ = Mode::Online;
-#ifdef WITH_ET
-        et_active_ = true;
-#endif
-    }
-
-    // run server in background
-    server_thread_ = std::thread([this]() { server_->run(); });
-    return port_;
-}
-
 void ViewerServer::stop()
 {
     running_ = false;
@@ -299,14 +228,12 @@ void ViewerServer::stop()
         try { server_->stop_listening(); server_->stop(); } catch (...) {}
     }
 
-    // Thread joins are handled by run()/startAsync() cleanup — not here.
+    // Thread joins are handled by run() cleanup — not here.
     // stop() may be called from a signal handler where blocking on join()
     // would hang if a thread is stuck in a library call (e.g. et_open).
 }
 
-// =========================================================================
-// Mode switching
-// =========================================================================
+// ── Mode switching ────────────────────────────────────────────────────────
 
 std::string ViewerServer::mode() const
 {
@@ -328,17 +255,62 @@ void ViewerServer::setMode(Mode m)
     wsBroadcast(json({{"type", "mode_changed"}, {"mode", mode()}}).dump());
 }
 
-// =========================================================================
-// WebSocket broadcast
-// =========================================================================
+#ifdef WITH_ET
+void ViewerServer::goOnline(const json &et_overrides)
+{
+    std::lock_guard<std::mutex> lk(mode_mtx_);
+    if (et_overrides.is_object()) {
+        const auto &j = et_overrides;
+        if (j.contains("host"))    et_cfg_.host    = j["host"];
+        if (j.contains("port"))    et_cfg_.port    = j["port"];
+        if (j.contains("et_file")) et_cfg_.et_file = j["et_file"];
+        if (j.contains("station")) et_cfg_.station = j["station"];
+    }
+    // bump generation so the ET reader reconnects with the new config
+    if (mode_.load() == Mode::Online)
+        et_generation_++;
+    et_active_ = true;
+    setMode(Mode::Online);
+}
+#endif
+
+void ViewerServer::goOffline()
+{
+    std::lock_guard<std::mutex> lk(mode_mtx_);
+    if (mode_.load() != Mode::Online) return;
+#ifdef WITH_ET
+    et_active_ = false;
+#endif
+    setMode(fileData() ? Mode::File : Mode::Idle);
+}
+
+// ── WebSocket broadcast ───────────────────────────────────────────────────
 
 void ViewerServer::wsBroadcast(const std::string &msg)
 {
     std::lock_guard<std::mutex> lk(ws_mtx_);
-    for (auto &hdl : ws_clients_) {
-        try { server_->send(hdl, msg, websocketpp::frame::opcode::text); }
-        catch (...) {}
+    for (auto &hdl : ws_clients_) wsSend(hdl, msg);
+}
+
+bool ViewerServer::wsSend(websocketpp::connection_hdl hdl, const std::string &msg)
+{
+    try {
+        server_->send(hdl, msg, websocketpp::frame::opcode::text);
+        return true;
+    } catch (...) {
+        return false;
     }
+}
+
+bool ViewerServer::clearDomain(const std::string &what)
+{
+    auto &app = activeApp();
+    if      (what == "hist")  app.clearHistograms();
+    else if (what == "lms")   app.clearLms();
+    else if (what == "epics") app.clearEpics();
+    else return false;
+    wsBroadcast("{\"type\":\"" + what + "_cleared\"}");
+    return true;
 }
 
 // ── Incoming WebSocket messages (JSON text) ────────────────────────────────
@@ -360,11 +332,8 @@ void ViewerServer::handleWsMessage(websocketpp::connection_hdl hdl,
     const std::string t = j["type"].get<std::string>();
 
     if (t == "client_hello") {
-        // The on-demand auto-report rollout: only clients that
-        // advertise the "auto_report" capability are eligible to be
-        // picked by dispatchCapture.  Old (pre-update) tabs never send
-        // this message and stay out of the candidate pool — they keep
-        // receiving every other broadcast unchanged.
+        // Only clients advertising the "auto_report" capability join
+        // reporter_capable_ (the dispatchCapture candidate pool).
         bool can_capture = false;
         if (j.contains("capabilities") && j["capabilities"].is_array()) {
             for (auto &c : j["capabilities"]) {
@@ -377,31 +346,19 @@ void ViewerServer::handleWsMessage(websocketpp::connection_hdl hdl,
             std::lock_guard<std::mutex> lk(ws_mtx_);
             reporter_capable_.insert(hdl);
         }
-        try {
-            server_->send(hdl,
-                json({{"type", "server_hello"},
-                      {"capabilities", json::array({"auto_report"})}}).dump(),
-                websocketpp::frame::opcode::text);
-        } catch (...) {}
+        wsSend(hdl, json({{"type", "server_hello"},
+                          {"capabilities", json::array({"auto_report"})}}).dump());
     }
     else if (t == "tagger_subscribe") {
         taggerSubscribe(hdl);
         // Acknowledge so the client can confirm its subscription took effect.
-        try {
-            server_->send(hdl,
-                json({{"type", "tagger_subscribed"},
-                      {"subscribers", tagger_subs_count_.load()}}).dump(),
-                websocketpp::frame::opcode::text);
-        } catch (...) {}
+        wsSend(hdl, json({{"type", "tagger_subscribed"},
+                          {"subscribers", tagger_subs_count_.load()}}).dump());
     }
     else if (t == "tagger_unsubscribe") {
         taggerUnsubscribe(hdl);
-        try {
-            server_->send(hdl,
-                json({{"type", "tagger_unsubscribed"},
-                      {"subscribers", tagger_subs_count_.load()}}).dump(),
-                websocketpp::frame::opcode::text);
-        } catch (...) {}
+        wsSend(hdl, json({{"type", "tagger_unsubscribed"},
+                          {"subscribers", tagger_subs_count_.load()}}).dump());
     }
     // Unknown types are silently ignored — old clients stay happy.
 
@@ -442,9 +399,7 @@ void ViewerServer::taggerBroadcastBinary(const void *data, size_t nbytes)
     }
 }
 
-// =========================================================================
-// File mode — loading
-// =========================================================================
+// ── File mode — loading ───────────────────────────────────────────────────
 
 void ViewerServer::loadFile(const std::string &path, bool hist)
 {
@@ -529,8 +484,7 @@ void ViewerServer::buildHistograms()
 
     if (!data_source_) return;
 
-    fdec::WaveAnalyzer ana(app_file_.daq_cfg.wave_cfg);
-    ana.SetTemplateStore(&app_file_.template_store);
+    auto ana = app_file_.makeAnalyzer();
     fdec::WaveResult wres;
 
     progress_.phase = 2; progress_.current = 0;
@@ -539,27 +493,17 @@ void ViewerServer::buildHistograms()
         // physics events (EVIO / ROOT raw)
         [&](int idx, fdec::EventData &event, ssp::SspEventData *ssp) {
             progress_.current = app_file_.events_processed.load() + 1;
-            // skip events that don't pass the filter
-            if (app_file_.filterActive() && !app_file_.evaluateFilter(event, ssp))
-                return;
-            // GEM reco BEFORE processEvent — runGemEfficiency (inside
-            // processEvent) reads gem_sys.GetHits(d), which only holds the
-            // current event's hits after processGemEvent runs.  Online and
-            // single-event accumulate paths already use this order; the
-            // preprocess loop must too, otherwise efficiency reads stale
-            // GEM hits from the previous event.
-            if (ssp) app_file_.processGemEvent(*ssp);
-            app_file_.processEvent(event, ana, wres);
+            if (!app_file_.evaluateFilter(event, ssp)) return;
+            app_file_.processEvent(event, ssp, ana, wres);
         },
         // recon events (ROOT recon)
-        [&](int idx, const ReconEventData &recon) {
+        [&](int idx, const prad2::ReconEventData &recon) {
             progress_.current = app_file_.events_processed.load() + 1;
             app_file_.processReconEvent(recon);
         },
         // control events (sync/prestart/go)
         [&](uint32_t unix_time, uint64_t last_ti_ts) {
-            if (app_file_.sync_unix == 0)
-                app_file_.recordSyncTime(unix_time, last_ti_ts);
+            app_file_.recordSyncTime(unix_time, last_ti_ts);
         },
         // EPICS events
         [&](const std::string &text, int32_t ev_num, uint64_t ts) {
@@ -577,15 +521,12 @@ void ViewerServer::buildHistograms()
               << ", LMS: " << app_file_.lms_events.load() << "\n";
 }
 
-// =========================================================================
-// File mode — event decoding
-// =========================================================================
+// ── File mode — event decoding ────────────────────────────────────────────
 
 std::string ViewerServer::decodeRawEvent(int ev1, fdec::EventData &event,
                                          ssp::SspEventData *ssp_evt)
 {
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
+    auto data = fileData();
     if (!data) return "no file loaded";
     int idx = ev1 - 1;
     if (idx < 0 || idx >= data->event_count) return "event out of range";
@@ -595,10 +536,7 @@ std::string ViewerServer::decodeRawEvent(int ev1, fdec::EventData &event,
     return data_source_->decodeEvent(idx, event, ssp_evt);
 }
 
-// Central accumulation gate for file mode.
-// Mirrors online-mode logic: processEvent + processGemEvent are called once
-// per event.  Preprocessed files skip this (buildHistograms already did it).
-// Any new accumulation added to processEvent() works automatically.
+// File-mode accumulation gate (see ondemand_processed_ in viewer_server.h).
 void ViewerServer::accumulate(int ev1, fdec::EventData &event,
                               ssp::SspEventData *ssp)
 {
@@ -607,44 +545,44 @@ void ViewerServer::accumulate(int ev1, fdec::EventData &event,
     std::lock_guard<std::mutex> lk(ondemand_mtx_);
     if (!ondemand_processed_.insert(ev1).second) return;  // already seen
 
-    // skip events that don't pass the filter
-    if (app_file_.filterActive() && !app_file_.evaluateFilter(event, ssp))
-        return;
+    if (!app_file_.evaluateFilter(event, ssp)) return;
 
-    if (ssp) app_file_.processGemEvent(*ssp);
-
-    fdec::WaveAnalyzer ana(app_file_.daq_cfg.wave_cfg);
-    ana.SetTemplateStore(&app_file_.template_store);
+    auto ana = app_file_.makeAnalyzer();
     fdec::WaveResult wres;
-    app_file_.processEvent(event, ana, wres);
+    app_file_.processEvent(event, ssp, ana, wres);
 }
 
-// =========================================================================
-// Filters
-// =========================================================================
+json ViewerServer::withFileEvent(int ev1, const RawEventFn &on_raw,
+                                 const ReconEventFn &on_recon)
+{
+    if (on_recon) {
+        auto data = fileData();
+        if (data && data->caps.source_type == "root_recon") {
+            auto recon = std::make_unique<prad2::ReconEventData>();
+            { std::lock_guard<std::mutex> lk(data_source_mtx_);
+              if (!data_source_ || !data_source_->decodeReconEvent(ev1 - 1, *recon))
+                  return {{"error", "decode error"}}; }
+            return on_recon(*recon);
+        }
+    }
+
+    auto event_ptr = std::make_unique<fdec::EventData>();
+    auto ssp_ptr   = std::make_unique<ssp::SspEventData>();
+    std::string err = decodeRawEvent(ev1, *event_ptr, ssp_ptr.get());
+    if (!err.empty()) return {{"error", err}};
+
+    accumulate(ev1, *event_ptr, ssp_ptr.get());
+    return on_raw(*event_ptr, *ssp_ptr);
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────
 
 std::string ViewerServer::applyFilter(const json &fj)
 {
     std::string err = app_file_.loadFilter(fj);
     if (!err.empty()) return err;
     app_online_.loadFilter(fj);
-
-    // clear + rebuild
-    app_file_.clearHistograms();
-    app_file_.clearLms();
-    app_online_.clearHistograms();
-    app_online_.clearLms();
-    { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
-
-    buildFilteredIndex();
-
-    if (hist_enabled_) {
-        std::shared_ptr<FileData> data;
-        { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
-        if (data) buildHistograms();
-    }
-
-    wsBroadcast("{\"type\":\"hist_cleared\"}");
+    resetAfterFilterChange();
     return "";
 }
 
@@ -652,20 +590,28 @@ void ViewerServer::clearFilter()
 {
     app_file_.unloadFilter();
     app_online_.unloadFilter();
+    resetAfterFilterChange();
+}
 
-    app_file_.clearHistograms();
-    app_file_.clearLms();
-    app_online_.clearHistograms();
-    app_online_.clearLms();
+std::string ViewerServer::loadFilterFile(const std::string &path)
+{
+    json fj;
+    std::string err;
+    if (!prad2::read_json_file(path, fj, &err)) return err;
+    return applyFilter(fj);
+}
+
+void ViewerServer::resetAfterFilterChange()
+{
+    for (AppState *app : {&app_file_, &app_online_}) {
+        app->clearHistograms();
+        app->clearLms();
+    }
     { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
 
-    filtered_indices_.clear();
+    buildFilteredIndex();   // only clears the index when no filter is active
 
-    if (hist_enabled_) {
-        std::shared_ptr<FileData> data;
-        { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
-        if (data) buildHistograms();
-    }
+    if (hist_enabled_ && fileData()) buildHistograms();
 
     wsBroadcast("{\"type\":\"hist_cleared\"}");
 }
@@ -678,10 +624,6 @@ void ViewerServer::buildFilteredIndex()
     std::lock_guard<std::mutex> lk(data_source_mtx_);
     if (!data_source_) return;
 
-    auto event_ptr = std::make_unique<fdec::EventData>();
-    auto &event = *event_ptr;
-    auto ssp_ptr = std::make_unique<ssp::SspEventData>();
-    auto &ssp_evt = *ssp_ptr;
     int idx = 0;
 
     progress_.loading = true;
@@ -707,95 +649,65 @@ void ViewerServer::buildFilteredIndex()
 
 json ViewerServer::decodeEvent(int ev1)
 {
-    // check if this is a recon source (no per-channel data)
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
-    if (data && data->caps.source_type == "root_recon") {
-        // return minimal event info + empty channels
-        ReconEventData recon;
-        { std::lock_guard<std::mutex> lk(data_source_mtx_);
-          if (!data_source_ || !data_source_->decodeReconEvent(ev1 - 1, recon))
-              return {{"error", "decode error"}}; }
-        return {{"event", ev1}, {"channels", json::object()},
-                {"event_number", recon.event_num},
-                {"trigger_bits", recon.trigger_bits},
-                {"run_number", recon.run_number}};
-    }
+    return withFileEvent(ev1,
+        [&](fdec::EventData &event, ssp::SspEventData &) {
+            auto ana = app_file_.makeAnalyzer();
+            fdec::WaveResult wres;
+            json result = app_file_.encodeEventJson(event, ev1, ana, wres);
 
-    auto event_ptr = std::make_unique<fdec::EventData>();
-    auto &event = *event_ptr;
-    auto ssp_ptr = std::make_unique<ssp::SspEventData>();
-    std::string err = decodeRawEvent(ev1, event, ssp_ptr.get());
-    if (!err.empty()) return {{"error", err}};
-
-    accumulate(ev1, event, ssp_ptr.get());
-
-    fdec::WaveAnalyzer ana(app_file_.daq_cfg.wave_cfg);
-    ana.SetTemplateStore(&app_file_.template_store);
-    fdec::WaveResult wres;
-    json result = app_file_.encodeEventJson(event, ev1, ana, wres);
-
-    // Tag the event type so the frontend can label non-Physics samples
-    // (Sync / EPICS / control) in the status bar instead of showing them as
-    // "0 channels, no trigger".  Default is "physics".
-    {
-        std::lock_guard<std::mutex> lk(data_source_mtx_);
-        if (data_source_) {
-            using ET = evc::EventType;
-            ET et = data_source_->eventTypeAt(ev1 - 1);
-            const char *kind = "physics";
-            switch (et) {
-                case ET::Physics:  kind = "physics";  break;
-                case ET::Sync:     kind = "sync";     break;
-                case ET::Epics:    kind = "epics";    break;
-                case ET::Prestart: kind = "prestart"; break;
-                case ET::Go:       kind = "go";       break;
-                case ET::End:      kind = "end";      break;
-                case ET::Control:  kind = "control";  break;
-                case ET::Unknown:  kind = "unknown";  break;
+            // Tag the event type so the frontend can label non-Physics samples
+            // (Sync / EPICS / control) in the status bar instead of showing them as
+            // "0 channels, no trigger".  Default is "physics".
+            std::lock_guard<std::mutex> lk(data_source_mtx_);
+            if (data_source_) {
+                using ET = evc::EventType;
+                ET et = data_source_->eventTypeAt(ev1 - 1);
+                const char *kind = "physics";
+                switch (et) {
+                    case ET::Physics:  kind = "physics";  break;
+                    case ET::Sync:     kind = "sync";     break;
+                    case ET::Epics:    kind = "epics";    break;
+                    case ET::Prestart: kind = "prestart"; break;
+                    case ET::Go:       kind = "go";       break;
+                    case ET::End:      kind = "end";      break;
+                    case ET::Control:  kind = "control";  break;
+                    case ET::Unknown:  kind = "unknown";  break;
+                }
+                result["event_kind"] = kind;
             }
-            result["event_kind"] = kind;
-        }
-    }
-    return result;
+            return result;
+        },
+        // recon source: minimal event info + empty channels
+        [&](const prad2::ReconEventData &recon) -> json {
+            uint32_t run = 0;
+            { std::lock_guard<std::mutex> lk(data_source_mtx_);
+              if (data_source_) run = data_source_->runNumber(); }
+            return {{"event", ev1}, {"channels", json::object()},
+                    {"event_number", recon.event_num},
+                    {"trigger_bits", recon.trigger_bits},
+                    {"run_number", run}};
+        });
 }
 
 json ViewerServer::computeClusters(int ev1)
 {
-    // recon source: return pre-computed clusters
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
-    if (data && data->caps.source_type == "root_recon") {
-        ReconEventData recon;
-        { std::lock_guard<std::mutex> lk(data_source_mtx_);
-          if (!data_source_ || !data_source_->decodeReconEvent(ev1 - 1, recon))
-              return {{"error", "decode error"}}; }
-        return app_file_.encodeReconClustersJson(recon, ev1);
-    }
-
-    auto event_ptr = std::make_unique<fdec::EventData>();
-    auto &event = *event_ptr;
-    auto ssp_ptr = std::make_unique<ssp::SspEventData>();
-    std::string err = decodeRawEvent(ev1, event, ssp_ptr.get());
-    if (!err.empty()) return {{"error", err}};
-
-    accumulate(ev1, event, ssp_ptr.get());
-
-    fdec::WaveAnalyzer ana(app_file_.daq_cfg.wave_cfg);
-    ana.SetTemplateStore(&app_file_.template_store);
-    fdec::WaveResult wres;
-    return app_file_.computeClustersJson(event, ev1, ana, wres);
+    return withFileEvent(ev1,
+        [&](fdec::EventData &event, ssp::SspEventData &) {
+            auto ana = app_file_.makeAnalyzer();
+            fdec::WaveResult wres;
+            return app_file_.computeClustersJson(event, ev1, ana, wres);
+        },
+        [&](const prad2::ReconEventData &recon) {
+            return app_file_.encodeReconClustersJson(recon, ev1);
+        });
 }
 
-// =========================================================================
-// Interactive command loop (stdin)
-// =========================================================================
+// ── Interactive command loop (stdin) ──────────────────────────────────────
 
 void ViewerServer::commandLoop()
 {
     std::string line;
     while (running_ && std::getline(std::cin, line)) {
-        // trim whitespace
         auto s = line.find_first_not_of(" \t");
         if (s == std::string::npos) continue;
         line = line.substr(s, line.find_last_not_of(" \t") - s + 1);
@@ -820,8 +732,7 @@ void ViewerServer::commandLoop()
                       << "  quit / exit       — stop the server\n";
         }
         else if (cmd == "status") {
-            std::shared_ptr<FileData> data;
-            { std::lock_guard<std::mutex> lk(file_data_mtx_); data = file_data_; }
+            auto data = fileData();
             std::cout << "Mode: " << mode() << "\n";
             if (data)
                 std::cout << "File: " << data->filepath << " (" << data->event_count << " events)\n";
@@ -844,44 +755,22 @@ void ViewerServer::commandLoop()
         }
 #ifdef WITH_ET
         else if (cmd == "online") {
-            std::lock_guard<std::mutex> lk(mode_mtx_);
-            if (mode_.load() == Mode::Online)
-                et_generation_++;
-            et_active_ = true;
-            setMode(Mode::Online);
+            goOnline();
             std::cout << "Switched to online mode\n";
         }
 #endif
         else if (cmd == "offline") {
-            std::lock_guard<std::mutex> lk(mode_mtx_);
-            if (mode_.load() == Mode::Online) {
-#ifdef WITH_ET
-                et_active_ = false;
-#endif
-                std::shared_ptr<FileData> data;
-                { std::lock_guard<std::mutex> lk2(file_data_mtx_); data = file_data_; }
-                setMode(data ? Mode::File : Mode::Idle);
-            }
+            goOffline();
             std::cout << "Switched to " << mode() << " mode\n";
         }
         else if (cmd == "clear") {
             std::string what;
             iss >> what;
-            if (what == "hist") {
-                activeApp().clearHistograms();
-                wsBroadcast("{\"type\":\"hist_cleared\"}");
-                std::cout << "Histograms cleared\n";
-            } else if (what == "lms") {
-                activeApp().clearLms();
-                wsBroadcast("{\"type\":\"lms_cleared\"}");
-                std::cout << "LMS cleared\n";
-            } else if (what == "epics") {
-                activeApp().clearEpics();
-                wsBroadcast("{\"type\":\"epics_cleared\"}");
-                std::cout << "EPICS cleared\n";
-            } else {
+            if (clearDomain(what))
+                std::cout << (what == "hist" ? "Histograms" : what == "lms" ? "LMS" : "EPICS")
+                          << " cleared\n";
+            else
                 std::cout << "Usage: clear hist|lms|epics\n";
-            }
         }
         else if (cmd == "filter") {
             std::string sub;
@@ -892,19 +781,12 @@ void ViewerServer::commandLoop()
                 if (path.empty()) {
                     std::cout << "Usage: filter load <path.json>\n";
                 } else {
-                    std::string s = readFile(path);
-                    if (s.empty()) { std::cout << "Cannot read: " << path << "\n"; }
-                    else {
-                        auto fj = json::parse(s, nullptr, false);
-                        if (fj.is_discarded()) { std::cout << "Invalid JSON\n"; }
-                        else {
-                            std::string err = applyFilter(fj);
-                            if (err.empty())
-                                std::cout << "Filter loaded: " << filtered_indices_.size()
-                                          << " events pass\n";
-                            else std::cout << "Error: " << err << "\n";
-                        }
-                    }
+                    std::string err = loadFilterFile(path);
+                    if (err.empty())
+                        std::cout << "Filter loaded: " << filtered_indices_.size()
+                                  << " events pass\n";
+                    else
+                        std::cout << "Error: " << err << "\n";
                 }
             } else if (sub == "unload") {
                 clearFilter();
@@ -923,9 +805,3 @@ void ViewerServer::commandLoop()
         }
     }
 }
-
-// =========================================================================
-// Online mode — ET reader thread
-// =========================================================================
-
-

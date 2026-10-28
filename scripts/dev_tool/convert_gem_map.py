@@ -59,9 +59,7 @@ from pathlib import Path
 from typing import Any
 
 
-# ---------------------------------------------------------------------------
 # Defaults — used only when --template is not provided.
-# ---------------------------------------------------------------------------
 DEFAULT_HEADER: "OrderedDict[str, Any]" = OrderedDict([
     ("apv_channels", 128),
     ("readout_center", 32),
@@ -76,9 +74,7 @@ DEFAULT_HEADER: "OrderedDict[str, Any]" = OrderedDict([
 ])
 
 
-# ---------------------------------------------------------------------------
-# Parsing
-# ---------------------------------------------------------------------------
+# --- Parsing ---
 
 # Match `# X-dimension MPD slot 2` or `# Y-dimension MPD17` etc.
 MPD_COMMENT_RE = re.compile(r"^\s*#\s*([XY])-dimension\s+(.*?)\s*$", re.IGNORECASE)
@@ -90,14 +86,13 @@ def parse_text(path: Path) -> tuple[list[dict], list[dict], list[tuple]]:
     Returns (layers, apvs, mpd_comments) where:
         layers        — list of physical layer descriptors
         apvs          — list of APV records (in document order)
-        mpd_comments  — list of ((line_no, key) -> comment) tuples; key is
-                        the FiberID of the *next* APV after the comment.
-                        The emitter walks APVs in document order and
-                        prints whichever pending comment matches.
+        mpd_comments  — list of (next_apv_index, plane, slot_label) tuples,
+                        one per `# X-dimension ...` comment, keyed by the
+                        index of the first APV that follows it.
     """
     layers: list[dict] = []
     apvs: list[dict] = []
-    mpd_comments: list[tuple] = []  # (next_apv_index, plane, slot_label)
+    mpd_comments: list[tuple] = []
     pending_comment: tuple[str, str] | None = None
 
     with path.open("r", encoding="utf-8") as f:
@@ -160,9 +155,7 @@ def parse_text(path: Path) -> tuple[list[dict], list[dict], list[tuple]]:
     return layers, apvs, mpd_comments
 
 
-# ---------------------------------------------------------------------------
-# Transform
-# ---------------------------------------------------------------------------
+# --- Transform ---
 
 def remap_and_finalize(apvs: list[dict],
                        crate_map: dict[int, int]) -> list[dict]:
@@ -198,7 +191,7 @@ def build_layers_section(text_layers: list[dict],
     """Build the per-chamber `layers` list that the C++ loader consumes.
 
     The text file describes physical layers (each holding 1 or more chambers);
-    the JSON `layers` array historically holds one entry per chamber. We
+    the JSON `layers` array holds one entry per chamber. We
     derive chamber count from the GEMIDs actually present in the APV table,
     and copy x_apvs / y_apvs / pitches from the matching physical layer.
     """
@@ -229,9 +222,7 @@ def build_layers_section(text_layers: list[dict],
     return out
 
 
-# ---------------------------------------------------------------------------
-# Output formatting
-# ---------------------------------------------------------------------------
+# --- Output formatting ---
 
 def _compact_dict(d: dict) -> str:
     """Render a dict on a single line, preserving key order."""
@@ -242,11 +233,9 @@ def _compact_dict(d: dict) -> str:
 
 
 def render_apvs_array(apvs: list[dict],
-                      raw_apvs: list[dict],
                       mpd_comments: list[tuple],
                       indent: str = "        ") -> str:
     """Pretty-print the apvs array with chamber + MPD comments interleaved."""
-    # Build mapping from APV index -> (plane, slot_label) from the raw stream.
     idx_comment: dict[int, tuple[str, str]] = {}
     for idx, plane, label in mpd_comments:
         idx_comment[idx] = (plane, label)
@@ -301,24 +290,18 @@ def render_apvs_array(apvs: list[dict],
 
     # Drop trailing comma on the last entry.
     if lines:
-        last = lines[-1]
-        if last.endswith(","):
-            lines[-1] = last[:-1]
+        lines[-1] = lines[-1][:-1]
 
     return "\n".join(lines)
 
 
 def render_layers_array(layers: list[dict], indent: str = "        ") -> str:
-    rows = [f"{indent}{_compact_dict(L)}," for L in layers]
-    if rows:
-        rows[-1] = rows[-1][:-1]
-    return "\n".join(rows)
+    return ",\n".join(f"{indent}{_compact_dict(L)}" for L in layers)
 
 
 def emit_json(header: dict,
               layers: list[dict],
               apvs: list[dict],
-              raw_apvs: list[dict],
               mpd_comments: list[tuple],
               source: Path,
               crate_map: dict[int, int]) -> str:
@@ -334,7 +317,6 @@ def emit_json(header: dict,
                  f'unless you also update the source.": "",')
     lines.append("")
 
-    # Header config
     for key, val in header.items():
         if key == "hole" and isinstance(val, dict):
             lines.append(f'    "hole": {{')
@@ -343,8 +325,6 @@ def emit_json(header: dict,
                 inner.append(f'        "{k}": {json.dumps(v)}')
             lines.append(",\n".join(inner))
             lines.append("    },")
-        elif isinstance(val, str) and key.startswith("//"):
-            lines.append(f'    {json.dumps(key)}: {json.dumps(val)},')
         else:
             lines.append(f'    {json.dumps(key)}: {json.dumps(val)},')
 
@@ -354,15 +334,13 @@ def emit_json(header: dict,
     lines.append("    ],")
     lines.append("")
     lines.append('    "apvs": [')
-    lines.append(render_apvs_array(apvs, raw_apvs, mpd_comments, indent="        "))
+    lines.append(render_apvs_array(apvs, mpd_comments, indent="        "))
     lines.append("    ]")
     lines.append("}")
     return "\n".join(lines) + "\n"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# --- Helpers ---
 
 def load_template_header(path: Path) -> "OrderedDict[str, Any]":
     """Pull header config (everything except `layers` and `apvs`) from an
@@ -393,9 +371,7 @@ def parse_crate_map(spec: str) -> dict[int, int]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# --- Main ---
 
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -420,11 +396,10 @@ def main() -> int:
     header = (load_template_header(args.template)
               if args.template else OrderedDict(DEFAULT_HEADER))
 
-    out = emit_json(header, layers, apvs, raw_apvs, mpd_comments,
+    out = emit_json(header, layers, apvs, mpd_comments,
                     args.input_txt, crate_map)
     args.output_json.write_text(out, encoding="utf-8")
 
-    # Summary
     crate_counts: dict[int, int] = {}
     fiber_counts: dict[int, set] = {}
     for rec in apvs:

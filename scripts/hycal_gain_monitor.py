@@ -9,17 +9,17 @@ channel stability charts, and a table of irregular (module, run) entries.
 
 Usage
 -----
-    python scripts/hycal_gain_monitor.py
+    python scripts/hycal_gain_monitor.py [-dir FOLDER] [--theme THEME]
 """
 
 from __future__ import annotations
 
 import glob
+import html
 import math
 import os
 import re
 import shutil
-import subprocess
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -39,20 +39,26 @@ from PyQt6.QtWidgets import (
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
     QDialog, QFormLayout, QTextEdit, QMessageBox, QCheckBox,
 )
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QTimer, QProcess
+from PyQt6.QtCore import (
+    Qt, QRectF, QPointF, pyqtSignal, QTimer, QProcess, QProcessEnvironment,
+)
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QFont, QPalette,
 )
 
 from hycal_geoview import (
-    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
-    apply_theme_palette, set_theme, available_themes, THEME, themed,
+    Module, load_modules, HyCalMapWidget, ZoomHistWidget, cmap_qcolor,
+    nice_ticks, apply_theme_palette, set_theme, available_themes, THEME,
+    themed, OVERLAY_BUTTON_QSS,
+)
+from hycal_calib import LMSRecord, ModuleRecord, read_lms_dat
+from evio_io import (
+    EVIO_BYTES_PER_FILE_EST, LOCAL_DATA_BASE, REMOTE_DATA_BASE, REMOTE_HOST,
+    check_disk_space, fmt_bytes, free_bytes, local_evio_in_range, scp_bash,
 )
 
 
-# ===========================================================================
-#  Paths & constants
-# ===========================================================================
+# ---- Paths & constants ----
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_DIR = SCRIPT_DIR / ".." / "database"
@@ -91,7 +97,7 @@ CHART_PLOTS: List[Tuple[str, str]] = [
     ("mod_gain",  "Module Gain"),
 ]
 
-# Default palette for non-drift modes (matches historical gain-monitor look).
+# Default palette for non-drift modes.
 _DEFAULT_PALETTE = "blue-orange"
 
 # Separate palette used only in Run-to-Run Drift mode (not cycled by the user)
@@ -101,28 +107,38 @@ DRIFT_PALETTE = [
     (1.00, (249, 115, 22)),  # orange — large positive drift
 ]
 
+# Stylesheets in legacy dark-theme hex: pass them through themed() when the
+# widget is built, since main() selects the theme after import.
+_COMBO_QSS = (
+    "QComboBox{background:#161b22;color:#c9d1d9;"
+    "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
+    "QComboBox::drop-down{border:none;width:18px;}"
+    "QComboBox::down-arrow{border-left:4px solid transparent;"
+    "border-right:4px solid transparent;border-top:5px solid #8b949e;"
+    "margin-right:4px;}"
+    "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
+    "border:1px solid #30363d;selection-background-color:#1f6feb;}")
+_EDIT_QSS = (
+    "QLineEdit{background:#161b22;color:#c9d1d9;"
+    "border:1px solid #30363d;border-radius:3px;padding:2px 4px;}")
+_BTN_QSS = (
+    "QPushButton{background:#21262d;color:#c9d1d9;"
+    "border:1px solid #30363d;padding:4px 8px;"
+    "font:bold 11px Consolas;border-radius:3px;}"
+    "QPushButton:hover{background:#30363d;}")
+_TOGGLE_QSS = _BTN_QSS + (
+    "QPushButton:checked{background:#1f6feb;color:white;"
+    "border-color:#388bfd;}")
 
-# ===========================================================================
-#  Data structures
-# ===========================================================================
 
-@dataclass
-class LMSRecord:
-    alpha_peak: float
-    alpha_sigma: float
-    alpha_chi2ndf: float
-    lms_peak: float
-    lms_sigma: float
-    lms_chi2ndf: float
+def _slabel(text: str) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setFont(QFont("Consolas", 10))
+    lbl.setStyleSheet(themed("color:#c9d1d9;"))
+    return lbl
 
 
-@dataclass
-class ModuleRecord:
-    lms_peak: float
-    lms_sigma: float
-    lms_chi2ndf: float
-    gain_factors: Tuple[float, float, float]
-
+# ---- Data structures ----
 
 @dataclass
 class RunData:
@@ -146,8 +162,8 @@ class IrregularEntry:
 class DriftEntry:
     name: str
     mod_type: str
-    run_number: int       # current run
-    prev_run_number: int  # previous run
+    run_number: int
+    prev_run_number: int
     gain_current: float
     gain_prev: float
     rel_change: float     # (gain_current - gain_prev) / gain_prev
@@ -163,63 +179,17 @@ class SummaryEntry:
     max_prev_run: int     # previous run for that pair
 
 
-# ===========================================================================
-#  File parsing
-# ===========================================================================
+# ---- File parsing ----
 
 def parse_dat_file(filepath: str) -> Optional[RunData]:
     """Parse a single prad_NNNNNN_LMS.dat file."""
-    basename = os.path.basename(filepath)
-    m = FILE_PATTERN.search(basename)
+    m = FILE_PATTERN.search(os.path.basename(filepath))
     if not m:
         return None
-    run_number = int(m.group(1))
-    rd = RunData(run_number=run_number)
-
-    try:
-        with open(filepath) as f:
-            lines = f.readlines()
-    except OSError:
+    parsed = read_lms_dat(filepath)
+    if parsed is None or not (parsed[0] or parsed[1]):
         return None
-
-    if len(lines) < 3:
-        return None
-
-    # First 3 lines: LMS reference channels
-    for i in range(3):
-        parts = lines[i].strip().replace(',', ' ').split()
-        if len(parts) < 7:
-            continue
-        try:
-            name = parts[0]
-            rd.lms[name] = LMSRecord(
-                alpha_peak=float(parts[1]),
-                alpha_sigma=float(parts[2]),
-                alpha_chi2ndf=float(parts[3]),
-                lms_peak=float(parts[4]),
-                lms_sigma=float(parts[5]),
-                lms_chi2ndf=float(parts[6]),
-            )
-        except (ValueError, IndexError):
-            continue
-
-    # Remaining lines: module data
-    for line in lines[3:]:
-        parts = line.strip().replace(',', ' ').split()
-        if len(parts) < 7:
-            continue
-        try:
-            name = parts[0]
-            rd.modules[name] = ModuleRecord(
-                lms_peak=float(parts[1]),
-                lms_sigma=float(parts[2]),
-                lms_chi2ndf=float(parts[3]),
-                gain_factors=(float(parts[4]), float(parts[5]), float(parts[6])),
-            )
-        except (ValueError, IndexError):
-            continue
-
-    return rd
+    return RunData(run_number=int(m.group(1)), lms=parsed[0], modules=parsed[1])
 
 
 def load_all_runs(folder: str) -> List[RunData]:
@@ -235,9 +205,24 @@ def load_all_runs(folder: str) -> List[RunData]:
     return runs
 
 
-# ===========================================================================
-#  Outlier detection
-# ===========================================================================
+# ---- Outlier detection ----
+
+def gain_stats(runs: List[RunData],
+               ref_idx: int) -> Dict[str, Tuple[float, float, int]]:
+    """Per-module (mean, population std, number of runs) of the gain factor
+    against reference ``ref_idx`` over ``runs``."""
+    gains: Dict[str, List[float]] = {}
+    for rd in runs:
+        for mname, mrec in rd.modules.items():
+            gains.setdefault(mname, []).append(mrec.gain_factors[ref_idx])
+    stats: Dict[str, Tuple[float, float, int]] = {}
+    for mname, glist in gains.items():
+        mean = sum(glist) / len(glist)
+        variance = sum((g - mean) ** 2 for g in glist) / len(glist)
+        stats[mname] = (mean, math.sqrt(variance) if variance > 0 else 0.0,
+                        len(glist))
+    return stats
+
 
 def compute_irregular_entries(
     runs: List[RunData],
@@ -245,38 +230,26 @@ def compute_irregular_entries(
     mod_by_name: Dict[str, Module],
     sigma_threshold: float = 3.0,
     min_runs: int = 5,
+    stats: Optional[Dict[str, Tuple[float, float, int]]] = None,
 ) -> List[IrregularEntry]:
-    """Find (module, run) pairs with outlier gain factors."""
-
-    # Collect gain values per module across all runs
-    # module_name -> [(run_number, gain)]
-    all_gains: Dict[str, List[Tuple[int, float]]] = {}
+    """Find (module, run) pairs with outlier gain factors.  ``stats`` is
+    gain_stats(runs, ref_idx), computed here when not given."""
+    if stats is None:
+        stats = gain_stats(runs, ref_idx)
+    entries: List[IrregularEntry] = []
     for rd in runs:
         for mname, mrec in rd.modules.items():
-            gains = all_gains.setdefault(mname, [])
-            gains.append((rd.run_number, mrec.gain_factors[ref_idx]))
-
-    entries: List[IrregularEntry] = []
-    for mname, gains_list in all_gains.items():
-        if len(gains_list) < min_runs:
-            continue
-        values = [g for _, g in gains_list]
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
-        std = math.sqrt(variance) if variance > 0 else 0.0
-        if std == 0:
-            continue
-
-        mod = mod_by_name.get(mname)
-        mod_type = mod.mod_type if mod else "?"
-
-        for run_num, gain in gains_list:
+            mean, std, n = stats[mname]
+            if n < min_runs or std == 0:
+                continue
+            gain = mrec.gain_factors[ref_idx]
             dev = abs(gain - mean) / std
             if dev > sigma_threshold:
+                mod = mod_by_name.get(mname)
                 entries.append(IrregularEntry(
                     name=mname,
-                    mod_type=mod_type,
-                    run_number=run_num,
+                    mod_type=mod.mod_type if mod else "?",
+                    run_number=rd.run_number,
                     gain=gain,
                     mean_gain=mean,
                     std_dev=std,
@@ -285,6 +258,17 @@ def compute_irregular_entries(
 
     entries.sort(key=lambda e: (e.name, e.run_number))
     return entries
+
+
+def _sym_rel_change(g_curr: float, g_prev: float) -> float:
+    """|g_curr - g_prev| relative to the smaller of the two gains (inf if
+    either is 0): the drift measure the thresholds apply to."""
+    denom = min(abs(g_curr), abs(g_prev))
+    return math.inf if denom == 0 else abs(g_curr - g_prev) / denom
+
+
+def _drift_threshold(name: str, thresh_g: float, thresh_w: float) -> float:
+    return thresh_g if name.startswith("G") else thresh_w
 
 
 def compute_drift_entries(
@@ -304,10 +288,9 @@ def compute_drift_entries(
         g_curr = mrec.gain_factors[ref_idx]
         g_prev = prev_mrec.gain_factors[ref_idx]
         rel_display = math.inf if g_prev == 0 else (g_curr - g_prev) / g_prev
-        denom = min(abs(g_curr), abs(g_prev))
-        rel_sym = math.inf if denom == 0 else abs(g_curr - g_prev) / denom
-        threshold = thresh_g if mname.startswith("G") else thresh_w
-        if denom == 0 or rel_sym > threshold:
+        rel_sym = _sym_rel_change(g_curr, g_prev)
+        if (math.isinf(rel_sym)
+                or rel_sym > _drift_threshold(mname, thresh_g, thresh_w)):
             mod = mod_by_name.get(mname)
             entries.append(DriftEntry(
                 name=mname,
@@ -318,65 +301,62 @@ def compute_drift_entries(
                 gain_prev=g_prev,
                 rel_change=rel_display,
             ))
-    entries.sort(key=lambda e: (0 if e.name.startswith("W") else 1,
-                                math.isinf(e.rel_change),
-                                -(abs(e.gain_current - e.gain_prev) / min(abs(e.gain_current), abs(e.gain_prev))
-                                  if min(abs(e.gain_current), abs(e.gain_prev)) != 0 else 0)))
+
+    def sort_key(e):
+        rel = _sym_rel_change(e.gain_current, e.gain_prev)
+        return (0 if e.name.startswith("W") else 1,
+                math.isinf(e.rel_change),
+                0 if math.isinf(rel) else -rel)
+
+    entries.sort(key=sort_key)
     return entries
 
 
-# ===========================================================================
-#  HyCal Gain Map Widget
-# ===========================================================================
+# ---- HyCal Gain Map Widget ----
 
+# Map legend swatches of each view: (palette position, label).
 _LEGEND_ITEMS = {
     "drift": [
-        (QColor(0, 210, 230),  "gain decreases"),
-        (QColor(80, 80, 80),   "stable"),
-        (QColor(249, 115, 22), "gain increases"),
+        (0.0, "gain decreases"),
+        (0.5, "stable"),
+        (1.0, "gain increases"),
     ],
     "summary": [
-        (QColor(10, 42, 110),  "low drift count"),
-        (QColor(249, 115, 22), "high drift count"),
+        (0.0, "low drift count"),
+        (1.0, "high drift count"),
     ],
     "gain": [
-        (QColor(10, 42, 110),  "low gain"),
-        (QColor(249, 115, 22), "high gain"),
+        (0.0, "low gain"),
+        (1.0, "high gain"),
     ],
     "deviation": [
-        (QColor(10, 42, 110),  "below mean"),
-        (QColor(80, 80, 80),   "near mean"),
-        (QColor(249, 115, 22), "above mean"),
+        (0.0, "below mean"),
+        (0.5, "near mean"),
+        (1.0, "above mean"),
     ],
 }
+
+# _LEGEND_ITEMS key of each GainMonitorWindow view mode (View combo index).
+_VIEW_MODE_LEGEND = ("gain", "deviation", "drift", "summary")
 
 
 class HyCalGainMapWidget(HyCalMapWidget):
     """Gain-monitor specialisation of the shared HyCal map widget.
 
-    Adds a custom palette override (used by Run-to-Run Drift mode), a
-    persistent module selection highlight, and a legend overlay above the
-    colour bar that explains the active view mode.
+    Adds a custom palette override (used by Run-to-Run Drift mode) and a
+    legend overlay above the colour bar that explains the active view
+    mode.  The LMS cells carry their Ref1/2/3 labels, and a module click
+    toggles the selection highlight.
     """
 
     CB_MAX_WIDTH = 300
 
-    # Module types to overlay with a small in-cell name label so the
-    # tiny LMS reference cells off to the side are identifiable.
-    _LABEL_TYPES = {"LMS"}
-
     def __init__(self, parent=None):
         super().__init__(parent, shrink=0.90, margin_top=8,
-                         enable_zoom_pan=True, include_lms=True)
+                         enable_zoom_pan=True, include_lms=True,
+                         label_types={"LMS"}, toggle_select=True)
         self._palette_override = None
         self._legend_mode: Optional[str] = None
-        self._selected: Optional[str] = None
-        self._label_names: set = set()    # populated in set_modules()
-
-    def set_modules(self, modules):
-        super().set_modules(modules)
-        self._label_names = {m.name for m in self._modules
-                             if m.mod_type in self._LABEL_TYPES}
 
     # -- public API additions --
 
@@ -401,10 +381,6 @@ class HyCalGainMapWidget(HyCalMapWidget):
             self._legend_mode = mode
             self.update()
 
-    def set_selected(self, name: Optional[str]):
-        self._selected = name
-        self.update()
-
     # -- base hooks --
 
     def palette_stops(self):
@@ -422,10 +398,8 @@ class HyCalGainMapWidget(HyCalMapWidget):
             return label
         return f"{label}: {v:.5f}"
 
-    def _colorbar_center_text(self) -> str:
-        if self._palette_override is not None:
-            return "cyan-grey-orange"
-        return super()._colorbar_center_text()
+    def _label_text(self, name: str) -> str:
+        return lms_display_name(name)
 
     def _paint_empty(self, p, w, h):
         if not self._values:
@@ -433,24 +407,6 @@ class HyCalGainMapWidget(HyCalMapWidget):
             p.setFont(QFont("Consolas", 12))
             p.drawText(QRectF(0, 0, w, h),
                        Qt.AlignmentFlag.AlignCenter, "No data loaded")
-
-    def _paint_overlays(self, p, w, h):
-        # Tiny LMS-cell name labels so the three reference modules off to
-        # the side are identifiable at a glance.
-        if self._label_names:
-            p.setPen(QColor(THEME.TEXT))
-            p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
-            for name in self._label_names:
-                r = self._rects.get(name)
-                if r is not None:
-                    p.drawText(r, Qt.AlignmentFlag.AlignCenter,
-                               lms_display_name(name))
-
-        if self._selected and self._selected in self._rects:
-            p.setPen(QPen(QColor(THEME.SELECT_BORDER), 2.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._selected])
-        super()._paint_overlays(p, w, h)
 
     def _paint_after_colorbar(self, p, w, h):
         items = _LEGEND_ITEMS.get(self._legend_mode)
@@ -472,10 +428,11 @@ class HyCalGainMapWidget(HyCalMapWidget):
         p.setBrush(QColor(10, 14, 20, 200))
         p.drawRoundedRect(QRectF(lx, ly, total_w + 2 * pad, lh + 2 * pad), 4, 4)
         x = lx + pad
-        for color, label in items:
+        stops = self.palette_stops()
+        for t, label in items:
             sy = ly + pad + (lh - swatch) // 2
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(color)
+            p.setBrush(cmap_qcolor(t, stops))
             p.drawRect(QRectF(x, sy, swatch, swatch))
             p.setPen(QColor(THEME.TEXT))
             p.drawText(QRectF(x + swatch + gap, ly + pad,
@@ -484,20 +441,25 @@ class HyCalGainMapWidget(HyCalMapWidget):
                        label)
             x += item_w + spacing
 
-    def _handle_click(self, pos):
-        if self._cb_rect and self._cb_rect.contains(pos):
-            self.paletteClicked.emit()
-            return
-        hit = self._hit(pos)
-        if hit is not None:
-            new_sel = None if hit == self._selected else hit
-            self._selected = new_sel
-            self.update()
-            self.moduleClicked.emit(new_sel if new_sel else "")
-        elif self._selected is not None:
-            self._selected = None
-            self.update()
-            self.moduleClicked.emit("")
+
+def _collect_series(runs: List[RunData], records: list, point):
+    """(1-based positions, run numbers, values, errors) of a chart series:
+    ``point(rec)`` gives (value, error) for the record of each run, or None
+    to skip the run; an error of None adds no error bar."""
+    indices: List[int] = []
+    actual_runs: List[int] = []
+    vals: List[float] = []
+    errs: List[float] = []
+    for idx, (rd, rec) in enumerate(zip(runs, records)):
+        pt = point(rec)
+        if pt is None:
+            continue
+        indices.append(idx + 1)
+        actual_runs.append(rd.run_number)
+        vals.append(pt[0])
+        if pt[1] is not None:
+            errs.append(pt[1])
+    return indices, actual_runs, vals, errs
 
 
 def _chart_y_range(values: List[float], errors: List[float]) -> Tuple[float, float]:
@@ -516,9 +478,7 @@ def _chart_y_range(values: List[float], errors: List[float]) -> Tuple[float, flo
     return y_lo, y_hi
 
 
-# ===========================================================================
-#  LMS Line Chart Widget
-# ===========================================================================
+# ---- LMS Line Chart Widget ----
 
 class LMSLineChartWidget(QWidget):
     """Line chart with error bars vs run number."""
@@ -537,7 +497,6 @@ class LMSLineChartWidget(QWidget):
         self._errors: List[float] = []
         self._title: str = ""
         self._hover_idx: int = -1
-        self._highlighted: bool = False
         self._current_run_number: int = -1
         self._y_range: Optional[Tuple[float, float]] = None
         self._series_color: Optional[QColor] = None
@@ -554,11 +513,6 @@ class LMSLineChartWidget(QWidget):
         """Override the default ACCENT-blue series colour. Pass None to clear."""
         self._series_color = QColor(color) if color is not None else None
         self.update()
-
-    def set_highlighted(self, on: bool):
-        if on != self._highlighted:
-            self._highlighted = on
-            self.update()
 
     def set_current_run(self, run_number: int):
         if run_number != self._current_run_number:
@@ -588,19 +542,17 @@ class LMSLineChartWidget(QWidget):
             x_min -= 1; x_max += 1
         return [px + (r - x_min) / (x_max - x_min) * pw for r in runs]
 
+    def _nearest_index(self, mx: float) -> int:
+        """Index of the point nearest to widget x ``mx``; -1 if none lies
+        within 20 px."""
+        xs = self._screen_xs(self.width())
+        if not xs:
+            return -1
+        i = min(range(len(xs)), key=lambda k: abs(mx - xs[k]))
+        return i if abs(mx - xs[i]) < 20 else -1
+
     def mouseMoveEvent(self, event):
-        runs = self._run_numbers
-        if not runs:
-            return
-        sx_list = self._screen_xs(self.width())
-        mx = event.position().x()
-        best_i, best_d = -1, float("inf")
-        for i, sx in enumerate(sx_list):
-            d = abs(mx - sx)
-            if d < best_d:
-                best_d = d
-                best_i = i
-        new_idx = best_i if best_d < 20 else -1
+        new_idx = self._nearest_index(event.position().x())
         if new_idx != self._hover_idx:
             self._hover_idx = new_idx
             self.update()
@@ -609,20 +561,10 @@ class LMSLineChartWidget(QWidget):
         btn = event.button()
         if btn not in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
             return
-        runs = self._run_numbers
-        if not runs:
+        i = self._nearest_index(event.position().x())
+        if i < 0 or i >= len(self._actual_run_numbers):
             return
-        sx_list = self._screen_xs(self.width())
-        mx = event.position().x()
-        best_i, best_d = -1, float("inf")
-        for i, sx in enumerate(sx_list):
-            d = abs(mx - sx)
-            if d < best_d:
-                best_d = d
-                best_i = i
-        if best_d >= 20 or best_i >= len(self._actual_run_numbers):
-            return
-        actual_rn = self._actual_run_numbers[best_i]
+        actual_rn = self._actual_run_numbers[i]
         if btn == Qt.MouseButton.LeftButton:
             self.runClicked.emit(actual_rn)
         else:
@@ -640,48 +582,21 @@ class LMSLineChartWidget(QWidget):
             self._hover_idx = -1
             self.update()
 
-    @staticmethod
-    def _nice_ticks(lo: float, hi: float, max_ticks: int = 6):
-        """Compute nice tick values for an axis range."""
-        if not math.isfinite(lo) or not math.isfinite(hi):
-            return []
-        if hi <= lo:
-            return [lo]
-        raw = (hi - lo) / max(max_ticks - 1, 1)
-        mag = 10 ** math.floor(math.log10(raw)) if raw > 0 else 1
-        candidates = [1, 2, 2.5, 5, 10]
-        step = mag
-        for c in candidates:
-            if c * mag >= raw:
-                step = c * mag
-                break
-        start = math.ceil(lo / step) * step
-        ticks = []
-        v = start
-        while v <= hi + step * 0.01:
-            ticks.append(v)
-            v += step
-        return ticks
-
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         w, h = self.width(), self.height()
         p.fillRect(0, 0, w, h, QColor(THEME.CANVAS))
 
-        # title
-        if self._highlighted:
-            title_color = QColor(THEME.HIGHLIGHT)
-        elif self._series_color is not None:
-            title_color = QColor(self._series_color)
+        if self._series_color is not None:
+            series_color = QColor(self._series_color)
         else:
-            title_color = QColor(THEME.ACCENT)
-        title_text = (self._title + "  [reference]") if self._highlighted else self._title
-        p.setPen(title_color)
+            series_color = QColor(THEME.ACCENT)
+        p.setPen(series_color)
         p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
         p.drawText(QRectF(self.PAD_L, 2, w - self.PAD_L - self.PAD_R, 20),
                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                   title_text)
+                   self._title)
 
         runs = self._run_numbers
         ratios = self._ratios
@@ -694,7 +609,6 @@ class LMSLineChartWidget(QWidget):
             p.end()
             return
 
-        # plot area
         px = self.PAD_L
         py = self.PAD_T
         pw = w - self.PAD_L - self.PAD_R
@@ -703,27 +617,13 @@ class LMSLineChartWidget(QWidget):
             p.end()
             return
 
-        # data ranges
         x_min, x_max = runs[0], runs[-1]
         if x_min == x_max:
             x_min -= 1
             x_max += 1
 
-        if self._y_range is not None:
-            y_lo, y_hi = self._y_range
-        else:
-            y_vals = [r for r in ratios if math.isfinite(r)]
-            for i, r in enumerate(ratios):
-                if not math.isfinite(r):
-                    continue
-                if i < len(errors) and math.isfinite(errors[i]):
-                    y_vals.append(r + errors[i])
-                    y_vals.append(r - errors[i])
-            y_lo = min(y_vals) if y_vals else 0.9
-            y_hi = max(y_vals) if y_vals else 1.1
-            margin = (y_hi - y_lo) * 0.1 if y_hi > y_lo else 0.05
-            y_lo -= margin
-            y_hi += margin
+        # set_y_range() always follows a non-empty set_data().
+        y_lo, y_hi = self._y_range
         if not math.isfinite(y_lo) or not math.isfinite(y_hi):
             p.setPen(QColor(THEME.TEXT_MUTED))
             p.setFont(QFont("Consolas", 10))
@@ -742,14 +642,12 @@ class LMSLineChartWidget(QWidget):
         def to_sy(v):
             return py + ph - (v - y_lo) / (y_hi - y_lo) * ph
 
-        # grid + axes
         p.setPen(QPen(QColor(THEME.BUTTON), 1, Qt.PenStyle.DotLine))
-        y_ticks = self._nice_ticks(y_lo, y_hi, 5)
+        y_ticks = nice_ticks(y_lo, y_hi, 5)
         for yt in y_ticks:
             sy = to_sy(yt)
             p.drawLine(QPointF(px, sy), QPointF(px + pw, sy))
 
-        # axes border
         p.setPen(QPen(QColor(THEME.BORDER), 1))
         p.drawLine(QPointF(px, py), QPointF(px, py + ph))
         p.drawLine(QPointF(px, py + ph), QPointF(px + pw, py + ph))
@@ -771,7 +669,6 @@ class LMSLineChartWidget(QWidget):
             p.drawText(QRectF(sx - 30, py + ph + 2, 60, 18),
                        Qt.AlignmentFlag.AlignCenter, str(runs[i]))
 
-        # error bars
         p.setPen(QPen(QColor(THEME.TEXT_DIM), 1))
         cap = 3
         for i in range(len(runs)):
@@ -786,14 +683,6 @@ class LMSLineChartWidget(QWidget):
             p.drawLine(QPointF(sx - cap, sy_top), QPointF(sx + cap, sy_top))
             p.drawLine(QPointF(sx - cap, sy_bot), QPointF(sx + cap, sy_bot))
 
-        if self._highlighted:
-            series_color = QColor(THEME.HIGHLIGHT)
-        elif self._series_color is not None:
-            series_color = QColor(self._series_color)
-        else:
-            series_color = QColor(THEME.ACCENT)
-
-        # connecting line
         p.setPen(QPen(series_color, 1.5))
         for i in range(len(runs) - 1):
             if i + 1 >= len(ratios):
@@ -801,7 +690,6 @@ class LMSLineChartWidget(QWidget):
             p.drawLine(QPointF(to_sx(runs[i]), to_sy(ratios[i])),
                        QPointF(to_sx(runs[i + 1]), to_sy(ratios[i + 1])))
 
-        # points
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(series_color)
         for i in range(len(runs)):
@@ -854,20 +742,19 @@ class LMSLineChartWidget(QWidget):
         p.end()
 
 
-# ===========================================================================
-#  ROOT histogram display widget
-# ===========================================================================
+# ---- ROOT histogram display widget ----
 
 _HIST_CACHE_MAX = 20
 
 
-class RootHistWidget(QWidget):
+class RootHistWidget(ZoomHistWidget):
     """Displays a TH1 histogram read from a fitted LMS ROOT file.
 
-    Left-drag to zoom into an x range; right-click → Unzoom resets to 0–2000.
+    Left-drag to zoom into an x range; right-click → Unzoom resets to the
+    histogram edges.
     """
 
-    PAD_L, PAD_R, PAD_T, PAD_B = 55, 16, 24, 40
+    PAD_B = 40
 
     _X_DEFAULT_LO = 0.0
     _X_DEFAULT_HI = 1000.0
@@ -896,9 +783,6 @@ class RootHistWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._values: List[float] = []
-        self._edges: List[float] = []
-        self._title: str = ""
         self._gauss: Optional[Tuple[float, float, float, float, float]] = None  # amp,mean,sigma,xmin,xmax
         # Optional overlay histogram (e.g., alpha peak for LMS modules).
         self._ovl_values: List[float] = []
@@ -910,13 +794,11 @@ class RootHistWidget(QWidget):
         # are available (reference PMTs only).  Ignored when no overlay.
         self._stack_src: str = "LMS"
         self._stack_entries: List[Tuple[List[float], List[float], str]] = []
+        # Title of the latest set_histogram() run, without the stack prefix.
+        self._latest_title: str = ""
         self._x_lo = self._X_DEFAULT_LO
         self._x_hi = self._X_DEFAULT_HI
-        self._drag_start: Optional[float] = None  # data-x where drag began
-        self._drag_cur:   Optional[float] = None  # data-x of current cursor
         self.setMinimumHeight(80)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMouseTracking(True)
 
         # Top-right "Stack" toggle.
         self._stack_btn = QPushButton("Stack: off", self)
@@ -928,10 +810,7 @@ class RootHistWidget(QWidget):
             "  off — clicking a run replaces the histogram (default)\n"
             "  on  — clicking different runs accumulates histograms\n"
             "        with distinct colours; fits are hidden")
-        self._stack_btn.setStyleSheet(themed(
-            "QPushButton{background:rgba(29,29,31,220);color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:4px;}"
-            "QPushButton:hover{background:#28282a;color:#e6edf3;}"))
+        self._stack_btn.setStyleSheet(themed(OVERLAY_BUTTON_QSS))
         self._stack_btn.clicked.connect(self._toggle_stack)
 
         # Source selector for stack mode — only meaningful for the three
@@ -946,57 +825,35 @@ class RootHistWidget(QWidget):
             "  Alpha — stack the alpha-peak histogram\n"
             "Toggling clears the current stack to avoid mixing\n"
             "LMS and Alpha distributions in one plot.")
-        self._src_btn.setStyleSheet(themed(
-            "QPushButton{background:rgba(29,29,31,220);color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:4px;}"
-            "QPushButton:hover{background:#28282a;color:#e6edf3;}"))
+        self._src_btn.setStyleSheet(themed(OVERLAY_BUTTON_QSS))
         self._src_btn.clicked.connect(self._toggle_stack_src)
 
-    # ------------------------------------------------------------------
     def set_histogram(self, values, edges, title: str = "",
                       gauss: Optional[Tuple[float, float, float, float, float]] = None,
                       overlay_values=None, overlay_edges=None,
                       overlay_gauss: Optional[Tuple[float, float, float, float, float]] = None):
-        vals_list = list(values)
-        edges_list = list(edges)
-        ovl_vals_list = list(overlay_values) if overlay_values is not None else []
-        ovl_edges_list = list(overlay_edges) if overlay_edges is not None else []
+        # The single-mode payload is kept in stack mode too, so toggling
+        # the source can re-seed the stack from the currently shown run.
+        self._values = list(values)
+        self._edges = list(edges)
+        self._ovl_values = list(overlay_values) if overlay_values is not None else []
+        self._ovl_edges = list(overlay_edges) if overlay_edges is not None else []
+        self._ovl_gauss = overlay_gauss
+        self._latest_title = title
         if self._stack_mode:
-            # Pick which histogram to append.  For reference PMTs the user
-            # can opt to stack the alpha-peak distribution instead of the
-            # LMS one; non-reference modules have no overlay and silently
-            # fall back to LMS.  Fits and overlays are hidden in this mode
-            # so multiple distributions stay readable.
-            use_alpha = (self._stack_src == "Alpha"
-                         and ovl_vals_list and ovl_edges_list
-                         and len(ovl_edges_list) >= 2)
-            if use_alpha:
-                entry = (ovl_vals_list, ovl_edges_list, f"{title} [α]")
-            else:
-                entry = (vals_list, edges_list, title)
-            self._stack_entries.append(entry)
-            if len(self._stack_entries) == 1:
-                self._x_lo = self._X_DEFAULT_LO
-                self._x_hi = self._X_DEFAULT_HI
-            self._title = (f"Stack [{self._stack_src}]: "
-                           f"{len(self._stack_entries)} run(s) — "
-                           f"latest: {title}")
+            # Fits and overlays are hidden in this mode so multiple
+            # distributions stay readable.
+            entry = self._stack_entry(title)
+            if entry:
+                self._stack_entries.append(entry)
+                if len(self._stack_entries) == 1:
+                    self._x_lo = self._X_DEFAULT_LO
+                    self._x_hi = self._X_DEFAULT_HI
+            self._title = self._stack_title(title)
             self._gauss = None
-            # Keep the latest single-mode payload so toggling the source
-            # can re-seed the stack from the currently shown run.
-            self._values = vals_list
-            self._edges = edges_list
-            self._ovl_values = ovl_vals_list
-            self._ovl_edges = ovl_edges_list
-            self._ovl_gauss = overlay_gauss
         else:
-            self._values = vals_list
-            self._edges = edges_list
             self._title = title
             self._gauss = gauss
-            self._ovl_values = ovl_vals_list
-            self._ovl_edges = ovl_edges_list
-            self._ovl_gauss = overlay_gauss
             self._x_lo = self._X_DEFAULT_LO
             self._x_hi = self._X_DEFAULT_HI
         self._drag_start = self._drag_cur = None
@@ -1006,6 +863,7 @@ class RootHistWidget(QWidget):
         self._values = []
         self._edges = []
         self._title = ""
+        self._latest_title = ""
         self._gauss = None
         self._ovl_values = []
         self._ovl_edges = []
@@ -1016,31 +874,37 @@ class RootHistWidget(QWidget):
         self._drag_start = self._drag_cur = None
         self.update()
 
+    def _stack_entry(self, title: str):
+        """Stack entry (values, edges, label) of the current histogram in
+        the chosen source; non-reference modules have no alpha overlay and
+        fall back to LMS.  None when there is nothing to stack."""
+        if (self._stack_src == "Alpha" and self._ovl_values
+                and len(self._ovl_edges) >= 2):
+            return (list(self._ovl_values), list(self._ovl_edges),
+                    f"{title} [α]")
+        if self._values and self._edges:
+            return (list(self._values), list(self._edges), title)
+        return None
+
+    def _stack_title(self, latest: Optional[str] = None) -> str:
+        n = len(self._stack_entries)
+        title = f"Stack [{self._stack_src}]: {n} run(s)"
+        return f"{title} — latest: {latest}" if n and latest is not None else title
+
+    def _reseed_stack(self):
+        """Restart the stack from the histogram currently shown."""
+        entry = self._stack_entry(self._latest_title)
+        self._stack_entries = [entry] if entry else []
+        self._title = self._stack_title(self._latest_title)
+        self._gauss = None
+
     def _toggle_stack(self):
         self._stack_mode = not self._stack_mode
         self._stack_btn.setText("Stack: on" if self._stack_mode else "Stack: off")
         if self._stack_mode:
-            # When entering stack mode, seed the stack with whatever single
-            # histogram is currently showing (so the user doesn't have to
-            # re-click the first run).  Honour the chosen source: for a
-            # reference PMT with an alpha overlay we can seed from Alpha.
-            seed_title = self._title
-            use_alpha = (self._stack_src == "Alpha"
-                         and self._ovl_values and self._ovl_edges
-                         and len(self._ovl_edges) >= 2)
-            if use_alpha:
-                self._stack_entries = [(list(self._ovl_values),
-                                        list(self._ovl_edges),
-                                        f"{seed_title} [α]")]
-            elif self._values and self._edges:
-                self._stack_entries = [(list(self._values),
-                                        list(self._edges),
-                                        seed_title)]
-            if self._stack_entries:
-                self._title = (f"Stack [{self._stack_src}]: "
-                               f"{len(self._stack_entries)} run(s) — "
-                               f"latest: {seed_title}")
-                self._gauss = None
+            # Seed the stack with the histogram currently showing so the
+            # user doesn't have to re-click the first run.
+            self._reseed_stack()
         else:
             # Leaving stack mode — drop the stack; the next set_histogram
             # call will repopulate the single-hist view.
@@ -1048,34 +912,12 @@ class RootHistWidget(QWidget):
         self.update()
 
     def _toggle_stack_src(self):
-        # Flip between LMS and Alpha.  Switching sources clears the stack
-        # so we never mix the two distributions in a single plot.
+        # Switching sources restarts the stack so the two distributions are
+        # never mixed in a single plot.
         self._stack_src = "Alpha" if self._stack_src == "LMS" else "LMS"
         self._src_btn.setText(f"Src: {self._stack_src}")
         if self._stack_mode:
-            seed_title = self._title
-            # Strip any existing "Stack [...]:" prefix so re-seeding doesn't
-            # nest labels on repeated toggles.
-            if " — latest: " in seed_title:
-                seed_title = seed_title.split(" — latest: ", 1)[1]
-            self._stack_entries = []
-            use_alpha = (self._stack_src == "Alpha"
-                         and self._ovl_values and self._ovl_edges
-                         and len(self._ovl_edges) >= 2)
-            if use_alpha:
-                self._stack_entries = [(list(self._ovl_values),
-                                        list(self._ovl_edges),
-                                        f"{seed_title} [α]")]
-            elif self._values and self._edges:
-                self._stack_entries = [(list(self._values),
-                                        list(self._edges),
-                                        seed_title)]
-            if self._stack_entries:
-                self._title = (f"Stack [{self._stack_src}]: "
-                               f"{len(self._stack_entries)} run(s) — "
-                               f"latest: {seed_title}")
-            else:
-                self._title = f"Stack [{self._stack_src}]: 0 run(s)"
+            self._reseed_stack()
         self.update()
 
     def resizeEvent(self, event):
@@ -1086,73 +928,25 @@ class RootHistWidget(QWidget):
         self._stack_btn.move(stack_x, 4)
         self._src_btn.move(stack_x - self._src_btn.width() - 6, 4)
 
-    # ------------------------------------------------------------------
-    def _plot_rect(self):
-        w, h = self.width(), self.height()
-        return self.PAD_L, self.PAD_T, w - self.PAD_L - self.PAD_R, h - self.PAD_T - self.PAD_B
-
-    def _sx_to_data(self, sx: float) -> float:
-        px, _py, pw, _ph = self._plot_rect()
-        if pw <= 0 or self._x_hi == self._x_lo:
-            return self._x_lo
-        return self._x_lo + (sx - px) / pw * (self._x_hi - self._x_lo)
-
-    # ------------------------------------------------------------------
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            px, py, pw, ph = self._plot_rect()
-            mx, my = event.position().x(), event.position().y()
-            if px <= mx <= px + pw and py <= my <= py + ph + self.PAD_B:
-                self._drag_start = self._sx_to_data(mx)
-                self._drag_cur   = self._drag_start
-                self.update()
-
-    def mouseMoveEvent(self, event):
-        if self._drag_start is not None:
-            self._drag_cur = self._sx_to_data(event.position().x())
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
-            d_end = self._sx_to_data(event.position().x())
-            d_start = self._drag_start
-            self._drag_start = self._drag_cur = None
-            span = self._x_hi - self._x_lo
-            if abs(d_end - d_start) > span * 0.01:
-                self._x_lo = min(d_start, d_end)
-                self._x_hi = max(d_start, d_end)
-            self.update()
-
-    def contextMenuEvent(self, event):
-        menu = QMenu(self)
-        menu.setStyleSheet(themed(
-            "QMenu{background:#161b22;color:#c9d1d9;border:1px solid #30363d;}"
-            "QMenu::item:selected{background:#1f6feb;}"))
-        menu.addAction("Unzoom").triggered.connect(self._unzoom)
+    def _extend_menu(self, menu):
         if self._stack_mode and self._stack_entries:
             menu.addAction("Clear stack").triggered.connect(self._clear_stack)
-        menu.exec(event.globalPos())
 
     def _clear_stack(self):
         self._stack_entries = []
-        self._title = f"Stack [{self._stack_src}]: 0 run(s)"
+        self._title = self._stack_title()
         self.update()
 
     def _unzoom(self):
-        if self._stack_mode and self._stack_entries:
+        if self._stack_mode and self._stack_entries and self._stack_entries[0][1]:
             edgs = self._stack_entries[0][1]
-            if edgs:
-                self._x_lo = edgs[0]
-                self._x_hi = edgs[-1]
-                self.update()
-                return
-        if self._edges:
-            self._x_lo = self._edges[0]
-            self._x_hi = self._edges[-1]
+            self._x_lo, self._x_hi = edgs[0], edgs[-1]
+            self.update()
+        elif self._edges:
+            super()._unzoom()
         else:
-            self._x_lo = self._X_DEFAULT_LO
-            self._x_hi = self._X_DEFAULT_HI
-        self.update()
+            self._x_lo, self._x_hi = self._X_DEFAULT_LO, self._X_DEFAULT_HI
+            self.update()
 
     def _draw_stack_legend(self, p, px, py, pw):
         if not self._stack_entries:
@@ -1177,11 +971,9 @@ class RootHistWidget(QWidget):
         # Anchor below the Stack button (which is at y=4, height ~22).
         lx = px + pw - legend_w - 6
         ly = py + 30
-        # Background.
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(10, 14, 20, 200))
         p.drawRoundedRect(QRectF(lx, ly, legend_w, legend_h), 4, 4)
-        # Entries.
         n_colors = len(self.STACK_COLORS)
         for row_idx, (entry_idx, label, _lw) in enumerate(rows):
             sy = ly + 3 + row_idx * line_h
@@ -1197,27 +989,17 @@ class RootHistWidget(QWidget):
                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
                        label)
 
-    # ------------------------------------------------------------------
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor(THEME.CANVAS))
-
-        if self._title:
-            p.setPen(QColor(THEME.ACCENT))
-            p.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-            p.drawText(QRectF(self.PAD_L, 2, w - self.PAD_L - self.PAD_R, 20),
-                       Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                       self._title)
+        p.fillRect(0, 0, self.width(), self.height(), QColor(THEME.CANVAS))
+        self._paint_title(p)
 
         # In stack mode treat any non-empty stack as "have data".
         have_data = (self._values and self._edges and len(self._edges) >= 2)
         have_stack = bool(self._stack_entries)
         if not have_data and not have_stack:
-            p.setPen(QColor(THEME.TEXT_MUTED))
-            p.setFont(QFont("Consolas", 10))
-            p.drawText(QRectF(0, 0, w, h), Qt.AlignmentFlag.AlignCenter, "No histogram")
+            self._paint_placeholder(p, "No histogram")
             p.end()
             return
 
@@ -1226,16 +1008,11 @@ class RootHistWidget(QWidget):
             p.end()
             return
 
-        x_lo = self._x_lo
-        x_hi = self._x_hi if self._x_hi > self._x_lo else self._x_lo + 1
+        x_lo, x_hi, _ = self._x_view()
+        to_sx = self._x_map()[0]
 
         def _vis_max(values, edges):
-            return max(
-                (v for i, v in enumerate(values)
-                 if i + 1 < len(edges)
-                 and edges[i + 1] > x_lo
-                 and edges[i] < x_hi),
-                default=0.0)
+            return max(self._visible_values(values, edges), default=0.0)
 
         # y scale from visible bins only — must fit primary, overlay, and
         # every stacked entry.
@@ -1247,33 +1024,10 @@ class RootHistWidget(QWidget):
                           _vis_max(self._ovl_values, self._ovl_edges))
         y_hi = vis_max * 1.1 if vis_max > 0 else 1.0
 
-        def to_sx(v):
-            return px + (v - x_lo) / (x_hi - x_lo) * pw
-
         def to_sy(v):
             return py + ph * (1.0 - v / y_hi)
 
-        # dotted grid
-        p.setPen(QPen(QColor(THEME.BUTTON), 1, Qt.PenStyle.DotLine))
-        n_yticks = 5
-        for i in range(n_yticks + 1):
-            sy = py + ph * i / n_yticks
-            p.drawLine(QPointF(px, sy), QPointF(px + pw, sy))
-
-        def _draw_bars(values, edges, color):
-            p.setPen(Qt.PenStyle.NoPen)
-            for i, v in enumerate(values):
-                if i + 1 >= len(edges):
-                    break
-                b_lo, b_hi = edges[i], edges[i + 1]
-                if b_hi <= x_lo or b_lo >= x_hi:
-                    continue
-                sx1 = max(to_sx(b_lo), px)
-                sx2 = min(to_sx(b_hi), px + pw)
-                bar_top = to_sy(v)
-                bar_h = (py + ph) - bar_top
-                if bar_h > 0 and sx2 > sx1:
-                    p.fillRect(QRectF(sx1, bar_top, sx2 - sx1 - 1, bar_h), color)
+        self._paint_grid(p)
 
         if self._stack_mode and have_stack:
             # Each stacked run gets its own colour from STACK_COLORS, with
@@ -1282,9 +1036,7 @@ class RootHistWidget(QWidget):
             for idx, (vals, edgs, _stack_title) in enumerate(self._stack_entries):
                 col = QColor(self.STACK_COLORS[idx % n_colors])
                 col.setAlphaF(self.STACK_ALPHA)
-                _draw_bars(vals, edgs, col)
-            # Stack legend — coloured swatches with run titles, top-right
-            # of the plot area, just below the Stack button.
+                self._paint_bars(p, vals, edgs, col, to_sy)
             self._draw_stack_legend(p, px, py, pw)
         else:
             # Overlay histogram (alpha peak for LMS modules) — drawn first
@@ -1292,9 +1044,11 @@ class RootHistWidget(QWidget):
             if self._ovl_values and self._ovl_edges and len(self._ovl_edges) >= 2:
                 ovl_color = QColor(self.OVERLAY_BAR_COLOR)
                 ovl_color.setAlphaF(0.55)
-                _draw_bars(self._ovl_values, self._ovl_edges, ovl_color)
+                self._paint_bars(p, self._ovl_values, self._ovl_edges,
+                                 ovl_color, to_sy)
             # Primary histogram (LMS or generic module) — full opacity.
-            _draw_bars(self._values, self._edges, QColor(THEME.HIGHLIGHT))
+            self._paint_bars(p, self._values, self._edges,
+                             QColor(THEME.HIGHLIGHT), to_sy)
 
             def _draw_gauss(g, color):
                 if g is None:
@@ -1320,57 +1074,48 @@ class RootHistWidget(QWidget):
             _draw_gauss(self._gauss,     QColor("#00bcd4"))
             _draw_gauss(self._ovl_gauss, QColor(self.OVERLAY_FIT_COLOR))
 
-        # drag selection overlay
-        if self._drag_start is not None and self._drag_cur is not None:
-            d_lo = min(self._drag_start, self._drag_cur)
-            d_hi = max(self._drag_start, self._drag_cur)
-            sx1 = max(to_sx(d_lo), px)
-            sx2 = min(to_sx(d_hi), px + pw)
-            if sx2 > sx1:
-                p.fillRect(QRectF(sx1, py, sx2 - sx1, ph), QColor(255, 255, 100, 50))
-                p.setPen(QPen(QColor(255, 255, 100, 180), 1))
-                p.drawRect(QRectF(sx1, py, sx2 - sx1, ph))
-
-        # axes
-        p.setPen(QPen(QColor(THEME.BORDER), 1))
-        p.drawLine(QPointF(px, py), QPointF(px, py + ph))
-        p.drawLine(QPointF(px, py + ph), QPointF(px + pw, py + ph))
-
-        # y labels
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.setFont(QFont("Consolas", 8))
-        for i in range(n_yticks + 1):
-            val = y_hi * (n_yticks - i) / n_yticks
-            sy = py + ph * i / n_yticks
-            p.drawText(QRectF(0, sy - 8, self.PAD_L - 4, 16),
-                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                       f"{val:.0f}")
-
-        # x labels
-        x_ticks = LMSLineChartWidget._nice_ticks(x_lo, x_hi, max(pw // 60, 2))
-        for xt in x_ticks:
-            sx = to_sx(xt)
-            p.drawText(QRectF(sx - 25, py + ph + 2, 50, 16),
-                       Qt.AlignmentFlag.AlignCenter, f"{xt:.0f}")
-
+        self._paint_drag(p)
+        self._paint_axes(p, self._lin_y_labels(y_hi))
         p.end()
 
 
-# ===========================================================================
-#  Irregular channels table
-# ===========================================================================
+# ---- Irregular channels table ----
 
 class IrregularTableWidget(QWidget):
-    """Table of outlier entries — supports both irregular (deviation) and drift modes."""
+    """Table of outlier entries: irregular gains (deviation), run-to-run
+    drift, or the drift summary."""
 
     runClicked = pyqtSignal(int)    # emits run number when a row is clicked
     moduleClicked = pyqtSignal(str) # emits module name when a row is clicked
 
+    # mode -> (column headers, count label, row(entry) -> (name colour,
+    # values of the columns after Module))
+    _MODES = {
+        "irregular": (
+            ["Module", "Run", "Gain", "Mean", "Std Dev", "Dev (σ)"],
+            "irregular gains: {} entries",
+            lambda e: (THEME.WARN,
+                       [e.run_number, round(e.gain, 5), round(e.mean_gain, 5),
+                        round(e.std_dev, 5), round(e.deviation_sigma, 5)])),
+        "drift": (
+            ["Module", "Curr Run", "Prev Run", "Gain (curr)", "Gain (prev)",
+             "Δ (%)"],
+            "drifted channels: {} entries",
+            lambda e: (THEME.DANGER if e.rel_change < 0 else THEME.SUCCESS,
+                       [e.run_number, e.prev_run_number,
+                        round(e.gain_current, 5), round(e.gain_prev, 5),
+                        round(e.rel_change * 100, 3)])),
+        "summary": (
+            ["Module", "Drift Counts", "Max |Δ%|", "Worst Run", "Prev Run"],
+            "problematic channels: {}",
+            lambda e: (THEME.DANGER,
+                       [e.drift_count, round(e.max_rel_change * 100, 3),
+                        e.max_run, e.max_prev_run])),
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._entries: List[IrregularEntry] = []
-        self._drift_entries: List[DriftEntry] = []
-        self._summary_entries: List[SummaryEntry] = []
+        self._entries: list = []
         self._mode: str = "irregular"
         self._build_ui()
 
@@ -1383,39 +1128,23 @@ class IrregularTableWidget(QWidget):
         fbar = QHBoxLayout()
         fbar.setSpacing(6)
 
-        lbl = QLabel("Search:")
-        lbl.setFont(QFont("Consolas", 10))
-        lbl.setStyleSheet(themed("color:#c9d1d9;"))
-        fbar.addWidget(lbl)
+        fbar.addWidget(_slabel("Search:"))
 
         self._search = QLineEdit()
         self._search.setPlaceholderText("module name...")
         self._search.setFixedWidth(120)
         self._search.setFont(QFont("Consolas", 10))
-        self._search.setStyleSheet(themed(
-            "QLineEdit{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 4px;}"))
+        self._search.setStyleSheet(themed(_EDIT_QSS))
         self._search.textChanged.connect(self._apply_filter)
         fbar.addWidget(self._search)
 
-        lbl2 = QLabel("Type:")
-        lbl2.setFont(QFont("Consolas", 10))
-        lbl2.setStyleSheet(themed("color:#c9d1d9;"))
-        fbar.addWidget(lbl2)
+        fbar.addWidget(_slabel("Type:"))
 
         self._type_filter = QComboBox()
         self._type_filter.addItems(["All", "PbWO4", "PbGlass"])
         self._type_filter.setFixedWidth(100)
         self._type_filter.setFont(QFont("Consolas", 10))
-        self._type_filter.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._type_filter.setStyleSheet(themed(_COMBO_QSS))
         self._type_filter.currentIndexChanged.connect(
             lambda _: self._apply_filter())
         fbar.addWidget(self._type_filter)
@@ -1430,11 +1159,10 @@ class IrregularTableWidget(QWidget):
 
         layout.addLayout(fbar)
 
-        # table
         self._table = QTableWidget()
-        self._table.setColumnCount(6)
-        self._table.setHorizontalHeaderLabels(
-            ["Module", "Run", "Gain", "Mean", "Std Dev", "Dev (sigma)"])
+        headers = self._MODES[self._mode][0]
+        self._table.setColumnCount(len(headers))
+        self._table.setHorizontalHeaderLabels(headers)
         self._table.setFont(QFont("Consolas", 10))
         self._table.setStyleSheet(themed(
             "QTableWidget{background:#0d1117;color:#c9d1d9;"
@@ -1464,51 +1192,29 @@ class IrregularTableWidget(QWidget):
         layout.addWidget(self._table)
 
     def set_data(self, entries: List[IrregularEntry]):
-        self._entries = entries
-        if self._mode != "irregular":
-            self._mode = "irregular"
-            self._table.setColumnCount(6)
-            self._table.setHorizontalHeaderLabels(
-                ["Module", "Run", "Gain", "Mean", "Std Dev", "Dev (σ)"])
-        else:
-            self._mode = "irregular"
-        self._apply_filter()
+        self._set_mode_data("irregular", entries)
 
     def set_drift_data(self, entries: List[DriftEntry]):
-        self._drift_entries = entries
-        if self._mode != "drift":
-            self._mode = "drift"
-            self._table.setColumnCount(6)
-            self._table.setHorizontalHeaderLabels(
-                ["Module", "Curr Run", "Prev Run", "Gain (curr)", "Gain (prev)", "Δ (%)"])
-        else:
-            self._mode = "drift"
-        self._apply_filter()
+        self._set_mode_data("drift", entries)
 
     def set_summary_data(self, entries: List[SummaryEntry]):
-        self._summary_entries = entries
-        if self._mode != "summary":
-            self._mode = "summary"
-            self._table.setColumnCount(5)
-            self._table.setHorizontalHeaderLabels(
-                ["Module", "Drift Counts", "Max |Δ%|", "Worst Run", "Prev Run"])
-        else:
-            self._mode = "summary"
+        self._set_mode_data("summary", entries)
+
+    def _set_mode_data(self, mode: str, entries: list):
+        self._entries = entries
+        if self._mode != mode:
+            self._mode = mode
+            headers = self._MODES[mode][0]
+            self._table.setColumnCount(len(headers))
+            self._table.setHorizontalHeaderLabels(headers)
         self._apply_filter()
 
     def _apply_filter(self):
         search = self._search.text().strip().upper()
         type_sel = self._type_filter.currentText()
 
-        if self._mode == "drift":
-            source = self._drift_entries
-        elif self._mode == "summary":
-            source = self._summary_entries
-        else:
-            source = self._entries
-
         filtered = []
-        for e in source:
+        for e in self._entries:
             if search and search not in e.name.upper():
                 continue
             if type_sel == "PbWO4" and e.mod_type != "PbWO4":
@@ -1517,83 +1223,18 @@ class IrregularTableWidget(QWidget):
                 continue
             filtered.append(e)
 
-        if self._mode == "drift":
-            self._count_lbl.setText(f"drifted channels: {len(filtered)} entries")
-            self._populate_drift_table(filtered)
-        elif self._mode == "summary":
-            self._count_lbl.setText(f"problematic channels: {len(filtered)}")
-            self._populate_summary_table(filtered)
-        else:
-            self._count_lbl.setText(f"irregular gains: {len(filtered)} entries")
-            self._populate_table(filtered)
-
-    def _populate_table(self, entries: List[IrregularEntry]):
-        self._table.setRowCount(len(entries))
-        for row, e in enumerate(entries):
+        _headers, count_fmt, row_of = self._MODES[self._mode]
+        self._count_lbl.setText(count_fmt.format(len(filtered)))
+        self._table.setRowCount(len(filtered))
+        for row, e in enumerate(filtered):
+            colour, values = row_of(e)
             item = QTableWidgetItem(e.name)
-            item.setForeground(QColor(THEME.WARN))
+            item.setForeground(QColor(colour))
             self._table.setItem(row, 0, item)
-
-            item_run = QTableWidgetItem()
-            item_run.setData(Qt.ItemDataRole.DisplayRole, e.run_number)
-            self._table.setItem(row, 1, item_run)
-
-            for col, val in [(2, e.gain), (3, e.mean_gain),
-                             (4, e.std_dev), (5, e.deviation_sigma)]:
-                item_f = QTableWidgetItem()
-                item_f.setData(Qt.ItemDataRole.DisplayRole, round(val, 5))
-                self._table.setItem(row, col, item_f)
-
-
-    def _populate_drift_table(self, entries: List[DriftEntry]):
-        self._table.setRowCount(len(entries))
-        for row, e in enumerate(entries):
-            item = QTableWidgetItem(e.name)
-            color = QColor(THEME.DANGER) if e.rel_change < 0 else QColor(THEME.SUCCESS)
-            item.setForeground(color)
-            self._table.setItem(row, 0, item)
-
-            item_curr = QTableWidgetItem()
-            item_curr.setData(Qt.ItemDataRole.DisplayRole, e.run_number)
-            self._table.setItem(row, 1, item_curr)
-
-            item_prev = QTableWidgetItem()
-            item_prev.setData(Qt.ItemDataRole.DisplayRole, e.prev_run_number)
-            self._table.setItem(row, 2, item_prev)
-
-            for col, val in [(3, e.gain_current), (4, e.gain_prev)]:
-                item_f = QTableWidgetItem()
-                item_f.setData(Qt.ItemDataRole.DisplayRole, round(val, 5))
-                self._table.setItem(row, col, item_f)
-
-            item_pct = QTableWidgetItem()
-            item_pct.setData(Qt.ItemDataRole.DisplayRole, round(e.rel_change * 100, 3))
-            self._table.setItem(row, 5, item_pct)
-
-
-    def _populate_summary_table(self, entries: List[SummaryEntry]):
-        self._table.setRowCount(len(entries))
-        for row, e in enumerate(entries):
-            item = QTableWidgetItem(e.name)
-            item.setForeground(QColor(THEME.DANGER))
-            self._table.setItem(row, 0, item)
-
-            item_cnt = QTableWidgetItem()
-            item_cnt.setData(Qt.ItemDataRole.DisplayRole, e.drift_count)
-            self._table.setItem(row, 1, item_cnt)
-
-            item_max = QTableWidgetItem()
-            item_max.setData(Qt.ItemDataRole.DisplayRole, round(e.max_rel_change * 100, 3))
-            self._table.setItem(row, 2, item_max)
-
-            item_run = QTableWidgetItem()
-            item_run.setData(Qt.ItemDataRole.DisplayRole, e.max_run)
-            self._table.setItem(row, 3, item_run)
-
-            item_prev = QTableWidgetItem()
-            item_prev.setData(Qt.ItemDataRole.DisplayRole, e.max_prev_run)
-            self._table.setItem(row, 4, item_prev)
-
+            for col, val in enumerate(values, 1):
+                item_v = QTableWidgetItem()
+                item_v.setData(Qt.ItemDataRole.DisplayRole, val)
+                self._table.setItem(row, col, item_v)
 
     def select_module(self, name: str):
         """Highlight and scroll to the first row matching name, or clear selection."""
@@ -1609,46 +1250,58 @@ class IrregularTableWidget(QWidget):
         name_item = self._table.item(row, 0)
         if name_item is not None:
             self.moduleClicked.emit(name_item.text())
-        item = self._table.item(row, 1)  # Run column (Curr Run for drift, Run for irregular)
+        # Run / Curr Run column; in summary mode it holds Drift Counts.
+        item = self._table.item(row, 1)
         if item is not None:
             run_num = item.data(Qt.ItemDataRole.DisplayRole)
             if isinstance(run_num, int):
                 self.runClicked.emit(run_num)
 
 
-# ===========================================================================
-#  Analyze Data dialog
-# ===========================================================================
+# ---- Process dialogs (Analyze Data / Get Data / Do It All) ----
 
 _SCRIPT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "shell", "run_gain_monitor.sh")
+# OUTPUTDIR default of run_gain_monitor.sh.
+_DEFAULT_OUTPUT_DIR = "/home/clasrun/prad2_daq/gain_monitoring/gain_monitor_output"
+
+_DIALOG_QSS = (
+    "QDialog{background:#0d1117;color:#c9d1d9;}"
+    "QLabel{color:#c9d1d9;font-family:Consolas;font-size:10pt;}"
+    "QLineEdit{background:#161b22;color:#c9d1d9;"
+    "border:1px solid #30363d;border-radius:3px;padding:2px 6px;"
+    "font-family:Consolas;font-size:10pt;}"
+    "QTextEdit{background:#0a0e14;color:#c9d1d9;"
+    "border:1px solid #30363d;font-family:Consolas;font-size:9pt;}"
+    "QPushButton{background:#21262d;color:#c9d1d9;"
+    "border:1px solid #30363d;padding:4px 12px;"
+    "font:bold 10pt Consolas;border-radius:3px;}"
+    "QPushButton:hover{background:#30363d;}"
+    "QPushButton:disabled{color:#555;}")
+_PRIMARY_BTN_QSS = (
+    "QPushButton{background:#1f6feb;color:white;border:1px solid #388bfd;"
+    "padding:4px 16px;font:bold 10pt Consolas;border-radius:3px;}"
+    "QPushButton:hover{background:#388bfd;}"
+    "QPushButton:disabled{background:#21262d;color:#555;border-color:#30363d;}")
 
 
-class AnalyzeDialog(QDialog):
-    """Popup that runs run_gain_monitor.sh and streams its output."""
+class _ProcessDialog(QDialog):
+    """Popup with an input form, Run/Stop/Close buttons and a console that
+    streams the output of a bash process.  Subclasses add the form rows in
+    _build_form() and start the process with _start() from _on_run()."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent, title: str, size: Tuple[int, int],
+                 run_label: str):
         super().__init__(parent)
-        self.setWindowTitle("Analyze Data")
-        self.resize(700, 500)
-        self.setStyleSheet(themed(
-            "QDialog{background:#0d1117;color:#c9d1d9;}"
-            "QLabel{color:#c9d1d9;font-family:Consolas;font-size:10pt;}"
-            "QLineEdit{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;"
-            "font-family:Consolas;font-size:10pt;}"
-            "QTextEdit{background:#0a0e14;color:#c9d1d9;"
-            "border:1px solid #30363d;font-family:Consolas;font-size:9pt;}"
-            "QPushButton{background:#21262d;color:#c9d1d9;"
-            "border:1px solid #30363d;padding:4px 12px;"
-            "font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#30363d;}"
-            "QPushButton:disabled{color:#555;}"))
+        self.setWindowTitle(title)
+        self.resize(*size)
+        self.setStyleSheet(themed(_DIALOG_QSS))
 
         self._process = QProcess(self)
         self._process.readyReadStandardOutput.connect(self._on_stdout)
         self._process.readyReadStandardError.connect(self._on_stderr)
         self._process.finished.connect(self._on_finished)
+        self._process.errorOccurred.connect(self._on_error)
 
         root = QVBoxLayout(self)
         root.setSpacing(8)
@@ -1656,41 +1309,13 @@ class AnalyzeDialog(QDialog):
         # inputs
         form = QFormLayout()
         form.setSpacing(6)
-
-        self._run_edit = QLineEdit()
-        self._run_edit.setPlaceholderText("e.g. 023735")
-        self._cpu_edit = QLineEdit("25")
-
-        def _dir_row(placeholder, browse_slot):
-            row = QHBoxLayout()
-            edit = QLineEdit()
-            edit.setPlaceholderText(placeholder)
-            btn = QPushButton("Browse…")
-            btn.setFixedWidth(80)
-            btn.clicked.connect(browse_slot)
-            row.addWidget(edit)
-            row.addWidget(btn)
-            return row, edit
-
-        in_row, self._indir_edit = _dir_row("/data/evio/data", self._browse_indir)
-        out_row, self._outdir_edit = _dir_row(
-            "/home/clasrun/prad2_daq/gain_monitoring/gain_monitor_output",
-            self._browse_outdir)
-
-        form.addRow("Run number:", self._run_edit)
-        form.addRow("Number of CPUs:", self._cpu_edit)
-        form.addRow("Input directory:", in_row)
-        form.addRow("Output directory:", out_row)
+        self._build_form(form)
         root.addLayout(form)
 
         # buttons
         btn_row = QHBoxLayout()
-        self._run_btn = QPushButton("Run")
-        self._run_btn.setStyleSheet(themed(
-            "QPushButton{background:#1f6feb;color:white;border:1px solid #388bfd;"
-            "padding:4px 16px;font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#388bfd;}"
-            "QPushButton:disabled{background:#21262d;color:#555;border-color:#30363d;}"))
+        self._run_btn = QPushButton(run_label)
+        self._run_btn.setStyleSheet(themed(_PRIMARY_BTN_QSS))
         self._run_btn.clicked.connect(self._on_run)
         self._stop_btn = QPushButton("Stop")
         self._stop_btn.setEnabled(False)
@@ -1703,21 +1328,172 @@ class AnalyzeDialog(QDialog):
         btn_row.addWidget(close_btn)
         root.addLayout(btn_row)
 
-        # output console
         self._console = QTextEdit()
         self._console.setReadOnly(True)
         self._console.document().setMaximumBlockCount(5000)
         root.addWidget(self._console, stretch=1)
 
-    def _browse_indir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Input Directory")
-        if d:
-            self._indir_edit.setText(d)
+    def _build_form(self, form: QFormLayout):
+        """Hook: add the input rows."""
 
-    def _browse_outdir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Output Directory")
-        if d:
-            self._outdir_edit.setText(d)
+    def _on_run(self):
+        """Hook: check the inputs and _start() the process."""
+
+    # -- form rows --
+
+    def _dir_row(self, caption: str, default: str = "",
+                 placeholder: str = "") -> Tuple[QHBoxLayout, QLineEdit]:
+        """Directory field with a Browse… button that opens a directory
+        dialog titled ``caption``."""
+        row = QHBoxLayout()
+        edit = QLineEdit(default)
+        if placeholder:
+            edit.setPlaceholderText(placeholder)
+        btn = QPushButton("Browse…")
+        btn.setFixedWidth(80)
+
+        def browse():
+            d = QFileDialog.getExistingDirectory(self, caption)
+            if d:
+                edit.setText(d)
+
+        btn.clicked.connect(browse)
+        row.addWidget(edit)
+        row.addWidget(btn)
+        return row, edit
+
+    def _file_range_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self._start_edit = QLineEdit("0")
+        self._start_edit.setFixedWidth(80)
+        self._end_edit = QLineEdit("99")
+        self._end_edit.setFixedWidth(80)
+        row.addWidget(self._start_edit)
+        row.addWidget(QLabel(" to "))
+        row.addWidget(self._end_edit)
+        row.addStretch()
+        return row
+
+    def _file_range(self) -> Optional[Tuple[int, int]]:
+        """(first, last) evio file number of the range row (empty fields
+        mean 0 and 9999); None after reporting invalid input."""
+        start_text = self._start_edit.text().strip() or "0"
+        end_text   = self._end_edit.text().strip()   or "9999"
+        if not start_text.isdigit() or not end_text.isdigit():
+            self._append("<span style='color:#f85149'>File number range must be integers.</span>")
+            return None
+        f_start = int(start_text)
+        f_end   = int(end_text)
+        if f_end < f_start:
+            self._append("<span style='color:#f85149'>End file number must be ≥ start.</span>")
+            return None
+        return f_start, f_end
+
+    def _host_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        self._host_edit    = QLineEdit(REMOTE_HOST)
+        self._rembase_edit = QLineEdit(REMOTE_DATA_BASE)
+        row.addWidget(self._host_edit)
+        row.addWidget(QLabel("  base:"))
+        row.addWidget(self._rembase_edit)
+        return row
+
+    # -- evio copy checks --
+
+    def _confirm_existing(self, run_dir: str, files: List[str],
+                          tail: str) -> bool:
+        """List the requested ``files`` already in ``run_dir``; False if
+        the user cancels."""
+        if not files:
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("Files Already Present")
+        box.setText(
+            f"{len(files)} file(s) in the requested range already exist "
+            f"in {run_dir}.\n{tail}")
+        box.setDetailedText("\n".join(files))
+        box.setStandardButtons(
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Ok)
+        return box.exec() != QMessageBox.StandardButton.Cancel
+
+    def _warn_insufficient(self, needed: int, free: int, hint: str = ""):
+        box = QMessageBox(self)
+        box.setWindowTitle("Insufficient Disk Space")
+        box.setIcon(QMessageBox.Icon.Critical)
+        box.setText(
+            "Not enough disk space to copy the requested files.\n\n"
+            f"  Required : {fmt_bytes(needed)}{hint}\n"
+            f"  Available: {fmt_bytes(free)}\n\n"
+            "Free up space and try again.")
+        box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        box.exec()
+
+    # -- process --
+
+    def _start(self, args: List[str]):
+        self._run_btn.setEnabled(False)
+        self._stop_btn.setEnabled(True)
+        self._process.start("bash", args)
+
+    def _on_stop(self):
+        self._process.kill()
+
+    def _on_stdout(self):
+        data = self._process.readAllStandardOutput().data().decode(errors="replace")
+        self._append(html.escape(data, quote=False).replace("\n", "<br>"))
+
+    def _on_stderr(self):
+        data = self._process.readAllStandardError().data().decode(errors="replace")
+        data = html.escape(data, quote=False)
+        self._append(f"<span style='color:#f85149'>{data.replace(chr(10), '<br>')}</span>")
+
+    def _on_finished(self, exit_code, exit_status):
+        self._run_btn.setEnabled(True)
+        self._stop_btn.setEnabled(False)
+        color = "#3fb950" if exit_code == 0 else "#f85149"
+        self._append(f"<span style='color:{color}'>[Process finished with exit code {exit_code}]</span>")
+
+    def _on_error(self, error):
+        # finished is not emitted when bash cannot be started at all.
+        if error == QProcess.ProcessError.FailedToStart:
+            self._run_btn.setEnabled(True)
+            self._stop_btn.setEnabled(False)
+            self._append("<span style='color:#f85149'>[Failed to start: "
+                         f"{html.escape(self._process.errorString())}]</span>")
+
+    def _append(self, markup: str):
+        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
+        self._console.insertHtml(themed(markup))
+        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
+
+    def closeEvent(self, event):
+        if self._process.state() != QProcess.ProcessState.NotRunning:
+            self._process.kill()
+            self._process.waitForFinished(2000)
+        super().closeEvent(event)
+
+
+class AnalyzeDialog(_ProcessDialog):
+    """Popup that runs run_gain_monitor.sh and streams its output."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, "Analyze Data", (700, 500), "Run")
+
+    def _build_form(self, form):
+        self._run_edit = QLineEdit()
+        self._run_edit.setPlaceholderText("e.g. 023735")
+        self._cpu_edit = QLineEdit("25")
+        # Empty directories leave the defaults to run_gain_monitor.sh.
+        in_row, self._indir_edit = self._dir_row(
+            "Select Input Directory", placeholder=LOCAL_DATA_BASE)
+        out_row, self._outdir_edit = self._dir_row(
+            "Select Output Directory", placeholder=_DEFAULT_OUTPUT_DIR)
+
+        form.addRow("Run number:", self._run_edit)
+        form.addRow("Number of CPUs:", self._cpu_edit)
+        form.addRow("Input directory:", in_row)
+        form.addRow("Output directory:", out_row)
 
     def _on_run(self):
         run_num = self._run_edit.text().strip()
@@ -1732,9 +1508,6 @@ class AnalyzeDialog(QDialog):
             self._append(f"<span style='color:#f85149'>Script not found: {_SCRIPT_PATH}</span>")
             return
 
-        # build environment with optional directory overrides
-        env = self._process.processEnvironment()
-        from PyQt6.QtCore import QProcessEnvironment
         env = QProcessEnvironment.systemEnvironment()
         indir = self._indir_edit.text().strip()
         outdir = self._outdir_edit.text().strip()
@@ -1752,285 +1525,52 @@ class AnalyzeDialog(QDialog):
         if outdir:
             extra += f" OUTPUTDIR={outdir}"
         self._append(f"<span style='color:#8b949e'>${extra} {_SCRIPT_PATH} {run_num} {n_cpu}</span><br>")
-        self._run_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        self._process.start("bash", [_SCRIPT_PATH, run_num, n_cpu])
-
-    def _on_stop(self):
-        self._process.kill()
-
-    def _on_stdout(self):
-        data = self._process.readAllStandardOutput().data().decode(errors="replace")
-        self._append(data.replace("\n", "<br>"))
-
-    def _on_stderr(self):
-        data = self._process.readAllStandardError().data().decode(errors="replace")
-        self._append(f"<span style='color:#f85149'>{data.replace(chr(10), '<br>')}</span>")
-
-    def _on_finished(self, exit_code, exit_status):
-        self._run_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        color = "#3fb950" if exit_code == 0 else "#f85149"
-        self._append(f"<span style='color:{color}'>[Process finished with exit code {exit_code}]</span>")
-
-    def _append(self, html: str):
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-        self._console.insertHtml(themed(html))
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-
-    def closeEvent(self, event):
-        if self._process.state() != QProcess.ProcessState.NotRunning:
-            self._process.kill()
-            self._process.waitForFinished(2000)
-        super().closeEvent(event)
+        self._start([_SCRIPT_PATH, run_num, n_cpu])
 
 
-# ===========================================================================
-#  Get Data dialog
-# ===========================================================================
-
-_LOCAL_DATA_BASE  = "/data/evio/data"
-_REMOTE_HOST      = "clondaq2"
-_REMOTE_DATA_BASE = "/data/stage2"
-# Conservative per-file size for disk-space estimates when an actual remote
-# `ls -l` listing isn't available.  Each evio file is ~2 GB; bump slightly
-# for safety so we don't run out mid-copy.
-_EVIO_BYTES_PER_FILE_EST = int(2.1 * 1024 ** 3)
-
-
-def _fmt_bytes(b: int) -> str:
-    for unit in ("B", "KB", "MB", "GB", "TB"):
-        if b < 1024:
-            return f"{b:.1f} {unit}"
-        b //= 1024
-    return f"{b:.1f} PB"
-
-
-def _check_disk_space(remote_host: str, remote_run_dir: str,
-                      local_base: str, f_start: int, f_end: int,
-                      local_run_dir: str = None):
-    """Return (needed_bytes, free_bytes) for evio files [f_start, f_end].
-
-    SSHes to remote_host and sums the sizes of files whose .evio.NNN suffix
-    falls within [f_start, f_end].  Files that already exist in local_run_dir
-    are excluded from the calculation.  If the remote listing yields no usable
-    sizes, falls back to a conservative ~2 GB-per-file estimate using the
-    count of missing files.  Free space is measured on the filesystem that
-    contains local_base (or its nearest existing ancestor).
-    Raises RuntimeError if the SSH call itself fails (exit 255).
-    """
-    result = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=10",
-         remote_host, f"ls -l {remote_run_dir}/ 2>/dev/null"],
-        capture_output=True, text=True, timeout=30,
-    )
-    # exit 255 means SSH itself failed to connect; other non-zero codes (e.g. 2
-    # when the remote directory doesn't exist yet) are recoverable — we fall
-    # back to the ~2GB-per-file estimate below.
-    if result.returncode == 255:
-        raise RuntimeError(result.stderr.strip() or "SSH connection failed")
-
-    needed = 0
-    counted = 0
-    for line in result.stdout.splitlines():
-        parts = line.split()
-        if len(parts) < 9:
-            continue
-        m = re.search(r'\.evio\.(\d+)$', parts[-1])
-        if not m:
-            continue
-        n = int(m.group(1))
-        if f_start <= n <= f_end:
-            fname = parts[-1]
-            if local_run_dir and os.path.isfile(os.path.join(local_run_dir, fname)):
-                continue  # already downloaded, skip
-            try:
-                needed += int(parts[4])
-                counted += 1
-            except (ValueError, IndexError):
-                pass
-
-    # If we got nothing from the remote listing (empty dir, parse failure,
-    # SSH success but no files yet) fall back to a conservative estimate so
-    # the user doesn't proceed without any check at all.
-    if counted == 0:
-        if local_run_dir and os.path.isdir(local_run_dir):
-            import glob as _glob
-            existing_nums = set()
-            for p in _glob.glob(os.path.join(local_run_dir, "*.evio.*")):
-                mm = re.search(r'\.evio\.(\d+)$', os.path.basename(p))
-                if mm:
-                    existing_nums.add(int(mm.group(1)))
-            missing = sum(1 for n in range(f_start, f_end + 1)
-                          if n not in existing_nums)
-        else:
-            missing = f_end - f_start + 1
-        needed = missing * _EVIO_BYTES_PER_FILE_EST
-
-    # walk up to the nearest existing directory so disk_usage doesn't fail
-    check_path = local_base
-    while check_path and not os.path.exists(check_path):
-        check_path = os.path.dirname(check_path)
-    free = shutil.disk_usage(check_path or "/").free
-    return needed, free
-
-
-class GetDataDialog(QDialog):
+class GetDataDialog(_ProcessDialog):
     """Popup that scps evio files from the DAQ machine for a given run."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Get Data")
-        self.resize(700, 520)
-        self.setStyleSheet(themed(
-            "QDialog{background:#0d1117;color:#c9d1d9;}"
-            "QLabel{color:#c9d1d9;font-family:Consolas;font-size:10pt;}"
-            "QLineEdit{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;"
-            "font-family:Consolas;font-size:10pt;}"
-            "QTextEdit{background:#0a0e14;color:#c9d1d9;"
-            "border:1px solid #30363d;font-family:Consolas;font-size:9pt;}"
-            "QPushButton{background:#21262d;color:#c9d1d9;"
-            "border:1px solid #30363d;padding:4px 12px;"
-            "font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#30363d;}"
-            "QPushButton:disabled{color:#555;}"))
+        super().__init__(parent, "Get Data", (700, 520), "Get Data")
 
-        self._process = QProcess(self)
-        self._process.readyReadStandardOutput.connect(self._on_stdout)
-        self._process.readyReadStandardError.connect(self._on_stderr)
-        self._process.finished.connect(self._on_finished)
-
-        root = QVBoxLayout(self)
-        root.setSpacing(8)
-
-        # ---- input fields ----
-        form = QFormLayout()
-        form.setSpacing(6)
-
+    def _build_form(self, form):
         self._run_edit = QLineEdit()
         self._run_edit.setPlaceholderText("e.g. 023739")
         form.addRow("Run number:", self._run_edit)
-
-        file_range_row = QHBoxLayout()
-        self._start_edit = QLineEdit("0")
-        self._start_edit.setFixedWidth(80)
-        self._end_edit = QLineEdit("99")
-        self._end_edit.setFixedWidth(80)
-        file_range_row.addWidget(self._start_edit)
-        file_range_row.addWidget(QLabel(" to "))
-        file_range_row.addWidget(self._end_edit)
-        file_range_row.addStretch()
-        form.addRow("File number range:", file_range_row)
-
-        def _dir_row(default, slot):
-            row = QHBoxLayout()
-            edit = QLineEdit(default)
-            btn = QPushButton("Browse…")
-            btn.setFixedWidth(80)
-            btn.clicked.connect(slot)
-            row.addWidget(edit)
-            row.addWidget(btn)
-            return row, edit
-
-        in_row,  self._localbase_edit  = _dir_row(_LOCAL_DATA_BASE,  self._browse_local)
+        form.addRow("File number range:", self._file_range_row())
+        in_row, self._localbase_edit = self._dir_row(
+            "Select Local Data Directory", LOCAL_DATA_BASE)
         form.addRow("Local data directory:", in_row)
+        form.addRow("Remote host:", self._host_row())
 
-        host_edit_row = QHBoxLayout()
-        self._host_edit = QLineEdit(_REMOTE_HOST)
-        self._rembase_edit = QLineEdit(_REMOTE_DATA_BASE)
-        host_edit_row.addWidget(self._host_edit)
-        host_edit_row.addWidget(QLabel("  base:"))
-        host_edit_row.addWidget(self._rembase_edit)
-        form.addRow("Remote host:", host_edit_row)
-
-        root.addLayout(form)
-
-        # ---- buttons ----
-        btn_row = QHBoxLayout()
-        self._run_btn = QPushButton("Get Data")
-        self._run_btn.setStyleSheet(themed(
-            "QPushButton{background:#1f6feb;color:white;border:1px solid #388bfd;"
-            "padding:4px 16px;font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#388bfd;}"
-            "QPushButton:disabled{background:#21262d;color:#555;border-color:#30363d;}"))
-        self._run_btn.clicked.connect(self._on_get)
-        self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.clicked.connect(self._on_stop)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._stop_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
-
-        # ---- terminal output ----
-        self._console = QTextEdit()
-        self._console.setReadOnly(True)
-        self._console.document().setMaximumBlockCount(5000)
-        root.addWidget(self._console, stretch=1)
-
-    # ------------------------------------------------------------------
-    def _browse_local(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Local Data Directory")
-        if d:
-            self._localbase_edit.setText(d)
-
-    def _on_get(self):
+    def _on_run(self):
         run_num = self._run_edit.text().strip()
         if not run_num:
             self._append("<span style='color:#f85149'>Please enter a run number.</span>")
             return
-
-        start_text = self._start_edit.text().strip() or "0"
-        end_text   = self._end_edit.text().strip()   or "9999"
-        if not start_text.isdigit() or not end_text.isdigit():
-            self._append("<span style='color:#f85149'>File number range must be integers.</span>")
+        file_range = self._file_range()
+        if file_range is None:
             return
-        f_start = int(start_text)
-        f_end   = int(end_text)
-        if f_end < f_start:
-            self._append("<span style='color:#f85149'>End file number must be ≥ start.</span>")
-            return
+        f_start, f_end = file_range
 
-        local_base  = self._localbase_edit.text().strip() or _LOCAL_DATA_BASE
-        remote_host = self._host_edit.text().strip() or _REMOTE_HOST
-        remote_base = self._rembase_edit.text().strip() or _REMOTE_DATA_BASE
+        local_base  = self._localbase_edit.text().strip() or LOCAL_DATA_BASE
+        remote_host = self._host_edit.text().strip() or REMOTE_HOST
+        remote_base = self._rembase_edit.text().strip() or REMOTE_DATA_BASE
 
         local_run_dir  = f"{local_base}/prad_{run_num}"
         remote_run_dir = f"{remote_base}/prad_{run_num}"
 
-        # -- pre-check: find files in range that already exist locally --
-        existing = []
-        if os.path.isdir(local_run_dir):
-            import glob as _glob
-            for path in sorted(_glob.glob(
-                    f"{local_run_dir}/prad_{run_num}.evio.*")):
-                m = re.search(r'\.evio\.(\d+)$', os.path.basename(path))
-                if m:
-                    n = int(m.group(1))
-                    if f_start <= n <= f_end:
-                        existing.append(os.path.basename(path))
-
-        if existing:
-            box = QMessageBox(self)
-            box.setWindowTitle("Files Already Present")
-            box.setText(
-                f"{len(existing)} file(s) in the requested range already exist "
-                f"in {local_run_dir}.\nThey will be skipped; only missing files "
-                f"will be copied.")
-            box.setDetailedText("\n".join(existing))
-            box.setStandardButtons(
-                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-            box.setDefaultButton(QMessageBox.StandardButton.Ok)
-            if box.exec() == QMessageBox.StandardButton.Cancel:
-                return
+        existing = local_evio_in_range(local_run_dir, f_start, f_end,
+                                       f"prad_{run_num}.evio.*")
+        if not self._confirm_existing(
+                local_run_dir, existing,
+                "They will be skipped; only missing files will be copied."):
+            return
 
         # -- disk space check --
         try:
-            needed, free = _check_disk_space(
+            needed, free = check_disk_space(
                 remote_host, remote_run_dir, local_base, f_start, f_end,
                 local_run_dir)
         except Exception as exc:
@@ -2045,42 +1585,8 @@ class GetDataDialog(QDialog):
                 return
         else:
             if needed > free:
-                box = QMessageBox(self)
-                box.setWindowTitle("Insufficient Disk Space")
-                box.setIcon(QMessageBox.Icon.Critical)
-                box.setText(
-                    "Not enough disk space to copy the requested files.\n\n"
-                    f"  Required : {_fmt_bytes(needed)}\n"
-                    f"  Available: {_fmt_bytes(free)}\n\n"
-                    "Free up space and try again.")
-                box.setStandardButtons(QMessageBox.StandardButton.Ok)
-                box.exec()
+                self._warn_insufficient(needed, free)
                 return
-
-        # bash: list remote files in range, skip those already local, scp the rest
-        bash_cmd = (
-            f"mkdir -p {local_run_dir}\n"
-            f"echo 'Local directory: {local_run_dir}'\n"
-            f"echo 'Listing remote files...'\n"
-            f"ALL_FILES=$(ssh {remote_host} 'ls {remote_run_dir}/' 2>/dev/null | sort)\n"
-            f"COPIED=0\n"
-            f"ALREADY=0\n"
-            f"while IFS= read -r f; do\n"
-            f"    NUM=$(echo \"$f\" | grep -oP '\\.evio\\.\\K[0-9]+')\n"
-            f"    [ -z \"$NUM\" ] && continue\n"
-            f"    N=$((10#$NUM))\n"
-            f"    if [ \"$N\" -lt {f_start} ] || [ \"$N\" -gt {f_end} ]; then continue; fi\n"
-            f"    if [ -f \"{local_run_dir}/$f\" ]; then\n"
-            f"        echo \"  Already exists: $f (skipping)\"\n"
-            f"        ALREADY=$((ALREADY+1))\n"
-            f"    else\n"
-            f"        echo \"  Copying $f\"\n"
-            f"        scp {remote_host}:{remote_run_dir}/$f {local_run_dir}/\n"
-            f"        COPIED=$((COPIED+1))\n"
-            f"    fi\n"
-            f"done <<< \"$ALL_FILES\"\n"
-            f"echo \"Done. Copied $COPIED file(s), $ALREADY already present.\"\n"
-        )
 
         self._console.clear()
         self._append(
@@ -2090,76 +1596,17 @@ class GetDataDialog(QDialog):
             self._append(
                 f"<span style='color:#d29922'>{len(existing)} file(s) skipped "
                 f"(already present).</span><br>")
-        self._run_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        self._process.start("bash", ["-c", bash_cmd])
-
-    def _on_stop(self):
-        self._process.kill()
-
-    def _on_stdout(self):
-        data = self._process.readAllStandardOutput().data().decode(errors="replace")
-        self._append(data.replace("\n", "<br>"))
-
-    def _on_stderr(self):
-        data = self._process.readAllStandardError().data().decode(errors="replace")
-        self._append(f"<span style='color:#f85149'>{data.replace(chr(10), '<br>')}</span>")
-
-    def _on_finished(self, exit_code, exit_status):
-        self._run_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        color = "#3fb950" if exit_code == 0 else "#f85149"
-        self._append(f"<span style='color:{color}'>[Process finished with exit code {exit_code}]</span>")
-
-    def _append(self, html: str):
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-        self._console.insertHtml(themed(html))
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-
-    def closeEvent(self, event):
-        if self._process.state() != QProcess.ProcessState.NotRunning:
-            self._process.kill()
-            self._process.waitForFinished(2000)
-        super().closeEvent(event)
+        self._start(["-c", scp_bash(remote_host, remote_run_dir,
+                                    local_run_dir, f_start, f_end)])
 
 
-# ===========================================================================
-#  Do It All dialog  (Get Data + Analyze Data combined)
-# ===========================================================================
-
-class DoItAllDialog(QDialog):
+class DoItAllDialog(_ProcessDialog):
     """Runs scp then gain monitor analysis in a single sequential workflow."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Do It All")
-        self.resize(750, 600)
-        self.setStyleSheet(themed(
-            "QDialog{background:#0d1117;color:#c9d1d9;}"
-            "QLabel{color:#c9d1d9;font-family:Consolas;font-size:10pt;}"
-            "QLineEdit{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;"
-            "font-family:Consolas;font-size:10pt;}"
-            "QTextEdit{background:#0a0e14;color:#c9d1d9;"
-            "border:1px solid #30363d;font-family:Consolas;font-size:9pt;}"
-            "QPushButton{background:#21262d;color:#c9d1d9;"
-            "border:1px solid #30363d;padding:4px 12px;"
-            "font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#30363d;}"
-            "QPushButton:disabled{color:#555;}"))
+        super().__init__(parent, "Do It All", (750, 600), "Run")
 
-        self._process = QProcess(self)
-        self._process.readyReadStandardOutput.connect(self._on_stdout)
-        self._process.readyReadStandardError.connect(self._on_stderr)
-        self._process.finished.connect(self._on_finished)
-
-        root = QVBoxLayout(self)
-        root.setSpacing(8)
-
-        # ---- input fields ----
-        form = QFormLayout()
-        form.setSpacing(6)
-
+    def _build_form(self, form):
         self._run_edit = QLineEdit()
         self._run_edit.setPlaceholderText("e.g. 023739")
         form.addRow("Run number(s):", self._run_edit)
@@ -2171,83 +1618,19 @@ class DoItAllDialog(QDialog):
         self._batch_check.toggled.connect(self._on_batch_toggled)
         form.addRow("", self._batch_check)
 
-        # file range
-        file_range_row = QHBoxLayout()
-        self._start_edit = QLineEdit("0")
-        self._start_edit.setFixedWidth(80)
-        self._end_edit = QLineEdit("99")
-        self._end_edit.setFixedWidth(80)
-        file_range_row.addWidget(self._start_edit)
-        file_range_row.addWidget(QLabel(" to "))
-        file_range_row.addWidget(self._end_edit)
-        file_range_row.addStretch()
-        form.addRow("File number range:", file_range_row)
+        form.addRow("File number range:", self._file_range_row())
 
         self._cpu_edit = QLineEdit("25")
         form.addRow("Number of CPUs:", self._cpu_edit)
 
-        def _dir_row(default, slot):
-            row = QHBoxLayout()
-            edit = QLineEdit(default)
-            btn = QPushButton("Browse…")
-            btn.setFixedWidth(80)
-            btn.clicked.connect(slot)
-            row.addWidget(edit)
-            row.addWidget(btn)
-            return row, edit
-
-        in_row,  self._localbase_edit = _dir_row(_LOCAL_DATA_BASE,  self._browse_local)
-        out_row, self._outdir_edit    = _dir_row(
-            "/home/clasrun/prad2_daq/gain_monitoring/gain_monitor_output",
-            self._browse_out)
+        in_row,  self._localbase_edit = self._dir_row(
+            "Select Local Data Directory", LOCAL_DATA_BASE)
+        out_row, self._outdir_edit    = self._dir_row(
+            "Select Output Directory", _DEFAULT_OUTPUT_DIR)
         form.addRow("Local data directory:", in_row)
         form.addRow("Output directory:", out_row)
 
-        host_row = QHBoxLayout()
-        self._host_edit    = QLineEdit(_REMOTE_HOST)
-        self._rembase_edit = QLineEdit(_REMOTE_DATA_BASE)
-        host_row.addWidget(self._host_edit)
-        host_row.addWidget(QLabel("  base:"))
-        host_row.addWidget(self._rembase_edit)
-        form.addRow("Remote host:", host_row)
-
-        root.addLayout(form)
-
-        # ---- buttons ----
-        btn_row = QHBoxLayout()
-        self._run_btn = QPushButton("Run")
-        self._run_btn.setStyleSheet(themed(
-            "QPushButton{background:#1f6feb;color:white;border:1px solid #388bfd;"
-            "padding:4px 16px;font:bold 10pt Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#388bfd;}"
-            "QPushButton:disabled{background:#21262d;color:#555;border-color:#30363d;}"))
-        self._run_btn.clicked.connect(self._on_run)
-        self._stop_btn = QPushButton("Stop")
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.clicked.connect(self._on_stop)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.close)
-        btn_row.addWidget(self._run_btn)
-        btn_row.addWidget(self._stop_btn)
-        btn_row.addStretch()
-        btn_row.addWidget(close_btn)
-        root.addLayout(btn_row)
-
-        self._console = QTextEdit()
-        self._console.setReadOnly(True)
-        self._console.document().setMaximumBlockCount(5000)
-        root.addWidget(self._console, stretch=1)
-
-    # ------------------------------------------------------------------
-    def _browse_local(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Local Data Directory")
-        if d:
-            self._localbase_edit.setText(d)
-
-    def _browse_out(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Output Directory")
-        if d:
-            self._outdir_edit.setText(d)
+        form.addRow("Remote host:", self._host_row())
 
     def _on_batch_toggled(self, on: bool):
         if on:
@@ -2255,12 +1638,9 @@ class DoItAllDialog(QDialog):
                 "e.g. 023739 023740 023741   (space- or comma-separated)")
         else:
             self._run_edit.setPlaceholderText("e.g. 023739")
-
     def _on_run(self):
         raw_runs   = self._run_edit.text().strip()
         n_cpu      = self._cpu_edit.text().strip()
-        start_text = self._start_edit.text().strip() or "0"
-        end_text   = self._end_edit.text().strip()   or "9999"
         batch_mode = self._batch_check.isChecked()
 
         if not raw_runs:
@@ -2284,23 +1664,18 @@ class DoItAllDialog(QDialog):
         if not n_cpu.isdigit() or int(n_cpu) < 1:
             self._append("<span style='color:#f85149'>Number of CPUs must be a positive integer.</span>")
             return
-        if not start_text.isdigit() or not end_text.isdigit():
-            self._append("<span style='color:#f85149'>File number range must be integers.</span>")
+        file_range = self._file_range()
+        if file_range is None:
             return
-        f_start = int(start_text)
-        f_end   = int(end_text)
-        if f_end < f_start:
-            self._append("<span style='color:#f85149'>End file number must be ≥ start.</span>")
-            return
+        f_start, f_end = file_range
         if not os.path.exists(_SCRIPT_PATH):
             self._append(f"<span style='color:#f85149'>Script not found: {_SCRIPT_PATH}</span>")
             return
 
-        local_base  = self._localbase_edit.text().strip() or _LOCAL_DATA_BASE
-        remote_host = self._host_edit.text().strip()      or _REMOTE_HOST
-        remote_base = self._rembase_edit.text().strip()   or _REMOTE_DATA_BASE
-        outdir      = self._outdir_edit.text().strip()    or \
-            "/home/clasrun/prad2_daq/gain_monitoring/gain_monitor_output"
+        local_base  = self._localbase_edit.text().strip() or LOCAL_DATA_BASE
+        remote_host = self._host_edit.text().strip()      or REMOTE_HOST
+        remote_base = self._rembase_edit.text().strip()   or REMOTE_DATA_BASE
+        outdir      = self._outdir_edit.text().strip()    or _DEFAULT_OUTPUT_DIR
 
         script_dir = os.path.dirname(_SCRIPT_PATH)
 
@@ -2309,27 +1684,11 @@ class DoItAllDialog(QDialog):
         if not batch_mode:
             run_num = run_numbers[0]
             local_run_dir = f"{local_base}/prad_{run_num}"
-            existing = []
-            if os.path.isdir(local_run_dir):
-                import glob as _glob
-                for path in sorted(_glob.glob(f"{local_run_dir}/prad_{run_num}.evio.*")):
-                    m = re.search(r'\.evio\.(\d+)$', os.path.basename(path))
-                    if m:
-                        n = int(m.group(1))
-                        if f_start <= n <= f_end:
-                            existing.append(os.path.basename(path))
-            if existing:
-                box = QMessageBox(self)
-                box.setWindowTitle("Files Already Present")
-                box.setText(
-                    f"{len(existing)} file(s) in the requested range already exist "
-                    f"in {local_run_dir}.\nThey will be skipped.")
-                box.setDetailedText("\n".join(existing))
-                box.setStandardButtons(
-                    QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel)
-                box.setDefaultButton(QMessageBox.StandardButton.Ok)
-                if box.exec() == QMessageBox.StandardButton.Cancel:
-                    return
+            existing = local_evio_in_range(local_run_dir, f_start, f_end,
+                                           f"prad_{run_num}.evio.*")
+            if not self._confirm_existing(local_run_dir, existing,
+                                          "They will be skipped."):
+                return
 
         # Disk-space check: in batch mode only check the first run up front,
         # since raw files for each completed run are removed before the next
@@ -2339,34 +1698,23 @@ class DoItAllDialog(QDialog):
         first_remote_run_dir = f"{remote_base}/prad_{first_run}"
         first_local_run_dir = f"{local_base}/prad_{first_run}"
         try:
-            needed, free = _check_disk_space(
+            needed, free = check_disk_space(
                 remote_host, first_remote_run_dir, local_base, f_start, f_end,
                 first_local_run_dir)
         except Exception as exc:
             # SSH itself failed — fall back to the ~2GB-per-file estimate so
             # the user isn't asked to "proceed without any check".
-            needed = (f_end - f_start + 1) * _EVIO_BYTES_PER_FILE_EST
-            check_path = local_base
-            while check_path and not os.path.exists(check_path):
-                check_path = os.path.dirname(check_path)
-            free = shutil.disk_usage(check_path or "/").free
+            needed = (f_end - f_start + 1) * EVIO_BYTES_PER_FILE_EST
+            free = free_bytes(local_base)
             self._append(
                 f"<span style='color:#d29922'>Could not reach remote host "
-                f"({exc}); estimating {_fmt_bytes(needed)} needed using "
+                f"({exc}); estimating {fmt_bytes(needed)} needed using "
                 f"~2 GB per file.</span><br>")
         if needed > free:
-            box = QMessageBox(self)
-            box.setWindowTitle("Insufficient Disk Space")
-            box.setIcon(QMessageBox.Icon.Critical)
-            hint = ("  (one run at a time; raw dir is wiped after each)"
-                    if batch_mode else "")
-            box.setText(
-                "Not enough disk space to copy the requested files.\n\n"
-                f"  Required : {_fmt_bytes(needed)}{hint}\n"
-                f"  Available: {_fmt_bytes(free)}\n\n"
-                "Free up space and try again.")
-            box.setStandardButtons(QMessageBox.StandardButton.Ok)
-            box.exec()
+            self._warn_insufficient(
+                needed, free,
+                "  (one run at a time; raw dir is wiped after each)"
+                if batch_mode else "")
             return
 
         # Bash: a single loop covers both single-run and batch.  In batch
@@ -2390,7 +1738,7 @@ class DoItAllDialog(QDialog):
             f"F_START={f_start}\n"
             f"F_END={f_end}\n"
             f"N_CPU={n_cpu}\n"
-            f"BYTES_PER_EVIO={_EVIO_BYTES_PER_FILE_EST}\n"
+            f"BYTES_PER_EVIO={EVIO_BYTES_PER_FILE_EST}\n"
             f"\n"
             f"for RUN in $RUNS; do\n"
             f"    LRD=\"$LOCAL_BASE/prad_$RUN\"\n"
@@ -2448,10 +1796,10 @@ class DoItAllDialog(QDialog):
             f"    cd \"$SCRIPT_DIR\"\n"
             f"    INPUTDIR=\"$LOCAL_BASE\" OUTPUTDIR=\"$OUTDIR\" bash \"$SCRIPT\" \"$RUN\" \"$N_CPU\"\n"
             + cleanup_block +
-            f"done\n"
-            f"\n"
-            f"echo \"\"\n"
-            f"echo \"=== All runs done ===\"\n"
+            "done\n"
+            "\n"
+            "echo \"\"\n"
+            "echo \"=== All runs done ===\"\n"
         )
 
         self._console.clear()
@@ -2463,42 +1811,10 @@ class DoItAllDialog(QDialog):
         self._append(
             f"<span style='color:#8b949e'>{summary} | files {f_start}–{f_end}"
             f" | {n_cpu} CPUs{cleanup_note}</span><br>")
-        self._run_btn.setEnabled(False)
-        self._stop_btn.setEnabled(True)
-        self._process.start("bash", ["-c", bash_cmd])
-
-    def _on_stop(self):
-        self._process.kill()
-
-    def _on_stdout(self):
-        data = self._process.readAllStandardOutput().data().decode(errors="replace")
-        self._append(data.replace("\n", "<br>"))
-
-    def _on_stderr(self):
-        data = self._process.readAllStandardError().data().decode(errors="replace")
-        self._append(f"<span style='color:#f85149'>{data.replace(chr(10), '<br>')}</span>")
-
-    def _on_finished(self, exit_code, exit_status):
-        self._run_btn.setEnabled(True)
-        self._stop_btn.setEnabled(False)
-        color = "#3fb950" if exit_code == 0 else "#f85149"
-        self._append(f"<span style='color:{color}'>[Process finished with exit code {exit_code}]</span>")
-
-    def _append(self, html: str):
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-        self._console.insertHtml(themed(html))
-        self._console.moveCursor(self._console.textCursor().MoveOperation.End)
-
-    def closeEvent(self, event):
-        if self._process.state() != QProcess.ProcessState.NotRunning:
-            self._process.kill()
-            self._process.waitForFinished(2000)
-        super().closeEvent(event)
+        self._start(["-c", bash_cmd])
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ---- Main window ----
 
 class GainMonitorWindow(QMainWindow):
 
@@ -2509,7 +1825,6 @@ class GainMonitorWindow(QMainWindow):
         self._runs: List[RunData] = []
         self._current_run_idx: int = 0
         self._current_ref_idx: int = LMS_REF_DEFAULT
-        self._palette_idx = PALETTE_NAMES.index(_DEFAULT_PALETTE)
         self._auto_range = True
         self._manual_vmin = 0.9
         self._manual_vmax = 1.1
@@ -2524,24 +1839,22 @@ class GainMonitorWindow(QMainWindow):
         self._thresh_g: float = 0.10
         self._thresh_w: float = 0.05
         self._view_mode: int = 2   # 0 = Gain Factor, 1 = Deviation (σ), 2 = Run-to-Run Drift, 3 = Summary
-        # pre-computed pairwise diffs for summary mode: (name, mod_type, rel, pair_idx)
-        # pair_idx = index of curr run in self._runs; recomputed on load or ref change
         self._pairwise_diffs: List = []
         self._pairwise_ref_idx: int = -1
         self._current_folder: str = ""
-        self._deviation_stats_cache: Optional[Dict] = None
-        self._deviation_stats_key: Optional[Tuple] = None
+        # gain_stats() of the active runs, valid for (start, end, ref) == key
+        self._gain_stats_cache: Dict[str, Tuple[float, float, int]] = {}
+        self._gain_stats_key: Optional[Tuple] = None
         self._file_snapshot: Dict[int, float] = {}   # run_number -> mtime
-        self._hist_cache: OrderedDict = OrderedDict()  # (run_number, module) -> (values, edges)
+        # (run_number, module) -> set_histogram() payload (values, edges,
+        # gauss, overlay values, overlay edges, overlay gauss)
+        self._hist_cache: OrderedDict = OrderedDict()
         self._auto_refresh_timer = QTimer(self)
         self._auto_refresh_timer.timeout.connect(self._auto_refresh_check)
 
         self._load_geometry()
         self._build_ui()
-        legend_map = {0: "gain", 1: "deviation", 2: "drift", 3: "summary"}
-        self._map.set_legend_mode(legend_map.get(self._view_mode))
-        if self._view_mode == 2:
-            self._map.set_palette_override(DRIFT_PALETTE)
+        self._apply_map_mode()
 
     def _load_geometry(self):
         self._all_modules = load_modules(MODULES_JSON)
@@ -2555,7 +1868,7 @@ class GainMonitorWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("HyCal Gain Monitor")
-        self.resize(1800, 1000)   # 18:10
+        self.resize(1800, 1000)
         apply_theme_palette(self)
 
         central = QWidget()
@@ -2610,7 +1923,7 @@ class GainMonitorWindow(QMainWindow):
         self._auto_refresh_btn.toggled.connect(self._on_auto_refresh_toggled)
         top.addWidget(self._auto_refresh_btn)
 
-        top.addWidget(self._slabel("every"))
+        top.addWidget(_slabel("every"))
         self._auto_refresh_interval = QSpinBox()
         self._auto_refresh_interval.setRange(5, 3600)
         self._auto_refresh_interval.setValue(10)
@@ -2624,8 +1937,6 @@ class GainMonitorWindow(QMainWindow):
         self._auto_refresh_interval.valueChanged.connect(self._on_refresh_interval_changed)
         top.addWidget(self._auto_refresh_interval)
 
-        # Floating "Summary table" toggle — the report table is hidden by
-        # default and lives in its own window when shown.
         self._summary_btn = QPushButton("Summary table")
         self._summary_btn.setCheckable(True)
         self._summary_btn.setChecked(False)
@@ -2646,14 +1957,12 @@ class GainMonitorWindow(QMainWindow):
         top.addWidget(self._status_lbl)
         root.addLayout(top)
 
-        # -- body splitter (horizontal: map | charts+reserved) --
+        # -- body splitter (horizontal: map | charts+histogram) --
         body = QSplitter(Qt.Orientation.Horizontal)
         self._body = body
 
-        # The report table no longer takes a slot in the body splitter.
-        # Build it once and host it inside a hidden top-level QDialog so
-        # the user can pop it open as a floating window via the toolbar
-        # toggle.  All existing signal hookups still work.
+        # The report table lives in a hidden top-level window that the
+        # "Summary table" toolbar toggle shows.
         self._irregular_table = IrregularTableWidget()
         self._irregular_table.runClicked.connect(self._on_jump_to_run)
         self._irregular_table.moduleClicked.connect(self._on_module_clicked)
@@ -2667,11 +1976,9 @@ class GainMonitorWindow(QMainWindow):
         _sw_layout = QVBoxLayout(self._summary_window)
         _sw_layout.setContentsMargins(6, 6, 6, 6)
         _sw_layout.addWidget(self._irregular_table)
-        # When the user clicks the window's close button, sync the toolbar
-        # toggle so its visual state matches reality.
         self._summary_window.installEventFilter(self)
 
-        # ---- middle panel: HyCal map ----
+        # ---- left panel: HyCal map ----
         left = QWidget()
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -2681,39 +1988,23 @@ class GainMonitorWindow(QMainWindow):
         ctrl = QHBoxLayout()
         ctrl.setSpacing(6)
 
-        ctrl.addWidget(self._slabel("Ref:"))
+        ctrl.addWidget(_slabel("Ref:"))
         self._ref_combo = QComboBox()
         self._ref_combo.addItems(LMS_DISPLAY)
         self._ref_combo.setCurrentIndex(LMS_REF_DEFAULT)
         self._ref_combo.setFixedWidth(90)
         self._ref_combo.setFont(QFont("Consolas", 10))
-        self._ref_combo.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._ref_combo.setStyleSheet(themed(_COMBO_QSS))
         self._ref_combo.currentIndexChanged.connect(self._on_ref_changed)
         ctrl.addWidget(self._ref_combo)
 
         ctrl.addSpacing(10)
-        ctrl.addWidget(self._slabel("View:"))
+        ctrl.addWidget(_slabel("View:"))
         self._view_combo = QComboBox()
         self._view_combo.addItems(["Gain Factor", "Deviation (σ)", "Run-to-Run Drift", "Summary"])
         self._view_combo.setFixedWidth(150)
         self._view_combo.setFont(QFont("Consolas", 10))
-        self._view_combo.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._view_combo.setStyleSheet(themed(_COMBO_QSS))
         self._view_combo.currentIndexChanged.connect(self._on_view_mode_changed)
         ctrl.addWidget(self._view_combo)
 
@@ -2721,83 +2012,56 @@ class GainMonitorWindow(QMainWindow):
         self._view_combo.setCurrentIndex(2)
         self._view_combo.blockSignals(False)
 
-        _edit_ss = ("QLineEdit{background:#161b22;color:#c9d1d9;"
-                    "border:1px solid #30363d;border-radius:3px;padding:2px 4px;}")
-
-        self._thresh_lbl = self._slabel("G thresh:")
+        self._thresh_lbl = _slabel("G thresh:")
         ctrl.addSpacing(6)
         ctrl.addWidget(self._thresh_lbl)
 
         self._thresh_g_input = QLineEdit("10.0")
         self._thresh_g_input.setFixedWidth(46)
         self._thresh_g_input.setFont(QFont("Consolas", 10))
-        self._thresh_g_input.setStyleSheet(themed(_edit_ss))
+        self._thresh_g_input.setStyleSheet(themed(_EDIT_QSS))
         self._thresh_g_input.editingFinished.connect(self._on_drift_threshold_changed)
         ctrl.addWidget(self._thresh_g_input)
-        self._thresh_g_pct = self._slabel("%")
+        self._thresh_g_pct = _slabel("%")
         ctrl.addWidget(self._thresh_g_pct)
 
-        self._thresh_w_lbl = self._slabel("  W thresh:")
+        self._thresh_w_lbl = _slabel("  W thresh:")
         ctrl.addWidget(self._thresh_w_lbl)
 
         self._thresh_w_input = QLineEdit("5.0")
         self._thresh_w_input.setFixedWidth(46)
         self._thresh_w_input.setFont(QFont("Consolas", 10))
-        self._thresh_w_input.setStyleSheet(themed(_edit_ss))
+        self._thresh_w_input.setStyleSheet(themed(_EDIT_QSS))
         self._thresh_w_input.editingFinished.connect(self._on_drift_threshold_changed)
         ctrl.addWidget(self._thresh_w_input)
-        self._thresh_w_pct = self._slabel("%")
+        self._thresh_w_pct = _slabel("%")
         ctrl.addWidget(self._thresh_w_pct)
 
         ctrl.addSpacing(10)
-        ctrl.addWidget(self._slabel("Start:"))
+        ctrl.addWidget(_slabel("Start:"))
         self._start_combo = QComboBox()
         self._start_combo.setMinimumWidth(100)
         self._start_combo.setFont(QFont("Consolas", 10))
-        self._start_combo.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._start_combo.setStyleSheet(themed(_COMBO_QSS))
         self._start_combo.currentIndexChanged.connect(self._on_start_run_changed)
         ctrl.addWidget(self._start_combo)
 
         ctrl.addSpacing(6)
-        ctrl.addWidget(self._slabel("End:"))
+        ctrl.addWidget(_slabel("End:"))
         self._end_combo = QComboBox()
         self._end_combo.setMinimumWidth(100)
         self._end_combo.setFont(QFont("Consolas", 10))
-        self._end_combo.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._end_combo.setStyleSheet(themed(_COMBO_QSS))
         self._end_combo.currentIndexChanged.connect(self._on_end_run_changed)
         ctrl.addWidget(self._end_combo)
 
         ctrl.addSpacing(10)
-        ctrl.addWidget(self._slabel("Run:"))
+        ctrl.addWidget(_slabel("Run:"))
 
         self._run_combo = QComboBox()
         self._run_combo.setMinimumWidth(100)
         self._run_combo.setFont(QFont("Consolas", 10))
-        self._run_combo.setStyleSheet(themed(
-            "QComboBox{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:3px;padding:2px 6px;}"
-            "QComboBox::drop-down{border:none;width:18px;}"
-            "QComboBox::down-arrow{border-left:4px solid transparent;"
-            "border-right:4px solid transparent;border-top:5px solid #8b949e;"
-            "margin-right:4px;}"
-            "QComboBox QAbstractItemView{background:#161b22;color:#c9d1d9;"
-            "border:1px solid #30363d;selection-background-color:#1f6feb;}"))
+        self._run_combo.setStyleSheet(themed(_COMBO_QSS))
         self._run_combo.currentIndexChanged.connect(self._on_run_changed)
         ctrl.addWidget(self._run_combo)
 
@@ -2816,22 +2080,19 @@ class GainMonitorWindow(QMainWindow):
         rng = QHBoxLayout()
         rng.setSpacing(6)
 
-        _EDIT_SS = ("QLineEdit{background:#161b22;color:#c9d1d9;"
-                    "border:1px solid #30363d;border-radius:3px;padding:2px 4px;}")
-
-        rng.addWidget(self._slabel("Min:"))
+        rng.addWidget(_slabel("Min:"))
         self._range_min = QLineEdit("0.9")
         self._range_min.setFixedWidth(70)
         self._range_min.setFont(QFont("Consolas", 10))
-        self._range_min.setStyleSheet(themed(_EDIT_SS))
+        self._range_min.setStyleSheet(themed(_EDIT_QSS))
         self._range_min.returnPressed.connect(self._on_apply_range)
         rng.addWidget(self._range_min)
 
-        rng.addWidget(self._slabel("Max:"))
+        rng.addWidget(_slabel("Max:"))
         self._range_max = QLineEdit("1.1")
         self._range_max.setFixedWidth(70)
         self._range_max.setFont(QFont("Consolas", 10))
-        self._range_max.setStyleSheet(themed(_EDIT_SS))
+        self._range_max.setStyleSheet(themed(_EDIT_QSS))
         self._range_max.returnPressed.connect(self._on_apply_range)
         rng.addWidget(self._range_max)
 
@@ -2853,35 +2114,22 @@ class GainMonitorWindow(QMainWindow):
         self._auto_btn.clicked.connect(self._on_auto_range)
         rng.addWidget(self._auto_btn)
 
-        # common toggle-button style
-        _TOGGLE_SS = (
-            "QPushButton{background:#21262d;color:#c9d1d9;"
-            "border:1px solid #30363d;padding:4px 8px;"
-            "font:bold 11px Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#30363d;}"
-            "QPushButton:checked{background:#1f6feb;color:white;"
-            "border-color:#388bfd;}")
-        self._apply_btn.setStyleSheet(themed(
-            "QPushButton{background:#21262d;color:#c9d1d9;"
-            "border:1px solid #30363d;padding:4px 8px;"
-            "font:bold 11px Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:#30363d;}"))
-        self._log_btn.setStyleSheet(themed(_TOGGLE_SS))
-        self._auto_btn.setStyleSheet(themed(_TOGGLE_SS))
+        self._apply_btn.setStyleSheet(themed(_BTN_QSS))
+        self._log_btn.setStyleSheet(themed(_TOGGLE_QSS))
+        self._auto_btn.setStyleSheet(themed(_TOGGLE_QSS))
 
         rng.addStretch()
         left_layout.addLayout(rng)
 
-        # geo map
         self._map = HyCalGainMapWidget()
         self._map.set_modules(self._all_modules)
-        self._map.set_palette(self._palette_idx)
+        self._map.set_palette(_DEFAULT_PALETTE)
         self._map.moduleHovered.connect(self._on_module_hovered)
         self._map.moduleClicked.connect(self._on_module_clicked)
         self._map.paletteClicked.connect(self._on_cycle_palette)
+        self._map.rangeEdited.connect(self._on_map_range_edited)
         left_layout.addWidget(self._map, stretch=1)
 
-        # info label
         self._info = QLabel("Hover over a module for details")
         self._info.setFont(QFont("Consolas", 10))
         self._info.setStyleSheet(themed(
@@ -2892,7 +2140,7 @@ class GainMonitorWindow(QMainWindow):
 
         body.addWidget(left)
 
-        # ---- right panel (vertical splitter: charts top, reserved bottom) ----
+        # ---- right panel (vertical splitter: charts top, histogram bottom) ----
         right = QSplitter(Qt.Orientation.Vertical)
 
         charts = QWidget()
@@ -2911,8 +2159,10 @@ class GainMonitorWindow(QMainWindow):
                 chart.set_series_color(QColor(THEME.HIGHLIGHT))
             chart.runClicked.connect(
                 lambda rn, k=kind: self._on_chart_run_clicked(k, rn))
-            chart.pointDeleteRequested.connect(self._on_delete_run)
-            chart.pointBackupRequested.connect(self._on_backup_run)
+            chart.pointDeleteRequested.connect(
+                lambda rn: self._remove_run(rn, backup=False))
+            chart.pointBackupRequested.connect(
+                lambda rn: self._remove_run(rn, backup=True))
             self._charts.append(chart)
             charts_layout.addWidget(chart)
 
@@ -2926,11 +2176,8 @@ class GainMonitorWindow(QMainWindow):
         self._right_splitter = right
 
         body.addWidget(right)
-        # Body now has just two panels — the report table is a floating
-        # window — so the HyCal map gets a much larger initial slice and
-        # the charts/histogram column grows correspondingly.
         body.setStretchFactor(0, 2)  # HyCal map
-        body.setStretchFactor(1, 5)  # charts + reserved
+        body.setStretchFactor(1, 5)  # charts + histogram
         QTimer.singleShot(0, lambda: self._body.setSizes([500, 1100]))
         QTimer.singleShot(0, lambda: self._right_splitter.setSizes([700, 300]))
 
@@ -2948,12 +2195,6 @@ class GainMonitorWindow(QMainWindow):
             f"QPushButton:disabled{{color:#555;}}"))
         btn.clicked.connect(slot)
         return btn
-
-    def _slabel(self, text):
-        lbl = QLabel(text)
-        lbl.setFont(QFont("Consolas", 10))
-        lbl.setStyleSheet(themed("color:#c9d1d9;"))
-        return lbl
 
     # ---- keyboard navigation ----
 
@@ -3051,41 +2292,26 @@ class GainMonitorWindow(QMainWindow):
             return
         self._runs = new_runs
         self._file_snapshot = new_snapshot
-        self._deviation_stats_key = None
+        self._gain_stats_key = None
         self._hist_cache.clear()
-
-        # rebuild start/end combos
-        self._start_combo.blockSignals(True)
-        self._end_combo.blockSignals(True)
-        self._start_combo.clear()
-        self._end_combo.clear()
-        for rd in self._runs:
-            self._start_combo.addItem(str(rd.run_number))
-            self._end_combo.addItem(str(rd.run_number))
 
         run_numbers = [rd.run_number for rd in self._runs]
         last = len(self._runs) - 1
 
-        # restore start index
         if start_run_number in run_numbers:
             self._start_run_idx = run_numbers.index(start_run_number)
         else:
             self._start_run_idx = 0
-        self._start_combo.setCurrentIndex(self._start_run_idx)
 
         # restore end index — extend to newest run if it was already at the end before refresh
         if end_run_number == old_last_run_number or end_run_number not in run_numbers:
             self._end_run_idx = last
         else:
             self._end_run_idx = run_numbers.index(end_run_number)
-        self._end_combo.setCurrentIndex(self._end_run_idx)
-
-        self._start_combo.blockSignals(False)
-        self._end_combo.blockSignals(False)
+        self._refill_range_combos()
 
         new_runs_added = run_numbers[-1] != old_last_run_number
         if new_runs_added:
-            # jump to the newest run
             self._current_run_idx = last
         elif current_run_number in run_numbers:
             self._current_run_idx = run_numbers.index(current_run_number)
@@ -3129,29 +2355,15 @@ class GainMonitorWindow(QMainWindow):
             self._status_lbl.setStyleSheet(themed("color:#f85149;"))
             return
 
-        # populate start/end combos (all runs)
-        self._start_combo.blockSignals(True)
-        self._start_combo.clear()
-        for rd in self._runs:
-            self._start_combo.addItem(str(rd.run_number))
-        self._start_combo.setCurrentIndex(0)
-        self._start_combo.blockSignals(False)
-
-        self._end_combo.blockSignals(True)
-        self._end_combo.clear()
-        for rd in self._runs:
-            self._end_combo.addItem(str(rd.run_number))
         last = len(self._runs) - 1
-        self._end_combo.setCurrentIndex(last)
-        self._end_combo.blockSignals(False)
-
         self._start_run_idx = 0
         self._end_run_idx = last
         self._current_run_idx = last
+        self._refill_range_combos()
         self._selected_module = None
         self._selected_hycal_module = None
         self._map.set_selected(None)
-        self._deviation_stats_key = None
+        self._gain_stats_key = None
 
         self._populate_run_combo()
         self._recompute_pairwise_diffs()
@@ -3165,43 +2377,43 @@ class GainMonitorWindow(QMainWindow):
 
         self._update_all_views()
 
+    @staticmethod
+    def _set_combo(combo: QComboBox, idx: int,
+                   labels: Optional[List[str]] = None):
+        """Select ``idx`` (after refilling with ``labels``) without
+        emitting signals."""
+        combo.blockSignals(True)
+        if labels is not None:
+            combo.clear()
+            combo.addItems(labels)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+
+    def _refill_range_combos(self):
+        labels = [str(rd.run_number) for rd in self._runs]
+        self._set_combo(self._start_combo, self._start_run_idx, labels)
+        self._set_combo(self._end_combo, self._end_run_idx, labels)
+
     def _populate_run_combo(self):
-        self._run_combo.blockSignals(True)
-        self._run_combo.clear()
-        for rd in self._active_runs:
-            self._run_combo.addItem(str(rd.run_number))
+        labels = [str(rd.run_number) for rd in self._active_runs]
         combo_idx = max(0, self._current_run_idx - self._start_run_idx)
-        combo_idx = min(combo_idx, self._run_combo.count() - 1)
-        self._run_combo.setCurrentIndex(combo_idx)
-        self._run_combo.blockSignals(False)
+        self._set_combo(self._run_combo, min(combo_idx, len(labels) - 1), labels)
+
+    def _set_run_range(self, start: int, end: int):
+        self._start_run_idx, self._end_run_idx = start, end
+        self._set_combo(self._start_combo, start)
+        self._set_combo(self._end_combo, end)
+        self._current_run_idx = min(max(self._current_run_idx, start), end)
+        self._populate_run_combo()
+        self._update_all_views()
 
     def _on_start_run_changed(self, index: int):
-        if index < 0 or index >= len(self._runs):
-            return
-        self._start_run_idx = index
-        if self._end_run_idx < self._start_run_idx:
-            self._end_combo.blockSignals(True)
-            self._end_combo.setCurrentIndex(index)
-            self._end_combo.blockSignals(False)
-            self._end_run_idx = index
-        if self._current_run_idx < self._start_run_idx:
-            self._current_run_idx = self._start_run_idx
-        self._populate_run_combo()
-        self._update_all_views()
+        if 0 <= index < len(self._runs):
+            self._set_run_range(index, max(index, self._end_run_idx))
 
     def _on_end_run_changed(self, index: int):
-        if index < 0 or index >= len(self._runs):
-            return
-        self._end_run_idx = index
-        if self._start_run_idx > self._end_run_idx:
-            self._start_combo.blockSignals(True)
-            self._start_combo.setCurrentIndex(index)
-            self._start_combo.blockSignals(False)
-            self._start_run_idx = index
-        if self._current_run_idx > self._end_run_idx:
-            self._current_run_idx = self._end_run_idx
-        self._populate_run_combo()
-        self._update_all_views()
+        if 0 <= index < len(self._runs):
+            self._set_run_range(min(self._start_run_idx, index), index)
 
     def _on_run_changed(self, index: int):
         if index < 0 or index >= len(self._active_runs):
@@ -3219,13 +2431,7 @@ class GainMonitorWindow(QMainWindow):
 
     def _on_ref_changed(self, index: int):
         self._current_ref_idx = index
-        if self._view_mode == 3:
-            self._recompute_pairwise_diffs()
-            self._update_summary_views()
-        else:
-            self._update_geo_view()
-            self._update_irregular_table()
-        self._update_line_charts()
+        self._update_all_views()
 
     def _on_prev_run(self):
         combo_idx = self._current_run_idx - self._start_run_idx
@@ -3250,6 +2456,12 @@ class GainMonitorWindow(QMainWindow):
         self._manual_vmin = vmin
         self._manual_vmax = vmax
         self._update_geo_view()
+
+    def _on_map_range_edited(self, vmin: float, vmax: float):
+        # An inline colour-bar edit sets the manual range, like Min/Max.
+        self._range_min.setText(f"{vmin:g}")
+        self._range_max.setText(f"{vmax:g}")
+        self._on_apply_range()
 
     def _on_log_toggled(self):
         self._log_scale = self._log_btn.isChecked()
@@ -3289,8 +2501,7 @@ class GainMonitorWindow(QMainWindow):
 
     def _drop_run_from_state(self, run_idx: int, run_number: int):
         """Remove a run from in-memory state and refresh combos / views.
-        Called by both the delete and the backup flows once the on-disk
-        action has succeeded."""
+        Called by _remove_run once the on-disk action is done."""
         del self._runs[run_idx]
         self._file_snapshot.pop(run_number, None)
         for key in [k for k in self._hist_cache if k[0] == run_number]:
@@ -3311,117 +2522,72 @@ class GainMonitorWindow(QMainWindow):
                                     min(self._current_run_idx,
                                         self._end_run_idx))
 
-        self._start_combo.blockSignals(True)
-        self._end_combo.blockSignals(True)
-        self._start_combo.clear()
-        self._end_combo.clear()
-        for rd in self._runs:
-            self._start_combo.addItem(str(rd.run_number))
-            self._end_combo.addItem(str(rd.run_number))
-        self._start_combo.setCurrentIndex(self._start_run_idx)
-        self._end_combo.setCurrentIndex(self._end_run_idx)
-        self._start_combo.blockSignals(False)
-        self._end_combo.blockSignals(False)
+        self._refill_range_combos()
         self._populate_run_combo()
 
         self._recompute_pairwise_diffs()
-        self._deviation_stats_key = None
+        self._gain_stats_key = None
         self._status_lbl.setText(f"{len(self._runs)} runs loaded")
         self._update_all_views()
 
-    def _on_delete_run(self, run_number: int):
-        """Remove a run from memory and delete its .dat/.root files on disk."""
+    def _remove_run(self, run_number: int, backup: bool):
+        """Delete a run's .dat/.root files on disk, or with ``backup`` move
+        them into <folder>/backup/, and drop the run from memory."""
         run_idx = next((i for i, rd in enumerate(self._runs)
                         if rd.run_number == run_number), -1)
         if run_idx < 0:
             return
         if len(self._runs) <= 1:
-            QMessageBox.warning(self, "Cannot delete",
-                                "Refusing to delete the last remaining run.")
+            if backup:
+                QMessageBox.warning(self, "Cannot backup",
+                                    "Refusing to remove the last remaining run "
+                                    "from the view.")
+            else:
+                QMessageBox.warning(self, "Cannot delete",
+                                    "Refusing to delete the last remaining run.")
             return
 
+        backup_dir = os.path.join(self._current_folder, "backup")
         paths = self._run_file_paths(run_number)
         existing = [p for p in paths if os.path.exists(p)]
         details = ("\n  ".join(existing) if existing
                    else "(no on-disk files found — only in-memory record)")
 
         box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Confirm run deletion")
-        box.setText(f"Are you sure you want to delete run {run_number}?")
-        box.setInformativeText(
-            "The following files will be permanently removed from disk:\n  "
-            + details
-            + "\n\nThis cannot be undone.")
+        if backup:
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setWindowTitle("Confirm move to backup")
+            box.setText(f"Move run {run_number} to backup?")
+            box.setInformativeText(
+                "The following files will be moved to:\n  "
+                + backup_dir + "\n\n  "
+                + details
+                + "\n\nThe run will also be removed from the current view.")
+        else:
+            box.setIcon(QMessageBox.Icon.Warning)
+            box.setWindowTitle("Confirm run deletion")
+            box.setText(f"Are you sure you want to delete run {run_number}?")
+            box.setInformativeText(
+                "The following files will be permanently removed from disk:\n  "
+                + details
+                + "\n\nThis cannot be undone.")
         box.setStandardButtons(
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         yes_btn = box.button(QMessageBox.StandardButton.Yes)
         if yes_btn is not None:
-            yes_btn.setText("Delete")
+            yes_btn.setText("Move" if backup else "Delete")
         if box.exec() != QMessageBox.StandardButton.Yes:
             return
 
-        errors: List[str] = []
-        for p in paths:
-            if not os.path.exists(p):
-                continue
+        if backup:
             try:
-                os.remove(p)
+                os.makedirs(backup_dir, exist_ok=True)
             except OSError as e:
-                errors.append(f"{p}: {e}")
-        if errors:
-            QMessageBox.warning(self, "Delete partially failed",
-                                "Some files could not be deleted:\n\n"
-                                + "\n".join(errors))
-
-        self._drop_run_from_state(run_idx, run_number)
-
-    def _on_backup_run(self, run_number: int):
-        """Move a run's .dat/.root files into <folder>/backup/ and drop the
-        run from the in-memory state."""
-        run_idx = next((i for i, rd in enumerate(self._runs)
-                        if rd.run_number == run_number), -1)
-        if run_idx < 0:
-            return
-        if len(self._runs) <= 1:
-            QMessageBox.warning(self, "Cannot backup",
-                                "Refusing to remove the last remaining run "
-                                "from the view.")
-            return
-
-        folder = self._current_folder
-        backup_dir = os.path.join(folder, "backup")
-        paths = self._run_file_paths(run_number)
-        existing = [p for p in paths if os.path.exists(p)]
-        details = ("\n  ".join(existing) if existing
-                   else "(no on-disk files found — only in-memory record)")
-
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Confirm move to backup")
-        box.setText(f"Move run {run_number} to backup?")
-        box.setInformativeText(
-            "The following files will be moved to:\n  "
-            + backup_dir + "\n\n  "
-            + details
-            + "\n\nThe run will also be removed from the current view.")
-        box.setStandardButtons(
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
-        yes_btn = box.button(QMessageBox.StandardButton.Yes)
-        if yes_btn is not None:
-            yes_btn.setText("Move")
-        if box.exec() != QMessageBox.StandardButton.Yes:
-            return
-
-        try:
-            os.makedirs(backup_dir, exist_ok=True)
-        except OSError as e:
-            QMessageBox.critical(self, "Backup failed",
-                                 f"Could not create backup directory:\n"
-                                 f"{backup_dir}\n\n{e}")
-            return
+                QMessageBox.critical(self, "Backup failed",
+                                     f"Could not create backup directory:\n"
+                                     f"{backup_dir}\n\n{e}")
+                return
 
         errors: List[str] = []
         for p in paths:
@@ -3429,21 +2595,32 @@ class GainMonitorWindow(QMainWindow):
                 continue
             dest = os.path.join(backup_dir, os.path.basename(p))
             try:
-                shutil.move(p, dest)
+                if backup:
+                    shutil.move(p, dest)
+                else:
+                    os.remove(p)
             except (OSError, shutil.Error) as e:
-                errors.append(f"{p} → {dest}: {e}")
+                errors.append(f"{p} → {dest}: {e}" if backup else f"{p}: {e}")
         if errors:
-            QMessageBox.warning(self, "Backup partially failed",
-                                "Some files could not be moved:\n\n"
+            if backup:
+                title, what = "Backup partially failed", "moved"
+            else:
+                title, what = "Delete partially failed", "deleted"
+            QMessageBox.warning(self, title,
+                                f"Some files could not be {what}:\n\n"
                                 + "\n".join(errors))
 
         self._drop_run_from_state(run_idx, run_number)
 
     def _on_cycle_palette(self):
-        if self._view_mode == 2:
-            return  # drift mode uses a fixed palette
-        self._palette_idx = (self._palette_idx + 1) % len(PALETTES)
-        self._map.set_palette(self._palette_idx)
+        if self._view_mode != 2:  # drift mode uses a fixed palette
+            self._map.cycle_palette()
+
+    def _apply_map_mode(self):
+        """Map palette and legend of the current view mode."""
+        self._map.set_palette_override(
+            DRIFT_PALETTE if self._view_mode == 2 else None)
+        self._map.set_legend_mode(_VIEW_MODE_LEGEND[self._view_mode])
 
     def _on_view_mode_changed(self, index: int):
         prev_mode = self._view_mode
@@ -3453,18 +2630,7 @@ class GainMonitorWindow(QMainWindow):
                   self._thresh_w_lbl, self._thresh_w_input, self._thresh_w_pct):
             w.setVisible(uses_threshold)
         self._run_combo.setEnabled(index != 3)
-        if prev_mode == 2 and index != 2:
-            self._map.set_palette_override(None)
-            self._map.set_palette(self._palette_idx)
-        if index == 0:
-            self._map.set_legend_mode("gain")
-        elif index == 1:
-            self._map.set_legend_mode("deviation")
-        elif index == 2:
-            self._map.set_palette_override(DRIFT_PALETTE)
-            self._map.set_legend_mode("drift")
-        elif index == 3:
-            self._map.set_legend_mode("summary")
+        self._apply_map_mode()
         if index == 3:
             self._update_summary_views()
             self._hist_widget.clear()
@@ -3513,11 +2679,9 @@ class GainMonitorWindow(QMainWindow):
                     f"  lms_peak: {mrec.lms_peak:.2f}"
                     f"  lms_sigma: {mrec.lms_sigma:.2f}")
             if self._view_mode == 1:
-                glist = [r.modules[name].gain_factors[self._current_ref_idx]
-                         for r in active if name in r.modules]
-                if len(glist) > 1:
-                    mean = sum(glist) / len(glist)
-                    std = math.sqrt(sum((g - mean) ** 2 for g in glist) / len(glist))
+                st = self._active_gain_stats().get(name)
+                if st and st[2] > 1:
+                    mean, std, _n = st
                     dev = (gain - mean) / std if std > 0 else 0.0
                     base += f"  dev: {dev:+.2f}σ"
             self._info.setText(base)
@@ -3527,10 +2691,6 @@ class GainMonitorWindow(QMainWindow):
     def _on_module_clicked(self, name: str):
         new_sel = name if name else None
         self._selected_module = new_sel
-        # The orange mod plots latch onto the last-clicked HyCal module and
-        # only ever change when the user clicks another one — clicks on a
-        # reference PMT, on empty map space, or on the mod plots themselves
-        # leave them as-is.
         if new_sel and new_sel not in LMS_NAMES:
             self._selected_hycal_module = new_sel
         # Clicking one of the three LMS cells doubles as a reference-PMT
@@ -3564,10 +2724,7 @@ class GainMonitorWindow(QMainWindow):
             return
         if run_number is None:
             run_number = self._runs[self._current_run_idx].run_number
-        # The histogram is driven by which module the user clicked on the
-        # map — clicking LMS1/LMS2/LMS3 shows that exact reference PMT.
-        hist_module = module_name
-        key = (run_number, hist_module)
+        key = (run_number, module_name)
         if key in self._hist_cache:
             self._hist_cache.move_to_end(key)
             values, edges, gauss, ovl_values, ovl_edges, ovl_gauss = self._hist_cache[key]
@@ -3603,15 +2760,15 @@ class GainMonitorWindow(QMainWindow):
 
             try:
                 with uproot.open(root_path) as rf:
-                    values, edges, gauss = _read_hist(rf, f"{hist_module}_LMS")
+                    values, edges, gauss = _read_hist(rf, f"{module_name}_LMS")
                     if values is None:
                         self._hist_widget.clear()
                         return
                     # For the three reference PMTs, also load the alpha-peak
                     # histogram + fit so they overlay on the same plot.
-                    if hist_module in LMS_NAMES:
+                    if module_name in LMS_NAMES:
                         ovl_values, ovl_edges, ovl_gauss = _read_hist(
-                            rf, f"{hist_module}_Alpha")
+                            rf, f"{module_name}_Alpha")
                     else:
                         ovl_values, ovl_edges, ovl_gauss = None, None, None
             except Exception:
@@ -3622,7 +2779,7 @@ class GainMonitorWindow(QMainWindow):
             if len(self._hist_cache) > _HIST_CACHE_MAX:
                 self._hist_cache.popitem(last=False)
         self._hist_widget.set_histogram(values, edges,
-                                        f"{lms_display_name(hist_module)}  run {run_number}",
+                                        f"{lms_display_name(module_name)}  run {run_number}",
                                         gauss=gauss,
                                         overlay_values=ovl_values,
                                         overlay_edges=ovl_edges,
@@ -3632,9 +2789,10 @@ class GainMonitorWindow(QMainWindow):
 
     def _recompute_pairwise_diffs(self):
         """Pre-compute all consecutive-run relative gain changes across ALL runs.
-        Stored as flat list of (name, mod_type, rel, pair_idx) where pair_idx is
-        the index of the current run in self._runs. Called once on load and on
-        ref index change so threshold/range updates just filter this list."""
+        Stored as flat list of (name, mod_type, rel, pair_idx, curr_run,
+        prev_run) where pair_idx is the index of the current run in
+        self._runs. Called on load, and by _update_summary_views after a ref
+        index change, so threshold/range updates just filter this list."""
         ref_idx = self._current_ref_idx
         runs = self._runs
         mod_by_name = self._mod_by_name
@@ -3650,14 +2808,29 @@ class GainMonitorWindow(QMainWindow):
                 g_prev = prev_gains.get(mname)
                 if g_prev is None:
                     continue
-                g_curr = mrec.gain_factors[ref_idx]
-                denom = min(abs(g_curr), abs(g_prev))
-                rel = math.inf if denom == 0 else abs(g_curr - g_prev) / denom
+                rel = _sym_rel_change(mrec.gain_factors[ref_idx], g_prev)
                 mod = mod_by_name.get(mname)
                 diffs.append((mname, mod.mod_type if mod else "?", rel, i,
                                curr_run, prev_run))
         self._pairwise_diffs = diffs
         self._pairwise_ref_idx = ref_idx
+
+    def _active_gain_stats(self) -> Dict[str, Tuple[float, float, int]]:
+        """gain_stats() of the active runs against the current ref."""
+        key = (self._start_run_idx, self._end_run_idx, self._current_ref_idx)
+        if self._gain_stats_key != key:
+            self._gain_stats_cache = gain_stats(self._active_runs,
+                                                self._current_ref_idx)
+            self._gain_stats_key = key
+        return self._gain_stats_cache
+
+    def _prev_active_run(self, active: List[RunData]) -> Optional[RunData]:
+        """The active run just before the current one; None if the current
+        run is the first active run or outside the active range."""
+        curr = self._runs[self._current_run_idx].run_number
+        pos = next((i for i, r in enumerate(active)
+                    if r.run_number == curr), None)
+        return active[pos - 1] if pos else None
 
     def _update_all_views(self):
         if self._view_mode == 3:
@@ -3671,6 +2844,8 @@ class GainMonitorWindow(QMainWindow):
         """Filter pre-computed pairwise diffs by active range + threshold."""
         if not self._runs:
             return
+        if self._pairwise_ref_idx != self._current_ref_idx:
+            self._recompute_pairwise_diffs()
         start_idx = self._start_run_idx
         end_idx = self._end_run_idx
         thresh_g = self._thresh_g
@@ -3679,8 +2854,7 @@ class GainMonitorWindow(QMainWindow):
         for name, mod_type, rel, pair_idx, curr_run, prev_run in self._pairwise_diffs:
             if pair_idx <= start_idx or pair_idx > end_idx:
                 continue
-            threshold = thresh_g if name.startswith("G") else thresh_w
-            if rel <= threshold:
+            if rel <= _drift_threshold(name, thresh_g, thresh_w):
                 continue
             s = stats.get(name)
             if s is None:
@@ -3721,28 +2895,10 @@ class GainMonitorWindow(QMainWindow):
 
         if self._view_mode == 1:
             # Deviation (σ): signed (gain − mean) / std across active runs
-            cache_key = (self._start_run_idx, self._end_run_idx, ref_idx)
-            if self._deviation_stats_key != cache_key:
-                all_gains: Dict[str, List[float]] = {}
-                for r in active:
-                    for mname, mrec in r.modules.items():
-                        lst = all_gains.get(mname)
-                        if lst is None:
-                            all_gains[mname] = [mrec.gain_factors[ref_idx]]
-                        else:
-                            lst.append(mrec.gain_factors[ref_idx])
-                dev_stats: Dict[str, Tuple[float, float]] = {}
-                for mname, glist in all_gains.items():
-                    mean = sum(glist) / len(glist)
-                    var = sum((g - mean) ** 2 for g in glist) / len(glist)
-                    dev_stats[mname] = (mean, math.sqrt(var))
-                self._deviation_stats_cache = dev_stats
-                self._deviation_stats_key = cache_key
-            stats = self._deviation_stats_cache
-
+            stats = self._active_gain_stats()
             values: Dict[str, float] = {}
             for mname, mrec in rd.modules.items():
-                mean, std = stats.get(mname, (0.0, 0.0))
+                mean, std, _n = stats.get(mname, (0.0, 0.0, 0))
                 if std > 0:
                     values[mname] = (mrec.gain_factors[ref_idx] - mean) / std
                 else:
@@ -3762,11 +2918,9 @@ class GainMonitorWindow(QMainWindow):
                 vmax = self._manual_vmax
         elif self._view_mode == 2:
             # Run-to-Run Drift: (gain_current - gain_prev) / gain_prev
-            curr_pos = next((i for i, r in enumerate(active)
-                             if r.run_number == rd.run_number), None)
+            rd_prev = self._prev_active_run(active)
             values: Dict[str, float] = {}
-            if curr_pos is not None and curr_pos > 0:
-                rd_prev = active[curr_pos - 1]
+            if rd_prev is not None:
                 for mname, mrec in rd.modules.items():
                     prev_mrec = rd_prev.modules.get(mname)
                     if prev_mrec and prev_mrec.gain_factors[ref_idx] != 0:
@@ -3783,7 +2937,7 @@ class GainMonitorWindow(QMainWindow):
                 vmax = self._manual_vmax
 
         else:
-            # Gain Factor mode (original)
+            # Gain Factor
             values: Dict[str, float] = {}
             for mname, mrec in rd.modules.items():
                 values[mname] = mrec.gain_factors[ref_idx]
@@ -3819,9 +2973,6 @@ class GainMonitorWindow(QMainWindow):
         ref_name = LMS_NAMES[ref_idx]
         curr_run_number = self._runs[self._current_run_idx].run_number
 
-        # Mod plots track the last-clicked HyCal module, so they stay
-        # populated when the user clicks on a reference PMT (cell or
-        # ref-plot point).  Ref plots ignore mname entirely.
         mname = self._selected_hycal_module
         has_module = bool(mname)
 
@@ -3833,7 +2984,6 @@ class GainMonitorWindow(QMainWindow):
             if vals:
                 chart.set_y_range(*_chart_y_range(vals, errs))
             chart.set_current_run(curr_run_number)
-            chart.set_highlighted(False)
 
     def _series_for_kind(
         self, kind: str, ref_idx: int, ref_name: str,
@@ -3842,97 +2992,58 @@ class GainMonitorWindow(QMainWindow):
     ) -> Tuple[List[int], List[int], List[float], List[float], str]:
         """Build (indices, actual_runs, vals, errs, title) for one of the
         five fixed plots."""
-        indices: List[int] = []
-        actual_runs: List[int] = []
-        vals: List[float] = []
-        errs: List[float] = []
-
         ref_disp = lms_display_name(ref_name)
+        if kind in ("mod_lms", "mod_gain") and not has_module:
+            what = ("Module LMS" if kind == "mod_lms"
+                    else f"Module Gain[{ref_disp}]")
+            return [], [], [], [], (
+                f"{what} — select a HyCal module  (run1={first_run})")
         mname_disp = lms_display_name(mname) if mname else mname
 
-        if kind == "ratio":
-            for idx, rd in enumerate(active):
-                rec = rd.lms.get(ref_name)
-                if rec is None or rec.alpha_peak == 0 or rec.lms_peak == 0:
-                    continue
-                ratio = rec.lms_peak / rec.alpha_peak
-                rel_lms = rec.lms_sigma / rec.lms_peak
-                rel_alpha = rec.alpha_sigma / rec.alpha_peak
-                err = ratio * math.sqrt(rel_lms ** 2 + rel_alpha ** 2)
-                indices.append(idx + 1)
-                actual_runs.append(rd.run_number)
-                vals.append(ratio)
-                errs.append(err)
-            return indices, actual_runs, vals, errs, (
-                f"{ref_disp}  LMS/Alpha  (run1={first_run})")
+        def lms_fit(rec):
+            if rec is None or rec.lms_peak == 0:
+                return None
+            return rec.lms_peak, rec.lms_sigma
 
-        if kind == "ref_lms":
-            for idx, rd in enumerate(active):
-                rec = rd.lms.get(ref_name)
-                if rec is None or rec.lms_peak == 0:
-                    continue
-                indices.append(idx + 1)
-                actual_runs.append(rd.run_number)
-                vals.append(rec.lms_peak)
-                errs.append(rec.lms_sigma)
-            return indices, actual_runs, vals, errs, (
-                f"{ref_disp}  LMS peak±σ  (run1={first_run})")
+        def alpha_fit(rec):
+            if rec is None or rec.alpha_peak == 0:
+                return None
+            return rec.alpha_peak, rec.alpha_sigma
 
-        if kind == "ref_alpha":
-            for idx, rd in enumerate(active):
-                rec = rd.lms.get(ref_name)
-                if rec is None or rec.alpha_peak == 0:
-                    continue
-                indices.append(idx + 1)
-                actual_runs.append(rd.run_number)
-                vals.append(rec.alpha_peak)
-                errs.append(rec.alpha_sigma)
-            return indices, actual_runs, vals, errs, (
-                f"{ref_disp}  Alpha peak±σ  (run1={first_run})")
+        def lms_alpha_ratio(rec):
+            if rec is None or rec.alpha_peak == 0 or rec.lms_peak == 0:
+                return None
+            ratio = rec.lms_peak / rec.alpha_peak
+            rel_lms = rec.lms_sigma / rec.lms_peak
+            rel_alpha = rec.alpha_sigma / rec.alpha_peak
+            return ratio, ratio * math.sqrt(rel_lms ** 2 + rel_alpha ** 2)
 
-        if kind == "mod_lms":
-            if not has_module:
-                return indices, actual_runs, vals, errs, (
-                    f"Module LMS — select a HyCal module  (run1={first_run})")
-            for idx, rd in enumerate(active):
-                mrec = rd.modules.get(mname)
-                if mrec is None or mrec.lms_peak == 0:
-                    continue
-                indices.append(idx + 1)
-                actual_runs.append(rd.run_number)
-                vals.append(mrec.lms_peak)
-                errs.append(mrec.lms_sigma)
-            return indices, actual_runs, vals, errs, (
-                f"{mname_disp}  LMS peak±σ  (run1={first_run})")
+        def gain(mrec):
+            return None if mrec is None else (mrec.gain_factors[ref_idx], None)
 
-        if kind == "mod_gain":
-            if not has_module:
-                return indices, actual_runs, vals, errs, (
-                    f"Module Gain[{ref_disp}] — select a HyCal module  "
-                    f"(run1={first_run})")
-            for idx, rd in enumerate(active):
-                mrec = rd.modules.get(mname)
-                if mrec is None:
-                    continue
-                indices.append(idx + 1)
-                actual_runs.append(rd.run_number)
-                vals.append(mrec.gain_factors[ref_idx])
-            return indices, actual_runs, vals, errs, (
-                f"{mname_disp}  gain[{ref_disp}]  (run1={first_run})")
-
-        return indices, actual_runs, vals, errs, ""
+        ref_recs = [rd.lms.get(ref_name) for rd in active]
+        mod_recs = [rd.modules.get(mname) for rd in active]
+        # kind -> (per-run records, point, title)
+        series = {
+            "ratio":     (ref_recs, lms_alpha_ratio, f"{ref_disp}  LMS/Alpha"),
+            "ref_lms":   (ref_recs, lms_fit,   f"{ref_disp}  LMS peak±σ"),
+            "ref_alpha": (ref_recs, alpha_fit, f"{ref_disp}  Alpha peak±σ"),
+            "mod_lms":   (mod_recs, lms_fit,   f"{mname_disp}  LMS peak±σ"),
+            "mod_gain":  (mod_recs, gain,      f"{mname_disp}  gain[{ref_disp}]"),
+        }
+        records, point, title = series[kind]
+        return (*_collect_series(active, records, point),
+                f"{title}  (run1={first_run})")
 
     def _update_irregular_table(self):
         active = self._active_runs
         if not active:
             return
         if self._view_mode == 2:
-            rd = self._runs[self._current_run_idx]
-            curr_pos = next((i for i, r in enumerate(active)
-                             if r.run_number == rd.run_number), None)
-            if curr_pos is not None and curr_pos > 0:
+            rd_prev = self._prev_active_run(active)
+            if rd_prev is not None:
                 entries = compute_drift_entries(
-                    rd, active[curr_pos - 1],
+                    self._runs[self._current_run_idx], rd_prev,
                     self._current_ref_idx, self._mod_by_name,
                     self._thresh_g, self._thresh_w)
             else:
@@ -3940,13 +3051,12 @@ class GainMonitorWindow(QMainWindow):
             self._irregular_table.set_drift_data(entries)
         else:
             entries = compute_irregular_entries(
-                active, self._current_ref_idx, self._mod_by_name)
+                active, self._current_ref_idx, self._mod_by_name,
+                stats=self._active_gain_stats())
             self._irregular_table.set_data(entries)
 
 
-# ===========================================================================
-#  Entry point
-# ===========================================================================
+# ---- Entry point ----
 
 def main():
     import argparse

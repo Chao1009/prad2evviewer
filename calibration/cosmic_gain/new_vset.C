@@ -1,147 +1,72 @@
+#include "cosmic_common.h"
+
+#include <map>
+
 void new_vset(){
-
-    const int NMODULES = 1156;
-
-    const int LG_num = 76;
-    int LG_module_id[LG_num] = 
-    {156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
-    186, 216, 246, 276, 306, 336, 366, 396, 426, 456, 486, 516, 546, 576, 606, 636, 666, 696, 726,
-    175, 205, 235, 265, 295, 325, 355, 385, 415, 445, 475, 505, 535, 565, 595, 625, 655, 685, 715,
-    727, 728, 729, 730, 731, 732, 733, 734, 735, 736, 737, 738, 739, 740, 741, 742, 743, 744, 745
-    };
-
-    // vset3 from vset_iter3_new.json, mean from cosmic_modules_run561.json
-    double vset[NMODULES+LG_num] = {};
-    double mean[NMODULES+LG_num]  = {};
-    bool   has_vset[NMODULES+LG_num] = {};
-    bool   has_run[NMODULES+LG_num] = {};
-
-    // Helper: find index for G module id, returns NMODULES+j or -1
-    auto find_lg_idx = [&](int gid) -> int {
-        for (int j = 0; j < LG_num; j++) {
-            if (LG_module_id[j] == gid) return NMODULES + j;
-        }
-        return -1;
-    };
 
     std::string vset_file = "vset_iter1.json";
     std::string cosmic_file = "cosmic_modules_run575.json";
     std::string output_file = "vset_iter2.json";
 
-    // ---- Read vset_iter3_new.json: V0Set per channel ----
+    // ---- Read vset_file: V0Set per channel ----
+    std::map<std::string, double> vset;
     {
         std::ifstream fin(vset_file);
         if (!fin.is_open()) { std::cerr << "Cannot open " << vset_file << std::endl; return; }
         std::string line;
-        int current_mod = -1;
-        bool current_is_g = false;
+        VsetLineTracker channel;
         while (std::getline(fin, line)) {
-            int mod = 0;
-            if (line.find("\"name\"") != std::string::npos) {
-                if (sscanf(line.c_str(), " \"name\": \"W%d\"", &mod) == 1) {
-                    current_mod = mod;
-                    current_is_g = false;
-                } else if (sscanf(line.c_str(), " \"name\": \"G%d\"", &mod) == 1) {
-                    current_mod = mod;
-                    current_is_g = true;
-                }
-            }
-            int idx = -1;
-            if (!current_is_g && current_mod > 0 && current_mod <= NMODULES) {
-                idx = current_mod - 1;
-            } else if (current_is_g) {
-                idx = find_lg_idx(current_mod);
-            }
-            if (idx >= 0) {
-                double val;
-                if (line.find("\"V0Set\"") != std::string::npos) {
-                    if (sscanf(line.c_str(), " \"V0Set\": %lf", &val) == 1) {
-                        vset[idx] = val;
-                        has_vset[idx] = true;
-                    }
-                }
-            }
+            double val;
+            if (channel.isV0Set(line) && sscanf(line.c_str(), " \"V0Set\": %lf", &val) == 1)
+                vset[channel.name] = val;
         }
     }
 
-    // ---- Read cosmic_modules_run561.json: peak_height_mean ----
-    {
-        std::ifstream fin(cosmic_file);
-        if (!fin.is_open()) { std::cerr << "Cannot open " << cosmic_file << std::endl; return; }
-        std::string line;
-        while (std::getline(fin, line)) {
-            int mod = 0;
-            int run_dummy = 0;
-            double v_ph_mean = 0, v_ph_sigma = 0, v_ph_diff = 0;
-            double v_pi_mean = 0, v_pi_sigma = 0, v_pi_diff = 0;
-            int cnt = 0;
-            if (sscanf(line.c_str(),
-                       " \"W%d\": [{\"run\": %d, \"peak_height_mean\": %lf, \"peak_height_sigma\": %lf, \"peak_height_diff\": %lf,"
-                       " \"peak_integral_mean\": %lf, \"peak_integral_sigma\": %lf, \"peak_integral_diff\": %lf,"
-                       " \"count\": %d",
-                       &mod, &run_dummy, &v_ph_mean, &v_ph_sigma, &v_ph_diff,
-                       &v_pi_mean, &v_pi_sigma, &v_pi_diff, &cnt) == 9) {
-                int idx = mod - 1;
-                if (idx >= 0 && idx < NMODULES) {
-                    mean[idx] = v_ph_mean;
-                    has_run[idx] = true;
-                }
-            } else if (sscanf(line.c_str(),
-                       " \"G%d\": [{\"run\": %d, \"peak_height_mean\": %lf, \"peak_height_sigma\": %lf, \"peak_height_diff\": %lf,"
-                       " \"peak_integral_mean\": %lf, \"peak_integral_sigma\": %lf, \"peak_integral_diff\": %lf,"
-                       " \"count\": %d",
-                       &mod, &run_dummy, &v_ph_mean, &v_ph_sigma, &v_ph_diff,
-                       &v_pi_mean, &v_pi_sigma, &v_pi_diff, &cnt) == 9) {
-                int idx = find_lg_idx(mod);
-                if (idx >= 0) {
-                    mean[idx] = v_ph_mean;
-                    has_run[idx] = true;
-                }
-            }
-        }
-    }
+    // ---- Read cosmic_file: peak_height_mean ----
+    std::vector<CosmicEntry> cosmic;
+    if (!read_cosmic_modules(cosmic_file, cosmic)) { std::cerr << "Cannot open " << cosmic_file << std::endl; return; }
 
-    // ---- Compute vset4 ----
-    double vsetnew[NMODULES+LG_num] = {};
-    bool   valid[NMODULES+LG_num] = {};
+    // ---- Compute the new V0Set ----
+    std::map<std::string, double> vsetnew;
 
     int n_valid = 0, n_skip = 0;
     int n_increase[3] = {0}, n_decrease[3] = {0}, n_unchanged = 0;
 
-    for (int i = 0; i < NMODULES+LG_num; i++) {
-        if (!has_vset[i] || !has_run[i] || i == 1018 || i == 1019) { n_skip++; continue; }
+    for (const auto &c : cosmic) {
+        auto it = vset.find(c.name);
+        if (it == vset.end() || c.name == "W1019" || c.name == "W1020") { n_skip++; continue; }
+        const double v = it->second, mean = c.ph_mean;
+        double vn = v;
 
-        vsetnew[i] = vset[i];
-
-        if (mean[i] > 45.0) {
-            vsetnew[i] = vset[i] - 20.0;
+        if (mean > 45.0) {
+            vn = v - 20.0;
             n_decrease[2]++;
-        }else if (mean[i] > 40.0) {
-            vsetnew[i] = vset[i] - 10.0;
+        }else if (mean > 40.0) {
+            vn = v - 10.0;
             n_decrease[1]++;
-        }else if (mean[i] > 37.0) {
-            vsetnew[i] = vset[i] - 5.0;
+        }else if (mean > 37.0) {
+            vn = v - 5.0;
             n_decrease[0]++;
         }
 
-        if(mean[i] < 25.0) {
-            vsetnew[i] = vset[i] + 20.0;
+        if(mean < 25.0) {
+            vn = v + 20.0;
             n_increase[2]++;
-        }else if(mean[i] < 30.0) {
-            vsetnew[i] = vset[i] + 10.0;
+        }else if(mean < 30.0) {
+            vn = v + 10.0;
             n_increase[1]++;
-        }else if(mean[i] < 33.0) {
-            vsetnew[i] = vset[i] + 5.0;
+        }else if(mean < 33.0) {
+            vn = v + 5.0;
             n_increase[0]++;
         }
-        
-        if(mean[i] >= 33.0 && mean[i] <= 37.0) {
-            vsetnew[i] = vset[i];
+
+        if(mean >= 33.0 && mean <= 37.0) {
+            vn = v;
             n_unchanged++;
         }
-        if (vsetnew[i] > 1270.0 && i < NMODULES) vsetnew[i] = 1270.0;
-        if (vsetnew[i] > 1800 && i >= NMODULES) vsetnew[i] = 1800.0;
-        valid[i] = true;
+        if (vn > 1270.0 && c.name[0] == 'W') vn = 1270.0;
+        if (vn > 1800 && c.name[0] == 'G') vn = 1800.0;
+        vsetnew[c.name] = vn;
         n_valid++;
     }
 
@@ -156,25 +81,22 @@ void new_vset(){
 
     printf("%-6s %10s %10s %10s %8s\n", "Ch", "vset", "height", "vsetnew", "action");
     printf("----------------------------------------------------------\n");
-    for (int i = 0; i < NMODULES + LG_num; i++) {
-        if (!valid[i]) continue;
+    for (const auto &c : cosmic) {
+        auto it = vsetnew.find(c.name);
+        if (it == vsetnew.end()) continue;
         const char* action = "keep";
-        double dv = vsetnew[i] - vset[i];
+        double dv = it->second - vset[c.name];
         if (dv > 15.0) action = "+20V";
         else if (dv < -15.0) action = "-20V";
         else if (dv > 7.0) action = "+10V";
         else if (dv < -7.0) action = "-10V";
         else if (dv > 2.0) action = "+5V";
         else if (dv < -2.0) action = "-5V";
-        if (i < NMODULES)
-            printf("W%-5d %10.1f %10.2f %10.1f %8s\n",
-                   i+1, vset[i], mean[i], vsetnew[i], action);
-        else
-            printf("G%-5d %10.1f %10.2f %10.1f %8s\n",
-                   LG_module_id[i - NMODULES], vset[i], mean[i], vsetnew[i], action);
+        printf("%-6s %10.1f %10.2f %10.1f %8s\n",
+               c.name.c_str(), vset[c.name], c.ph_mean, it->second, action);
     }
 
-    // ---- Write vset_iter4.json: based on vset_iter3_new.json, V0Set replaced by vsetnew ----
+    // ---- Write output_file: vset_file with V0Set replaced by vsetnew ----
     {
         std::ifstream fin(vset_file);
         std::ofstream fout(output_file);
@@ -183,37 +105,19 @@ void new_vset(){
             return;
         }
         std::string line;
-        int current_mod = -1;
-        bool current_is_g = false;
+        VsetLineTracker channel;
         while (std::getline(fin, line)) {
-            int mod = 0;
-            if (line.find("\"name\"") != std::string::npos) {
-                if (sscanf(line.c_str(), " \"name\": \"W%d\"", &mod) == 1) {
-                    current_mod = mod;
-                    current_is_g = false;
-                } else if (sscanf(line.c_str(), " \"name\": \"G%d\"", &mod) == 1) {
-                    current_mod = mod;
-                    current_is_g = true;
-                }
-            }
-            int idx = -1;
-            if (!current_is_g && current_mod > 0 && current_mod <= NMODULES) {
-                idx = current_mod - 1;
-            } else if (current_is_g) {
-                idx = find_lg_idx(current_mod);
-            }
-            if (line.find("\"V0Set\"") != std::string::npos && idx >= 0) {
-                if (valid[idx]) {
-                    bool has_comma = (line.find(",") != std::string::npos &&
-                                      line.rfind(",") > line.find("V0Set"));
-                    char buf[256];
-                    if (has_comma)
-                        snprintf(buf, sizeof(buf), "        \"V0Set\": %.1f,", vsetnew[idx]);
-                    else
-                        snprintf(buf, sizeof(buf), "        \"V0Set\": %.1f", vsetnew[idx]);
-                    fout << buf << "\n";
-                    continue;
-                }
+            auto it = channel.isV0Set(line) ? vsetnew.find(channel.name) : vsetnew.end();
+            if (it != vsetnew.end()) {
+                bool has_comma = (line.find(",") != std::string::npos &&
+                                  line.rfind(",") > line.find("V0Set"));
+                char buf[256];
+                if (has_comma)
+                    snprintf(buf, sizeof(buf), "        \"V0Set\": %.1f,", it->second);
+                else
+                    snprintf(buf, sizeof(buf), "        \"V0Set\": %.1f", it->second);
+                fout << buf << "\n";
+                continue;
             }
             fout << line << "\n";
         }

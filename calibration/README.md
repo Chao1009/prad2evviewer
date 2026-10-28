@@ -119,11 +119,11 @@ Verify that:
 | `hycal_snake_scan.py` | Snake-scan GUI with dwell control (expert / observer / simulation). |
 | `scan_path_editor.py` | Manual path-builder GUI. |
 | `gain_scanner.py` | Gain-scan engine, spectrum analyser, and HTTP / HV clients. |
-| `scan_geoview.py` | HyCal map widget with scaler overlay. |
+| `scan_geoview.py` | HyCal map widget with scaler overlay; subclasses `scripts/hycal_geoview.py`'s `HyCalMapWidget`, so `scripts/` must sit next to `calibration/` (as in the source checkout). |
 | `scan_epics.py` | EPICS PV utilities (motor, scaler). |
 | `scan_engine.py` | Scan-path engine and motion executor. |
-| `scan_utils.py` | Shared types, constants, coordinate transforms, and theme. |
-| `scan_gui_common.py` | Shared GUI helpers (session log, encoder-drift monitor, position-check panel, profile loading). Used by both scan GUIs to remove duplication. |
+| `scan_utils.py` | Shared types, constants, coordinate transforms, path-profile loading, and theme. |
+| `scan_gui_common.py` | Shared GUI code for both scan GUIs: the `ScanWindowBase` main-window shell (top bar, map with scaler controls, path profiles, event log, beam / encoder displays), the `run_scan_gui` command-line entry point, focus-guarded input widgets, the position-check panel, and EPICS bring-up. |
 | `pmt_response.py` | Power-law PMT gain model (`edge = A · V^k`); proposes ΔV for the next iteration when the fit is trustworthy and falls back to a static lookup otherwise. Pure Python, no third-party dependencies — testable in isolation. |
 | `paths.json` | Predefined scan-path profiles. |
 

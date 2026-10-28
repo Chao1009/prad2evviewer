@@ -3,27 +3,30 @@
 Cross-check strip mapping between three implementations:
   1. PRadAnalyzer  (PRad-I, SRS electronics, no hybrid board)
   2. mpd_gem_view_ssp (PRad-II, MPD electronics, hybrid board)
-  3. Our implementation (GemSystem::buildStripMap, configurable)
+  3. Our implementation (gem::MapStrip via gem_strip_map.map_strip)
 
 Verifies that our config-driven pipeline produces identical plane-wide
 strip numbers as the reference code for all 128 channels of every APV.
 
 Usage:
-    python check_strip_map.py [path/to/gem_map.json]
+    python check_strip_map.py [-G path/to/gem_map.json]
 """
 
 import argparse
 import json
-import sys
 import os
-from gem_strip_map import map_strip
+import sys
+
+_SCRIPTS = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "scripts")
+if _SCRIPTS not in sys.path:
+    sys.path.append(_SCRIPTS)
+from gem_strip_map import map_strip  # noqa: E402
+from prad2_env import find_database_file  # noqa: E402
 
 APV_SIZE = 128
 
 
-# =========================================================================
 # Reference implementations (hardcoded logic from original codebases)
-# =========================================================================
 
 def map_strip_pradanalyzer(ch, plane_type, plane_index, orient, plane_orient=1):
     """PRadAnalyzer PRadGEMAPV::MapStrip — SRS, no hybrid board."""
@@ -68,23 +71,6 @@ def map_strip_mpd(ch, plane_type, plane_index, orient):
     return local, strip
 
 
-# =========================================================================
-# Our implementation (config-driven, from GemSystem::buildStripMap)
-# =========================================================================
-
-def map_strip_ours(ch, plane_index, orient, pin_rotate=0, shared_pos=-1,
-                   hybrid_board=True, apv_channels=128, readout_center=32):
-    """Our implementation — delegates to shared gem_strip_map.map_strip."""
-    return map_strip(ch, plane_index, orient,
-                     pin_rotate=pin_rotate, shared_pos=shared_pos,
-                     hybrid_board=hybrid_board,
-                     apv_channels=apv_channels, readout_center=readout_center)
-
-
-# =========================================================================
-# Comparison logic
-# =========================================================================
-
 def check_apv(plane_type, plane_index, orient, pin_rotate=0, shared_pos=-1,
               hybrid_board=True, verbose=False):
     """Check all 128 channels. Returns (mpd_fail, prad_fail, details)."""
@@ -94,10 +80,10 @@ def check_apv(plane_type, plane_index, orient, pin_rotate=0, shared_pos=-1,
 
     for ch in range(APV_SIZE):
         _, mpd_plane = map_strip_mpd(ch, plane_type, plane_index, orient)
-        _, our_plane = map_strip_ours(ch, plane_index, orient,
-                                       pin_rotate=pin_rotate,
-                                       shared_pos=shared_pos,
-                                       hybrid_board=hybrid_board)
+        _, our_plane = map_strip(ch, plane_index, orient,
+                                 pin_rotate=pin_rotate,
+                                 shared_pos=shared_pos,
+                                 hybrid_board=hybrid_board)
         if mpd_plane != our_plane:
             mismatches_mpd += 1
             if verbose and mismatches_mpd <= 5:
@@ -105,11 +91,14 @@ def check_apv(plane_type, plane_index, orient, pin_rotate=0, shared_pos=-1,
 
     # also check vs PRadAnalyzer (SRS = no hybrid board)
     for ch in range(APV_SIZE):
-        _, prad_plane = map_strip_pradanalyzer(ch, plane_type, plane_index, orient)
-        _, our_plane = map_strip_ours(ch, plane_index, orient,
-                                       pin_rotate=pin_rotate,
-                                       shared_pos=shared_pos,
-                                       hybrid_board=False)
+        # PRad-I flips when orient != plane_orient; PRad-II gem_map.json
+        # orient follows the MPD convention (flip when orient == 1).
+        _, prad_plane = map_strip_pradanalyzer(ch, plane_type, plane_index,
+                                               orient, plane_orient=0)
+        _, our_plane = map_strip(ch, plane_index, orient,
+                                 pin_rotate=pin_rotate,
+                                 shared_pos=shared_pos,
+                                 hybrid_board=False)
         if prad_plane != our_plane:
             mismatches_prad += 1
 
@@ -124,25 +113,10 @@ def main():
                         help="GEM map JSON path (default: auto-search).")
     args = parser.parse_args()
 
-    gem_map_path = args.gem_map
-    if not gem_map_path:
-        env_db = os.environ.get("PRAD2_DATABASE_DIR")
-        here = os.path.dirname(os.path.abspath(__file__))
-        candidates = []
-        if env_db:
-            candidates.append(os.path.join(env_db, "gem_map.json"))
-        candidates.append(os.path.join(here, "..", "database", "gem_map.json"))
-        candidates += ["database/gem_map.json",
-                       "../database/gem_map.json",
-                       "../../database/gem_map.json",
-                       "gem_map.json"]
-        for candidate in candidates:
-            if os.path.exists(candidate):
-                gem_map_path = candidate
-                break
-        else:
-            print("Error: cannot find gem_map.json (pass -G <path>)")
-            sys.exit(1)
+    gem_map_path = args.gem_map or find_database_file("gem_map.json")
+    if gem_map_path is None:
+        print("Error: cannot find gem_map.json (pass -G <path>)")
+        sys.exit(1)
 
     with open(gem_map_path, encoding="utf-8") as f:
         raw = json.load(f)
@@ -153,7 +127,6 @@ def main():
     print(f"Comparing against mpd_gem_view_ssp (hybrid board) and PRadAnalyzer (SRS)")
     print()
 
-    # ---- check all APVs from config ----
     total_mpd_fail = 0
     total_prad_fail = 0
 
@@ -194,7 +167,6 @@ def main():
         total_mpd_fail += mpd_fail
         total_prad_fail += prad_fail
 
-    # ---- summary ----
     print()
     print("=" * 72)
     print(f"vs mpd_gem_view_ssp (MPD, hybrid board): ", end="")
@@ -210,7 +182,6 @@ def main():
         print(f"{total_prad_fail} channel mismatches")
     print("=" * 72)
 
-    # ---- also test edge cases not in config ----
     print("\nAdditional edge case checks:")
 
     edge_cases = [
@@ -235,11 +206,9 @@ def main():
             all_edge_ok = False
 
     print()
-    if total_mpd_fail == 0 and all_edge_ok:
-        print("ALL CHECKS PASSED")
-    else:
-        print("SOME CHECKS FAILED")
-    return 0 if (total_mpd_fail == 0 and all_edge_ok) else 1
+    ok = total_mpd_fail == 0 and total_prad_fail == 0 and all_edge_ok
+    print("ALL CHECKS PASSED" if ok else "SOME CHECKS FAILED")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

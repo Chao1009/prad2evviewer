@@ -3,8 +3,8 @@
 #include "HyCalSystem.h"
 #include "EventData.h"
 #include "EventData_io.h"
-#include "ConfigSetup.h"
 #include "InstallPaths.h"
+#include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -19,40 +19,42 @@
 #include <TChain.h>
 #include <TMarker.h>
 #include <TLegend.h>
-#include <TROOT.h>
-#include <TClass.h>
 
 #include <iostream>
 #include <string>
 #include <vector>
+#include <array>
+#include <map>
+#include <utility>
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <algorithm>
-#include <thread>
 #include <mutex>
-#include <unistd.h>
-
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
 
 using namespace analysis;
-namespace fs = std::filesystem;
 
 using EventVars_Recon = prad2::ReconEventData;
 
-static std::vector<std::string> collectRootFiles(const std::string &path);
 // returns the number of events passing the sum-trigger selection
 long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events = -1,
+    std::map<int, TH1F*> &energy_hists, float Ebeam, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
 
 float resolution = 0.035; // pre-defined energy resolution
 
-float E3p5 = 3485.41f; // Energy for 3.5 GeV beam
-float E2p2 = 2239.51f; // Energy for 2.2 GeV beam
-float E0p7 = 728.9f;  // Energy for 0.7 GeV beam
+// One beam-energy data set (-a/-b/-c): its inputs, per-module energy
+// histograms and output directory.
+struct BeamSet {
+    const char *tag;    // histogram/directory suffix
+    const char *label;  // beam energy in GeV, for titles and log lines
+    float Ebeam;        // MeV
+    float min_ee_sep;   // fit the e-e peak only if it is this far (MeV) from the e-p peak
+    std::vector<std::string> inputs;
+    std::map<int, TH1F*> hists;
+    long long n_sum = 0;
+    TDirectory *dir = nullptr;
+};
+constexpr int kNBeams = 3;
 
 bool Vetoed(float cl_time, float sci_time, float sci_int){
     // Simple veto logic: if the cluster time is within a certain window of the scintillator time, and the scintillator signal is above a threshold, we consider it a vetoed event.
@@ -63,15 +65,15 @@ bool Vetoed(float cl_time, float sci_time, float sci_int){
 }
 
 int main(int argc, char *argv[]){
-    // ROOT multi-thread safety (must be called before ROOT objects are created).
-    ROOT::EnableThreadSafety();
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
-    TClass::GetClass("TH1F");
+    analysis::InitRootThreading();
+
+    std::array<BeamSet, kNBeams> beams{{
+        {"3p5", "3.5", 3485.41f, 0.f},
+        {"2p2", "2.2", 2239.51f, 0.f},
+        {"0p7", "0.7", 728.9f, 170.f},
+    }};
 
     std::string output;
-    std::vector<std::string> input_3p5, input_2p2, input_0p7;
     std::string pngDir = "module_hists";
 
     int max_events = -1;
@@ -80,9 +82,9 @@ int main(int argc, char *argv[]){
         std::vector<std::string> *cur = nullptr;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if (arg == "-a")       { cur = &input_3p5; }
-            else if (arg == "-b")  { cur = &input_2p2; }
-            else if (arg == "-c")  { cur = &input_0p7; }
+            if (arg == "-a")       { cur = &beams[0].inputs; }
+            else if (arg == "-b")  { cur = &beams[1].inputs; }
+            else if (arg == "-c")  { cur = &beams[2].inputs; }
             else if (arg == "-g")  { cur = nullptr; use_GEM = true; }
             else if (arg == "-o")  { cur = nullptr; if (++i < argc) output = argv[i]; }
             else if (arg == "-n")  { cur = nullptr; if (++i < argc) max_events = std::atoi(argv[i]); }
@@ -92,46 +94,32 @@ int main(int argc, char *argv[]){
     }
     
 
-    // --- database path ---
-    std::string dbDir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string dbDir = prad2::database_dir();
 
-    // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
     PhysicsTools physics(hycal);
 
     // Energy histogram for each crystal
-    std::map<int, TH1F*> energy_hists_3p5;
-    std::map<int, TH1F*> energy_hists_2p2;
-    std::map<int, TH1F*> energy_hists_0p7;
     for (int i = 0; i < hycal.module_count(); ++i) {
         const auto &m = hycal.module(i);
         if (!m.is_pwo4()) continue;
         std::string hname = "h_energy_" + m.name;
         std::string htitle = "Energy " + m.name + ";E (MeV);Counts";
-        energy_hists_3p5[m.id] = new TH1F((hname + "_3p5").c_str(), (htitle + " (3.5)").c_str(), 400, 0, 4000);
-        energy_hists_2p2[m.id] = new TH1F((hname + "_2p2").c_str(), (htitle + " (2.2)").c_str(), 400, 0, 4000);
-        energy_hists_0p7[m.id] = new TH1F((hname + "_0p7").c_str(), (htitle + " (0.7)").c_str(), 400, 0, 4000);
-        energy_hists_3p5[m.id]->SetDirectory(nullptr);
-        energy_hists_2p2[m.id]->SetDirectory(nullptr);
-        energy_hists_0p7[m.id]->SetDirectory(nullptr);
+        for (auto &beam : beams) {
+            TH1F *h = new TH1F((hname + "_" + beam.tag).c_str(),
+                               (htitle + " (" + beam.label + ")").c_str(), 400, 0, 4000);
+            h->SetDirectory(nullptr);
+            beam.hists[m.id] = h;
+        }
     }
 
-    long long n_sum_3p5 = 0;
-    long long n_sum_2p2 = 0;
-    long long n_sum_0p7 = 0;
     std::mutex io_mtx;
 
-    auto run_energy = [&](const std::string &label,
-                          const std::vector<std::string> &inputs,
-                          std::map<int, TH1F*> &energy_hists,
-                          float Ebeam,
-                          long long &n_sum) {
+    auto run_energy = [&](BeamSet &beam) {
+        const std::string label = std::string(beam.label) + " GeV";
         TChain chain("recon");
-        for (const auto &f : inputs) {
+        for (const auto &f : beam.inputs) {
             chain.Add(f.c_str());
             std::lock_guard<std::mutex> lk(io_mtx);
             std::cerr << "[" << label << "] Added file: " << f << "\n";
@@ -139,42 +127,29 @@ int main(int argc, char *argv[]){
 
         EventVars_Recon ev;
         prad2::SetReconReadBranches(&chain, ev);
-        PhysicsTools local_physics(hycal);
 
         {
             std::lock_guard<std::mutex> lk(io_mtx);
             std::cerr << "[" << label << "] Processing "
                       << chain.GetEntries() << " event(s)\n";
         }
-        n_sum = process_event(use_GEM, &chain, ev, hycal, energy_hists, local_physics,
-                              Ebeam, max_events, label, &io_mtx);
+        beam.n_sum = process_event(use_GEM, &chain, ev, hycal, beam.hists,
+                                   beam.Ebeam, max_events, label, &io_mtx);
         {
             std::lock_guard<std::mutex> lk(io_mtx);
-            std::cerr << "[" << label << "] Selected " << n_sum
+            std::cerr << "[" << label << "] Selected " << beam.n_sum
                       << " sum-trigger event(s)\n";
         }
     };
-
-    std::vector<std::thread> threads;
-    threads.reserve(3);
-    threads.emplace_back([&]() {
-        run_energy("3.5 GeV", input_3p5, energy_hists_3p5, E3p5, n_sum_3p5);
-    });
-    threads.emplace_back([&]() {
-        run_energy("2.2 GeV", input_2p2, energy_hists_2p2, E2p2, n_sum_2p2);
-    });
-    threads.emplace_back([&]() {
-        run_energy("0.7 GeV", input_0p7, energy_hists_0p7, E0p7, n_sum_0p7);
-    });
-    for (auto &t : threads) t.join();
+    ParallelFor(beams.size(), kNBeams, [&](size_t b, int) { run_energy(beams[b]); });
 
     // a file with no sum-trigger events would silently produce an all-default
     // calibration (every module skipped); refuse to write output in that case
-    if (n_sum_3p5 <= 0 || n_sum_2p2 <= 0 || n_sum_0p7 <= 0) {
-        std::cerr << "No sum-trigger events selected (3.5 GeV: " << n_sum_3p5
-                  << ", 2.2 GeV: " << n_sum_2p2
-                  << ", 0.7 GeV: " << n_sum_0p7
-                  << "); check trigger_bits in the inputs. Aborting before writing calibration.\n";
+    if (std::any_of(beams.begin(), beams.end(), [](const BeamSet &b) { return b.n_sum <= 0; })) {
+        std::cerr << "No sum-trigger events selected (";
+        for (int b = 0; b < kNBeams; ++b)
+            std::cerr << (b ? ", " : "") << beams[b].label << " GeV: " << beams[b].n_sum;
+        std::cerr << "); check trigger_bits in the inputs. Aborting before writing calibration.\n";
         return 1;
     }
 
@@ -188,40 +163,15 @@ int main(int argc, char *argv[]){
     // calculate non-linearity module by module and save to output file
     gSystem->mkdir(pngDir.c_str(), true);
     TFile outFile(output.empty() ? "nonlinearity_results.root" : output.c_str(), "RECREATE");
-    TDirectory *dir_3p5 = outFile.mkdir("energy_3p5GeV");
-    TDirectory *dir_2p2 = outFile.mkdir("energy_2p2GeV");
-    TDirectory *dir_0p7 = outFile.mkdir("energy_0p7GeV");
+    for (auto &beam : beams) beam.dir = outFile.mkdir(Form("energy_%sGeV", beam.tag));
     TDirectory *dir_lin = outFile.mkdir("linearity");
     for (int i = 0; i < hycal.module_count(); i++) {
         const auto &mod = hycal.module(i);
         int mod_id = mod.id;
-        if (!mod.is_pwo4()) continue; // only look at PbWO4 crystals
-
-        auto it_3p5 = energy_hists_3p5.find(mod_id);
-        if (it_3p5 == energy_hists_3p5.end() || !it_3p5->second) continue;
-        auto hist_3p5 = it_3p5->second;
-        auto it_2p2 = energy_hists_2p2.find(mod_id);
-        if (it_2p2 == energy_hists_2p2.end() || !it_2p2->second) continue;
-        auto hist_2p2 = it_2p2->second;
-        auto it_0p7 = energy_hists_0p7.find(mod_id);
-        if (it_0p7 == energy_hists_0p7.end() || !it_0p7->second) continue;
-        auto hist_0p7 = it_0p7->second;
+        if (!mod.is_pwo4()) continue;
 
         float x = mod.x, y = mod.y, z = 6275.f;
         float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
-        float e_p_exp_3p5 = physics.ExpectedEnergy(theta, E3p5, "ep");
-        float e_e_exp_3p5 = physics.ExpectedEnergy(theta, E3p5, "ee");
-        float e_p_exp_2p2 = physics.ExpectedEnergy(theta, E2p2, "ep");
-        float e_e_exp_2p2 = physics.ExpectedEnergy(theta, E2p2, "ee");
-        float e_p_exp_0p7 = physics.ExpectedEnergy(theta, E0p7, "ep");
-        float e_e_exp_0p7 = physics.ExpectedEnergy(theta, E0p7, "ee");
-
-        float sigma_ep_3p5 = resolution * e_p_exp_3p5 / sqrt(e_p_exp_3p5/1000.f);
-        float sigma_ee_3p5 = resolution * e_e_exp_3p5 / sqrt(e_e_exp_3p5/1000.f);
-        float sigma_ep_2p2 = resolution * e_p_exp_2p2 / sqrt(e_p_exp_2p2/1000.f);
-        float sigma_ee_2p2 = resolution * e_e_exp_2p2 / sqrt(e_e_exp_2p2/1000.f);
-        float sigma_ep_0p7 = resolution * e_p_exp_0p7 / sqrt(e_p_exp_0p7/1000.f);
-        float sigma_ee_0p7 = resolution * e_e_exp_0p7 / sqrt(e_e_exp_0p7/1000.f);
 
         int _fit_uid = mod_id * 10;
 
@@ -238,7 +188,7 @@ int main(int argc, char *argv[]){
             wl->SetLineColor(6); wl->SetLineStyle(7); wl->SetLineWidth(2); wl->Draw();
             TLine *wr = new TLine(Eexp + 6.*sigma, ypad_min, Eexp + 6.*sigma, ypad);
             wr->SetLineColor(6); wr->SetLineStyle(7); wr->SetLineWidth(2); wr->Draw();
-            // Step 2: weighted mean within search window
+            // weighted mean within search window
             double wsum = 0., wpos = 0.;
             for (int ib = b0; ib <= b1; ++ib) {
                 double c = h->GetBinContent(ib);
@@ -246,7 +196,7 @@ int main(int argc, char *argv[]){
             }
             if (wsum <= 0.) return 0.f;
             double mean = wpos / wsum;
-            // Step 3: first Gaussian fit within [mean ± 2σ]
+            // first Gaussian fit within [mean ± 2σ]
             auto estimateSig = [](double E) -> double {
                 return (E > 0.) ? E * 0.035 / std::sqrt(E / 1000.) : 1.;
             };
@@ -257,7 +207,7 @@ int main(int argc, char *argv[]){
                 h->Fit(&g1, "RQ0");
                 mean = g1.GetParameter(1);
             }
-            // Step 4: final Gaussian fit within [mean ± 1σ]
+            // final Gaussian fit within [mean ± 1σ]
             sig = estimateSig(mean);
             TF1 *g = new TF1(Form("_gfit_%d", _fit_uid), "gaus", mean - sig, mean + sig);
             g->SetParameters(h->GetMaximum(), mean, sig);
@@ -271,122 +221,72 @@ int main(int argc, char *argv[]){
             return static_cast<float>(mean);
         };
 
-        // --- Draw all beam-energy histograms on a three-pad canvas, save PNG ---
+        // --- one pad per beam energy (3.5, 2.2, 0.7 GeV from top), save PNG ---
         TCanvas *ch = new TCanvas(Form("ch_mod_W%d", mod_id-1000),
             Form("Module W%d Histograms", mod_id-1000), 800, 1200);
-        ch->Divide(1, 3, 0, 0);
+        ch->Divide(1, kNBeams, 0, 0);
 
-        // --- top pad: 3.5 GeV ---
-        ch->cd(1);
-        gPad->SetBottomMargin(0.005);
-        gPad->SetTopMargin(0.10);
-        gPad->SetLeftMargin(0.12);
-        hist_3p5->GetXaxis()->SetLabelSize(0);
-        hist_3p5->GetXaxis()->SetTitleSize(0);
-        hist_3p5->SetTitle(Form("Module W%d;  ;Counts", mod_id-1000));
-        hist_3p5->SetLineColor(kBlack);
-        hist_3p5->SetLineWidth(2);
-        hist_3p5->SetStats(0);
-        hist_3p5->Draw("HIST");
-        float peak_ep_3p5 = fitPeakAndDraw(hist_3p5, e_p_exp_3p5, sigma_ep_3p5, kRed);
-        float peak_ee_3p5 = fitPeakAndDraw(hist_3p5, e_e_exp_3p5, sigma_ee_3p5, kBlue);
-        {
+        float exp_ep[kNBeams], exp_ee[kNBeams], peak_ep[kNBeams] = {}, peak_ee[kNBeams] = {};
+        for (int b = 0; b < kNBeams; ++b) {
+            const BeamSet &beam = beams[b];
+            const bool top = (b == 0), bottom = (b == kNBeams - 1);
+            TH1F *h = beam.hists.at(mod_id);
+            exp_ep[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ep");
+            exp_ee[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ee");
+            float sigma_ep = resolution * exp_ep[b] / sqrt(exp_ep[b]/1000.f);
+            float sigma_ee = resolution * exp_ee[b] / sqrt(exp_ee[b]/1000.f);
+
+            ch->cd(b + 1);
+            gPad->SetTopMargin(top ? 0.10 : 0.005);
+            gPad->SetBottomMargin(bottom ? 0.14 : 0.005);
+            gPad->SetLeftMargin(0.12);
+            if (!bottom) {
+                h->GetXaxis()->SetLabelSize(0);
+                h->GetXaxis()->SetTitleSize(0);
+            }
+            h->SetTitle(top ? Form("Module W%d;  ;Counts", mod_id-1000)
+                            : bottom ? ";Energy (MeV);Counts" : ";  ;Counts");
+            h->SetLineColor(kBlack);
+            h->SetLineWidth(2);
+            h->SetStats(0);
+            h->Draw("HIST");
+            peak_ep[b] = fitPeakAndDraw(h, exp_ep[b], sigma_ep, kRed);
+            if (std::abs(exp_ep[b] - exp_ee[b]) > beam.min_ee_sep)
+                peak_ee[b] = fitPeakAndDraw(h, exp_ee[b], sigma_ee, kBlue);
+
             TLatex lat;
             lat.SetNDC(); lat.SetTextSize(0.050);
             lat.SetTextColor(kRed);
             lat.DrawLatex(0.50, 0.86, Form("e-p: exp=%.0f  meas=%s",
-                (double)e_p_exp_3p5, peak_ep_3p5 > 0.f ? Form("%.0f MeV", (double)peak_ep_3p5) : "N/A"));
+                (double)exp_ep[b], peak_ep[b] > 0.f ? Form("%.0f MeV", (double)peak_ep[b]) : "N/A"));
             lat.SetTextColor(kBlue);
             lat.DrawLatex(0.50, 0.78, Form("e-e: exp=%.0f  meas=%s",
-                (double)e_e_exp_3p5, peak_ee_3p5 > 0.f ? Form("%.0f MeV", (double)peak_ee_3p5) : "N/A"));
+                (double)exp_ee[b], peak_ee[b] > 0.f ? Form("%.0f MeV", (double)peak_ee[b]) : "N/A"));
             lat.SetTextColor(kBlack);
-            lat.DrawLatex(0.15, 0.86, "E_{beam} = 3.5 GeV");
-        }
-
-        // --- middle pad: 2.2 GeV ---
-        ch->cd(2);
-        gPad->SetBottomMargin(0.005);
-        gPad->SetTopMargin(0.005);
-        gPad->SetLeftMargin(0.12);
-        hist_2p2->GetXaxis()->SetLabelSize(0);
-        hist_2p2->GetXaxis()->SetTitleSize(0);
-        hist_2p2->SetTitle(";  ;Counts");
-        hist_2p2->SetLineColor(kBlack);
-        hist_2p2->SetLineWidth(2);
-        hist_2p2->SetStats(0);
-        hist_2p2->Draw("HIST");
-        float peak_ep_2p2 = fitPeakAndDraw(hist_2p2, e_p_exp_2p2, sigma_ep_2p2, kRed);
-        float peak_ee_2p2 = fitPeakAndDraw(hist_2p2, e_e_exp_2p2, sigma_ee_2p2, kBlue);
-        {
-            TLatex lat;
-            lat.SetNDC(); lat.SetTextSize(0.050);
-            lat.SetTextColor(kRed);
-            lat.DrawLatex(0.50, 0.86, Form("e-p: exp=%.0f  meas=%s",
-                (double)e_p_exp_2p2, peak_ep_2p2 > 0.f ? Form("%.0f MeV", (double)peak_ep_2p2) : "N/A"));
-            lat.SetTextColor(kBlue);
-            lat.DrawLatex(0.50, 0.78, Form("e-e: exp=%.0f  meas=%s",
-                (double)e_e_exp_2p2, peak_ee_2p2 > 0.f ? Form("%.0f MeV", (double)peak_ee_2p2) : "N/A"));
-            lat.SetTextColor(kBlack);
-            lat.DrawLatex(0.15, 0.86, "E_{beam} = 2.2 GeV");
-        }
-
-        // --- bottom pad: 0.7 GeV ---
-        ch->cd(3);
-        gPad->SetTopMargin(0.005);
-        gPad->SetBottomMargin(0.14);
-        gPad->SetLeftMargin(0.12);
-        hist_0p7->SetTitle(";Energy (MeV);Counts");
-        hist_0p7->SetLineColor(kBlack);
-        hist_0p7->SetLineWidth(2);
-        hist_0p7->SetStats(0);
-        hist_0p7->Draw("HIST");
-        float peak_ep_0p7 = 0.f, peak_ee_0p7 = 0.f;
-        peak_ep_0p7 = fitPeakAndDraw(hist_0p7, e_p_exp_0p7, sigma_ep_0p7, kRed);
-        if (std::abs(e_p_exp_0p7 - e_e_exp_0p7) > 170.f) {
-            peak_ee_0p7 = fitPeakAndDraw(hist_0p7, e_e_exp_0p7, sigma_ee_0p7, kBlue);
-        }
-        {
-            TLatex lat;
-            lat.SetNDC(); lat.SetTextSize(0.050);
-            lat.SetTextColor(kRed);
-            lat.DrawLatex(0.50, 0.86, Form("e-p: exp=%.0f  meas=%s",
-                (double)e_p_exp_0p7, peak_ep_0p7 > 0.f ? Form("%.0f MeV", (double)peak_ep_0p7) : "N/A"));
-            lat.SetTextColor(kBlue);
-            lat.DrawLatex(0.50, 0.78, Form("e-e: exp=%.0f  meas=%s",
-                (double)e_e_exp_0p7, peak_ee_0p7 > 0.f ? Form("%.0f MeV", (double)peak_ee_0p7) : "N/A"));
-            lat.SetTextColor(kBlack);
-            lat.DrawLatex(0.15, 0.86, "E_{beam} = 0.7 GeV");
+            lat.DrawLatex(0.15, 0.86, Form("E_{beam} = %s GeV", beam.label));
         }
 
         ch->SaveAs(Form("%s/mod_W%d.png", pngDir.c_str(), mod_id-1000));
         delete ch;
 
         // if the anchor point (3.5 GeV e-p) has no clean peak, skip this module
-        if (peak_ep_3p5 == 0.f) continue;
+        if (peak_ep[0] == 0.f) continue;
+        const float E_base = exp_ep[0];
 
-        h_energy_peak_3p5->Fill(peak_ep_3p5);
+        h_energy_peak_3p5->Fill(peak_ep[0]);
 
-        // make a canvas, E_rec/E_exp vs E_rec; only add points with valid peaks
+        // (E_exp, E_rec) of every valid peak, the anchor first
+        std::vector<std::pair<double, float>> points;
+        for (int b = 0; b < kNBeams; ++b) {
+            if (peak_ep[b] != 0.f) points.emplace_back(exp_ep[b], peak_ep[b]);
+            if (peak_ee[b] != 0.f) points.emplace_back(exp_ee[b], peak_ee[b]);
+        }
+
+        // make a canvas, E_rec/E_exp vs E_rec
         TCanvas *c = new TCanvas(Form("c_mod_W%d", mod_id-1000), Form("Module W%d Non-linearity", mod_id-1000), 1400, 800);
         c->SetGrid();
         TGraph *g = new TGraph();
-        int np = 0;
-        auto addPoint = [&](double Eexp, float peak) {
-            if (peak != 0.f) g->SetPoint(np++, peak, peak / Eexp);
-        };
-        float scale = e_p_exp_3p5 / peak_ep_3p5;
-        //peak_ep_3p5 *= scale;
-        //peak_ee_3p5 *= scale;
-        //peak_ep_2p2 *= scale;
-        //peak_ee_2p2 *= scale;
-        //peak_ep_0p7 *= scale;
-        //peak_ee_0p7 *= scale;
-        addPoint(e_p_exp_3p5, peak_ep_3p5);
-        addPoint(e_e_exp_3p5, peak_ee_3p5);
-        addPoint(e_p_exp_2p2, peak_ep_2p2);
-        addPoint(e_e_exp_2p2, peak_ee_2p2);
-        addPoint(e_p_exp_0p7, peak_ep_0p7);
-        addPoint(e_e_exp_0p7, peak_ee_0p7);
+        for (const auto &[Eexp, peak] : points) g->SetPoint(g->GetN(), peak, peak / Eexp);
         g->SetMarkerStyle(20);
         g->SetMarkerSize(1.5);
         g->SetTitle(Form("Module W%d Non-linearity;E_{rec} (MeV);E_{rec}/E_{exp}", mod_id-1000));
@@ -408,7 +308,7 @@ int main(int argc, char *argv[]){
             [](double *x, double *p){ return 1.0 + p[0] * (x[0] - p[1])/1000.0; },
             xmin, xmax, 2);
         fitLine->SetParameter(0, 0.01);
-        fitLine->FixParameter(1, e_p_exp_3p5);
+        fitLine->FixParameter(1, E_base);
         fitLine->SetLineColor(kBlue);
         fitLine->SetLineWidth(2);
         g->Fit(fitLine, "RQ0");
@@ -428,7 +328,7 @@ int main(int argc, char *argv[]){
             xmin, xmax, 3);
         fitLine2->SetParameter(0, nl);
         fitLine2->SetParameter(1, 0.0);
-        fitLine2->FixParameter(2, e_p_exp_3p5);
+        fitLine2->FixParameter(2, E_base);
         fitLine2->SetLineColor(kMagenta+1);
         fitLine2->SetLineWidth(2);
         fitLine2->SetLineStyle(7);
@@ -451,7 +351,7 @@ int main(int argc, char *argv[]){
         tex->SetTextColor(kMagenta+1);
         tex->DrawLatex(0.15, 0.78, "2nd: + nl_{2} #times ((E_{rec}-E_{base})/1000)^{2}");
         tex->DrawLatex(0.15, 0.73, Form("nl_{1} = %.4f #pm %.4f, nl_{2} = %.4f #pm %.4f", nl2_1, nl2_1_err, nl2_2, nl2_2_err));
-        tex->DrawLatex(0.15, 0.68, Form("#chi^{2}/ndf = %.2f/%d,  E_{base} = %.1f MeV", chi2_2, ndf_2, (double)e_p_exp_3p5));
+        tex->DrawLatex(0.15, 0.68, Form("#chi^{2}/ndf = %.2f/%d,  E_{base} = %.1f MeV", chi2_2, ndf_2, (double)E_base));
         tex->SetTextColor(kBlack);
 
         // corrected points using 1st order: E_corr = E_rec / (1 + nl*(E_rec-E_base)/1000)
@@ -459,21 +359,10 @@ int main(int argc, char *argv[]){
         gCorr->SetMarkerStyle(24);
         gCorr->SetMarkerSize(1.0);
         gCorr->SetMarkerColor(kGreen+2);
-        {
-            int nc = 0;
-            auto addCorrPoint = [&](double Eexp, float peak) {
-                if (peak != 0.f) {
-                    double denom = 1.0 + nl * (peak - e_p_exp_3p5)/1000.0;
-                    double E_corr = (denom != 0.) ? peak / denom : peak;
-                    gCorr->SetPoint(nc++, E_corr, E_corr / Eexp);
-                }
-            };
-            addCorrPoint(e_p_exp_3p5, peak_ep_3p5);
-            addCorrPoint(e_e_exp_3p5, peak_ee_3p5);
-            addCorrPoint(e_p_exp_2p2, peak_ep_2p2);
-            addCorrPoint(e_e_exp_2p2, peak_ee_2p2);
-            addCorrPoint(e_p_exp_0p7, peak_ep_0p7);
-            addCorrPoint(e_e_exp_0p7, peak_ee_0p7);
+        for (const auto &[Eexp, peak] : points) {
+            double denom = 1.0 + nl * (peak - E_base)/1000.0;
+            double E_corr = (denom != 0.) ? peak / denom : peak;
+            gCorr->SetPoint(gCorr->GetN(), E_corr, E_corr / Eexp);
         }
         gCorr->Draw("P same");
 
@@ -482,26 +371,14 @@ int main(int argc, char *argv[]){
         gCorr2->SetMarkerStyle(25);
         gCorr2->SetMarkerSize(1.0);
         gCorr2->SetMarkerColor(kOrange+2);
-        {
-            int nc = 0;
-            auto addCorrPoint2 = [&](double Eexp, float peak) {
-                if (peak != 0.f) {
-                    double t = (peak - e_p_exp_3p5) / 1000.0;
-                    double denom = 1.0 + nl2_1 * t + nl2_2 * t * t;
-                    double E_corr = (denom != 0.) ? peak / denom : peak;
-                    gCorr2->SetPoint(nc++, E_corr, E_corr / Eexp);
-                }
-            };
-            addCorrPoint2(e_p_exp_3p5, peak_ep_3p5);
-            addCorrPoint2(e_e_exp_3p5, peak_ee_3p5);
-            addCorrPoint2(e_p_exp_2p2, peak_ep_2p2);
-            addCorrPoint2(e_e_exp_2p2, peak_ee_2p2);
-            addCorrPoint2(e_p_exp_0p7, peak_ep_0p7);
-            addCorrPoint2(e_e_exp_0p7, peak_ee_0p7);
+        for (const auto &[Eexp, peak] : points) {
+            double t = (peak - E_base) / 1000.0;
+            double denom = 1.0 + nl2_1 * t + nl2_2 * t * t;
+            double E_corr = (denom != 0.) ? peak / denom : peak;
+            gCorr2->SetPoint(gCorr2->GetN(), E_corr, E_corr / Eexp);
         }
         gCorr2->Draw("P same");
 
-        // legend
         TLegend *leg = new TLegend(0.60, 0.12, 0.92, 0.52);
         leg->SetBorderSize(1);
         leg->SetTextSize(0.026);
@@ -527,17 +404,14 @@ int main(int argc, char *argv[]){
         delete g;
 
         // outermost ring or absorber/beam-hole region: no non-linearity correction
-        bool is_outer    = (mod.row == 1-1 || mod.row == 34-1 || mod.column == 1-1 || mod.column == 34-1);
-        bool is_absorber = (mod.row >= 16-1 && mod.row <= 19-1 && mod.column >= 16-1 && mod.column <= 19-1);
-        if (is_outer || is_absorber) nl = 0.0;
+        if (fdec::test_bit(mod.flag, fdec::kTransition) || fdec::test_bit(mod.flag, fdec::kInnerBound))
+            nl = 0.0;
         hycal.SetCalibNonLinearity(mod_id, nl);
     }
-    dir_3p5->cd();
-    for (auto &[id, h] : energy_hists_3p5) if (h) h->Write();
-    dir_2p2->cd();
-    for (auto &[id, h] : energy_hists_2p2) if (h) h->Write();
-    dir_0p7->cd();
-    for (auto &[id, h] : energy_hists_0p7) if (h) h->Write();
+    for (auto &beam : beams) {
+        beam.dir->cd();
+        for (auto &[id, h] : beam.hists) if (h) h->Write();
+    }
     outFile.cd();
     h_energy_peak_3p5->Write();
     std::cout << "Results saved to " << outFile.GetName() << "\n";
@@ -548,7 +422,7 @@ int main(int argc, char *argv[]){
 }
 
 long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, PhysicsTools &physics, float Ebeam, int max_events,
+    std::map<int, TH1F*> &energy_hists, float Ebeam, int max_events,
     const std::string &label, std::mutex *io_mtx)
 {
     auto log_msg = [&](const std::string &msg, bool flush = false) {
@@ -582,12 +456,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
             int mod_id = ev.cl_center[j];
             if (ev.cl_nblocks[j] < 4) continue;
             auto mod = hycal.module_by_id(mod_id);
-            if ( !mod || !mod->is_pwo4()) continue; // only look at PbWO4 crystals
-
-            float mod_x = (float)mod->x;
-            float mod_y = (float)mod->y;
-            float mod_size_x = (float)mod->size_x;
-            float mod_size_y = (float)mod->size_y;
+            if ( !mod || !mod->is_pwo4()) continue;
 
             float c_x, c_y, c_z;
             if(!use_GEM){
@@ -607,7 +476,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     float scale = 6275.f / c_z;
                     c_x *= scale;
                     c_y *= scale;
-                    c_z = 6275.f; // project onto the HyCal module plane
+                    c_z = 6275.f;
                 }
                 else{
                     c_x = -999.f;
@@ -617,9 +486,8 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                 
             }
 
-            // require hit to be in central 3x3 of a 5x5 grid (|xd|,|yd| < 0.3)
-            float xd = (c_x - mod_x) / mod_size_x;
-            float yd = (c_y - mod_y) / mod_size_y;
+            // require the hit near the seed module centre (|xd|,|yd| < 0.2 module sizes)
+            const auto [xd, yd] = mod->cell_offset<float>(c_x, c_y);
             if (std::abs(xd) >= 0.2f || std::abs(yd) >= 0.2f) continue;
 
             float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), 6275.f) * 180.f / M_PI;

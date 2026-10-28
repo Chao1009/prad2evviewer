@@ -12,9 +12,7 @@ if(NOT CMAKE_PROJECT_NAME)
     set(CMAKE_CXX_STANDARD_REQUIRED ON)
 endif()
 
-# ---------------------------------------------------------------------------
 # Dependencies: evio and et
-# ---------------------------------------------------------------------------
 set(EVIO_SOURCE "hallb" CACHE STRING "evio provider: hallb | fetch | system")
 set(ET_SOURCE   "hallb" CACHE STRING "et provider:   hallb | fetch | system")
 
@@ -59,7 +57,7 @@ if(EVIO_SOURCE STREQUAL "fetch")
     FetchContent_GetProperties(evio)
     if(NOT evio_POPULATED)
         FetchContent_Populate(evio)
-        # Patch out unconditional REQUIRED on Boost (only C++ lib needs it)
+        # Drop evio's unconditional REQUIRED on Boost (only its C++ lib needs Boost).
         file(READ "${evio_SOURCE_DIR}/CMakeLists.txt" _evio_cml)
         string(REPLACE "find_package(Boost REQUIRED" "find_package(Boost"
                _evio_cml "${_evio_cml}")
@@ -102,9 +100,7 @@ if(WITH_ET)
     endif()
 endif()
 
-# ---------------------------------------------------------------------------
 # Library target
-# ---------------------------------------------------------------------------
 set(PRAD2DEC_SOURCES
     src/EvChannel.cpp
     src/Fadc250Decoder.cpp
@@ -128,11 +124,8 @@ endif()
 
 add_library(prad2dec STATIC ${PRAD2DEC_SOURCES})
 
-# Required so this archive can be linked into shared objects (pybind11
-# module, ACLiC-compiled ROOT macros).  Static libs don't need PIC for
-# plain executable linking, but it's free on x86-64 and avoids a class of
-# "relocation R_X86_64_32S can not be used when making a shared object"
-# errors downstream.
+# PIC so the archive can be linked into shared objects (pybind11 module,
+# ACLiC-compiled ROOT macros), also when built standalone.
 set_target_properties(prad2dec PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 target_include_directories(prad2dec
@@ -145,9 +138,13 @@ target_link_libraries(prad2dec PUBLIC evio)
 
 # nlohmann::json — header-only, used by PulseTemplateStore.cpp to load
 # the per-channel pulse-template JSON.  load_daq_config.h also pulls it
-# in but only via downstream callers, so until now prad2dec didn't need
-# the dep itself.
+# in, but only in downstream callers.
 target_link_libraries(prad2dec PRIVATE nlohmann_json::nlohmann_json)
+
+# Build-time fallback of prad2::database_dir() (InstallPaths.cpp).
+if(DEFINED DATABASE_DIR)
+    target_compile_definitions(prad2dec PRIVATE DATABASE_DIR="${DATABASE_DIR}")
+endif()
 
 # dladdr is used by InstallPaths.cpp for runtime module-path discovery.
 # CMAKE_DL_LIBS is the portable "dl" link name — empty on Windows,
@@ -164,20 +161,14 @@ else()
     target_compile_definitions(prad2dec PUBLIC USE_ET=0)
 endif()
 
-# ---------------------------------------------------------------------------
 # Install
-# ---------------------------------------------------------------------------
 include(GNUInstallDirs)
 
 install(TARGETS prad2dec ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/prad2dec)
 
-# ---------------------------------------------------------------------------
-# Tests (opt-in)
-# ---------------------------------------------------------------------------
-# Building the firmware-emulation regression test does not pull any external
-# dep — just the prad2dec lib (which is the system under test).  Wire it
-# into CTest when the parent project enables testing.
+# Tests: the firmware-emulation regression test needs nothing beyond
+# prad2dec itself.
 option(PRAD2DEC_BUILD_TESTS "Build prad2dec unit tests" ON)
 if(PRAD2DEC_BUILD_TESTS)
     enable_testing()

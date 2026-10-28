@@ -4,10 +4,6 @@
 
 using json = nlohmann::json;
 
-//=============================================================================
-// Filters
-//=============================================================================
-
 void AppState::resolveFilterKeys()
 {
     filter_wf_keys.clear();
@@ -16,9 +12,7 @@ void AppState::resolveFilterKeys()
         if (!mod || mod->daq.crate < 0) continue;
         for (auto &[roc_tag, crate_id] : roc_to_crate) {
             if (crate_id == mod->daq.crate) {
-                filter_wf_keys.insert(std::to_string(roc_tag) + "_"
-                    + std::to_string(mod->daq.slot) + "_"
-                    + std::to_string(mod->daq.channel));
+                filter_wf_keys.insert(fdec::ChannelKey(roc_tag, mod->daq.slot, mod->daq.channel));
                 break;
             }
         }
@@ -43,7 +37,6 @@ std::string AppState::loadFilter(const json &j)
     waveform_filter = {};
     cluster_filter = {};
 
-    // trigger type filter
     if (j.contains("trigger_type")) {
         auto &tt = j["trigger_type"];
         if (tt.contains("enable")) trigger_type_filter.enable = tt["enable"];
@@ -59,12 +52,15 @@ std::string AppState::loadFilter(const json &j)
         if (w.contains("enable"))       f.enable       = w["enable"];
         if (w.contains("n_peaks_min"))  f.n_peaks_min  = w["n_peaks_min"];
         if (w.contains("n_peaks_max"))  f.n_peaks_max  = w["n_peaks_max"];
-        if (w.contains("time_min"))     f.time_min     = w["time_min"];
-        if (w.contains("time_max"))     f.time_max     = w["time_max"];
-        if (w.contains("integral_min")) f.integral_min = w["integral_min"];
-        if (w.contains("integral_max")) f.integral_max = w["integral_max"];
-        if (w.contains("height_min"))   f.height_min   = w["height_min"];
-        if (w.contains("height_max"))   f.height_max   = w["height_max"];
+        auto bound = [&](const char *key, std::optional<float> &b) {
+            if (w.contains(key)) b = w[key].get<float>();
+        };
+        bound("time_min", f.peak.time_min);
+        bound("time_max", f.peak.time_max);
+        bound("integral_min", f.peak.integral_min);
+        bound("integral_max", f.peak.integral_max);
+        bound("height_min", f.peak.height_min);
+        bound("height_max", f.peak.height_max);
         if (w.contains("modules"))
             for (auto &m : w["modules"])
                 f.modules.push_back(m.get<std::string>());
@@ -121,12 +117,15 @@ json AppState::filterToJson() const
         if (!f.modules.empty()) w["modules"] = f.modules;
         w["n_peaks_min"] = f.n_peaks_min;
         w["n_peaks_max"] = f.n_peaks_max;
-        if (f.time_min > -1e20f)     w["time_min"]     = f.time_min;
-        if (f.time_max <  1e20f)     w["time_max"]     = f.time_max;
-        if (f.integral_min > -1e20f) w["integral_min"] = f.integral_min;
-        if (f.integral_max <  1e20f) w["integral_max"] = f.integral_max;
-        if (f.height_min > -1e20f)   w["height_min"]   = f.height_min;
-        if (f.height_max <  1e20f)   w["height_max"]   = f.height_max;
+        auto bound = [&](const char *key, const std::optional<float> &b) {
+            if (b) w[key] = *b;
+        };
+        bound("time_min", f.peak.time_min);
+        bound("time_max", f.peak.time_max);
+        bound("integral_min", f.peak.integral_min);
+        bound("integral_max", f.peak.integral_max);
+        bound("height_min", f.peak.height_min);
+        bound("height_max", f.peak.height_max);
         r["waveform"] = w;
     }
     {
@@ -158,52 +157,33 @@ bool AppState::evaluateFilter(fdec::EventData &event,
     if (trigger_type_filter.enable && !trigger_type_filter(event.info.trigger_type))
         return false;
 
-    bool is_adc1881m = (daq_cfg.adc_format == "adc1881m");
-
     // --- waveform filter ---
     if (waveform_filter.enable) {
         if (filter_wf_keys.empty()) return false;  // enabled but no modules resolved
 
+        const bool is_adc1881m = (daq_cfg.adc_format == "adc1881m");
         bool any_module_pass = false;
-        fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
-        ana.SetTemplateStore(&template_store);
+        auto ana = makeAnalyzer();
         fdec::WaveResult wres;
 
         for (int r = 0; r < event.nrocs && !any_module_pass; ++r) {
             auto &roc = event.rocs[r];
             if (!roc.present) continue;
-            for (int s = 0; s < fdec::MAX_SLOTS && !any_module_pass; ++s) {
-                if (!roc.slots[s].present) continue;
-                auto &slot = roc.slots[s];
-                for (int c = 0; c < fdec::MAX_CHANNELS && !any_module_pass; ++c) {
-                    if (!(slot.channel_mask & (1ull << c))) continue;
-                    auto &cd = slot.channels[c];
-                    if (cd.nsamples <= 0) continue;
+            fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+                if (any_module_pass) return;
+                if (!filter_wf_keys.count(fdec::ChannelKey(roc.tag, s, c))) return;
 
-                    std::string key = std::to_string(roc.tag) + "_"
-                                    + std::to_string(s) + "_" + std::to_string(c);
-                    if (filter_wf_keys.find(key) == filter_wf_keys.end()) continue;
+                if (is_adc1881m) return;  // no peak analysis for ADC1881M
 
-                    if (is_adc1881m) continue;  // no peak analysis for ADC1881M
-
-                    ana.SetChannelKey(roc.tag, s, c);
-                    ana.Analyze(cd.samples, cd.nsamples, wres);
-                    int n_qual = 0;
-                    for (int p = 0; p < wres.npeaks; ++p) {
-                        auto &pk = wres.peaks[p];
-                        if (pk.height < waveform_filter.height_min ||
-                            pk.height > waveform_filter.height_max) continue;
-                        if (pk.time < waveform_filter.time_min ||
-                            pk.time > waveform_filter.time_max) continue;
-                        if (pk.integral < waveform_filter.integral_min ||
-                            pk.integral > waveform_filter.integral_max) continue;
-                        n_qual++;
-                    }
-                    if (n_qual >= waveform_filter.n_peaks_min &&
-                        n_qual <= waveform_filter.n_peaks_max)
-                        any_module_pass = true;
-                }
-            }
+                ana.SetChannelKey(roc.tag, s, c);
+                ana.Analyze(cd.samples, cd.nsamples, wres);
+                int n_qual = 0;
+                for (int p = 0; p < wres.npeaks; ++p)
+                    if (waveform_filter.peak(wres.peaks[p])) n_qual++;
+                if (n_qual >= waveform_filter.n_peaks_min &&
+                    n_qual <= waveform_filter.n_peaks_max)
+                    any_module_pass = true;
+            });
         }
         if (!any_module_pass) return false;
     }
@@ -214,66 +194,9 @@ bool AppState::evaluateFilter(fdec::EventData &event,
         fdec::HyCalCluster clusterer(hycal);
         clusterer.SetConfig(cluster_cfg);
 
-        fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
-        ana.SetTemplateStore(&template_store);
+        auto ana = makeAnalyzer();
         fdec::WaveResult wres;
-
-        for (int r = 0; r < event.nrocs; ++r) {
-            auto &roc = event.rocs[r];
-            if (!roc.present) continue;
-            auto cit = roc_to_crate.find(roc.tag);
-            if (cit == roc_to_crate.end()) continue;
-            int crate = cit->second;
-
-            for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                if (!roc.slots[s].present) continue;
-                auto &slot = roc.slots[s];
-                for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                    if (!(slot.channel_mask & (1ull << c))) continue;
-                    auto &cd = slot.channels[c];
-                    if (cd.nsamples <= 0) continue;
-
-                    const auto *mod = hycal.module_by_daq(crate, s, c);
-                    if (!mod || !mod->is_hycal()) continue;
-
-                    if (is_adc1881m) {
-                        float adc_val = (float)cd.samples[0];
-                        if (adc_val > 0) {
-                            float energy = (mod->cal_factor > 0.)
-                                ? static_cast<float>(mod->energize(adc_val))
-                                : adc_val * adc_to_mev;
-                            clusterer.AddHit(mod->index, energy, 0.f);
-                        }
-                        continue;
-                    }
-
-                    ana.SetChannelKey(roc.tag, s, c);
-                    ana.Analyze(cd.samples, cd.nsamples, wres);
-                    if (wres.npeaks <= 0) continue;
-
-                    if (cluster_cfg.seed_time_window > 0.f) {
-                        // Multi-pulse: feed every detected peak with its time
-                        // so the clusterer can apply the seed-anchored gate.
-                        for (int p = 0; p < wres.npeaks; ++p) {
-                            const auto &pk = wres.peaks[p];
-                            if (pk.integral <= 0) continue;
-                            float energy = (mod->cal_factor > 0.)
-                                ? static_cast<float>(mod->energize(pk.integral))
-                                : pk.integral * adc_to_mev;
-                            clusterer.AddHit(mod->index, energy, pk.time);
-                        }
-                    } else {
-                        float adc_val = bestPeak(wres);
-                        if (adc_val > 0) {
-                            float energy = (mod->cal_factor > 0.)
-                                ? static_cast<float>(mod->energize(adc_val))
-                                : adc_val * adc_to_mev;
-                            clusterer.AddHit(mod->index, energy, 0.f);
-                        }
-                    }
-                }
-            }
-        }
+        feedClusterEvent(event, ana, wres, clusterer);
 
         clusterer.FormClusters();
         std::vector<fdec::HyCalCluster::RecoResult> results;
@@ -284,20 +207,16 @@ bool AppState::evaluateFilter(fdec::EventData &event,
             auto &hit = rr.hit;
             auto *cl = rr.cluster;
 
-            // energy range
             if (hit.energy < cluster_filter.energy_min ||
                 hit.energy > cluster_filter.energy_max) continue;
-            // size range
             if (hit.nblocks < cluster_filter.size_min ||
                 hit.nblocks > cluster_filter.size_max) continue;
-            // includes check
             if (!filter_cl_includes.empty()) {
                 int count = 0;
                 for (auto &h : cl->hits)
                     if (filter_cl_includes.count(h.index)) count++;
                 if (count < cluster_filter.includes_min) continue;
             }
-            // center check
             if (!filter_cl_centers.empty()) {
                 if (!filter_cl_centers.count(hit.center_id)) continue;
             }

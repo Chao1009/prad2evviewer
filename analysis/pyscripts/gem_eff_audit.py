@@ -17,7 +17,8 @@ on every event so they can be compared:
                      straight track that lights up the 3 OTHER GEMs.
   * loo-target-in    Same GEM-seeded matching, but the fit additionally
                      includes (target_x, target_y, target_z) as a weighted
-                     measurement with σ = `--sigma-target` (≈ beam spot).
+                     measurement with σ = `--sigma-target-x/-y/-z`
+                     (≈ beam spot).
                      Pulls the line toward the target → kills upstream halo
                      and beam-gas tracks; the χ² gate then rejects anything
                      that doesn't actually point back to (0,0,0).
@@ -43,16 +44,19 @@ cluster — minimum to make any anchor possible.
 Usage
 -----
     python analysis/pyscripts/gem_eff_audit.py <evio_path> <out_dir> \\
-        [--match-nsigma 3.0] [--max-chi2 10.0] [--sigma-gem 0.5] \\
-        [--sigma-target 1.0] [--min-cluster-energy 500] \\
-        [--max-hits-per-det 3] [--max-events N]
+        [--match-nsigma 3.0] [--max-chi2 3.5] [--sigma-gem MM] \\
+        [--sigma-target-x MM] [--sigma-target-y MM] [--sigma-target-z MM] \\
+        [--min-cluster-energy 500] [--max-hits-per-det 50] \\
+        [--n-dets 4] [--n-event-plots 2] [--max-events N]
+        (plus the common run/database overrides, see --help)
 
 `<evio_path>` accepts a glob (quote it), directory, or single split.
-`<out_dir>` is created if missing; the script writes `anchor_chi2.png`
-(two-row anchor-quality plot — χ²/dof distribution + cumulative
-acceptance, NOT detector efficiency) and one `residuals_<variant>.png`
-per LOO mode.  Detector efficiency numbers go to stdout in the text
-summary.
+`<out_dir>` is created if missing; the script writes `efficiency.png`,
+`anchor_chi2.png` (two-row anchor-quality plot — χ²/dof distribution +
+cumulative acceptance, NOT detector efficiency) and, per LOO mode,
+`residuals_<variant>.png`, `eff_ineff_<variant>.png` and up to
+--n-event-plots eff / ineff `event_<variant>_*.png` displays.  Detector
+efficiency numbers go to stdout in the text summary.
 """
 
 from __future__ import annotations
@@ -60,91 +64,14 @@ from __future__ import annotations
 import argparse
 import math
 import sys
-import time
 from dataclasses import dataclass, field
-from itertools import combinations, product
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
+
 import _common as C
-from _common import dec, det  # noqa: F401  (det is imported for future use)
-
-
-# ---------------------------------------------------------------------------
-# Geometry-aware tracking primitives — Python port of the C++ originals
-# ---------------------------------------------------------------------------
-
-def seed_line(x1: float, y1: float, z1: float,
-              x2: float, y2: float, z2: float
-              ) -> Tuple[float, float, float, float]:
-    """Two-point line in lab frame: x(z)=ax+bx·z, y(z)=ay+by·z.
-    Caller must ensure z1 != z2."""
-    dz = z2 - z1
-    if abs(dz) < 1e-6:
-        return (x1, 0.0, y1, 0.0)
-    bx = (x2 - x1) / dz
-    ax = x1 - bx * z1
-    by = (y2 - y1) / dz
-    ay = y1 - by * z1
-    return (ax, bx, ay, by)
-
-
-def fit_weighted_line(z: Sequence[float], x: Sequence[float],
-                      y: Sequence[float],
-                      w_x: Sequence[float],
-                      w_y: Optional[Sequence[float]] = None
-                      ) -> Optional[Tuple[float, float, float, float, float]]:
-    """Independent (z,x) and (z,y) weighted LSQ — 4-parameter line.
-    `w_y` defaults to `w_x` when both axes share the same per-point σ
-    (the common case: GEM/HyCal hits, where σ_x = σ_y).  Pass distinct
-    `w_y` to handle anisotropic uncertainties (e.g. the target point in
-    `loo-target-in`, where σ_x and σ_y inherit different
-    slope×σ_target_z couplings).  Returns (ax, bx, ay, by, chi2_per_dof)
-    or None if the normal-equations determinant is degenerate.
-    dof = 2N − 4."""
-    N = len(z)
-    if N < 2:
-        return None
-    if w_y is None:
-        w_y = w_x
-    # x-fit
-    Swx = Szx = Szzx = Sx = Sxz = 0.0
-    for wi, zi, xi in zip(w_x, z, x):
-        Swx  += wi
-        Szx  += wi * zi
-        Szzx += wi * zi * zi
-        Sx   += wi * xi
-        Sxz  += wi * xi * zi
-    delta_x = Swx * Szzx - Szx * Szx
-    if abs(delta_x) < 1e-9:
-        return None
-    bx = (Swx * Sxz - Szx * Sx) / delta_x
-    ax = (Sx - bx * Szx) / Swx
-    # y-fit
-    Swy = Szy = Szzy = Sy = Syz = 0.0
-    for wi, zi, yi in zip(w_y, z, y):
-        Swy  += wi
-        Szy  += wi * zi
-        Szzy += wi * zi * zi
-        Sy   += wi * yi
-        Syz  += wi * yi * zi
-    delta_y = Swy * Szzy - Szy * Szy
-    if abs(delta_y) < 1e-9:
-        return None
-    by = (Swy * Syz - Szy * Sy) / delta_y
-    ay = (Sy - by * Szy) / Swy
-    # chi2 (both axes contribute, possibly with different weights)
-    dof = 2 * N - 4
-    if dof > 0:
-        chi2 = 0.0
-        for wxi, wyi, zi, xi, yi in zip(w_x, w_y, z, x, y):
-            dxp = (ax + bx * zi) - xi
-            dyp = (ay + by * zi) - yi
-            chi2 += wxi * dxp * dxp + wyi * dyp * dyp
-        chi2_per_dof = chi2 / dof
-    else:
-        chi2_per_dof = 0.0
-    return (ax, bx, ay, by, chi2_per_dof)
+from _common import det
 
 
 def find_closest(hits: Sequence[Tuple[float, float, float]],
@@ -166,16 +93,11 @@ def find_closest(hits: Sequence[Tuple[float, float, float]],
     return best_idx, math.sqrt(best_d2)
 
 
-# ---------------------------------------------------------------------------
-# Match definition: a track is accepted when (a) the weighted line fit's
-# χ²/dof passes the gate, AND (b) every matched detector's hit lies within
-# `match_nsigma · σ_GEM[d]` of the fit line.  The seed-line projection
-# window stays at `σ_total = sqrt(σ_HC@gem² + σ_GEM²)` because that's the
-# uncertainty before the fit refines the line.  The post-fit gate uses just
-# σ_GEM[d] because by then HyCal is already in the fit and the projection
-# at any plane is dominated by the GEM resolution.
-# ---------------------------------------------------------------------------
-
+# The seed-line projection window is `σ_total = sqrt(σ_HC@gem² + σ_GEM²)`
+# because that's the uncertainty before the fit refines the line.  The
+# post-fit gate below uses just σ_GEM[d] because by then HyCal is already
+# in the fit and the projection at any plane is dominated by the GEM
+# resolution.
 def fit_residuals_within_window(
         fit_params: Tuple[float, float, float, float],
         matched: Sequence[bool],
@@ -189,9 +111,7 @@ def fit_residuals_within_window(
         h = cand[d]
         pred_x = ax + bx * h[2]
         pred_y = ay + by * h[2]
-        s_gem = (params.gem_pos_res[d]
-                 if d < len(params.gem_pos_res) else 0.1)
-        cut = params.match_nsigma * s_gem
+        cut = params.match_nsigma * params.gem_pos_res[d]
         dx = h[0] - pred_x
         dy = h[1] - pred_y
         if dx * dx + dy * dy > cut * cut:
@@ -199,9 +119,7 @@ def fit_residuals_within_window(
     return True
 
 
-# ---------------------------------------------------------------------------
-# Tracking-efficiency runs
-# ---------------------------------------------------------------------------
+# ---- Tracking-efficiency runs ----
 
 @dataclass
 class TrackingParams:
@@ -226,59 +144,80 @@ def _try_seed(seed_d: int, seed_idx: int,
               candidate_dets: Sequence[int],
               params: TrackingParams,
               min_match: int,
+              target: Tuple[float, float, float] = (0.0, 0.0, 0.0),
               target_in_fit: bool = False,
-              target_x: float = 0.0, target_y: float = 0.0,
-              target_z: float = 0.0,
-              sigma_target_x: float = 1.0,
-              sigma_target_y: float = 1.0,
-              sigma_target_z: float = 20.0,
+              sigma_target: Tuple[float, float, float] = (1.0, 1.0, 20.0),
+              cap_candidates: bool = False,
+              diag: Optional[Dict[str, List[int]]] = None,
+              test_d: int = -1,
               ) -> Optional[TrackResult]:
-    """Build a track using seed_d/seed_idx.  Match candidates only on the
-    detectors listed in `candidate_dets` (always include seed_d).  Need at
-    least `min_match` matched detectors for a valid fit (counts seed).
+    """Build one track, like the C++ trySeed(S, ...).  With seed_d >= 0 the
+    seed line runs from HyCal through hit `seed_idx` of GEM `seed_d`, which
+    counts as matched (seed_d must be in `candidate_dets`).  With seed_d < 0
+    it runs from `target` to HyCal and nothing is pre-matched; such tracks
+    point back to the target, which rejects upstream halo / vacuum
+    interactions.  The other `candidate_dets` are matched within
+    match_nsigma · σ_total of the seed line; at least `min_match` matched
+    detectors are needed for a fit.
 
-    If `target_in_fit`, append (target_x, target_y, target_z) to the
-    weighted fit as a soft "track originated at target" constraint.
-    σ_target_z (the target's longitudinal extent) couples to the
-    transverse measurement at z = target_z via the track slope:
+    If `target_in_fit`, append `target` to the weighted fit as a soft
+    "track originated at target" constraint.  σ_target_z (the target's
+    longitudinal extent) couples to the transverse measurement at
+    z = target_z via the track slope:
         σ_x_eff² = σ_target_x² + (bx_est · σ_target_z)²
         σ_y_eff² = σ_target_y² + (by_est · σ_target_z)²
     where the slope estimate comes from the (target → HyCal cluster)
     line; for central tracks this leaves the σ_x,y contributions
     unchanged, while peripheral tracks (large |HyCal x,y|) get the
-    expected σ_z lever-arm widening."""
-    if seed_d not in candidate_dets:
-        return None
-    hits_s = hits_by_det[seed_d]
-    if seed_idx >= len(hits_s):
-        return None
-    g0 = hits_s[seed_idx]
+    expected σ_z lever-arm widening.
 
-    ax_s, bx_s, ay_s, by_s = seed_line(hcx, hcy, hcz, g0[0], g0[1], g0[2])
-
+    `diag` (with `test_d`) collects the per-stage counters n_3matched,
+    n_pass_chi2 and n_pass_resid."""
+    tx, ty, tz = target
     n_dets = len(hits_by_det)
     matched = [False] * n_dets
     cand: List[Optional[Tuple[float, float, float]]] = [None] * n_dets
-    matched[seed_d] = True
-    cand[seed_d] = g0
+    if seed_d < 0:
+        ax_s, bx_s, ay_s, by_s = det.seed_line(tx, ty, tz, hcx, hcy, hcz)
+    else:
+        if seed_d not in candidate_dets:
+            return None
+        hits_s = hits_by_det[seed_d]
+        if seed_idx >= len(hits_s):
+            return None
+        g0 = hits_s[seed_idx]
+        ax_s, bx_s, ay_s, by_s = det.seed_line(hcx, hcy, hcz,
+                                               g0[0], g0[1], g0[2])
+        matched[seed_d] = True
+        cand[seed_d] = g0
 
+    # σ_HC is 0 at the target and sigma_hc at HyCal; at z_gem the projected
+    # positional uncertainty scales with the lever arm from the target.
+    lever_hc = (hcz - tz) if hcz != tz else 1.0
+    cap = params.max_hits_per_det if cap_candidates else 0
     for d in candidate_dets:
-        if d == seed_d:
+        if matched[d]:
             continue
         zd = gem_z[d]
         pred_x = ax_s + bx_s * zd
         pred_y = ay_s + by_s * zd
-        s_hc_at_gem = sigma_hc * abs(zd / hcz) if hcz != 0 else sigma_hc
-        s_gem = params.gem_pos_res[d] if d < len(params.gem_pos_res) else 0.1
+        s_hc_at_gem = sigma_hc * abs((zd - tz) / lever_hc)
+        s_gem = params.gem_pos_res[d]
         s_total = math.sqrt(s_hc_at_gem * s_hc_at_gem + s_gem * s_gem)
         cut = params.match_nsigma * s_total
-        idx, _ = find_closest(hits_by_det[d], pred_x, pred_y, cut)
+        # The C++ findClosest caps candidates at gem_eff_max_hits_per_det in
+        # every mode (also the test-detector probe in _record_loo); here
+        # only the target-seeded mode does.
+        cand_hits = hits_by_det[d][:cap] if cap > 0 else hits_by_det[d]
+        idx, _ = find_closest(cand_hits, pred_x, pred_y, cut)
         if idx >= 0:
             matched[d] = True
-            cand[d] = hits_by_det[d][idx]
+            cand[d] = cand_hits[idx]
 
     if sum(matched) < min_match:
         return None
+    if diag is not None:
+        diag["n_3matched"][test_d] += 1
 
     # Weighted fit of HyCal + every matched GEM (+ target if requested).
     # x and y use the same per-point σ except at the target: σ_target_z
@@ -292,18 +231,17 @@ def _try_seed(seed_d: int, seed_idx: int,
         # Slope estimate from (target → HyCal cluster) — used to widen the
         # target's transverse σ by the σ_z lever arm.  Falls back to zero
         # slope when HyCal sits on the target plane.
-        if hcz != target_z:
-            bx_est = (hcx - target_x) / (hcz - target_z)
-            by_est = (hcy - target_y) / (hcz - target_z)
+        if hcz != tz:
+            bx_est = (hcx - tx) / (hcz - tz)
+            by_est = (hcy - ty) / (hcz - tz)
         else:
             bx_est = by_est = 0.0
-        sx_eff_sq = (sigma_target_x * sigma_target_x
-                     + (bx_est * sigma_target_z) ** 2)
-        sy_eff_sq = (sigma_target_y * sigma_target_y
-                     + (by_est * sigma_target_z) ** 2)
-        z_arr.append(target_z)
-        x_arr.append(target_x)
-        y_arr.append(target_y)
+        stx, sty, stz = sigma_target
+        sx_eff_sq = stx * stx + (bx_est * stz) ** 2
+        sy_eff_sq = sty * sty + (by_est * stz) ** 2
+        z_arr.append(tz)
+        x_arr.append(tx)
+        y_arr.append(ty)
         w_x_arr.append(1.0 / sx_eff_sq)
         w_y_arr.append(1.0 / sy_eff_sq)
     for d in range(n_dets):
@@ -313,18 +251,22 @@ def _try_seed(seed_d: int, seed_idx: int,
         z_arr.append(h[2])
         x_arr.append(h[0])
         y_arr.append(h[1])
-        s_gem = params.gem_pos_res[d] if d < len(params.gem_pos_res) else 0.1
+        s_gem = params.gem_pos_res[d]
         w_x_arr.append(1.0 / (s_gem * s_gem))
         w_y_arr.append(1.0 / (s_gem * s_gem))
 
-    fit = fit_weighted_line(z_arr, x_arr, y_arr, w_x_arr, w_y_arr)
+    fit = det.fit_weighted_line(z_arr, x_arr, y_arr, w_x_arr, w_y_arr)
     if fit is None:
         return None
     ax, bx, ay, by, chi2_per_dof = fit
     if chi2_per_dof > params.max_chi2:
         return None
+    if diag is not None:
+        diag["n_pass_chi2"][test_d] += 1
     if not fit_residuals_within_window((ax, bx, ay, by), matched, cand, params):
         return None
+    if diag is not None:
+        diag["n_pass_resid"][test_d] += 1
     return TrackResult(chi2_per_dof, matched, cand, (ax, bx, ay, by))
 
 
@@ -333,16 +275,13 @@ def best_track(hcx: float, hcy: float, hcz: float, sigma_hc: float,
                gem_z: Sequence[float], seed_dets: Sequence[int],
                candidate_dets: Sequence[int], params: TrackingParams,
                min_match: int,
+               target: Tuple[float, float, float] = (0.0, 0.0, 0.0),
                target_in_fit: bool = False,
-               target_x: float = 0.0, target_y: float = 0.0,
-               target_z: float = 0.0,
-               sigma_target_x: float = 1.0,
-               sigma_target_y: float = 1.0,
-               sigma_target_z: float = 20.0,
+               sigma_target: Tuple[float, float, float] = (1.0, 1.0, 20.0),
                ) -> Optional[TrackResult]:
     """Try every (seed_d, seed_idx) pair.  Return the lowest-χ²/dof
-    TrackResult that passes the chi²_max gate, or None.  All target_*
-    args are forwarded to _try_seed unchanged."""
+    TrackResult that passes the chi²_max gate, or None.  The target args
+    are forwarded to _try_seed unchanged."""
     best: Optional[TrackResult] = None
     for seed_d in seed_dets:
         if seed_d >= len(hits_by_det):
@@ -351,13 +290,7 @@ def best_track(hcx: float, hcy: float, hcz: float, sigma_hc: float,
         for seed_idx in range(n_seeds):
             r = _try_seed(seed_d, seed_idx, hcx, hcy, hcz, sigma_hc,
                           hits_by_det, gem_z, candidate_dets, params,
-                          min_match,
-                          target_in_fit=target_in_fit,
-                          target_x=target_x, target_y=target_y,
-                          target_z=target_z,
-                          sigma_target_x=sigma_target_x,
-                          sigma_target_y=sigma_target_y,
-                          sigma_target_z=sigma_target_z)
+                          min_match, target, target_in_fit, sigma_target)
             if r is None:
                 continue
             if best is None or r.chi2_per_dof < best.chi2_per_dof:
@@ -365,167 +298,11 @@ def best_track(hcx: float, hcy: float, hcz: float, sigma_hc: float,
     return best
 
 
-def best_track_target_seed(hcx: float, hcy: float, hcz: float,
-                           target_x: float, target_y: float, target_z: float,
-                           sigma_hc: float,
-                           hits_by_det: List[List[Tuple[float, float, float]]],
-                           gem_z: Sequence[float],
-                           params: TrackingParams,
-                           min_match: int = 3,
-                           candidate_dets: Optional[Sequence[int]] = None,
-                           diag: Optional[Dict[str, List[int]]] = None,
-                           test_d: int = -1,
-                           ) -> Optional[TrackResult]:
-    """Target-seeded tracker — no GEM in the seed line.
-
-    Seed line goes from (target_x, target_y, target_z) to the HyCal
-    cluster.  Project to each candidate GEM plane, take the closest hit
-    within `match_nsigma · σ_total`, then fit HyCal + matched GEMs and
-    apply the χ²/dof gate.  Need ≥`min_match` GEMs to call it a "good
-    track".  `candidate_dets` defaults to all GEM planes; the LOO mode
-    passes the OTHER 3 detectors so the test detector is not in the fit.
-
-    Per-detector efficiency built on top of this is unbiased *and*
-    selects only target-pointing tracks — i.e., it rejects upstream
-    halo / vacuum-interaction tracks that the combinatorial unbiased
-    mode would still accept.  Comparing the two modes per detector is
-    a clean way to estimate the halo fraction."""
-    n_dets = len(hits_by_det)
-    if candidate_dets is None:
-        candidate_dets = range(n_dets)
-    if diag is not None and test_d >= 0:
-        diag["n_call"][test_d] += 1
-    ax_s, bx_s, ay_s, by_s = seed_line(target_x, target_y, target_z,
-                                       hcx, hcy, hcz)
-
-    # σ_HC at target = 0 (target is geometric origin), σ_HC at HyCal =
-    # sigma_hc.  Linear interpolation: at z_gem the projected positional
-    # uncertainty scales with the lever arm from target.
-    lever_hc = (hcz - target_z) if hcz != target_z else 1.0
-
-    matched = [False] * n_dets
-    cand: List[Optional[Tuple[float, float, float]]] = [None] * n_dets
-    for d in candidate_dets:
-        zd = gem_z[d]
-        pred_x = ax_s + bx_s * zd
-        pred_y = ay_s + by_s * zd
-        s_hc_at_gem = sigma_hc * abs((zd - target_z) / lever_hc)
-        s_gem = params.gem_pos_res[d] if d < len(params.gem_pos_res) else 0.1
-        s_total = math.sqrt(s_hc_at_gem * s_hc_at_gem + s_gem * s_gem)
-        cut = params.match_nsigma * s_total
-        # Cap candidate hits per detector to mirror the C++
-        # findClosest cap (gem_eff_max_hits_per_det).
-        cap = params.max_hits_per_det
-        cand_hits = hits_by_det[d][:cap] if cap > 0 else hits_by_det[d]
-        idx, _ = find_closest(cand_hits, pred_x, pred_y, cut)
-        if idx >= 0:
-            matched[d] = True
-            cand[d] = cand_hits[idx]
-
-    if sum(matched) < min_match:
-        return None
-    if diag is not None and test_d >= 0:
-        diag["n_3matched"][test_d] += 1
-
-    z_arr: List[float] = [hcz]
-    x_arr: List[float] = [hcx]
-    y_arr: List[float] = [hcy]
-    w_arr: List[float] = [1.0 / (sigma_hc * sigma_hc)]
-    for d in range(n_dets):
-        if not matched[d] or cand[d] is None:
-            continue
-        h = cand[d]
-        z_arr.append(h[2])
-        x_arr.append(h[0])
-        y_arr.append(h[1])
-        s_gem = params.gem_pos_res[d] if d < len(params.gem_pos_res) else 0.1
-        w_arr.append(1.0 / (s_gem * s_gem))
-
-    fit = fit_weighted_line(z_arr, x_arr, y_arr, w_arr)
-    if fit is None:
-        return None
-    ax, bx, ay, by, chi2_per_dof = fit
-    if chi2_per_dof > params.max_chi2:
-        return None
-    if diag is not None and test_d >= 0:
-        diag["n_pass_chi2"][test_d] += 1
-    if not fit_residuals_within_window((ax, bx, ay, by), matched, cand, params):
-        return None
-    if diag is not None and test_d >= 0:
-        diag["n_pass_resid"][test_d] += 1
-    return TrackResult(chi2_per_dof, matched, cand, (ax, bx, ay, by))
-
-
-def best_track_unbiased(hcx: float, hcy: float, hcz: float, sigma_hc: float,
-                        hits_by_det: List[List[Tuple[float, float, float]]],
-                        gem_z: Sequence[float], params: TrackingParams,
-                        min_gems: int = 3) -> Optional[TrackResult]:
-    """Combinatorial best-track finder — no seed, no projection-and-match.
-    For every subset of GEM detectors with size in [min_gems, n_dets],
-    enumerate one cluster from each detector in the subset (capped at
-    params.max_hits_per_det per detector), fit HyCal + that combo with
-    fitWeightedLine, and return the lowest-χ²/dof fit that passes the
-    chi²_max gate.
-
-    Per-detector efficiency built on top of this is unbiased: every
-    detector competes on equal footing for inclusion in the best track,
-    so no detector gets the "automatic match" bonus the seed has in
-    AppState::runGemEfficiency."""
-    n_dets = len(hits_by_det)
-    # Per-detector candidate lists, capped.
-    capped: List[List[Tuple[float, float, float]]] = [
-        hits_by_det[d][:params.max_hits_per_det] for d in range(n_dets)
-    ]
-    available = [d for d in range(n_dets) if capped[d]]
-    if len(available) < min_gems:
-        return None
-
-    inv_sigma2_hc = 1.0 / (sigma_hc * sigma_hc)
-    best: Optional[TrackResult] = None
-
-    # Subsets of size {min_gems, …, len(available)} drawn from `available`.
-    for k in range(min_gems, len(available) + 1):
-        for det_subset in combinations(available, k):
-            cluster_lists = [capped[d] for d in det_subset]
-            # Pre-compute weights for this subset (constant across combos).
-            w_gem = [1.0 / (params.gem_pos_res[d] *
-                            params.gem_pos_res[d])
-                     for d in det_subset]
-            for combo in product(*cluster_lists):
-                z = [hcz]
-                x = [hcx]
-                y = [hcy]
-                for h in combo:
-                    z.append(h[2]); x.append(h[0]); y.append(h[1])
-                w = [inv_sigma2_hc] + w_gem
-                fit = fit_weighted_line(z, x, y, w)
-                if fit is None:
-                    continue
-                ax, bx, ay, by, chi2 = fit
-                if chi2 > params.max_chi2:
-                    continue
-                if best is not None and chi2 >= best.chi2_per_dof:
-                    continue
-                matched = [False] * n_dets
-                cand: List[Optional[Tuple[float, float, float]]] = (
-                    [None] * n_dets)
-                for i, d in enumerate(det_subset):
-                    matched[d] = True
-                    cand[d] = combo[i]
-                if not fit_residuals_within_window(
-                        (ax, bx, ay, by), matched, cand, params):
-                    continue
-                best = TrackResult(chi2, matched, cand, (ax, bx, ay, by))
-    return best
-
-
-# ---------------------------------------------------------------------------
 # Per-event accumulator — one set per LOO variant.  Each variant runs N times
 # per HyCal cluster (one per test detector), so the denominator is per-detector
 # (the "anchor exists" counter for that detector excluded), and the numerator
 # is per-detector too.  chi2_list aggregates anchor χ²/dof across all test
 # detectors.
-# ---------------------------------------------------------------------------
 
 @dataclass
 class CapturedEvent:
@@ -603,8 +380,7 @@ def _record_loo(stats: "LooStats", test_d: int,
     zd = gem_z[test_d]
     pred_x = ax + bx * zd
     pred_y = ay + by * zd
-    s_gem = (params.gem_pos_res[test_d]
-             if test_d < len(params.gem_pos_res) else 0.1)
+    s_gem = params.gem_pos_res[test_d]
     cut = params.match_nsigma * s_gem
     idx, _ = find_closest(hits_by_det[test_d], pred_x, pred_y, cut)
     stats.n_attempted[test_d] += 1
@@ -621,7 +397,6 @@ def _record_loo(stats: "LooStats", test_d: int,
         stats.ineff_local_x[test_d].append(pred_lx)
         stats.ineff_local_y[test_d].append(pred_ly)
 
-    # Optional: snapshot first N eff and N ineff events for display plots.
     if hc_lab is not None and target_lab is not None and n_event_plots > 0:
         is_matched = (idx >= 0)
         bucket = stats.captured_eff if is_matched else stats.captured_ineff
@@ -649,9 +424,7 @@ def _record_loo(stats: "LooStats", test_d: int,
             ))
 
 
-# ---------------------------------------------------------------------------
-# Main loop
-# ---------------------------------------------------------------------------
+# ---- Main loop ----
 
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(
@@ -704,17 +477,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_dir = Path(args.out_path)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    p = C.setup_pipeline(
-        evio_path     = args.evio_path,
-        max_events    = args.max_events,
-        run_num       = args.run_num,
-        gem_ped_file  = args.gem_ped_file,
-        gem_cm_file   = args.gem_cm_file,
-        hc_calib_file = args.hc_calib_file,
-        daq_config    = args.daq_config,
-        gem_map_file  = args.gem_map_file,
-        hc_map_file   = args.hc_map_file,
-    )
+    p = C.setup_pipeline_from_args(args)
 
     (pr_A, pr_B, pr_C), gem_pos_res, target_pos_res = C.load_matching_config(p)
     if args.sigma_gem is not None:
@@ -726,6 +489,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                       if args.sigma_target_y is not None else cfg_tgt_y)
     sigma_target_z = (args.sigma_target_z
                       if args.sigma_target_z is not None else cfg_tgt_z)
+    sigma_target = (sigma_target_x, sigma_target_y, sigma_target_z)
     print(f"[setup] HC σ(E) = sqrt(({pr_A:.3f}/√E_GeV)²"
           f"+({pr_B:.3f}/E_GeV)²+{pr_C:.3f}²) mm")
     print(f"[setup] σ_GEM   = {gem_pos_res} mm"
@@ -775,151 +539,90 @@ def main(argv: Optional[List[str]] = None) -> int:
     # server's default loo_mode).  Lets us pinpoint where Python and the
     # C++ server's anchor counts diverge.
     diag_target_seed: Dict[str, List[int]] = {
-        "n_call":        [0]*4,   # times best_track_target_seed entered for test_d
+        "n_call":        [0]*4,   # target-seeded anchor attempts for test_d
         "n_3matched":    [0]*4,   # all 3 candidate dets matched in seed window
         "n_pass_chi2":   [0]*4,   # passed χ²/dof gate (after 3-match)
         "n_pass_resid":  [0]*4,   # passed per-det residual gate (= denominator)
     }
-    n_events_filter_pass = 0
+    n_events_filter_pass = n_used = 0
+    target_lab_pt = (p.geo.target_x, p.geo.target_y, p.geo.target_z)
 
-    ch = dec.EvChannel()
-    ch.set_config(p.cfg)
-
-    t0 = time.monotonic()
-    n_phys = n_used = 0
-
-    for fpath in p.evio_files:
-        if ch.open_auto(fpath) != dec.Status.success:
-            print(f"[WARN] skip (cannot open): {fpath}")
+    stats = C.LoopStats()
+    for fadc_evt, ssp_evt in C.iter_physics_events(
+            p, stats, with_ssp=True, max_events=args.max_events,
+            accept=C.passes_physics_trigger):
+        hc_raw = C.reconstruct_hycal(p, fadc_evt)
+        if not hc_raw:
             continue
-        print(f"[file] {fpath}")
-        done = False
-        while ch.read() == dec.Status.success:
-            if not ch.scan() or ch.get_event_type() != dec.EventType.Physics:
+        hc_lab = [(*C.hycal_to_lab(p, h), float(h.energy)) for h in hc_raw]
+
+        C.reconstruct_gem(p, ssp_evt)
+        hits_by_det: List[List[Tuple[float, float, float]]] = [
+            [] for _ in range(n_dets)
+        ]
+        for d in range(n_dets):
+            xform = p.gem_xforms[d]
+            for g in p.gem_sys.get_hits(d):
+                x, y, z = xform.to_lab(g.x, g.y)
+                hits_by_det[d].append((x, y, z))
+
+        # Event filter — at least 3 GEM detectors must each have
+        # ≥1 cluster: a track needs 4 points (HyCal + ≥3 GEMs) to be a
+        # non-trivial 4-parameter fit (dof = 2N − 4 ≥ 2).
+        n_dets_with_hits = sum(1 for h in hits_by_det if h)
+        if n_dets_with_hits < 3:
+            continue
+        n_events_filter_pass += 1
+
+        for hcx, hcy, hcz, energy in hc_lab:
+            if hcz <= 0:
                 continue
-            for i in range(ch.get_n_events()):
-                decoded = ch.decode_event(i, with_ssp=True)
-                if not decoded["ok"]:
-                    continue
-                n_phys += 1
-                if args.max_events and n_phys >= args.max_events:
-                    done = True
+            if energy < args.min_cluster_energy:
+                continue
+            sigma_hc = C.hycal_pos_resolution(pr_A, pr_B, pr_C, energy)
+            n_used += 1
 
-                fadc_evt = decoded["event"]
-                ssp_evt  = decoded["ssp"]
-                if not C.passes_physics_trigger(fadc_evt.info.trigger_bits):
-                    continue
+            hc_lab_pt = (hcx, hcy, hcz)
 
-                # HyCal clusters → lab.
-                hc_raw = C.reconstruct_hycal(p, fadc_evt)
-                if not hc_raw:
-                    continue
-                hc_lab: List[Tuple[float, float, float, float]] = []
-                for h in hc_raw:
-                    z_local = det.shower_depth(h.center_id, h.energy)
-                    x, y, z = p.hycal_xform.to_lab(h.x, h.y, z_local)
-                    hc_lab.append((x, y, z, float(h.energy)))
+            for test_d in range(n_dets):
+                others = [d for d in range(n_dets) if d != test_d]
+                seeds_for_loo = [d for d in others if hits_by_det[d]]
+                test_xform = p.gem_xforms[test_d]
 
-                # GEM hits → lab, per detector.
-                C.reconstruct_gem(p, ssp_evt)
-                hits_by_det: List[List[Tuple[float, float, float]]] = [
-                    [] for _ in range(n_dets)
-                ]
-                for d in range(n_dets):
-                    xform = p.gem_xforms[d]
-                    for g in p.gem_sys.get_hits(d):
-                        x, y, z = xform.to_lab(g.x, g.y)
-                        hits_by_det[d].append((x, y, z))
-
-                # Event filter — at least 3 GEM detectors must each have
-                # ≥1 cluster.  Mirrors the user's gating spec; a track
-                # needs 4 points (HyCal + ≥3 GEMs) to be a non-trivial
-                # 4-parameter fit (dof = 2N − 4 ≥ 2).
-                n_dets_with_hits = sum(1 for h in hits_by_det if h)
-                if n_dets_with_hits < 3:
-                    continue
-                n_events_filter_pass += 1
-
-                for hcx, hcy, hcz, energy in hc_lab:
-                    if hcz <= 0:
-                        continue
-                    if energy < args.min_cluster_energy:
-                        continue
-                    sigma_hc = C.hycal_pos_resolution(pr_A, pr_B, pr_C, energy)
-                    n_used += 1
-
-                    hc_lab_pt     = (hcx, hcy, hcz)
-                    target_lab_pt = (p.geo.target_x, p.geo.target_y,
-                                     p.geo.target_z)
-
-                    # Three LOO variants run per HyCal cluster, per test
-                    # detector D.  The OTHER 3 GEMs anchor the fit; D is
-                    # excluded from both the candidate matching and the fit,
-                    # so the prediction at D is genuinely unbiased.
-                    #
-                    #   loo              GEM-seeded  · fit = HyCal+3 GEMs
-                    #   loo-target-in    GEM-seeded  · fit = target+HyCal+3 GEMs
-                    #   loo-target-seed  target→HyCal seed · fit = HyCal+3 GEMs
-                    for test_d in range(n_dets):
-                        others = [d for d in range(n_dets) if d != test_d]
-                        seeds_for_loo = [d for d in others if hits_by_det[d]]
-                        test_xform = p.gem_xforms[test_d]
-
-                        # --- loo: GEM-seeded, no target ---
-                        if seeds_for_loo:
-                            track = best_track(hcx, hcy, hcz, sigma_hc,
-                                hits_by_det, gem_z,
-                                seed_dets=seeds_for_loo,
-                                candidate_dets=others,
-                                params=params, min_match=3)
-                            _record_loo(loo, test_d, track,
-                                        hits_by_det, gem_z, params, test_xform,
-                                        hc_lab=hc_lab_pt,
-                                        target_lab=target_lab_pt,
-                                        n_event_plots=args.n_event_plots)
-
-                        # --- loo-target-in: GEM-seeded, target in fit ---
-                        if seeds_for_loo:
-                            track = best_track(hcx, hcy, hcz, sigma_hc,
-                                hits_by_det, gem_z,
-                                seed_dets=seeds_for_loo,
-                                candidate_dets=others,
-                                params=params, min_match=3,
-                                target_in_fit=True,
-                                target_x=p.geo.target_x,
-                                target_y=p.geo.target_y,
-                                target_z=p.geo.target_z,
-                                sigma_target_x=sigma_target_x,
-                                sigma_target_y=sigma_target_y,
-                                sigma_target_z=sigma_target_z)
-                            _record_loo(loo_target_in, test_d, track,
-                                        hits_by_det, gem_z, params, test_xform,
-                                        hc_lab=hc_lab_pt,
-                                        target_lab=target_lab_pt,
-                                        n_event_plots=args.n_event_plots)
-
-                        # --- loo-target-seed: target→HyCal seed, no target in fit ---
-                        track = best_track_target_seed(hcx, hcy, hcz,
-                            p.geo.target_x, p.geo.target_y, p.geo.target_z,
-                            sigma_hc, hits_by_det, gem_z, params,
-                            min_match=3, candidate_dets=others,
-                            diag=diag_target_seed, test_d=test_d)
-                        _record_loo(loo_target_seed, test_d, track,
+                # --- loo / loo-target-in: GEM-seeded ---
+                if seeds_for_loo:
+                    for mode, target_in_fit in ((loo, False),
+                                                (loo_target_in, True)):
+                        track = best_track(hcx, hcy, hcz, sigma_hc,
+                            hits_by_det, gem_z,
+                            seed_dets=seeds_for_loo,
+                            candidate_dets=others,
+                            params=params, min_match=3,
+                            target=target_lab_pt,
+                            target_in_fit=target_in_fit,
+                            sigma_target=sigma_target)
+                        _record_loo(mode, test_d, track,
                                     hits_by_det, gem_z, params, test_xform,
                                     hc_lab=hc_lab_pt,
                                     target_lab=target_lab_pt,
                                     n_event_plots=args.n_event_plots)
 
-            if done:
-                break
-        ch.close()
-        if done:
-            break
+                # --- loo-target-seed: target→HyCal seed, no target in fit ---
+                diag_target_seed["n_call"][test_d] += 1
+                track = _try_seed(-1, -1, hcx, hcy, hcz, sigma_hc,
+                                  hits_by_det, gem_z, others, params,
+                                  min_match=3, target=target_lab_pt,
+                                  cap_candidates=True,
+                                  diag=diag_target_seed, test_d=test_d)
+                _record_loo(loo_target_seed, test_d, track,
+                            hits_by_det, gem_z, params, test_xform,
+                            hc_lab=hc_lab_pt,
+                            target_lab=target_lab_pt,
+                            n_event_plots=args.n_event_plots)
 
-    elapsed = time.monotonic() - t0
-    print(f"[done] {n_phys} physics events, "
+    print(f"[done] {stats.n_phys} physics events, "
           f"{n_events_filter_pass} pass filter (≥1 HyCal + ≥3 GEMs), "
-          f"{n_used} HyCal clusters used, {elapsed:.1f}s")
+          f"{n_used} HyCal clusters used, {stats.elapsed:.1f}s")
 
     print()
     print("loo-target-seed per-stage breakdown (per test_d):")
@@ -934,14 +637,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     print()
 
     write_outputs(out_dir, loo_modes, params,
-                  n_phys, n_events_filter_pass, n_used,
+                  stats.n_phys, n_events_filter_pass, n_used,
                   args.min_cluster_energy, det_half, gem_z)
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Reporting
-# ---------------------------------------------------------------------------
+# ---- Reporting ----
 
 def _eff(num: int, den: int) -> str:
     if den == 0:
@@ -997,7 +698,7 @@ def write_outputs(out_dir: Path,
         print()
 
     # ---- plots (matplotlib optional) --------------------------------------
-    plt = _import_pyplot()
+    plt = C.import_pyplot()
     if plt is None:
         print("[plot] matplotlib not available; skipping PNGs")
         return
@@ -1019,16 +720,6 @@ def write_outputs(out_dir: Path,
                 _plot_single_event(plt, ev, gem_z, slug, kind, k, out_path)
 
 
-def _import_pyplot():
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-        return plt
-    except ImportError:
-        return None
-
-
 def _plot_efficiency_bars(plt, modes: Sequence[LooStats], out: Path) -> None:
     """One panel per GEM (2x2 grid).  Each panel stacks one horizontal
     progress bar per LOO variant: full width = 100%, filled portion =
@@ -1048,16 +739,12 @@ def _plot_efficiency_bars(plt, modes: Sequence[LooStats], out: Path) -> None:
             n_att   = m.n_attempted[d]
             eff     = (100.0 * n_match / n_att) if n_att > 0 else 0.0
             y       = ys[i]
-            # background "track" (full 100%)
             ax.barh(y, 100.0, height=bar_h, color="lightgray", alpha=0.4,
                     edgecolor="gray", linewidth=0.5, zorder=1)
-            # filled portion (efficiency)
             ax.barh(y, eff, height=bar_h, color=f"C{i}", alpha=0.85,
                     zorder=2)
-            # variant label on the left
             ax.text(-2, y, m.name.split()[0], va="center", ha="right",
                     fontsize=9, color=f"C{i}", fontweight="bold")
-            # efficiency + counts on the right
             ann = (f"{eff:5.1f}%  ({n_match}/{n_att})"
                    if n_att > 0 else "no anchors")
             ax.text(102, y, ann, va="center", ha="left", fontsize=9)
@@ -1087,7 +774,6 @@ def _plot_anchor_chi2(plt, modes: Sequence[LooStats],
     text summary)."""
     if not any(m.chi2_list for m in modes):
         return
-    import numpy as np
     fig, (ax_hist, ax_acc) = plt.subplots(2, 1, figsize=(9, 8),
                                           sharex=True)
 
@@ -1149,7 +835,6 @@ def _plot_eff_ineff_local(plt, loo: LooStats,
     has_ineff = any(loo.ineff_local_x[d] for d in range(4))
     if not (has_eff or has_ineff):
         return
-    import numpy as np
     from matplotlib.colors import LogNorm
     fig, axes = plt.subplots(
         2, 4, figsize=(13, 11), sharex="col", sharey="row",
@@ -1217,6 +902,41 @@ def _plot_eff_ineff_local(plt, loo: LooStats,
     print(f"[plot] {out}")
 
 
+def _draw_event_primitives(ax, ev: "CapturedEvent", ix: int, iy: int,
+                           line_h, line_v, labels: bool) -> None:
+    """Draw one snapshot's GEM hits, anchor matches, HyCal cluster, target,
+    fit line (line_h, line_v), prediction and test hit on `ax`, using lab
+    coordinates ix / iy (0 = x, 1 = y, 2 = z) as the horizontal / vertical
+    axes.  Legend labels are attached only when `labels`."""
+    lab = (lambda s: s) if labels else (lambda s: None)
+    hc = (ev.hcx, ev.hcy, ev.hcz)
+    tg = (ev.target_x, ev.target_y, ev.target_z)
+    pr = (ev.pred_x, ev.pred_y, ev.pred_z)
+    for d, hits in enumerate(ev.all_hits):
+        for k, h in enumerate(hits):
+            ax.plot(h[ix], h[iy], 'o', color=f"C{d}", markersize=4,
+                    alpha=0.4, label=lab(f"GEM{d} hits") if k == 0 else None)
+    first_anchor = True
+    for d in range(len(ev.all_hits)):
+        m = ev.matched_hits[d]
+        if d == ev.test_d or m is None:
+            continue
+        ax.plot(m[ix], m[iy], 's', color=f"C{d}", markersize=12, mfc='none',
+                mew=2, label=lab("anchor match") if first_anchor else None)
+        first_anchor = False
+    ax.plot(hc[ix], hc[iy], '*', color='black', markersize=16,
+            label=lab('HyCal cluster'))
+    ax.plot(tg[ix], tg[iy], 'x', color='black', markersize=12, mew=2,
+            label=lab('target'))
+    ax.plot(line_h, line_v, '--', color='red', lw=1.2, alpha=0.7,
+            label=lab('fit'))
+    ax.plot(pr[ix], pr[iy], 'P', color='red', markersize=14, mfc='none',
+            mew=2, label=lab(f'pred @ GEM{ev.test_d}'))
+    if ev.test_hit is not None:
+        ax.plot(ev.test_hit[ix], ev.test_hit[iy], 'D', color='red',
+                markersize=10, label=lab(f'GEM{ev.test_d} hit'))
+
+
 def _plot_single_event(plt, ev: "CapturedEvent",
                        gem_z: Sequence[float],
                        mode_short: str, kind: str, idx: int,
@@ -1226,7 +946,7 @@ def _plot_single_event(plt, ev: "CapturedEvent",
       * X-Y (top-down): all GEM hits per detector, anchor matches squared,
         HyCal star, target ×, fit-line projection, predicted position at
         the test detector (red plus), and the test-detector hit (red
-        diamond) when the LOO call was efficient.  A dashed circle of
+        diamond) when the LOO call was efficient.  A dotted circle of
         radius `match_nsigma · σ_GEM[test_d]` around the prediction
         visualizes the matching window.
       * Z-Y (side):  same primitives, with z on the horizontal axis so the
@@ -1234,7 +954,6 @@ def _plot_single_event(plt, ev: "CapturedEvent",
 
     GEMs are color-coded C0..C3; the test detector's data is highlighted
     in red regardless of detector index."""
-    import numpy as np
     fig, (ax_xy, ax_zy) = plt.subplots(1, 2, figsize=(14, 6))
 
     a_x, b_x, a_y, b_y = ev.fit
@@ -1245,39 +964,8 @@ def _plot_single_event(plt, ev: "CapturedEvent",
     line_x = a_x + b_x * z_arr
     line_y = a_y + b_y * z_arr
 
-    n_dets_ev = len(ev.all_hits)
-
     # ----- X-Y (top-down) -------------------------------------------------
-    seen_det = set()
-    for d in range(n_dets_ev):
-        for h in ev.all_hits[d]:
-            lab = f"GEM{d} hits" if d not in seen_det else None
-            ax_xy.plot(h[0], h[1], 'o', color=f"C{d}",
-                       markersize=4, alpha=0.4, label=lab)
-            seen_det.add(d)
-    seen_anchor = set()
-    for d in range(n_dets_ev):
-        if d == ev.test_d:
-            continue
-        m = ev.matched_hits[d]
-        if m is None:
-            continue
-        lab = "anchor match" if "anchor" not in seen_anchor else None
-        ax_xy.plot(m[0], m[1], 's', color=f"C{d}",
-                   markersize=12, mfc='none', mew=2, label=lab)
-        seen_anchor.add("anchor")
-    ax_xy.plot(ev.hcx, ev.hcy, '*', color='black',
-               markersize=16, label='HyCal cluster')
-    ax_xy.plot(ev.target_x, ev.target_y, 'x', color='black',
-               markersize=12, mew=2, label='target')
-    ax_xy.plot(line_x, line_y, '--', color='red', lw=1.2,
-               alpha=0.7, label='fit')
-    ax_xy.plot(ev.pred_x, ev.pred_y, 'P', color='red',
-               markersize=14, mfc='none', mew=2,
-               label=f'pred @ GEM{ev.test_d}')
-    if ev.test_hit is not None:
-        ax_xy.plot(ev.test_hit[0], ev.test_hit[1], 'D', color='red',
-                   markersize=10, label=f'GEM{ev.test_d} hit')
+    _draw_event_primitives(ax_xy, ev, 0, 1, line_x, line_y, True)
     cut_radius = ev.match_nsigma * ev.sigma_gem_test
     circle = plt.Circle((ev.pred_x, ev.pred_y), cut_radius,
                         facecolor='none', edgecolor='red',
@@ -1292,28 +980,8 @@ def _plot_single_event(plt, ev: "CapturedEvent",
     ax_xy.legend(loc='best', fontsize=7, framealpha=0.85)
 
     # ----- Z-Y (side view) ------------------------------------------------
-    for d in range(n_dets_ev):
-        for h in ev.all_hits[d]:
-            ax_zy.plot(h[2], h[1], 'o', color=f"C{d}",
-                       markersize=4, alpha=0.4)
-    for d in range(n_dets_ev):
-        if d == ev.test_d:
-            continue
-        m = ev.matched_hits[d]
-        if m is None:
-            continue
-        ax_zy.plot(m[2], m[1], 's', color=f"C{d}",
-                   markersize=12, mfc='none', mew=2)
-    ax_zy.plot(ev.hcz, ev.hcy, '*', color='black', markersize=16)
-    ax_zy.plot(ev.target_z, ev.target_y, 'x', color='black',
-               markersize=12, mew=2)
-    ax_zy.plot(z_arr, line_y, '--', color='red', lw=1.2, alpha=0.7)
-    ax_zy.plot(ev.pred_z, ev.pred_y, 'P', color='red',
-               markersize=14, mfc='none', mew=2)
-    if ev.test_hit is not None:
-        ax_zy.plot(ev.test_hit[2], ev.test_hit[1], 'D', color='red',
-                   markersize=10)
-    # Dashed verticals at the GEM planes — orient the eye to where each
+    _draw_event_primitives(ax_zy, ev, 2, 1, z_arr, line_y, False)
+    # Dotted verticals at the GEM planes — orient the eye to where each
     # detector lives along z.
     for d, zd in enumerate(gem_z):
         ax_zy.axvline(zd, color=f"C{d}", ls=':', lw=0.6, alpha=0.4)
@@ -1337,7 +1005,6 @@ def _plot_single_event(plt, ev: "CapturedEvent",
 def _plot_residuals(plt, loo: LooStats, out: Path) -> None:
     if not any(loo.residuals_x):
         return
-    import numpy as np
     fig, axes = plt.subplots(2, 4, figsize=(16, 6), sharex='row')
     for d in range(4):
         for row, (label, arr) in enumerate(

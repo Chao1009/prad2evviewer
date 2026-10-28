@@ -6,14 +6,14 @@ simulated stand-ins so every calibration GUI can run offline without
 a live EPICS environment.
 
 Tier 1 -- base utilities:
-    PVGroup, ReadOnlyPVGroup, ScalerPVGroup
+    PVGroup, ScalerPVGroup
 
 Tier 2 -- application-specific:
     SPMG, PV (constants), MOTOR_PV_MAP,
-    MotorEPICS, ObserverEPICS,
+    MotorEPICS (read-only observer when writable=False),
     SimulatedMotorEPICS, SimulatedScalerEPICS,
     epics_move_to, epics_stop, epics_pause, epics_resume,
-    epics_is_moving, epics_read_rbv
+    epics_is_moving, epics_read_rbv, epics_wait_move_done
 """
 
 from __future__ import annotations
@@ -23,20 +23,18 @@ import random
 import threading
 import time
 from enum import IntEnum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from scan_utils import (
     Module,
     BEAM_CENTER_X,
     BEAM_CENTER_Y,
+    SCANNABLE_TYPES,
     ptrans_in_limits,
 )
 
 
-# ============================================================================
-#  Tier 1 -- Base utility classes
-# ============================================================================
-
+# -- Tier 1: base utility classes ------------------------------------------
 
 class PVGroup:
     """Thin wrapper around *pyepics* PV objects.
@@ -62,22 +60,16 @@ class PVGroup:
         self._timeout = timeout
         self._pvs: Dict[str, Any] = {}
         self._all_connected = False
-        self._epics: Any = None  # lazy import
-
-    # -- connection ----------------------------------------------------------
 
     def connect(self) -> Tuple[int, int]:
         """Create PV objects, wait for connections, return (connected, total)."""
         import epics as _epics
-        self._epics = _epics
         for key, pvname in self._pv_map:
             self._pvs[key] = _epics.PV(pvname, connection_timeout=self._timeout)
         time.sleep(2.0)
         n = sum(1 for p in self._pvs.values() if p.connected)
         self._all_connected = n == len(self._pvs)
         return n, len(self._pvs)
-
-    # -- read / write --------------------------------------------------------
 
     def get(self, key: str, default: Any = None) -> Any:
         """Read a PV by its friendly *key*."""
@@ -100,8 +92,6 @@ class PVGroup:
             return True
         return False
 
-    # -- diagnostics ---------------------------------------------------------
-
     def disconnected_pvs(self) -> List[str]:
         """Return PV *names* (not keys) that failed to connect."""
         return [
@@ -110,43 +100,11 @@ class PVGroup:
             if key in self._pvs and not self._pvs[key].connected
         ]
 
-    def connection_count(self) -> Tuple[int, int]:
-        """Return (connected, total) counts."""
-        n = sum(1 for p in self._pvs.values() if p.connected)
-        return n, len(self._pvs)
-
-    # -- lifecycle -----------------------------------------------------------
-
     def stop(self) -> None:  # noqa: D401
         """No-op in the base class; subclasses may override."""
 
 
-class ReadOnlyPVGroup:
-    """Wraps any object with get/put/connect/disconnected_pvs/stop,
-    blocking all ``put()`` calls.
-    """
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-
-    def connect(self) -> Tuple[int, int]:
-        return self._inner.connect()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._inner.get(key, default)
-
-    def put(self, key: str, value: Any) -> bool:  # noqa: ARG002
-        """Always blocked -- returns False."""
-        return False
-
-    def disconnected_pvs(self) -> List[str]:
-        return self._inner.disconnected_pvs()
-
-    def stop(self) -> None:  # noqa: D401
-        """No-op -- read-only wrapper never commands hardware."""
-
-
-class ScalerPVGroup:
+class ScalerPVGroup(PVGroup):
     """Reads FADC scaler PVs for PbWO4 and PbGlass modules.
 
     PV pattern: ``B_DET_HYCAL_FADC_{label}:c`` where *label* is the
@@ -156,53 +114,20 @@ class ScalerPVGroup:
     _PATTERN = "B_DET_HYCAL_FADC_{}:c"
 
     def __init__(self, modules: List[Module]) -> None:
-        self._labels: List[str] = [
-            m.name
-            for m in modules
-            if m.mod_type in ("PbWO4", "PbGlass")
-        ]
-        self._pv_map = [
-            (label, self._PATTERN.format(label)) for label in self._labels
-        ]
-        self._pvs: Dict[str, Any] = {}
-        self._epics: Any = None
-
-    def connect(self) -> Tuple[int, int]:
-        import epics as _epics
-        self._epics = _epics
-        for label, pvname in self._pv_map:
-            self._pvs[label] = _epics.PV(pvname, connection_timeout=5.0)
-        time.sleep(2.0)
-        return self.connection_count()
-
-    def get(self, name: str) -> Optional[float]:
-        """Read a single scaler value by module name."""
-        pv = self._pvs.get(name)
-        if pv and pv.connected:
-            v = pv.get()
-            return float(v) if v is not None else None
-        return None
+        super().__init__([(m.name, self._PATTERN.format(m.name))
+                          for m in modules if m.mod_type in SCANNABLE_TYPES])
 
     def get_all(self) -> Dict[str, float]:
         """Batch-read all connected scaler PVs."""
         result: Dict[str, float] = {}
-        for label in self._labels:
-            pv = self._pvs.get(label)
-            if pv and pv.connected:
-                v = pv.get()
-                if v is not None:
-                    result[label] = float(v)
+        for label, _ in self._pv_map:
+            v = self.get(label)
+            if v is not None:
+                result[label] = float(v)
         return result
 
-    def connection_count(self) -> Tuple[int, int]:
-        n = sum(1 for p in self._pvs.values() if p.connected)
-        return n, len(self._pvs)
 
-
-# ============================================================================
-#  Tier 2 -- Application-specific constants
-# ============================================================================
-
+# -- Tier 2: application-specific constants --------------------------------
 
 class SPMG(IntEnum):
     STOP = 0; PAUSE = 1; MOVE = 2; GO = 3  # noqa: E702
@@ -254,67 +179,38 @@ MOTOR_PV_MAP: List[Tuple[str, str]] = [
 ]
 
 
-# ============================================================================
-#  Tier 2 -- Motor EPICS classes
-# ============================================================================
-
+# -- Tier 2: motor EPICS classes -------------------------------------------
 
 class MotorEPICS(PVGroup):
     """Live EPICS interface for the HyCal transporter motors.
 
     Extends :class:`PVGroup` with :data:`MOTOR_PV_MAP` and an emergency
-    ``stop()`` that commands SPMG.STOP on both axes.
+    ``stop()`` that commands SPMG.STOP on both axes.  With
+    ``writable=False`` it is a pure observer: ``put()`` and ``stop()``
+    never touch the hardware.
     """
 
     def __init__(self, writable: bool = False, timeout: float = 5.0) -> None:
         super().__init__(MOTOR_PV_MAP, writable=writable, timeout=timeout)
 
     def stop(self) -> None:
-        """Emergency stop -- set SPMG to STOP on both axes."""
+        """Emergency stop -- set SPMG to STOP on both axes.
+
+        Bypasses the all-connected check of :meth:`put` so a partially
+        connected motor can still be stopped.
+        """
+        if not self._writable:
+            return
         for key in ("x_spmg", "y_spmg"):
             pv = self._pvs.get(key)
             if pv and pv.connected:
                 pv.put(int(SPMG.STOP))
 
 
-class ObserverEPICS:
-    """Read-only EPICS interface for monitoring motor PVs.
-
-    Creates a non-writable :class:`MotorEPICS` internally and blocks
-    all ``put()`` / ``stop()`` calls via the :class:`ReadOnlyPVGroup`
-    pattern.
-    """
-
-    def __init__(self) -> None:
-        self._real = MotorEPICS(writable=False)
-
-    def connect(self) -> Tuple[int, int]:
-        return self._real.connect()
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self._real.get(key, default)
-
-    def put(self, key: str, value: Any) -> bool:  # noqa: ARG002
-        return False
-
-    def disconnected_pvs(self) -> List[str]:
-        return self._real.disconnected_pvs()
-
-    def stop(self) -> None:
-        pass
-
-
-# ============================================================================
-#  Tier 2 -- Simulated stand-ins
-# ============================================================================
-
+# -- Tier 2: simulated stand-ins -------------------------------------------
 
 class SimulatedMotorEPICS:
-    """Offline motor simulator with the same interface as :class:`MotorEPICS`.
-
-    Reproduces the exact motion physics from the original
-    ``SimulatedEPICS`` class in ``hycal_snake_scan.py``.
-    """
+    """Offline motor simulator with the same interface as :class:`MotorEPICS`."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -380,12 +276,9 @@ class SimulatedMotorEPICS:
         self.put("x_spmg", int(SPMG.STOP))
         self.put("y_spmg", int(SPMG.STOP))
 
-    # -- internal ------------------------------------------------------------
-
     def _evaluate_motion(self) -> None:
-        if self._x_spmg == SPMG.STOP or self._y_spmg == SPMG.STOP:
-            self._moving = False; self._x_movn = 0; self._y_movn = 0       # noqa: E702
-        elif self._x_spmg == SPMG.PAUSE or self._y_spmg == SPMG.PAUSE:
+        halted = (SPMG.STOP, SPMG.PAUSE)
+        if self._x_spmg in halted or self._y_spmg in halted:
             self._moving = False; self._x_movn = 0; self._y_movn = 0       # noqa: E702
         elif self._x_spmg == SPMG.GO and self._y_spmg == SPMG.GO:
             if not self._moving:
@@ -422,19 +315,12 @@ class SimulatedScalerEPICS:
 
     def __init__(self, modules: List[Module]) -> None:
         self._labels: List[str] = [
-            m.name
-            for m in modules
-            if m.mod_type in ("PbWO4", "PbGlass")
+            m.name for m in modules if m.mod_type in SCANNABLE_TYPES
         ]
         self._rng = random.Random(0)
 
     def connect(self) -> Tuple[int, int]:
         return self.connection_count()
-
-    def get(self, name: str) -> Optional[float]:
-        if name in self._labels:
-            return self._rng.uniform(0, 1000)
-        return None
 
     def get_all(self) -> Dict[str, float]:
         return {label: self._rng.uniform(0, 1000) for label in self._labels}
@@ -443,10 +329,7 @@ class SimulatedScalerEPICS:
         return len(self._labels), len(self._labels)
 
 
-# ============================================================================
-#  Helper functions
-# ============================================================================
-
+# -- Tier 2: helper functions ----------------------------------------------
 
 def epics_move_to(ep: Any, x: float, y: float) -> bool:
     """Command the transporter to move to (*x*, *y*).
@@ -483,3 +366,37 @@ def epics_is_moving(ep: Any) -> bool:
 def epics_read_rbv(ep: Any) -> Tuple[float, float]:
     """Return the current (x, y) read-back values."""
     return (ep.get("x_rbv", 0.0), ep.get("y_rbv", 0.0))
+
+
+def epics_wait_move_done(ep: Any, x: float, y: float, *,
+                         pos_threshold: float, timeout: float,
+                         aborted: Callable[[], bool],
+                         hold_if_paused: Callable[[], None],
+                         log: Callable[..., None]) -> bool:
+    """Wait for the transporter to stop at (*x*, *y*).
+
+    "On position" requires BOTH MOVN=0 AND RBV within *pos_threshold*
+    (mm) of the target.  Checking only MOVN is unsafe because MOVN is
+    still 0 in the brief window after issuing a move command before
+    the IOC has processed it — a check in that window would declare
+    the move "done" before it started.
+
+    Polls every 0.1 s.  *aborted* ends the wait early; *hold_if_paused*
+    blocks while the operator has paused the scan.  Returns False on
+    abort or after *timeout* seconds (logged via *log*); the caller
+    decides which happened.
+    """
+    t0 = time.time()
+    while not aborted():
+        hold_if_paused()
+        if aborted():
+            return False
+        if not epics_is_moving(ep):
+            rx, ry = epics_read_rbv(ep)
+            if math.sqrt((rx - x) ** 2 + (ry - y) ** 2) <= pos_threshold:
+                return True
+        if time.time() - t0 > timeout:
+            log(f"MOVE TIMEOUT after {timeout:.0f}s", level="error")
+            return False
+        time.sleep(0.1)
+    return False

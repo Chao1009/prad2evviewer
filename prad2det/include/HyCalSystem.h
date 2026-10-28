@@ -57,14 +57,13 @@ struct SectorInfo {
     double      msize_x = 0.;
     double      msize_y = 0.;
     // boundary rectangle: [x_min, y_min] to [x_max, y_max]
-    // stored as 4 corner points (BL, TL, TR, BR) for intersection tests
+    // stored as 4 corner points (TL, BL, BR, TR) for intersection tests
     struct Point { double x, y; };
     std::array<Point, 4> boundpts{};
 
     void set_boundary(double x1, double y1, double x2, double y2)
     {
-        // counter-clockwise: BL, TL, TR, BR  (matches old code: [3]=TL,[0]=BL,[1]=TR,[2]=BR)
-        // old code order: (x1,y2), (x1,y1), (x2,y1), (x2,y2)
+        // counter-clockwise from top-left
         boundpts[0] = {x1, y2};  // top-left
         boundpts[1] = {x1, y1};  // bottom-left
         boundpts[2] = {x2, y1};  // bottom-right
@@ -168,10 +167,30 @@ struct Module {
         virtual_neighbors.push_back(neighbor);
     }
 
-    // helpers
     bool is_pwo4()   const { return type == ModuleType::PbWO4; }
     bool is_glass()  const { return type == ModuleType::PbGlass; }
     bool is_hycal()  const { return is_pwo4() || is_glass(); }
+
+    // Offset of (px, py) from the module centre in units of the module size
+    // (0 at the centre, +-0.5 at the edges).  fold=true wraps a value beyond
+    // +-0.5 (a point in a neighbouring cell) back into [-0.5, 0.5].  Real is
+    // the arithmetic precision; HyCalEnergyBias uses the default double.
+    template <class Real = double>
+    std::array<float, 2> cell_offset(double px, double py, bool fold = false) const
+    {
+        std::array<float, 2> d{
+            static_cast<float>((static_cast<Real>(px) - static_cast<Real>(x))
+                               / static_cast<Real>(size_x)),
+            static_cast<float>((static_cast<Real>(py) - static_cast<Real>(y))
+                               / static_cast<Real>(size_y))};
+        if (fold) {
+            for (float &v : d) {
+                if (v < -0.5f) v += 1.f;
+                if (v >  0.5f) v -= 1.f;
+            }
+        }
+        return d;
+    }
 
     bool is_neighbor(const Module &other, bool include_corners = true) const
     {
@@ -190,6 +209,11 @@ struct Module {
         return false;
     }
 };
+
+// --- quantized-distance windows ---------------------------------------------
+// (dx, dy) from HyCalSystem::qdist, in module sizes.
+inline bool qdist_in_3x3(double dx, double dy) { return std::abs(dx) < 1.01 && std::abs(dy) < 1.01; }
+inline bool qdist_in_5x5(double dx, double dy) { return std::abs(dx) < 2.51 && std::abs(dy) < 2.51; }
 
 // --- HyCalSystem ------------------------------------------------------------
 class HyCalSystem
@@ -219,14 +243,11 @@ public:
     const Module   *module_by_daq(int crate, int slot, int ch) const;
 
     // --- calibration accessors ----------------------------------------------
+    // Unknown ids read 0 and are ignored by the setters.
     double GetCalibConstant(int primex_id) const;
-    double GetCalibBaseEnergy(int primex_id) const;
-    double GetCalibNonLinearity1(int primex_id) const;
-    double GetCalibNonLinearity2(int primex_id) const;
     void   SetCalibConstant(int primex_id, double factor);
     void   SetCalibBaseEnergy(int primex_id, double energy);
-    void   SetCalibNonLinearity(int primex_id, double nl);
-    void   SetCalibNonLinearity(int primex_id, double nl1, double nl2);
+    void   SetCalibNonLinearity(int primex_id, double nl1, double nl2 = 0.);
     void   PrintCalibConstants(const std::string &output_file) const;
 
     // --- sector info --------------------------------------------------------
@@ -330,7 +351,6 @@ private:
     void  build_sector_grids();
     void  build_neighbors();
 
-    // line-segment intersection (ported from cana::intersection)
     static int line_intersect(double x1, double y1, double x2, double y2,       
                               double x3, double y3, double x4, double y4,
                               double &xc, double &yc);
@@ -358,14 +378,6 @@ private:
 
     // sector grids for O(1) same-sector neighbor lookup
     std::array<SectorGrid, static_cast<int>(Sector::Max)> sector_grids_;
-
-    // pack DAQ address into a single key
-    static uint64_t pack_daq(int crate, int slot, int ch)
-    {
-        return (static_cast<uint64_t>(crate) << 32) |
-               (static_cast<uint64_t>(slot)  << 16) |
-               static_cast<uint64_t>(ch);
-    }
 };
 
 } // namespace fdec

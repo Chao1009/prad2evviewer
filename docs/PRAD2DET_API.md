@@ -16,6 +16,8 @@ function, and namespace constant exported by the library.
 | [`GemSystem.h`](#gemsystemh) | `gem` | `GemSystem`, `DetectorConfig`, `PlaneConfig`, `ApvConfig`, `ApvPedestal`, `ClusterConfig`, `StripHit`, `StripCluster`, `GEMHit`, `MapStrip()`, `MapApvStrips()` |
 | [`GemCluster.h`](#gemclusterh) | `gem` | `GemCluster` |
 | [`GemPedestal.h`](#gempedestalh) | `gem` | `GemPedestal` |
+| [`GemEventJson.h`](#gemeventjsonh) | `gem` | `ZsApvsToJson()`, `DetectorsToJson()` |
+| [`GemTracking.h`](#gemtrackingh) | `gem` | `TrackLine`, `SeedLine()`, `FitWeightedLine1D()`, `FitWeightedLine()` |
 | [`DetectorTransform.h`](#detectortransformh) | (global) | `DetectorTransform` |
 | [`RunInfoConfig.h`](#runinfoconfigh) | `prad2` | `RunConfig`, `LoadRunConfig()`, `WriteRunConfig()` |
 | [`PipelineBuilder.h`](#pipelinebuilderh) | `prad2` | `PipelineBuilder`, `Pipeline` |
@@ -85,8 +87,8 @@ Member helpers: `energize(adc)` → MeV (incl. non-linear correction);
 | `const Module *module_by_name(const std::string&) const` | |
 | `const Module *module_by_id(int primex_id) const` | |
 | `const Module *module_by_daq(int crate, int slot, int ch) const` | |
-| `double GetCalibConstant(int primex_id) const` | also `GetCalibBaseEnergy`, `GetCalibNonLinearity` |
-| `void SetCalibConstant(int primex_id, double)` | also `SetCalibBaseEnergy`, `SetCalibNonLinearity` |
+| `double GetCalibConstant(int primex_id) const` | |
+| `void SetCalibConstant(int primex_id, double)` | also `SetCalibBaseEnergy`, `SetCalibNonLinearity(id, nl1, nl2 = 0)` |
 | `void PrintCalibConstants(const std::string &output_file) const` | |
 | `const SectorInfo &sector_info(int s) const` | |
 | `int get_sector_id(double x, double y) const` | |
@@ -120,6 +122,7 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 | `least_split`       | 0.01 | minimum split fraction |
 | `log_weight_thres`  | 3.6 | W = max(0, thres + ln(E_i / E_tot)) |
 | `non_linear_corr`   | true | apply per-module energy non-linearity correction |
+| `energy_bias_correction` | false | apply the beam- and position-dependent PbWO4 5x5 correction |
 
 ### Per-event types
 
@@ -127,8 +130,10 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 
 `ModuleCluster { center, hits, energy, flag }` with `add_hit(h)`.
 
-`ClusterHit { center_id, x, y, energy, time, nblocks, npos, flag }` —
-reconstructed cluster output.
+`ClusterHit { center_id, x, y, energy, time, nblocks, npos, flag,
+linear_corr, bias_corr }` — reconstructed cluster output. `linear_corr`
+contains only the non-linearity factor and `bias_corr` contains only the
+position-dependent energy-bias factor.
 
 `shower_depth(int center_id, float energy_mev)` — shower-max depth (mm)
 discriminating PWO4 vs PbGlass via `PWO_ID0`.
@@ -172,10 +177,32 @@ full-readout vs online-ZS data per APV.
 `StripHit { strip, charge, max_timebin, position, cross_talk, ts_adc }`.
 
 `StripCluster { position, peak_charge, total_charge, max_timebin,
-cross_talk, hits }` — see comment in header about value-init importance.
+cross_talk, hits, seed_time, seed_peak_adc, seed_sum_adc, max_strip_dt,
+min_ts_corr, ts_adc_sum }` — see comment in header about value-init importance.
+The last six are SBS-style quality variables filled by
+`GemCluster::FormClusters` for every cluster (seed = first strip with the
+max `charge`; `NaN` = undefined):
+
+| Field | |
+|---|---|
+| `seed_time` | `StripMeanTime` of the seed strip (ns) |
+| `seed_peak_adc` | max `ts_adc` of the seed strip (equals `peak_charge` when strip `charge` = max sample, as on every PRad path; SBS naming) |
+| `seed_sum_adc` | sum of the seed's `ts_adc`, all samples |
+| `max_strip_dt` | max over non-seed strips of \|t_i − seed_time\| (ns); `NaN` for 1-strip clusters |
+| `min_ts_corr` | min over non-seed strips of `TimeSampleCorrelation(seed, i)`; `NaN` for 1-strip clusters |
+| `ts_adc_sum` | cluster-summed samples `Σ_i w_i·ts_adc_i[s]`, `w_i = charge_i / max ts_adc_i` (1, or ½ for the valley strip `splitCluster` halved; 1 without a positive sample); empty if the strips have no samples or differ in count |
 
 `GEMHit { x, y, z, det_id, x_charge, y_charge, x_peak, y_peak,
-x_max_timebin, y_max_timebin, x_size, y_size }`.
+x_max_timebin, y_max_timebin, x_size, y_size, x_time, y_time, time_diff,
+adc_asym, x_max_strip_dt, y_max_strip_dt, x_min_ts_corr, y_min_ts_corr,
+xy_ts_corr }`.
+The quality fields are filled in both match modes: `x_time`/`y_time` =
+cluster `seed_time`, `time_diff = x_time − y_time` (signed ns),
+`adc_asym = (x_peak − y_peak)/(x_peak + y_peak)` (signed, `NaN` if the sum
+≤ 0; its magnitude is what `match_adc_asymmetry` cuts),
+`xy_ts_corr = TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum)` (the X/Y
+cluster time-sample correlation ρ_cl, SBS-offline `corrcoeff_clust`; what
+`match_ts_corr_min` cuts), the rest copied from the X / Y cluster.
 
 ### Configuration types
 
@@ -203,7 +230,22 @@ pedestal table, and per-APV CM range.
 | `match_mode`        | 1 | 0 = ADC-sorted 1:1, 1 = Cartesian-with-cuts |
 | `match_adc_asymmetry` | 0.8 | max \|Qx-Qy\|/(Qx+Qy); <0 disables |
 | `match_time_diff`     | 50 ns | <0 disables |
-| `ts_period`           | 25 ns | |
+| `match_ts_corr_min`   | −1 | reject X/Y pair if `xy_ts_corr` < value (mode 1, `NaN` passes); ≤−1 disables (off in the shipped configs, see gem_clustering.md) |
+| `ts_period`           | 25 ns | also the period for strip mean times; JSON `match_ts_period` |
+| `strip_time_min`, `strip_time_max` | −∞, +∞ | strip mean-time window (inclusive), active if either is finite; JSON `strip_mean_time_range: [lo, hi]` (`[]`/`null` = off) |
+| `strip_unimodal`      | false | strip must pass `IsUnimodalPulse`; JSON `strip_unimodal_shape` |
+| `seed_min_peak_adc`   | 0 | reject cluster if `seed_peak_adc` < value; ≤0 disables |
+| `seed_min_sum_adc`    | 0 | reject cluster if `seed_sum_adc` < value; ≤0 disables |
+| `strip_time_agreement` | −1 ns | reject cluster if `max_strip_dt` > value; <0 disables |
+| `strip_ts_corr_min`   | −1 | reject cluster if `min_ts_corr` < value; ≤−1 disables (SBS never applies its 0.7; not recommended as a cluster cut, see gem_clustering.md) |
+
+The last six are SBS-style (`mpd_gem_view_ssp` Cuts) quality cuts, all
+off by default and in the shipped database configs. Strip-level cuts drop
+the failing strip and end the current run of consecutive strips (the plane
+hits keep it); cluster-level cuts run in the filter step, and `NaN`
+quality values pass. JSON keys other than those noted equal the field
+names (`reconstruction_config.json:gem.default` / per-detector
+`"0".."3"`). Details: `docs/technical_notes/gem_clustering/`.
 
 ### Strip-mapping helpers (pure)
 
@@ -229,7 +271,7 @@ instantiating a `GemSystem`. `GemSystem::buildStripMap()` delegates to
 |---|---|
 | `void Init(const std::string &map_file)` | Load `gem_map.json` (detectors + APVs). |
 | `void LoadPedestals(const std::string &ped_file, const std::map<int,int> &crate_remap = {})` | Upstream APV-block text format. `crate_remap` maps file-side hardware crate IDs to logical IDs (e.g. 146→1, 147→2). Slot field in headers is ignored. |
-| `void LoadCommonModeRange(const std::string &cm_file, const std::map<int,int> &crate_remap = {})` | Per-APV CM bounds for the Danning algorithm. |
+| `void LoadCommonModeRange(const std::string &cm_file, const std::map<int,int> &crate_remap = {})` | Per-APV CM bounds into `ApvConfig::cm_range_min/max`; not used by the reconstruction. |
 | `void SetReconConfigs(std::vector<ClusterConfig>)` | Per-detector cluster/match parameters; vector clamped/padded to `GetNDetectors()`. |
 | `const std::vector<ClusterConfig>& GetReconConfigs() const` | |
 | `void Clear()` | |
@@ -266,6 +308,15 @@ Algorithm details: `docs/technical_notes/gem_clustering/`.
 
 `ClusterConfig` is shared with `GemSystem.h`.
 
+Free helpers (namespace `gem`), reusable on any `ts_adc` vector:
+
+| Function | Description |
+|---|---|
+| `float StripMeanTime(const std::vector<float>& ts_adc, float ts_period = 25.f)` | ADC-weighted mean time (ns) over positive samples only, sample `i` at `(i+1)·ts_period`; `NaN` if no positive sample. The seed mean time used by the X/Y time cut. |
+| `float TimeSampleCorrelation(const std::vector<float>& a, const std::vector<float>& b)` | Pearson r of two sample vectors; `NaN` if sizes differ, size < 2, or either is flat. |
+| `float TimeSampleCorrelation(const float* a, const float* b, size_t n)` | Same on `n` samples of two arrays, e.g. two rows of the recon-tree `gem_cl_ts_adc[n_gem_cl][6]` (gives `gem_xy_corr` for any X/Y cluster pair). |
+| `bool IsUnimodalPulse(const std::vector<float>& ts_adc)` | SBS "concave shape": strictly rising to the first maximum, strictly falling after; peaks in the first/last sample pass; empty → false. |
+
 ---
 
 ## `GemPedestal.h`
@@ -276,11 +327,54 @@ correction as the live GEM pipeline.
 | Method | Description |
 |---|---|
 | `void Clear()` | drop accumulators |
-| `void Accumulate(const ssp::SspEventData &evt)` | fold one event; APVs in online-ZS (nstrips ≠ 128) are skipped |
+| `int Accumulate(const ssp::SspEventData &evt)` | fold one event's full-readout APVs (online-ZS APVs are skipped); returns the number folded |
 | `int NumApvs() const`, `int NumStrips() const` | |
-| `int Write(const std::string &output_path) const` | JSON in the format `GemSystem::LoadPedestals` reads. Returns APV count or `<0` on failure. |
+| `int Write(const std::string &output_path) const` | APV-block text in the format `GemSystem::LoadPedestals` reads (slot written as -1). Returns APV count or `<0` on failure. |
 
 Non-copyable (`std::unique_ptr<Impl>`).
+
+---
+
+## `GemEventJson.h`
+
+```cpp
+nlohmann::json gem::ZsApvsToJson(const GemSystem &sys, bool round = false,
+                                 const ssp::SspEventData *evt = nullptr);
+nlohmann::json gem::DetectorsToJson(const GemSystem &sys, bool round = false);
+```
+
+JSON view of one processed event (after `ProcessEvent()`, plus
+`Reconstruct()` for the detector block) in the `zs_apvs` / `detectors`
+schema that `gem_dump -m evdump` writes and `gem_event_viewer` draws.
+`ZsApvsToJson` lists every APV with at least one strip that survived zero
+suppression (GemSystem order, or the readout order of `evt`), with
+per-channel charge, max time bin, cross-talk flag and the 6 samples.
+`DetectorsToJson` gives per detector the strip pitches and counts, X/Y
+clusters and 2-D hits.  `round = true` rounds ADC values to 0.1 and
+positions to 0.01 mm (file dumps).
+
+---
+
+## `GemTracking.h`
+
+Header-only straight-line track primitives, templated on the scalar type
+(`float` in the online GEM efficiency monitor, `double` in the Python
+bindings); the fit sums are always `double`.
+
+```cpp
+template <class T> struct TrackLine { T ax, bx, ay, by, chi2_per_dof; };   // x = ax + bx*z, y = ay + by*z
+template <class T> TrackLine<T> SeedLine(T x1, T y1, T z1, T x2, T y2, T z2);
+template <class T> bool FitWeightedLine1D(int N, const T *z, const T *v, const T *w,
+                                          double &a, double &b);
+template <class T> bool FitWeightedLine(int N, const T *z, const T *x, const T *y,
+                                        const T *wx, const T *wy, TrackLine<T> &out);
+```
+
+`SeedLine` is the line through two points (the flat line through point 1
+when `|z2 - z1| < 1e-6`).  `FitWeightedLine` does independent weighted
+least-squares fits in (z, x) and (z, y), with `chi2_per_dof` over
+`2N - 4` degrees of freedom; it returns `false`, leaving `out` untouched,
+when `N < 2` or a fit is singular.
 
 ---
 
@@ -330,6 +424,7 @@ the largest `run_number` ≤ the requested run (or the latest if `< 0`).
 | `matching_use_square` | true | square vs circular cut |
 | `gain_data_dir` | "gain_factor" | |
 | `gain_ref_run` | 23915 | reference run for gain factors |
+| `gain_ref_pmt` | 23 | `gain_factor.ref_PMT`: PbWO4 reference PMTs to average (`1`, `2`, `3`, `12`, `13`, `23`, `123`) |
 
 ### Functions
 
@@ -360,13 +455,15 @@ server, Python bindings) share the same wiring.
 | `hycal` | initialized + calibrated `fdec::HyCalSystem` |
 | `gem`   | initialized GEM with pedestals / CM / per-detector configs installed |
 | `hycal_cluster_cfg` | `fdec::ClusterConfig` (caller wires into `HyCalCluster::SetConfig`) |
+| `hycal_energy_bias` | shared ee/ep 5x5 bias tables loaded when the correction is enabled |
+| `hycal_energy_bias_nominal` | selected nominal parameter energy in MeV (700, 2200, or 3500) |
 | `hycal_transform`, `gem_transforms[4]` | poses already `set()`, matrices cached |
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |
 | `gem_pos_res` | per-detector σ (mm) |
 | `target_pos_res[3]` | (σx, σy, σz) at target |
-| `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (`1` = legacy `PostMatch` (closest to hycal cluster), other = `PostMatch_upgrade` (optimized matching algorithm, minimizes deltaR between 2 GEM hits)) |
+| `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (branches of `MatchingTools::PostMatch`: `1` = per GEM pair, the hit closest to the HyCal cluster; other = the GEM-hit pair with minimum ΔR between the two hits) |
 | `gem_crate_remap` | derived from `daq_cfg.roc_tags[type=="gem"]` |
-| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
+| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `hycal_energy_bias_ee_path`, `hycal_energy_bias_ep_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
 
 Move-only — `HyCalSystem` and `GemSystem` hold large internal buffers.
 
@@ -453,16 +550,24 @@ Per-event header (`event_num`, `trigger_type`, `trigger_bits`,
 (`nch`, `module_id`, `module_type`, `nsamples`, `samples`,
 `gain_factor`), optional soft-analyzer peaks (`ped_*`, `npeaks`,
 `peak_*`), optional firmware-mode peaks (`daq_npeaks`, `daq_peak_*`),
-and GEM strip data (`gem_nch`, `mpd_crate`, `mpd_fiber`, `apv`,
-`strip`, `ssp_samples`). `ssp_raw` is a `std::vector<uint32_t>` of
-the raw 0xE10C SSP trigger bank words.
+GEM strip data (`gem_nch`, `gem_det`, `gem_plane`, `gem_strip`,
+`gem_charge`, `gem_max_tb`, `gem_pos`, `gem_xtalk`, `gem_ts_adc[][6]`), and
+the raw trigger / DAQ bank words as `std::vector<uint32_t>`: `ssp_raw`
+(0xE10C SSP), `vtp_roc_tags` / `vtp_nwords` / `vtp_words` (0xE122 VTP) and
+`tdc_roc_tags` / `tdc_nwords` / `tdc_words` (0xE107 TDC).
 
 ### `ReconEventData` ("recon" tree)
 
-HyCal clusters (`n_clusters`, `cl_x/y/z/energy/time/nblocks/center/flag`),
-HyCal↔GEM matches (`matchFlag`, `matchGEM[xyz]`), quick-access matched
-pairs (`match_num`, `mHit_*`), GEM hits (`n_gem_hits`, `det_id`, `gem_*`),
-Veto (optional) and LMS soft-peak summaries, and `ssp_raw`.
+`total_energy`, HyCal clusters (`n_clusters`,
+`cl_x/y/z/energy/time/nblocks/npos/center/flag`, `cl_linear_corr`,
+`cl_bias_corr`, `cl_dt_rf`),
+HyCal↔GEM matches (`matchFlag`, `match_cl_idx`, `match_det_id`,
+`match_gem_x/y/z`), quick-access matched pairs (`match_num`, `mHit_*`),
+GEM hits (`n_gem_hits`, `det_id`, `gem_*` incl. the per-hit quality
+variables and `gem_xy_corr`) and 1-D clusters (`n_gem_cl`, `gem_cl_*` incl.
+`gem_cl_ts_adc[][6]`), Veto (optional) and LMS soft-peak summaries,
+`ssp_raw`, the raw VTP bank words and decoded VTP clusters (`vtp_cl_*`), and
+the RF reference times (`rf_n_a/b`, `rf_ns_a/b`).
 
 ### `RawScalerData` ("scalers" tree)
 
@@ -488,15 +593,25 @@ no link-time ROOT dependency.
 ### Writers
 
 ```cpp
-SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks);
-SetReconWriteBranches(TTree*, ReconEventData&, bool is_x17 = false);
+SetRawWriteBranches(TTree*, RawEventData&, bool with_peaks,
+                    bool Ecalib = false, bool noWaveform = false);
+SetReconWriteBranches(TTree*, ReconEventData&, bool x17_mode,
+                      bool with_gem_hits = false,
+                      const ReconReadStatus *layout = nullptr);
 SetScalerWriteBranches(TTree*, RawScalerData&);
 SetEpicsWriteBranches(TTree*, RawEpicsData&);
 ```
 
-For recon trees, `is_x17=true` omits the Veto branch group
-(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`). LMS,
-cluster, GEM, trigger-bank, and RF branches are unchanged.
+For recon trees, `x17_mode=true` omits the Veto branch group
+(`veto_nch`, `veto_id`, `veto_npeaks`, and `veto_peak_*`).
+`with_gem_hits` (`replay_recon -gem_hit`) books the GEM hits, their
+quality variables (incl. `gem_xy_corr`) and the `gem_cl_*` block (incl.
+`gem_cl_ts_adc`); off by default. `layout` books only the GEM quality /
+cluster / time-sample groups it flags: `replay_filter` passes the read
+status of the tree it copies (it also passes `noWaveform` when the raw
+input has no waveforms), the simulation converters a status with only
+`has_gem_hits`. LMS, HyCal cluster, trigger-bank, and RF branches are
+always written.
 
 ### Readers (skip missing branches; return optional-group flags)
 
@@ -507,8 +622,11 @@ SetScalerReadBranches(TTree*, RawScalerData&);   // void
 SetEpicsReadBranches(TTree*, RawEpicsData&);     // void
 ```
 
-`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw }`.
-`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw }`.
+`RawReadStatus { has_peaks, has_daq_peaks, has_gem, has_ssp_raw, has_vtp_raw, has_tdc_raw,
+has_waveform }`.
+`ReconReadStatus { has_match_num, has_per_cl_match, has_veto, has_lms, has_ssp_raw,
+has_vtp_raw, has_vtp_cl, has_rf, has_gem_hits, has_gem_qa, has_gem_cl, has_gem_ts }`
+(`has_gem_ts`: `gem_xy_corr` + `gem_cl_ts_adc`; missing GEM quality arrays read as NaN).
 
 `ssp_raw` is a `std::vector<uint32_t>` branch — readers must bind their
 own held `vector<uint32_t>**` (see comment in header).
@@ -523,7 +641,7 @@ FillScalerRow(const dsc::DscEventData&, const psync::SyncInfo&,
 FillEpicsRow(const epics::EpicsRecord&, RawEpicsData&);
 ```
 
-Schema reference: `analysis/REPLAYED_DATA.md` is the human-readable
+Schema reference: [`REPLAYED_DATA.md`](REPLAYED_DATA.md) is the human-readable
 counterpart; this header is the executable schema.
 
 ---

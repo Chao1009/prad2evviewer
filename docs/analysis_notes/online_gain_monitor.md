@@ -326,10 +326,14 @@ across visible runs; its label estimates batch duration from
 The lower-right display has one panel per LMS reference PMT. It plots:
 
 ```text
-fit_mean_ref_lms / fit_mean_ref_alpha
+(fit_mean_ref_lms / fit_mean_ref_alpha) / mean(fit_mean_ref_lms / fit_mean_ref_alpha)
 ```
 
-The dotted line is the visible-data mean used by **ratio tol**.
+Each PMT is normalized by its own mean over the positive, finite ratios
+across visible runs, including points rejected by **ratio tol**. The dotted
+line is at 1, and the y-axis is fixed at 0.995–1.005 for all three panels.
+Curves and markers outside this range are clipped. Normalization only
+affects this chart; the raw ratios and **ratio tol** rejection are unchanged.
 Accepted points are coloured dots; rejected points are red crosses.
 
 ### Run-average strip

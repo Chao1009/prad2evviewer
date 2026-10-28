@@ -1,13 +1,5 @@
 //=============================================================================
-// EpicsStore.cpp — EPICS snapshot accumulation and lookup
-//
-// Parsing of the raw "value channel_name" payload is shared with the rest
-// of the codebase via prad2dec's epics::ParseEpicsText (see EpicsData.h).
-// EpicsStore adds two responsibilities the bare parser doesn't:
-//   1. dynamic channel registry (stable IDs across snapshots),
-//   2. cumulative snapshots — every Feed() copies the previous values so
-//      slow channels (which only update on a subset of EPICS events)
-//      retain their last-known reading.
+// EpicsStore.cpp — EPICS snapshot accumulation and lookup (see EpicsStore.h)
 //=============================================================================
 
 #include "EpicsStore.h"
@@ -18,9 +10,7 @@
 namespace epics
 {
 
-//=============================================================================
-// Channel management
-//=============================================================================
+// --- Channel management -----------------------------------------------------
 
 int EpicsStore::get_or_create_channel(const std::string &name)
 {
@@ -40,16 +30,14 @@ int EpicsStore::GetChannelId(const std::string &name) const
     return (it != channel_map_.end()) ? it->second : -1;
 }
 
-//=============================================================================
-// Feed — parse text and store snapshot
-//=============================================================================
+// --- Feed — parse text and store snapshot -----------------------------------
 
 void EpicsStore::Feed(int32_t event_number, uint64_t timestamp, const std::string &text)
 {
     if (text.empty()) return;
 
     // Parse via the shared decoder (also used by EvChannel::Epics() and the
-    // offline replay's epics tree).  Same namespace now — drop the qualifier.
+    // offline replay's epics tree).
     EpicsRecord rec;
     ParseEpicsText(text, rec);
     if (rec.channel.empty()) return;
@@ -76,9 +64,7 @@ void EpicsStore::Feed(int32_t event_number, uint64_t timestamp, const std::strin
     snapshots_.push_back(std::move(snap));
 }
 
-//=============================================================================
-// Lookup — find most recent snapshot at or before event_number
-//=============================================================================
+// --- Lookup — find most recent snapshot at or before event_number -----------
 
 const EpicsStore::Snapshot *EpicsStore::FindSnapshot(int32_t event_number) const
 {
@@ -109,9 +95,7 @@ bool EpicsStore::GetValue(int32_t event_number, const std::string &channel, floa
     return true;
 }
 
-//=============================================================================
-// Clear
-//=============================================================================
+// --- Trim / Clear -----------------------------------------------------------
 
 void EpicsStore::Trim(int max_count)
 {

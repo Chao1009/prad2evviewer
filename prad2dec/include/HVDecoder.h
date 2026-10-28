@@ -80,15 +80,6 @@ struct Interval {
 };
 
 // -------------------------------------------------------------------------
-// (No EventPin struct needed for associate_events any more.)  Anchor
-// scalars (anchor_ti_ticks, anchor_unix_time_ms) come straight from any
-// SYNC scaler row — they pin the linear ti_ticks ↔ unix_time mapping
-// (1 ms = 250 000 four-nanosecond ticks).  All event_number /
-// ti_ticks_at_arrival values then come from the recon tree's actual
-// (event_num, timestamp) entries — no interpolation across events.
-// -------------------------------------------------------------------------
-
-// -------------------------------------------------------------------------
 // HVSegment — one materialized time × channel window.
 //
 // Layout mirrors VMDF v2: dv is row-major (n_snapshots × n_channels) and
@@ -118,7 +109,7 @@ public:
     std::vector<float>        booster_imon;      // n_bsnap × n_bst
     std::vector<BstEvent>     booster_events;
 
-    // ── meta (carried in cache; not load-bearing for analysis) ─────────
+    // ── meta (set by load_window, not persisted; not load-bearing) ─────
     std::vector<std::string>  source_files;
     double                    window_start_unix = 0.0;
     double                    window_end_unix   = 0.0;

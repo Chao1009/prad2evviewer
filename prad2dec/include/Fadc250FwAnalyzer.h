@@ -11,7 +11,7 @@
 //   * WaveAnalyzer       — software-friendly local-maxima search with
 //                          iterative-outlier-rejection pedestal estimate.
 //                          Tunable, robust against pile-up, returns Peak[].
-//   * Fadc250FwAnalyzer  — firmware bit-faithful: Vnoise from first 4 samples,
+//   * Fadc250FwAnalyzer  — firmware bit-faithful: Vnoise from first NPED samples,
 //                          mid-amplitude bracket interpolation for Tfine,
 //                          NSB/NSA windowing.  Returns DaqPeak[] with
 //                          coarse/fine/quality fields you can compare to
@@ -22,7 +22,7 @@
 // PED handling: at PRad-II's data path the recorded waveforms have already
 // passed firmware TET (channels below PED+TET are not written out), so the
 // software emulator just receives the soft analyzer's pedestal mean as PED
-// and proceeds.  No per-channel firmware register file in v1.
+// and proceeds.  No per-channel firmware register file is read.
 //
 // Configuration source: evc::DaqConfig::Fadc250FwConfig in DaqConfig.h, populated from
 // the optional "fadc250_waveform.firmware" block in daq_config.json.

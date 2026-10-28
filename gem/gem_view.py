@@ -1,21 +1,17 @@
 """
-GEM rendering — data shaping + QPainter drawing, shared by:
-
-* ``gem_event_viewer.py`` (interactive GUI via ``GemEventCanvas``)
-* ``gem_cluster_view.py`` (JSON → PNG batch thin wrapper)
-* ``gem_layout.py`` (strip layout PNG thin wrapper)
+GEM rendering — data shaping + QPainter drawing for ``gem_event_viewer.py``
+(interactive GUI via ``GemEventCanvas``, plus the ``--json`` / ``--layout``
+batch PNG export).
 
 Two draw entry points:
 
 * ``draw_event_panels`` — N detectors side by side, coloured strips + cluster
   markers + 2D hits + legend + colorbars.  Consumes ``process_zs_hits``
-  output + ``build_det_list_from_gemsys`` output.
+  output + the ``detectors`` list of a gem_dump event JSON, which
+  ``build_det_list_from_gemsys`` gets from the C++ serializer for a live
+  GemSystem.
 * ``draw_layout`` — one detector, strip positions from ``build_strip_layout``,
   APV boundary dashed lines, beam hole.
-
-Shared colour LUTs (``CMAP_WINTER_RGB`` / ``CMAP_AUTUMN_RGB``) reproduce
-matplotlib's ``cm.winter`` / ``cm.autumn`` two-stop gradients — linear so
-an analytic lookup suffices.
 """
 
 from __future__ import annotations
@@ -51,7 +47,6 @@ def _font(size: float, bold: bool = False) -> QFont:
     return f
 
 
-# =============================================================================
 # PRad-II GEM mechanical layout (transcribed from
 # mpd_gem_view_ssp/gui/experiment_setup/PRadSetup.cpp).
 #
@@ -59,7 +54,6 @@ def _font(size: float, bold: bool = False) -> QFont:
 # spacers; positions are given for det_pos == 0 (left chamber).  The right
 # chamber is the same physical part rotated 180°, so we mirror around the
 # chamber centre.
-# =============================================================================
 
 _SPACER_VERT_X_LEFT = (183.8, 366.2)                                    # mm
 _SPACER_HORIZ_Y_LEFT = (171.0, 347.0, 523.0, 729.8, 920.8, 1096.8)      # mm
@@ -79,9 +73,7 @@ _DET_POS_FILL = {
 }
 
 
-# =============================================================================
-# Colour LUTs
-# =============================================================================
+# ---- Colour LUTs ----
 
 # matplotlib cm.winter / cm.autumn are linear two-stop gradients.  Reproduce
 # them as 256-entry RGB tables; callers index with fraction*255.
@@ -109,9 +101,7 @@ def _lut_color(lut: List[Tuple[int, int, int]], frac: float) -> QColor:
     return QColor(*lut[int(round(frac * (len(lut) - 1)))])
 
 
-# =============================================================================
-# Data shaping — gem_map + layout
-# =============================================================================
+# ---- Data shaping — gem_map + layout ----
 
 
 def load_gem_map(path: str):
@@ -122,6 +112,33 @@ def load_gem_map(path: str):
     apvs = [e for e in raw["apvs"] if "crate" in e]
     hole = raw.get("hole", None)
     return layers, apvs, hole, raw
+
+
+def _hole_bounds(hole):
+    """Beam-hole (x0, x1, y0, y1) in chamber mm; -1 sentinels when unplaced."""
+    if not (hole and "x_center" in hole):
+        return -1, -1, -1, -1
+    hw, hh = hole["width"], hole["height"]
+    return (hole["x_center"] - hw / 2, hole["x_center"] + hw / 2,
+            hole["y_center"] - hh / 2, hole["y_center"] + hh / 2)
+
+
+def _x_strip_extent(match, y_size, bounds):
+    """(y0, y1) of an X strip; split APVs stop at the beam-hole edge."""
+    _, _, hy0, hy1 = bounds
+    if match == "+Y" and hy1 > 0:
+        return hy1, y_size
+    if match == "-Y" and hy0 > 0:
+        return 0, hy0
+    return 0, y_size
+
+
+def _y_strip_segments(y, x_size, bounds):
+    """(x0, x1) segments of a Y strip at height ``y``, split across the hole."""
+    hx0, hx1, hy0, hy1 = bounds
+    if hy0 > 0 and hy0 < y < hy1:
+        return (0, hx0), (hx1, x_size)
+    return ((0, x_size),)
 
 
 def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
@@ -161,7 +178,6 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
             "spacer_y": [],        # y positions of horizontal spacer dashed lines
         }
 
-    apv_ch = raw.get("apv_channels", 128)
     ro_center = raw.get("readout_center", 32)
 
     all_x_strips = {det_id: set() for det_id in detectors}
@@ -173,7 +189,7 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
         if det_id not in detectors:
             continue
         plane = apv["plane"]
-        plane_strips = map_apv_strips(apv, apv_channels=apv_ch, readout_center=ro_center)
+        plane_strips = map_apv_strips(apv, apv_channels=strips_per_apv, readout_center=ro_center)
         apv_data.append((apv, det_id, plane, plane_strips))
         if plane == "X":
             all_x_strips[det_id].update(plane_strips)
@@ -181,9 +197,7 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
                 match_strips[det_id].extend(plane_strips)
 
     # Active X (and Y) extent — ask GemSystem when available; otherwise
-    # derive from max(strips)*pitch (Y bbox already set above).  All paths
-    # produce the same number for the same gem_map; the GemSystem path
-    # just keeps a single source of truth in C++.
+    # derive from max(strips)*pitch (Y bbox already set above).
     for det_id, strips in all_x_strips.items():
         if not strips:
             continue
@@ -196,12 +210,6 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
         else:
             det["x_size"] = (max(strips) + 1) * det["x_pitch"]
 
-    if hole:
-        hw = hole["width"]
-        hh = hole["height"]
-    else:
-        hw = hh = 0
-
     ref_det_id = min(detectors.keys())
     ref_det = detectors[ref_det_id]
     if hole and match_strips[ref_det_id]:
@@ -213,17 +221,12 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
             offset = gem_sys.get_hole_x_offset()
             ref_size = ref_det["x_pitch"] * raw["layers"][0]["x_apvs"] \
                        * strips_per_apv
-            hx = offset + ref_size * 0.5
+            hole["x_center"] = offset + ref_size * 0.5
         else:
             ms = match_strips[ref_det_id]
-            hx = (min(ms) + max(ms) + 1) / 2 * ref_det["x_pitch"]
-        hy = ref_det["y_size"] / 2
-        hole_x0, hole_x1 = hx - hw / 2, hx + hw / 2
-        hole_y0, hole_y1 = hy - hh / 2, hy + hh / 2
-        hole["x_center"] = hx
-        hole["y_center"] = hy
-    else:
-        hole_x0 = hole_x1 = hole_y0 = hole_y1 = -1
+            hole["x_center"] = (min(ms) + max(ms) + 1) / 2 * ref_det["x_pitch"]
+        hole["y_center"] = ref_det["y_size"] / 2
+    hole_bounds = _hole_bounds(hole)
 
     for apv, det_id, plane, plane_strips in apv_data:
         det = detectors[det_id]
@@ -238,12 +241,7 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
             strip_positions = sorted(set(plane_strips))
             x_min = min(strip_positions) * pitch
             x_max = (max(strip_positions) + 1) * pitch
-            if match == "+Y" and hole:
-                y0_edge, y1_edge = hole_y1, det["y_size"]
-            elif match == "-Y" and hole:
-                y0_edge, y1_edge = 0, hole_y0
-            else:
-                y0_edge, y1_edge = 0, det["y_size"]
+            y0_edge, y1_edge = _x_strip_extent(match, det["y_size"], hole_bounds)
             det["x_apv_edges"].add((x_min, y0_edge, y1_edge))
             det["x_apv_edges"].add((x_max, y0_edge, y1_edge))
             for s in plane_strips:
@@ -268,11 +266,8 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
             det["y_apv_edges"].add(y_max)
             for s in plane_strips:
                 strip_y = s * pitch
-                if hole and hole_y0 < strip_y < hole_y1:
-                    det["y_strips"].append((strip_y, 0, hole_x0))
-                    det["y_strips"].append((strip_y, hole_x1, det["x_size"]))
-                else:
-                    det["y_strips"].append((strip_y, 0, det["x_size"]))
+                for x0, x1 in _y_strip_segments(strip_y, det["x_size"], hole_bounds):
+                    det["y_strips"].append((strip_y, x0, x1))
             # Y APVs all sit on the chamber's outer side: left edge for the
             # left chamber, right edge for the right chamber.
             det["y_apv_boxes"].append({
@@ -300,9 +295,7 @@ def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
     return detectors
 
 
-# =============================================================================
-# Data shaping — per-event (zero-suppressed hits)
-# =============================================================================
+# ---- Data shaping — per-event (zero-suppressed hits) ----
 
 
 def build_apv_map(gem_map_apvs: Iterable[dict]) -> Dict[Tuple[int, int, int], dict]:
@@ -319,14 +312,7 @@ def process_zs_hits(zs_apvs, apv_map, detectors, hole, raw):
     """
     apv_ch = raw.get("apv_channels", 128)
     ro_center = raw.get("readout_center", 32)
-
-    if hole and "x_center" in hole:
-        hx, hy = hole["x_center"], hole["y_center"]
-        hw, hh = hole["width"], hole["height"]
-        hole_x0, hole_x1 = hx - hw / 2, hx + hw / 2
-        hole_y0, hole_y1 = hy - hh / 2, hy + hh / 2
-    else:
-        hole_x0 = hole_x1 = hole_y0 = hole_y1 = -1
+    hole_bounds = _hole_bounds(hole)
 
     result: Dict[int, Dict[str, list]] = defaultdict(lambda: {"x": [], "y": []})
 
@@ -362,21 +348,13 @@ def process_zs_hits(zs_apvs, apv_map, detectors, hole, raw):
 
             if plane == "X":
                 strip_pos = plane_strip * det["x_pitch"]
-                if match == "+Y" and hole_y1 > 0:
-                    s0, s1 = hole_y1, det["y_size"]
-                elif match == "-Y" and hole_y0 > 0:
-                    s0, s1 = 0, hole_y0
-                else:
-                    s0, s1 = 0, det["y_size"]
+                s0, s1 = _x_strip_extent(match, det["y_size"], hole_bounds)
                 result[det_id]["x"].append((strip_pos, s0, s1, charge, cross_talk))
 
             elif plane == "Y":
                 strip_pos = plane_strip * det["y_pitch"]
-                if hole_y0 > 0 and hole_y0 < strip_pos < hole_y1:
-                    result[det_id]["y"].append((strip_pos, 0, hole_x0, charge, cross_talk))
-                    result[det_id]["y"].append((strip_pos, hole_x1, det["x_size"], charge, cross_talk))
-                else:
-                    result[det_id]["y"].append((strip_pos, 0, det["x_size"], charge, cross_talk))
+                for s0, s1 in _y_strip_segments(strip_pos, det["x_size"], hole_bounds):
+                    result[det_id]["y"].append((strip_pos, s0, s1, charge, cross_talk))
 
     return dict(result)
 
@@ -392,92 +370,28 @@ def charge_range(det_hits: Dict[int, Dict[str, list]]) -> Tuple[float, float]:
     return 0.0, vmax if vmax > 0 else 1.0
 
 
-# =============================================================================
-# Data shaping — pull from live GemSystem
-# =============================================================================
+# ---- Data shaping — pull from live GemSystem ----
 
 
 def build_zs_apvs_from_gemsys(gsys) -> List[dict]:
     """Build a ``zs_apvs`` list (same shape gem_dump emits) from a post-
-    ProcessEvent GemSystem."""
-    zs_thres = gsys.zero_sup_threshold
-    xt_thres = gsys.cross_talk_threshold
-
-    out: List[dict] = []
-    n_apvs = gsys.get_n_apvs()
-    n_ts = 6  # SSP_TIME_SAMPLES
-    for idx in range(n_apvs):
-        if not gsys.has_apv_zs_hits(idx):
-            continue
-        cfg = gsys.get_apv_config(idx)
-        channels: Dict[str, dict] = {}
-        for ch in range(128):
-            if not gsys.is_channel_hit(idx, ch):
-                continue
-            ts = [gsys.get_processed_adc(idx, ch, t) for t in range(n_ts)]
-            max_charge = max(ts)
-            max_tb = ts.index(max_charge)
-            ped = cfg.pedestal(ch)
-            xtalk = (max_charge < ped.noise * xt_thres) and \
-                    (max_charge > ped.noise * zs_thres)
-            channels[str(ch)] = {
-                "charge": max_charge,
-                "max_timebin": max_tb,
-                "cross_talk": bool(xtalk),
-                "ts_adc": ts,
-            }
-        if channels:
-            out.append({
-                "crate": cfg.crate_id,
-                "mpd": cfg.mpd_id,
-                "adc": cfg.adc_ch,
-                "channels": channels,
-            })
-    return out
+    ProcessEvent GemSystem.  Channels are put back in ascending channel
+    order (the JSON text has them in string order, "0", "1", "10", ...);
+    strips are drawn in this order."""
+    apvs = json.loads(gsys.zs_apvs_json())
+    for apv in apvs:
+        apv["channels"] = dict(sorted(apv["channels"].items(),
+                                      key=lambda kv: int(kv[0])))
+    return apvs
 
 
 def build_det_list_from_gemsys(gsys) -> List[dict]:
     """Build the per-detector list (x_clusters, y_clusters, hits_2d) that
     draw_event_panels expects, reading from a post-Reconstruct GemSystem."""
-    out: List[dict] = []
-    dets = gsys.get_detectors()
-    for d in range(gsys.get_n_detectors()):
-        det = dets[d]
-        entry = {
-            "id":       d,
-            "name":     det.name,
-            "x_pitch":  det.plane_x.pitch,
-            "y_pitch":  det.plane_y.pitch,
-            "x_strips": det.plane_x.n_apvs * 128,
-            "y_strips": det.plane_y.n_apvs * 128,
-        }
-        for p, pre in ((0, "x"), (1, "y")):
-            cls = gsys.get_plane_clusters(d, p)
-            entry[pre + "_clusters"] = [
-                {
-                    "position":     cl.position,
-                    "peak_charge":  cl.peak_charge,
-                    "total_charge": cl.total_charge,
-                    "max_timebin":  cl.max_timebin,
-                    "cross_talk":   cl.cross_talk,
-                    "size":         len(cl.hits),
-                    "hit_strips":   [h.strip for h in cl.hits],
-                } for cl in cls
-            ]
-        entry["hits_2d"] = [
-            {"x": h.x, "y": h.y,
-             "x_charge": h.x_charge, "y_charge": h.y_charge,
-             "x_peak":   h.x_peak,   "y_peak":   h.y_peak,
-             "x_size":   h.x_size,   "y_size":   h.y_size}
-            for h in gsys.get_hits(d)
-        ]
-        out.append(entry)
-    return out
+    return json.loads(gsys.detectors_json())
 
 
-# =============================================================================
-# QPainter drawing — common helpers
-# =============================================================================
+# ---- QPainter drawing — common helpers ----
 
 
 def _panel_transform(world_w: float, world_h: float,
@@ -486,9 +400,8 @@ def _panel_transform(world_w: float, world_h: float,
                      fit_factor: float = 0.92) -> Tuple[float, float, float]:
     """Uniform fit of a (margin-padded) world box into the panel rect.
 
-    With ``margin_x = margin_y = 0`` (default), behaves as before: world
-    (0, 0) sits at ``(ox, oy + world_h * scale)`` in panel coords (Y
-    flipped so up = +y).
+    With ``margin_x = margin_y = 0`` (default), world (0, 0) sits at
+    ``(ox, oy + world_h * scale)`` in panel coords (Y flipped so up = +y).
 
     Non-zero margins reserve that many world-units on every side of the
     chamber, which is where APV boxes / external markers go.  ``ox/oy``
@@ -506,9 +419,25 @@ def _panel_transform(world_w: float, world_h: float,
     return scale, ox, oy
 
 
-# =============================================================================
-# QPainter drawing — APV boxes & mechanical spacers
-# =============================================================================
+def _begin_canvas(p: QPainter, canvas: QRectF, title: Optional[str],
+                  bg: Optional[QColor], fg: Optional[QColor],
+                  *, title_pt: float) -> Tuple[QColor, QColor, int]:
+    """Fill the background (default white) and draw the centred bold title
+    in ``fg`` (default #222); returns ``(bg, fg, title_h)``."""
+    bg = QColor("white") if bg is None else bg
+    fg = QColor("#222") if fg is None else fg
+    p.fillRect(canvas, bg)
+    title_h = 32 if title else 8
+    if title:
+        p.setPen(fg)
+        p.setFont(_font(title_pt, bold=True))
+        p.drawText(
+            QRectF(canvas.x(), canvas.y() + 4, canvas.width(), title_h - 8),
+            Qt.AlignmentFlag.AlignCenter, title)
+    return bg, fg, title_h
+
+
+# ---- QPainter drawing — APV boxes & mechanical spacers ----
 
 
 def _draw_spacers(p: QPainter, det: dict,
@@ -524,15 +453,8 @@ def _draw_spacers(p: QPainter, det: dict,
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
 
-    # Hole bounds in world coords; -1 sentinel disables the split logic.
-    if hole and "x_center" in hole:
-        hw, hh = hole["width"], hole["height"]
-        hx0 = hole["x_center"] - hw / 2
-        hx1 = hole["x_center"] + hw / 2
-        hy0 = hole["y_center"] - hh / 2
-        hy1 = hole["y_center"] + hh / 2
-    else:
-        hx0 = hx1 = hy0 = hy1 = -1.0
+    # -1 sentinels of an unplaced hole disable the split logic.
+    hx0, hx1, hy0, hy1 = _hole_bounds(hole)
 
     for x in det.get("spacer_x", []):
         if not (0.0 < x < x_size):
@@ -558,6 +480,19 @@ def _draw_spacers(p: QPainter, det: dict,
                        QPointF(ox + x_size * scale, ya))
         else:
             p.drawLine(QPointF(ox, ya), QPointF(ox + x_size * scale, ya))
+
+
+def _draw_hole(p: QPainter, hole: Optional[dict],
+               scale: float, ox: float, oy: float, y_size: float,
+               *, pen_w: float, alpha: int):
+    """Beam hole — square cutout with a framed border (placed holes only)."""
+    if not (hole and "x_center" in hole):
+        return
+    x0, _, _, y1 = _hole_bounds(hole)
+    p.setPen(QPen(QColor("#cc3333"), pen_w))
+    p.setBrush(QColor(255, 204, 0, alpha))
+    p.drawRect(QRectF(ox + x0 * scale, oy + (y_size - y1) * scale,
+                      hole["width"] * scale, hole["height"] * scale))
 
 
 def _draw_apv_boxes(p: QPainter, det: dict,
@@ -629,15 +564,7 @@ def _draw_apv_boxes(p: QPainter, det: dict,
     p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
 
-def _w2p(scale: float, ox: float, oy: float, world_h: float,
-         x: float, y: float) -> QPointF:
-    """World → panel point (Y flipped)."""
-    return QPointF(ox + x * scale, oy + (world_h - y) * scale)
-
-
-# =============================================================================
-# QPainter drawing — event view
-# =============================================================================
+# ---- QPainter drawing — event view ----
 
 
 _LEGEND_ENTRIES = [
@@ -677,27 +604,15 @@ def draw_event_panels(painter: QPainter, canvas: QRectF,
     detector.  Strip colormap is theme-dependent — winter on dark, autumn
     on light.
     """
-    if bg is None: bg = QColor("white")
-    if fg is None: fg = QColor("#222")
+    bg, fg, title_h = _begin_canvas(painter, canvas, title, bg, fg, title_pt=12)
     lut = _pick_charge_lut(bg)
-
-    painter.fillRect(canvas, bg)
 
     if det_filter >= 0:
         det_list = [d for d in det_list if d["id"] == det_filter]
 
-    title_h = 32 if title else 8
     legend_h = 36
     cb_w = 90
     margin = 12
-
-    # Title
-    if title:
-        painter.setPen(fg)
-        painter.setFont(_font(12, bold=True))
-        painter.drawText(
-            QRectF(canvas.x(), canvas.y() + 4, canvas.width(), title_h - 8),
-            Qt.AlignmentFlag.AlignCenter, title)
 
     # Colorbar (right margin) — based on global charge range
     vmin, vmax = charge_range(det_hits)
@@ -707,7 +622,6 @@ def draw_event_panels(painter: QPainter, canvas: QRectF,
                      canvas.height() - title_h - legend_h - margin)
     _paint_colorbar(painter, cb_area, lut, vmin, vmax, "strip charge", fg)
 
-    # Panel strip
     panels_area = QRectF(canvas.x() + margin,
                          canvas.y() + title_h,
                          canvas.width() - cb_w - 3 * margin,
@@ -731,10 +645,9 @@ def draw_event_panels(painter: QPainter, canvas: QRectF,
                               det_hits.get(did, {"x": [], "y": []}),
                               hole, vmin, vmax, fg, lut)
 
-    # Legend
     legend = QRectF(canvas.x(), canvas.bottom() - legend_h,
                     canvas.width(), legend_h)
-    _paint_legend(painter, legend, _LEGEND_ENTRIES, fg, lut)
+    _paint_legend(painter, legend, _LEGEND_ENTRIES, fg, lut=lut)
 
 
 def _draw_event_panel(p: QPainter, panel: QRectF,
@@ -769,7 +682,7 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     p.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
     # Mechanical spacers — light dashed lines, drawn before strips so any
-    # strip hits render on top.  Spacers crossing the hole get split.
+    # strip hits render on top.
     _draw_spacers(p, geom, scale, ox, oy, x_size, y_size, hole,
                   alpha=70, width=0.8)
 
@@ -779,16 +692,7 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
                     show_labels=True, fill_alpha=180,
                     border_width=0.5, font_size=6.5)
 
-    # Beam hole — square cutout with a framed border.
-    if hole and "x_center" in hole:
-        hx, hy = hole["x_center"], hole["y_center"]
-        hw, hh = hole["width"], hole["height"]
-        rx = ox + (hx - hw / 2) * scale
-        ry = oy + (y_size - (hy + hh / 2)) * scale
-        rw, rh = hw * scale, hh * scale
-        p.setPen(QPen(QColor("#cc3333"), 1.6))
-        p.setBrush(QColor(255, 204, 0, 24))
-        p.drawRect(QRectF(rx, ry, rw, rh))
+    _draw_hole(p, hole, scale, ox, oy, y_size, pen_w=1.6, alpha=24)
 
     # Strip segments (solid first, then cross-talk dashed).  Both planes
     # use the active colormap — orientation alone identifies X vs Y.
@@ -933,8 +837,11 @@ def _paint_colorbar(p: QPainter, area: QRectF,
 
 
 def _paint_legend(p: QPainter, area: QRectF, entries, fg: QColor,
-                  lut: List[Tuple[int, int, int]]):
-    """Horizontal legend row inside ``area`` — equal-width cells."""
+                  *, lut: Optional[List[Tuple[int, int, int]]] = None,
+                  apv_rgb: Optional[Tuple[int, int, int]] = None,
+                  glyph_dx: float = 8, label_dx: float = 22):
+    """Horizontal legend row inside ``area`` — equal-width cells.  ``lut``
+    feeds the patch-cmap glyph, ``apv_rgb`` the patch-apv glyph."""
     p.setPen(fg)
     p.setFont(_font(9))
     fm = QFontMetrics(p.font())
@@ -942,17 +849,17 @@ def _paint_legend(p: QPainter, area: QRectF, entries, fg: QColor,
     if n == 0:
         return
     cell_w = area.width() / n
-    mark_w = 18
     for i, (kind, label) in enumerate(entries):
-        cx = area.x() + i * cell_w + 8
+        cx = area.x() + i * cell_w + glyph_dx
         cy = area.center().y()
-        _draw_legend_glyph(p, kind, cx, cy, fg, lut)
+        _draw_legend_glyph(p, kind, cx, cy, fg, lut, apv_rgb)
         p.setPen(fg)
-        p.drawText(QPointF(cx + mark_w + 4, cy + fm.ascent() / 2 - 2), label)
+        p.drawText(QPointF(cx + label_dx, cy + fm.ascent() / 2 - 2), label)
 
 
 def _draw_legend_glyph(p: QPainter, kind: str, cx: float, cy: float,
-                       fg: QColor, lut: List[Tuple[int, int, int]]):
+                       fg: QColor, lut: Optional[List[Tuple[int, int, int]]],
+                       apv_rgb: Optional[Tuple[int, int, int]]):
     if kind == "patch-cmap":
         c = QColor(*lut[len(lut) // 2])
         p.setPen(QPen(c, 0)); p.setBrush(c)
@@ -979,11 +886,32 @@ def _draw_legend_glyph(p: QPainter, kind: str, cx: float, cy: float,
         pen = QPen(QColor("#888"), 1.2); pen.setStyle(Qt.PenStyle.DashLine)
         p.setPen(pen)
         p.drawLine(QPointF(cx, cy), QPointF(cx + 14, cy))
+    elif kind == "patch-steelblue":
+        c = QColor(70, 130, 180, 200)
+        p.setPen(QPen(c, 0)); p.setBrush(c)
+        p.drawRect(QRectF(cx, cy - 5, 14, 10))
+    elif kind == "patch-indianred":
+        c = QColor(205, 92, 92, 200)
+        p.setPen(QPen(c, 0)); p.setBrush(c)
+        p.drawRect(QRectF(cx, cy - 5, 14, 10))
+    elif kind == "patch-yellow":
+        p.setPen(QPen(QColor("#cc3333"), 1.2))
+        p.setBrush(QColor(255, 204, 0, 48))
+        p.drawRect(QRectF(cx, cy - 5, 14, 10))
+    elif kind == "patch-apv":
+        c = QColor(*apv_rgb, 220)
+        p.setPen(QPen(QColor("#222"), 0.8)); p.setBrush(c)
+        # full-thickness sample + half-thickness stub side-by-side.
+        p.drawRect(QRectF(cx, cy - 5, 9, 10))
+        p.drawRect(QRectF(cx + 11, cy - 2, 4, 4))
+    elif kind == "dash-spacer":
+        pen = QPen(QColor(150, 150, 150, 160), 1.0)
+        pen.setStyle(Qt.PenStyle.DashLine)
+        p.setPen(pen)
+        p.drawLine(QPointF(cx, cy), QPointF(cx + 14, cy))
 
 
-# =============================================================================
-# QPainter drawing — static layout view
-# =============================================================================
+# ---- QPainter drawing — static layout view ----
 
 
 def draw_layout(painter: QPainter, canvas: QRectF,
@@ -993,21 +921,9 @@ def draw_layout(painter: QPainter, canvas: QRectF,
                 bg: Optional[QColor] = None,
                 fg: Optional[QColor] = None):
     """Paint a single detector's strip layout into ``canvas``."""
-    if bg is None: bg = QColor("white")
-    if fg is None: fg = QColor("#222")
-
-    painter.fillRect(canvas, bg)
-
-    title_h = 32 if title else 8
+    _, fg, title_h = _begin_canvas(painter, canvas, title, bg, fg, title_pt=13)
     legend_h = 32
     margin = 16
-
-    if title:
-        painter.setPen(fg)
-        painter.setFont(_font(13, bold=True))
-        painter.drawText(
-            QRectF(canvas.x(), canvas.y() + 4, canvas.width(), title_h - 8),
-            Qt.AlignmentFlag.AlignCenter, title)
 
     panel = QRectF(canvas.x() + margin, canvas.y() + title_h,
                    canvas.width() - 2 * margin,
@@ -1026,22 +942,12 @@ def draw_layout(painter: QPainter, canvas: QRectF,
     painter.setBrush(Qt.BrushStyle.NoBrush)
     painter.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
-    # Mechanical spacers (dashed light gray, drawn before strips so the
-    # strip lines render on top and remain readable).  The hole is passed
-    # so spacers crossing the beam hole are split at its edges.
+    # Mechanical spacers, drawn before strips so the strip lines render on
+    # top and remain readable.
     _draw_spacers(painter, det, scale, ox, oy, x_size, y_size, hole,
                   alpha=110, width=1.0)
 
-    # Beam hole — square cutout with a framed border.
-    if hole and "x_center" in hole:
-        hx, hy = hole["x_center"], hole["y_center"]
-        hw, hh = hole["width"], hole["height"]
-        rx = ox + (hx - hw / 2) * scale
-        ry = oy + (y_size - (hy + hh / 2)) * scale
-        rw, rh = hw * scale, hh * scale
-        painter.setPen(QPen(QColor("#cc3333"), 2.5))
-        painter.setBrush(QColor(255, 204, 0, 36))
-        painter.drawRect(QRectF(rx, ry, rw, rh))
+    _draw_hole(painter, hole, scale, ox, oy, y_size, pen_w=2.5, alpha=36)
 
     # X strips (vertical blue lines, decimated by show_every within each extent group)
     x_by_extent: Dict[Tuple[float, float], list] = {}
@@ -1100,7 +1006,6 @@ def draw_layout(painter: QPainter, canvas: QRectF,
     _draw_apv_boxes(painter, det, scale, ox, oy, x_size, y_size,
                     show_labels=True, font_size=8.0)
 
-    # Legend
     n_x_apvs = len(det.get("x_apv_boxes", []))
     n_y_apvs = len(det.get("y_apv_boxes", []))
     legend_entries = [
@@ -1109,48 +1014,10 @@ def draw_layout(painter: QPainter, canvas: QRectF,
         ("patch-apv",       f"APVs (X:{n_x_apvs}/Y:{n_y_apvs}, split = stub)"),
         ("dash-spacer",     "Spacers"),
     ]
-    if hole:
+    if hole and "x_center" in hole:
         legend_entries.append(("patch-yellow", "Beam hole"))
     legend = QRectF(canvas.x(), canvas.bottom() - legend_h,
                     canvas.width(), legend_h)
-    _paint_layout_legend(painter, legend, legend_entries, fg, det)
-
-
-def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor,
-                         det: Optional[dict] = None):
-    p.setPen(fg)
-    p.setFont(_font(9))
-    fm = QFontMetrics(p.font())
-    n = len(entries)
-    if n == 0:
-        return
-    cell_w = area.width() / n
-    apv_rgb = _DET_POS_FILL.get((det or {}).get("det_pos", 0), _DET_POS_FILL[0])
-    for i, (kind, label) in enumerate(entries):
-        cx = area.x() + i * cell_w + 16
-        cy = area.center().y()
-        if kind == "patch-steelblue":
-            c = QColor(70, 130, 180, 200)
-            p.setPen(QPen(c, 0)); p.setBrush(c)
-            p.drawRect(QRectF(cx, cy - 5, 14, 10))
-        elif kind == "patch-indianred":
-            c = QColor(205, 92, 92, 200)
-            p.setPen(QPen(c, 0)); p.setBrush(c)
-            p.drawRect(QRectF(cx, cy - 5, 14, 10))
-        elif kind == "patch-yellow":
-            p.setPen(QPen(QColor("#cc3333"), 1.2))
-            p.setBrush(QColor(255, 204, 0, 48))
-            p.drawRect(QRectF(cx, cy - 5, 14, 10))
-        elif kind == "patch-apv":
-            c = QColor(*apv_rgb, 220)
-            p.setPen(QPen(QColor("#222"), 0.8)); p.setBrush(c)
-            # full-thickness sample + half-thickness stub side-by-side.
-            p.drawRect(QRectF(cx, cy - 5, 9, 10))
-            p.drawRect(QRectF(cx + 11, cy - 2, 4, 4))
-        elif kind == "dash-spacer":
-            pen = QPen(QColor(150, 150, 150, 160), 1.0)
-            pen.setStyle(Qt.PenStyle.DashLine)
-            p.setPen(pen)
-            p.drawLine(QPointF(cx, cy), QPointF(cx + 14, cy))
-        p.setPen(fg)
-        p.drawText(QPointF(cx + 20, cy + fm.ascent() / 2 - 2), label)
+    _paint_legend(painter, legend, legend_entries, fg,
+                  apv_rgb=_DET_POS_FILL.get(det.get("det_pos", 0), _DET_POS_FILL[0]),
+                  glyph_dx=16, label_dx=20)

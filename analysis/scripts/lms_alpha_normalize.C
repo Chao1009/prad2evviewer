@@ -20,6 +20,9 @@
 #include "load_daq_config.h"
 #include "WaveAnalyzer.h"
 #include "Fadc250Data.h"
+#include "EventData.h"
+#include "EvioFiles.h"
+#include "InstallPaths.h"
 
 #include <nlohmann/json.hpp>
 
@@ -27,8 +30,6 @@
 #include <TH1D.h>
 #include <TGraph.h>
 #include <TCanvas.h>
-#include <TSystem.h>
-#include <TSystemDirectory.h>
 #include <TString.h>
 #include <TStyle.h>
 #include <TLegend.h>
@@ -36,14 +37,9 @@
 #include <vector>
 #include <string>
 #include <map>
-#include <algorithm>
+#include <memory>
 #include <fstream>
 #include <iostream>
-#include <cmath>
-
-// ── trigger bits (database/trigger_bits.json) ───────────────────────────
-static constexpr uint32_t TBIT_LMS   = (1u << 24);
-static constexpr uint32_t TBIT_ALPHA = (1u << 25);
 
 // ── LMS reference channels ─────────────────────────────────────────────
 static constexpr int N_LMS_REF = 3;   // LMS1, LMS2, LMS3
@@ -94,39 +90,12 @@ static void loadDaqMap(const char *path)
     gNMod = idx;
 }
 
-// ── file discovery ─────────────────────────────────────────────────────
-static std::vector<std::string> discoverFiles(const char *dir, int run)
-{
-    std::vector<std::string> out;
-    TString prefix = Form("prad_%d.evio.", run);
-
-    TSystemDirectory d("", dir);
-    TList *list = d.GetListOfFiles();
-    if (!list) return out;
-
-    TIter next(list);
-    TObject *obj;
-    while ((obj = next())) {
-        TString name = obj->GetName();
-        if (!name.BeginsWith(prefix)) continue;
-        TString sfx = name(prefix.Length(), name.Length() - prefix.Length());
-        bool ok = sfx.Length() > 0;
-        for (int i = 0; i < sfx.Length(); i++)
-            if (!isdigit(sfx[i])) { ok = false; break; }
-        if (!ok) continue;
-        out.push_back(std::string(dir) + "/" + name.Data());
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
 // ── main ───────────────────────────────────────────────────────────────
 //
 // Full version takes 4 explicit args (no defaults).  A 2-arg overload
 // delegates with empty-string placeholders so cling's interpreter call
 // path doesn't have to synthesize `const char* = nullptr` defaults
-// (known SEGV trigger when mixed with other types — see the matching
-// note in gem_clusters_to_root.C).
+// (known SEGV trigger when mixed with other types).
 void lms_alpha_normalize(const char *data_dir, int run_number,
                          const char *daq_cfg_path,
                          const char *daq_map_path);
@@ -140,9 +109,7 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
                          const char *daq_cfg_path,
                          const char *daq_map_path)
 {
-    // --- locate database directory ---
-    TString dbDir = gSystem->Getenv("PRAD2_DATABASE_DIR");
-    if (dbDir.IsNull()) dbDir = "database";
+    TString dbDir = prad2::database_dir().c_str();
 
     TString cfgFile = (daq_cfg_path && *daq_cfg_path) ? TString(daq_cfg_path)
                                                       : Form("%s/daq_config.json", dbDir.Data());
@@ -186,15 +153,13 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
         if (ci.is_lms) printf(" %s(crate %d)", ci.name.c_str(), addr / 10000);
     printf("\n");
 
-    // build ROC tag -> crate lookup from daq_config
-    std::map<uint32_t, int> tagToCrate;
-    for (auto &re : cfg.roc_tags) {
-        tagToCrate[re.tag] = re.crate;
+    const auto tagToCrate = cfg.roc_crate_map();
+    for (auto &re : cfg.roc_tags)
         printf("  ROC 0x%02X -> crate %d (%s)\n", re.tag, re.crate, re.name.c_str());
-    }
 
     // --- discover files ---
-    auto files = discoverFiles(data_dir, run_number);
+    auto files = prad2::discover_split_files(std::string(data_dir) + "/prad_"
+                                             + std::to_string(run_number) + ".evio.*");
     if (files.empty()) {
         fprintf(stderr, "No prad_%d.evio.* files in %s\n", run_number, data_dir);
         return;
@@ -209,25 +174,25 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
         "Normalized LMS vs Module;Module index;Avg Norm LMS",
         gNMod, 0, gNMod);
 
+    auto mkGraph = [](const TString &name, const TString &title, Color_t col) {
+        auto *g = new TGraph();
+        g->SetName(name);
+        g->SetTitle(title);
+        g->SetMarkerStyle(7);
+        g->SetMarkerColor(col);
+        return g;
+    };
     TGraph *grAlpha[N_LMS_REF], *grLMS[N_LMS_REF], *grRatio[N_LMS_REF];
     for (int j = 0; j < N_LMS_REF; j++) {
-        grAlpha[j] = new TGraph();
-        grAlpha[j]->SetName(Form("grAlpha%d", j + 1));
-        grAlpha[j]->SetTitle(Form("Alpha Ref LMS%d;Event #;Integral", j + 1));
-        grAlpha[j]->SetMarkerStyle(7);
-        grAlpha[j]->SetMarkerColor(kRed + j);
-
-        grLMS[j] = new TGraph();
-        grLMS[j]->SetName(Form("grLMS%d", j + 1));
-        grLMS[j]->SetTitle(Form("LMS Ref LMS%d;Event #;Integral", j + 1));
-        grLMS[j]->SetMarkerStyle(7);
-        grLMS[j]->SetMarkerColor(kBlue + j);
-
-        grRatio[j] = new TGraph();
-        grRatio[j]->SetName(Form("grRatio%d", j + 1));
-        grRatio[j]->SetTitle(Form("Alpha/LMS Ratio LMS%d;LMS Event #;Ratio", j + 1));
-        grRatio[j]->SetMarkerStyle(7);
-        grRatio[j]->SetMarkerColor(kGreen + 2 + j);
+        grAlpha[j] = mkGraph(TString::Format("grAlpha%d", j + 1),
+                             TString::Format("Alpha Ref LMS%d;Event #;Integral", j + 1),
+                             kRed + j);
+        grLMS[j]   = mkGraph(TString::Format("grLMS%d", j + 1),
+                             TString::Format("LMS Ref LMS%d;Event #;Integral", j + 1),
+                             kBlue + j);
+        grRatio[j] = mkGraph(TString::Format("grRatio%d", j + 1),
+                             TString::Format("Alpha/LMS Ratio LMS%d;LMS Event #;Ratio", j + 1),
+                             kGreen + 2 + j);
     }
 
     // --- accumulators ---
@@ -242,7 +207,8 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
     evc::EvChannel reader;
     reader.SetConfig(cfg);
 
-    fdec::EventData evt;
+    auto evt_ptr = std::make_unique<fdec::EventData>();
+    auto &evt = *evt_ptr;
     fdec::WaveAnalyzer wave;
 
     // --- event loop ---------------------------------------------------------
@@ -263,8 +229,8 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
                 if (!reader.DecodeEvent(ie, evt)) continue;
                 nTotal++;
 
-                bool isLMS   = (evt.info.trigger_bits & TBIT_LMS)   != 0;
-                bool isAlpha = (evt.info.trigger_bits & TBIT_ALPHA) != 0;
+                bool isLMS   = (evt.info.trigger_bits & prad2::TBIT_lms)   != 0;
+                bool isAlpha = (evt.info.trigger_bits & prad2::TBIT_alpha) != 0;
                 if (!isLMS && !isAlpha) continue;
 
                 // -- compute waveform integrals for all channels ----
@@ -278,22 +244,16 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
                     if (ct == tagToCrate.end()) continue;
                     int crate = ct->second;
 
-                    for (int s = 0; s < fdec::MAX_SLOTS; s++) {
-                        if (!roc.slots[s].present) continue;
-                        for (int c = 0; c < fdec::MAX_CHANNELS; c++) {
-                            auto &cd = roc.slots[s].channels[c];
-                            if (cd.nsamples == 0) continue;
+                    fdec::ForEachChannel(roc, [&](int s, int c, const fdec::ChannelData &cd) {
+                        fdec::WaveResult wres;
+                        wave.Analyze(cd.samples, cd.nsamples, wres);
 
-                            fdec::WaveResult wres;
-                            wave.Analyze(cd.samples, cd.nsamples, wres);
+                        float integral = 0.f;
+                        for (int k = 0; k < cd.nsamples; k++)
+                            integral += cd.samples[k] - wres.ped.mean;
 
-                            float integral = 0.f;
-                            for (int k = 0; k < cd.nsamples; k++)
-                                integral += cd.samples[k] - wres.ped.mean;
-
-                            integrals[packAddr(crate, s, c)] = integral;
-                        }
-                    }
+                        integrals[packAddr(crate, s, c)] = integral;
+                    });
                 }
 
                 // -- extract LMS reference values from this event ----
@@ -416,35 +376,18 @@ void lms_alpha_normalize(const char *data_dir, int run_number,
     hNormMap->SetMarkerStyle(6);
     hNormMap->Draw("P");
 
-    c1->cd(3);
-    if (grAlpha[0]->GetN() > 0) {
-        grAlpha[0]->Draw("AP");
-        for (int j = 1; j < N_LMS_REF; j++) grAlpha[j]->Draw("P SAME");
+    auto drawOverlay = [](TGraph *const *gr) {
+        if (gr[0]->GetN() == 0) return;
+        gr[0]->Draw("AP");
+        for (int j = 1; j < N_LMS_REF; j++) gr[j]->Draw("P SAME");
         auto *leg = new TLegend(0.65, 0.75, 0.88, 0.88);
         for (int j = 0; j < N_LMS_REF; j++)
-            leg->AddEntry(grAlpha[j], Form("LMS%d", j + 1), "p");
+            leg->AddEntry(gr[j], Form("LMS%d", j + 1), "p");
         leg->Draw();
-    }
-
-    c1->cd(4);
-    if (grLMS[0]->GetN() > 0) {
-        grLMS[0]->Draw("AP");
-        for (int j = 1; j < N_LMS_REF; j++) grLMS[j]->Draw("P SAME");
-        auto *leg = new TLegend(0.65, 0.75, 0.88, 0.88);
-        for (int j = 0; j < N_LMS_REF; j++)
-            leg->AddEntry(grLMS[j], Form("LMS%d", j + 1), "p");
-        leg->Draw();
-    }
-
-    c1->cd(5);
-    if (grRatio[0]->GetN() > 0) {
-        grRatio[0]->Draw("AP");
-        for (int j = 1; j < N_LMS_REF; j++) grRatio[j]->Draw("P SAME");
-        auto *leg = new TLegend(0.65, 0.75, 0.88, 0.88);
-        for (int j = 0; j < N_LMS_REF; j++)
-            leg->AddEntry(grRatio[j], Form("LMS%d", j + 1), "p");
-        leg->Draw();
-    }
+    };
+    c1->cd(3); drawOverlay(grAlpha);
+    c1->cd(4); drawOverlay(grLMS);
+    c1->cd(5); drawOverlay(grRatio);
 
     c1->Update();
     c1->SaveAs(Form("lms_alpha_run%d.png", run_number));

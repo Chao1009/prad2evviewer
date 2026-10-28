@@ -12,7 +12,7 @@ sub-events, and lets the user step through them.  Two tabs:
 * **Cluster** — HyCal heatmap of per-module energy with cluster
   overlays (crosshair + energy label), cluster table, selector.
   Clustering uses ``prad2py.det.HyCalCluster`` on live ADC data;
-  calibration comes from ``HyCalSystem::Init``.
+  the per-run calibration is loaded by ``prad2py.det.PipelineBuilder``.
 
 Usage
 -----
@@ -28,7 +28,7 @@ import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
@@ -37,9 +37,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
     QLabel, QComboBox, QCheckBox, QCompleter, QFileDialog, QMessageBox,
     QProgressDialog, QSizePolicy, QStatusBar, QToolTip, QPushButton,
-    QSpinBox, QDoubleSpinBox, QSplitter, QTabWidget, QTableWidget,
+    QSpinBox, QSplitter, QTabWidget, QTableWidget,
     QTableWidgetItem, QHeaderView, QDockWidget, QGroupBox,
-    QDialog, QDialogButtonBox, QFrame, QLineEdit,
+    QDialog, QDialogButtonBox, QLineEdit,
 )
 from PyQt6.QtCore import (
     Qt, QObject, QPointF, QRectF, QThread, pyqtSignal, QTimer,
@@ -50,36 +50,25 @@ from PyQt6.QtGui import (
 )
 
 from hycal_geoview import (
-    load_modules as load_geo_modules,
-    HyCalMapWidget, ColorRangeController, cmap_qcolor,
+    load_modules as load_geo_modules, load_daq_map, load_roc_tag_map,
+    HyCalMapWidget, ColorRangeController, cmap_qcolor, series_qcolor,
+    draw_wave_axes, AUX_TYPES, OVERLAY_BUTTON_QSS,
     apply_theme_palette, set_theme,
     available_themes, THEME, themed,
+    setup_tuning_dock, add_config_rows, editor_value, set_editor_value,
+    config_to_editors, editors_to_config, start_worker_thread,
 )
+from evio_io import EvioCursor, iter_physics_records, open_evio
+from prad2_env import import_prad2py
 
 
-# ===========================================================================
-#  prad2py discovery (mirrors tagger_viewer.py)
-# ===========================================================================
+# ---- prad2py discovery ----
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_DIR   = _SCRIPT_DIR.parent
 
-for _cand in (
-    _REPO_DIR / "build" / "python",
-    _REPO_DIR / "build-release" / "python",
-    _REPO_DIR / "build" / "Release" / "python",
-):
-    if _cand.is_dir() and str(_cand) not in sys.path:
-        sys.path.insert(0, str(_cand))
-
-try:
-    import prad2py                                # type: ignore
-    _HAVE_PRAD2PY = True
-    _PRAD2PY_ERR  = ""
-except Exception as _exc:
-    prad2py = None                                # type: ignore
-    _HAVE_PRAD2PY = False
-    _PRAD2PY_ERR  = f"{type(_exc).__name__}: {_exc}"
+prad2py, _PRAD2PY_ERR = import_prad2py()
+_HAVE_PRAD2PY = prad2py is not None
 
 
 def _check_evchannel_support() -> Optional[str]:
@@ -99,12 +88,9 @@ def _check_evchannel_support() -> Optional[str]:
     return None
 
 
-# ===========================================================================
-#  WaveAnalyzer — direct exports of the C++ implementation in prad2py.dec.
-#  The server uses the same code; ~50× faster than the previous Python port
-#  which mattered a lot when "Accumulate all modules" analyses 1700+
-#  channels per event.
-# ===========================================================================
+# ---- WaveAnalyzer ----
+# Direct exports of the C++ implementation in prad2py.dec (the server runs
+# the same code).
 
 WaveConfig = prad2py.dec.WaveConfig if _HAVE_PRAD2PY else None
 Peak       = prad2py.dec.Peak       if _HAVE_PRAD2PY else None
@@ -116,9 +102,7 @@ def analyze(samples, cfg):
     return prad2py.dec.WaveAnalyzer(cfg).analyze(samples)
 
 
-# ===========================================================================
-#  Histogram accumulator
-# ===========================================================================
+# ---- Histogram accumulator ----
 
 @dataclass
 class Hist1D:
@@ -166,20 +150,57 @@ class ChannelHists:
     position:    Optional[Hist1D] = None
     npeaks:      Optional[Hist1D] = None
 
+    def fill_peaks(self, peaks, flt: "WaveformFilter") -> int:
+        """Fold one event's peaks that pass ``flt`` into the histograms and
+        return how many passed."""
+        kept = 0
+        for p in peaks:
+            if not flt.passes(p):
+                continue
+            self.height.fill(p.height)
+            self.integral.fill(p.integral)
+            self.position.fill(p.time)
+            kept += 1
+        self.npeaks.fill(kept)
+        self.events += 1
+        if kept > 0:
+            self.peak_events += 1
+        return kept
 
-# ===========================================================================
-#  Waveform peak filter — mirrors C++ PeakFilter (src/app_state.h).
-# ===========================================================================
-#
-# Each axis is an optional [min, max] range; missing bound = no constraint.
-# Quality bits use accept / reject masks resolved against PEAK_QUALITY_BITS.
-# `enable=False` makes the filter a no-op — driven by the GUI "apply" toggle.
-# Same JSON shape as the web monitor's `waveform_filter`, so the same
-# monitor_config.json `waveform.filter` block configures both viewers.
 
-# Mirrors AppState::peak_quality_bits_def in src/app_state_init.cpp.  Bit
-# values must agree with prad2py.dec.Q_PEAK_* (we read those at runtime so
-# the names stay authoritative if the C++ side adds another flag).
+class _HistSpec(NamedTuple):
+    attr: str                 # ChannelHists field
+    cfg_key: Optional[str]    # binning key in monitor_config.json's "waveform"
+    json_key: str             # key in the saved histogram JSON
+    label: str                # placeholder title
+    title: str                # plot title
+    color: str
+    default: Dict             # binning when cfg_key is absent
+
+
+# The n-peaks binning is fixed; its left edge at -0.5 puts integer counts
+# (0, 1, 2 …) on bin centres rather than at the left edge of each bar.
+_HIST_SPECS: Tuple[_HistSpec, ...] = (
+    _HistSpec("height", "height_hist", "height_hist", "Peak Height",
+              "Peak Height [ADC]", "#e599f7",
+              {"min": 0, "max": 4000, "step": 10}),
+    _HistSpec("integral", "integral_hist", "integral_hist", "Peak Integral",
+              "Peak Integral [ADC·sample]", "#00b4d8",
+              {"min": 0, "max": 20000, "step": 100}),
+    _HistSpec("position", "time_hist", "position_hist", "Peak Time",
+              "Peak Time [ns]", "#51cf66",
+              {"min": 0, "max": 400, "step": 4}),
+    _HistSpec("npeaks", None, "npeaks_hist", "Peaks / Event",
+              "Peaks / Event", "#ffa657",
+              {"min": -0.5, "max": 10.5, "step": 1}),
+)
+
+
+# ---- Waveform peak filter ----
+
+# Mirrors AppState::peak_quality_bits_def in src/app_state_init.cpp; the
+# masks are read from prad2py.dec.Q_PEAK_* at runtime so they always agree
+# with the C++ side.
 def _resolve_quality_bits() -> List[Dict[str, object]]:
     if not _HAVE_PRAD2PY:
         return []
@@ -294,36 +315,7 @@ def _mask_to_names(mask: int) -> List[str]:
     return [d["name"] for d in PEAK_QUALITY_BITS if mask & int(d["mask"])]
 
 
-# ===========================================================================
-#  Config / map loaders
-# ===========================================================================
-
-def load_daq_map(path: Path) -> Dict[Tuple[int, int, int], str]:
-    """(crate, slot, channel) -> module_name from hycal_map.json.
-
-    Records without a "daq" block (boosters, PRad-1 V1-V4) are skipped.
-    """
-    with open(path, encoding="utf-8") as f:
-        entries = json.load(f)
-    out: Dict[Tuple[int, int, int], str] = {}
-    for e in entries:
-        d = e.get("daq")
-        if not d:
-            continue
-        out[(int(d["crate"]), int(d["slot"]), int(d["channel"]))] = e["n"]
-    return out
-
-
-def load_roc_tag_map(path: Path) -> Dict[int, int]:
-    with open(path, encoding="utf-8") as f:
-        cfg = json.load(f)
-    out = {}
-    for r in cfg.get("roc_tags", []):
-        tag = int(r["tag"], 16) if isinstance(r["tag"], str) else int(r["tag"])
-        if r.get("type") == "roc":
-            out[tag] = int(r["crate"])
-    return out
-
+# ---- Config loaders ----
 
 def load_hist_config(path: Path) -> Dict:
     with open(path, encoding="utf-8") as f:
@@ -350,37 +342,68 @@ def _mask_from_names(names: List[str], bitmap: Dict[str, int]) -> int:
     return m
 
 
-# ===========================================================================
-#  Hist bin builder helpers
-# ===========================================================================
+def trigger_ok(tb: int, accept: int, reject: int) -> bool:
+    """True if ``tb`` has one of the ``accept`` bits (any, when 0) and none
+    of the ``reject`` bits."""
+    return not ((accept and (tb & accept) == 0) or (reject and (tb & reject)))
+
+
+# ---- Histogram filling ----
 
 def _nbins(c: Dict) -> int:
     span = c["max"] - c["min"]
     return max(1, int(np.ceil(span / c["step"])))
 
 
-def _make_hists(h_cfg: Dict, i_cfg: Dict, p_cfg: Dict, n_cfg: Dict,
-                roc: int, slot: int, channel: int,
+def _make_hists(cfgs: Dict[str, Dict], roc: int, slot: int, channel: int,
                 module: Optional[str]) -> ChannelHists:
+    """ChannelHists with one Hist1D per ``cfgs`` entry (field -> binning)."""
     return ChannelHists(
         roc=roc, slot=slot, channel=channel, module=module,
-        height  =Hist1D(_nbins(h_cfg), h_cfg["min"], h_cfg["step"]),
-        integral=Hist1D(_nbins(i_cfg), i_cfg["min"], i_cfg["step"]),
-        position=Hist1D(_nbins(p_cfg), p_cfg["min"], p_cfg["step"]),
-        npeaks  =Hist1D(_nbins(n_cfg), n_cfg["min"], n_cfg["step"]),
-    )
+        **{a: Hist1D(_nbins(c), c["min"], c["step"]) for a, c in cfgs.items()})
 
 
-# ===========================================================================
-#  Indexer — background pass to locate all physics sub-events
-# ===========================================================================
+def _iter_channel_peaks(fadc_evt,
+                        channels: Dict[Tuple[int, int, int], ChannelHists],
+                        wcfg):
+    """Yield ``(key, hits, peaks)`` for every channel of the event that has
+    histograms in ``channels`` and at least 10 samples."""
+    for r in range(fadc_evt.nrocs):
+        roc = fadc_evt.roc(r)
+        roc_tag = int(roc.tag)
+        for s in roc.present_slots():
+            slot = roc.slot(s)
+            for c in slot.present_channels():
+                key = (roc_tag, s, c)
+                hits = channels.get(key)
+                if hits is None:
+                    continue
+                samples = slot.channel(c).samples
+                if samples.size < 10:
+                    continue
+                _, _, peaks = analyze(samples, wcfg)
+                yield key, hits, peaks
+
+
+# One flag per physics sub-event, set once its peaks are in the histograms
+# so re-visiting an event does not count it twice.
+def _is_folded(acc: Optional[np.ndarray], idx: int) -> bool:
+    return acc is not None and 0 <= idx < acc.size and bool(acc[idx])
+
+
+def _mark_folded(acc: Optional[np.ndarray], idx: int) -> None:
+    if acc is not None and 0 <= idx < acc.size:
+        acc[idx] = True
+
+
+# ---- Indexer — background pass to locate all physics sub-events ----
 
 class IndexerWorker(QObject):
-    """Scans the file once in RA mode to record (evio_idx, sub_idx) per
-    physics sub-event.  No waveform decoding — Scan() only."""
+    """Scans the file once to record (evio_idx, sub_idx) per physics
+    sub-event.  No waveform decoding — Scan() only."""
 
     progressed = pyqtSignal(int, int)   # (evio_events_scanned, total_evio_events)
-    finished   = pyqtSignal(object)     # {"path": str, "index": list, "total_evio": int}
+    finished   = pyqtSignal(object)     # {"index": list, "total_evio": int, "cancelled": bool}
     failed     = pyqtSignal(str)
 
     def __init__(self, evio_path: str, daq_config_path: str):
@@ -399,15 +422,7 @@ class IndexerWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
     def _run(self) -> Dict:
-        dec = prad2py.dec
-        cfg = (dec.load_daq_config(self._daq_cfg_path) if self._daq_cfg_path
-               else dec.load_daq_config())
-        ch  = dec.EvChannel()
-        ch.set_config(cfg)
-        st = ch.open_auto(self._path)
-        if st != dec.Status.success:
-            raise RuntimeError(f"cannot open {self._path}: {st}")
-        is_ra = ch.is_random_access()
+        ch, is_ra = open_evio(self._path, self._daq_cfg_path)
 
         # In RA mode we know the total upfront; sequential mode walks to EOF
         # so we just report a rolling count.
@@ -415,27 +430,26 @@ class IndexerWorker(QObject):
         index: List[Tuple[int, int]] = []
 
         progress_every = max(1, total_evio // 200) if total_evio else 500
-        ei = 0
-        while ch.read() == dec.Status.success:
-            if self._cancel:
-                break
-            if ch.scan() and ch.get_event_type() == dec.EventType.Physics:
-                for si in range(ch.get_n_events()):
-                    index.append((ei, si))
-            ei += 1
-            if (ei % progress_every) == 0:
-                self.progressed.emit(ei, total_evio or ei)
+        n_rec = 0
 
-        ch.close()
-        self.progressed.emit(ei, total_evio or ei)
-        return {"path": self._path, "index": index,
-                "total_evio": ei, "cancelled": self._cancel,
-                "random_access": is_ra}
+        def _on_record(idx: int):
+            nonlocal n_rec
+            n_rec = idx + 1
+            if (n_rec % progress_every) == 0:
+                self.progressed.emit(n_rec, total_evio or n_rec)
+
+        try:
+            for ei in iter_physics_records(ch, is_ra, lambda: self._cancel,
+                                           _on_record):
+                index.extend((ei, si) for si in range(ch.get_n_events()))
+        finally:
+            ch.close()
+        self.progressed.emit(n_rec, total_evio or n_rec)
+        return {"index": index,
+                "total_evio": n_rec, "cancelled": self._cancel}
 
 
-# ===========================================================================
-#  Batch processor — fills all-module hists for the next N events
-# ===========================================================================
+# ---- Batch processor — fills all-module hists for the next N events ----
 
 class BatchWorker(QObject):
     """Reads events start_idx .. start_idx + n - 1 (no display updates) and
@@ -479,16 +493,7 @@ class BatchWorker(QObject):
             self.failed.emit(f"{type(e).__name__}: {e}\n{traceback.format_exc()}")
 
     def _run(self) -> int:
-        dec = prad2py.dec
-        cfg = (dec.load_daq_config(self._daq_cfg_path) if self._daq_cfg_path
-               else dec.load_daq_config())
-        ch  = dec.EvChannel()
-        ch.set_config(cfg)
-        st = ch.open_auto(self._path)
-        if st != dec.Status.success:
-            raise RuntimeError(f"cannot open {self._path}: {st}")
-        is_ra = ch.is_random_access()
-
+        cur = EvioCursor(self._path, self._daq_cfg_path)
         n_done = 0
         peaks_found = 0
         progress_every = max(1, self._count // 100)
@@ -497,96 +502,48 @@ class BatchWorker(QObject):
         channels = self._channels
 
         def _fold_event(phys_idx: int, sub_idx: int) -> int:
-            """Scan + select current event, accumulate hists for every
+            """Scan + select the loaded event, accumulate hists for every
             channel, return peaks found this event (or -1 if the event
             is rejected by trigger mask or dedup)."""
             nonlocal n_done
-            if (self._accumulated is not None
-                    and 0 <= phys_idx < self._accumulated.size
-                    and self._accumulated[phys_idx]):
+            if _is_folded(self._accumulated, phys_idx):
                 n_done += 1
                 return -1
+            ch = cur.ch
             if not ch.scan():
                 return -1
             ch.select_event(sub_idx)
-            info = ch.info()
-            tb = int(info.trigger_bits)
-            if self._accept and (tb & self._accept) == 0:
+            if not trigger_ok(int(ch.info().trigger_bits),
+                              self._accept, self._reject):
                 n_done += 1
                 return -1
-            if self._reject and (tb & self._reject):
-                n_done += 1
-                return -1
-            fadc_evt = ch.fadc()
             pfound = 0
-            for r in range(fadc_evt.nrocs):
-                roc = fadc_evt.roc(r)
-                roc_tag = int(roc.tag)
-                for s in roc.present_slots():
-                    slot = roc.slot(s)
-                    for c in slot.present_channels():
-                        key = (roc_tag, s, c)
-                        hits = channels.get(key)
-                        if hits is None:
-                            continue
-                        samples = slot.channel(c).samples
-                        if samples.size < 10:
-                            continue
-                        _, _, peaks = analyze(samples, wcfg)
-                        np_kept = 0
-                        for p in peaks:
-                            if not flt.passes(p):
-                                continue
-                            hits.height.fill(p.height)
-                            hits.integral.fill(p.integral)
-                            hits.position.fill(p.time)
-                            np_kept += 1
-                            pfound += 1
-                        hits.npeaks.fill(np_kept)
-                        hits.events += 1
-                        if np_kept > 0:
-                            hits.peak_events += 1
-            if self._accumulated is not None and 0 <= phys_idx < self._accumulated.size:
-                self._accumulated[phys_idx] = True
+            for _, hits, peaks in _iter_channel_peaks(ch.fadc(), channels, wcfg):
+                pfound += hits.fill_peaks(peaks, flt)
+            _mark_folded(self._accumulated, phys_idx)
             n_done += 1
             return pfound
 
+        # self._index is in file order, so a sequential cursor only ever
+        # walks forward.
         try:
-            if is_ra:
-                # RA: jump directly to each phys event's evio block.
-                for i in range(self._count):
-                    if self._cancel: break
-                    phys_idx = self._start + i
-                    if phys_idx >= len(self._index): break
-                    ev_idx, sub_idx = self._index[phys_idx]
-                    if ch.read_event_by_index(ev_idx) != dec.Status.success:
+            for i in range(self._count):
+                if self._cancel: break
+                phys_idx = self._start + i
+                if phys_idx >= len(self._index): break
+                ev_idx, sub_idx = self._index[phys_idx]
+                try:
+                    cur.seek(ev_idx)
+                except RuntimeError:
+                    if cur.is_ra:
                         continue
-                    pf = _fold_event(phys_idx, sub_idx)
-                    if pf > 0: peaks_found += pf
-                    if (i % progress_every) == 0:
-                        self.progressed.emit(n_done, self._count, peaks_found)
-            else:
-                # Sequential: walk forward through the file, processing the
-                # index entries in order.  self._index is already in
-                # evio-order so consecutive phys entries only ever require
-                # more Read()s, never a rewind.
-                cur_evio = -1
-                for i in range(self._count):
-                    if self._cancel: break
-                    phys_idx = self._start + i
-                    if phys_idx >= len(self._index): break
-                    need_evio, sub_idx = self._index[phys_idx]
-                    while cur_evio < need_evio:
-                        if ch.read() != dec.Status.success:
-                            raise RuntimeError(
-                                f"EOF before reaching evio event {need_evio}")
-                        cur_evio += 1
-                    pf = _fold_event(phys_idx, sub_idx)
-                    if pf > 0: peaks_found += pf
-                    if (i % progress_every) == 0:
-                        self.progressed.emit(n_done, self._count, peaks_found)
+                    raise
+                pf = _fold_event(phys_idx, sub_idx)
+                if pf > 0: peaks_found += pf
+                if (i % progress_every) == 0:
+                    self.progressed.emit(n_done, self._count, peaks_found)
         finally:
-            ch.close()
+            cur.close()
 
         self.progressed.emit(n_done, self._count, peaks_found)
         return n_done
@@ -607,9 +564,7 @@ def _find_channel_samples(fadc_evt, roc_tag: int, slot: int, channel: int):
     return None
 
 
-# ===========================================================================
-#  Small themed overlay controls for plot widgets
-# ===========================================================================
+# ---- Plot widget helpers (overlay controls, framed canvas base) ----
 
 def _overlay_checkbox_qss() -> str:
     """QSS for a compact checkbox drawn on top of a plot canvas."""
@@ -640,11 +595,35 @@ def _overlay_button_qss() -> str:
     )
 
 
-# ===========================================================================
-#  Hist1DWidget — QPainter bar chart with optional log Y
-# ===========================================================================
+class _PlotCanvas(QWidget):
+    """Canvas with a framed plot rect inset by the subclass's PAD_L/R/T/B
+    margins and a title above it."""
 
-class Hist1DWidget(QWidget):
+    def _plot_rect(self) -> QRectF:
+        w, h = self.width(), self.height()
+        return QRectF(self.PAD_L, self.PAD_T,
+                      max(1.0, w - self.PAD_L - self.PAD_R),
+                      max(1.0, h - self.PAD_T - self.PAD_B))
+
+    def _paint_frame(self, p: QPainter, title: str, title_dy: int) -> QRectF:
+        """Fill the background, outline the plot rect and draw ``title``
+        ``title_dy`` px above it; returns the plot rect."""
+        p.fillRect(self.rect(), QColor(THEME.BG))
+        r = self._plot_rect()
+        p.setPen(QColor(THEME.BORDER))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(r)
+        if title:
+            f = QFont("Monospace", 10); f.setBold(True)
+            p.setFont(f)
+            p.setPen(QColor(THEME.TEXT))
+            p.drawText(int(r.left()), int(r.top() - title_dy), title)
+        return r
+
+
+# ---- Hist1DWidget — QPainter bar chart with optional log Y ----
+
+class Hist1DWidget(_PlotCanvas):
     PAD_L, PAD_R, PAD_T, PAD_B = 58, 14, 20, 20
 
     def __init__(self, parent=None):
@@ -699,12 +678,6 @@ class Hist1DWidget(QWidget):
         self._hover_idx = -1
         self.update()
 
-    def _plot_rect(self) -> QRectF:
-        w, h = self.width(), self.height()
-        return QRectF(self.PAD_L, self.PAD_T,
-                      max(1.0, w - self.PAD_L - self.PAD_R),
-                      max(1.0, h - self.PAD_T - self.PAD_B))
-
     def resizeEvent(self, ev):
         cb = self._logy_cb
         cb.adjustSize()
@@ -714,18 +687,7 @@ class Hist1DWidget(QWidget):
     def paintEvent(self, _ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.fillRect(self.rect(), QColor(THEME.BG))
-
-        r = self._plot_rect()
-        p.setPen(QColor(THEME.BORDER))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(r)
-
-        if self._title:
-            f = QFont("Monospace", 10); f.setBold(True)
-            p.setFont(f)
-            p.setPen(QColor(THEME.TEXT))
-            p.drawText(int(r.left()), int(r.top() - 8), self._title)
+        r = self._paint_frame(p, self._title, 8)
 
         n = self._bins.size
         if n == 0 or self._bins.sum() == 0:
@@ -837,19 +799,11 @@ def _fmt_count(v: float) -> str:
     return f"{v:.2g}"
 
 
-# ===========================================================================
-#  WaveformPlotWidget — draws the current event's raw FADC samples
-# ===========================================================================
+# ---- WaveformPlotWidget — draws the current event's raw FADC samples ----
 
-class WaveformPlotWidget(QWidget):
+class WaveformPlotWidget(_PlotCanvas):
     PAD_L, PAD_R, PAD_T, PAD_B = 52, 14, 22, 30
     MAX_STACK = 200
-
-    # Same peak colour palette the web frontend uses (resources/viewer.js PC).
-    _PEAK_PALETTE = (
-        "#00b4d8", "#ff6b6b", "#51cf66", "#ffd43b",
-        "#cc5de8", "#ff922b", "#20c997", "#f06595",
-    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -862,19 +816,17 @@ class WaveformPlotWidget(QWidget):
         self._ped_rms: float = 0.0
         self._title: str = ""
         self._clk_mhz: float = 250.0
-        # Active waveform filter (mirrors web monitor's PeakFilter).  Peaks
-        # rejected by it are drawn dimmer and the cut regions get a faint
-        # overlay rectangle on the plot — same visual language as
-        # resources/waveform.js.  ``_filter_show`` mirrors the "show"
-        # toggle: when False the overlays are hidden but peaks are still
-        # dimmed (so the user can still see which ones are filtered).
+        # Peaks rejected by the active filter are drawn dimmer and the cut
+        # regions get a faint overlay (as in resources/waveform.js).
+        # ``_filter_show`` is the "show" toggle: when False the overlays are
+        # hidden but rejected peaks are still dimmed.
         self._filter: Optional[WaveformFilter] = None
         self._filter_show: bool = True
 
         # --- stack mode state ---
         self._stack_enabled: bool = False
         self._stack_traces: List[np.ndarray] = []   # bounded by MAX_STACK
-        self._stack_key: str = ""                   # (module,roc,slot,ch) key
+        self._stack_key: str = ""                   # channel key; a new key resets the stack
 
         # --- overlay controls (top-right) ---
         self._stack_cb = QCheckBox("Stack", self)
@@ -901,9 +853,7 @@ class WaveformPlotWidget(QWidget):
         self._stack_count_lbl.setVisible(False)
         self._stack_count_lbl.adjustSize()
 
-    # ------------------------------------------------------------------
-    #  Public API
-    # ------------------------------------------------------------------
+    # ---- Public API ----
 
     def set_data(self, samples: np.ndarray, peaks: List[Peak],
                  ped_mean: float, ped_rms: float,
@@ -962,9 +912,7 @@ class WaveformPlotWidget(QWidget):
     def is_stacking(self) -> bool:
         return self._stack_enabled
 
-    # ------------------------------------------------------------------
-    #  Internals
-    # ------------------------------------------------------------------
+    # ---- Internals ----
 
     def _on_stack_toggled(self, on: bool):
         self._stack_enabled = on
@@ -997,12 +945,6 @@ class WaveformPlotWidget(QWidget):
             x -= self._stack_count_lbl.width() + 6
             self._stack_count_lbl.move(x, y + 2)
 
-    def _plot_rect(self) -> QRectF:
-        w, h = self.width(), self.height()
-        return QRectF(self.PAD_L, self.PAD_T,
-                      max(1.0, w - self.PAD_L - self.PAD_R),
-                      max(1.0, h - self.PAD_T - self.PAD_B))
-
     def resizeEvent(self, ev):
         self._stack_cb.adjustSize()
         self._stack_clear_btn.adjustSize()
@@ -1010,26 +952,15 @@ class WaveformPlotWidget(QWidget):
         self._layout_overlays()
         super().resizeEvent(ev)
 
-    # ------------------------------------------------------------------
-    #  Painting
-    # ------------------------------------------------------------------
+    # ---- Painting ----
 
     def paintEvent(self, _ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        p.fillRect(self.rect(), QColor(THEME.BG))
-
-        r = self._plot_rect()
-        p.setPen(QColor(THEME.BORDER))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(r)
-
-        if self._title:
-            f = QFont("Monospace", 10); f.setBold(True)
-            p.setFont(f)
-            p.setPen(QColor(THEME.TEXT))
-            suffix = f" — Stacked ({len(self._stack_traces)})" if self._stack_enabled else ""
-            p.drawText(int(r.left()), int(r.top() - 6), self._title + suffix)
+        title = self._title
+        if title and self._stack_enabled:
+            title += f" — Stacked ({len(self._stack_traces)})"
+        r = self._paint_frame(p, title, 6)
 
         if self._stack_enabled:
             self._paint_stacked(p, r)
@@ -1068,13 +999,18 @@ class WaveformPlotWidget(QWidget):
             return r.bottom() - (v - ymin) / (ymax - ymin) * r.height()
 
         # ---- cut-region overlays (drawn first, low layer) ---------------
-        # Mirrors xRangeShapes / yRangeShapes in resources/waveform.js.  Only
-        # drawn when the user has enabled "show" — independent of the
-        # "apply" toggle so users can hide the chrome while keeping the
-        # filter active (or vice versa).
+        # Mirrors xRangeShapes / yRangeShapes in resources/waveform.js.
         ns_total = (n - 1) * 1000.0 / self._clk_mhz if self._clk_mhz > 0 else 0.0
         cut_fill = QColor(THEME.TEXT_MUTED); cut_fill.setAlphaF(0.18)
         cut_edge = QColor(THEME.HIGHLIGHT)
+
+        def shade(band: QRectF, x1: float, y1: float, x2: float, y2: float):
+            """Shade a cut band and draw its dashed edge (x1,y1)-(x2,y2)."""
+            p.setPen(Qt.PenStyle.NoPen)
+            p.fillRect(band, cut_fill)
+            p.setPen(QPen(cut_edge, 1, Qt.PenStyle.DashLine))
+            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+
         f = self._filter
         if f is not None and self._filter_show:
             # Time cut (left/right shaded bands outside [time_min, time_max]).
@@ -1082,20 +1018,14 @@ class WaveformPlotWidget(QWidget):
                 x1 = to_sx((f.time_min * self._clk_mhz / 1000.0))
                 x1 = min(max(x1, r.left()), r.right())
                 if x1 > r.left():
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.fillRect(QRectF(r.left(), r.top(),
-                                      x1 - r.left(), r.height()), cut_fill)
-                    p.setPen(QPen(cut_edge, 1, Qt.PenStyle.DashLine))
-                    p.drawLine(int(x1), int(r.top()), int(x1), int(r.bottom()))
+                    shade(QRectF(r.left(), r.top(), x1 - r.left(), r.height()),
+                          x1, r.top(), x1, r.bottom())
             if ns_total > 0 and f.time_max is not None and f.time_max < ns_total:
                 x2 = to_sx((f.time_max * self._clk_mhz / 1000.0))
                 x2 = min(max(x2, r.left()), r.right())
                 if x2 < r.right():
-                    p.setPen(Qt.PenStyle.NoPen)
-                    p.fillRect(QRectF(x2, r.top(),
-                                      r.right() - x2, r.height()), cut_fill)
-                    p.setPen(QPen(cut_edge, 1, Qt.PenStyle.DashLine))
-                    p.drawLine(int(x2), int(r.top()), int(x2), int(r.bottom()))
+                    shade(QRectF(x2, r.top(), r.right() - x2, r.height()),
+                          x2, r.top(), x2, r.bottom())
 
         # pedestal baseline
         y_ped = to_sy(self._ped_mean) if self._ped_mean != 0 else None
@@ -1109,8 +1039,7 @@ class WaveformPlotWidget(QWidget):
             p.drawLine(int(r.left()), int(y_thr), int(r.right()), int(y_thr))
             # Height-cut shading — top/bottom bands for samples above
             # height_max + ped or below height_min + ped (filter is on
-            # sample-pedestal units; we paint in raw ADC).  Drawn only when
-            # "show" is on.
+            # sample-pedestal units; we paint in raw ADC).
             if f is not None and self._filter_show:
                 if f.height_min is not None:
                     hcut_v = self._ped_mean + f.height_min
@@ -1118,34 +1047,26 @@ class WaveformPlotWidget(QWidget):
                         y_hcut = to_sy(hcut_v)
                         y_hcut = min(max(y_hcut, r.top()), r.bottom())
                         if y_hcut > r.top():
-                            p.setPen(Qt.PenStyle.NoPen)
-                            p.fillRect(QRectF(r.left(), y_hcut,
-                                              r.width(), r.bottom() - y_hcut),
-                                       cut_fill)
-                            p.setPen(QPen(cut_edge, 1, Qt.PenStyle.DashLine))
-                            p.drawLine(int(r.left()), int(y_hcut),
-                                       int(r.right()), int(y_hcut))
+                            shade(QRectF(r.left(), y_hcut,
+                                         r.width(), r.bottom() - y_hcut),
+                                  r.left(), y_hcut, r.right(), y_hcut)
                 if f.height_max is not None:
                     hcut_v = self._ped_mean + f.height_max
                     y_hcut = to_sy(hcut_v)
                     y_hcut = min(max(y_hcut, r.top()), r.bottom())
                     if y_hcut < r.bottom():
-                        p.setPen(Qt.PenStyle.NoPen)
-                        p.fillRect(QRectF(r.left(), r.top(),
-                                          r.width(), y_hcut - r.top()),
-                                   cut_fill)
-                        p.setPen(QPen(cut_edge, 1, Qt.PenStyle.DashLine))
-                        p.drawLine(int(r.left()), int(y_hcut),
-                                   int(r.right()), int(y_hcut))
+                        shade(QRectF(r.left(), r.top(),
+                                     r.width(), y_hcut - r.top()),
+                              r.left(), y_hcut, r.right(), y_hcut)
 
         # Fill the integral area (between pedestal and waveform) per peak,
-        # colour-coded from _PEAK_PALETTE. Mirrors resources/waveform.js.
+        # colour-coded with series_qcolor. Mirrors resources/waveform.js.
         # Peaks rejected by the active filter are drawn with reduced alpha
         # so the user can tell at a glance which peaks the geo / hists use.
         if self._peaks and y_ped is not None:
             for i, pk in enumerate(self._peaks):
                 passes = self._peak_passes(pk)
-                base = QColor(self._PEAK_PALETTE[i % len(self._PEAK_PALETTE)])
+                base = series_qcolor(i)
                 fill = QColor(base)
                 fill.setAlphaF(0.18 if passes else 0.06)
                 poly = QPolygonF()
@@ -1185,7 +1106,7 @@ class WaveformPlotWidget(QWidget):
                 if pk.pos < 0 or pk.pos >= n:
                     continue
                 passes = self._peak_passes(pk)
-                col = QColor(self._PEAK_PALETTE[i % len(self._PEAK_PALETTE)])
+                col = series_qcolor(i)
                 if not passes:
                     col.setAlphaF(0.55)
                 p.setPen(QPen(col, 1.2))
@@ -1200,7 +1121,7 @@ class WaveformPlotWidget(QWidget):
                 ])
                 p.drawPolygon(diamond)
 
-        self._paint_axes(p, r, ymin, ymax)
+        draw_wave_axes(p, r, ymin, ymax, n, self._clk_mhz, self.PAD_L)
 
         # ped/rms/peak-count readout — drawn inside the plot at top-right to
         # stay clear of the Stack checkbox / Clear button in the widget's
@@ -1231,7 +1152,6 @@ class WaveformPlotWidget(QWidget):
                        "(stack is empty — step through events to accumulate)")
             return
 
-        # Compute common y-range across all traces.
         ymin = min(float(w.min()) for w in traces)
         ymax = max(float(w.max()) for w in traces)
         if ymax - ymin < 5.0:
@@ -1265,7 +1185,7 @@ class WaveformPlotWidget(QWidget):
             p.drawLine(int(to_sx(i, n)),     int(to_sy(float(latest[i]))),
                        int(to_sx(i + 1, n)), int(to_sy(float(latest[i + 1]))))
 
-        self._paint_axes(p, r, ymin, ymax, n=n_max)
+        draw_wave_axes(p, r, ymin, ymax, n_max, self._clk_mhz, self.PAD_L)
 
         p.setPen(QColor(THEME.TEXT_DIM))
         p.drawText(QRectF(r.left(), r.top() - 20,
@@ -1273,38 +1193,8 @@ class WaveformPlotWidget(QWidget):
                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                    f"stack={len(traces)}/{self.MAX_STACK}")
 
-    # --- shared axis/tick drawing -------------------------------------
 
-    def _paint_axes(self, p: QPainter, r: QRectF,
-                    ymin: float, ymax: float, n: Optional[int] = None):
-        if n is None:
-            n = self._samples.size
-        p.setPen(QColor(THEME.TEXT_DIM))
-        p.setFont(QFont("Monospace", 8))
-        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
-            y = r.bottom() - frac * r.height()
-            p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
-            val = ymin + frac * (ymax - ymin)
-            p.drawText(int(r.left() - self.PAD_L + 2), int(y + 4), f"{val:.0f}")
-        tick_every = max(1, n // 8)
-        for i in range(0, n, tick_every):
-            x = r.left() + (i / max(1, n - 1)) * r.width()
-            p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
-            ns = i * 1e3 / self._clk_mhz
-            p.drawText(int(x - 18), int(r.bottom() + 14), f"{ns:g}")
-
-        p.setFont(QFont("Monospace", 9))
-        p.drawText(int(r.left() + r.width() / 2 - 10),
-                   int(r.bottom() + 26), "ns")
-
-
-# ===========================================================================
-#  WaveformGeoView — small HyCal overview for module selection
-# ===========================================================================
-
-# Module types that should get a small name label painted on top of the cell
-# (so the tiny LMS / V blocks off to the left of HyCal are identifiable).
-_LABEL_TYPES = {"LMS", "Veto"}
+# ---- WaveformGeoView — small HyCal overview for module selection ----
 
 class WaveformGeoView(HyCalMapWidget):
     """Compact HyCal geo view with two colour-coding modes.
@@ -1320,32 +1210,28 @@ class WaveformGeoView(HyCalMapWidget):
 
     MODE_CURRENT = "current"
     MODE_OVERALL = "overall"
+    SELECT_PEN_WIDTH = 2.0
 
     # Resolved at paint time so the active theme wins; see :class:`THEME`.
     @property
     def UNAVAIL_COLOR(self) -> QColor:
         return QColor(THEME.BORDER)
 
-    @property
-    def SELECT_COLOR(self) -> QColor:
-        return QColor(THEME.SELECT_BORDER)
-
     def __init__(self, parent=None):
         # margin_bottom must exceed the base's colour-bar anchor (cb_y =
         # h - 40) so the module rects clear the bar — leave ~16 px gap.
+        # The tiny LMS / V blocks off to the left of HyCal get name labels.
         super().__init__(parent, show_colorbar=True, include_lms=True,
+                         label_types=AUX_TYPES,
                          margin_top=4, margin_bottom=56,
                          min_size=(220, 280), shrink=0.90)
         self._available: set = set()
-        self._selected_name: Optional[str] = None
-        self._label_names: set = set()          # filled in set_modules()
         self._mode = self.MODE_CURRENT
         self._current_vals: Dict[str, float] = {}
         self._overall_vals: Dict[str, float] = {}
-        # Modules where the analyser found peaks in the current event but
-        # all of them were rejected by the threshold / time-window cut —
-        # i.e. they appear as shaded peaks on the waveform plot but don't
-        # contribute to the geo's max-integral.  Used by _tooltip_text.
+        # Modules whose peaks in the current event were all rejected by the
+        # peak filter: shaded on the waveform plot but absent from the geo's
+        # max-integral.  Used by _tooltip_text.
         self._rejected_current: set = set()
         # Headless range controller: handles auto-fit logic.  Both vmin and
         # vmax are inline-editable on the colorbar so the user can pin the
@@ -1362,25 +1248,12 @@ class WaveformGeoView(HyCalMapWidget):
             "Colour coding:\n"
             "  Current — max peak integral in the currently viewed event\n"
             "  Overall — occupancy (events-with-peak / accumulated events)")
-        self._mode_btn.setStyleSheet(themed(
-            "QPushButton{background:rgba(29,29,31,220);color:#c9d1d9;"
-            "border:1px solid #30363d;border-radius:4px;}"
-            "QPushButton:hover{background:#28282a;color:#e6edf3;}"))
+        self._mode_btn.setStyleSheet(themed(OVERLAY_BUTTON_QSS))
         self._mode_btn.clicked.connect(self._toggle_mode)
-
-    def set_modules(self, modules):
-        super().set_modules(modules)
-        self._label_names = {m.name for m in self._modules
-                             if m.mod_type in _LABEL_TYPES}
 
     def set_available(self, names):
         self._available = set(names)
         self.update()
-
-    def set_selected_module(self, name: Optional[str]):
-        if name != self._selected_name:
-            self._selected_name = name
-            self.update()
 
     def set_current_values(self, vals: Dict[str, float]):
         self._current_vals = vals
@@ -1389,8 +1262,7 @@ class WaveformGeoView(HyCalMapWidget):
 
     def set_rejected_current(self, names: set):
         """Modules where the current event had peaks rejected by the cut.
-        Pass an empty set to clear.  Drives the tooltip wording so users can
-        tell "no peak" apart from "peak rejected by filter"."""
+        Pass an empty set to clear."""
         self._rejected_current = set(names) if names else set()
 
     def set_overall_values(self, vals: Dict[str, float]):
@@ -1418,18 +1290,11 @@ class WaveformGeoView(HyCalMapWidget):
         super().resizeEvent(event)
         self._mode_btn.move(6, 6)
 
-    def _colorbar_center_text(self) -> str:
-        return ("occupancy" if self._mode == self.MODE_OVERALL
-                else "max peak integral")
-
     def _paint_modules(self, p):
-        # Keep the "not yet seen" grey distinct from the colormap's low end
-        # so unused modules don't masquerade as "low value".
         avail = self._available
         u_col = self.UNAVAIL_COLOR
         no_data = self.NO_DATA_COLOR
         stops = self.palette_stops()
-        vmin, vmax = self._vmin, self._vmax
         vals = self._values
         for name, rect in self._rects.items():
             if name not in avail:
@@ -1439,22 +1304,7 @@ class WaveformGeoView(HyCalMapWidget):
             if v is None:
                 p.fillRect(rect, no_data)
                 continue
-            t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-            p.fillRect(rect, cmap_qcolor(t, stops))
-
-    def _paint_overlays(self, p, w, h):
-        p.setPen(QColor(THEME.TEXT))
-        p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
-        for name in self._label_names:
-            r = self._rects.get(name)
-            if r is not None:
-                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
-
-        if self._selected_name and self._selected_name in self._rects:
-            p.setPen(QPen(self.SELECT_COLOR, 2.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._selected_name])
-        super()._paint_overlays(p, w, h)   # hover border
+            p.fillRect(rect, cmap_qcolor(self.value_to_t(v), stops))
 
     def _tooltip_text(self, name: str) -> str:
         if name not in self._available:
@@ -1463,10 +1313,6 @@ class WaveformGeoView(HyCalMapWidget):
         unit = ("occupancy" if self._mode == self.MODE_OVERALL
                 else "max integral")
         if v is None:
-            # In Current mode, distinguish "no peak found" from "peak found
-            # but rejected by the threshold/time cut" — the latter is what
-            # confused the user when the waveform plot shows shaded peaks
-            # but the geo / tooltip shows nothing.
             if (self._mode == self.MODE_CURRENT
                     and name in self._rejected_current):
                 return f"{name}  ({unit}: — peak outside cut)"
@@ -1474,44 +1320,25 @@ class WaveformGeoView(HyCalMapWidget):
         return f"{name}  {unit}={v:.3g}"
 
 
-# ===========================================================================
-#  Cluster display wrappers
-# ===========================================================================
+# ---- Cluster display wrappers ----
 
 
 class _DisplayCluster:
     """Display-friendly wrapper around a bound ClusterHit.  We can't set
-    arbitrary attributes on pybind11 objects, so carry centre-name +
-    member-name lists alongside the raw hit."""
-    __slots__ = ("energy", "x", "y", "nblocks", "npos",
-                 "center_id", "center_name", "members")
+    arbitrary attributes on pybind11 objects, so copy the displayed hit
+    fields and add the centre name + member-name list."""
+    __slots__ = ("energy", "x", "y", "nblocks", "center_name", "members")
 
     def __init__(self, hit, center_name: str, members: List[str]):
         self.energy      = float(hit.energy)
         self.x           = float(hit.x)
         self.y           = float(hit.y)
         self.nblocks     = int(hit.nblocks)
-        self.npos        = int(hit.npos)
-        self.center_id   = int(hit.center_id)
         self.center_name = center_name or ""
         self.members     = list(members)
 
 
-# ===========================================================================
-#  Cluster map widget — HyCal heatmap + cluster overlays
-# ===========================================================================
-
-
-# Per-cluster frame/chip colours (mirrors ``PC`` in resources/cluster.js so
-# the Python viewer and the web monitor agree on "cluster #3 is green").
-CLUSTER_PALETTE: Tuple[str, ...] = (
-    "#00b4d8", "#ff6b6b", "#51cf66", "#ffd43b",
-    "#cc5de8", "#ff922b", "#20c997", "#f06595",
-)
-
-
-def cluster_color(idx: int) -> QColor:
-    return QColor(CLUSTER_PALETTE[idx % len(CLUSTER_PALETTE)])
+# ---- Cluster map widget — HyCal heatmap + cluster overlays ----
 
 
 class HyCalClusterMap(HyCalMapWidget):
@@ -1521,7 +1348,7 @@ class HyCalClusterMap(HyCalMapWidget):
     def __init__(self, parent=None):
         super().__init__(parent, include_lms=True, enable_zoom_pan=True,
                          show_colorbar=True)
-        self._clusters: List = []               # List[ClusterHit]
+        self._clusters: List = []               # List[_DisplayCluster]
         self._selected_cluster: Optional[int] = None
         self._member_modules: set = set()       # module names of selected cluster
 
@@ -1543,10 +1370,8 @@ class HyCalClusterMap(HyCalMapWidget):
     # -- internals -------------------------------------------------------
 
     def _recompute_membership(self):
-        """Build set of module names that belong to the selected cluster.
-        ClusterHit doesn't carry a module list; we use ``center_id`` plus
-        the ``members`` list if the caller attached one.  If not, only the
-        centre module lights up for a selected cluster — still useful."""
+        """Build set of module names that belong to the selected cluster:
+        its ``members`` list, or just ``center_name`` when that is empty."""
         self._member_modules.clear()
         if self._selected_cluster is None:
             return
@@ -1558,22 +1383,20 @@ class HyCalClusterMap(HyCalMapWidget):
             self._member_modules.add(cl.center_name)
 
     def _paint_modules(self, p):
-        """Default colormap paint, but dim non-members when a cluster is
-        selected.  Calls the base implementation via a per-module alpha."""
+        """Default colormap paint, but dim non-members (low alpha) when a
+        cluster is selected."""
         dim = self._selected_cluster is not None and self._member_modules
         if not dim:
             super()._paint_modules(p)
             return
         stops = self.palette_stops()
-        vmin, vmax = self._vmin, self._vmax
         no_data = self.NO_DATA_COLOR
         for name, rect in self._rects.items():
             v = self._values.get(name)
             if v is None:
                 col = QColor(no_data)
             else:
-                t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                col = cmap_qcolor(t, stops)
+                col = cmap_qcolor(self.value_to_t(v), stops)
             if name not in self._member_modules:
                 col = QColor(col.red(), col.green(), col.blue(), 60)
             p.fillRect(rect, col)
@@ -1594,7 +1417,7 @@ class HyCalClusterMap(HyCalMapWidget):
             if not members:
                 continue
             width = 2.5 if (sel is not None and i == sel) else 1.5
-            p.setPen(QPen(cluster_color(i), width))
+            p.setPen(QPen(series_qcolor(i), width))
             for name in members:
                 rect = self._rects.get(name)
                 if rect is not None:
@@ -1612,8 +1435,6 @@ class HyCalClusterMap(HyCalMapWidget):
         p.save()
         cross_pen = QPen(QColor("#ffd166"), 1.6)
         circle_pen = QPen(QColor("#ffd166"), 1.4)
-        label_pen = QPen(QColor("#ffffff" if THEME.BG.startswith("#0")
-                                or THEME.BG == "#000000" else "#1d1d1f"))
         font = QFont("Monospace", 9, QFont.Weight.Bold)
         p.setFont(font)
         fm = p.fontMetrics()
@@ -1634,7 +1455,6 @@ class HyCalClusterMap(HyCalMapWidget):
             p.setPen(circle_pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawEllipse(pt, r, r)
-            # label: "C{id}  {E:.0f} MeV"
             text = f"C{i}  {cl.energy:.0f}"
             tw = fm.horizontalAdvance(text)
             tx = pt.x() + r + 3
@@ -1650,9 +1470,7 @@ class HyCalClusterMap(HyCalMapWidget):
         p.restore()
 
 
-# ===========================================================================
-#  Cluster panel — selector + table + footer stats
-# ===========================================================================
+# ---- Cluster panel — selector + table + footer stats ----
 
 
 class ClusterPanel(QWidget):
@@ -1723,7 +1541,7 @@ class ClusterPanel(QWidget):
                 item = QTableWidgetItem(v)
                 if c == 0:
                     # Colour chip linking the row to its cluster colour.
-                    item.setBackground(QBrush(cluster_color(i)))
+                    item.setBackground(QBrush(series_qcolor(i)))
                     item.setForeground(text_black)
                     item.setFont(chip_font)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -1760,12 +1578,7 @@ class ClusterPanel(QWidget):
         self.clusterSelected.emit(i)
 
 
-# ===========================================================================
-#  Cut Settings dialog — modal editor for the active WaveformFilter.
-#  Mirrors resources/cut_dialog.js + viewer.html's #cut-dialog markup so
-#  users moving between the web monitor and this viewer see the same
-#  fields with the same semantics.
-# ===========================================================================
+# ---- Cut Settings dialog — modal editor for the active WaveformFilter ----
 
 
 class _RangeRow(QWidget):
@@ -1815,7 +1628,8 @@ def _fmt_filter_num(v: float) -> str:
 
 
 class CutSettingsDialog(QDialog):
-    """Modal "Cut Settings" editor — replicates resources/cut_dialog.js.
+    """Modal "Cut Settings" editor — replicates resources/cut_dialog.js
+    (and viewer.html's #cut-dialog markup) field for field.
 
     The user edits the active filter's per-axis ranges and quality bits,
     then clicks Save to commit.  Cancel discards changes.  Reset reverts
@@ -1835,8 +1649,6 @@ class CutSettingsDialog(QDialog):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(8)
 
-        # Time / Integral / Height range groups (one QGroupBox each, mirroring
-        # the web's <fieldset class="cut-fieldset"> blocks).
         self._rows: Dict[str, _RangeRow] = {}
         for axis, label, suffix in (("time",     "Time",     " (ns)"),
                                     ("integral", "Integral", ""),
@@ -1850,7 +1662,6 @@ class CutSettingsDialog(QDialog):
             root.addWidget(gb)
 
         # Quality bits — two columns of checkboxes (accept / reject).
-        # Mirrors buildBitList() in cut_dialog.js.
         qg = QGroupBox("Quality bits")
         qg_lay = QGridLayout(qg)
         qg_lay.setContentsMargins(8, 4, 8, 6)
@@ -1887,7 +1698,6 @@ class CutSettingsDialog(QDialog):
         qg_lay.addWidget(hint, qg_lay.rowCount(), 0, 1, 2)
         root.addWidget(qg)
 
-        # Standard Cancel / Reset / Save buttonbox.
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -1903,8 +1713,6 @@ class CutSettingsDialog(QDialog):
         root.addWidget(bb)
 
         self._populate(current)
-
-    # ------------------------------------------------------------------
 
     def _populate(self, f: WaveformFilter):
         self._rows["time"]    .set_values(f.time_min,     f.time_max)
@@ -1923,8 +1731,7 @@ class CutSettingsDialog(QDialog):
 
     def _sync_bit_mutex(self):
         """A bit can be in Accept OR Reject but not both — disable the
-        twin checkbox when its sibling is checked.  Mirrors
-        syncBitMutualExclusion() in cut_dialog.js."""
+        twin checkbox when its sibling is checked."""
         for name, acc in self._accept_checks.items():
             rej = self._reject_checks.get(name)
             if rej is None:
@@ -1934,8 +1741,8 @@ class CutSettingsDialog(QDialog):
 
     def result_filter(self) -> WaveformFilter:
         """Build a WaveformFilter from the current form contents.  ``enable``
-        is preserved from the input filter (controlled by the toolbar's
-        "apply" toggle, not this dialog)."""
+        is left at its default; the caller restores it from the toolbar's
+        "apply" toggle."""
         f = WaveformFilter()
         f.time_min,     f.time_max     = self._rows["time"].values()
         f.integral_min, f.integral_max = self._rows["integral"].values()
@@ -1947,14 +1754,45 @@ class CutSettingsDialog(QDialog):
         return f
 
 
-# ===========================================================================
-#  Main window
-# ===========================================================================
+# ---- Main window ----
 
 _NATKEY_RE = re.compile(r"(\d+)")
 def _natural_sort_key(s: str):
     return [int(p) if p.isdigit() else p.lower()
             for p in _NATKEY_RE.split(s or "")]
+
+
+# Advanced-dock rows: (config field, min, max, step, tooltip); step None
+# makes an integer field.
+_WAVE_FIELDS = (
+    ("peak_nsigma",      0.0,    50.0, 0.5,  "peak detection threshold (× pedestal RMS)"),
+    ("min_peak_height",  0.0,  4096.0, 1.0,  "absolute floor on detected peak height (ADC)"),
+    ("min_peak_ratio",   0.0,     1.0, 0.01, "secondary/primary peak ratio"),
+    ("int_tail_ratio",   0.0,     1.0, 0.01, "tail integration cut"),
+    ("ped_flatness",     0.0,  1000.0, 0.5,  "pedestal RMS ceiling"),
+    ("clk_mhz",          1.0,  1000.0, 1.0,  "FADC clock (MHz)"),
+    ("smooth_order",     1,      16,   None, "kernel order (1 = identity, N gives 2N-1 taps)"),
+    ("ped_nsamples",     1,      64,   None, "samples to use for pedestal"),
+    ("ped_max_iter",     1,     100,   None, "pedestal iteration cap"),
+    ("overflow",         0,   65535,   None, "overflow cutoff (ADC)"),
+)
+
+_CLUSTER_FIELDS = (
+    ("min_module_energy",  0.0, 1e4, 0.1, "single-module threshold (MeV)"),
+    ("min_center_energy",  0.0, 1e4, 0.1, "seed threshold (MeV)"),
+    ("min_cluster_energy", 0.0, 1e5, 0.1, "total cluster threshold (MeV)"),
+    ("log_weight_thres",   0.0, 20.0, 0.1, "log-weight offset"),
+    ("least_split",        0.0, 1.0, 0.01, "min fraction to keep a split hit"),
+    ("seed_time_window",   -1.0, 200.0, 0.5,
+        "Multi-pulse seed-time gate (ns).  ≤0 disables timing "
+        "gating (legacy single-pulse-per-module mode).  >0 lets "
+        "AddHit() be called once per pulse; FormClusters then "
+        "groups neighbours within ±this window of the seed pulse.\n"
+        "Persistent default: 'seed_time_window' under the 'hycal' "
+        "block in database/reconstruction_config.json."),
+    ("min_cluster_size", 1, 100, None, "min modules in cluster"),
+    ("split_iter",       0, 100, None, "island-split iteration cap"),
+)
 
 
 class HyCalEventViewer(QMainWindow):
@@ -1971,7 +1809,6 @@ class HyCalEventViewer(QMainWindow):
                  hycal_map_path: Optional[str] = None,
                  recon_config_path: Optional[str] = None):
         super().__init__()
-        self._hist_config   = hist_config
         self._daq_map       = daq_map
         self._roc_to_crate  = roc_to_crate
         self._accept_mask   = accept_mask
@@ -1981,38 +1818,26 @@ class HyCalEventViewer(QMainWindow):
         self._hycal_map_path = hycal_map_path
         self._recon_cfg_path = recon_config_path
 
-        # Bin configs — merge user config with defaults, add n-peaks hist
-        self._h_cfg = hist_config.get("height_hist",
-                                      {"min": 0, "max": 4000,  "step": 10})
-        self._i_cfg = hist_config.get("integral_hist",
-                                      {"min": 0, "max": 20000, "step": 100})
-        self._p_cfg = hist_config.get("time_hist",
-                                      {"min": 0, "max": 400,   "step": 4})
-        # Left edge at -0.5 so integer n_peaks values (0, 1, 2 …) sit on bin
-        # centres rather than at the left edge of each bar.
-        self._n_cfg = {"min": -0.5, "max": 10.5, "step": 1}
+        # Bin configs by ChannelHists field — user config over defaults.
+        self._hist_cfg: Dict[str, Dict] = {
+            spec.attr: (hist_config.get(spec.cfg_key, spec.default)
+                        if spec.cfg_key else spec.default)
+            for spec in _HIST_SPECS}
 
         # Seed the analyzer config from daq_config.json's
         # `fadc250_waveform.analyzer` block.  This is the single source of
         # truth for peak-detection knobs (peak_nsigma, min_peak_height,
-        # min_peak_ratio); monitor_config.json no longer overrides them.
-        # Falls back to plain defaults if the daq_config can't be loaded —
-        # opening files later will fail loudly anyway in that case.
+        # min_peak_ratio).  Falls back to plain defaults if the daq_config
+        # can't be loaded — opening files later will fail loudly anyway.
         try:
-            _dc = (prad2py.dec.load_daq_config(self._daq_cfg_path)
-                   if self._daq_cfg_path
-                   else prad2py.dec.load_daq_config())
+            _dc = prad2py.dec.load_daq_config(self._daq_cfg_path or "")
             self._wcfg = WaveConfig(_dc.wave_cfg)
         except Exception:
             self._wcfg = WaveConfig()
 
-        # Waveform peak filter — same JSON shape and semantics as the web
-        # monitor's `waveform.filter` (see resources/cut_dialog.js + C++
-        # PeakFilter).  Defaults parsed from monitor_config.json; the
-        # snapshot in `_filter_default` lets the Cut-Settings "Reset" button
-        # restore the file values without a server round-trip.  ``enable``
-        # is the GUI "apply" toggle (filter is a no-op when False); ``show``
-        # is the client-side overlay toggle on the waveform plot.
+        # Peak filter from monitor_config.json's `waveform.filter`; the
+        # `_filter_default` snapshot backs the Cut-Settings "Reset" button.
+        # `_filter_show` is the overlay toggle on the waveform plot.
         _flt_json = hist_config.get("filter") or {}
         self._filter         = WaveformFilter.from_json(_flt_json)
         self._filter_default = WaveformFilter.from_json(_flt_json)
@@ -2031,21 +1856,16 @@ class HyCalEventViewer(QMainWindow):
         self._evio_path: Optional[Path] = None
         self._index: List[Tuple[int, int]] = []
         self._current_idx: int = -1
-        # One bool per physics sub-event — True once its peaks have been
-        # folded into self._channels hists.  Lets Prev/Next re-display an
-        # event without double-counting.  np.bool = 1 byte/event, so 1 M
-        # events ≈ 1 MB, 10 M ≈ 10 MB — negligible.
+        # Folded-event flags (see _is_folded); 1 byte/event, so 10 M
+        # events ≈ 10 MB.
         self._accumulated: Optional[np.ndarray] = None
 
         # Per-channel accumulated hists, keyed by (roc, slot, ch)
         self._channels: Dict[Tuple[int, int, int], ChannelHists] = {}
         self._selected_key: Optional[Tuple[int, int, int]] = None
 
-        # Reader state — open EvChannel in RA mode, kept alive across browse
-        self._ch: Optional["prad2py.dec.EvChannel"] = None
-        self._reader_path: Optional[str] = None
-        self._reader_is_ra: bool = False
-        self._reader_pos: int = -1
+        # Browse handle, kept open across navigation
+        self._reader: Optional[EvioCursor] = None
 
         # Worker threads
         self._idx_worker: Optional[IndexerWorker] = None
@@ -2053,13 +1873,9 @@ class HyCalEventViewer(QMainWindow):
         self._batch_worker: Optional[BatchWorker] = None
         self._batch_thread: Optional[QThread] = None
 
-        # HyCal clustering — wired up via prad2py.det.PipelineBuilder so the
-        # daq / recon / runinfo configs and per-run HyCal calibration are all
-        # loaded automatically (matches the live server / analysis scripts).
-        # `_pipeline` keeps the C++ Pipeline object alive; the borrowed
-        # `hycal` reference is stored separately as `_hcsys` for the existing
-        # call sites (`module_by_daq`, `load_calibration`, …).  Per-channel
-        # DAQ → module lookups are cached by (crate, slot, ch) so the
+        # HyCal clustering (see _build_hycal_pipeline).  `_pipeline` keeps
+        # the C++ Pipeline object alive; `_hcsys` borrows its `hycal`.
+        # DAQ → module lookups are cached by (roc_tag, slot, ch) so the
         # per-event hot loop doesn't go through pybind11 every hit.
         self._pipeline = None
         self._hcsys = None
@@ -2186,17 +2002,15 @@ class HyCalEventViewer(QMainWindow):
     # ---- Tabs -----------------------------------------------------------
 
     def _build_waveform_tab(self) -> QWidget:
-        """Original waveform viewer body: geo + waveform on the left, four
-        histograms stacked on the right."""
+        """Geo + waveform on the left, four histograms stacked on the
+        right."""
         tab = QWidget()
         lay = QVBoxLayout(tab)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(3)
 
-        # Cut-Settings toolbar — mirrors the web monitor's <div class="tcut-bar">
-        # with the "Cut Settings…" / apply / show controls.  apply toggles
-        # WaveformFilter.enable; show toggles overlay drawing (no filter
-        # change).  Both fire a re-run so changes are visible immediately.
+        # Cut-Settings toolbar (the web monitor's .tcut-bar): dialog button
+        # plus the "apply" / "show" toggles.
         cut_bar = QHBoxLayout()
         cut_bar.setContentsMargins(2, 0, 2, 0)
         cut_bar.setSpacing(8)
@@ -2249,12 +2063,8 @@ class HyCalEventViewer(QMainWindow):
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(0)
-        self._h_height   = Hist1DWidget()
-        self._h_integral = Hist1DWidget()
-        self._h_position = Hist1DWidget()
-        self._h_npeaks   = Hist1DWidget()
-        for hist in (self._h_height, self._h_integral,
-                     self._h_position, self._h_npeaks):
+        self._hist_w = {spec.attr: Hist1DWidget() for spec in _HIST_SPECS}
+        for hist in self._hist_w.values():
             right_lay.addWidget(hist, stretch=1)
         split.addWidget(right)
 
@@ -2311,130 +2121,53 @@ class HyCalEventViewer(QMainWindow):
         """Right-side collapsible dock exposing WaveConfig + HyCalClusterConfig.
 
         Both configs live in prad2py bindings; changes trigger a re-run of
-        the current event (``_rerun_current``) so the effect is immediate.
+        the current event (``_rerun_current_event``) so the effect is
+        immediate.
         """
         dock = QDockWidget("Advanced tuning", self)
-        dock.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea
-                             | Qt.DockWidgetArea.LeftDockWidgetArea)
-        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable
-                         | QDockWidget.DockWidgetFeature.DockWidgetMovable
-                         | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
-
-        root = QWidget()
-        rlay = QVBoxLayout(root)
-        rlay.setContentsMargins(6, 6, 6, 6)
+        rlay = setup_tuning_dock(dock)
 
         # ---- WaveConfig ------------------------------------------------
         wg = QGroupBox("Waveform analyser")
         wf = QFormLayout(wg)
-        self._adv_wave_spins: Dict[str, QDoubleSpinBox] = {}
-        wave_fields = [
-            ("peak_nsigma",      0.0,    50.0, 0.5,  "peak detection threshold (× pedestal RMS)"),
-            ("min_peak_height",  0.0,  4096.0, 1.0,  "absolute floor on detected peak height (ADC)"),
-            ("min_peak_ratio",   0.0,     1.0, 0.01, "secondary/primary peak ratio"),
-            ("int_tail_ratio",   0.0,     1.0, 0.01, "tail integration cut"),
-            ("ped_flatness",     0.0,  1000.0, 0.5,  "pedestal RMS ceiling"),
-            ("clk_mhz",          1.0,  1000.0, 1.0,  "FADC clock (MHz)"),
-        ]
-        for name, lo, hi, step, tip in wave_fields:
-            sp = QDoubleSpinBox()
-            sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(3)
-            val = getattr(self._wcfg, name, 0.0)
-            sp.setValue(float(val))
-            sp.setToolTip(tip)
-            sp.valueChanged.connect(self._on_advanced_changed)
-            wf.addRow(name, sp)
-            self._adv_wave_spins[name] = sp
+        self._adv_wave = add_config_rows(wf, self._wcfg, _WAVE_FIELDS,
+                                         self._on_advanced_changed)
 
-        self._adv_wave_int_spins: Dict[str, QSpinBox] = {}
-        for name, lo, hi, tip in [
-                ("smooth_order", 1, 16,  "kernel order (1 = identity, N gives 2N-1 taps)"),
-                ("ped_nsamples", 1, 64,  "samples to use for pedestal"),
-                ("ped_max_iter", 1, 100, "pedestal iteration cap"),
-                ("overflow",     0, 65535, "overflow cutoff (ADC)")]:
-            sp = QSpinBox()
-            sp.setRange(lo, hi); sp.setValue(int(getattr(self._wcfg, name, 0)))
-            sp.setToolTip(tip)
-            sp.valueChanged.connect(self._on_advanced_changed)
-            wf.addRow(name, sp)
-            self._adv_wave_int_spins[name] = sp
-
-        # Note: peak filter (time / integral / height / quality_bits) lives
-        # in the Cut Settings dialog above the waveform plot — same UX as
-        # the web monitor.  Keeping the dock focused on analyser knobs
-        # avoids two places editing the same numbers.
+        # The peak filter is edited only in the Cut Settings dialog, so it
+        # is deliberately absent from this dock.
 
         rlay.addWidget(wg)
 
         # ---- HyCalClusterConfig ---------------------------------------
         cg = QGroupBox("HyCal clustering")
         cf = QFormLayout(cg)
-        self._adv_cluster_spins: Dict[str, object] = {}
+        self._adv_cluster: Dict[str, QWidget] = {}
         if self._hccl is not None:
             ccfg = self._hccl.get_config()
-            cluster_fields = [
-                ("min_module_energy",  0.0, 1e4, 0.1, "single-module threshold (MeV)"),
-                ("min_center_energy",  0.0, 1e4, 0.1, "seed threshold (MeV)"),
-                ("min_cluster_energy", 0.0, 1e5, 0.1, "total cluster threshold (MeV)"),
-                ("log_weight_thres",   0.0, 20.0, 0.1, "log-weight offset"),
-                ("least_split",        0.0, 1.0, 0.01, "min fraction to keep a split hit"),
-                ("seed_time_window",   -1.0, 200.0, 0.5,
-                    "Multi-pulse seed-time gate (ns).  ≤0 disables timing "
-                    "gating (legacy single-pulse-per-module mode).  >0 lets "
-                    "AddHit() be called once per pulse; FormClusters then "
-                    "groups neighbours within ±this window of the seed pulse.\n"
-                    "Persistent default: 'seed_time_window' under the 'hycal' "
-                    "block in database/reconstruction_config.json."),
-            ]
-            for name, lo, hi, step, tip in cluster_fields:
-                sp = QDoubleSpinBox()
-                sp.setRange(lo, hi); sp.setSingleStep(step); sp.setDecimals(3)
-                sp.setValue(float(getattr(ccfg, name, 0.0)))
-                sp.setToolTip(tip)
-                sp.valueChanged.connect(self._on_advanced_changed)
-                cf.addRow(name, sp)
-                self._adv_cluster_spins[name] = sp
-
-            for name, lo, hi, tip in [
-                    ("min_cluster_size", 1, 100, "min modules in cluster"),
-                    ("split_iter",       0, 100, "island-split iteration cap")]:
-                sp = QSpinBox()
-                sp.setRange(lo, hi); sp.setValue(int(getattr(ccfg, name, 0)))
-                sp.setToolTip(tip)
-                sp.valueChanged.connect(self._on_advanced_changed)
-                cf.addRow(name, sp)
-                self._adv_cluster_spins[name] = sp
-
+            self._adv_cluster = add_config_rows(cf, ccfg, _CLUSTER_FIELDS,
+                                                self._on_advanced_changed)
             cbx = QCheckBox("corner_conn (include diagonal neighbors)")
-            cbx.setChecked(bool(getattr(ccfg, "corner_conn", False)))
+            set_editor_value(cbx, getattr(ccfg, "corner_conn", False))
             cbx.toggled.connect(self._on_advanced_changed)
             cf.addRow(cbx)
-            self._adv_cluster_spins["corner_conn"] = cbx
+            self._adv_cluster["corner_conn"] = cbx
         else:
             cf.addRow(QLabel("(HyCalSystem not initialized)"))
         rlay.addWidget(cg)
 
         rlay.addStretch(1)
 
-        # Snapshot initial widget values (from monitor_config.json + WaveConfig
-        # defaults + HyCalClusterConfig defaults) so "Reset to defaults"
-        # can restore them after arbitrary tuning.
-        self._adv_defaults: Dict[str, object] = {}
-        for name, sp in self._adv_wave_spins.items():
-            self._adv_defaults[f"wave_{name}"] = sp.value()
-        for name, sp in self._adv_wave_int_spins.items():
-            self._adv_defaults[f"wave_{name}"] = sp.value()
-        for name, w in self._adv_cluster_spins.items():
-            if isinstance(w, QCheckBox):
-                self._adv_defaults[f"cluster_{name}"] = w.isChecked()
-            else:
-                self._adv_defaults[f"cluster_{name}"] = w.value()
+        # Snapshot initial widget values (from WaveConfig + HyCalClusterConfig)
+        # so "Reset to defaults" can restore them after arbitrary tuning.
+        self._adv_wave_defaults = {n: editor_value(e)
+                                   for n, e in self._adv_wave.items()}
+        self._adv_cluster_defaults = {n: editor_value(e)
+                                      for n, e in self._adv_cluster.items()}
 
         reset_btn = QPushButton("Reset to defaults")
         reset_btn.clicked.connect(self._reset_advanced_defaults)
         rlay.addWidget(reset_btn)
 
-        dock.setWidget(root)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         dock.hide()
         return dock
@@ -2443,55 +2176,22 @@ class HyCalEventViewer(QMainWindow):
         """Restore every Advanced-dock widget to its initial (post-load)
         value and re-run the current event once.  The peak filter lives in
         the Cut Settings dialog and has its own Reset button."""
-        if not hasattr(self, "_adv_defaults"):
-            return
-        for name, sp in self._adv_wave_spins.items():
-            sp.blockSignals(True)
-            sp.setValue(self._adv_defaults[f"wave_{name}"])
-            sp.blockSignals(False)
-        for name, sp in self._adv_wave_int_spins.items():
-            sp.blockSignals(True)
-            sp.setValue(self._adv_defaults[f"wave_{name}"])
-            sp.blockSignals(False)
-        for name, w in self._adv_cluster_spins.items():
-            w.blockSignals(True)
-            if isinstance(w, QCheckBox):
-                w.setChecked(self._adv_defaults[f"cluster_{name}"])
-            else:
-                w.setValue(self._adv_defaults[f"cluster_{name}"])
-            w.blockSignals(False)
+        for editors, defaults in ((self._adv_wave, self._adv_wave_defaults),
+                                  (self._adv_cluster, self._adv_cluster_defaults)):
+            for name, ed in editors.items():
+                set_editor_value(ed, defaults[name])
         # Single re-run after all widgets are restored.
         self._on_advanced_changed()
 
     def _on_advanced_changed(self, *_):
         """Push every dock value back into WaveConfig + HyCalClusterConfig,
-        then schedule a debounced re-run of the current event.  Setattrs
-        are wrapped in try/except so a type mismatch on any single field
-        (e.g. pybind's strict int↔float) doesn't take down the whole dock."""
-        def _safe(obj, name, value):
-            try:
-                setattr(obj, name, value)
-            except Exception as exc:     # noqa: BLE001
-                print(f"[advanced] {type(obj).__name__}.{name} "
-                      f"setattr failed: {exc}", file=sys.stderr)
-
-        for name, sp in self._adv_wave_spins.items():
-            _safe(self._wcfg, name, float(sp.value()))
-        for name, sp in self._adv_wave_int_spins.items():
-            _safe(self._wcfg, name, int(sp.value()))
-
-        if self._hccl is not None and self._adv_cluster_spins:
+        then schedule a debounced re-run of the current event."""
+        editors_to_config(self._adv_wave, self._wcfg)
+        if self._hccl is not None and self._adv_cluster:
             ccfg = self._hccl.get_config()
-            for name, widget in self._adv_cluster_spins.items():
-                if isinstance(widget, QCheckBox):
-                    _safe(ccfg, name, bool(widget.isChecked()))
-                elif isinstance(widget, QSpinBox):
-                    _safe(ccfg, name, int(widget.value()))
-                else:
-                    _safe(ccfg, name, float(widget.value()))
+            editors_to_config(self._adv_cluster, ccfg)
             self._hccl.set_config(ccfg)
 
-        # Debounce: coalesce slider drags into one re-run.
         self._adv_redraw_timer.start(self._adv_debounce_ms)
 
     def _rerun_current_event(self):
@@ -2502,11 +2202,9 @@ class HyCalEventViewer(QMainWindow):
     # ---- Cut Settings dialog --------------------------------------------
 
     def _open_cut_settings_dialog(self):
-        """Modal editor for the active peak filter — replicates the web
-        monitor's Cut Settings dialog (resources/cut_dialog.js).  On Save,
-        the new filter values replace ``self._filter`` (preserving
-        ``enable``, which stays under the toolbar's "apply" toggle) and
-        the current event is re-analysed."""
+        """On Save, the new filter values replace ``self._filter``
+        (preserving ``enable``, which stays under the toolbar's "apply"
+        toggle) and the current event is re-analysed."""
         dlg = CutSettingsDialog(self, self._filter, self._filter_default)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2516,20 +2214,17 @@ class HyCalEventViewer(QMainWindow):
         self._rerun_current_event()
 
     def _on_cut_apply_toggled(self, on: bool):
-        """User flipped the toolbar's "apply" checkbox — toggles
-        WaveformFilter.enable so every peak counts when off, every peak
-        is filtered when on.  Re-runs the current event to refresh hists
-        / geo / clusters."""
+        """Toolbar "apply" checkbox → WaveformFilter.enable; re-runs the
+        current event to refresh hists / geo / clusters."""
         self._filter.enable = bool(on)
         self._rerun_current_event()
 
     def _on_cut_show_toggled(self, on: bool):
-        """User flipped the "show" checkbox — toggles overlay drawing on
-        the waveform plot only (filter values + apply state unchanged).
-        Cheap repaint, no full re-analysis."""
+        """Toolbar "show" checkbox: toggles cut overlays on the waveform
+        plot only — a repaint, no re-analysis."""
         self._filter_show = bool(on)
-        if self._current_idx >= 0 and self._ch is not None:
-            self._display_waveform(self._ch.fadc())
+        if self._current_idx >= 0 and self._reader is not None:
+            self._display_waveform(self._reader.ch.fadc())
         else:
             self._wave.update()
 
@@ -2651,11 +2346,9 @@ class HyCalEventViewer(QMainWindow):
         # calibration actually loaded → suppress the cluster-tab warning.
         self._hycal_calib_loaded = bool(getattr(pipeline, "hycal_calib_path", "")
                                         or "")
-        # Sync the Advanced dock's cluster spinboxes to the new config so
+        # Sync the Advanced dock's cluster editors to the new config so
         # the user sees the values that actually drive reconstruction.
-        # `hasattr` guard: this also runs from __init__ before the dock exists.
-        if hasattr(self, "_adv_cluster_spins"):
-            self._sync_advanced_dock_cluster_cfg()
+        self._sync_advanced_dock_cluster_cfg()
         if hasattr(self, "_calib_warn_lbl"):
             self._calib_warn_lbl.setVisible(not self._hycal_calib_loaded)
         return True
@@ -2691,30 +2384,20 @@ class HyCalEventViewer(QMainWindow):
         return True
 
     def _sync_advanced_dock_cluster_cfg(self):
-        """Refresh the Advanced-dock cluster spinboxes from _hccl's config.
-        Called after a pipeline rebuild so the dock matches the new run's
-        recon-config defaults instead of stale values."""
-        if self._hccl is None or not getattr(self, "_adv_cluster_spins", None):
+        """Refresh the Advanced-dock cluster editors, and the values their
+        Reset restores, from _hccl's config.  Called after a pipeline
+        rebuild so the dock matches the new run's recon-config defaults
+        instead of stale values; a no-op before the dock exists (the
+        pipeline is first built from __init__)."""
+        if self._hccl is None or not getattr(self, "_adv_cluster", None):
             return
         try:
             ccfg = self._hccl.get_config()
         except Exception:
             return
-        for name, widget in self._adv_cluster_spins.items():
-            try:
-                v = getattr(ccfg, name)
-            except AttributeError:
-                continue
-            widget.blockSignals(True)
-            try:
-                if isinstance(widget, QCheckBox):
-                    widget.setChecked(bool(v))
-                elif isinstance(widget, QSpinBox):
-                    widget.setValue(int(v))
-                else:
-                    widget.setValue(float(v))
-            finally:
-                widget.blockSignals(False)
+        config_to_editors(ccfg, self._adv_cluster)
+        self._adv_cluster_defaults = {n: editor_value(e)
+                                      for n, e in self._adv_cluster.items()}
 
     # -- file open --
 
@@ -2800,8 +2483,6 @@ class HyCalEventViewer(QMainWindow):
         QApplication.processEvents()
 
         worker = IndexerWorker(str(path), self._daq_cfg_path)
-        thread = QThread(self)
-        worker.moveToThread(thread)
 
         def _on_progress(done: int, total: int):
             if total > 0:
@@ -2810,21 +2491,18 @@ class HyCalEventViewer(QMainWindow):
             dlg.setLabelText(f"Indexing {path.name}\n"
                              f"evio events: {done:,} / {total:,}")
 
-        thread.started.connect(worker.run)
-        worker.progressed.connect(_on_progress)
-        worker.finished.connect(lambda res: self._on_index_done(path, res))
-        worker.failed.connect(lambda msg: self._on_index_failed(path, msg))
-        dlg.canceled.connect(worker.request_cancel)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(dlg.close)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, "_idx_thread", None))
+        def _on_thread_finished():
+            dlg.close()
+            self._idx_thread = None
+            self._idx_worker = None
 
+        worker.progressed.connect(_on_progress)
         self._idx_worker = worker
-        self._idx_thread = thread
-        thread.start()
+        self._idx_thread = start_worker_thread(
+            self, worker,
+            lambda res: self._on_index_done(path, res),
+            lambda msg: self._on_index_failed(path, msg),
+            dialog=dlg, on_thread_finished=_on_thread_finished)
 
     def _on_index_done(self, path: Path, res: Dict):
         self._evio_path = path
@@ -2840,7 +2518,7 @@ class HyCalEventViewer(QMainWindow):
                                  f"Indexing finished but reader open failed:\n{err}")
             return
 
-        mode_note = ("" if self._reader_is_ra
+        mode_note = ("" if self._reader.is_ra
                      else "   [sequential mode — Prev is slow]")
         self._file_lbl.setText(
             f"{path.name}   physics events: {n_phys:,}   "
@@ -2871,32 +2549,18 @@ class HyCalEventViewer(QMainWindow):
 
     def _open_reader(self, path: str) -> Tuple[bool, str]:
         try:
-            dec = prad2py.dec
-            cfg = (dec.load_daq_config(self._daq_cfg_path) if self._daq_cfg_path
-                   else dec.load_daq_config())
-            ch  = dec.EvChannel()
-            ch.set_config(cfg)
-            st = ch.open_auto(path)
-            if st != dec.Status.success:
-                return False, f"status = {st}"
-            self._ch = ch
-            self._reader_path = path
-            self._reader_is_ra = bool(ch.is_random_access())
-            self._reader_pos = -1     # sequential-mode cursor
+            self._reader = EvioCursor(path, self._daq_cfg_path)
             return True, ""
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
 
     def _close_reader(self):
-        if self._ch is not None:
+        if self._reader is not None:
             try:
-                self._ch.close()
+                self._reader.close()
             except Exception:
                 pass
-        self._ch = None
-        self._reader_path = None
-        self._reader_is_ra = False
-        self._reader_pos = -1
+        self._reader = None
 
     # -- navigation --
 
@@ -2916,39 +2580,22 @@ class HyCalEventViewer(QMainWindow):
             self._goto(v)
 
     def _goto(self, phys_idx: int):
-        if self._ch is None or not (0 <= phys_idx < len(self._index)):
+        if self._reader is None or not (0 <= phys_idx < len(self._index)):
             return
         ev_idx, sub_idx = self._index[phys_idx]
-        dec = prad2py.dec
-        # RA: jump in O(1).  Sequential: close/reopen on backward jumps,
-        # walk forward to the target.
-        if self._reader_is_ra:
-            st = self._ch.read_event_by_index(ev_idx)
-            if st != dec.Status.success:
-                self.statusBar().showMessage(
-                    f"read_event_by_index({ev_idx}) → {st}")
-                return
-        else:
-            if self._reader_pos > ev_idx:
-                # Backward seek — reopen and walk forward from start.
-                self._close_reader()
-                ok, err = self._open_reader(str(self._evio_path))
-                if not ok:
-                    self.statusBar().showMessage(
-                        f"reopen for backward seek failed: {err}")
-                    return
-            while self._reader_pos < ev_idx:
-                if self._ch.read() != dec.Status.success:
-                    self.statusBar().showMessage(
-                        f"EOF before evio event {ev_idx}")
-                    return
-                self._reader_pos += 1
-        if not self._ch.scan():
+        # RA: jump in O(1).  Sequential: reopen on backward jumps, walk
+        # forward to the target.
+        try:
+            self._reader.seek(ev_idx)
+        except RuntimeError as e:
+            self.statusBar().showMessage(str(e))
+            return
+        ch = self._reader.ch
+        if not ch.scan():
             self.statusBar().showMessage(f"scan() failed at physics #{phys_idx}")
             return
-        self._ch.select_event(sub_idx)
-        info = self._ch.info()
-        tb = int(info.trigger_bits)
+        ch.select_event(sub_idx)
+        info = ch.info()
 
         self._current_idx = phys_idx
         self._event_spin.blockSignals(True)
@@ -2956,11 +2603,10 @@ class HyCalEventViewer(QMainWindow):
         self._event_spin.blockSignals(False)
 
         # Apply trigger filter: skip updating hists but still show waveform
-        trig_ok = True
-        if self._accept_mask and (tb & self._accept_mask) == 0: trig_ok = False
-        if self._reject_mask and (tb & self._reject_mask):       trig_ok = False
+        trig_ok = trigger_ok(int(info.trigger_bits),
+                             self._accept_mask, self._reject_mask)
 
-        fadc_evt = self._ch.fadc()
+        fadc_evt = ch.fadc()
         self._update_channel_list_from_event(fadc_evt)
         self._accumulate_and_display(fadc_evt, info, trig_ok)
 
@@ -2980,8 +2626,7 @@ class HyCalEventViewer(QMainWindow):
                     if key not in self._channels:
                         module = self._daq_map.get((crate, s, c))
                         self._channels[key] = _make_hists(
-                            self._h_cfg, self._i_cfg, self._p_cfg, self._n_cfg,
-                            roc_tag, s, c, module)
+                            self._hist_cfg, roc_tag, s, c, module)
                         added = True
         if added:
             self._refresh_combo()
@@ -3020,12 +2665,11 @@ class HyCalEventViewer(QMainWindow):
         if 0 <= idx < len(self._combo_keys):
             self._selected_key = self._combo_keys[idx]
             hits = self._channels.get(self._selected_key)
-            self._geo.set_selected_module(hits.module if hits else None)
+            self._geo.set_selected(hits.module if hits else None)
             # Re-render: hists from cache, waveform from current event
             self._display_hists_for_selected()
-            if self._current_idx >= 0 and self._ch is not None:
-                # Re-pull the waveform for the new module from current event
-                fadc_evt = self._ch.fadc()
+            if self._current_idx >= 0 and self._reader is not None:
+                fadc_evt = self._reader.ch.fadc()
                 self._display_waveform(fadc_evt)
 
     def _on_geo_clicked(self, name: str):
@@ -3044,98 +2688,65 @@ class HyCalEventViewer(QMainWindow):
     # -- accumulate + display --
 
     def _accumulate_and_display(self, fadc_evt, info, trig_ok: bool):
-        # Analyse every channel present in the event.  The C++ WaveAnalyzer
-        # makes this cheap (~50× faster than the old Python port), so we
-        # no longer need a "selected-channel-only" fast path.  Histogram
-        # fills are dedup'd via self._accumulated: an event already folded
-        # in still gets re-analysed for display, but isn't counted again.
+        # Analyse every channel present in the event.  Histogram fills are
+        # dedup'd via self._accumulated: an event already folded in still
+        # gets re-analysed for display, but isn't counted again.
         sel_peaks: List[Peak] = []
         wcfg = self._wcfg
         flt = self._filter
         sel_key = self._selected_key
         idx = self._current_idx
-        already = (self._accumulated is not None and 0 <= idx < self._accumulated.size
-                   and bool(self._accumulated[idx]))
-        do_fill = trig_ok and not already
+        do_fill = trig_ok and not _is_folded(self._accumulated, idx)
 
         current_vals: Dict[str, float] = {}   # module_name -> max peak integral
         module_energies: Dict[str, float] = {}  # name -> MeV (cluster tab)
-        # Modules where the analyser found at least one peak rejected by
-        # the active filter — drives the geo tooltip so users can tell
-        # "no signal" apart from "rejected by filter".
         rejected_current: set = set()
 
         # Reset clustering state for this event.
         if self._hccl is not None:
             self._hccl.clear()
 
-        for r in range(fadc_evt.nrocs):
-            roc = fadc_evt.roc(r)
-            roc_tag = int(roc.tag)
+        for key, hits, peaks in _iter_channel_peaks(fadc_evt, self._channels,
+                                                    wcfg):
+            if key == sel_key:
+                sel_peaks = peaks
+            # Pick the best (highest-integral) peak that passes the
+            # active filter; matches viewer_utils.h::bestPeakInWindow
+            # plus the integral/height/quality cuts in PeakFilter.
+            # ``best_time`` is needed for HyCalCluster.add_hit's
+            # multi-pulse seed-time gating.
+            best_int = 0.0
+            best_time = 0.0
+            any_peak = len(peaks) > 0
+            for p in peaks:
+                if not flt.passes(p):
+                    continue
+                if p.integral > best_int:
+                    best_int = p.integral
+                    best_time = float(p.time)
+            max_int = best_int
+            if max_int > 0 and hits.module:
+                current_vals[hits.module] = max_int
+            elif any_peak and hits.module:
+                rejected_current.add(hits.module)
+
+            # Feed the cluster tab: resolve channel → HyCal module
+            # and push (module_idx, energy_MeV, time_ns).
+            roc_tag, s, c = key
             crate = self._roc_to_crate.get(roc_tag)
-            for s in roc.present_slots():
-                slot = roc.slot(s)
-                for c in slot.present_channels():
-                    key = (roc_tag, s, c)
-                    hits = self._channels.get(key)
-                    if hits is None:
-                        continue
-                    samples = slot.channel(c).samples
-                    if samples.size < 10:
-                        continue
-                    _, _, peaks = analyze(samples, wcfg)
-                    if key == sel_key:
-                        sel_peaks = peaks
-                    # Pick the best (highest-integral) peak that passes the
-                    # active filter; matches viewer_utils.h::bestPeakInWindow
-                    # plus the integral/height/quality cuts in PeakFilter.
-                    # ``best_time`` is needed for HyCalCluster.add_hit's
-                    # multi-pulse seed-time gating (commit 0dafbae).
-                    best_int = 0.0
-                    best_time = 0.0
-                    any_peak = len(peaks) > 0
-                    for p in peaks:
-                        if not flt.passes(p):
-                            continue
-                        if p.integral > best_int:
-                            best_int = p.integral
-                            best_time = float(p.time)
-                    max_int = best_int
-                    if max_int > 0 and hits.module:
-                        current_vals[hits.module] = max_int
-                    elif any_peak and hits.module:
-                        rejected_current.add(hits.module)
+            if self._hccl is not None and crate is not None and max_int > 0:
+                mod = self._resolve_hycal_module(crate, s, c, key)
+                if mod is not None:
+                    energy = mod.energize(max_int)
+                    if energy > 0:
+                        self._hccl.add_hit(mod.index, energy, best_time)
+                        module_energies[mod.name] = energy
 
-                    # Feed the cluster tab: resolve channel → HyCal module
-                    # and push (module_idx, energy_MeV, time_ns).  Without
-                    # calibration loaded, cal_factor==0 → energize returns
-                    # 0 → no clusters form; the cluster tab surfaces a
-                    # warning banner (File → Load HyCal calibration…).
-                    if self._hccl is not None and crate is not None and max_int > 0:
-                        mod = self._resolve_hycal_module(crate, s, c, key)
-                        if mod is not None:
-                            energy = mod.energize(max_int)
-                            if energy > 0:
-                                self._hccl.add_hit(mod.index, energy, best_time)
-                                module_energies[mod.name] = energy
+            if do_fill:
+                hits.fill_peaks(peaks, flt)
 
-                    if not do_fill:
-                        continue
-                    kept = 0
-                    for p in peaks:
-                        if not flt.passes(p):
-                            continue
-                        hits.height.fill(p.height)
-                        hits.integral.fill(p.integral)
-                        hits.position.fill(p.time)
-                        kept += 1
-                    hits.npeaks.fill(kept)
-                    hits.events += 1
-                    if kept > 0:
-                        hits.peak_events += 1
-
-        if do_fill and self._accumulated is not None and 0 <= idx < self._accumulated.size:
-            self._accumulated[idx] = True
+        if do_fill:
+            _mark_folded(self._accumulated, idx)
 
         self._geo.set_rejected_current(rejected_current)
         self._geo.set_current_values(current_vals)
@@ -3236,26 +2847,11 @@ class HyCalEventViewer(QMainWindow):
             self._clear_hists()
             return
         mod = hits.module or "(unmapped)"
-        self._h_height.set_data(hits.height.bins, hits.height.bmin,
-                                hits.height.bstep,
-                                under=hits.height.under, over=hits.height.over,
-                                title=f"{mod}  —  Peak Height [ADC]",
-                                color="#e599f7")
-        self._h_integral.set_data(hits.integral.bins, hits.integral.bmin,
-                                  hits.integral.bstep,
-                                  under=hits.integral.under, over=hits.integral.over,
-                                  title=f"{mod}  —  Peak Integral [ADC·sample]",
-                                  color="#00b4d8")
-        self._h_position.set_data(hits.position.bins, hits.position.bmin,
-                                  hits.position.bstep,
-                                  under=hits.position.under, over=hits.position.over,
-                                  title=f"{mod}  —  Peak Time [ns]",
-                                  color="#51cf66")
-        self._h_npeaks.set_data(hits.npeaks.bins, hits.npeaks.bmin,
-                                hits.npeaks.bstep,
-                                under=hits.npeaks.under, over=hits.npeaks.over,
-                                title=f"{mod}  —  Peaks / Event",
-                                color="#ffa657")
+        for spec in _HIST_SPECS:
+            h = getattr(hits, spec.attr)
+            self._hist_w[spec.attr].set_data(
+                h.bins, h.bmin, h.bstep, under=h.under, over=h.over,
+                title=f"{mod}  —  {spec.title}", color=spec.color)
 
     def _display_waveform(self, fadc_evt):
         key = self._selected_key
@@ -3266,9 +2862,9 @@ class HyCalEventViewer(QMainWindow):
         stack_key = f"{roc_tag:02X}_{slot}_{ch}"
         samples = _find_channel_samples(fadc_evt, roc_tag, slot, ch)
         if samples is None or samples.size == 0:
-            # Keep the stacker intact on empty events — matches
-            # resources/waveform.js:105 — but still clear it when the
-            # user has switched to a different module.
+            # Keep the stacker intact on empty events (as in
+            # resources/waveform.js) but still clear it when the user has
+            # switched to a different module.
             if self._wave.is_stacking():
                 self._wave.reset_stack_if_new_key(stack_key)
                 return
@@ -3288,10 +2884,8 @@ class HyCalEventViewer(QMainWindow):
                             filter_show=self._filter_show)
 
     def _clear_hists(self):
-        self._h_height.clear("Peak Height")
-        self._h_integral.clear("Peak Integral")
-        self._h_position.clear("Peak Time")
-        self._h_npeaks.clear("Peaks / Event")
+        for spec in _HIST_SPECS:
+            self._hist_w[spec.attr].clear(spec.label)
 
     def _clear_plots(self):
         self._clear_hists()
@@ -3302,10 +2896,8 @@ class HyCalEventViewer(QMainWindow):
         if not key: return
         hits = self._channels.get(key)
         if not hits: return
-        hits.height.reset()
-        hits.integral.reset()
-        hits.position.reset()
-        hits.npeaks.reset()
+        for spec in _HIST_SPECS:
+            getattr(hits, spec.attr).reset()
         hits.events = 0
         hits.peak_events = 0
         self._display_hists_for_selected()
@@ -3336,8 +2928,6 @@ class HyCalEventViewer(QMainWindow):
             accept_mask=self._accept_mask, reject_mask=self._reject_mask,
             accumulated=self._accumulated,
         )
-        thread = QThread(self)
-        worker.moveToThread(thread)
 
         # Modal progress dialog — blocks input to the main window until the
         # batch finishes (or the user cancels), so they can't switch modules
@@ -3387,22 +2977,13 @@ class HyCalEventViewer(QMainWindow):
             self._batch_worker = None
             self._batch_thread = None
 
-        thread.started.connect(worker.run)
         worker.progressed.connect(_on_progress)
-        worker.finished.connect(_on_finished)
-        worker.failed.connect(_on_failed)
-        dlg.canceled.connect(worker.request_cancel)
-        worker.finished.connect(thread.quit)
-        worker.failed.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(_cleanup)
-
         self._batch_worker = worker
-        self._batch_thread = thread
         self._batch_btn.setEnabled(False)
         self._batch_status.setText(f"batch: 0/{count:,}")
-        thread.start()
+        self._batch_thread = start_worker_thread(
+            self, worker, _on_finished, _on_failed,
+            dialog=dlg, on_thread_finished=_cleanup)
 
     # -- JSON save --
 
@@ -3419,14 +3000,9 @@ class HyCalEventViewer(QMainWindow):
         try:
             out = {
                 "source_file": str(self._evio_path) if self._evio_path else "",
-                "height_hist":   {"min": self._h_cfg["min"], "max": self._h_cfg["max"],
-                                  "step": self._h_cfg["step"]},
-                "integral_hist": {"min": self._i_cfg["min"], "max": self._i_cfg["max"],
-                                  "step": self._i_cfg["step"]},
-                "position_hist": {"min": self._p_cfg["min"], "max": self._p_cfg["max"],
-                                  "step": self._p_cfg["step"]},
-                "npeaks_hist":   {"min": self._n_cfg["min"], "max": self._n_cfg["max"],
-                                  "step": self._n_cfg["step"]},
+                **{spec.json_key: {k: self._hist_cfg[spec.attr][k]
+                                   for k in ("min", "max", "step")}
+                   for spec in _HIST_SPECS},
                 "filter":        self._filter.to_json(),
                 "filter_active": self._filter.enable,
                 "wave_config":   self._wcfg.__dict__.copy(),
@@ -3440,10 +3016,8 @@ class HyCalEventViewer(QMainWindow):
                     "channel":     hits.channel,
                     "events":      hits.events,
                     "peak_events": hits.peak_events,
-                    "height_hist":   hits.height.to_json(),
-                    "integral_hist": hits.integral.to_json(),
-                    "position_hist": hits.position.to_json(),
-                    "npeaks_hist":   hits.npeaks.to_json(),
+                    **{spec.json_key: getattr(hits, spec.attr).to_json()
+                       for spec in _HIST_SPECS},
                 }
             Path(path_str).parent.mkdir(parents=True, exist_ok=True)
             with open(path_str, "w", encoding="utf-8") as f:
@@ -3467,9 +3041,7 @@ class HyCalEventViewer(QMainWindow):
         super().closeEvent(ev)
 
 
-# ===========================================================================
-#  Main
-# ===========================================================================
+# ---- Main ----
 
 def main():
     ap = argparse.ArgumentParser(

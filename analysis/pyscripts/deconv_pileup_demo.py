@@ -20,47 +20,26 @@ Usage
         [--daq-config database/daq_config.json] \\
         [--template templates.json] \\
         [--out-dir plots/deconv] \\
-        [--max-events N] [--max-plots K]
+        [--max-events N] [--max-plots K] [--min-peaks M]
 
 `--template` overrides `nnls_deconv.template_file` from the daq config.
-Both paths resolve against `PRAD2_DATABASE_DIR` if not absolute.
+The template path and the default `daq_config.json` resolve against
+`PRAD2_DATABASE_DIR` if not absolute.
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
-try:
-    from prad2py import dec
-except ImportError as exc:
-    raise SystemExit(
-        f"[ERROR] cannot import prad2py: {exc}\n"
-        "        Build the python bindings (cmake -DBUILD_PYTHON=ON) and "
-        "ensure the install directory is on PYTHONPATH."
-    )
+import _common as C
+from _common import dec  # prad2py.dec re-export
 
 
-# --------------------------------------------------------------------------
-# Path helpers
-# --------------------------------------------------------------------------
-
-def resolve_db_path(p: str) -> str:
-    """Resolve a possibly-relative path against PRAD2_DATABASE_DIR."""
-    if not p or os.path.isabs(p):
-        return p
-    db = os.environ.get("PRAD2_DATABASE_DIR")
-    return os.path.join(db, p) if db else p
-
-
-# --------------------------------------------------------------------------
-# Plot one channel-event (before / after overlay)
-# --------------------------------------------------------------------------
+# ---- Plot one channel-event (before / after overlay) ----
 
 def plot_one(samples: np.ndarray,
              ped: float,
@@ -70,9 +49,7 @@ def plot_one(samples: np.ndarray,
              tmpl,
              title: str,
              out_path: Path) -> None:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    plt = C.import_pyplot()
     from matplotlib.lines import Line2D
 
     n = samples.size
@@ -134,9 +111,7 @@ def plot_one(samples: np.ndarray,
     plt.close(fig)
 
 
-# --------------------------------------------------------------------------
-# Main loop
-# --------------------------------------------------------------------------
+# ---- Main loop ----
 
 def main() -> int:
     ap = argparse.ArgumentParser(
@@ -158,14 +133,13 @@ def main() -> int:
     args = ap.parse_args()
 
     # ---- DAQ config + WaveAnalyzer ---------------------------------------
-    daq_cfg_path = args.daq_config or resolve_db_path("daq_config.json")
+    daq_cfg_path = args.daq_config or C.resolve_db_path("daq_config.json")
     cfg = dec.load_daq_config(daq_cfg_path) if daq_cfg_path else dec.load_daq_config()
     print(f"[setup] DAQ config : {daq_cfg_path or '(default)'}", flush=True)
 
     wcfg = dec.WaveConfig(cfg.wave_cfg)
-    # Honour command-line template override if given.
     tmpl_rel = args.template or cfg.wave_cfg.nnls_deconv.template_file
-    tmpl_path = resolve_db_path(tmpl_rel)
+    tmpl_path = C.resolve_db_path(tmpl_rel)
     if not tmpl_path or not Path(tmpl_path).is_file():
         print(f"[ERROR] template file not found: {tmpl_path or '(none)'}",
               file=sys.stderr)
@@ -182,7 +156,7 @@ def main() -> int:
           flush=True)
 
     wave_ana = dec.WaveAnalyzer(wcfg)
-    clk_ns = 1000.0 / wcfg.clk_mhz if wcfg.clk_mhz > 0 else 4.0
+    clk_ns = wcfg.clk_ns
 
     # ---- Crate map (roc tag → crate index) for naming output files ------
     roc_to_crate: dict[int, int] = {}
@@ -210,53 +184,37 @@ def main() -> int:
             ch.select_event(ei)
             n_events += 1
             fadc = ch.fadc()    # FADC composite event (HyCal + Veto + LMS)
-            for ri in range(fadc.nrocs):
-                roc = fadc.roc(ri)
-                if not roc.present:
+            for roc_tag, s, c, cd in C.iter_fadc_channels(fadc):
+                samples = np.asarray(cd.samples, dtype=np.uint16)
+                wres = wave_ana.analyze_result(samples)
+                peaks = list(wres.peaks)
+                if len(peaks) < args.min_peaks:
                     continue
-                crate = roc_to_crate.get(roc.tag, roc.tag)
-                for s in roc.present_slots():
-                    slot = roc.slot(s)
-                    for c in slot.present_channels():
-                        cd = slot.channel(c)
-                        if cd.nsamples <= 0:
-                            continue
-                        samples = np.asarray(cd.samples, dtype=np.uint16)
-                        wres = wave_ana.analyze_result(samples)
-                        peaks = list(wres.peaks)
-                        if len(peaks) < args.min_peaks:
-                            continue
-                        # Pile-up = at least one peak with Q_PEAK_PILED set.
-                        if not any(pk.quality & dec.Q_PEAK_PILED
-                                   for pk in peaks):
-                            continue
-                        n_piled += 1
-                        tmpl = store.lookup(roc.tag, s, c)
-                        if tmpl is None:
-                            continue
-                        dec_out = wave_ana.deconvolve(samples, wres, tmpl)
-                        # Both states mean "LM converged" — APPLIED is the
-                        # historical name (per-channel template), FALLBACK_GLOBAL
-                        # is what the simplified per-type store always sets.
-                        if dec_out.state not in (dec.Q_DECONV_APPLIED,
-                                                 dec.Q_DECONV_FALLBACK_GLOBAL):
-                            continue
-                        # Plot.
-                        title = (f"crate{crate} slot{s} ch{c}  "
-                                 f"event #{n_events}  "
-                                 f"({len(peaks)} peaks, deconv n={dec_out.n})")
-                        out_path = (args.out_dir
-                                    / f"deconv_c{crate}_s{s:02d}_ch{c:02d}"
-                                      f"_ev{n_events:06d}.png")
-                        plot_one(samples, wres.ped.mean, clk_ns,
-                                 wres, dec_out, tmpl, title, out_path)
-                        n_plotted += 1
-                        print(f"[plot {n_plotted:3d}/{args.max_plots}] "
-                              f"{out_path.name}", flush=True)
-                        if n_plotted >= args.max_plots:
-                            break
-                    if n_plotted >= args.max_plots:
-                        break
+                if not any(pk.quality & dec.Q_PEAK_PILED for pk in peaks):
+                    continue
+                n_piled += 1
+                tmpl = store.lookup(roc_tag, s, c)
+                if tmpl is None:
+                    continue
+                dec_out = wave_ana.deconvolve(samples, wres, tmpl)
+                # Both states mean "LM converged": APPLIED with a
+                # per-channel template, FALLBACK_GLOBAL with a per-type
+                # aggregate one.
+                if dec_out.state not in (dec.Q_DECONV_APPLIED,
+                                         dec.Q_DECONV_FALLBACK_GLOBAL):
+                    continue
+                crate = roc_to_crate.get(roc_tag, roc_tag)
+                title = (f"crate{crate} slot{s} ch{c}  "
+                         f"event #{n_events}  "
+                         f"({len(peaks)} peaks, deconv n={dec_out.n})")
+                out_path = (args.out_dir
+                            / f"deconv_c{crate}_s{s:02d}_ch{c:02d}"
+                              f"_ev{n_events:06d}.png")
+                plot_one(samples, wres.ped.mean, clk_ns,
+                         wres, dec_out, tmpl, title, out_path)
+                n_plotted += 1
+                print(f"[plot {n_plotted:3d}/{args.max_plots}] "
+                      f"{out_path.name}", flush=True)
                 if n_plotted >= args.max_plots:
                     break
             if n_plotted >= args.max_plots:

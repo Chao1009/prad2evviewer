@@ -1,6 +1,4 @@
-// =========================================================================
 // Online mode: WebSocket + ring buffer
-// =========================================================================
 function updateRingSelector() {
     fetch('/api/ring').then(r => r.json()).then(data => {
         const sel = document.getElementById('ring-select');
@@ -13,7 +11,6 @@ function updateRingSelector() {
             o.textContent = `Sample ${ring[i]}` + (i === ring.length - 1 ? ' (latest)' : '');
             sel.appendChild(o);
         }
-        // keep selection if not auto-following
         if (!autoFollow && prev && ring.includes(parseInt(prev))) sel.value = prev;
         else if (ring.length) sel.value = ring[ring.length - 1];
     });
@@ -101,8 +98,6 @@ function pollMonitorStatus(){
                 else if(showE)          txt += ePart;
                 else                    txt += iPart;
                 beamEl.textContent=txt;
-                // Red if current is below the configured trip-warn threshold,
-                // dim if either reading is missing, otherwise success-green.
                 const tripped = (showI && beamCurrentTripWarn!=null
                                  && iVal!=null && iVal < beamCurrentTripWarn);
                 const missing = (showE && eVal==null) || (showI && iVal==null);
@@ -132,11 +127,8 @@ function connectWebSocket() {
     ws = new WebSocket(`${proto}//${location.host}`);
 
     ws.onopen = () => {
-        // Tell the server which protocols this build understands so it
-        // can pick the right candidate for on-demand auto-report.
-        // Pre-update tabs never send this and stay excluded from the
-        // dispatchCapture pool, while still receiving all other
-        // broadcasts unchanged.
+        // Advertise auto-report support; only clients that send this are
+        // in the server's dispatchCapture candidate pool.
         try {
             ws.send(JSON.stringify({
                 type: 'client_hello',
@@ -150,20 +142,17 @@ function connectWebSocket() {
     ws.onmessage = (evt) => {
         try {
             const msg = JSON.parse(evt.data);
+            const now = Date.now();
             if (msg.type === 'new_event') {
                 setEtStatus(true);  // receiving events means ET is connected
-                const now = Date.now();
-                // throttle event display to ~5 Hz
                 if (autoFollow && now - lastEventFetch > refreshEventMs) {
                     lastEventFetch = now;
                     loadLatestEvent();
                 }
-                // throttle ring selector update to ~2 Hz
                 if (now - lastRingFetch > refreshRingMs) {
                     lastRingFetch = now;
                     updateRingSelector();
                 }
-                // throttle occupancy + cluster hist refresh to ~0.5 Hz
                 if (now - lastOccFetch > refreshHistMs) {
                     lastOccFetch = now;
                     if(histEnabled) { fetchOccupancy(); fetchClHist(); }
@@ -178,8 +167,7 @@ function connectWebSocket() {
                 setEtStatus(msg.connected, msg.waiting, msg.retries);
             } else if (msg.type === 'hist_cleared') {
                 occData={}; occTcutData={}; occTotal=0;
-                initClHist(); plotClHist(); plotClStatHists();
-                gemResidData=null; plotGemResiduals();
+                resetClusterHists();
                 lastHistModule = '';   // bypass refresh throttle
                 // Use showWaveform (not showHistograms) so the waveform
                 // plot's cut-range shapes also refresh when the peak
@@ -194,31 +182,20 @@ function connectWebSocket() {
                 // Pull fresh config so histConfig.waveform_filter and the
                 // "apply" checkbox stay in sync, then redraw histograms and
                 // the geo (color metric uses the time filter).
-                if (typeof fetchConfigAndApply === 'function') fetchConfigAndApply();
+                fetchConfigAndApply();
                 if (selectedModule) showHistograms(selectedModule);
                 redrawGeo();
             } else if (msg.type === 'lms_event') {
-                // throttle LMS refresh to ~0.5 Hz
-                const now2 = Date.now();
-                if (!lastLmsFetch) lastLmsFetch = 0;
-                if (now2 - lastLmsFetch > refreshLmsMs) {
-                    lastLmsFetch = now2;
-                    if(activeTab==='lms') fetchLmsSummary();
-                    // also refresh selected module's history
-                    if(activeTab==='lms' && lmsSelectedModule>=0){
-                        const name=lmsSummaryData&&lmsSummaryData.modules&&lmsSummaryData.modules[String(lmsSelectedModule)]
-                            ?lmsSummaryData.modules[String(lmsSelectedModule)].name:'';
-                        fetchLmsHistory(lmsSelectedModule, name);
-                    }
+                if (now - lastLmsFetch > refreshLmsMs) {
+                    lastLmsFetch = now;
+                    if(activeTab==='lms'){ fetchLmsSummary(); refreshSelectedLmsHistory(); }
                 }
             } else if (msg.type === 'lms_cleared') {
-                lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
-                _lmsHistRaw=null; _lmsHistModName=null;
+                lmsSummaryData=null; resetLmsSelection();
                 if(activeTab==='lms'){ geoLms(); updateLmsTable(); }
             } else if (msg.type === 'epics_event') {
-                const now3 = Date.now();
-                if (now3 - lastEpicsFetch > refreshEpicsMs) {
-                    lastEpicsFetch = now3;
+                if (now - lastEpicsFetch > refreshEpicsMs) {
+                    lastEpicsFetch = now;
                     if(activeTab==='epics'){
                         fetchEpicsChannels();
                         fetchEpicsLatest();
@@ -233,48 +210,34 @@ function connectWebSocket() {
                     fetchConfigAndApply();
                 }
             } else if (msg.type === 'autoclear_done') {
-                // Server-side autoclear has just wiped histograms / lms
-                // / epics.  Mirror that to the local UI in lockstep so
-                // every connected tab resets together (sampleCount,
-                // Plotly redraws, GEM caches, …).  The per-domain
-                // *_cleared broadcasts that preceded this still run
-                // their existing partial-reset handlers; clearFrontend
-                // is idempotent on top of that.
-                if (typeof clearFrontend === 'function') clearFrontend();
+                // Server-side autoclear wiped histograms / lms / epics; reset
+                // the whole UI so every connected tab clears together.  The
+                // preceding *_cleared handlers already ran; clearFrontend is
+                // idempotent on top of them.
+                clearFrontend();
             } else if (msg.type === 'capture_request') {
-                // Server picked us as the on-demand reporter for this
-                // run.  Light the badge, run the capture pipeline, and
-                // POST.  All other clients ignore this message — only
-                // the one whose connection_hdl was selected ever sees it.
-                if (typeof handleCaptureRequest === 'function')
-                    handleCaptureRequest(msg);
+                // Server picked this client as the on-demand reporter for
+                // the run; only the selected connection receives this.
+                handleCaptureRequest(msg);
             } else if (msg.type === 'auto_capture_done') {
-                // Authoritative end-of-flow signal from the server.
-                // Drop our reporter badge if we were holding it; status
-                // bar gets a one-line outcome line.
-                if (typeof autoSetReporting === 'function') autoSetReporting(false);
+                // Authoritative end-of-flow signal: drop the reporter badge.
+                autoSetReporting(false);
                 const sb = document.getElementById('status-bar');
                 if (sb) sb.textContent = msg.posted
                     ? `Auto report posted (run ${msg.run||'?'})`
                     : `Auto report saved locally (run ${msg.run||'?'})`;
             } else if (msg.type === 'gem_threshold_updated') {
-                // Another viewer (or this one) changed the GEM σ — keep
-                // every open tab's input in sync immediately so users
-                // see the same value across windows.  hits[] update
-                // arrives naturally with the next event.  Guarded so
-                // online.js loading before gem_apv.js can't TDZ-throw.
-                if (typeof syncGemApvZsSigmaInput === 'function')
-                    syncGemApvZsSigmaInput(msg.zs_sigma);
-                if (typeof gemApvCalib !== 'undefined' && gemApvCalib)
-                    gemApvCalib.zs_sigma = msg.zs_sigma;
+                // Another viewer (or this one) changed the GEM σ — sync this
+                // tab's input; hits[] update with the next event.
+                syncGemApvZsSigmaInput(msg.zs_sigma);
+                if (gemApvCalib) gemApvCalib.zs_sigma = msg.zs_sigma;
             } else if (msg.type === 'gem_apv_full_event') {
                 // Server captured a new "monitoring event" — one where the
                 // firmware bypassed online ZS, so every channel of every
                 // APV was read out.  Only the gem_apv tab in 'Latest full-
                 // readout' source cares; gemApvOnLiveEvent gates by source
-                // and pause state.  No-op for current-event viewers.
-                if (typeof gemApvOnLiveEvent === 'function' && activeTab === 'gem_apv')
-                    gemApvOnLiveEvent(msg.seq || 0, 'full_event');
+                // and pause state.
+                if (activeTab === 'gem_apv') gemApvOnLiveEvent(msg.seq || 0, 'full_event');
             }
         } catch (e) {}
     };

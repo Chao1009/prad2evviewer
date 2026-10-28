@@ -92,7 +92,7 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
     // Constant for the entire window — the manual's "first value greater
     // than Vnoise" reading in §Requirements describes where a pulse *starts*,
     // not the value used in the Va formula (cf. step 1c which is the actual
-    // assignment the firmware performs).  See FADC250_algorithms.md §7.1.
+    // assignment the firmware performs).  See FADC250_algorithms.md §9.1.
     const float Vmin = Vnoise;
 
     const float TET = cfg.TET;
@@ -104,9 +104,7 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
     const int   max_pulses = std::min(cfg.MAX_PULSES, MAX_PEAKS);
     const float clk_per_64 = cfg.CLK_NS / 64.0f;  // ns per fine-time LSB
 
-    // Search starts after the pedestal window — manual §Requirements: "at
-    // least 5 samples (background) before pulse."  With NPED configurable
-    // we generalise: NPED background samples + at least 1 to settle.
+    // Search starts after the pedestal window (see §Requirements above).
     int i = nped;
     int pulse_idx = 0;
 

@@ -20,12 +20,7 @@
 //         d[2] : run type (PRESTART only; 0 for GO/END)
 //
 // `EvChannel::Sync()` returns the latest SyncInfo observed since the channel
-// was opened.  It auto-updates whenever `Scan()` lands on a SYNC/EPICS or
-// control event and otherwise returns the cached snapshot — so a physics-
-// event loop always has an absolute time to anchor its 48-bit TI tick delta
-// against.  To detect "a new SYNC just arrived", diff `sync_counter` against
-// your last-seen value: it's monotonic for 0xE112 and stays 0 for control
-// events (distinguish those via `event_tag`).
+// was opened; see EvChannel.h for how it persists across physics events.
 //
 // Note on the namespace name: `psync` (not `sync`) to avoid a collision with
 // POSIX `int sync(void)` declared in <unistd.h> — any translation unit that

@@ -3,7 +3,8 @@
 //
 // Phase 1: replay EVIO files (multi-threaded) → per-file *_lms.root
 // Phase 2: chain all *_lms.root, accumulate histograms in windows of N LMS
-//          events, fit them, write gain-correction rows to gain_corr.root.
+//          events, fit them, write gain-correction rows to
+//          <db>/gain_factor/gain_correction/prad_<run>_gain_corr.root.
 //          Each row includes the batch-midpoint unix_time derived from the
 //          EPICS tree (with the scaler tree as fallback).
 //
@@ -14,6 +15,7 @@
 //              [-c daq_config.json] [-d hycal_map.json]
 //              [-b batch_size] [-r ref_run]
 //              [-s]  save intermediate *_lms.root files (hadd into one)
+//              [-p] [-w id1,id2,...]
 //   -o  output directory (REQUIRED)
 //   -f  max files to process (default: all)
 //   -j  number of threads (default: 4)
@@ -22,57 +24,31 @@
 //   -b  LMS events per gain-correction batch (default: 4000)
 //   -r  reference run number for gain table (default: from general.json)
 //   -s  save intermediate *_lms.root (merged via hadd); default: delete them
+//   -p  save overlay plots of the batch histograms (prad_<run>_gain_corr_plots.pdf)
+//   -w  comma-separated W module IDs to add to the plots
 //=============================================================================
 
-#include "Replay.h"
-#include "EventData.h"
-#include "EventData_io.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
 #include "GainCorrCompute.h"
+#include "ToolUtils.h"
 
-#include <TClass.h>
 #include <TROOT.h>
 #include <TH1F.h>
 #include <TCanvas.h>
-#include <TLegend.h>
 
 #include <algorithm>
-#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <getopt.h>
 #include <iostream>
-#include <mutex>
 #include <map>
 #include <set>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <vector>
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 using namespace analysis;
-
-// ── file discovery ───────────────────────────────────────────────────────────
-static std::vector<std::string> collectEvioFiles(const std::string &path)
-{
-    std::vector<std::string> files;
-    if (std::filesystem::is_directory(path)) {
-        for (auto &e : std::filesystem::directory_iterator(path)) {
-            if (e.is_regular_file() &&
-                e.path().filename().string().find(".evio") != std::string::npos)
-                files.push_back(e.path().string());
-        }
-        std::sort(files.begin(), files.end());
-    } else {
-        files.push_back(path);
-    }
-    return files;
-}
 
 // Pick up to max evenly-spaced elements from a vector.
 static std::vector<TH1F*> subsample(const std::vector<TH1F*> &all, int max)
@@ -188,27 +164,20 @@ static void savePlots(const std::string &pdf_path,
     std::cout << "  [plot] saved to " << pdf_path << "\n";
 }
 
-// ── main ─────────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
 {
-    ROOT::EnableThreadSafety();
-    TClass::GetClass("TTree");
-    TClass::GetClass("TFile");
-    TClass::GetClass("TBranch");
+    analysis::InitRootThreading();
 
     std::string daq_config, daq_map, output_dir;
     int  max_files   = -1;
     int  num_threads = 4;
-    int  batch_size  = 4000;
+    int  batch_size  = kGainBatchSizeOffline;
     int  ref_run     = -1;
     bool save_lms    = false;
     GainPlotConfig plot_cfg;
     GainPlotStore  ps;
 
-    std::string db_dir = prad2::resolve_data_dir(
-        "PRAD2_DATABASE_DIR",
-        {"../share/prad2evviewer/database"},
-        DATABASE_DIR);
+    std::string db_dir = prad2::database_dir();
     daq_config = db_dir + "/daq_config.json";
 
     int opt;
@@ -236,11 +205,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    std::vector<std::string> evio_files;
-    for (int i = optind; i < argc; ++i) {
-        auto f = collectEvioFiles(argv[i]);
-        evio_files.insert(evio_files.end(), f.begin(), f.end());
-    }
+    std::vector<std::string> evio_files = CollectInputs(argc, argv, optind, IsEvioName);
 
     if (evio_files.empty() || output_dir.empty()) {
         std::cerr <<
@@ -270,86 +235,39 @@ int main(int argc, char *argv[])
               << "  HyCal   : " << daq_map << "\n";
 
     // ── Phase 1: multi-threaded EVIO → _lms.root ────────────────────────────
-    std::atomic<int>         next_file{0};
-    std::mutex               io_mtx;
-    std::atomic<int>         replay_errors{0};
     std::vector<std::string> lms_out_files;
-    std::mutex               out_files_mtx;
-
-    auto worker = [&]() {
-        analysis::Replay replay;
-        if (!daq_config.empty()) replay.LoadDaqConfig(daq_config);
-        replay.LoadHyCalMap(daq_map);
-
-        while (true) {
-            int idx = next_file.fetch_add(1);
-            if (idx >= num_files) break;
-
-            std::string out = output_dir + "/" + MakeLMSOutputFile(evio_files[idx]);
-            bool ok = replay.Process_LMSgainFactor(evio_files[idx], out,
-                                                   db_dir, daq_config);
-            {
-                std::lock_guard<std::mutex> lk(io_mtx);
-                if (ok) {
-                    std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
-                              << evio_files[idx] << " -> " << out << "\n";
-                } else {
-                    std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
-                              << evio_files[idx] << "\n";
-                    ++replay_errors;
-                }
-            }
-            if (ok) {
-                std::lock_guard<std::mutex> lk(out_files_mtx);
-                lms_out_files.push_back(out);
-            }
-        }
-    };
-
-    {
-        std::vector<std::thread> threads;
-        threads.reserve(num_threads);
-        for (int i = 0; i < num_threads; ++i)
-            threads.emplace_back(worker);
-        for (auto &t : threads) t.join();
-    }
+    const int replay_errors = ReplayLMSFiles(
+        std::vector<std::string>(evio_files.begin(), evio_files.begin() + num_files),
+        output_dir, num_threads, daq_config, daq_map, db_dir, &lms_out_files);
 
     std::cout << "Phase 1 done: " << num_files << " files, "
-              << replay_errors.load() << " errors\n";
+              << replay_errors << " errors\n";
 
     if (lms_out_files.empty()) {
         std::cerr << "No LMS files produced; skipping gain calculation.\n";
-        return replay_errors.load() > 0 ? 1 : 0;
+        return replay_errors > 0 ? 1 : 0;
     }
 
     // ── Phase 2: gain corrections ────────────────────────────────────────────
     std::sort(lms_out_files.begin(), lms_out_files.end());
 
-    auto ref_tbl = prad2::LoadRefGain(gRunConfig.gain_data_dir + "/ref_gain", ref_run);
+    auto ref_tbl = prad2::LoadRefGain(prad2::RefGainDir(db_dir), ref_run);
     if (!ref_tbl.loaded) {
         std::cerr << "Warning: reference gain table not loaded"
                   << " (ref_run=" << ref_run
-                  << ", dir=" << gRunConfig.gain_data_dir << ")\n";
+                  << ", dir=" << prad2::RefGainDir(db_dir) << ")\n";
     }
 
     // Save gain-correction output to the project database directory.
-    std::string gain_corr_dir = db_dir + "/gain_factor/gain_correction";
-    {
-        std::error_code ec;
-        std::filesystem::create_directories(gain_corr_dir, ec);
-        if (ec)
-            std::cerr << "Warning: cannot create " << gain_corr_dir
-                      << ": " << ec.message() << "\n";
-    }
-    std::string gain_out = gain_corr_dir + "/" +
-        std::string(Form("prad_%06d_gain_corr.root", run_num));
+    const std::string gain_out = GainCorrOutputPath(db_dir, run_num);
 
     std::cout << "\n=== Phase 2: gain corrections ===\n"
               << "  Batch size : " << batch_size << " LMS events\n"
               << "  Ref run    : " << ref_run << "\n"
               << "  Output     : " << gain_out << "\n";
 
-    ComputeGainCorrections(lms_out_files, gain_out, batch_size, ref_run, ref_tbl, &plot_cfg, &ps);
+    const bool gain_ok = ComputeGainCorrections(lms_out_files, gain_out, batch_size, ref_run,
+                                                ref_tbl, &plot_cfg, &ps);
 
     if (plot_cfg.enabled) {
         std::string pdf_out = gain_out.substr(0, gain_out.rfind('.')) + "_plots.pdf";
@@ -381,16 +299,13 @@ int main(int argc, char *argv[])
         std::cout << "\n=== Merging intermediate LMS root files (hadd) ===\n"
                   << "  Output : " << merged << "\n";
 
-        // Build hadd command: hadd -f <merged> <file1> <file2> ...
-        std::string cmd = "hadd -f " + merged;
-        for (const auto &f : lms_out_files)
-            cmd += " " + f;
-        int rc = std::system(cmd.c_str());
+        std::vector<std::string> args{"hadd", "-f", merged};
+        args.insert(args.end(), lms_out_files.begin(), lms_out_files.end());
+        const int rc = RunCommand(args);
         if (rc != 0) {
             std::cerr << "  Warning: hadd returned " << rc
                       << "; individual files kept in " << output_dir << "\n";
         } else {
-            // Remove individual files after successful merge.
             int n_del = 0;
             for (const auto &f : lms_out_files) {
                 std::error_code ec;
@@ -401,5 +316,5 @@ int main(int argc, char *argv[])
     }
 
     std::cout << "All done.\n";
-    return replay_errors.load() > 0 ? 1 : 0;
+    return (!gain_ok || replay_errors > 0) ? 1 : 0;
 }

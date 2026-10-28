@@ -22,8 +22,7 @@ emits four PNG plots:
                                 max-ADC strip in each X / Y cluster, in
                                 ns (gem_*_max_tb · ts_period).
 
-Required input columns (auto-emitted by gem_hycal_matching.py since the
-2026-04 column-set extension):
+Required input columns (emitted by gem_hycal_matching.py):
 
   det_id, gem_x, gem_y,                             # plot 2
   gem_x_local, gem_y_local,                         # plot 1
@@ -38,6 +37,9 @@ Usage
   # explicit out-dir, custom binning, no GUI (good for headless / CI):
   python analysis/pyscripts/plot_match_summary.py match.tsv \\
       --out-dir plots/ --bins 200 --no-show
+
+  # other options: --csv (force CSV input), --prefix NAME (output stem),
+  # --ts-period NS (time-sample period, default 25)
 """
 from __future__ import annotations
 
@@ -49,9 +51,6 @@ try:
     import pandas as pd
 except ImportError as e:
     raise SystemExit(f"[ERROR] pandas required: pip install pandas ({e})")
-
-# matplotlib is imported lazily in main() so we can pick the backend
-# (Agg vs interactive) based on --no-show before pyplot is touched.
 
 REQUIRED_COLS = [
     "det_id", "gem_x", "gem_y",
@@ -119,58 +118,52 @@ def plot_lab_scatter(plt, df: pd.DataFrame, out_path: Path) -> None:
     print(f"  wrote {out_path}", flush=True)
 
 
-def plot_peak_adc(plt, df: pd.DataFrame, bins: int, out_path: Path) -> None:
-    """Histogram of x_peak / y_peak per detector — X and Y overlaid."""
+def _plot_xy_hists(plt, df: pd.DataFrame, xs: pd.Series, ys: pd.Series,
+                   bins: int, rng: tuple[float, float], xlabel: str,
+                   title: str, out_path: Path) -> None:
+    """2×2 grid, one panel per detector, with the X- and Y-cluster
+    quantities `xs` / `ys` (aligned with df) overlaid as step histograms."""
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
-    fig.suptitle("Max-strip ADC of matching X / Y clusters")
-    pmax = float(max(df.gem_x_peak.max(), df.gem_y_peak.max()) or 1.0)
-    rng  = (0.0, pmax * 1.05)
+    fig.suptitle(title)
     for d, ax in enumerate(axes.flat):
-        sub = df[df.det_id == d]
+        sel = df.det_id == d
         ax.set_title(f"GEM {d}", color=DET_COLORS[d])
-        ax.set_xlabel("max strip ADC")
+        ax.set_xlabel(xlabel)
         ax.set_ylabel("counts")
-        if sub.empty:
+        if not sel.any():
             ax.text(0.5, 0.5, "no hits", ha="center", va="center",
                     transform=ax.transAxes)
             continue
-        ax.hist(sub.gem_x_peak, bins=bins, range=rng,
+        ax.hist(xs[sel], bins=bins, range=rng,
                 histtype="step", linewidth=1.4, color="C0", label="X cluster")
-        ax.hist(sub.gem_y_peak, bins=bins, range=rng,
+        ax.hist(ys[sel], bins=bins, range=rng,
                 histtype="step", linewidth=1.4, color="C3", label="Y cluster")
         ax.legend(loc="upper right")
     fig.savefig(out_path, dpi=150)
     print(f"  wrote {out_path}", flush=True)
 
 
+def plot_peak_adc(plt, df: pd.DataFrame, bins: int, out_path: Path) -> None:
+    """Histogram of x_peak / y_peak per detector — X and Y overlaid."""
+    pmax = float(max(df.gem_x_peak.max(), df.gem_y_peak.max()) or 1.0)
+    _plot_xy_hists(plt, df, df.gem_x_peak, df.gem_y_peak, bins,
+                   (0.0, pmax * 1.05), "max strip ADC",
+                   "Max-strip ADC of matching X / Y clusters", out_path)
+
+
 def plot_timing(plt, df: pd.DataFrame, bins: int, ts_period: float,
                 out_path: Path) -> None:
     """Histogram of max-ADC strip timing (ns) per detector."""
-    fig, axes = plt.subplots(2, 2, figsize=(10, 8), constrained_layout=True)
-    fig.suptitle(f"Timing of max-ADC strip — time sample × {ts_period:.1f} ns")
     tx = df.gem_x_max_tb * ts_period
     ty = df.gem_y_max_tb * ts_period
     tmin = float(min(tx.min(), ty.min()))
     tmax = float(max(tx.max(), ty.max()))
     if tmin == tmax:
         tmax = tmin + 1.0  # avoid degenerate range with a single timebin
-    rng = (tmin, tmax)
-    for d, ax in enumerate(axes.flat):
-        sub = df[df.det_id == d]
-        ax.set_title(f"GEM {d}", color=DET_COLORS[d])
-        ax.set_xlabel("max-ADC strip time [ns]")
-        ax.set_ylabel("counts")
-        if sub.empty:
-            ax.text(0.5, 0.5, "no hits", ha="center", va="center",
-                    transform=ax.transAxes)
-            continue
-        ax.hist(sub.gem_x_max_tb * ts_period, bins=bins, range=rng,
-                histtype="step", linewidth=1.4, color="C0", label="X cluster")
-        ax.hist(sub.gem_y_max_tb * ts_period, bins=bins, range=rng,
-                histtype="step", linewidth=1.4, color="C3", label="Y cluster")
-        ax.legend(loc="upper right")
-    fig.savefig(out_path, dpi=150)
-    print(f"  wrote {out_path}", flush=True)
+    _plot_xy_hists(plt, df, tx, ty, bins, (tmin, tmax),
+                   "max-ADC strip time [ns]",
+                   f"Timing of max-ADC strip — time sample × {ts_period:.1f} ns",
+                   out_path)
 
 
 def main(argv: list[str] | None = None) -> int:

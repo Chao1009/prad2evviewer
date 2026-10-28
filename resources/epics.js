@@ -1,8 +1,7 @@
 // epics.js — EPICS slow control monitoring tab
 //
-// Depends on globals from viewer.js: PL, PC_EPICS, activeTab
+// Depends on globals from viewer.js: PL, PC_EPICS, PC, activeTab
 
-const EPICS_COLORS=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b'];
 const EPICS_MAX_PER_SLOT=6;
 const EPICS_NUM_SLOTS=6;
 let epicsChannels=[];
@@ -12,9 +11,7 @@ let epicsLatestData=null;
 let epicsSlotData=new Array(EPICS_NUM_SLOTS).fill(null); // cached fetch results per slot
 let lastEpicsFetch=0, refreshEpicsMs=2000;
 
-// =========================================================================
 // Data fetching
-// =========================================================================
 
 function fetchEpicsChannels(){
     return fetch('/api/epics/channels').then(r=>r.json()).then(data=>{
@@ -34,8 +31,8 @@ function plotEpicsSlot(slot){
         traces.push({
             x:data.time,y:data.value,type:'scatter',mode:'lines+markers',
             name:data.name,
-            line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
-            marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
+            line:{color:PC[i%PC.length],width:1.5},
+            marker:{size:3,color:PC[i%PC.length]},
             hovertemplate:`${data.name}: %{y:.3f} (%{x:.1f}s)<extra></extra>`,
         });
     });
@@ -63,10 +60,8 @@ function fetchAndPlotEpicsSlot(slot){
         plotEpicsSlot(slot);
         return Promise.resolve();
     }
-    // batch fetch: single request for all channels in this slot
     const query=names.map(n=>'ch='+encodeURIComponent(n)).join('&');
     return fetch(`/api/epics/batch?${query}`).then(r=>r.json()).then(batch=>{
-        // reshape batch response to match the per-channel format
         epicsSlotData[slot]=(batch.channels||[]).map(ch=>({
             name:ch.name, time:batch.time||[], value:ch.value||[], count:ch.count||0
         }));
@@ -102,9 +97,7 @@ function updateEpicsDot(){
     dot.className='tab-dot'+(worst===2?' alert':worst===1?' warn':'');
 }
 
-// =========================================================================
 // Slot management
-// =========================================================================
 
 function addEpicsChannel(slot,name){
     if(epicsSlots[slot].includes(name)) return;
@@ -123,7 +116,7 @@ function removeEpicsChannel(slot,name){
 function renderEpicsChips(slot){
     const container=document.getElementById('epics-chips-'+slot);
     container.innerHTML=epicsSlots[slot].map((name,i)=>
-        `<span class="epics-chip" style="background:${EPICS_COLORS[i%EPICS_COLORS.length]}33;color:${EPICS_COLORS[i%EPICS_COLORS.length]}">`+
+        `<span class="epics-chip" style="background:${PC[i%PC.length]}33;color:${PC[i%PC.length]}">`+
         `${name}<span class="chip-x" data-slot="${slot}" data-name="${name}">&times;</span></span>`
     ).join('');
     container.querySelectorAll('.chip-x').forEach(x=>{
@@ -131,9 +124,7 @@ function renderEpicsChips(slot){
     });
 }
 
-// =========================================================================
 // Summary table
-// =========================================================================
 
 function updateEpicsTable(){
     const tbody=document.getElementById('epics-tbody');
@@ -177,10 +168,6 @@ function updateEpicsTable(){
     });
 }
 
-// =========================================================================
-// Clear
-// =========================================================================
-
 function clearEpicsFrontend(){
     // Slot configuration (epicsSlots) is user/config state — preserve it across
     // run boundaries so the preset charts refill when EPICS data resumes.
@@ -191,9 +178,7 @@ function clearEpicsFrontend(){
     updateEpicsTable();
 }
 
-// =========================================================================
-// Init — called from viewer.js init() with config data
-// =========================================================================
+// Init — called from applyConfig() (config.js) with the /api/config data
 
 function initEpics(data){
     // config — idempotent: fetchConfigAndApply() is called on file open,
@@ -272,11 +257,7 @@ function initEpics(data){
     });
 }
 
-// Theme flip — legend font.color comes from THEME.textDim at draw time.
-// Replay every slot from the cached batch response so the new palette
-// reaches the legend without paying a server roundtrip.
-if (typeof onThemeChange === 'function') {
-    onThemeChange(() => {
-        for (let i = 0; i < EPICS_NUM_SLOTS; i++) plotEpicsSlot(i);
-    });
-}
+// Theme flip — the legend color is baked at draw time; replot from cache.
+onThemeChange(() => {
+    for (let i = 0; i < EPICS_NUM_SLOTS; i++) plotEpicsSlot(i);
+});

@@ -12,7 +12,6 @@ let wfRequestId = 0;  // sequence guard for async waveform fetches
 const NS_PER_SAMPLE = 4;  // FADC250: 250 MHz → 4 ns/sample
 
 // Firmware quality bitmask (must match prad2dec/include/Fadc250Data.h).
-const Q_DAQ_GOOD             = 0;
 const Q_DAQ_PEAK_AT_BOUNDARY = 1 << 0;
 const Q_DAQ_NSB_TRUNCATED    = 1 << 1;
 const Q_DAQ_NSA_TRUNCATED    = 1 << 2;
@@ -69,7 +68,7 @@ function cutShow(){
 // unset (empty range).  Otherwise returns {min?, max?}.
 function filterRange(field){
     if (!cutShow()) return null;
-    const f = (typeof histConfig !== 'undefined') && histConfig.waveform_filter;
+    const f = histConfig.waveform_filter;
     if (!f) return null;
     const r = f[field];
     if (!r || (r.min == null && r.max == null)) return null;
@@ -150,16 +149,39 @@ function wfLayout(title, xMax, pm, yRange){
         xaxis:{...PL.xaxis, title:'Time (ns)', range:[0, xMax], autorange:false},
         yaxis,
         shapes,
+        legend:{x:1, y:1, xanchor:'right', bgcolor:THEME.overlay, font:{size:9}},
     };
 }
 
-// =========================================================================
-// Waveform
-// =========================================================================
+// Blank the DQ detail plots and peak tables and drop in-flight waveform
+// fetches (the module selection and the detail header are left to the caller).
+function resetDqPlots(wfTitle){
+    wfRequestId++;
+    currentWaveform=null; currentHist={};
+    Plotly.react('waveform-div',[], wfLayout(wfTitle, wfWindowNs()), PC2);
+    for(const id of ['heighthist-div','inthist-div','poshist-div']) resetPlot(id);
+    document.getElementById('peaks-tbody').innerHTML='';
+    document.getElementById('peaks-tbody-daq').innerHTML='';
+}
+
+// Set the Stack and DAQ waveform modes (callers keep them mutually
+// exclusive) and sync their toolbar controls and the peak tables.
+function setWfMode(stack, daq){
+    wfStackEnabled=stack; wfDaqEnabled=daq;
+    if(!stack){ wfStackTraces=[]; wfStackModKey=''; }
+    document.getElementById('wf-stack').checked=stack;
+    document.getElementById('wf-stack-count').style.display=stack?'':'none';
+    document.getElementById('btn-wf-stack-reset').style.display=stack?'':'none';
+    document.getElementById('wf-daq').checked=daq;
+    document.getElementById('wf-daq-info').style.display=daq?'':'none';
+    document.getElementById('peaks-table-soft').style.display=daq?'none':'';
+    document.getElementById('peaks-table-daq').style.display=daq?'':'none';
+}
+
+// ── Waveform ──────────────────────────────────────────────────────────
 function showWaveform(mod){
     selectedModule=mod;
 
-    // no waveform data available for this source type
     if(!sourceCaps.has_waveforms){
         document.getElementById('detail-header').innerHTML=
             `<span class="mod-name">${mod.n}</span> <span class="mod-daq">No waveform data for this file type</span>`;
@@ -182,7 +204,7 @@ function showWaveform(mod){
         if(!wfStackEnabled){
             currentWaveform=null;
             Plotly.react('waveform-div',[], wfLayout(`${mod.n} — No data`, wfWindowNs()), PC2);
-            document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
+            document.getElementById('peaks-tbody').innerHTML='<tr class="empty-row"><td colspan="8">No data</td></tr>';
         } else if(wfStackTraces.length===0){
             Plotly.react('waveform-div',[], wfLayout(`${mod.n} — Stacked (0)`, wfWindowNs()), PC2);
         }
@@ -211,12 +233,25 @@ function showWaveform(mod){
     showHistograms(mod); redrawGeo();
 }
 
+// Shade the area between curve (x, y) and the constant `base`: an invisible
+// baseline trace, then the curve filled 'tonexty' in `col` (#rrggbb) at `alpha`.
+function fillUnderTraces(x, y, base, col, alpha, name){
+    const n=parseInt(col.slice(1),16);
+    return [
+        {x, y:x.map(()=>base), type:'scatter', mode:'lines',
+         line:{width:0}, showlegend:false, hoverinfo:'skip'},
+        {x, y, type:'scatter', mode:'lines', name,
+         line:{color:col, width:2}, fill:'tonexty',
+         fillcolor:`rgba(${n>>16},${(n>>8)&255},${n&255},${alpha})`},
+    ];
+}
+
 function renderWaveform(mod, key, d, samples){
     if(!samples){
         if(wfStackEnabled) return;  // skip empty events, keep existing stack
         currentWaveform=null;
         Plotly.react('waveform-div',[], wfLayout(`${mod.n} — No samples`, wfWindowNs()), PC2);
-        document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No waveform data</td></tr>';
+        document.getElementById('peaks-tbody').innerHTML='<tr class="empty-row"><td colspan="8">No waveform data</td></tr>';
         document.getElementById('peaks-tbody-daq').innerHTML='';
         return;
     }
@@ -226,8 +261,6 @@ function renderWaveform(mod, key, d, samples){
     currentWaveform={x, y:Array.from(samples)};
 
     // --- DAQ (firmware-mode) annotations ---
-    // Mutually exclusive with stack mode — DAQ annotations don't make sense
-    // when overlaying many events.  Stack toggle disables DAQ; DAQ disables stack.
     if(wfDaqEnabled && d.daq){
         renderWaveformDaq(mod, d, samples, x, tMax);
         return;
@@ -268,7 +301,7 @@ function renderWaveform(mod, key, d, samples){
         Plotly.react('waveform-div', traces, stackLayout, PC2);
 
         document.getElementById('peaks-tbody').innerHTML=
-            '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">Stack mode — peaks hidden</td></tr>';
+            '<tr class="empty-row"><td colspan="8">Stack mode — peaks hidden</td></tr>';
         return;
     }
 
@@ -282,12 +315,7 @@ function renderWaveform(mod, key, d, samples){
     peaks.forEach((p,i)=>{
         const col=PC[i%PC.length],px=[],py=[];
         for(let j=p.l;j<=p.r;j++){px.push(j*NS_PER_SAMPLE);py.push(samples[j]);}
-        const r=parseInt(col.slice(1,3),16),g=parseInt(col.slice(3,5),16),b=parseInt(col.slice(5,7),16);
-        const fill=`rgba(${r},${g},${b},0.18)`;
-        traces.push({x:px,y:px.map(()=>d.pm),type:'scatter',mode:'lines',
-            line:{width:0},showlegend:false,hoverinfo:'skip'});
-        traces.push({x:px,y:py,type:'scatter',mode:'lines',name:`Peak ${i}`,
-            line:{color:col,width:2},fill:'tonexty',fillcolor:fill});
+        traces.push(...fillUnderTraces(px,py,d.pm,col,0.18,`Peak ${i}`));
         traces.push({x:[p.p*NS_PER_SAMPLE],y:[samples[p.p]],type:'scatter',mode:'markers',
             marker:{color:col,size:7,symbol:'diamond'},showlegend:false});
     });
@@ -297,9 +325,7 @@ function renderWaveform(mod, key, d, samples){
     // without disturbing autorange.  Includes d.pm so the pedestal line
     // stays in view even on quiet channels with all-baseline samples.
     const yRange = adcYRange(samples.concat([d.pm]));
-    const layout = wfLayout(`${mod.n} — Event ${currentEvent}`, tMax, d.pm, yRange);
-    layout.legend = {x:1,y:1,xanchor:'right',bgcolor:THEME.overlay,font:{size:9}};
-    Plotly.react('waveform-div', traces, layout, PC2);
+    Plotly.react('waveform-div', traces, wfLayout(`${mod.n} — Event ${currentEvent}`, tMax, d.pm, yRange), PC2);
 
     // peaks table
     let rows='';
@@ -307,18 +333,15 @@ function renderWaveform(mod, key, d, samples){
         const col=PC[i%PC.length];
         rows+=`<tr style="border-left:3px solid ${col}"><td>${i}</td><td>${p.p}</td><td>${p.t.toFixed(0)}</td><td>${p.h.toFixed(1)}</td><td>${p.i.toFixed(0)}</td><td>${p.l}</td><td>${p.r}</td><td style="text-align:center">${p.o?'⚠':''}</td></tr>`;
     });
-    if(!peaks.length) rows='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No peaks</td></tr>';
+    if(!peaks.length) rows='<tr class="empty-row"><td colspan="8">No peaks</td></tr>';
     document.getElementById('peaks-tbody').innerHTML=rows;
 }
 
-// =========================================================================
-// DAQ-mode (firmware Mode 1/2/3) renderer
-//
+// ── DAQ-mode (firmware Mode 1/2/3) renderer ───────────────────────────
 // Annotates the waveform with the firmware-emulated TDC + windowing per the
 // FADC250 User's Manual: TET line, Vnoise baseline, NSB/NSA brackets around
 // each Tcross, Vp marker, vertical T line at the interpolated mid-amplitude
 // time, and the Mode 2 integration polygon (Σ).
-// =========================================================================
 function renderWaveformDaq(mod, d, samples, x, tMax){
     const daq = d.daq || {};
     const pulses = daq.pk || [];
@@ -345,20 +368,15 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
          line:{color:'#ff6b6b', width:1.4, dash:'dash'}},
     ];
 
-    // Same shape stack the soft-mode plot uses: ref lines for the waveform
-    // plot + the time-axis cut overlay (when "show" is on).  The legacy
-    // helper `timeCutShapes(tMax)` was removed during the cut-overlay
-    // refactor; this is the equivalent expansion.
-    const shapes = refShapes('waveform') || [];
-    shapes.push(...xRangeShapes(0, tMax, filterRange('time')));
+    const title = pulses.length
+        ? `${mod.n} — DAQ mode · ${pulses.length} pulse${pulses.length>1?'s':''}`
+        : `${mod.n} — DAQ mode · 0 pulses (Vp ≤ TET)`;
+    const layout = wfLayout(title, tMax);
+    const shapes = layout.shapes;
     const annotations = [];
 
     pulses.forEach((p, idx) => {
         const col = PC[idx % PC.length];
-        const r = parseInt(col.slice(1,3),16),
-              g = parseInt(col.slice(3,5),16),
-              b = parseInt(col.slice(5,7),16);
-        const fill = `rgba(${r},${g},${b},0.20)`;
         const tCrossNs = p.cross * NS_PER_SAMPLE;
 
         // Mode-2 integration polygon — fill under the curve over [wlo, whi].
@@ -367,13 +385,7 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
             wx.push(j*NS_PER_SAMPLE);
             wy.push(ys[j]);
         }
-        if(wx.length){
-            traces.push({x:wx, y:wx.map(()=>0), type:'scatter', mode:'lines',
-                line:{width:0}, showlegend:false, hoverinfo:'skip'});
-            traces.push({x:wx, y:wy, type:'scatter', mode:'lines',
-                name:`Σ${idx} = ${p.i.toFixed(0)}`,
-                line:{color:col, width:2}, fill:'tonexty', fillcolor:fill});
-        }
+        if(wx.length) traces.push(...fillUnderTraces(wx, wy, 0, col, 0.20, `Σ${idx} = ${p.i.toFixed(0)}`));
 
         // Vp marker (open circle at the peak sample, not Tcross).
         const peakSample = (p.vp_pos !== undefined) ? p.vp_pos : p.cross;
@@ -426,15 +438,8 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
             y0:0, y1:1, line:{color:'#ff6b6b', width:0.8, dash:'dot'}});
     });
 
-    const title = pulses.length
-        ? `${mod.n} — DAQ mode · ${pulses.length} pulse${pulses.length>1?'s':''}`
-        : `${mod.n} — DAQ mode · 0 pulses (Vp ≤ TET)`;
-    const layout = wfLayout(title, tMax);
-    layout.shapes = shapes;
     layout.annotations = annotations;
     layout.yaxis = {...layout.yaxis, title:'ADC (ped-subtracted)'};
-    layout.legend = {x:1, y:1, xanchor:'right', bgcolor:THEME.overlay,
-                     font:{size:9}};
     Plotly.react('waveform-div', traces, layout, PC2);
 
     // DAQ peaks table.
@@ -448,43 +453,57 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
               + `<td style="text-align:center" title="${qualityLabel(p.q)}">${p.q?qualityLabel(p.q):'OK'}</td>`
               + `</tr>`;
     });
-    if(!pulses.length) rows = '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No firmware pulses (Vp ≤ TET)</td></tr>';
+    if(!pulses.length) rows = '<tr class="empty-row"><td colspan="8">No firmware pulses (Vp ≤ TET)</td></tr>';
     document.getElementById('peaks-tbody-daq').innerHTML = rows;
 }
 
-// =========================================================================
-// Histograms
-// =========================================================================
+// ── Histograms ────────────────────────────────────────────────────────
+// Bar histogram of `bins` (bin i centred at min+(i+0.5)*step).  Returns the
+// non-zero {x,y} pairs for the copy button, or null after drawing a
+// '<title> — No data' placeholder when there are no bins.  Options:
+//   title, xTitle, color   plot title, x-axis title, bar colour
+//   stats(n)               stats line under the title; n = sum of the bins
+//   max                    x-axis upper edge (default min+bins.length*step)
+//   logYId                 id of the log-y checkbox, if any
+//   refKey                 refShapes key for reference lines, if any
+//   shapes(xMin, xMax)     extra overlay shapes, if any
+//   selectedIdx            bin drawn in THEME.highlight, if any
+//   hover                  hovertemplate (default '%{x}: %{y}<extra></extra>')
+function plotBarHist(div, bins, min, step, o){
+    if(!bins||!bins.length){
+        Plotly.react(div,[],{...PL,title:{text:`${o.title} — No data`,font:{size:10,color:THEME.textMuted}}},PC2);
+        return null;
+    }
+    const x=bins.map((_,i)=>min+(i+0.5)*step);
+    const entries=bins.reduce((a,b)=>a+b,0);
+    const cx=[], cy=[];
+    for(let i=0;i<bins.length;i++){if(bins[i]>0){cx.push(x[i]);cy.push(bins[i]);}}
+    const color=(o.selectedIdx>=0 && o.selectedIdx<bins.length)
+        ? bins.map((_,i)=>i===o.selectedIdx?THEME.highlight:o.color) : o.color;
+    const xMax=o.max??min+bins.length*step;
+    Plotly.react(div,[{
+        x,y:bins,type:'bar',marker:{color,line:{width:0}},
+        hovertemplate:o.hover||'%{x}: %{y}<extra></extra>',
+    }],{...PL,
+        title:{text:`${o.title}<br><span style="font-size:9px;color:var(--theme-text-dim)">${o.stats(entries)}</span>`,font:{size:10,color:THEME.textDim}},
+        xaxis:{...PL.xaxis,title:o.xTitle,range:[min,xMax]},
+        yaxis:{...PL.yaxis,title:'Counts',
+            type:o.logYId&&document.getElementById(o.logYId).checked?'log':'linear'},
+        bargap:0.05,
+        shapes:[...(o.refKey?refShapes(o.refKey):[]), ...(o.shapes?o.shapes(min,xMax):[])],
+    },PC2);
+    return {x:cx,y:cy};
+}
+
 // `field` selects which filter axis to overlay on this histogram:
 // 'time' | 'integral' | 'height' | null (no overlay).
 function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, logYId, refKey, field){
     fetch(url).then(r=>r.json()).then(data=>{
-        if(data.error||!data.bins||!data.bins.length){
-            currentHist[divId]=null;
-            Plotly.react(divId,[],{...PL,title:{text:`${title} — No data`,font:{size:10,color:THEME.textMuted}}},PC2);
-            return;
-        }
-        const x=data.bins.map((_,i)=>binMin+(i+0.5)*binStep);
-        const cx=[], cy=[];
-        for(let i=0;i<data.bins.length;i++){if(data.bins[i]>0){cx.push(x[i]);cy.push(data.bins[i]);}}
-        currentHist[divId]={x:cx,y:cy};
-
-        const entries=data.bins.reduce((a,b)=>a+b,0)+data.underflow+data.overflow;
-        const stats=`${data.events} evts | Entries: ${entries}  Under: ${data.underflow}  Over: ${data.overflow}`;
-        const xMin=binMin, xMax=binMin+data.bins.length*binStep;
-        const shapes = refKey ? (refShapes(refKey)||[]) : [];
-        if (field) shapes.push(...xRangeShapes(xMin, xMax, filterRange(field)));
-        Plotly.react(divId,[{
-            x,y:data.bins,type:'bar',marker:{color:barColor,line:{width:0}},
-            hovertemplate:'%{x:.0f}: %{y}<extra></extra>',
-        }],{...PL,
-            title:{text:`${title}<br><span style="font-size:9px;color:var(--theme-text-dim)">${stats}</span>`,font:{size:10,color:THEME.textDim}},
-            xaxis:{...PL.xaxis,title:xTitle,range:[xMin,xMax]},
-            yaxis:{...PL.yaxis,title:'Counts',
-                type:logYId&&document.getElementById(logYId).checked?'log':'linear'},
-            bargap:0.05,
-            shapes,
-        },PC2);
+        currentHist[divId]=plotBarHist(divId, data.error?null:data.bins, binMin, binStep, {
+            title, xTitle, color:barColor, logYId, refKey,
+            hover:'%{x:.0f}: %{y}<extra></extra>',
+            shapes:field?(lo,hi)=>xRangeShapes(lo,hi,filterRange(field)):null,
+            stats:n=>`${data.events} evts | Entries: ${n+data.underflow+data.overflow}  Under: ${data.underflow}  Over: ${data.overflow}`});
     }).catch(()=>{
         currentHist[divId]=null;
         Plotly.react(divId,[],{...PL,title:{text:'Fetch error',font:{size:10,color:THEME.danger}}},PC2);
@@ -493,16 +512,11 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
 
 function showHistograms(mod){
     const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
-    // in online mode, throttle auto-refreshes of the same module to ~1 Hz
-    if (mode === 'online' && key === lastHistModule) {
-        const now = Date.now();
-        if (now - lastHistFetch < refreshHistMs) return;
-        lastHistFetch = now;
-    }
+    // in online mode, throttle auto-refreshes of the same module to refresh_ms.histogram
+    if (mode === 'online' && key === lastHistModule && Date.now() - lastHistFetch < refreshHistMs) return;
     lastHistFetch = Date.now();
     lastHistModule = key;
-    // Cut ranges are visualised by the dashed-line + dim-region overlays
-    // when "show" is on, so the titles stay clean (no stale [min-max] suffix).
+    // Cut ranges are shown by the overlays (when "show" is on), not in titles.
     const h=histConfig;
     fetchAndPlotHist('heighthist-div',`/api/heighthist/${key}`,
         `${mod.n} Peak Height`,

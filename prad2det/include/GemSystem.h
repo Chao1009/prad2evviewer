@@ -19,14 +19,14 @@
 //=============================================================================
 
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
 #include <array>
 #include <unordered_map>
 
-// Forward-declare SSP data types (from prad2dec)
-namespace ssp { struct SspEventData; struct ApvData; }
+#include "SspData.h"
 
 namespace gem
 {
@@ -47,13 +47,35 @@ struct StripCluster {
     float   peak_charge  = 0.f; // highest strip charge in cluster
     float   total_charge = 0.f; // sum of all strip charges
     short   max_timebin  = -1;
-    // CRITICAL: must be value-initialized.  filterClusters() reads
-    // this field; an uninitialized value (random heap byte) was the
-    // root cause of the cross-call non-determinism that made GEM0
-    // efficiency ~half the expected rate when reconstruct_hycal was
-    // interleaved with reconstruct_gem.
+    // CRITICAL: must be value-initialized — filterClusters() reads this
+    // field, and a garbage value drops clusters non-deterministically.
     bool    cross_talk   = false;
     std::vector<StripHit> hits;
+
+    // --- SBS-style (mpd_gem_view_ssp Cuts) quality variables ----------------
+    // Filled for every cluster by GemCluster::reconstructCluster.  Seed =
+    // first strip with the maximum `charge` (strict >).  NaN = undefined;
+    // keep the default initializers (see cross_talk above).
+    //   seed_time      StripMeanTime of the seed strip (ns)
+    //   seed_peak_adc  max ts_adc of the seed strip (SBS "seed strip peak ADC";
+    //                  equals peak_charge whenever charge = max sample, as on
+    //                  every PRad path — a halved valley strip is never the seed)
+    //   seed_sum_adc   sum of ts_adc of the seed strip, all samples
+    //   max_strip_dt   max over non-seed strips of |StripMeanTime(i) - seed_time|
+    //                  (ns); NaN for single-strip clusters
+    //   min_ts_corr    min over non-seed strips of TimeSampleCorrelation(seed, i);
+    //                  NaN for single-strip clusters
+    //   ts_adc_sum     cluster-summed time samples, sum_i w_i * hits[i].ts_adc[s]
+    //                  with w_i = charge_i / max_s ts_adc_i[s]: 1 for a normal
+    //                  strip, 1/2 for the valley strip splitCluster halved (as in
+    //                  total_charge; 1 if the strip has no positive sample).
+    //                  Empty if the strips have no samples or differ in count.
+    float   seed_time     = std::numeric_limits<float>::quiet_NaN();
+    float   seed_peak_adc = std::numeric_limits<float>::quiet_NaN();
+    float   seed_sum_adc  = std::numeric_limits<float>::quiet_NaN();
+    float   max_strip_dt  = std::numeric_limits<float>::quiet_NaN();
+    float   min_ts_corr   = std::numeric_limits<float>::quiet_NaN();
+    std::vector<float> ts_adc_sum;
 };
 
 struct GEMHit {
@@ -63,6 +85,27 @@ struct GEMHit {
     float x_peak   = 0.f, y_peak   = 0.f;
     short x_max_timebin = 0, y_max_timebin = 0;
     int   x_size = 0, y_size = 0;
+
+    // --- SBS-style quality of the X/Y cluster pair ---------------------------
+    // Filled by GemCluster in both match modes, independent of whether any
+    // cut is enabled.  NaN = undefined.
+    //   x_time, y_time   seed mean times of the X / Y cluster (ns)
+    //   time_diff        x_time - y_time (signed, ns)
+    //   adc_asym         (x_peak - y_peak) / (x_peak + y_peak), signed; NaN if
+    //                    the sum <= 0.  |adc_asym| is what match_adc_asymmetry cuts
+    //   x/y_max_strip_dt, x/y_min_ts_corr   copied from the X / Y StripCluster
+    //   xy_ts_corr       TimeSampleCorrelation(X ts_adc_sum, Y ts_adc_sum), the
+    //                    X/Y cluster time-sample correlation rho_cl (SBS-offline
+    //                    corrcoeff_clust); NaN if a waveform is empty or flat
+    float x_time    = std::numeric_limits<float>::quiet_NaN();
+    float y_time    = std::numeric_limits<float>::quiet_NaN();
+    float time_diff = std::numeric_limits<float>::quiet_NaN();
+    float adc_asym  = std::numeric_limits<float>::quiet_NaN();
+    float x_max_strip_dt = std::numeric_limits<float>::quiet_NaN();
+    float y_max_strip_dt = std::numeric_limits<float>::quiet_NaN();
+    float x_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
+    float y_min_ts_corr  = std::numeric_limits<float>::quiet_NaN();
+    float xy_ts_corr     = std::numeric_limits<float>::quiet_NaN();
 };
 
 // --- APV pedestal -----------------------------------------------------------
@@ -96,9 +139,10 @@ struct ApvConfig {
     std::string match;
 
     // Pedestals (per-strip)
-    ApvPedestal pedestal[128];
+    ApvPedestal pedestal[ssp::APV_STRIP_SIZE];
 
-    // Common mode range (for Danning algorithm)
+    // Common-mode range from LoadCommonModeRange; not used by the
+    // reconstruction (processApv uses the sorting estimator).
     float cm_range_min = 0.f;
     float cm_range_max = 5000.f;
 };
@@ -139,7 +183,7 @@ int MapStrip(int ch, int plane_index, int orient,
              int  pin_rotate    = 0,
              int  shared_pos    = -1,
              bool hybrid_board  = true,
-             int  apv_channels  = 128,
+             int  apv_channels  = ssp::APV_STRIP_SIZE,
              int  readout_center = 32);
 
 // Convenience: compute plane-wide strip numbers for every channel of an APV.
@@ -148,14 +192,16 @@ std::vector<int> MapApvStrips(int plane_index, int orient,
                               int  pin_rotate    = 0,
                               int  shared_pos    = -1,
                               bool hybrid_board  = true,
-                              int  apv_channels  = 128,
+                              int  apv_channels  = ssp::APV_STRIP_SIZE,
                               int  readout_center = 32);
 
 // --- reconstruction config (per-detector knobs for GemCluster) --------------
 //
 // Lives here (rather than in GemCluster.h) so GemSystem can store one entry
-// per detector by value.  Defaults reproduce the historical mpd_gem_view_ssp
-// reconstruction chain.
+// per detector by value.  Defaults follow the mpd_gem_view_ssp reconstruction
+// chain, except that charac_dists is empty (cross-talk flagging off); the
+// production distances come from reconstruction_config.json
+// (gem.default.charac_dists).
 struct ClusterConfig {
     int   min_cluster_hits  = 1;
     int   max_cluster_hits  = 20;
@@ -163,19 +209,35 @@ struct ClusterConfig {
     float split_thres       = 14.f; // charge valley depth for splitting
     float cross_talk_width  = 2.f;  // mm
     float cross_talk_peak_ratio_max = 0.40f; // weak/strong peak ratio upper bound
-    std::vector<float> charac_dists;// cross-talk characteristic distances
+    std::vector<float> charac_dists;// cross-talk characteristic distances (mm); empty = off
 
     // XY matching mode: 0 = ADC-sorted 1:1, 1 = full Cartesian with cuts
     int   match_mode          = 1;
     // XY matching cuts (mode 1 only)
     float match_adc_asymmetry = 0.8f;  // max |Qx-Qy|/(Qx+Qy), <0 to disable
     float match_time_diff     = 50.f;  // max |mean_t_x - mean_t_y| in ns, <0 to disable
-    float ts_period           = 25.f;  // ns per time sample
+    float match_ts_corr_min   = -1.f;  // min GEMHit::xy_ts_corr, <=-1 to disable; NaN passes (SBS corrcoeff_cut: 0.4-0.5)
+    float ts_period           = 25.f;  // ns per time sample (also used for strip mean times)
+
+    // --- SBS-style (mpd_gem_view_ssp Cuts) quality cuts; all off by default ---
+    // strip level: applied while grouping strips into clusters.  A failing strip
+    // is dropped and terminates the current run of consecutive strips (SBS
+    // IsGoodStrip semantics).  Strips without a positive sample fail an active
+    // time window; empty ts_adc fails an active unimodal cut.
+    float strip_time_min = -std::numeric_limits<float>::infinity();  // ns, inclusive strip mean-time window
+    float strip_time_max =  std::numeric_limits<float>::infinity();  // (active if either finite)
+    bool  strip_unimodal = false;   // SBS "use concave shape cut for strip"
+    // cluster level: applied in filterClusters (after cross-talk flagging).
+    // NaN quality values (e.g. single-strip cluster) pass.
+    float seed_min_peak_adc    = 0.f;   // <= 0 disables (SBS: 30)
+    float seed_min_sum_adc     = 0.f;   // <= 0 disables (SBS: 60)
+    float strip_time_agreement = -1.f;  // ns; reject if max_strip_dt > value; < 0 disables (SBS: 50)
+    float strip_ts_corr_min    = -1.f;  // reject if min_ts_corr < value; <= -1 disables (SBS: 0.7, never applied there)
 };
 
 // --- GemSystem class --------------------------------------------------------
 
-class GemCluster;   // forward declaration
+class GemCluster;
 
 class GemSystem
 {
@@ -206,8 +268,8 @@ public:
     // --- reconstruction config ---------------------------------------------
     // Set per-detector clustering / XY-matching parameters.  Application
     // layer (app_state_init.cpp / Replay) supplies one ClusterConfig per
-    // detector after parsing reconstruction_config.json.  cfgs.size() must
-    // equal GetNDetectors(); shorter/longer vectors are clamped + padded
+    // detector after parsing reconstruction_config.json.  cfgs.size() should
+    // equal GetNDetectors(); longer vectors are truncated, shorter ones padded
     // with library defaults.  Reconstruct() applies entry [d] before
     // clustering each detector.
     void SetReconConfigs(std::vector<ClusterConfig> cfgs);
@@ -249,12 +311,12 @@ public:
     // Per-APV zero-suppression results (valid after ProcessEvent)
     bool  IsChannelHit(int apv_idx, int ch) const { return apv_work_[apv_idx].hit_pos[ch]; }
     bool  HasApvZsHits(int apv_idx) const {
-        for (int ch = 0; ch < APV_STRIP_SIZE; ++ch)
+        for (int ch = 0; ch < ssp::APV_STRIP_SIZE; ++ch)
             if (apv_work_[apv_idx].hit_pos[ch]) return true;
         return false;
     }
     float GetProcessedAdc(int apv_idx, int ch, int ts) const {
-        return apv_work_[apv_idx].raw[ts * APV_STRIP_SIZE + ch];
+        return apv_work_[apv_idx].raw[ts * ssp::APV_STRIP_SIZE + ch];
     }
 
     // Configuration
@@ -275,34 +337,27 @@ public:
 private:
     // --- per-APV processing -------------------------------------------------
     void processApv(int apv_idx, const ssp::ApvData &data);
-    float commonModeSorting(float *buf, int size, int apv_idx);
-    float commonModeDanning(float *buf, int size, int apv_idx);
+    static float commonModeSorting(const float *buf, int size);
     void collectHits(int apv_idx);
 
     // --- strip mapping ------------------------------------------------------
     void buildStripMap(int apv_idx);
+    // {min, max} mapped strip over the APVs of detectors_[det] on `plane`
+    // (match APVs only if match_only); min > max when there are none.
+    std::pair<int, int> stripRange(int det, int plane, bool match_only) const;
 
     // --- detector hierarchy -------------------------------------------------
     std::vector<DetectorConfig> detectors_;
     std::vector<ApvConfig> apvs_;
-    std::unordered_map<uint64_t, int> apv_map_;  // packed(crate,mpd,adc) → apv index
-
-    static uint64_t packApvKey(int crate, int mpd, int adc)
-    {
-        return (static_cast<uint64_t>(static_cast<uint16_t>(crate)) << 32) |
-               (static_cast<uint64_t>(static_cast<uint16_t>(mpd))  << 16) |
-               static_cast<uint64_t>(static_cast<uint16_t>(adc));
-    }
+    std::unordered_map<uint64_t, int> apv_map_;  // prad2::pack_daq_key(crate,mpd,adc) → apv index
 
     // --- per-APV working data (pre-allocated) -------------------------------
-    static constexpr int APV_STRIP_SIZE   = 128;
-    static constexpr int SSP_TIME_SAMPLES = 6;
     static constexpr int NUM_HIGH_STRIPS  = 20;  // for sorting CM algorithm
 
     struct ApvWorkData {
-        float raw[APV_STRIP_SIZE * SSP_TIME_SAMPLES];
-        bool  hit_pos[APV_STRIP_SIZE];
-        int   strip_map[APV_STRIP_SIZE];    // APV channel → plane strip
+        float raw[ssp::APV_STRIP_SIZE * ssp::SSP_TIME_SAMPLES];
+        bool  hit_pos[ssp::APV_STRIP_SIZE];
+        int   strip_map[ssp::APV_STRIP_SIZE];    // APV channel → plane strip
     };
     std::vector<ApvWorkData> apv_work_;
 
@@ -319,12 +374,12 @@ private:
     std::vector<GEMHit> all_hits_;
 
     // --- global APV parameters -----------------------------------------------
-    int   apv_channels_     = 128;     // channels per APV chip
+    int   apv_channels_     = ssp::APV_STRIP_SIZE;  // channels per APV chip
     int   readout_center_   = 32;      // default readout mapping center
 
     // --- thresholds.  zerosup_thres_ runs on both paths (full readout
-    // and online-ZS, see processApv).  common_thres_ is only used by the
-    // Danning common-mode algorithm in the full-readout pipeline.
+    // and online-ZS, see processApv).  common_thres_ and crosstalk_thres_
+    // are stored but not used by the reconstruction.
     float common_thres_     = 20.f;
     float zerosup_thres_    = 5.f;
     float crosstalk_thres_  = 8.f;
@@ -337,8 +392,7 @@ private:
 
     // --- per-detector reconstruction config (clustering + XY matching) ----
     // Sized to detectors_.size() during Init().  Library-default ClusterConfig
-    // until SetReconConfigs() supplies parsed values.  Reconstruct() applies
-    // entry [d] to the supplied GemCluster before clustering each detector.
+    // until SetReconConfigs() supplies parsed values.
     std::vector<ClusterConfig> per_det_cfgs_;
 };
 

@@ -24,14 +24,14 @@
         "calibration":   {"default_adc2mev": 0.12},
         "target":        [0.0, 0.0, 0.0],
         "hycal": {
-            "position":  [0.0, 0.0, 6267.0], "tilting":   [0.0, 0.0, 0.0]
+            "position":  [0.0, 0.0, 6265.887], "tilting":   [0.0, 0.0, 0.0]
         },
         "gem": {
             "detectors": [
-                {"id": 0, "position": [-228.0, 0.0, 5812.0], "tilting": [180.0, 0.0, 0.0]},
-                {"id": 1, "position": [227.0, 0.0, 5852.0], "tilting": [180.0, 0.0, 180.0]},
-                {"id": 2, "position": [-228.0, 0.0, 5412.0], "tilting": [180.0, 0.0, 0.0]},
-                {"id": 3, "position": [227.0, 0.0, 5458.0], "tilting": [180.0, 0.0, 180.0]}
+                {"id": 0, "position": [-228.323, -0.7, 5813.831], "tilting": [180.0, 0.0, -0.037]},
+                {"id": 1, "position": [227.177, 0.694, 5853.713], "tilting": [180.0, 0.0, 179.959]},
+                {"id": 2, "position": [-228.369, 0.515, 5411.839], "tilting": [180.0, 0.0, -0.061]},
+                {"id": 3, "position": [227.279, 0.814, 5456.658], "tilting": [180.0, 0.0, 179.94]}
             ]
         },
         "matching":      {"radius": 8.0, "use_square_cut": false, "energy_dependent": true, "sigma": 4.0}
@@ -43,18 +43,14 @@
             "beam_energy": 2108.8,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [60.0, 400.0]},
-            "gain_factor": {"data_dir": "", 
-            "ref_run": 24827}
+            "gain_factor": {"data_dir": "", "ref_run": 24827}
         },
         {
             "from_run":    24185,
             "beam_energy": 3488.43,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  24827
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
         {
             "// Reuses the 24185 calibration, time cuts, and gain reference":  "",
@@ -67,15 +63,42 @@
             "beam_energy": 3485.41,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  24827
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
-		{
-			"from_run":    25200,
-			"beam_energy": 2239.51
-		},
+
+        {
+            "// calibration period 1 of 2.2GeV": "",
+            "beam_energy": 2239.51,
+            "from_run":    25200,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_1.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25213, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 2 of 2.2GeV": "",
+            "from_run":    25255,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_2.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25261, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 3 of 2.2GeV": "",
+            "from_run":    25292,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_3.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25292, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 4 of 2.2GeV": "",
+            "from_run":    25311,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_4.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25326, "ref_PMT": 12}
+        },
+        {
+            "// calibration period 5-1-1 of 2.2GeV": "",
+            "from_run":    25349,
+            "calibration": {"file": "calibration/PRad2_2p2_round1_5.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25353, "ref_PMT": 12}
+        },
+
+
         {
             "// from here, start the X17 experimental runs": "",
 
@@ -95,10 +118,7 @@
 			"beam_energy": 2239.51,
             "calibration": {"file": "calibration/x17_25560.json"},
             "time_cuts":   {"hc_time_window": [130, 200.0]},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25560
-            },
+            "gain_factor": {"data_dir": "", "ref_run":  25560},
             "// 25560 is the reference run for the 1st X17 calibration": "",
             "// reuse PRad2 calibration, the ref_gain run is 24827": "",
             "matching":    {"radius": 15.0, "use_square_cut": false, "energy_dependent": true, "sigma": 3.0}
@@ -106,34 +126,22 @@
         {
             "from_run":    25655,
             "calibration": {"file": "calibration/x17_25655.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25655
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  25655}
         },
         {
             "from_run":    25785,
             "calibration": {"file": "calibration/x17_25825.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  25825
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  25825}
         },
         {
             "from_run":    26030,
             "calibration": {"file": "calibration/x17_26094.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  26094
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  26094}
         },
         {
             "from_run":    26214,
             "calibration": {"file": "calibration/x17_26214.json"},
-            "gain_factor": {
-                "data_dir": "",
-                "ref_run":  26214
-            }
+            "gain_factor": {"data_dir": "", "ref_run":  26214}
         }
 
     ],
@@ -157,6 +165,7 @@
     "// if a run has an entry here, it overrides the target_* fields for the runs >= from_run.": "",
     "beam_target_positions": [
         {"from_run": 24185, "target": [0.0, 0.0, 0.0]},
+        {"from_run": 25308, "target": [0.805, 1.486, 0.0]},
         {"from_run": 25655, "target": [-0.108, 1.601, 0.0]},
         {"from_run": 26000, "target": [0.85, 1.5, 0.0]}
     ],
@@ -164,9 +173,10 @@
     "// Per-run HyCal dead modules list. Independent lookup, no chaining": "",
     "// the definate time of W1141 dead is not known, run 24850 is an estimate": "",
     "hycal_dead_modules": [
-        {"from_run": 0, "dead_modules": ["W1124", "W691"]},
-        {"from_run": 24693, "dead_modules": ["W1124"]},
-        {"from_run": 24850, "dead_modules": ["W1124", "W1141"]},
-        {"from_run": 25540, "dead_modules": ["W1124", "W781"]}
+        {"from_run": 0, "dead_modules": ["W1019", "W1020", "W1124", "W691"]},
+        {"from_run": 24693, "dead_modules": ["W1019", "W1020", "W1124"]},
+        {"from_run": 24850, "dead_modules": ["W1019", "W1020", "W1124", "W1141"]},
+        {"from_run": 25200, "dead_modules": ["W1019", "W1020", "W1124"]},
+        {"from_run": 25540, "dead_modules": ["W1019", "W1020", "W1124", "W781"]}
     ]
 }

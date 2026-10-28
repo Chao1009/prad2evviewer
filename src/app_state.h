@@ -7,8 +7,8 @@
 // separate accumulators but identical configuration.
 //=============================================================================
 
-// forward declaration (full definition in data_source.h)
-struct ReconEventData;
+// forward declaration (full definition in EventData.h)
+namespace prad2 { struct ReconEventData; }
 
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
@@ -104,6 +104,9 @@ struct TriggerFilter {
         return accept == 0 || (bits & accept);
     }
 
+    // Opt-in consumers (LMS, Alpha): an empty accept mask selects nothing.
+    bool matchesExplicit(uint32_t bits) const { return accept != 0 && (*this)(bits); }
+
     // parse from JSON section containing accept_trigger_bits / reject_trigger_bits
     // values can be: bit numbers (8, 24), or names ("LMS", "Pulser") resolved
     // against the trigger_bits_def lookup table from trigger_bits.json
@@ -126,14 +129,11 @@ struct TriggerFilter {
 // Per-peak filter for the Waveform Tab histograms (and any consumer that opts
 // into it).  Each axis is an optional [min, max] range — missing bound means
 // no constraint on that side.  Quality bits use accept/reject masks resolved
-// against AppState::peak_quality_bits_def.  `enable=false` makes the filter a
-// no-op (predicate returns true unconditionally) — the GUI's "apply" checkbox
-// drives this flag.
+// against AppState::peak_quality_bits_def.  `enable` is the GUI's "apply"
+// checkbox; it is checked by the caller, not by operator().
 struct PeakFilter {
-    // Default `enable=true` so the JSON-configured filter is active on
-    // startup — preserves today's behavior (time-cut always applied) without
-    // needing a runtime flag in monitor_config.json.  The GUI "apply"
-    // checkbox toggles this at runtime.
+    // True so the JSON-configured filter is active on startup; runtime-only
+    // (no monitor_config.json key).
     bool enable = true;
     std::optional<float> time_min, time_max;
     std::optional<float> integral_min, integral_max;
@@ -158,16 +158,37 @@ struct PeakFilter {
     nlohmann::json toJson(const nlohmann::json &quality_bits_def) const;
 };
 
+// --- Event-level filters (loaded from external JSON, applied per-event) ------
+// Each filter has enable=false by default; disabled filters are skipped.
+
+struct WaveformFilter {
+    bool  enable       = false;
+    std::vector<std::string> modules;   // HyCal module names; empty = no module restriction
+    int   n_peaks_min  = 1;             // qualifying-peak count range
+    int   n_peaks_max  = 999999;
+    PeakFilter peak;                    // qualifying-peak time/integral/height window
+                                        // (its enable and quality masks are unused)
+};
+
+struct ClusterFilter {
+    bool  enable       = false;
+    int   n_min        = 0;             // qualifying-cluster count range
+    int   n_max        = 999999;
+    float energy_min   = 0;             // per-cluster energy range
+    float energy_max   = 1e30f;
+    int   size_min     = 1;             // per-cluster nblocks range
+    int   size_max     = 999999;
+    std::vector<std::string> includes_modules;  // cluster must contain >= includes_min of these
+    int   includes_min = 1;
+    std::vector<std::string> center_modules;    // cluster center must be in this list
+};
+
 struct AppState {
-    // ---- Configuration (set once at startup, then read-only) ---------------
+    // ---- Configuration (set at startup) -----------------------------------
     HistConfig hist_cfg;
     TriggerFilter waveform_trigger;
-    int hist_nbins   = 0;
-    int pos_nbins    = 0;
-    int height_nbins = 0;
 
     // Waveform-Tab peak filter (height/integral/time hist + show overlays).
-    // `enable` is the GUI "apply" checkbox; runtime-only, not in monitor_config.json.
     // `peak_filter_default` snapshots the JSON-configured filter at startup
     // so the Cut-Settings "Reset" button can restore the file values without
     // a server round-trip.
@@ -195,11 +216,18 @@ struct AppState {
 
     // Per-channel pulse-template store for the NNLS pile-up deconvolver.
     // Loaded by init() from `daq_cfg.wave_cfg.nnls_deconv.template_file`
-    // (resolved against db_dir).  When invalid (file missing / parse
-    // failure) the deconv path silently falls back to the local-maxima
-    // peak heights — every WaveAnalyzer in the app picks this up via
-    // SetTemplateStore() during the same init.
+    // (resolved like the other database files, via findFile).  When invalid
+    // (file missing / parse failure) the deconv path silently falls back to
+    // the local-maxima peak heights — every WaveAnalyzer in the app picks
+    // this up via makeAnalyzer().
     fdec::PulseTemplateStore template_store;
+
+    fdec::WaveAnalyzer makeAnalyzer() const
+    {
+        fdec::WaveAnalyzer ana(daq_cfg.wave_cfg);
+        ana.SetTemplateStore(&template_store);
+        return ana;
+    }
 
     // GEM system
     gem::GemSystem gem_sys;
@@ -208,6 +236,19 @@ struct AppState {
 
     // GEM per-detector lab-frame transform (same type as HyCal)
     std::vector<DetectorTransform> gem_transforms;  // indexed by detector id
+
+    // Per-detector active strip extent {x_lo, x_hi, y_lo, y_hi} in detector-
+    // local mm (GemSystem::GetActiveExtent, cached at init).  Tighter than
+    // PlaneConfig.size on the beam-hole side because pos=11 reuses pos=10's
+    // strip numbers via shared_pos; the GUI draws it as the dashed frame.
+    std::vector<std::array<float, 4>> gem_active_ext;
+    // Fill a grid whose nx × ny bins span detector d's active extent, so the
+    // heatmap sits flush against the frame; points outside it are dropped.
+    void fillActiveGrid(Histogram2D &h, int d, float lx, float ly) const
+    {
+        const auto &e = gem_active_ext[d];
+        h.fill(lx, ly, e[0], (e[1] - e[0]) / h.nx, e[2], (e[3] - e[2]) / h.ny);
+    }
 
     // GEM occupancy (accumulated per-detector 2D histograms)
     static constexpr int GEM_OCC_NX = 50;
@@ -288,24 +329,21 @@ struct AppState {
     // that ticks each metric on its own poll_sec; an empty command skips
     // that metric.  Avoids a build-time EPICS dependency by shelling out to
     // whatever tool the host provides (typically caget).
-    //
-    // livetime: healthy/warning are percent thresholds for color
-    // (≥ healthy → green, ≥ warning → orange, otherwise red).
-    std::string livetime_cmd;
-    std::string livetime_unit       = "%";
-    int         livetime_poll_sec   = 30;
-    float       livetime_healthy    = 90.f;
-    float       livetime_warning    = 80.f;
-
-    // Beam status (energy, current).  trip_warn for current colors red when
-    // the reading drops below the threshold (beam-trip indicator).
     struct ShellMetric {
         std::string command;
         std::string unit;
         int         poll_sec        = 5;
+        // Colors the reading red below the threshold (beam-trip indicator).
         bool        has_trip_warn   = false;
         float       trip_warn_below = 0.f;
     };
+
+    // livetime: healthy/warning are percent thresholds for color
+    // (≥ healthy → green, ≥ warning → orange, otherwise red).
+    ShellMetric livetime_status{"", "%", 30};
+    float       livetime_healthy    = 90.f;
+    float       livetime_warning    = 80.f;
+
     ShellMetric beam_energy_status;
     ShellMetric beam_current_status;
 
@@ -329,8 +367,8 @@ struct AppState {
     // Physics / coordinate config
     float target_x=0, target_y=0, target_z=0;  // target position in lab frame (mm)
     DetectorTransform hycal_transform;           // HyCal position + tilting
-    float ea_angle_min=0.f, ea_angle_max=8.f, ea_angle_step=0.2f;   // degrees
-    float ea_energy_min=0.f, ea_energy_max=3000.f, ea_energy_step=100.f; // MeV
+    HistAxis ea_angle_axis{0.f, 8.f, 0.2f};       // degrees
+    HistAxis ea_energy_axis{0.f, 3000.f, 100.f};  // MeV
     // Single-source beam energy: MBSY2C_energy from EPICS overrides; runinfo is fallback.
     // Read in physics paths (cluster filling, plots); written by init() (runinfo) and
     // processEpics() (EPICS). Atomic so processEpics can update without holding data_mtx.
@@ -350,16 +388,16 @@ struct AppState {
     float moller_angle_min  = 1.0f;     // deg — require one cluster in this range
     float moller_angle_max  = 1.2f;     // deg
     // Møller XY histogram
-    float moller_xy_x_min=-600.f, moller_xy_x_max=600.f, moller_xy_x_step=5.f;  // mm
-    float moller_xy_y_min=-600.f, moller_xy_y_max=600.f, moller_xy_y_step=5.f;  // mm
+    HistAxis moller_x_axis{-600.f, 600.f, 5.f};  // mm
+    HistAxis moller_y_axis{-600.f, 600.f, 5.f};  // mm
 
     // HyCal cluster-hit XY (single-cluster ep-elastic candidates) — cuts + hist
     int   hxy_n_clusters      = 1;        // require Ncl == this
     float hxy_energy_frac_min = 0.9f;     // require E_cl >= frac * beam_energy
     int   hxy_nblocks_min     = 5;
     int   hxy_nblocks_max     = 20;
-    float hxy_x_min=-600.f, hxy_x_max=600.f, hxy_x_step=5.f;  // mm
-    float hxy_y_min=-600.f, hxy_y_max=600.f, hxy_y_step=5.f;  // mm
+    HistAxis hxy_x_axis{-600.f, 600.f, 5.f};  // mm
+    HistAxis hxy_y_axis{-600.f, 600.f, 5.f};  // mm
 
     // GEM↔HyCal matching: per-detector residuals filled when ep candidate fires.
     // The cut is parametric: cut = match_nsigma * sqrt(sigma_HC² + sigma_GEM²),
@@ -367,12 +405,17 @@ struct AppState {
     // (both projected to the residual plane).  See reconstruction_config.json:matching.
     bool  gem_match_require_ep = true;    // gate on hxy_* selection (clean track)
     float gem_match_nsigma     = 3.f;     // residual cut in σ_total
-    float gem_resid_min = -25.f, gem_resid_max = 25.f, gem_resid_step = 0.5f;  // mm
+    HistAxis gem_resid_axis{-25.f, 25.f, 0.5f};  // mm
 
     // Per-detector GEM position resolution (mm), parsed from
     // reconstruction_config.json:matching:gem_pos_res.  HyCal's energy-
     // dependent resolution lives on HyCalSystem (PositionResolution(E)).
     std::vector<float> gem_pos_res;
+    // 0.1 mm for detectors missing from gem_pos_res.
+    float gemPosRes(int d) const
+    {
+        return (d >= 0 && d < (int)gem_pos_res.size()) ? gem_pos_res[d] : 0.1f;
+    }
 
     // GEM tracking-efficiency monitor — leave-one-out per detector.
     //
@@ -457,9 +500,8 @@ struct AppState {
     // Data-readiness gate for the schedule trigger.  When schedule_minutes
     // elapses, dispatch is held until at least one of the three counters
     // (events_processed / cluster_events_processed / lms_events) reaches
-    // this floor.  Guards against the "PRESTART armed timer but no physics
-    // events ever flowed" failure mode that produced the empty run_024790
-    // report.  Set to 0 to disable the gate (legacy immediate-fire).
+    // this floor, so a timer armed at PRESTART cannot report a run in which
+    // no physics events ever flowed.  Set to 0 to disable the gate.
     int         auto_report_min_events_for_schedule = 100;
     // Hard ceiling on schedule-gate deferral.  Once
     // schedule_minutes + schedule_max_wait_min elapses the schedule
@@ -469,8 +511,8 @@ struct AppState {
     // run-change / END for this run.
     int         auto_report_schedule_max_wait_min = 60;
     // Below this samples-count the auto-report body adds a "Partial-run
-    // report" header note.  Surfaced to clients via /api/auto_report_config
-    // and consumed by report.js generateReport().  0 disables the note.
+    // report" header note.  Surfaced to clients via /api/config
+    // (auto_report) and consumed by report.js.  0 disables the note.
     int         auto_report_partial_threshold_events = 1000;
 
     // color range defaults: key "tab:metric" → [min, max]
@@ -479,27 +521,14 @@ struct AppState {
     // cluster config
     TriggerFilter cluster_trigger;
     float    adc_to_mev        = 1.0f;
-    float    cl_hist_min       = 0.f;
-    float    cl_hist_max       = 3000.f;
-    float    cl_hist_step      = 10.f;
-    // nclusters_hist range is float so the user can shift bin edges by half
-    // a step (default 0.5 .. 10.5 / 1 → bin centers land on 1, 2, …, 10).
-    // The bucket index that a given Ncl event falls in is reused as the
-    // index into cluster_energy_hist_by_ncl / nblocks_hist_by_ncl, so the
-    // dependent histograms can be filtered to "events with this many
-    // clusters" by clicking a bar in the GUI.
-    float    nclusters_hist_min  = 0.5f;
-    float    nclusters_hist_max  = 10.5f;
-    float    nclusters_hist_step = 1.0f;
-    int      nblocks_hist_min    = 0;
-    int      nblocks_hist_max    = 40;
-    int      nblocks_hist_step   = 1;
+    HistAxis cluster_energy_axis{0.f, 3000.f, 10.f};
+    // Default 0.5 .. 10.5 / 1 puts the Ncl bin centers on 1, 2, …, 10.
+    HistAxis nclusters_axis{0.5f, 10.5f, 1.f};
+    IntHistAxis nblocks_axis{0, 40, 1};
     // Raw (per-event) HyCal energy sum: total energy deposited across all
     // modules before clustering.  Wider range than energy_hist because a
     // single Moller event can deposit ~Eb across two clusters.
-    float    raw_energy_hist_min  = 0.f;
-    float    raw_energy_hist_max  = 6000.f;
-    float    raw_energy_hist_step = 20.f;
+    HistAxis raw_energy_axis{0.f, 6000.f, 20.f};
 
     // ---- Event filters (loaded from external JSON via loadFilter) -----------
     // trigger_type filter: if enabled, only events with trigger_type in accept pass
@@ -552,21 +581,19 @@ struct AppState {
     int                    gem_match_events = 0;
     std::vector<int>       gem_match_hits;  // per-det count of in-window hits
 
-    // GEM efficiency counters: per-detector numerator, single shared
-    // denominator (incremented once per good track).  See class-level comment
-    // above for the definition of a good track.
+    // GEM efficiency counters (see the LOO description above gem_eff_loo_mode).
     std::vector<int> gem_eff_num;   // per-detector numerator
     std::vector<int> gem_eff_den;   // per-detector denominator (LOO test count)
+    static constexpr int GEM_EFF_MAX_DETS = 4;
     // Per-stage breakdown for the loo-target-seed mode: lets us diff the
     // server's anchor pipeline against the offline gem_eff_audit.py at
     // each gate.  Only the target-seeded path is instrumented because
     // the GEM-seeded modes try multiple seeds per (HyCal, test_d) and
     // the per-stage counts would not be 1:1 comparable.
-    int gem_eff_diag_call[4]       = {0,0,0,0};
-    int gem_eff_diag_3matched[4]   = {0,0,0,0};
-    int gem_eff_diag_pass_chi2[4]  = {0,0,0,0};
-    int gem_eff_diag_pass_resid[4] = {0,0,0,0};
-    static constexpr int GEM_EFF_MAX_DETS = 4;
+    struct GemEffDiag {
+        int n_call = 0, n_3matched = 0, n_pass_chi2 = 0, n_pass_resid = 0;
+    };
+    GemEffDiag gem_eff_diag[GEM_EFF_MAX_DETS];
     // Snapshot of the last good track for the "last good event" panel.
     // Stores the single fit + per-detector status (used in fit, prediction,
     // residual) so the frontend can draw the track and per-detector markers.
@@ -597,18 +624,15 @@ struct AppState {
         bool  z_target_valid  = false;
     };
     GemEffSnapshot gem_eff_snapshot;
-    // Per-detector efficiency-vs-position grid (predicted local coords of the
-    // LOO test point).  Each detector has the same (nx,ny) bin count; bin
-    // step = det.size / N so the grid spans the full active area.
+    // Per-detector efficiency-vs-position grids (see gem_eff_grid_nx), filled
+    // over the active strip extent via fillActiveGrid.
     std::vector<Histogram2D> gem_eff_grid_num;
     std::vector<Histogram2D> gem_eff_grid_den;
     // Inferred vertex-z spread (DOCA to z-axis − target_z), one entry per
     // matched event.  Range/step are configurable via
     // monitor_config.json: gem.efficiency.z_target_hist.{min,max,step}.
     Histogram gem_eff_z_target_hist;
-    float gem_eff_z_target_min  = -50.f;   // mm
-    float gem_eff_z_target_max  =  50.f;   // mm
-    float gem_eff_z_target_step =   1.f;   // mm
+    HistAxis  gem_eff_z_target_axis{-50.f, 50.f, 1.f};  // mm
     int         moller_events = 0;
     // Atomic so the auto-report schedule gate (viewer_server_http.cpp,
     // tickAutoReportSchedule) can read it without acquiring data_mtx —
@@ -636,23 +660,24 @@ struct AppState {
     std::atomic<int> epics_events{0};
 
     // ---- GEM calibration revision -------------------------------------------
-    // Bumped on any change to per-APV pedestal noise (e.g. LoadPedestals).
-    // The frontend caches /api/gem/calib (which carries this rev) and
-    // refetches when it sees a different value embedded in /api/gem/apv/<n>.
-    // Threshold (zs_sigma) changes do NOT bump this — the frontend reads
-    // zs_sigma per event so band tracks the encoded hits.
+    // Served as rev in /api/gem/calib and calib_rev in /api/gem/apv/<n>; the
+    // frontend caches /api/gem/calib and refetches when the two differ.
+    // Nothing bumps it (pedestals load once at init); zs_sigma changes need
+    // no refetch because the frontend reads zs_sigma per event.
     std::atomic<int> gem_calib_rev{0};
 
     // ---- Initialization (call once at startup) -----------------------------
 
     // Load all configs from db_dir.  Empty filename ⇒ auto-find in db_dir:
     //   daq_config_file   → daq_config.json   (DAQ + raw decoding)
-    //   monitor_config_file → monitor_config.json (GUI / online server)
     //   recon_config_file → reconstruction_config.json (runinfo + clustering)
+    // monitor_cfg is the already-parsed monitor_config.json (GUI / online
+    // server; empty object when absent), monitor_path its file for the log.
     void init(const std::string &db_dir,
               const std::string &daq_config_file,
-              const std::string &monitor_config_file = "",
-              const std::string &recon_config_file = "");
+              const std::string &monitor_path,
+              const nlohmann::json &monitor_cfg,
+              const std::string &recon_config_file);
 
     // ---- Per-event processing ----------------------------------------------
 
@@ -663,18 +688,20 @@ struct AppState {
     void prepareGemForView(const ssp::SspEventData &ssp_evt);
 
     // Process GEM SSP data for one event. Call after DecodeEvent with ssp_evt.
-    // Calls prepareGemForView, then accumulates occupancy + histograms.
+    // Calls prepareGemForView, then accumulates gem_occupancy.
     void processGemEvent(const ssp::SspEventData &ssp_evt);
 
-    // Process one fully-decoded event: histograms + clustering + LMS.
-    // Single pass over all channels (analyzes each channel once).
+    // Process one fully-decoded event: GEM (when ssp is given), histograms,
+    // clustering + physics, LMS.  GEM runs first because runGemEfficiency
+    // reads this event's gem_sys hits.  Single pass over all channels
+    // (analyzes each channel once).
     // Thread-safe (acquires data_mtx + lms_mtx internally).
-    void processEvent(fdec::EventData &event,
+    void processEvent(fdec::EventData &event, const ssp::SspEventData *ssp,
                       fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
 
     // Process a pre-computed recon event (from ROOT recon files).
     // Fills cluster/physics histograms from pre-computed clusters.
-    void processReconEvent(const struct ReconEventData &recon);
+    void processReconEvent(const prad2::ReconEventData &recon);
 
     // Project a lab-frame point through the target onto the HyCal local
     // plane (z_local = 0). Returns HyCal-local (px, py).
@@ -698,7 +725,7 @@ struct AppState {
                                        fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
 
     // Encode pre-computed recon clusters (from ROOT recon files) as JSON.
-    nlohmann::json encodeReconClustersJson(const struct ReconEventData &recon, int ev_id);
+    nlohmann::json encodeReconClustersJson(const prad2::ReconEventData &recon, int ev_id);
 
     // Record a sync event's absolute time. Call when a Sync event is scanned.
     // last_ti_ts is the TI timestamp of the most recent physics event.
@@ -709,16 +736,16 @@ struct AppState {
     void clearEpics();        // locks epics_mtx
 
     // ---- GEM tracking efficiency monitor (called per HyCal cluster) --------
-    // Pass A: GEM0 seed → tests {1,2,3}.  Pass B: GEM1 seed → tests {0}.
     // hits_by_det[d] = lab-frame (x,y,z) of every reconstructed GEM-d hit
     // available for this event (capped internally to gem_eff_max_hits_per_det).
-    // Updates gem_eff_num/den, residual histograms, and gem_eff_snapshot.
+    // Updates gem_eff_num/den/diag, the eff grids, gem_eff_z_target_hist and
+    // gem_eff_snapshot.
     using LabHit = std::array<float, 3>;
     void runGemEfficiency(int event_id,
                           float hcx, float hcy, float hcz, float hc_energy,
                           const std::vector<std::vector<LabHit>> &hits_by_det);
     void clearGemEfficiency();   // counters + snapshot (data_mtx already held)
-    void initGemEfficiency();    // size num/den/residuals (called from init())
+    void initGemEfficiency();    // size num/den/grids (called from init())
     nlohmann::json gemEffSnapshotJson() const;  // assumes data_mtx held
 
     // ---- DSC2 scaler processing --------------------------------------------
@@ -752,6 +779,12 @@ struct AppState {
     nlohmann::json apiHycalXY() const;
     nlohmann::json apiGemResiduals() const;
     nlohmann::json apiGemEfficiency() const;
+    // 'config' block of /api/gem/efficiency (also /api/config gem.efficiency).
+    nlohmann::json gemEffConfigJson() const;
+    // GEM detector d: runtime name, else "GEM<d>"; and its geometry block
+    // {id: d, name, and for runtime detectors x/y_size + x/y_active}.
+    std::string    gemDetName(int d) const;
+    nlohmann::json gemDetJson(int d) const;
     nlohmann::json apiEpicsChannels() const;
     nlohmann::json apiEpicsChannel(const std::string &name) const;
     nlohmann::json apiEpicsBatch(const std::vector<std::string> &names) const;
@@ -779,15 +812,11 @@ struct AppState {
                              bool skip_sw_zs = false,
                              bool *any_full_readout = nullptr) const;
 
-    // One-shot calibration payload for the GEM APV tab: returns
+    // One-shot calibration payload for the GEM APV tab (see gem_calib_rev):
     //   {rev, zs_sigma, apvs:[{id, noise:[128]}, ...]}
-    // The frontend caches this and refetches only when the calib_rev
-    // embedded in /api/gem/apv/<n> diverges from the cached value.
     nlohmann::json apiGemCalib() const;
 
-    // Update the software N-sigma cut on this AppState's gem_sys.  Does
-    // NOT bump gem_calib_rev — noise is unchanged, and frontend uses the
-    // per-event zs_sigma so band always tracks encoded hits.
+    // Update the software N-sigma cut on this AppState's gem_sys (v < 0 → 0).
     void setGemZsSigma(float v);
 
     // ---- Filters ---------------------------------------------------------------
@@ -807,4 +836,43 @@ struct AppState {
 
 private:
     void resolveFilterKeys();
+
+    // HyCal cluster input of one channel: ADC1881M uses samples[0] at t = 0;
+    // otherwise, with cluster_cfg.seed_time_window > 0, every peak of wres
+    // with integral > 0 at its time, else the largest-integral peak
+    // (bestPeak) at t = 0.  Energy: mod.energize(adc) when cal_factor > 0,
+    // else adc * adc_to_mev.  Each fed energy is added to energy_sum.
+    void feedClusterChannel(fdec::HyCalCluster &cl, const fdec::Module &mod,
+                            const fdec::ChannelData &cd,
+                            const fdec::WaveResult &wres, bool is_adc1881m,
+                            float &energy_sum) const;
+    // Every HyCal channel of the event through feedClusterChannel; non-ADC1881M
+    // channels are analyzed with ana first.  mod_energy, when given, gets
+    // (*mod_energy)[mod->index] = that channel's energy when it is > 0.
+    void feedClusterEvent(const fdec::EventData &event, fdec::WaveAnalyzer &ana,
+                          fdec::WaveResult &wres, fdec::HyCalCluster &cl,
+                          std::vector<float> *mod_energy = nullptr) const;
+
+    // One reconstructed HyCal cluster as the cluster/physics monitors see it.
+    struct PhysCluster {
+        float x, y;          // HyCal-local (mm) — GEM residual reference
+        float lx, ly, lz;    // lab frame at the shower-max depth (mm)
+        float theta;         // polar angle from the target (deg)
+        float energy;        // MeV
+        int   nblocks;
+    };
+    PhysCluster physCluster(float x, float y, int center_id,
+                            float energy, int nblocks) const;
+    // Lab-frame hits of the event currently held by gem_sys, per detector.
+    std::vector<std::vector<LabHit>> gemLabHits() const;
+    // Per-event fill of the cluster histograms (when cluster_hists) and of
+    // the physics monitors: energy-angle, HyCal XY, GEM residuals and GEM
+    // efficiency under physics_accept, Møller under moller_accept.
+    // raw_energy_sum feeds raw_energy_hist; gem_lab[d] holds detector d's
+    // lab-frame hits.  Caller holds data_mtx.
+    void fillClusterMonitors(const std::vector<PhysCluster> &cls,
+                             float raw_energy_sum,
+                             const std::vector<std::vector<LabHit>> &gem_lab,
+                             bool cluster_hists, bool physics_accept,
+                             bool moller_accept, int event_id);
 };

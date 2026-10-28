@@ -60,8 +60,8 @@ ADC counts for the same deposited energy — i.e. the gain is larger.
 
 Three independent values $g_1, g_2, g_3$ (one per LMS reference PMT)
 are stored per module.  Agreement among the three is a cross-check on
-the stability of each LMS PMT; their average is used when applying the
-correction.
+the stability of each LMS PMT. The PMTs used when applying the correction
+are selected by `gain_factor.ref_PMT` in `runinfo/general.json` (default: 23).
 
 ### 1.2 Correction Factor
 
@@ -77,15 +77,15 @@ Multiplying the raw FADC integral by $c_j$ is equivalent to asking:
 "what integral would this event have produced had the detector been
 operating at its reference gain?"
 
-The three per-LMS values are averaged into a single scalar applied in
+The selected per-LMS values are averaged into a single scalar applied in
 reconstruction:
 
 $$
-\bar{c} \;=\; \frac{1}{n_\text{valid}} \sum_{j=1}^{3} c_j
+\bar{c} \;=\; \frac{1}{|S|} \sum_{j \in S} c_j
 $$
 
-where $n_\text{valid}$ counts only the channels for which both
-$g_j^{\text{ref}}$ and $g_j^{\text{current}}$ are non-zero.
+where $S$ is the selected set of reference PMTs. A failed fit contributes
+identity (1.0) and remains in the average.
 
 | Value | Interpretation |
 |---|---|
@@ -327,21 +327,45 @@ While decoding FADC data, for each PbWO4 or PbGlass module:
 
 ```cpp
 // mod->id > 1000 → PbWO4 (W module);  mod->id ≤ 900 → PbGlass (G module)
-const float gain = (mod->id > 1000)
-    ? gain_corr.w[mod->id - 1000].avg
-    : gain_corr.g[mod->id].avg;
+const float gain = gain_corr.ModuleGain(mod->id, gRunConfig.gain_ref_pmt);
 
 float adc    = wres.peaks[p].integral * gain;          // gain-corrected integral
 float energy = static_cast<float>(mod->energize(adc)); // convert to MeV
 ```
 
-The FADC integral is multiplied by `avg = ref_gain / current_gain` before
+The FADC integral is multiplied by the selected mean of `ref_gain / current_gain` before
 being passed to the HyCal calibration function `energize()`.  PbGlass
 has the same interface but its correction entries default to 1.0 (not yet
 stored in `gain_corr.root`).
 
 In `Process` (raw replay), the per-channel correction factor is stored in
 the `ev->gain_factor[nch]` branch for use in downstream analysis.
+
+### 4.5 Reference PMT Selection
+
+Set `gain_factor.ref_PMT` to an integer whose digits identify the reference
+PMTs to average:
+
+```json
+"gain_factor": {"data_dir": "", "ref_run": 25320, "ref_PMT": 12}
+```
+
+| `ref_PMT` | Applied PbWO4 correction |
+|---|---|
+| `1`, `2`, `3` | That PMT's correction |
+| `12` | Mean of PMT 1 and 2 |
+| `13` | Mean of PMT 1 and 3 |
+| `23` (default) | Mean of PMT 2 and 3 |
+| `123` | Mean of all three PMTs |
+
+The selection follows the usual chained run-configuration inheritance;
+omitting the field preserves the inherited value (or 23 if never set).
+Use `23` explicitly to restore the default after a different selection.
+Only the integer values listed above are accepted; invalid selections throw
+`std::invalid_argument`. `WriteRunConfig` preserves the selection on write-back.
+All replay and calibration consumers of `ModuleGain` use this setting.
+It applies to both load-time and precomputed corrections without changing
+the three-channel ROOT file format or PbGlass behavior.
 
 ---
 

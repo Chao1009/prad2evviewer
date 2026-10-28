@@ -38,45 +38,33 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <map>
-#include <memory>
-#include <numeric>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include <getopt.h>
 
-#include <TFile.h>
-#include <TTree.h>
-
 #include <nlohmann/json.hpp>
 
-#include "EventData.h"
 #include "EventData_io.h"
+#include "SlowControl.h"
+#include "ToolUtils.h"
 
 #include "EvChannel.h"
 #include "DaqConfig.h"
 #include "load_daq_config.h"
 #include "InstallPaths.h"
 
-#ifndef DATABASE_DIR
-#define DATABASE_DIR "."
-#endif
-
 namespace fs = std::filesystem;
 using json   = nlohmann::json;
+using analysis::ScalerRow;
+using analysis::EpicsRow;
 
 namespace {
-
-constexpr double TI_TICK_SEC = 4.0e-9;
-constexpr int    DSC_NCH     = 16;
 
 // ── Per-input dispatch ──────────────────────────────────────────────────────
 
@@ -92,206 +80,14 @@ InputKind classify(const std::string &p)
     return InputKind::Unknown;
 }
 
-// Expand a user-supplied path: file paths pass through, directories are
-// listed and each child is classified individually so a single directory can
-// contribute both ROOT and EVIO files (rare, but cheap to support).
-struct InputFile {
-    std::string path;
-    InputKind   kind;
-};
-
-std::vector<InputFile> collect_inputs(const std::string &arg)
-{
-    std::vector<InputFile> out;
-    auto push = [&](const std::string &p) {
-        InputKind k = classify(p);
-        if (k != InputKind::Unknown) out.push_back({p, k});
-    };
-    if (fs::is_directory(arg)) {
-        std::vector<std::string> children;
-        for (auto &entry : fs::directory_iterator(arg))
-            if (entry.is_regular_file())
-                children.push_back(entry.path().string());
-        std::sort(children.begin(), children.end());
-        for (auto &c : children) push(c);
-    } else {
-        push(arg);
-    }
-    return out;
-}
-
-// ── In-memory rows ──────────────────────────────────────────────────────────
-
-struct ScalerRow {
-    int32_t  event_number   = 0;
-    int64_t  ti_ticks       = 0;
-    uint32_t ref_gated      = 0;
-    uint32_t ref_ungated    = 0;
-    uint32_t trg_gated[DSC_NCH]   = {};
-    uint32_t trg_ungated[DSC_NCH] = {};
-    uint32_t tdc_gated[DSC_NCH]   = {};
-    uint32_t tdc_ungated[DSC_NCH] = {};
-    bool     good           = true;        // defaults to "kept" when no col
-};
-
-struct EpicsRow {
-    int32_t                       event_number = 0;
-    int64_t                       ti_ticks     = 0;
-    bool                          good         = true;
-    std::map<std::string, double> updates;
-};
-
-// ── ROOT-tree readers (replayed `scalers` / `epics` side trees) ─────────────
-
-bool load_scalers_root(const std::vector<std::string> &files,
-                       std::vector<ScalerRow>          &out,
-                       bool                            &any_good_col)
-{
-    prad2::RawScalerData sc;
-    for (const auto &path : files) {
-        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-        if (!f || f->IsZombie()) {
-            std::cerr << "live_charge: cannot open " << path << "\n";
-            return false;
-        }
-        TTree *t = dynamic_cast<TTree *>(f->Get("scalers"));
-        if (!t) continue;
-        prad2::SetScalerReadBranches(t, sc);
-        bool good = true;
-        const bool has_good = (t->GetBranch("good") != nullptr);
-        any_good_col = any_good_col || has_good;
-        if (has_good) t->SetBranchAddress("good", &good);
-        Long64_t n = t->GetEntries();
-        out.reserve(out.size() + n);
-        for (Long64_t i = 0; i < n; ++i) {
-            good = true;
-            t->GetEntry(i);
-            ScalerRow r;
-            r.event_number = sc.event_number;
-            r.ti_ticks     = sc.ti_ticks;
-            r.ref_gated    = sc.ref_gated;
-            r.ref_ungated  = sc.ref_ungated;
-            std::memcpy(r.trg_gated,   sc.trg_gated,   DSC_NCH * sizeof(uint32_t));
-            std::memcpy(r.trg_ungated, sc.trg_ungated, DSC_NCH * sizeof(uint32_t));
-            std::memcpy(r.tdc_gated,   sc.tdc_gated,   DSC_NCH * sizeof(uint32_t));
-            std::memcpy(r.tdc_ungated, sc.tdc_ungated, DSC_NCH * sizeof(uint32_t));
-            r.good = good;
-            out.push_back(r);
-        }
-    }
-    return true;
-}
-
-bool load_epics_root(const std::vector<std::string> &files,
-                     std::vector<EpicsRow>           &out,
-                     bool                            &any_good_col)
-{
-    for (const auto &path : files) {
-        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
-        if (!f || f->IsZombie()) {
-            std::cerr << "live_charge: cannot open " << path << "\n";
-            return false;
-        }
-        TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
-        if (!t) continue;
-
-        prad2::RawEpicsData ep;
-        std::vector<std::string> *cp = &ep.channel;
-        std::vector<double>      *vp = &ep.value;
-        t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
-        const bool has_ticks =
-            (t->GetBranch("ti_ticks_at_arrival") != nullptr);
-        if (has_ticks)
-            t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
-        t->SetBranchAddress("channel", &cp);
-        t->SetBranchAddress("value",   &vp);
-        bool good = true;
-        const bool has_good = (t->GetBranch("good") != nullptr);
-        any_good_col = any_good_col || has_good;
-        if (has_good) t->SetBranchAddress("good", &good);
-
-        Long64_t n = t->GetEntries();
-        out.reserve(out.size() + n);
-        for (Long64_t i = 0; i < n; ++i) {
-            ep.ti_ticks_at_arrival = 0;
-            good = true;
-            t->GetEntry(i);
-            EpicsRow r;
-            r.event_number = ep.event_number_at_arrival;
-            r.ti_ticks     = has_ticks
-                ? static_cast<int64_t>(ep.ti_ticks_at_arrival) : 0;
-            r.good         = good;
-            const size_t k_max = std::min(ep.channel.size(), ep.value.size());
-            for (size_t k = 0; k < k_max; ++k)
-                r.updates[ep.channel[k]] = ep.value[k];
-            out.push_back(std::move(r));
-        }
-    }
-    return true;
-}
-
-// ── EVIO walker (raw split-file sequences) ──────────────────────────────────
-//
-// One EvChannel reused across every input file — its persistent
-// last_physics_event_number_ / last_sync_info_ snapshots survive the
-// per-file Close()/OpenAuto() cycle, so EPICS rows arriving at the start of
-// file N+1 still get stamped with the last physics event_number from file N
-// rather than -1.  Calls only the cheap Info()/Dsc()/Epics() accessors —
-// no FADC waveform decode.
-//
-// At end-of-file we re-run the same `integrate()` arithmetic on just this
-// file's row slice so the per-file log line carries elapsed wall-clock
-// (first→last physics TI tick), live charge, ⟨livetime⟩ and ⟨I⟩ in addition
-// to the raw row counts.  These per-file numbers don't sum exactly to the
-// global Q because each slice loses its own first-pair anchor (delta_lt is
-// undefined for the leading scaler row), but they're a useful per-file
-// signal that's right to a few percent.
-
 // ── Delta-livetime + integration ────────────────────────────────────────────
 
-inline std::pair<uint32_t, uint32_t>
-select_pair(const ScalerRow &r, const std::string &source, int channel)
-{
-    if (source == "ref") return {r.ref_gated, r.ref_ungated};
-    const int c = std::clamp(channel, 0, DSC_NCH - 1);
-    if (source == "trg") return {r.trg_gated[c], r.trg_ungated[c]};
-    if (source == "tdc") return {r.tdc_gated[c], r.tdc_ungated[c]};
-    return {0, 0};
-}
-
-template <class T>
-std::vector<size_t> sort_by_event(const std::vector<T> &v)
-{
-    std::vector<size_t> idx(v.size());
-    std::iota(idx.begin(), idx.end(), 0);
-    std::sort(idx.begin(), idx.end(),
-              [&](size_t a, size_t b) { return v[a].event_number < v[b].event_number; });
-    return idx;
-}
-
-struct ChargeResult {
-    // Gated (post-cut): only adjacent pairs where both endpoints have
-    // good=true.  When the input has no `good` column (raw EVIO / recon /
-    // unfiltered ROOT) every pair is treated as good, so the gated values
-    // equal the ungated values below.  These are the canonical "live
-    // charge" numbers downstream tools should consume.
-    double  value_nC                   = 0.0;
-    double  live_seconds               = 0.0;
-    double  real_seconds               = 0.0;   // Σ Δt over integrated pairs
-    int64_t n_pairs_kept               = 0;     // both endpoints good=true
-    int64_t n_pairs_integrated         = 0;     // contributed to Q
-    int64_t n_pairs_skipped            = 0;     // kept but missing data
-    // Ungated (pre-cut): every adjacent pair with valid data, ignoring the
-    // `good` column.  Reported alongside the gated values so users can see
-    // how much charge the cut throws away.  Equal to the gated values when
-    // the input has no `good` column.
-    double  ungated_value_nC           = 0.0;
-    double  ungated_live_seconds       = 0.0;
-    double  ungated_real_seconds       = 0.0;
-    int64_t n_ungated_pairs_integrated = 0;
-    int64_t n_ungated_pairs_skipped    = 0;
-    int64_t n_pairs_total              = 0;     // adjacent (i, i+1) pairs walked
-    bool    any_good_col               = false; // input carried the `good` bool
+// Gated sums: pairs with both endpoints good, or every pair when the input
+// has no `good` column.
+struct ChargeResult : analysis::ChargeSums {
+    int64_t n_pairs_total = 0;       // adjacent (i, i+1) pairs walked
+    int64_t n_pairs_kept  = 0;       // both endpoints good=true
+    bool    any_good_col  = false;   // input carried the `good` bool
 };
 
 ChargeResult integrate(const std::vector<ScalerRow> &scalers,
@@ -303,25 +99,12 @@ ChargeResult integrate(const std::vector<ScalerRow> &scalers,
     ChargeResult r;
     r.any_good_col = any_good_col;
 
-    // 1. delta livetime per scaler row, indexed by load order.
-    auto sc_order = sort_by_event(scalers);
-    std::vector<double> delta_lt(scalers.size(), -1.0);   // fraction in [0, 1]
-    {
-        uint32_t pg = 0, pu = 0;
-        for (size_t k = 0; k < sc_order.size(); ++k) {
-            const size_t orig = sc_order[k];
-            const auto [g, u] = select_pair(scalers[orig], source, channel);
-            if (g < pg || u < pu) { pg = pu = 0; }   // counter rebase
-            const uint32_t dg = g - pg;
-            const uint32_t du = u - pu;
-            if (du > 0 && dg <= du)
-                delta_lt[orig] = double(dg) / double(du);
-            pg = g; pu = u;
-        }
-    }
+    // 1. delta livetime fraction per scaler row, indexed by load order.
+    auto sc_order = analysis::SortByEvent(scalers);
+    const auto delta_lt = analysis::DeltaLivetime(scalers, sc_order, source, channel);
 
     // 2. merged-timeline pass with forward-fill of livetime + beam current.
-    auto ep_order = sort_by_event(epics_rows);
+    auto ep_order = analysis::SortByEvent(epics_rows);
     struct Cp {
         int64_t ticks         = 0;
         double  live_fraction = std::nan("");
@@ -363,46 +146,35 @@ ChargeResult integrate(const std::vector<ScalerRow> &scalers,
         tl.push_back(cp);
     }
 
-    // 3. integrate.  Walk every adjacent pair once and accumulate into
-    //    both buckets:
-    //      * ungated_*  — every pair with valid data, ignoring the `good`
-    //        column (always populated; equals the gated values when the
-    //        input has no `good` column).
-    //      * value_nC / live_seconds / real_seconds (gated) — only pairs
-    //        where both endpoints had good=true.  When the input lacks a
-    //        `good` column every pair is treated as good.
+    // 3. integrate every adjacent pair.
     for (size_t k = 1; k < tl.size(); ++k) {
         ++r.n_pairs_total;
         const auto &a = tl[k - 1];
         const auto &b = tl[k];
         const bool good_pair = !any_good_col || (a.good && b.good);
         if (good_pair) ++r.n_pairs_kept;
-        const bool data_ok = !(a.ticks <= 0 || b.ticks <= 0 || b.ticks <= a.ticks
-            || !std::isfinite(b.live_fraction) || b.live_fraction < 0
-            || !std::isfinite(a.beam_current)  || !std::isfinite(b.beam_current));
-        if (!data_ok) {
-            if (good_pair) ++r.n_pairs_skipped;
-            ++r.n_ungated_pairs_skipped;
-            continue;
-        }
-        const double dt = (b.ticks - a.ticks) * TI_TICK_SEC;
-        const double I  = 0.5 * (a.beam_current + b.beam_current);
-        const double dQ = b.live_fraction * dt * I;
-        const double dL = b.live_fraction * dt;
-        r.ungated_value_nC     += dQ;
-        r.ungated_live_seconds += dL;
-        r.ungated_real_seconds += dt;
-        ++r.n_ungated_pairs_integrated;
-        if (good_pair) {
-            r.value_nC     += dQ;
-            r.live_seconds += dL;
-            r.real_seconds += dt;
-            ++r.n_pairs_integrated;
-        }
+        r.AddPair(a.ticks, b.ticks, b.live_fraction, a.beam_current, b.beam_current, good_pair);
     }
     return r;
 }
 
+// ── EVIO walker (raw split-file sequences) ──────────────────────────────────
+//
+// One EvChannel reused across every input file — its persistent
+// last_physics_event_number_ / last_sync_info_ snapshots survive the
+// per-file Close()/OpenAuto() cycle, so EPICS rows arriving at the start of
+// file N+1 still get stamped with the last physics event_number from file N
+// rather than -1.  Calls only the cheap Info()/Dsc()/Epics() accessors —
+// no FADC waveform decode.
+//
+// At end-of-file we re-run the same `integrate()` arithmetic on just this
+// file's row slice so the per-file log line carries elapsed wall-clock
+// (first→last physics TI tick), live charge, ⟨livetime⟩ and ⟨I⟩ in addition
+// to the raw row counts.  These per-file numbers don't sum exactly to the
+// global Q: each slice drops the pair spanning the file boundary, and its
+// first scaler row's livetime is taken against the (0, 0) baseline rather
+// than the previous file's last row.  They're a useful per-file signal that's
+// right to a few percent.
 bool load_from_evio(const std::vector<std::string> &files,
                     const evc::DaqConfig            &daq_cfg,
                     std::vector<ScalerRow>          &scalers,
@@ -457,14 +229,7 @@ bool load_from_evio(const std::vector<std::string> &files,
             const auto &dsc  = ch.Dsc();
             if (dsc.present) {
                 ScalerRow r;
-                r.event_number = info.event_number;
-                r.ti_ticks     = static_cast<int64_t>(info.timestamp);
-                r.ref_gated    = dsc.ref_gated;
-                r.ref_ungated  = dsc.ref_ungated;
-                std::memcpy(r.trg_gated,   dsc.trg_gated,   DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.trg_ungated, dsc.trg_ungated, DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.tdc_gated,   dsc.tdc_gated,   DSC_NCH * sizeof(uint32_t));
-                std::memcpy(r.tdc_ungated, dsc.tdc_ungated, DSC_NCH * sizeof(uint32_t));
+                prad2::FillScalerRow(dsc, ch.Sync(), info, daq_cfg.dsc_scaler, r);
                 scalers.push_back(r);
             }
             ++total;
@@ -473,7 +238,7 @@ bool load_from_evio(const std::vector<std::string> &files,
         const size_t sc_added = scalers.size() - sc_before;
         const size_t ep_added = epics_rows.size() - ep_before;
         const double elapsed_s = any_phys
-            ? double(last_phys_ts - first_phys_ts) * TI_TICK_SEC : 0.0;
+            ? double(last_phys_ts - first_phys_ts) * fdec::TI_TICK_SEC : 0.0;
 
         // Per-file slice integration.  Cheap: tens of rows.
         ChargeResult rf{};
@@ -568,14 +333,17 @@ int main(int argc, char **argv)
         }
     }
 
+    // A directory contributes each child of a recognised kind, so one
+    // directory can hold both ROOT and EVIO files; other paths are dropped.
     std::vector<std::string> root_inputs, evio_inputs, all_inputs;
-    for (int i = optind; i < argc; ++i) {
-        for (auto &in : collect_inputs(argv[i])) {
-            all_inputs.push_back(in.path);
-            if (in.kind == InputKind::Root) root_inputs.push_back(in.path);
-            else                            evio_inputs.push_back(in.path);
+    const auto known = [](const std::string &name) { return classify(name) != InputKind::Unknown; };
+    for (int i = optind; i < argc; ++i)
+        for (const auto &path : analysis::ExpandInputPath(argv[i], known)) {
+            const InputKind kind = classify(path);
+            if (kind == InputKind::Unknown) continue;
+            all_inputs.push_back(path);
+            (kind == InputKind::Root ? root_inputs : evio_inputs).push_back(path);
         }
-    }
     if (all_inputs.empty()) { print_usage(argv[0]); return 2; }
 
     std::vector<ScalerRow> scalers;
@@ -583,16 +351,12 @@ int main(int argc, char **argv)
     bool any_good_col = false;
 
     if (!root_inputs.empty()) {
-        if (!load_scalers_root(root_inputs, scalers,    any_good_col)) return 1;
-        if (!load_epics_root  (root_inputs, epics_rows, any_good_col)) return 1;
+        if (!analysis::LoadScalerRows(root_inputs, scalers, "live_charge", &any_good_col)) return 1;
+        if (!analysis::LoadEpicsRows(root_inputs, epics_rows, "live_charge", &any_good_col)) return 1;
     }
 
     if (!evio_inputs.empty()) {
-        const std::string db_dir = prad2::resolve_data_dir(
-            "PRAD2_DATABASE_DIR",
-            {"../share/prad2evviewer/database"},
-            DATABASE_DIR);
-        if (daq_config.empty()) daq_config = db_dir + "/daq_config.json";
+        if (daq_config.empty()) daq_config = prad2::database_dir() + "/daq_config.json";
 
         evc::DaqConfig daq_cfg;
         if (!evc::load_daq_config(daq_config, daq_cfg)) {
@@ -659,11 +423,6 @@ int main(int argc, char **argv)
         << " (missing tick / livetime / current on either side)\n";
 
     if (!json_path.empty()) {
-        // value_nC / live_seconds / real_seconds are gated by the `good`
-        // column when present (canonical post-cut numbers).  The
-        // ungated_* counterparts are computed over every valid-data pair
-        // and are emitted unconditionally so consumers always see both —
-        // for raw / recon inputs without a `good` column they are equal.
         json j = {
             {"value_nC",                   r.value_nC},
             {"unit",                       "nC"},

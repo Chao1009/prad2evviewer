@@ -1,21 +1,18 @@
 // report.js — Report generation: markdown body + per-tab PNG screenshots.
 //
-// One screenshot per tab (Waveform / LMS / Clustering / GEM / EPICS / Physics)
+// One screenshot per tab (Waveform / LMS / Clustering / GEM / APV / EPICS / Physics)
 // instead of capturing individual plots — captureTabScreenshot() switches to
 // the tab, swaps every visible <canvas> and Plotly plot with a freshly
 // rendered <img>, then composites the cloned DOM through an SVG
 // <foreignObject> wrapper so toolbars, tables, and labels round-trip with
 // their CSS intact.
 //
-// Drives both the Report dropdown (Download / Post to Elog) and the Auto
-// mode in viewer.js (END → post, PRESTART → clear, run-number-change as
-// fallback, hard-rate-limited to once per 15 min).
+// Driven by the server's capture_request message (handleCaptureRequest), which
+// generates the report on the chosen client and posts it to the elog.
 //
 // Depends on globals from viewer.js (accessed at runtime, not load time).
 
-// =========================================================================
-// Registry
-// =========================================================================
+// ── Registry ──────────────────────────────────────────────────────────
 const reportRegistry=[];
 let elogConfig={url:'',logbook:'',author:'',tags:[]};
 let reportAttachments=[];  // [{data (base64), filename, caption, type}]
@@ -31,19 +28,15 @@ function addAttachment(dataUrl,filename,caption){
     if(b64) reportAttachments.push({data:b64,filename,caption,type:'image/png'});
 }
 
-// =========================================================================
-// Whole-tab screenshot
-//
-// Strategy: switch to the target tab, flip the page to the light theme,
-// pre-render every <canvas> + Plotly plot to a data URL on the live DOM
-// (cloneNode loses canvas pixels and Plotly's internal SVG state), clone
-// the panel, replace those nodes with <img> elements, and ship the result
-// through an SVG <foreignObject>.  All same-origin stylesheets are inlined
-// in a <style> tag so layout + theme survive the trip.
-// =========================================================================
-
+// ── Whole-tab screenshot ──────────────────────────────────────────────
+// Strategy: switch to the target tab, pre-render every <canvas> + Plotly
+// plot to a data URL on the live DOM (cloneNode loses canvas pixels and
+// Plotly's internal SVG state), clone the panel, replace those nodes with
+// <img> elements, and ship the result through an SVG <foreignObject>.  All
+// same-origin stylesheets are inlined in a <style> tag so layout + theme
+// survive the trip.
 const TAB_SETTLE_MS = 1000;   // post-switch settling for layout + data fetch
-const THEME_SETTLE_MS = 250;  // post-theme-flip settling
+const THEME_SETTLE_MS = 250;  // settling for async Plotly re-renders
 
 // Tabs included in the report, in order. Keys must match data-tab values.
 const REPORT_TABS = [
@@ -56,22 +49,6 @@ const REPORT_TABS = [
     {tab:'physics', title:'Physics',           filename:'tab_physics.png', prep:_prepPhysicsTab},
 ];
 
-// Tab panel IDs corresponding to each REPORT_TABS entry (and a couple of
-// dq sub-panels that share the geo-panel container). Used by the screenshot
-// pipeline to force-hide every non-active panel in the cloned DOM, so the
-// SVG foreignObject can't render stale layout from a different tab.
-const TAB_PANELS = {
-    dq:      ['geo-panel','div-main','detail-panel'],
-    lms:     ['geo-panel','div-main','lms-panel'],
-    cluster: ['geo-panel','div-main','cluster-panel'],
-    gem:     ['gem-outer'],
-    gem_apv: ['gem-apv-outer'],
-    epics:   ['epics-outer'],
-    physics: ['physics-outer'],
-};
-const ALL_TAB_PANEL_IDS = ['geo-panel','div-main','detail-panel','lms-panel',
-    'cluster-panel','gem-outer','gem-apv-outer','epics-outer','physics-outer'];
-
 function _wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
 // Force the DQ tab to a deterministic capture state and return a restore
@@ -79,75 +56,63 @@ function _wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 //   1) color-metric  -> 'occupancy'   (so the geo legend matches the title)
 //   2) focus-pbwo4   -> unchecked     (deterministic Lead-Glass dim state)
 //   3) selectedModule -> null         (no per-channel detail panel leak)
-//   4) detail-header / four detail Plotly divs / peaks table -> placeholder
+//   4) detail-header / four detail Plotly divs / peaks tables -> placeholder
 //   5) repaint via geoDq() so the swap lands before the screenshot
-// clearFrontend() (config.js:1-73) deliberately keeps selectedModule across
-// server-side autoclear so the live UI stays responsive — that's why we
-// have to wipe-and-restore here per-capture instead of relying on the
-// server's hist_cleared broadcast.
+// clearFrontend() deliberately keeps selectedModule across server-side
+// autoclear so the live UI stays responsive — that's why we have to
+// wipe-and-restore here per-capture instead of relying on the server's
+// hist_cleared broadcast.
 function _prepDqTab(){
     const sel           = document.getElementById('color-metric');
     const focus         = document.getElementById('focus-pbwo4');
     const detailHeader  = document.getElementById('detail-header');
     const peaksTbody    = document.getElementById('peaks-tbody');
+    const peaksTbodyDaq = document.getElementById('peaks-tbody-daq');
 
     const prevMetric    = sel ? sel.value : '';
     const prevFocus     = focus ? focus.checked : false;
-    const prevFocusVar  = (typeof geoFocusPbWO4==='boolean') ? geoFocusPbWO4 : false;
-    const prevSelected  = (typeof selectedModule!=='undefined') ? selectedModule : null;
-    const prevWf        = (typeof currentWaveform!=='undefined') ? currentWaveform : null;
-    const prevHist      = (typeof currentHist!=='undefined') ? currentHist : {};
+    const prevFocusVar  = geoFocusPbWO4;
+    const prevSelected  = selectedModule;
+    const prevWf        = currentWaveform;
+    const prevHist      = currentHist;
     const prevHeader    = detailHeader ? detailHeader.innerHTML : '';
     const prevPeaks     = peaksTbody ? peaksTbody.innerHTML : '';
+    const prevPeaksDaq  = peaksTbodyDaq ? peaksTbodyDaq.innerHTML : '';
 
     if(sel && prevMetric!=='occupancy'){
         sel.value='occupancy';
-        if(typeof syncDqRange==='function') syncDqRange();
+        syncDqRange();
     }
     if(focus && prevFocus){
         focus.checked=false;
     }
-    if(typeof geoFocusPbWO4!=='undefined') geoFocusPbWO4=false;
-    if(typeof selectedModule!=='undefined') selectedModule=null;
-    if(typeof currentWaveform!=='undefined') currentWaveform=null;
-    if(typeof currentHist!=='undefined') currentHist={};
+    geoFocusPbWO4=false; selectedModule=null;
     if(detailHeader)
         detailHeader.innerHTML =
             '<div class="empty-msg">No module selected (auto-report capture)</div>';
-    if(peaksTbody) peaksTbody.innerHTML='';
-    try{
-        // Match the switchTab-DQ placeholder pattern at viewer.js:96-103.
-        Plotly.react('waveform-div',  [], wfLayout('', wfWindowNs()), PC2);
-        Plotly.react('heighthist-div',[], {...PL,title:{text:'Height Histogram',
-            font:{size:10,color:THEME.textMuted}}}, PC2);
-        Plotly.react('inthist-div',   [], {...PL,title:{text:'Integral Histogram',
-            font:{size:10,color:THEME.textMuted}}}, PC2);
-        Plotly.react('poshist-div',   [], {...PL,title:{text:'Position Histogram',
-            font:{size:10,color:THEME.textMuted}}}, PC2);
-    }catch(e){ /* missing plotly divs on a stripped page — non-fatal */ }
-    if(typeof geoDq==='function') geoDq();
+    try{ resetDqPlots(''); }catch(e){ /* missing plotly divs on a stripped page — non-fatal */ }
+    geoDq();
 
     return ()=>{
         if(sel && sel.value!==prevMetric){
             sel.value=prevMetric;
-            if(typeof syncDqRange==='function') syncDqRange();
+            syncDqRange();
         }
         if(focus && focus.checked!==prevFocus){
             focus.checked=prevFocus;
         }
-        if(typeof geoFocusPbWO4!=='undefined') geoFocusPbWO4=prevFocusVar;
-        if(typeof selectedModule!=='undefined') selectedModule=prevSelected;
-        if(typeof currentWaveform!=='undefined') currentWaveform=prevWf;
-        if(typeof currentHist!=='undefined') currentHist=prevHist;
-        if(detailHeader) detailHeader.innerHTML=prevHeader;
-        if(peaksTbody)   peaksTbody.innerHTML=prevPeaks;
+        geoFocusPbWO4=prevFocusVar; selectedModule=prevSelected;
+        currentWaveform=prevWf; currentHist=prevHist;
+        if(detailHeader)  detailHeader.innerHTML=prevHeader;
+        if(peaksTbody)    peaksTbody.innerHTML=prevPeaks;
+        if(peaksTbodyDaq) peaksTbodyDaq.innerHTML=prevPeaksDaq;
         // If the user had a focused channel, re-render its waveform +
         // histograms + peaks table from the live event stream so the live
         // UI returns to the prior state once the capture finishes.
-        if(prevSelected && typeof showWaveform==='function'){
+        if(prevSelected){
             try{ showWaveform(prevSelected); }catch(e){}
         }
-        if(typeof geoDq==='function') geoDq();
+        geoDq();
     };
 }
 
@@ -163,66 +128,59 @@ function _prepLmsTab(){
     const prevRef=refSel.value;
     if(prevMetric!=='rms_frac'){
         metric.value='rms_frac';
-        if(typeof geoLms==='function') geoLms();
+        geoLms();
     }
-    let lms3='';
-    for(const o of refSel.options) if(o.textContent==='LMS3'){ lms3=o.value; break; }
+    const lms3=_lmsRefOptionValue();
     if(lms3 && refSel.value!==lms3){
         refSel.value=lms3;
-        if(typeof geoLms==='function') geoLms();
+        geoLms();
     }
     return ()=>{
         if(metric.value!==prevMetric){
             metric.value=prevMetric;
-            if(typeof geoLms==='function') geoLms();
+            geoLms();
         }
         if(refSel.value!==prevRef){
             refSel.value=prevRef;
-            if(typeof geoLms==='function') geoLms();
+            geoLms();
         }
     };
 }
 
-// Re-render every Plotly plot in the tab AFTER it has been switched
-// visible.  refreshDataForReport prefetched the data + ran the relevant
-// plot* call while the panel was still display:none, so Plotly's
-// _fullLayout was computed against a zero/default container —
-// autorange / ticks / legend / heatmap aspect all come out different
-// from the live monitor.  switchTab + Plotly.Plots.resize alone do
-// NOT re-run the trace pipeline (resize only updates dimensions), so
-// for plots that were react'd while hidden we have to re-call the
-// plot* function to get Plotly.react against the now-correct
-// geometry.  No state to restore — the next live refresh will
-// reapply the same data anyway — but we still return a no-op restore
-// so captureTabScreenshot waits THEME_SETTLE_MS for Plotly to land
-// its re-render before the screenshot fires.  Cluster, EPICS, and
-// Physics all share this hidden-panel-Plotly-react problem.
+// Value of the 'LMS3' option in the LMS reference dropdown, or '' if absent.
+function _lmsRefOptionValue(){
+    for(const o of document.getElementById('lms-ref-select').options)
+        if(o.textContent==='LMS3') return o.value;
+    return '';
+}
+
+// Re-run the tab's plot* calls once it is visible.  refreshDataForReport ran
+// them while the panel was display:none, so Plotly laid them out against a
+// zero-size container (autorange / ticks / legend / heatmap aspect differ
+// from the live monitor), and Plotly.Plots.resize only updates dimensions
+// without re-running the trace pipeline.  Nothing to restore, but the no-op
+// restore makes captureTabScreenshot wait THEME_SETTLE_MS for the re-render.
+// Shared by the Cluster, EPICS and Physics preps.
 function _prepClusterTab(){
     // Includes the shared geo (HyCal occupancy on the left) so it
     // matches the right-half plots' freshly re-react'd traces.
     try{
-        if(typeof plotClHist==='function')        plotClHist();
-        if(typeof plotRawEnergyHist==='function') plotRawEnergyHist();
-        if(typeof plotClStatHists==='function')   plotClStatHists();
-        if(typeof plotGemResiduals==='function')  plotGemResiduals();
-        if(typeof geoCluster==='function')        geoCluster();
+        plotClHist();
+        plotRawEnergyHist();
+        plotClStatHists();
+        plotGemResiduals();
+        geoCluster();
     }catch(e){ /* fall through — captureTabScreenshot still snapshots what it has */ }
     return ()=>{};
 }
 
 function _prepEpicsTab(){
-    if(typeof plotEpicsSlot==='function' &&
-       typeof EPICS_NUM_SLOTS!=='undefined')
-    {
-        for(let i=0;i<EPICS_NUM_SLOTS;i++) plotEpicsSlot(i);
-    }
+    for(let i=0;i<EPICS_NUM_SLOTS;i++) plotEpicsSlot(i);
     return ()=>{};
 }
 
 function _prepPhysicsTab(){
-    if(typeof plotEnergyAngle==='function') plotEnergyAngle();
-    if(typeof plotMollerXY==='function')    plotMollerXY();
-    if(typeof plotHycalXY==='function')     plotHycalXY();
+    plotEnergyAngle(); plotMollerXY(); plotHycalXY();
     return ()=>{};
 }
 
@@ -296,7 +254,7 @@ async function captureTabScreenshot(tab){
         // 2D draws are synchronous so toDataURL would already pick up the
         // new bitmap, but we yield once anyway in case redrawGeo schedules
         // any deferred work (e.g. a Plotly resize on a co-mounted plot).
-        if(typeof redrawGeo==='function') redrawGeo();
+        redrawGeo();
         await _wait(0);
     }
 
@@ -422,9 +380,7 @@ async function captureTabScreenshot(tab){
     return dataUrl;
 }
 
-// =========================================================================
-// Markdown table helper
-// =========================================================================
+// ── Markdown table helper ─────────────────────────────────────────────
 function mdTable(headers,rows,alignments){
     const aligns=alignments||headers.map(()=>'l');
     const sepMap={l:':---',r:'---:',c:':---:'};
@@ -435,14 +391,10 @@ function mdTable(headers,rows,alignments){
     return md+'\n';
 }
 
-// =========================================================================
-// Per-tab text summaries
-//
+// ── Per-tab text summaries ────────────────────────────────────────────
 // Each section grabs whatever metadata the live globals expose and formats
 // a short markdown summary; the visual is provided separately by
 // captureTabScreenshot(tab).
-// =========================================================================
-
 async function _summaryDq(){
     if(occTotal>0) return `Total events: ${occTotal}\n\n`;
     // Placeholder ensures the section under the screenshot is never bare,
@@ -453,9 +405,7 @@ async function _summaryDq(){
 
 async function _summaryLms(){
     // refresh with LMS3 ref so the warning summary is meaningful
-    const refSel=document.getElementById('lms-ref-select');
-    let lms3=-1;
-    for(const o of refSel.options) if(o.textContent==='LMS3') lms3=parseInt(o.value);
+    const lms3=parseInt(_lmsRefOptionValue());
     const refQ=lms3>=0?`?ref=${lms3}`:'';
     let d=null;
     try{ d=await fetch(`/api/lms/summary${refQ}`).then(r=>r.json()); }catch(e){}
@@ -468,30 +418,14 @@ async function _summaryLms(){
         // tab screenshot shows the stale "default-ref" rows (or "No
         // LMS data" if the autoclear had wiped lmsSummaryData and the
         // first fetch returned no modules yet).
-        if(typeof updateLmsTable==='function') updateLmsTable();
+        updateLmsTable();
     }
     if(!d || !d.modules || !Object.keys(d.modules).length){
         const tf=d&&d.trigger||{};
         const trigMask=`accept=0x${(tf.trigger_accept||0).toString(16)} reject=0x${(tf.trigger_reject||0).toString(16)}`;
         return `LMS events received: ${d?d.events||0:0} (trigger mask = ${trigMask})\n\n`;
     }
-    const stateOf=m => m.state || (m.warn ? 'warn' : 'ok');
-    const allEntries=Object.entries(d.modules).map(([idx,m])=>({idx:parseInt(idx),...m,_st:stateOf(m)}));
-    // Sort: drift first (worst |drift-1| at top) → warn (worst RMS/Mean)
-    // → ok.  Drift entries are top-priority errors and need to lead the
-    // report so reviewers see them before scrolling.
-    const stateRank=st=>(st==='drift'?0:st==='warn'?1:2);
-    allEntries.sort((a,b)=>{
-        const ra=stateRank(a._st), rb=stateRank(b._st);
-        if(ra!==rb) return ra-rb;
-        if(a._st==='drift'){
-            const da=a.drift!=null?Math.abs(a.drift-1):0;
-            const db=b.drift!=null?Math.abs(b.drift-1):0;
-            return db-da;
-        }
-        const ramf=a.mean>0?a.rms/a.mean:0, rbmf=b.mean>0?b.rms/b.mean:0;
-        return rbmf-ramf;
-    });
+    const allEntries=lmsSortedEntries(d.modules);
     const driftEntries=allEntries.filter(e=>e._st==='drift');
     const warnEntries =allEntries.filter(e=>e._st==='warn');
     const okEntries   =allEntries.filter(e=>e._st==='ok');
@@ -542,23 +476,10 @@ async function _summaryCluster(){
     // raw_energy may have entries even when cluster_energy doesn't (events
     // passed cluster_trigger but produced zero clusters); mention it so the
     // 'Raw Energy Sum' bin in the screenshot isn't mysterious.
-    const raw=(typeof rawEnergyBins!=='undefined' && rawEnergyBins)
-              ? rawEnergyBins.reduce((a,b)=>a+b,0) : 0;
+    const raw=rawEnergyBins ? rawEnergyBins.reduce((a,b)=>a+b,0) : 0;
     return raw>0
         ? `_No reconstructed clusters yet (raw-energy fills = ${raw})._\n\n`
         : `_No clustering events accumulated._\n\n`;
-}
-
-async function _summaryGem(){
-    let data;
-    try{ data=await fetch('/api/gem/hist').then(r=>r.json()); }catch(e){ return ''; }
-    if(!data) return '';
-    if(data.nclusters && data.nclusters.bins){
-        const total=data.nclusters.bins.reduce((a,b)=>a+b,0);
-        if(total>0) return `GEM events: ${total}\n\n`;
-        return `_No GEM cluster events yet (matched ep events = 0)._\n\n`;
-    }
-    return `_GEM histogram endpoint returned no nclusters block._\n\n`;
 }
 
 async function _summaryGemApv(){
@@ -566,17 +487,13 @@ async function _summaryGemApv(){
         return `_No GEM APV snapshot available (full-readout event not seen since last clear)._\n\n`;
     const ndets=(gemApvData.detectors||[]).length;
     const napvs=(gemApvData.apvs||[]).length;
-    const evnum=(typeof gemApvCurrentEvent==='number')?gemApvCurrentEvent:'?';
-    let s=`Event: ${evnum} | Detectors: ${ndets} | APVs: ${napvs}`;
+    let s=`Event: ${gemApvCurrentEvent} | Detectors: ${ndets} | APVs: ${napvs}`;
     if(gemApvData.zs_sigma) s+=` | ZS σ: ${gemApvData.zs_sigma}`;
     return s+'\n\n';
 }
 
 async function _summaryPhysics(){
-    let data, ml, hxy;
-    try{ data=await fetch('/api/physics/energy_angle').then(r=>r.json()); }catch(e){}
-    try{ ml=await fetch('/api/physics/moller').then(r=>r.json()); }catch(e){}
-    try{ hxy=await fetch('/api/physics/hycal_xy').then(r=>r.json()); }catch(e){}
+    const data=physicsData, ml=mollerData, hxy=hycalXyData;
     if((!data||!data.events) && (!ml||!ml.total_events) && (!hxy||!hxy.total_events))
         return `_No physics events accumulated (energy/angle, Møller, HyCal-XY all empty)._\n\n`;
     const evts=data?.events || ml?.total_events || hxy?.total_events || 0;
@@ -592,10 +509,9 @@ const _SECTION_SUMMARIES = {
     dq:      _summaryDq,
     lms:     _summaryLms,
     cluster: _summaryCluster,
-    gem:     _summaryGem,
     gem_apv: _summaryGemApv,
-    // EPICS: screenshot is enough; the channel table duplicated it in text
-    // and dominated the post body, so no text summary.
+    // GEM, EPICS: screenshot is enough; the EPICS channel table duplicated
+    // it in text and dominated the post body, so no text summary.
     physics: _summaryPhysics,
 };
 
@@ -616,57 +532,23 @@ REPORT_TABS.forEach((t, i)=>{
     });
 });
 
-// =========================================================================
 // Pre-fetch live data for every tab so captureTabScreenshot doesn't have
 // to wait for in-flight async fetches inside switchTab. Each fetch* call
 // returns a promise that resolves after its plot* call has run, so by the
 // time Promise.all finishes the page state matches what each tab would
 // show if the user navigated to it.
-// =========================================================================
 async function refreshDataForReport(){
-    const fetches=[];
-    fetches.push(fetch('/api/occupancy').then(r=>r.json()).then(d=>{
-        occData=d.occ||{}; occTcutData=d.occ_tcut||{}; occTotal=d.total||0;
-    }).catch(()=>{}));
-    fetches.push(fetch('/api/cluster_hist').then(r=>r.json()).then(d=>{
-        if(d.bins&&d.bins.length){
-            if(d.min!==undefined) clHistMin=d.min;
-            if(d.max!==undefined) clHistMax=d.max;
-            if(d.step!==undefined) clHistStep=d.step;
-            clHistBins=d.bins; clHistEvents=d.events||0;
-        }
-        if(d.nclusters&&d.nclusters.bins&&d.nclusters.bins.length){
-            nclustMin=d.nclusters.min||0; nclustMax=d.nclusters.max||20;
-            nclustStep=d.nclusters.step||1; nclustBins=d.nclusters.bins;
-        }
-        if(d.nblocks&&d.nblocks.bins&&d.nblocks.bins.length){
-            nblocksMin=d.nblocks.min||0; nblocksMax=d.nblocks.max||40;
-            nblocksStep=d.nblocks.step||1; nblocksBins=d.nblocks.bins;
-        }
-        if(d.raw_energy&&d.raw_energy.bins&&d.raw_energy.bins.length){
-            rawEnergyMin=d.raw_energy.min||0; rawEnergyMax=d.raw_energy.max||6000;
-            rawEnergyStep=d.raw_energy.step||20; rawEnergyBins=d.raw_energy.bins;
-        }
-    }).catch(()=>{}));
-    if(typeof fetchGemResiduals==='function') fetches.push(fetchGemResiduals());
-    if(typeof fetchGemAccum==='function')     fetches.push(fetchGemAccum());
-    if(typeof fetchGemApvData==='function' && typeof currentEvent==='number'
-        && currentEvent>0)                    fetches.push(fetchGemApvData(currentEvent));
-    if(typeof fetchLmsSummary==='function')   fetches.push(fetchLmsSummary());
-    if(typeof fetchEpicsChannels==='function')fetches.push(fetchEpicsChannels());
-    if(typeof fetchEpicsLatest==='function')  fetches.push(fetchEpicsLatest());
-    if(typeof fetchAllEpicsSlots==='function')fetches.push(fetchAllEpicsSlots());
-    if(typeof fetchPhysics==='function')      fetches.push(fetchPhysics());
+    const fetches=[fetchOccupancy(), fetchClHist(), fetchGemResiduals(), fetchGemAccum(),
+        fetchLmsSummary(), fetchEpicsChannels(), fetchEpicsLatest(), fetchAllEpicsSlots(),
+        fetchPhysics()];
+    if(currentEvent>0) fetches.push(fetchGemApvData(currentEvent));
     await Promise.all(fetches);
     // Plotly.react schedules an async DOM update; give the browser a frame
     // to commit the latest plots before we start switching tabs.
     await _wait(THEME_SETTLE_MS);
 }
 
-// =========================================================================
-// Report generation core
-// =========================================================================
-
+// ── Report generation core ────────────────────────────────────────────
 // Generate the report. Returns {md, attachments, low_data, partial} or null.
 async function generateReport(reportBy,runNumber){
     if(!modules.length){
@@ -690,20 +572,18 @@ async function generateReport(reportBy,runNumber){
         // Empty-state detection.  refreshDataForReport has just landed
         // the three counters as globals, so the read is synchronous.
         // _suspicious -> every accumulator that has a per-tab summary
-        //                line was empty at capture (the run_024790
-        //                failure mode).
+        //                line was empty at capture.
         // _partial    -> BOTH occupancy/recon samples AND cluster
         //                events are below partialThr.  Deliberately
         //                an AND, not an OR: a cluster-rich run with
         //                undersampled occupancy (or vice-versa) is
         //                still informative enough not to flag.  Set
         //                partial_threshold_events = 0 to disable.
-        const clusterEvts = (typeof clHistEvents==='number') ? clHistEvents : 0;
+        const clusterEvts = clHistEvents;
         const lmsEvts     = (lmsSummaryData && lmsSummaryData.events) || 0;
         const _suspicious = (samples===0 && clusterEvts===0 && lmsEvts===0);
-        const partialThr  = (typeof autoReportPartialThreshold==='number')
-                          ? autoReportPartialThreshold : 1000;
-        const _partial    = !_suspicious && partialThr>0 &&
+        const partialThr  = autoReportPartialThreshold;
+        const _partial   = !_suspicious && partialThr>0 &&
                             samples<partialThr && clusterEvts<partialThr;
         const runStr=runNumber?String(runNumber).padStart(6,'0'):'';
         const titleRun=runStr?`Run ${runStr}: `:'';
@@ -733,7 +613,7 @@ async function generateReport(reportBy,runNumber){
         // append LMS warn summary to header (data available after LMS section runs)
         if(lmsSummaryData&&lmsSummaryData.modules){
             const warns=Object.values(lmsSummaryData.modules)
-                .filter(m=>m.warn).map(m=>m.name)
+                .filter(m=>lmsState(m)!=='ok').map(m=>m.name)
                 .sort((a,b)=>{
                     const ta=a.startsWith('W')?0:1, tb=b.startsWith('W')?0:1;
                     if(ta!==tb) return ta-tb;
@@ -755,10 +635,7 @@ async function generateReport(reportBy,runNumber){
     }
 }
 
-// =========================================================================
-// Elog XML helpers (used by autoPostReport)
-// =========================================================================
-
+// ── Elog XML helpers (used by handleCaptureRequest) ────────────────────
 function escXml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
         .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -794,22 +671,18 @@ function buildElogXml(title,logbook,author,tags,body,attachments){
     return parts.join('\n');
 }
 
-// =========================================================================
-// On-demand capture handler
-// =========================================================================
+// ── On-demand capture handler ─────────────────────────────────────────
 // Called by online.js's WS handler when the server sends
 // {type:"capture_request", request_id, run, reason}.  Only the chosen
 // client receives this message — every other tab ignores it.  No client-
 // side dedup or rate-limit logic; the server is the single gatekeeper.
-// =========================================================================
-
 function elogAvailable(){ return !!(elogConfig && elogConfig.url); }
 
 function autoReportTitle(runNumber, lowData){
     const baseTitle='PRad2 Event Monitor Auto Report';
     // [NO-DATA] prefix makes a bad report unmistakable in the elog
-    // titles list before anyone opens the entry.  See report.js
-    // _suspicious flag in generateReport for the trigger condition.
+    // titles list before anyone opens the entry.  See the _suspicious
+    // flag in generateReport for the trigger condition.
     const prefix = lowData ? '[NO-DATA] ' : '';
     return runNumber ? `${prefix}Run #${runNumber}: ${baseTitle}`
                      : `${prefix}${baseTitle}`;
@@ -827,7 +700,7 @@ async function handleCaptureRequest(msg){
         return;
     }
 
-    if(typeof autoSetReporting==='function') autoSetReporting(true);
+    autoSetReporting(true);
     if(sb) sb.textContent = `Auto-report (${reason}, run ${runNumber}): capturing…`;
 
     try{
@@ -854,12 +727,8 @@ async function handleCaptureRequest(msg){
                                   reportBy, tags, body, report.attachments);
 
         if(sb) sb.textContent = `Auto-report (run ${runNumber}): uploading…`;
-        const resp = await fetch('/api/elog/post', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({xml, auto:true, run_number:runNumber,
-                                  request_id:requestId, low_data:lowData})
-        });
-        const r = await resp.json();
+        const r = await postJson('/api/elog/post', {xml, auto:true, run_number:runNumber,
+                                                    request_id:requestId, low_data:lowData});
         if(r.ok && r.dry_run){
             if(sb) sb.textContent =
                 `Auto-report saved (dry-run): ${r.saved_xml||r.saved_dir||fullTitle}`;
@@ -877,20 +746,16 @@ async function handleCaptureRequest(msg){
     } catch(e){
         if(sb) sb.textContent = `Auto-report error: ${e.message}`;
     } finally {
-        if(typeof autoSetReporting==='function') autoSetReporting(false);
+        autoSetReporting(false);
     }
 }
 
-// =========================================================================
-// Init — called from viewer.js init() with config data. There is no manual
-// report UI anymore: this just stashes the elog config (now nested under
-// auto_report, since auto-mode is the only producer) so autoPostReport
-// has author/logbook/tags to draw from, and forwards the auto_report
-// config block on to viewer.js's applyAutoReportConfig.
-// =========================================================================
+// Called from config.js with the /api/config data.  Stashes the elog
+// config (nested under auto_report) so handleCaptureRequest has
+// author/logbook/tags to draw from, and forwards the auto_report config
+// block on to viewer.js's applyAutoReportConfig.
 function initReport(data){
     const ar = data && data.auto_report;
     if(ar && ar.elog && ar.elog.url) elogConfig = ar.elog;
-    if(typeof applyAutoReportConfig==='function')
-        applyAutoReportConfig(ar);
+    applyAutoReportConfig(ar);
 }

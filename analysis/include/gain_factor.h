@@ -3,32 +3,34 @@
 // gain_factor.h — per-module LMS gain factors and time-dependent corrections
 //
 // ── Reference gain (.dat files, produced by refGain_produce) ─────────────────
-//   Directory: <db>/gain_factor/
+//   Directory: RefGainDir(<db>) = <db>/gain_factor/ref_gain/
 //   File:      prad_XXXXXX_LMS.dat  (7 columns: Name lms_peak lms_sigma
 //              lms_chi2/ndf g1 g2 g3)
 //   W/G module lines only; LMS header lines ignored.
 //
-//   auto tbl = prad2::LoadRefGain(db + "/gain_factor", run_num);
+//   auto tbl = prad2::LoadRefGain(prad2::RefGainDir(db), run_num);
 //   float g1_W1 = tbl.w[1].g[0];
 //
 // ── Time-dependent correction (.root files, produced by replay_gainCorr) ──────
-//   Directory: <db>/gain_factor/gain_correction/
+//   Directory: GainCorrDir(<db>) = <db>/gain_factor/gain_correction/
 //   File:      prad_XXXXXX_gain_corr.root  (TTree "gain_corr", one entry/batch)
 //   Only W (PbWO4) modules; G (PbGlass) corrections not stored in these files.
+//   Writers always use GainCorrDir(<db>); readers use RunConfig::gain_data_dir,
+//   which defaults to the same directory (general.json gain_factor.data_dir
+//   only redirects the reader).  The correction methods are described at
+//   LoadGainCorrTimeSeries().
 //
 //   // One-time setup (single-threaded):
-//   auto ts = prad2::LoadGainCorrTimeSeries(
-//                 db + "/gain_factor/gain_correction", run_num);
+//   auto ts = prad2::LoadGainCorrTimeSeries(gRunConfig, run_num);
 //   // Per-event lookup (read-only → safe from multiple threads after init):
 //   const auto& corr = ts.GetCorr(event_num);
-//   new_adc2mev = old_adc2mev * corr.w[module_id].avg;
+//   new_adc2mev = old_adc2mev * corr.ModuleGain(module_id, gRunConfig.gain_ref_pmt);
 //
-// ── Selection rule (both variants) ───────────────────────────────────────────
-//   run_num >= 0 -> largest file run number that is <= run_num
-//   run_num <  0 -> file with the largest run number ("latest")
+// Both kinds of file are looked up by exact run number (FindRunFile).
 //=============================================================================
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -38,10 +40,24 @@
 #include <vector>
 
 #include <TROOT.h>
+#include <TF1.h>
 #include <TFile.h>
+#include <TH1F.h>
 #include <TTree.h>
 
+#include "RunInfoConfig.h"
+
 namespace prad2 {
+
+inline std::string RefGainDir(const std::string &db_dir)
+{
+    return db_dir + "/gain_factor/ref_gain";
+}
+
+inline std::string GainCorrDir(const std::string &db_dir)
+{
+    return db_dir + "/gain_factor/gain_correction";
+}
 
 // Single module's three gain factors (g1, g2, g3 from the LMS/alpha fit).
 // Zero-initialised by default so missing entries are safe to use.
@@ -61,27 +77,21 @@ struct RefGainTable {
     bool loaded     = false;
 };
 
-// Returns the path to the gain factor file whose run number exactly matches run_num.
-// Returns an empty string if no matching file is found or the directory is inaccessible.
+// Path of the regular file dir/prad_<run_num as %06d><suffix>, or an empty
+// string when there is none (run_num outside 0..999999 never matches).
+inline std::string FindRunFile(const std::string &dir, int run_num, const char *suffix)
+{
+    if (dir.empty() || run_num < 0 || run_num > 999999) return {};
+    char name[64];
+    std::snprintf(name, sizeof(name), "prad_%06d%s", run_num, suffix);
+    const std::filesystem::path path = std::filesystem::path(dir) / name;
+    std::error_code ec;
+    return std::filesystem::is_regular_file(path, ec) ? path.string() : std::string{};
+}
+
 inline std::string FindRefGainFile(const std::string &dir, int run_num)
 {
-    const std::regex pat(R"(prad_(\d{6})_LMS\.dat)");
-
-    std::error_code ec;
-    for (auto &entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file()) continue;
-        std::smatch m;
-        std::string fname = entry.path().filename().string();
-        if (!std::regex_match(fname, m, pat)) continue;
-
-        if (std::stoi(m[1].str()) == run_num)
-            return entry.path().string();
-    }
-    if (ec)
-        std::cerr << "Warning: cannot iterate gain_factor dir " << dir
-                  << ": " << ec.message() << "\n";
-
-    return {};
+    return FindRunFile(dir, run_num, "_LMS.dat");
 }
 
 // Load reference gain factors from one explicit .dat file.
@@ -98,7 +108,7 @@ inline RefGainTable LoadRefGainFile(const std::string &path)
 
     // Parse the embedded run number from the file name.
     {
-        std::regex pat(R"(prad_(\d{6})_LMS\.dat)");
+        static const std::regex pat(R"(prad_(\d{6})_LMS\.dat)");
         std::smatch m;
         std::string fname = std::filesystem::path(path).filename().string();
         if (std::regex_search(fname, m, pat))
@@ -111,24 +121,12 @@ inline RefGainTable LoadRefGainFile(const std::string &path)
     std::string name;
     float col2, col3, col4, g1, g2, g3;
     while (f >> name >> col2 >> col3 >> col4 >> g1 >> g2 >> g3) {
-        if (name.empty()) continue;
-
-        if (name[0] == 'W') {
-            int id = std::stoi(name.substr(1));
-            if (id >= 1 && id < RefGainTable::MAX_W) {
-                tbl.w[id].g[0] = g1;
-                tbl.w[id].g[1] = g2;
-                tbl.w[id].g[2] = g3;
-            }
-        } else if (name[0] == 'G') {
-            int id = std::stoi(name.substr(1));
-            if (id >= 1 && id < RefGainTable::MAX_G) {
-                tbl.g[id].g[0] = g1;
-                tbl.g[id].g[1] = g2;
-                tbl.g[id].g[2] = g3;
-            }
-        }
-        // LMS lines and anything else are silently skipped.
+        // W/G module lines only; LMS lines and anything else are skipped.
+        if (name.empty() || (name[0] != 'W' && name[0] != 'G')) continue;
+        const bool is_w = name[0] == 'W';
+        const int id = std::stoi(name.substr(1));
+        if (id >= 1 && id < (is_w ? RefGainTable::MAX_W : RefGainTable::MAX_G))
+            (is_w ? tbl.w : tbl.g)[id] = {{g1, g2, g3}};
     }
 
     tbl.loaded = true;
@@ -158,10 +156,11 @@ struct GainCorrTable {
     static constexpr int MAX_G = RefGainTable::MAX_G;
 
     // correction[id][j] = ref.g[j] / cur.g[j]  (j = 0,1,2 for g1,g2,g3)
-    // avg[id]           = mean of the valid (non-zero) per-LMS corrections
+    // avg[id]           = mean of the three per-LMS corrections, a failed
+    //                     fit counting as 1
     struct Entry {
-        float corr[3] = {1.f, 1.f, 1.f};  // per-LMS correction
-        float avg      = 1.f;              // average over valid LMS channels
+        float corr[3] = {1.f, 1.f, 1.f};
+        float avg      = 1.f;
     };
 
     Entry w[MAX_W];
@@ -169,31 +168,34 @@ struct GainCorrTable {
 
     int ref_run = -1;
     int cur_run = -1;
+
+    // Gain factor for a module id (PbGlass: G number, PbWO4: 1000 + W
+    // number). PbWO4 averages the reference PMTs selected by ref_pmt's
+    // digits (default: LMS2 and LMS3); PbGlass keeps its avg.
+    // Any other id (Veto, LMS) gets 1.
+    float ModuleGain(int id, int ref_pmt = 23) const
+    {
+        const unsigned mask = detail::GainRefPMTMask(ref_pmt);
+        if (id > 1000 && id - 1000 < MAX_W) {
+            float sum = 0.f;
+            int count = 0;
+            for (int j = 0; j < 3; ++j) {
+                if (!(mask & (1u << j))) continue;
+                sum += w[id - 1000].corr[j];
+                ++count;
+            }
+            return sum / static_cast<float>(count);
+        }
+        if (id > 0 && id < MAX_G) return g[id].avg;
+        return 1.f;
+    }
 };
 
 // ── Time-dependent gain correction from replay_gainCorr ROOT output ───────────
 
-// Locate prad_XXXXXX_gain_corr.root for the given run.
-// Same selection rule as FindRefGainFile.
 inline std::string FindGainCorrRootFile(const std::string &dir, int run_num)
 {
-    const std::regex pat(R"(prad_(\d{6})_gain_corr\.root)");
-
-    std::error_code ec;
-    for (auto &entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!entry.is_regular_file()) continue;
-        std::smatch m;
-        std::string fname = entry.path().filename().string();
-        if (!std::regex_match(fname, m, pat)) continue;
-
-        if (std::stoi(m[1].str()) == run_num)
-            return entry.path().string();
-    }
-    if (ec)
-        std::cerr << "Warning: cannot iterate gain_correction dir " << dir
-                  << ": " << ec.message() << "\n";
-
-    return {};
+    return FindRunFile(dir, run_num, "_gain_corr.root");
 }
 
 // A time series of gain correction tables loaded from a replay_gainCorr ROOT
@@ -216,7 +218,6 @@ struct GainCorrTimeSeries {
     // Return the correction table for the given event number.
     // Finds the last batch whose event_num_start <= event_num.
     // Falls back to the first batch if event_num precedes all batches.
-    // Thread-safe after LoadGainCorrTimeSeries() returns: purely read-only.
     const GainCorrTable &GetCorr(int event_num) const noexcept
     {
         // C++11 guarantees thread-safe initialisation of function-scope statics.
@@ -230,18 +231,33 @@ struct GainCorrTimeSeries {
 
 // Load the gain correction time series from the replay_gainCorr ROOT output.
 //
-// corr_dir : directory containing prad_XXXXXX_gain_corr.root files
-//            (typically <db>/gain_factor/gain_correction)
-// run_num  : select file by run number (see selection rule in header)
+// run_cfg         : RunConfig for this run — supplies gain_data_dir (the
+//                    directory holding the gain_corr files) and gain_ref_run
+//                    (the reference run number to divide into; the ref_run
+//                    stored in the current run's file is unreliable and not
+//                    read).
+// run_num         : run whose prad_XXXXXX_gain_corr.root is loaded
+// use_precomputed : false (default) — compute the correction at load time as
+//                    ref_run.gain_W / cur_run.gain_W, where ref_run.gain_W is
+//                    averaged over every batch in the reference run's own
+//                    gain_corr.root (one average per module/LMS channel);
+//                    the gain_corr_W branch is ignored.  true — use the
+//                    pre-computed gain_corr_W branch instead (legacy
+//                    behaviour: ref_tbl.g from the .dat file / cur_run's
+//                    gain_W, computed once by replay_gainCorr).
 //
 // Thread safety
 //   Call once from a single thread during setup.
 //   The returned GainCorrTimeSeries may then be shared across threads for
 //   read-only access via GetCorr().  Requires ROOT::EnableThreadSafety() to
 //   have been called before spawning worker threads.
-inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
-                                                  int               run_num)
+inline GainCorrTimeSeries LoadGainCorrTimeSeries(const RunConfig &run_cfg,
+                                                  int              run_num,
+                                                  bool             use_precomputed = false)
 {
+    const std::string corr_dir = run_cfg.gain_data_dir;
+    const int         ref_run  = run_cfg.gain_ref_run;
+
     GainCorrTimeSeries ts;
     ts.run_num = run_num;
 
@@ -252,7 +268,6 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
         return ts;
     }
 
-    // Open privately — no gDirectory/gFile side-effects on the caller's context.
     TFile *f = TFile::Open(path.c_str(), "READ");
     if (!f || f->IsZombie()) {
         std::cerr << "Warning: cannot open " << path << "\n";
@@ -268,20 +283,75 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
         return ts;
     }
 
-    // Written with gain_corr_W[N_W][N_LMS], N_W = 1156, N_LMS = 3.
+    // Written with gain_corr_W[N_W][N_LMS] or gain_W[N_W][N_LMS], N_W = 1156, N_LMS = 3.
     static constexpr int kNW   = GainCorrTable::MAX_W - 1;  // 1156
     static constexpr int kNLMS = 3;
 
-    int   ev_start = 0, ev_end = 0;
+    int      ev_start = 0, ev_end = 0;
     uint32_t unix_time = 0;
     float corr_W[kNW][kNLMS];
+    float gain_W[kNW][kNLMS];
 
     tree->SetBranchAddress("event_num_start", &ev_start);
     tree->SetBranchAddress("event_num_end",   &ev_end);
-    tree->SetBranchAddress("gain_corr_W",      corr_W);
+    if (use_precomputed)
+        tree->SetBranchAddress("gain_corr_W", corr_W);
+    else
+        tree->SetBranchAddress("gain_W",      gain_W);
     const bool has_unix_time = tree->GetBranch("unix_time") != nullptr;
     if (has_unix_time)
         tree->SetBranchAddress("unix_time", &unix_time);
+
+    // Default method: average the reference run's own gain_W over all
+    // of its batches, then divide it into every current-run batch below.
+    float ref_gain_W[kNW][kNLMS];
+    bool  have_ref_gain = false;
+    if (!use_precomputed) {
+        if (ref_run < 0) {
+            std::cerr << "Warning: RunConfig has no valid gain_ref_run\n";
+        } else {
+            std::string ref_path = FindGainCorrRootFile(corr_dir, ref_run);
+            if (ref_path.empty()) {
+                std::cerr << "Warning: no gain_corr root file in " << corr_dir
+                          << " for ref run " << ref_run << "\n";
+            } else {
+                TFile *ref_f = TFile::Open(ref_path.c_str(), "READ");
+                if (!ref_f || ref_f->IsZombie()) {
+                    std::cerr << "Warning: cannot open ref-run gain_corr file "
+                              << ref_path << "\n";
+                } else {
+                    TTree *ref_tree = nullptr;
+                    ref_f->GetObject("gain_corr", ref_tree);
+                    const Long64_t n_ref_entries = ref_tree ? ref_tree->GetEntries() : 0;
+                    if (n_ref_entries == 0) {
+                        std::cerr << "Warning: no 'gain_corr' entries in "
+                                  << ref_path << "\n";
+                    } else {
+                        float ref_batch_W[kNW][kNLMS];
+                        float ref_sum[kNW][kNLMS] = {};
+                        int   ref_cnt[kNW][kNLMS] = {};
+                        ref_tree->SetBranchAddress("gain_W", ref_batch_W);
+                        for (Long64_t rk = 0; rk < n_ref_entries; ++rk) {
+                            ref_tree->GetEntry(rk);
+                            for (int wi = 0; wi < kNW; ++wi) {
+                                for (int j = 0; j < kNLMS; ++j) {
+                                    if (ref_batch_W[wi][j] <= 0.f) continue;
+                                    ref_sum[wi][j] += ref_batch_W[wi][j];
+                                    ++ref_cnt[wi][j];
+                                }
+                            }
+                        }
+                        for (int wi = 0; wi < kNW; ++wi)
+                            for (int j = 0; j < kNLMS; ++j)
+                                ref_gain_W[wi][j] = (ref_cnt[wi][j] > 0)
+                                    ? ref_sum[wi][j] / ref_cnt[wi][j] : 0.f;
+                        have_ref_gain = true;
+                    }
+                }
+                delete ref_f;
+            }
+        }
+    }
 
     const Long64_t nentries = tree->GetEntries();
     ts.batches.reserve(static_cast<size_t>(nentries));
@@ -294,12 +364,19 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
         b.event_num_end   = ev_end;
         b.unix_time       = has_unix_time ? unix_time : 0;
         b.corr.cur_run    = run_num;
+        b.corr.ref_run    = ref_run;
 
         for (int wi = 0; wi < kNW; ++wi) {
             float sum = 0.f;
             for (int j = 0; j < kNLMS; ++j) {
-                // 0 in the ROOT file signals a failed fit — treat as identity.
-                float v = (corr_W[wi][j] > 0.f) ? corr_W[wi][j] : 1.f;
+                float v;
+                if (use_precomputed) {
+                    // 0 in the ROOT file signals a failed fit — treat as identity.
+                    v = (corr_W[wi][j] > 0.f) ? corr_W[wi][j] : 1.f;
+                } else {
+                    v = (have_ref_gain && ref_gain_W[wi][j] > 0.f && gain_W[wi][j] > 0.f)
+                        ? ref_gain_W[wi][j] / gain_W[wi][j] : 1.f;
+                }
                 b.corr.w[wi + 1].corr[j] = v;
                 sum += v;
             }
@@ -319,11 +396,13 @@ inline GainCorrTimeSeries LoadGainCorrTimeSeries(const std::string &corr_dir,
 
     ts.loaded = true;
     std::cerr << "GainCorrTS: run " << run_num << ": "
-              << ts.batches.size() << " batches from " << path << "\n";
+              << ts.batches.size() << " batches from " << path
+              << (use_precomputed ? " (precomputed gain_corr_W)"
+                                  : " (ref-run gain_W ratio)") << "\n";
     return ts;
 }
 
-//reuse the code in gain_fitter.cpp
+// Gaussian fit of an LMS/alpha amplitude peak (all zero when the fit failed).
 struct FitResult{
     float mean     = 0.;
     float sigma    = 0.;
@@ -355,7 +434,7 @@ inline FitResult gain_hist_fitter(TH1F* h, const float & fac)
     int leftBin  = maxBin;
     int rightBin = maxBin;
 
-    // Find first bin to the left below 10% of max
+    // Find first bin to the left below threshold (fac * max)
     for (int ibin = maxBin; ibin >= 1; --ibin) {
         if (h->GetBinContent(ibin) < threshold) {
             leftBin = ibin;
@@ -366,7 +445,7 @@ inline FitResult gain_hist_fitter(TH1F* h, const float & fac)
         }
     }
 
-    // Find first bin to the right below 10% of max
+    // Find first bin to the right below threshold
     for (int ibin = maxBin; ibin <= nBins; ++ibin) {
         if (h->GetBinContent(ibin) < threshold) {
             rightBin = ibin;
@@ -377,8 +456,8 @@ inline FitResult gain_hist_fitter(TH1F* h, const float & fac)
         }
     }
 
-    // Optional: if you want the fit range to stay inside the above-threshold region,
-    // shift inward by one bin when the threshold-crossing bin itself is below threshold.
+    // Keep the fit range inside the above-threshold region: shift inward by
+    // one bin when the threshold-crossing bin itself is below threshold.
     if (leftBin < maxBin && h->GetBinContent(leftBin) < threshold) {
         leftBin++;
     }
@@ -392,7 +471,6 @@ inline FitResult gain_hist_fitter(TH1F* h, const float & fac)
     if (leftBin  > maxBin - 2) leftBin  = maxBin - 2;
     if (rightBin < maxBin + 2) rightBin = maxBin + 2;
 
-    // Safety check
     if (leftBin < 1) leftBin = 1;
     if (rightBin > nBins) rightBin = nBins;
     if (leftBin >= rightBin) {

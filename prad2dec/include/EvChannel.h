@@ -2,7 +2,7 @@
 //=============================================================================
 // EvChannel.h — read evio events, scan bank tree, lazily decode per product
 //
-// New (lazy) API:
+// Usage:
 //   EvChannel ch;
 //   ch.SetConfig(cfg);             // builds per-product tag lists
 //   ch.OpenAuto("file.evio");      // RA when supported, sequential otherwise
@@ -16,12 +16,6 @@
 //           // multiple requests for the same product reuse the cached result
 //       }
 //   }
-//
-// Legacy DecodeEvent is preserved as a thin compat wrapper so existing
-// callers compile and behave unchanged.  The earlier DecodeEventInfo /
-// DecodeEventTdc fast paths were removed in favour of SelectEvent() + the
-// corresponding Info()/Tdc() accessors, which decode only what's requested
-// and cache the result for repeat calls on the same event.
 //=============================================================================
 
 #include "EvStruct.h"
@@ -52,9 +46,9 @@ public:
 
     // --- configuration ------------------------------------------------------
     // Stores the config and precomputes per-product tag lists used by the
-    // lazy accessors.  If the config's data_banks map is empty (legacy JSON
-    // without a bank_structure section), default entries are synthesised
-    // from the legacy bank-tag fields so older configs keep working.
+    // lazy accessors.  Every tag set in the bank-tag fields but missing from
+    // data_banks (e.g. JSON without a bank_structure section) gets a default
+    // entry, so older configs keep working.
     void SetConfig(const DaqConfig &cfg);
     const DaqConfig &GetConfig() const   { return config; }
 
@@ -87,10 +81,10 @@ public:
 
     // --- convenience: open with RA when possible, else sequential ---------
     // Tries OpenRandomAccess first; if that fails (e.g. evio-4 files whose
-    // blocks lack the optional index array), falls back to the sequential
-    // Open().  After success, IsRandomAccess() tells the caller which mode
-    // was actually selected so they can dispatch between ReadEventByIndex()
-    // and Read().
+    // blocks lack the optional index array), falls back to OpenSequential().
+    // After success, IsRandomAccess() tells the caller which mode was
+    // actually selected so they can dispatch between ReadEventByIndex() and
+    // Read().
     virtual status OpenAuto(const std::string &path);
 
     // True iff the current handle was opened in random-access mode.
@@ -122,6 +116,26 @@ public:
     size_t GetDataBytes(const EvNode &n) const { return n.data_words * sizeof(uint32_t); }
     const uint8_t *GetCompositePayload(const EvNode &n, size_t &nbytes) const;
 
+    // Text of a CHARSTAR8/CHAR8 bank up to its first NUL.  EVIO pads string
+    // banks with NULs and may pack several strings; only the first is read.
+    std::string GetString(const EvNode &n) const;
+
+    // Visit every non-empty UINT32 bank carrying `tag` that lies inside the
+    // buffer and is not part of a composite bank, in scan order, as
+    // fn(const EvNode &bank, uint32_t roc_tag); roc_tag is the parent bank's
+    // tag (0 at top level).
+    template <class Fn>
+    void ForEachLeafBank(uint32_t tag, Fn &&fn) const
+    {
+        for (int ni : NodesForTag(tag)) {
+            const EvNode &n = nodes[ni];
+            if (n.type != DATA_UINT32 || n.data_words == 0) continue;
+            if (n.data_begin + n.data_words > buffer.size()) continue;
+            if (n.parent >= 0 && nodes[n.parent].type == DATA_COMPOSITE) continue;
+            fn(n, n.parent >= 0 ? nodes[n.parent].tag : 0u);
+        }
+    }
+
     uint32_t       *GetRawBuffer()       { return buffer.data(); }
     const uint32_t *GetRawBuffer() const { return buffer.data(); }
 
@@ -129,9 +143,13 @@ public:
     // For single-event mode this is 1. For multi-event blocks this is M.
     int GetNEvents() const { return nevents; }
 
-    // --- lazy data-product accessors (new API) ------------------------------
+    // Bank tags decoded by Tdc() / Vtp(), in decode order (from SetConfig).
+    const std::vector<uint32_t> &GetTdcTags() const { return tdc_tags; }
+    const std::vector<uint32_t> &GetVtpTags() const { return vtp_tags; }
+
+    // --- lazy data-product accessors ----------------------------------------
     //
-    // Choose the sub-event index subsequent Get*() calls refer to.  Clears
+    // Choose the sub-event index subsequent accessor calls refer to.  Clears
     // the product cache if the index changed; for PRad-II single-event data,
     // pass 0 (the default after Scan()).  Safe to call repeatedly.
     void SelectEvent(int i) const;
@@ -143,7 +161,7 @@ public:
     const fdec::EventData    &Fadc() const;  // FADC250 + ADC1881M waveforms
     const ssp::SspEventData  &Gem()  const;  // SSP/MPD GEM strips
     const tdc::TdcEventData  &Tdc()  const;  // V1190 timing hits
-    const vtp::VtpEventData  &Vtp()  const;  // VTP ECAL peaks/clusters
+    const vtp::VtpEventData  &Vtp()  const;  // VTP trigger clusters (see VtpData.h)
 
     // Absolute-time / run-state snapshot.  Unlike the other accessors this
     // one's result PERSISTS across events — it's only refreshed when Scan()
@@ -254,11 +272,7 @@ protected:
     mutable std::unique_ptr<dsc::DscEventData> cache_dsc;
     mutable std::unique_ptr<epics::EpicsRecord> cache_epics;
 
-    // Latest physics event_number / TI timestamp observed via Info() /
-    // DecodeEvent().  Used by slow-event consumers to stamp non-physics
-    // records with the most recent physics event so analysis can join
-    // trees by integer key (event_number) and recover the slow row's
-    // approximate time without re-reading the events tree (timestamp).
+    // See GetLastPhysicsEventNumber() / GetLastPhysicsTimestamp().
     mutable int32_t  last_physics_event_number_ = -1;
     mutable uint64_t last_physics_timestamp_    = 0;
 
@@ -272,7 +286,7 @@ protected:
 
     // --- per-bank decoders (shared by legacy and lazy paths) ----------------
     void decodeTriggerInfo(const EvNode &node, fdec::EventInfo &info) const;
-    void decodeTIBank(const EvNode &node, fdec::EventInfo &info, bool is_master) const;
+    void decodeTIBank(const EvNode &node, fdec::EventInfo &info) const;
     void decodeRunInfo(const EvNode &node, fdec::EventInfo &info) const;
 
     // --- per-product dispatchers (write into caller-supplied structs) -------
@@ -300,9 +314,15 @@ protected:
     // Invalidate all product cache flags.
     void clearCache() const;
 
+    // Close any open handle, then evOpen `path` in evio `mode` ("r" or "ra")
+    // with the random-access cursor reset.  Returns the evio status code.
+    int openHandle(const std::string &path, const char *mode);
+
     size_t scanBank      (size_t off, int depth, int parent);
+    // SEGMENT or TAGSEGMENT (1-word header): Hdr is SegmentHeader or
+    // TagSegmentHeader.
+    template <class Hdr>
     size_t scanSegment   (size_t off, int depth, int parent);
-    size_t scanTagSegment(size_t off, int depth, int parent);
     void   scanChildren  (size_t off, size_t nwords, uint32_t ptype, int depth, int pidx);
 };
 

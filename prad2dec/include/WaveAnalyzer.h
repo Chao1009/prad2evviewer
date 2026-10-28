@@ -10,7 +10,7 @@
 //   - Threshold adapts to pedestal noise (N × RMS with absolute floor)
 //   - All scratch buffers on the stack — no heap allocation in the hot path
 //
-// Author: Chao Peng (original), merged/rewritten 2025
+// Author: Chao Peng
 //=============================================================================
 
 #include "Fadc250Data.h"
@@ -22,7 +22,7 @@
 namespace fdec
 {
 
-class PulseTemplateStore;   // forward decl — defined in PulseTemplateStore.h
+class PulseTemplateStore;
 
 struct LogNormalFitResult {
     bool  ok = false;
@@ -67,6 +67,9 @@ struct WaveConfig {
     int      ped_max_iter  = 3;       // outlier rejection iterations
     uint16_t overflow      = 4095;    // overflow ADC value (12-bit)
     float    clk_mhz       = 250.0f;  // clock frequency for time conversion
+
+    // Sample period in ns; 4 ns (250 MHz) when clk_mhz is not positive.
+    float clk_ns() const { return clk_mhz > 0.0f ? 1000.0f / clk_mhz : 4.0f; }
 
     // ---- Per-pulse-fit pile-up deconvolution ----------------------------
     //
@@ -148,8 +151,8 @@ public:
 
     // Analyze one channel.  Fills result in-place, no heap allocation.
     //
-    // When all of the following hold, Analyze ALSO runs NNLS pile-up
-    // deconvolution at the end of the pipeline:
+    // When all of the following hold, Analyze ALSO runs pile-up
+    // deconvolution (Deconvolve) at the end of the pipeline:
     //   * cfg.nnls_deconv.enabled is true
     //   * SetTemplateStore() was called with a valid store
     //   * SetChannelKey() was called with a non-negative triple
@@ -160,7 +163,7 @@ public:
     // On a successful deconv each affected peak's height/integral are
     // overwritten in place and Q_PEAK_DECONVOLVED is OR-ed into its
     // quality flag.  Any failure path (no template, bad template,
-    // singular system) silently leaves the original peaks untouched —
+    // LM not converged) silently leaves the original peaks untouched —
     // production code keeps running without templates.
     void Analyze(const uint16_t *samples, int nsamples, WaveResult &result, float time_offset = 0.f) const;
 
@@ -190,10 +193,10 @@ public:
 
     // ---- Per-pulse shape fit (calibration utility) -------------------
     //
-    // Output of FitPulseShape().  `ok=false` means the LM solve never
-    // accepted a step (no useful fit returned); fields below are
-    // undefined in that case except `peak_amp` which is set as soon as
-    // the slice is validated.
+    // Output of FitPulseShape().  `ok=false` means the slice failed
+    // validation or no finite parameters were found; the fields below are
+    // then zero except `peak_amp`, which is set as soon as the slice is
+    // validated.  Otherwise they hold the best point the LM visited.
     struct PulseFitResult {
         bool   ok;
         float  t0_ns;          // template onset, ns from start of slice
@@ -227,13 +230,12 @@ public:
         int    n_iter;
     };
 
-
     // Three-parameter Levenberg-Marquardt fit of the unit-amplitude
     // two-tau model T(t; t0, τ_r, τ_f) / T_max(τ_r, τ_f) to a waveform
     // slice after pedsub + per-pulse peak-height normalisation.  Used by
-    // analysis/pyscripts/fit_pulse_template.py to build the per-channel
-    // template store; the script aggregates per-pulse results to a
-    // median/MAD entry per channel.
+    // analysis/pyscripts/fit_pulse_template.py to build the pulse-template
+    // JSON; the script aggregates per-pulse results to a median/MAD entry
+    // per channel and per module type.
     //
     // Static because the fit has no analyzer state — purely a math
     // operation.  Stack-only: scratch sized for MAX_SAMPLES floats.
@@ -276,18 +278,17 @@ public:
                                                  float cfd_fraction,
                                                  float ped_mean, float ped_rms);
 
-
-    // Power-user / diagnostic API: explicit NNLS deconvolution against a
-    // caller-supplied template.  Used by the Python `apply_pulse_template`
-    // script to plot before/after comparisons; NOT called by production
-    // code (Replay / viewer) — they get deconv automatically through
-    // Analyze().  See DeconvOutput in Fadc250Data.h for state semantics.
+    // Power-user / diagnostic API: explicit per-pulse LM deconvolution
+    // against a caller-supplied template.  Used by the Python
+    // deconv_pileup_demo.py script to plot before/after comparisons; NOT
+    // called by production code (Replay / viewer) — they get deconv
+    // automatically through Analyze().  See DeconvOutput in Fadc250Data.h
+    // for state semantics.
     //
     // Always runs given valid inputs (samples non-null, npeaks>0, tmpl in
-    // the cfg τ ranges, M^TM well-conditioned) — does NOT consult
-    // cfg.nnls_deconv.enabled, so the diagnostic can compute deconv
-    // values without flipping the production master switch.  Conditioning
-    // and τ-range gates from cfg.nnls_deconv still apply.
+    // the cfg τ ranges) — does NOT consult cfg.nnls_deconv.enabled, so the
+    // diagnostic can compute deconv values without flipping the production
+    // master switch.  The τ-range gates from cfg.nnls_deconv still apply.
     //
     // Stack-only.  Scratch up to MAX_PEAKS × MAX_SAMPLES floats.
     void Deconvolve(const uint16_t *samples, int nsamples,
@@ -313,16 +314,15 @@ private:
                    WaveResult &result) const;
 
     // Auto-deconv path called from Analyze().  Looks up template via
-    // template_store_ + channel-key context; runs NNLS into a stack
+    // template_store_ + channel-key context; runs Deconvolve() into a stack
     // DeconvOutput, then overwrites the matching peaks' height /
     // integral and OR-s in Q_PEAK_DECONVOLVED on success.  Silent
     // no-op on every failure path (no store, no key, no template,
-    // singular, bad template).
+    // bad template, LM not converged).
     void applyAutoDeconv(const uint16_t *samples, int nsamples,
                          WaveResult &result) const;
 
-    // ---- Deconv binding (mutable so we can set without losing const
-    // semantics on Analyze) ----------------------------------------------
+    // ---- Deconv binding (SetTemplateStore / SetChannelKey) -------------
     const PulseTemplateStore *template_store_ = nullptr;
     int ck_roc_  = -1;
     int ck_slot_ = -1;

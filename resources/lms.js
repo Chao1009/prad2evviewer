@@ -3,7 +3,7 @@
 let g_lmsWarnThresh=0.1;
 let g_lmsRefIndex=-1;  // -1 = None (no normalization)
 let currentLmsData=null;  // {x:[], y:[]} for copy button
-let lmsSummaryData=null;  // {modules:{idx:{name,mean,rms,count,warn}}, events}
+let lmsSummaryData=null;  // {modules:{idx:{name,mean,rms,count,state,drift,...}}, events}
 let lmsSelectedModule=-1;
 // Last /api/lms/<idx> response + module label, kept so theme flips can
 // re-render the lms-plot from cache (Plotly bakes THEME.success/danger/text
@@ -11,13 +11,21 @@ let lmsSelectedModule=-1;
 let _lmsHistRaw=null, _lmsHistModName=null;
 
 // Tri-state from the API: 'drift' (top-priority error from gain-drift
-// detection) > 'warn' (rms/floor stability check) > 'ok'.  Older API
-// responses may only have md.warn — fall back to it so the GUI keeps
-// working against an old server.
+// detection) > 'warn' (rms/floor stability check) > 'ok'.
 function lmsState(md){
     if(!md) return 'ok';
-    if(md.state) return md.state;
-    return md.warn ? 'warn' : 'ok';
+    return md.state;
+}
+
+// Summary modules as [{idx, ...module, _st}], most broken first: drift (largest
+// |drift-1|), then warn (largest RMS/Mean), then ok (largest RMS/Mean).
+function lmsSortedEntries(mods){
+    const rank=st=>(st==='drift'?0:st==='warn'?1:2);
+    const dev=e=>e.drift!=null?Math.abs(e.drift-1):0;
+    const frac=e=>e.mean>0?e.rms/e.mean:0;
+    return Object.entries(mods)
+        .map(([idx,m])=>({idx:parseInt(idx),...m,_st:lmsState(m)}))
+        .sort((a,b)=>(rank(a._st)-rank(b._st)) || (a._st==='drift'?dev(b)-dev(a):frac(b)-frac(a)));
 }
 
 const LMS_DRIFT_SUFFIX_RE = /\s*\(\d+ drift\)$/;
@@ -60,7 +68,7 @@ function geoLms(){
             if(metric==='warn'){
                 const st=lmsState(md);
                 if(st==='drift') return THEME.danger;
-                if(st==='warn')  return THEME.warn || THEME.danger;
+                if(st==='warn')  return THEME.warn;
                 if(md && md.count>0) return THEME.success;
                 return geoEmptyColor(modules[i].t);
             }
@@ -75,7 +83,7 @@ function geoLms(){
             const md=mods[String(i)];
             const st=lmsState(md);
             if(st==='drift') return {color:THEME.danger,width:2};
-            if(st==='warn')  return {color:THEME.warn||THEME.danger,width:1.5};
+            if(st==='warn')  return {color:THEME.warn,width:1.5};
             return null;
         },
         null
@@ -138,6 +146,21 @@ function fetchLmsHistory(modIdx, modName){
     }).catch(()=>{});
 }
 
+// Re-fetch the history of the selected module (no-op when none is selected).
+function refreshSelectedLmsHistory(){
+    if(lmsSelectedModule<0) return;
+    const md=lmsSummaryData&&lmsSummaryData.modules&&lmsSummaryData.modules[lmsSelectedModule];
+    fetchLmsHistory(lmsSelectedModule, md?md.name:'');
+}
+
+// Drop the module selection and blank the history plot and its readout.
+function resetLmsSelection(){
+    lmsSelectedModule=-1; currentLmsData=null;
+    _lmsHistRaw=null; _lmsHistModName=null;
+    resetPlot('lms-plot');
+    document.getElementById('lms-info-text').textContent='Click a module to view LMS history';
+}
+
 function renderLmsHistory(){
     if(!_lmsHistRaw || _lmsHistModName==null) return;
     const data=_lmsHistRaw;
@@ -146,6 +169,8 @@ function renderLmsHistory(){
         currentLmsData=null;
         Plotly.react('lms-plot',[],{...PL,
             title:{text:`${modName} — No LMS data`,font:{size:10,color:THEME.textMuted}}},PC2);
+        document.getElementById('lms-info-text').innerHTML=
+            `<span class="mod-name">${modName}</span> <span class="mod-daq">No LMS data</span>`;
         return;
     }
     currentLmsData={x:Array.from(data.time), y:Array.from(data.integral)};
@@ -184,31 +209,15 @@ function renderLmsHistory(){
 function updateLmsTable(){
     const tbody=document.getElementById('lms-tbody');
     if(!lmsSummaryData||!lmsSummaryData.modules){
-        tbody.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--dim);padding:8px">No LMS data</td></tr>';
+        tbody.innerHTML='<tr class="empty-row"><td colspan="7">No LMS data</td></tr>';
         return;
     }
-    // Sort: drift first (largest |drift-1| at top), then warn (largest
-    // RMS/Mean), then OK.  This puts the most-broken channels on top so
-    // the operator sees them without scrolling.
-    const entries=Object.entries(lmsSummaryData.modules).map(([idx,m])=>({idx:parseInt(idx),...m}));
-    const stateRank=st=>(st==='drift'?0:st==='warn'?1:2);
-    entries.sort((a,b)=>{
-        const ra=stateRank(lmsState(a)), rb=stateRank(lmsState(b));
-        if(ra!==rb) return ra-rb;
-        if(lmsState(a)==='drift'){
-            // Worst drift first within the drift group.
-            const da=a.drift!=null?Math.abs(a.drift-1):0;
-            const db=b.drift!=null?Math.abs(b.drift-1):0;
-            return db-da;
-        }
-        const ramf=a.mean>0?a.rms/a.mean:0, rbmf=b.mean>0?b.rms/b.mean:0;
-        return rbmf-ramf;
-    });
+    const entries=lmsSortedEntries(lmsSummaryData.modules);
     let rows='';
     for(const e of entries){
         const rmsFrac=e.mean>0?(e.rms/e.mean*100).toFixed(1):'--';
         const sel=lmsSelectedModule===e.idx;
-        const st=lmsState(e);
+        const st=e._st;
         // Drift cell: show value, mark with a (·) hint when suppressed so the
         // operator knows the module is out of band but the warn was muted on
         // purpose.  No row tint — suppressed rows stay 'ok' in sort order.
@@ -238,22 +247,14 @@ function updateLmsTable(){
     tbody.innerHTML=rows;
     tbody.querySelectorAll('.cl-table-row').forEach(tr=>{
         tr.onclick=()=>{
-            const idx=parseInt(tr.dataset.idx);
-            lmsSelectedModule=idx;
-            const mod=modules.find(m=>modules.indexOf(m)===idx);
-            const name=lmsSummaryData.modules[idx]?lmsSummaryData.modules[idx].name:'';
-            fetchLmsHistory(idx, name);
+            lmsSelectedModule=parseInt(tr.dataset.idx);
+            refreshSelectedLmsHistory();
             updateLmsTable();
             geoLms();
         };
     });
 }
 
-// Theme flip — lms-plot embeds THEME.success/danger/text/overlay/textMuted
-// in trace lines, the legend bg, and titles.  Replay from the cached raw
-// response (set by fetchLmsHistory) so a flip doesn't leave stale colors.
-// geoLms paints the SHARED geo canvas — viewer.js's master listener calls
-// redrawGeo() for the active tab, so we don't repeat it here.
-if (typeof onThemeChange === 'function') {
-    onThemeChange(renderLmsHistory);
-}
+// Theme flip — replay lms-plot from cache.  The shared geo canvas (geoLms)
+// is redrawn by viewer.js's master listener.
+onThemeChange(renderLmsHistory);
