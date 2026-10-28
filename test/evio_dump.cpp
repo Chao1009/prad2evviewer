@@ -682,7 +682,7 @@ static int doVtp(EvChannel &ch, int max_events)
 // hit format -- bits 31:27 slot, 26 edge, 25:19 channel, 18:0 TDC value with
 // ~24 ps LSB after rol2.c's V1190->V1290 normalization).  In run 24386 there
 // are 2 active channels (slot=16, ch=0 and ch=8), each firing roughly five
-// hits per event spaced ~131 ns apart -- a divided CEBAF RF reference.
+// hits per event spaced 128.25 ns (32 × 4.0077 ns RF buckets) apart -- a divided CEBAF RF reference.
 //
 // Per-event lines list raw TDC ticks followed by ns.  The summary tracks
 // per-channel hit counts and the mean inter-hit interval (1/period gives the

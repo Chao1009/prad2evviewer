@@ -198,7 +198,7 @@ raw `0xE10B` hardware stream is already stripped of TDC headers / EOB
 markers / global trailer, so the payload is a flat array of hits).  In
 PRad-II run 24386 onward there is one active TDC ROC per physics event,
 ROC `0x40` ("rf"), carrying ~10–12 hits/event on slot 16, channels 0
-and 8 — the divided CEBAF RF reference (period ≈ 131.3 ns ≈ 7.61 MHz).
+and 8 — the divided CEBAF RF reference (period ≈ 128.25 ns (32 × 4.0077 ns RF buckets) ≈ 7.80 MHz).
 The tagger TDC (ROC `0x8E`) lands in the same branches if/when it
 comes back online; offline tools split by `tdc_roc_tags[i]`.
 

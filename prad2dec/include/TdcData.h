@@ -35,7 +35,7 @@ static constexpr double TDC_LSB_NS = 23.436e-3; // 23.436 ps per TDC ch, from Ra
 
 // --- PRad-II RF reference cabling ------------------------------------------
 // Channels 0 and 8 of slot 16 in ROC 0x40 carry the divided CEBAF RF
-// reference (run 24386 onward, period ≈ 131.3 ns ≈ 7.61 MHz). Cabling
+// reference (run 24386 onward, period ≈ 128.25 ns (32 × 4.0077 ns RF buckets) ≈ 7.80 MHz). Cabling
 // constants live here so analysis doesn't have to remember the layout.
 static constexpr uint32_t RF_ROC_TAG = 0x40;
 static constexpr uint8_t  RF_SLOT    = 16;
@@ -92,7 +92,7 @@ struct TdcEventData
 // Compact, analysis-friendly view of the RF reference: just the leading-edge
 // tick lists for the two PRad-II RF channels (RF_CH_A=0 and RF_CH_B=8 of
 // slot RF_SLOT in ROC RF_ROC_TAG).  Each channel carries roughly 5–6 hits
-// per trigger window (period ≈ 131.3 ns); MAX_HITS_PER_CH=16 covers the
+// per trigger window (period ≈ 128.25 ns (32 × 4.0077 ns RF buckets)); MAX_HITS_PER_CH=16 covers the
 // observed range with margin. Units are ns (TDC_LSB_NS already applied).
 struct RfTimeData
 {
