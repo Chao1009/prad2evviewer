@@ -39,7 +39,7 @@ Results:
 
 | Item | Behaviour |
 |---|---|
-| Template file | `output/pulse_templates_h50.dat`: per-module median (and MAD) of two-τ fits, τ_r and τ_f, for runs 25308 and 25320. Physics trigger `SSP_RawSum` (type 41), height ≥ 50 ADC, χ² ≤ 3, `min_pulses` 50, t0 ≥ 22 ns for 25320. 1151 rows. Column 25320, else 25308; validity τ_r 1–6, τ_f 15–35 ns; W1019, W1020, W1124 and any W module without a valid row take the PbWO4 aggregate τ_r 2.499, τ_f 24.41 ns. PbGlass and Veto keep WaveAnalyzer peaks. |
+| Template file | `output/pulse_templates_h50.dat`: per-module median (and MAD) of two-τ fits, τ_r and τ_f, for runs 25308 and 25320. Physics trigger `SSP_RawSum` (type 41), height ≥ 50 ADC, χ² ≤ 3, `min_pulses` 50, t0 ≥ 22 ns for 25320. 1151 rows. The h50 templates (`fit_pulse_template.py`) also required ≤ 20 fired modules per event (channels with height ≥ 50), which removed 19 / 17 / 25 events in 25320 / 25308 / X17 combined. Column 25320, else 25308; validity τ_r 1–6, τ_f 15–35 ns; W1019, W1020, W1124 and any W module without a valid row take the PbWO4 aggregate τ_r 2.499, τ_f 24.41 ns. PbGlass and Veto keep WaveAnalyzer peaks. |
 | Model | p(t) = (1 − e^{−t/τ_r}) e^{−t/τ_f} / T_max for t > 0, unit peak. |
 | Search | Own pedestal (clipped mean of samples 0–29). Kernel bank per module at onset phases 0–3 ns (1 ns grid), 24 samples. Candidate channel if the 3-sample moving-average maximum exceeds max(3σ, 3 ADC). |
 | Accept and subtract | Iterative. Accept if A ≥ max(5σ_A, 5 ADC) (`--mf-nsigma`, `--mf-min-amp`). A secondary under an accepted pulse's kernel span also needs A ≥ r_model·A_parent (`--mf-r-model`, 0.3). Up to `--mf-kmax` 4 pulses. Onsets closer than `MIN_SEP_NS` = 12 ns are one pulse. |

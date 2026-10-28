@@ -1,7 +1,7 @@
-# PbWO4 energy resolution from waveforms: summary of the 2026-10-21 to 10-24 work
+# PbWO4 energy resolution from waveforms: summary of the 2026-10-21 to 10-25 work
 
-**Author:** Jingyi Zhou (jyzhou), documented 2026-10-24; §3–§6 updated from `plans/plan_20261025.md` (progress log to 10-25 01:42).
-**Branch:** `waveform_jz` (HEAD `80e19b6`; everything after it is uncommitted, §5.2)
+**Author:** Jingyi Zhou (jyzhou), documented 2026-10-24; §3–§6 updated from `plans/plan_20261025.md` (progress log to 10-25 23:50, including the module-timing work of §3.9). Reference updated to R4 on 2026-10-28 (best-50 banks for H2/C, best-200 Ta bank; see §4), previously R3 on 2026-10-26 (§3.6, §4, §5.1). CFD-fraction scan added 2026-10-27 (§3.3, §3.10, §5.1).
+**Branch:** `waveform_jz` (HEAD `3566071`, 10-25 14:14; later work is uncommitted, §5.2)
 **Plans:** `plans/plan_benchmark_hycal_timing_test_20261021.md`, `plans/plan_20261021.md`, `plans/plan_20261022.md`, `plans/plan_20261023.md`, `plans/plan_20261024.md`, `plans/plan_20261025.md`
 **Previous notes:** `notes/PbWO4_energy_resolution_20261021.md`, `notes/PbWO4_energy_resolution_20261022.md`, `notes/PbWO4_energy_resolution_20261023.md`, `notes/PbWO4_energy_resolution_20261025.md`
 
@@ -31,6 +31,26 @@ Run 24578 is excluded (non-standard trigger; `_EXCLUDED_RUNS` in the driver). Sp
 - **Legacy path**: one hit per module, the largest-integral pulse inside the pre-window, no time cut.
 - **Gated path**: every pre-window pulse is a hit; a neighbour joins the cluster only within |t_hit − t_seed| ≤ W (`--window`).
 
+### 1.4 Best energy resolution per run type (2026-10-27)
+
+Numbers: 118-split scan, mean ± SE over splits, R4 reference chain (R3 with the best-50 banks and gains; Ta with the n200 bank, §4). R3 and R4 are equal on e-p (paired Δ R4 − R3, preferred fit, legacy: +0.002 ± 0.005 pp at 3.49 GeV H2, +0.001 ± 0.002 at 2.24 GeV H2, −0.004 ± 0.011 at 0.73 GeV, −0.008 ± 0.007 on C), so a row shows the R4 value where it is the lower one and the R3 value otherwise (see the note under the table). Sources: R3 `output/resolution_fit_20261026/out_r3.txt` (pooled rows), per-run Ta R3 and R4 from `output/resolution_fit_20261028_ta/compare/n200_vs_r3_splits.tsv` (columns R3, Fix_n200); R4 H2 and C from `output/resolution_fit_20261027_best50/compare/r4_vs_r3.{md,tsv}` and `r4_vs_r3_splits.tsv`, R4 CB cores from `output/resolution_fit_20261027_best50/out_r4.txt`. For the e-p runs the gated and legacy paths agree to ≤ 0.004 pp; the 16 ns gate matters only for Ta (≈ 5 % better). Ta runs are reported per run, never pooled (rule of 2026-10-27).
+
+| Run type | splits | best σ_E/E (%) | fit / path | CB core width (%) | Methods applied |
+|---|---|---|---|---|---|
+| 3.49 GeV H2 | 27 | **1.491 ± 0.007** | CB, gated (= legacy 1.492) | 1.491 | common chain + hybrid bowl position correction |
+| 2.24 GeV H2 | 42 | **1.853 ± 0.004** | Gauss ±2σ, gated (= legacy 1.854) | 1.804 ± 0.005 | common chain + hybrid bowl |
+| 2.24 GeV C | 8 | **1.786 ± 0.016** | CB, gated (legacy 1.789; R3 1.797 ± 0.012, Δ R4 − R3 −0.011 ± 0.008) | 1.786 | common chain + hybrid bowl, best-50 bank (R4) |
+| 0.73 GeV H2 | 16 | **3.711 ± 0.009** | Gauss ±2σ, gated (legacy 3.714; R3 3.714 ± 0.011, Δ R4 − R3 −0.003 ± 0.010) | 2.973 ± 0.024 (R3) | common chain + bilinear position correction, best-50 bank (R4) |
+| 2.24 GeV Ta, run 25800 | 8 | **1.909 ± 0.041** | CB, gated (legacy 1.983; R3 1.938 ± 0.030, Δ R4 − R3 −0.030 ± 0.021) | — | common chain + bilinear; 16 ns gate essential; Ta n200 bank (R4) |
+| 2.24 GeV Ta, run 26138 | 4 | **1.890 ± 0.116** | CB, gated (legacy 1.949; R3 1.920 ± 0.111, Δ R4 − R3 −0.029 ± 0.028) | — | same |
+| 2.24 GeV Ta, run 26230 | 13 | **1.828 ± 0.056** | CB, gated (legacy 1.983) | — | same |
+
+Note on the rows: the bold figure is the gated value. 3.49 GeV H2 (R3 1.491 ± 0.007; R4 1.493 ± 0.008, Δ +0.003 ± 0.004), 2.24 GeV H2 (R3 1.853 ± 0.004; R4 1.854 ± 0.004, Δ +0.001 ± 0.002) and Ta 26230 (R3 1.828 ± 0.056, legacy 1.983; R4 1.889 ± 0.043, legacy 1.981, gated Δ +0.061 ± 0.038, legacy Δ −0.002 ± 0.031) keep the R3 value because it is the lower one; every R3 − R4 difference is within 1.6 SE, so treat R3 and R4 as equal and the choice of the lower value as no result. CB cores of the preferred-Gaussian rows are the R3 values (R4: 1.805 ± 0.005 at 2.24 GeV H2, 2.975 ± 0.020 at 0.73 GeV, 1.493 ± 0.008 at 3.49 GeV).
+
+Common chain (R4; R3 differs only in the template banks and gains, the production banks `output/templates_spline/` with `percrystal_spl`): FADC waveform → pedestal → matched-filter pulse fit with the best-50 spline template bank (per module, per run type; Ta: the n200 rebuild) → MF-amplitude energy with per-crystal spline gains refitted for that bank (`percrystal_best50`; Ta `percrystal_ta_fix`; elastic peak vs E_beam) → island clustering with seed-anchored coincidence (|t_hit − t_seed| ≤ 16 ns, pre-window 100–200 ns) → position correction (hybrid bowl at 3.49/2.24 H2 and C, bilinear at 0.73 and Ta) → 2-ring edge exclusion → elastic window → fit (CB for 3.49 H2, 2.24 C, Ta; iterative ±2σ Gaussian for 2.24 and 0.73 H2) → mean ± SE over splits. "CB core width" gives the Crystal Ball σ where the Gaussian is the preferred fit; the two estimators are not interchangeable (CB excludes the radiative tail). Methods tried and not adopted: see `notes/PbWO4_methods_summary_20261027.md` §7.
+
+- Standing rule (2026-10-27): the X17/Ta runs 25800, 26138, 26230 are reported per run, never pooled; any pooled Ta value is labelled 'pooled, superseded'. Reason: the Ta runs differ in background occupancy (12 / 12 / 18 % of fired channels with an extra pulse; `output/pileup_rates_20261027/`), and runs 26138 and 26230 show split-to-split σ_E/E scatter 5–8× that of the e-p runs (SD 0.22 / 0.20 vs 0.03–0.04).
+
 ## 2. Road map and script structure
 
 `EVIO → pulse (rawsum | mf) → LMS → time offsets (optional) → clustering (legacy + gated) → per-crystal gains (optional) → seed-indexed refinement → σ/E per split → driver / harness`
@@ -48,10 +68,10 @@ Run 24578 is excluded (non-standard trigger; `_EXCLUDED_RUNS` in the driver). Sp
 | Clustering | benchmark | Constant overrides on both clusterers (item 4) | `--cluster-min-module-energy MEV`, `--cluster-corner-conn {0,1}`, `--cluster-non-linear-corr {0,1}` (default: config value) | `# cluster_cfg` header line when given | P4 variants; modified |
 | Calibration | benchmark | Seed-indexed elastic-window gains to E'(θ) | `--cal-method elastic-window --exclude-rowcol --inner-radius 200 --min-per-module 30` | `_window.tsv` | in use |
 | Calibration | `percrystal_calib.py`; benchmark | Pooled per-crystal gains | `fit --dumps --splits --fixed-windows --out`; `--cluster-dump auto`, `--gain-file` | `output/percrystal_rect/<run>/` | in use; modified |
-| Calibration | benchmark | Position correction E → E/R(u, v), after `--gain-file`, before the window fit, both paths | `--pos-corr FILE` (default off) | `# pos_corr` header line | in use (R2); modified |
-| Calibration | `position_corr.py` | Position map R(u, v) per run type; bilinear and poly8 fits; global-vs-type test | `map --scan-dir --splits --path --gauss-window`; `fit --map --form {bilinear,poly8,both}`; `fit --global --maps` | `output/poscorr_20261025/` | in use (R2); untracked |
+| Calibration | benchmark | Position correction E → E/R(u, v), after `--gain-file`, before the window fit, both paths | `--pos-corr FILE` (default off) | `# pos_corr` header line | in use (R3); modified |
+| Calibration | `position_corr.py` | Position map R(u, v) per run type; bilinear and poly8 fits; global-vs-type test | `map --scan-dir --splits --path --gauss-window`; `fit --map --form {bilinear,poly8,both}`; `fit --global --maps`; `fit --per-module` | `output/poscorr_20261025/` | in use (R3); tracked, modified (uncommitted) |
 | Calibration | benchmark | Software Møller veto; Møller-gap re-admission | `--veto-second-cluster EMIN_MEV`, `--veto-dphi DEG` (needs EMIN), `--moller-gap-nsigma X` (default 3; 0 re-admits) | veto count in the result header | add-on study; modified |
-| Fit | benchmark; `compare_scan_dirs.py`, `plot_module_resolution.py`, `position_corr.py map` | Reported Gaussian: iterative ±2σ or the old fixed ±150 MeV × kS window (§3.7) | `--gauss-window {2sigma,fixed150}` (`compare_scan_dirs.py` also `stored`) | `# gauss_fit` header line | default 2sigma since 10-24 19:50; modified (`position_corr.py` untracked) |
+| Fit | benchmark; `compare_scan_dirs.py`, `plot_module_resolution.py`, `position_corr.py map` | Reported Gaussian: iterative ±2σ or the old fixed ±150 MeV × kS window (§3.7) | `--gauss-window {2sigma,fixed150}` (`compare_scan_dirs.py` also `stored`) | `# gauss_fit` header line | default 2sigma since 10-24 19:50; modified (`position_corr.py` tracked, uncommitted) |
 | Driver | `benchmark_hycal_timing_scan.py` | All runs and splits | `--pulse-method --window --pre-window --gain-file-map auto --gain-dir --mf-templates-map --write-cluster-tsv --output-dir` | `output/scan_<tag>/` | in use; modified |
 | Harness | `gate_scan_20261021.py`, `gate_scan_20261022.py` | Gate scans (frozen); rawsum/mf and variant scans | `run --stage --half --configs-file --tags --bench-args`, `select`, `restable` | `output/gate_scan_2026102{1,2}/`, `output/scan_2026102{3,4}/` | 5359d63, unchanged |
 | Diagnostics | `plot_module_resolution.py` | Per-module σ_M/μ_M maps | `--scan-dir --group-runs` | `output/module_resolution_20261024/` | untracked |
@@ -61,7 +81,7 @@ Run 24578 is excluded (non-standard trigger; `_EXCLUDED_RUNS` in the driver). Sp
 | Diagnostics | `regauss_tables.py` | fixed150 vs ±2σ Gaussian per run type from a scan's stored histograms | `--scan-dir --out` | `output/regauss_20261025/` | untracked |
 | Diagnostics | `mf_ampshape_diag.py` | Option (ii) offline refit: shape interpolated in ln A between band templates | `--dumps --templates --out` | `output/templates_spline_20261025/ampshape_diag/` | untracked |
 
-The driver hard-codes `--calibrate --exclude-rowcol 15 20 15 20 --inner-radius 200 --min-per-module 30` and LMS `auto` where a gain_corr file exists. Flags are from argparse (inventory 2026-10-24).
+The driver hard-codes `--calibrate --exclude-rowcol 15 20 15 20 --inner-radius 200 --min-per-module 30` and LMS `auto` where a gain_corr file exists. Flags are from argparse (inventory 2026-10-24). The git column is the 10-24 state; the current state is in §5.2.
 
 ## 3. Findings
 
@@ -89,6 +109,8 @@ Gaussian values in rows sourced from the 20261021–20261024 notes and plans, an
 | **Amplitude-indexed shapes (option ii) flatten the 2.24 and 3.49 GeV study waveforms**, offline only | `mf_ampshape_diag.py` on stored study waveforms, (a) module template + f(A) → (b) shape interpolated in ln A between band templates: spread 0.58 → 0.23 % (25320), 0.58 → 0.16 % (24503), 0.19 → 0.23 % (24590); not flat by 2 SE (worst pull 6.6–8.8); χ²/dof lower in every bin (24503, 2000–4000 ADC: 1.26 → 0.68); t_b − t_a < 0.07 ns. The filter implementation needs a separate go | `plans/plan_20261025.md` log 10-24 16:05; 20261025 §3.4 |
 | **Per-module f(A) in production makes σ/E worse; rejected** (`scan_20261025_fa`: pm banks, refitted gains `percrystal_fa`; vs reference, legacy, paired) | +0.043 ± 0.004 (3.49, CB), +0.029 ± 0.002 (2.24 H2; +0.031 ± 0.001 fixed150), +0.044 ± 0.003 (C, CB); 0.73 −0.003 ± 0.007; Ta −0.003 ± 0.009; per-module medians 1.61 → 1.63 % (3.49), 1.83 → 1.90 % (C). The current f(A) stays. Reading (untested): per-module band ratios from ≤ 200 pulses imprint template noise, and Q_raw is not an unbiased truth | `plans/plan_20261025.md` log 10-24 18:53, 20:20; `output/scan_20261025_fa/compare/fa_vs_ref_2sigma.md` |
 | **W335 at 0.73 GeV has a broken module template, in the reference bank too** | χ²/ndf 3375 (≤ 119 for every other 0.73 GeV module); I_int 4.52 vs 7.0–7.3 in the other run types and the two-τ value; lohi_iint_ratio 0.65; present in `output/templates_spline/0p73GeV_H2/`, so R1 and R2 carry it; one module of 1103; not rebuilt | `plans/plan_20261025.md` log 10-24 17:10, 20:20 |
+| **Best-50 banks (10-26, adopted as R4 on 10-28)**: per module the 50 highest-energy pulses (E < 1.2 E_beam, exactly one MF pulse, ≤ 20 channels, bit 24 vetoed) of a run type; direct fit with 1.2 % shape σ, λ ∈ {1e2, 1e3, 1e4} by held-out χ², λ × 10 escalation against wiggles | No spurious extrema at 0.2 % prominence (production 5–11 % of modules); held-out χ²/dof (full σ) 4.3–6.0 vs 5.7–6.2; w99 +0.01 to +0.11 ns; G1-6 PASS (production FAIL); G1-8 FAIL at 3.49 GeV (1065, 42 run-type-average modules); outer loop converged; σ/E vs R3 on 4 splits per type −0.033 ± 0.032 to +0.011 ± 0.010 pp (legacy), peak positions within 0.01 %. MF energy has a ±0.4 % sub-sample-phase bias (production bank). Full scan, 118 splits (R4 − R3, preferred fit, legacy): +0.002 ± 0.005 (3.49 H2), +0.001 ± 0.002 (2.24 H2), −0.004 ± 0.011 (0.73 H2), −0.008 ± 0.007 (C). Ta with the 50-pulse bank was worse per run, +0.029 ± 0.015 / +0.055 ± 0.035 / +0.026 ± 0.036 pp (25800 / 26138 / 26230; 1.9 / 1.6 / 0.7 SE), not a module, region, gain or selection effect, so ascribed (inference) to the 50-pulse pools of the 8 central modules; the Ta bank rebuilt from the same pulses with `--n-max 200` gives −0.003 ± 0.009 / −0.001 ± 0.006 / −0.002 ± 0.031 vs R3 (gated −0.030 ± 0.021 / −0.029 ± 0.028 / +0.061 ± 0.038; vs the 50-pulse bank, legacy −0.032 ± 0.022 / −0.056 ± 0.039 / −0.027 ± 0.027) and is the Ta bank of R4 (§4). H2 and C keep n 50 | 20261025 §4.10; 20261027 §2; 20261028 §3; `output/templates_spline_best50_20261026/`, `output/templates_spline_ta_fix_20261028/n200/` |
+| **The template shape depends weakly on pulse amplitude** (2.24 GeV H2 select pools, 193 modules, bins 300–600 / 600–1200 / 1200–2500 ADC, median A 487 / 721 / 1558; 1200–2500 minus 300–600) | FWHM −0.17 ± 0.02 ns (0.7 %); rise +0.02 ± 0.02 and w99 −0.01 ± 0.05 ns flat; the f(A) table is flat in these bins (+0.03 %; shape-implied integral −0.35 ± 0.06 %). Amplitude explains ≲ 10 % of the per-module Ta − H2 scatter (FWHM ρ +0.37; predicted σ 0.04 vs observed 0.19 ns), none of the rise / w99 scatter, and not the 0.73 GeV bank FWHM offset (predicted sign wrong; rise predicted −0.02, energy-top slope −0.05, of −0.07 observed, so the conclusion rests on the FWHM sign). < 300 ADC untested | 20261028 §2; `template_amp_binned.py`; `output/templates_spline_best50_20261026/amp_binned/` |
 
 ### 3.2 LMS gain tracking
 
@@ -112,14 +134,9 @@ Gaussian values in rows sourced from the 20261021–20261024 notes and plans, an
 | **Tight gates hurt** | mean of 5 run types, half A: traw_w4 +0.45, tcal_w2 +0.14, tcal_w4 +0.03 pp; traw_w8 fails ε_peak (0.987–0.989) | `plans/plan_20261021.md` §8 |
 | **The gate gains only on Ta** | rawsum working point Δgate −0.087 ± 0.046 (half B); mf working point −0.099 ± 0.024 | `plans/plan_20261021.md` §8; 20261022 §7 |
 | **mf time offsets fail** | σ_MAD with mf offsets 0.780 / 0.810 ns vs rawsum + database offsets 0.672 / 0.709 ns (24503 / 25257) | 20261022 §6 |
-| **Pile-up rates explain why only Ta gains from the gate** | candidates / channels with E_dom > 0.5·E_beam: 0.005–0.013 % (3.49), 0.077–0.097 % (0.73), 0.182–0.241 % (2.24 H2 and C), 1.035–1.250 % (Ta) | 20261023 §7, §9 |
-| **The +12–40 ns secondary excess is not a template tail** | mean clean single-pulse residual over [12, 40) ns ≤ 0.36 % of peak (≈ 0.4 %) | 20261023 §9.3; `output/pileup_20261024/artefact/resid_window_means.tsv` |
-| **Two populations make the excess** (37–50 % of e-p/C candidates, 65–70 % at 0.73 GeV, pre-fix) | (a) burst events with ≥ 10 candidate channels (34–1149 channels, dominant at 186–275 ns, χ²/dof ~10³): 25 % of 2.24 GeV candidates, 9 % at 3.49, none in the two 0.73 splits studied; (b) genuine isolated second bumps at Δt ≈ 23 ns (16–30), E_ratio ≈ 0.18 (0.14–0.28 for A_dom < 1000 ADC), amplitude-proportional, mostly single-channel, in 0.1–0.3 % of pulses (0.29 % at 0.73, 0.17 % at 2.24, 0.09 % at 3.49); origin not identified | `output/pileup_20261024/artefact/burst_events.tsv`, `window_secondaries_isolated.tsv`, `energy_effect.tsv`; 20261023 §9.3 |
-| **Study scope** | 6 H2 splits (24503, 24590, 25320 × 2); C and Ta not studied | `output/pileup_20261024/artefact/` |
-| **An accepted secondary takes 6–8 % from the dominant pulse** | dominant energy below the single-pulse refit by a median 6.3 % (0.73), 7.2 % (2.24), 7.7 % (3.49), isolated sample; bursts −20 % | `output/pileup_20261024/artefact/energy_effect.tsv` |
-| **Fix: burst veto and window rule 40 ns : 0.16** | events with ≥ 10 candidate channels removed from numerator and denominator; a secondary with 0 ≤ dt < 40 ns and E_ratio < 0.16 is not counted (0.17 lost 2–4 efficiency points at ratio 0.2, dt 24–32 ns, r_model 0.10) | `plans/plan_20261024.md` log 10-24; 20261023 §9.3 |
-| **Rates before → after the fix** (50 MeV denominator; upper bound on accidental pile-up, since bumps with E_ratio ≥ 0.16 still count) | 3.49 H2 0.231–0.361 → 0.149–0.234 %; 2.24 H2 0.511–0.588 → 0.397–0.407 %; 0.73 H2 0.415–0.598 → 0.260–0.293 %; C 0.515 → 0.364 %; Ta 10.56–11.24 → 10.32–11.04 %; hot channels change the fixed rates by ≤ 0.011 pp | `output/pileup_20261024/pileup_rate_summary.tsv` → `output/pileup_20261024_fix/pileup_rate_summary.tsv` (rate_fixed) |
-| **The window rule leaves the efficiency unchanged** | eff_match changes by 0 points in all 30 cells with ratio ≥ 0.2, dt ≥ 24 ns, every run type, r_model 0.3 and 0.10 | `output/pileup_eff_20261024_fix/<slug>/eff_<slug>.md`; 20261023 §9.4 |
+| **Pile-up** | rates, artefacts and detection efficiency in §3.8 | — |
+| **Module timing** | references, widths, bunch structure in §3.9 | — |
+| **CFD fraction** | fraction scan and the log-normal refinement in §3.10 | — |
 
 ### 3.4 Clustering
 
@@ -185,7 +202,7 @@ Three inconsistencies in `docs/technical_notes/hycal_clustering/hycal_clustering
 
 ### 3.6 Resolution decomposition
 
-Source: `output/resolution_fit_20261024/` (`phase0.py` copied there with only its scan dict changed: spl = `scan_20261024_spline`, pc = `scan_20261024_pc`; `out.txt`); old rows `output/resolution_fit_20261023/` (20261023 §2; `plans/plan_20261023.md` §2.1). E = 0.727, 2.236, 3.484 GeV; C and Ta not fitted. Errors SEM only; χ² for 1 dof. The spline and h50 rows use the fixed150 Gaussian at 0.73 and 2.24 GeV. The R1 and R2 rows (2026-10-25) come from `output/resolution_fit_20261025/out.txt` (`phase0.py --also-fixed150`; scans spl 119, R1 119, R2 118 splits; Gaussian refit from the stored histograms, CB stored; `plans/plan_20261025.md` log 10-24 20:14, 21:41).
+Source: `output/resolution_fit_20261024/` (`phase0.py` copied there with only its scan dict changed: spl = `scan_20261024_spline`, pc = `scan_20261024_pc`; `out.txt`); old rows `output/resolution_fit_20261023/` (20261023 §2; `plans/plan_20261023.md` §2.1). E = 0.727, 2.236, 3.484 GeV; C and Ta not fitted. Errors SEM only; χ² for 1 dof. The spline and h50 rows use the fixed150 Gaussian at 0.73 and 2.24 GeV. The R1 and R2 rows (2026-10-25) come from `output/resolution_fit_20261025/out.txt` (`phase0.py --also-fixed150`; scans spl 119, R1 119, R2 118 splits; Gaussian refit from the stored histograms, CB stored; `plans/plan_20261025.md` log 10-24 20:14, 21:41). The R3 rows (2026-10-26) come from a copy of the same `phase0.py` with an added scan key r3, a directory of per-run symlinks to the existing splits (`pos_hybrid` for 3.49 GeV H2, 2.24 GeV H2 and C; `pos_all` for 0.73 GeV and Ta), run as `phase0.py --scans spl,r2,r3 --also-fixed150`. The copy reproduces the R2 rows exactly; both are kept as `output/resolution_fit_20261026/phase0.py` and `output/resolution_fit_20261026/out_r3.txt`. The R4 rows (2026-10-28) come from `output/resolution_fit_20261027_best50/out_r4.txt` (`phase0.py --scans spl,r2,r3,r4 --also-fixed150`, scan key r4 = `r4_splits`). H2 only (E = 0.727, 2.236, 3.484 GeV): the Ta per-run points are excluded from the fit, so the Ta n200 bank does not enter and `out_r4.txt` is unchanged by the Ta fix.
 
 | Scan / path / estimator | σ/E 0.73 / 2.24 / 3.49 (%) | 2-term a, b (χ²) | 3-term a, b, c |
 |---|---|---|---|
@@ -200,6 +217,12 @@ Source: `output/resolution_fit_20261024/` (`phase0.py` copied there with only it
 | R2 (R1 + position correction), legacy, preferred (±2σ) | 3.718 / 1.898 / 1.610 | 3.12, −0.78 (616) | 1.77, 1.16, 2.08 |
 | R2, legacy, CB for all | 2.974 / 1.858 / 1.610 | 2.37, 0.98 (3.6) | 2.25, 1.05, 0.64 |
 | R2, legacy, preferred (fixed150) | 4.338 / 1.942 / 1.610 | 2.91, 0.11 ± 0.29 (414) | 1.17, 1.24, 2.85 |
+| R3 (hybrid map at 2.24 and 3.49 GeV), legacy, preferred (±2σ) | 3.718 / 1.854 / 1.492 | 3.18, −0.98 (374) | 2.26, 0.69, 1.82 |
+| R3, legacy, CB for all | 2.974 / 1.806 / 1.492 | 2.49, 0.68 (3.4) | c² < 0; a 2.60, b 0.57 |
+| R3, legacy, preferred (fixed150) | 4.338 / 1.893 / 1.492 | 3.07, −0.77 (334) | 1.77, 0.85, 2.70 |
+| R4 (R3 with best-50 banks and gains), legacy, preferred (±2σ) | 3.714 / 1.855 / 1.494 | 3.23, −1.05 (346) | 2.27, 0.70, 1.82 |
+| R4, legacy, CB for all | 2.974 / 1.807 / 1.494 | 2.48, 0.70 (3.6) | c² < 0; a 2.60, b 0.57 |
+| R4, legacy, preferred (fixed150) | 4.336 / 1.895 / 1.494 | 3.08, −0.79 (282) | 1.78, 0.85, 2.69 |
 
 | Finding | Key numbers |
 |---|---|
@@ -209,7 +232,7 @@ Source: `output/resolution_fit_20261024/` (`phase0.py` copied there with only it
 | **Spline vs h50 centred**, CB for all, 2-term | b 1.32 → 1.20, a 2.28 → 2.20 |
 | **The constant term is ≈ 71 % of σ² at 3.49 GeV** | spline CB-for-all 3-term, 1.44²/1.709² (from rounded b); preferred 3-term gives 89 % but with a² < 0 |
 
-2026-10-25 refit (R1, R2; gated within 0.01 of legacy):
+2026-10-25/26/28 refit (R1, R2, R3, R4; gated within 0.01 of legacy):
 
 | Finding | Key numbers |
 |---|---|
@@ -217,6 +240,8 @@ Source: `output/resolution_fit_20261024/` (`phase0.py` copied there with only it
 | **CB for all is the consistent estimator** | independent of the Gaussian definition; R1 equals the spline row |
 | **The position correction lowers b to 0.98 %** (CB for all) | R1 → R2 2-term b 1.20 → 0.98 %, a 2.20 → 2.37 %·√GeV, χ² 58 → 3.6; 3-term R2 a 2.25, b 1.05, c 0.64 |
 | **The constant term is ≈ 43 % of σ² at 3.49 GeV in R2** | CB-for-all 3-term, b² 1.11 / 1.610² (`out.txt`); 71 % in R1 |
+| **R3 lowers the 2-term b to 0.68 %** (CB for all; refit 2026-10-26) | R2 → R3 b 0.98 → 0.68 %, a 2.37 → 2.49 %·√GeV, χ² 3.6 → 3.4. The 3-term fit is unphysical (c² = −0.40), so the 43 % share stays R2-based. The 2.24 and 3.49 GeV inputs carry the in-sample hybrid gain (§4) |
+| **R4 leaves the 2-term b at 0.70 %** (CB for all; refit 2026-10-28) | R3 → R4 b 0.68 → 0.70 ± 0.03 %, a 2.49 → 2.48 %·√GeV, χ² 3.4 → 3.6; the 3-term fit is still unphysical (c² = −0.40). H2 only; Ta per-run points are excluded from the fit, so the fit is unchanged by the Ta fix. The inputs carry the in-sample gains and hybrid maps (§4) |
 
 Old scan (`scan_20261022_mf`, old rectangle, no per-crystal):
 
@@ -250,39 +275,200 @@ Post σ/E (%), R1, mean over splits; half-width in MeV (fixed150: nominal 150·k
 | 2.24 GeV C (CB), 8 | 1.953 → 1.905 (−0.048) | 1.952 → 1.904 (−0.048) | 150 / 85 | 2.0; 0 |
 | 2.24 GeV Ta (X17) (CB), 25 | 2.109 → 2.055 (−0.054) | 2.037 → 1.981 (−0.056) | 150 / 92 | 2.0; 0 |
 
+3.49 GeV H2: Gaussian shown for completeness; the preferred estimator is the CB (1.71 %, unaffected by the Gaussian redefinition).
+
 Bold: the preferred fit is the Gaussian. On the CB run types the preferred σ/E does not change (CB 1.709, 1.858, 2.000 legacy). h50 centred (`scan_20261024_pc`): 2.071 → 2.042 % (2.24 GeV H2), 4.440 → 3.771 % (0.73 GeV H2) (log 10-24 19:30).
 
 - The peak position moves +0.5–0.7 MeV at 2.24 and 3.49 GeV and +2.8 MeV at 0.73 GeV (723.1 → 725.9 MeV, legacy post).
 - At 0.73 GeV the refit does not converge in 5 of 16 post spectra per path (8 of 16 pre): it alternates between two bin sets on the tailed peak. The 5-refit cap is kept (no mean-of-last-two estimator); capped spectra are flagged.
 
+### 3.8 Pile-up rates and detection efficiency
+
+The rates come from the Python matched-filter peak finding in `plot_pileup_examples.py` (spline banks on 10/24, h50 on 10/23), not from the C++ deconvolver, which stays two-τ (user decision D6, `plans/plan_20261024.md` §2).
+
+| Item | Definition |
+|---|---|
+| Pile-up | > 1 mf pulse in a module waveform, with a secondary E/E_dom > 0.10 (`--secondary-frac`, also the mf r_model) whose onset is not at the window end; E ratio = amplitude ratio for a fixed template (20261023 §7; `plans/plan_20261024.md` §7.1) |
+| Rate | candidate channels / denominator channels |
+| (a) 10/23 | denominator: unclipped PbWO4 channels with E_dom > 0.5·E_beam (`--dominant-frac 0.5`); h50 templates (`--mf-templates auto`), κ 1.010, no LMS; 1–3 splits per run (4–12k events for Ta); `output/pileup_examples_20261023/pileup_rate_<run>.txt`, `pileup_candidates_<run>.tsv` |
+| (b) 10/24 | denominator E_dom > 50 MeV (`--dominant-min-mev 50`); spline templates per run type, κ 1.0, all splits; `output/pileup_20261024/pileup_rate_summary.tsv` (rate as a fraction), `pileup_rate_window_split.tsv` |
+| Fix | `--burst-veto 10` removes events with ≥ 10 candidate channels from numerator and denominator; `--window-rule 40:0.16` drops a secondary with 0 ≤ dt < 40 ns and E/E_dom < 0.16; rescan `output/pileup_20261024_fix/` (`rate_fixed`, `rate_fixed_nohot`, `n_burst_events`, `pileup_hot_channels.tsv`) |
+
+(a) and (b) are not comparable: the level change is the denominator; the two-τ bank gives 0.53 % on the same events with the 50 MeV denominator (20261023 §9.3).
+
+Rates (%) per run:
+
+| Run | Run type | (a) 10/23, 0.5·E_beam (num/den) | (b) raw, 50 MeV | (b) fixed |
+|---|---|---|---|---|
+| 24386 | 3.49 H2 | 0.0122 (10/81910) | 0.361 | 0.2336 |
+| 24503 | 3.49 H2 | 0.0129 (13/100739) | 0.231 | 0.1866 |
+| 24512 | 3.49 H2 | 0.0053 (10/187583) | 0.290 | 0.1489 |
+| 24590 | 0.73 H2 | 0.0773 (95/122853) | 0.415 | 0.2603 |
+| 24603 | 0.73 H2 | 0.0972 (99/101886) | 0.598 | 0.2926 |
+| 25228 | 2.24 H2 | 0.2201 (202/91793) | 0.511 | 0.4054 |
+| 25257 | 2.24 H2 | 0.2413 (230/95329) | 0.588 | 0.4009 |
+| 25260 | 2.24 H2 | 0.2214 (213/96197) | 0.511 | 0.4067 |
+| 25299 | 2.24 H2 | 0.1815 (173/95329) | 0.516 | 0.3973 |
+| 25308 | 2.24 C | 0.1839 (196/106587) | 0.515 | 0.3645 |
+| 25320 | 2.24 H2 | 0.1822 (172/94411) | 0.540 | 0.4006 |
+| 25800 | 2.24 Ta (X17) | 1.0349 (111/10726) | 10.556 | 10.322 |
+| 26138 | 2.24 Ta (X17) | 1.1384 (57/5007) | 11.238 | 11.044 |
+| 26230 | 2.24 Ta (X17) | 1.2503 (48/3839) | 11.229 | 10.996 |
+
+- Raw is the first 10/24 scan (`output/pileup_20261024/`); the `rate_raw` column in the `_fix` dir differs by ≤ 0.003 pp (different N_den).
+- The burst veto removes 4–36 events per run; hot channels (`rate_fixed_nohot`) change the fixed rates by ≤ 0.011 pp (max 0.0113, 24603).
+- Candidates whose secondaries all lie in [12, 40) ns (raw, `pileup_rate_window_split.tsv`): 37–50 % of e-p/C candidates, 65–70 % at 0.73 GeV, 10–11 % on Ta; without them the rate is 0.126–0.344 % (e-p, C), 9.39–10.11 % (Ta).
+- 25257 and 25299 share the (a) denominator 95329 (unchecked coincidence; 20261023 §10).
+- Link to the gate: after the fix e-p and C sit at 0.1–0.4 % and Ta at 10.3–11.0 %, so a time gate can remove a measurable out-of-time contribution only on Ta (Δgate −0.099 ± 0.024 pp at the mf working point, 20261022 §7; e-p and C −0.003 to +0.004 pp, neutral; §3.3).
+- Accidental module–veto pairs arrive in 4.008 ns beam-bunch steps (§3.9). Without a gate, S/B within ±10 ns of the coincidence peak is 448 / 8.1 / 1.4 at 0.73 / 2.24 / 3.49 GeV (`output/module_timing_20261025/run_nogate.log`).
+
+Pooled secondaries of (a), 1629 candidates, 2344 secondaries (20261023 §7 gives 16/50/84 %; IQR and \|Δt\| recomputed from `output/pileup_examples_20261023/pileup_candidates_<run>.tsv`):
+
+| Quantity | Value |
+|---|---|
+| E_ratio | 16/50/84 % 0.13 / 0.30 / 0.69; IQR 0.157–0.572 |
+| Δt (secondary − dominant) | 16/50/84 % −36.8 / 38.3 / 88.3 ns; \|Δt\| median 52.1 ns, IQR 31.4–83.8 ns |
+| Before the dominant (Δt < 0) | 29 % |
+| Other | 41 % in the 100–200 ns pre-window; 24 % with \|Δt\| < 30 ns; 503 of 1629 candidates at kmax = 4 |
+
+Artefacts and the fix (raw 10/24 scan unless noted):
+
+| Finding | Key numbers | Source |
+|---|---|---|
+| **The +12–40 ns secondary excess is not a template tail** | mean clean single-pulse residual over [12, 40) ns ≤ 0.36 % of peak (≈ 0.4 %) | 20261023 §9.3; `output/pileup_20261024/artefact/resid_window_means.tsv` |
+| **Two populations make the excess** (37–50 % of e-p/C candidates, 65–70 % at 0.73 GeV, pre-fix) | (a) 14 burst events (6 at 2.24, 8 at 3.49 GeV) with ≥ 10 candidate channels (34–1149 channels, dominant at 186–275 ns, χ²/dof ~10³): 25 % of 2.24 GeV candidates (2421/9619), 9 % at 3.49 (388/4184), none in the two 0.73 splits studied (the full rescan has them, §5.3); (b) genuine isolated second bumps at Δt ≈ 23 ns (16–30), E_ratio ≈ 0.18 (0.14–0.28 for A_dom < 1000 ADC), amplitude-proportional, mostly single-channel, in 0.1–0.3 % of pulses (0.29 % at 0.73, 0.17 % at 2.24, 0.09 % at 3.49); origin not identified | `output/pileup_20261024/artefact/burst_events.tsv`, `window_secondaries_isolated.tsv`, `energy_effect.tsv`, `summary.json`; 20261023 §9.3 |
+| **Study scope** | 6 H2 splits (24503, 24590, 25320 × 2); C and Ta not studied | `output/pileup_20261024/artefact/` |
+| **An accepted secondary takes 6–8 % from the dominant pulse** | dominant energy below the single-pulse refit by a median 6.3 % (0.73), 7.2 % (2.24), 7.7 % (3.49), isolated sample; bursts −20.9 % (2.24), −20.2 % (3.49) | `output/pileup_20261024/artefact/energy_effect.tsv` |
+| **Fix: burst veto and window rule 40 ns : 0.16** | events with ≥ 10 candidate channels removed from numerator and denominator; a secondary with 0 ≤ dt < 40 ns and E_ratio < 0.16 is not counted (0.17 lost 2–4 efficiency points at ratio 0.2, dt 24–32 ns, r_model 0.10) | `plans/plan_20261024.md` log 10-24; 20261023 §9.3 |
+| **Rates before → after the fix** (50 MeV denominator; upper bound on accidental pile-up, since bumps with E_ratio ≥ 0.16 still count) | 3.49 H2 0.231–0.361 → 0.149–0.234 %; 2.24 H2 0.511–0.588 → 0.397–0.407 %; 0.73 H2 0.415–0.598 → 0.260–0.293 %; C 0.515 → 0.364 %; Ta 10.56–11.24 → 10.32–11.04 % | `output/pileup_20261024/pileup_rate_summary.tsv` → `output/pileup_20261024_fix/pileup_rate_summary.tsv` (rate_fixed) |
+| **The window rule leaves the efficiency unchanged** | eff_match changes by 0 points in all 30 cells with ratio ≥ 0.2, dt ≥ 24 ns, every run type, r_model 0.3 and 0.10; outside these cells, ratio 0.1 at dt 32 ns, r_model 0.10 loses 2–4 points (C, 2.24 H2, Ta, 3.49) and 2.24 H2 2 points at dt 48 ns; the pre-fix grid `output/pileup_eff_20261024/` equals the fix grid without the rule | `output/pileup_eff_20261024_fix/<slug>/eff_<slug>.md`; 20261023 §9.4 |
+
+Hot channels (raw rate = candidates / denominator pulses of the module; `output/pileup_20261024_fix/pileup_hot_channels.tsv`):
+
+| Module | Raw rate | Note |
+|---|---|---|
+| W335 | 89.6 % (448/500, 24590), 92.0 % (287/312, 24603); 11–15 % at 3.49 GeV | its 0.73 GeV template is broken (§3.1) |
+| W1 | 37–56 % at 2.24 GeV (H2, C); 6–29 % at 3.49 and 0.73 GeV | |
+| W1019, W1020 | 18.5–61 %, 21–64 % (e-p, C) | |
+| W934 | 18.4 % (24590), 16.0 % (24603); ≤ 0.9 % elsewhere | dt 25 ns, ratio 0.28–0.29 (`output/pileup_20261024/artefact/W934_dt_ratio_by_run_amp.tsv`) |
+
+Plots: `output/pileup_20261024/pileup_heatmap_<run>.png` (14 runs), `pileup_heatmaps_all_runs.pdf`, `pileup_examples_all_runs.pdf`, same names in `output/pileup_20261024_fix/`; 10/23 examples `output/pileup_examples_20261023/pileup_examples_<run>.pdf`.
+
+Detection efficiency. `pileup_generator.py` injects a second pulse with the module's sampled spline template (the `.npz` bank the mf uses) into real waveforms of one base run per type (24590.00010, 25308.00050, 25320.00050, 25800 all splits, 24503.00010); no noise model, 50 events per cell, seed 12345. Grid: Δt 8, 12, 16, 20, 24, 32, 48, 64, 96, 128 ns × ratio (injected / base) 0.1, 0.2, 0.3, 0.5, 1, 2 (60 cells). `benchmark_pileup_mf.py` runs the mf (nsigma 5, min_amp 5, kmax 4, MIN_SEP 12 ns) at r_model 0.3 (headline) and 0.10; a pulse matches when its onset is within ±4 ns of the truth. Δt is the injected peak − the base 50 % CFD time (`pileup_generator.py:114-116`); the true onset separation is Δt − 6.2 ns (measured −6.15 to −6.19 ns on the fix synth; docstring says 6.4). Source: `output/pileup_eff_20261024_fix/<slug>/eff_<slug>.md`.
+
+eff_match (% of events with both pulses matched, without the window rule), min–max over the five run types; ≥ 2 WA is n2_wa (% of events with ≥ 2 WaveAnalyzer peaks, Table-4 style, no timing match, independent of r_model):
+
+| Δt (ns) | r 0.3: ratio ≤ 0.3 | 0.5 | 1 | 2 | r 0.10: ratio 0.1 | 0.2 | ≥ 0.3 | ≥ 2 WA, ratio 0.5 / 1 / 2 |
+|---|---|---|---|---|---|---|---|---|
+| ≤ 16 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 / 0 / 0 |
+| 20 | 0 | 0–2 | 22–42 | 96–100 | 0–2 | 14–22 | 96–100 | 0 / 0–2 / 0 |
+| 24 | 0 | 0–6 | 78–90 | 96–100 | 0–2 | 94–98 | 96–100 | 0 / 80–90 / 36–48 |
+| 32 | 0–2 | 96–100 | 96–100 | 96–100 | 2–4 | 96–100 | 96–100 | 0 / 100 / 100 |
+| 48 | 0 | 96–100 | 96–100 | 96–100 | 2–22 | 96–100 | 96–100 | 98–100 / 100 / 100 |
+| 64 | 0 | 96–100 | 98–100 | 98–100 | 10–28 | 96–100 | 96–100 | 100 / 100 / 100 |
+| 96 | 0–2 | 96–100 | 100 | 100 | 8–24 | 96–100 | 96–100 | 100 / 100 / 100 |
+
+- The 96–98 eff_match entries are Ta (n_clean 47 in every cell; eff_match_clean 100) and, at Δt 20, r 0.10, ratio ≥ 0.3, C and 3.49 H2 (98); the n2_wa 98 at Δt 48 is 0.73 GeV.
+- n2_wa is 0 at ratio ≤ 0.3 up to Δt 96 ns. Table 4 (`docs/technical_notes/waveform_analysis/fit_pulse_template.md:508-524`) shows 4–18 % at ratios 0.1 and 0.3 (noise-driven false positives); the new pseudo-data give 0–2 %. Agreement with Table 4: 28/45 cells on the new pseudo-data, 45/45 on the original dataset (20261023 §9.4).
+- At Δt 128 ns, ratios 0.1–0.5 give 94–100 % at both r_model (n2_wa 0–2 % at ratio ≤ 0.3); not a trend. 20261023 §9.4 attributes the r_model 0.3, ratio ≤ 0.3 jump to the acceptance rule acting only inside the 96 ns kernel span.
+
+Fake rate (unmatched mf pulses per event). The grid has no single-pulse cell, so fakes are counted inside the pile-up cells:
+
+| Cell (ratio 1) | r_model 0.3 | r_model 0.10 |
+|---|---|---|
+| Δt 16 ns | 0.64–0.82 | 0.62–0.82 |
+| Δt 20 ns | 0.58–0.74 | ≤ 0.08 |
+| Δt 24 ns | 0.10–0.22 | ≤ 0.06 |
+
+Elsewhere 0, except a Ta floor of ≈ 0.06 per event (about half the cells at r_model 0.3, most at 0.10) and 0.02 at 0.73 GeV, r_model 0.10, in most cells (origin not checked). Pseudo-data fake rates are optimistic: the injected shape is the reconstruction template (20261023 §9.4).
+
+### 3.9 Module timing (2026-10-25)
+
+Per-module time of the dominant matched-filter pulse (`p_time`, a continuous onset fit, not a CFD) against four references, from per-split dumps of 111 splits (`module_timing_dump.py`, `rf_time_dump.py`) and the plotters `plot_module_timing.py`, `plot_module_timing_rf.py`, `plot_module_timing_vs_integral.py`. Outputs are in `output/module_timing_20261025/` (20261025 §9). The veto counters V1–V4 are read out in the H2 runs only.
+
+Median per-module σ in ns, modules with N > 10 000 in parentheses:
+
+| Reference | 0.73 GeV H2 | 2.24 GeV H2 | 3.49 GeV H2 | X17 Ta | Source |
+|---|---|---|---|---|---|
+| Veto, counter-aligned (in time in 25.3 / 1.4 / 0.37 / 0 % of physics events) | 0.63 (93) | 0.62 (39) | none (0) | no veto | `module_timing_veto_summary.txt`, `veto_summary.tsv` |
+| Event median, raw (leave-one-out, E > 10 MeV) | 1.30 (203) | 0.98 (858) | 0.99 (472) | 1.96 (412) | `module_timing_evtref_summary.txt` |
+| Event median, time-calibrated | 0.58 (203) | 0.54 (857) | 0.53 (472) | 0.79 (412) | `module_timing_evtref_tcal_summary.txt` |
+| Seed (highest-energy pulse), raw | | | | 2.64 (374) | `module_timing_veto_summary.txt` |
+| RF, runs aligned per type | 0.500 (205) | 0.461 (871) | 0.583 (473) | 0.588 (465) | `module_timing_rf.tsv` |
+
+| Finding | Key numbers | Source |
+|---|---|---|
+| **Intrinsic resolution 0.18–0.30 ns above 100 MeV** (RF reference) | pooled 0.21 ns at 2.24 GeV H2, 0.25 ns at X17 (diagnostic 10/25); the all-energy medians above include the low-energy tail. On the 93 veto modules at 0.73 GeV, σ_RF 0.462 vs σ_veto 0.630 ns. The 3.49 GeV value is degraded by run 24386 (§5.1) | `module_timing_rf_tcal.pdf`; `run_rf.log`; 20261025 §9.5 |
+| **Accidentals arrive in beam-bunch steps** | the no-gate accidental floor of t_module − t_veto is a comb with period **P = 4.00755 ± 0.00013 ns** (46 teeth, 2.24 GeV): −1.3σ from the RF period 128.247/32 = 4.0077 ns, +59.5σ from the 4.000 ns FADC clock. The ±4, ±8 ns satellites at 3.49 GeV are veto hits from neighbouring bunches inside the ±10 ns gate; no-gate in-time fraction 0.96 / 0.28 / 0.066 (0.73 / 2.24 / 3.49 GeV) | `accidental_comb_period.txt`, `run_nogate.log`; 20261025 §9.3 |
+| **Veto counters need their own offsets** | V1–V4 have no entry in `time_calib.json`; taking the largest-integral counter made a ≈ 2.4 ns double peak (diagnostic 10/25). A fit of per-(module, counter) peaks as a_module + b_counter (residual rms 0.07–0.11 ns) gives V4 − V1 = 2.1–2.4 ns and σ 0.73 → 0.63 ns (0.73 GeV), 1.02 → 0.62 ns (2.24 GeV). Per-counter centroids of v_t − t_event are biased by the raw offsets of the HyCal region each counter covers | `run_veto.log`; `module_timing_veto_valign_type_summary.txt` → `module_timing_veto_summary.txt`; 20261025 §9.2 |
+| **X17: no veto; the RF reference works** | CEBAF RF in TDC ROC 0x40 slot 16 ch 0/8 in 100 % of physics events (5.6 channel-A hits per event); P per split 4.00771 ns in all 13 runs | `rf_summary.tsv`; 20261025 §9.5 |
+| **The FADC–RF phase changes per run** | 25800 vs 26230: 1139 of 1150 modules shift by > 0.5 ns. Split-to-split span ≤ 0.004 ns in 9 of 13 runs. RF time calibration must be per run | `rf_summary.tsv` |
+| **Per-run RF offsets derived; the central block is shifted in 26230 only** | 12 of 13 runs usable, 24386 bimodal (78.2 % of measured modules) and unusable, 24503 flagged drift (span 0.133 ns). Held-out dhalf: median \|dhalf\| 0.0167 ns, 0.9985 within 0.30 ns (13 011 pairs). Median σ above 100 MeV 0.183–0.203 ns by type. The 25800 → 26230 jump is global, +1.990 ns; 80 of 83 boards are within ±0.1 ns of it, the exceptions are (3,15), (3,8), (3,18), the boards holding most of the central block (23 of 33 modules). Of the 33 central and halo modules, 26230 alone has them at D² −2.10 … −0.34 ns (26 central −2.10 … −0.85); 25800 and 26138 agree with the prior except W525, W528, W597, W697 (D² −0.89 … −1.35 ns at 25800 and 26138, −1.10 … −2.00 at 26230). Offsets centre the Python matched-filter time, not the C++ CFD time | `output/rf_calib_20261026/rf_calib_validation.txt`; 20261025 §9.7 |
+| **26 central modules carry stale offsets at X17** | database offsets 1.0–2.0 ns off at X17 (≤ 0.3 ns at 2.24 GeV H2), widths normal; X17 needs per-run-period offsets | `module_timing_rf.tsv` (offset_tcal vs type median) |
+| **Raw offsets from t_module − t_seed (X17)** | 74 of 374 modules > 3 ns from the median mean (0.565 ns). Fitted means: W219–W327 −2.4 to −6.9 ns, W353–W367 −2.7 to −3.8 ns, W560 −7.8, W593 −6.3, W598 −5.2 ns; W464 +6.8, W559 +5.7, W589/W590 +4.5/+4.1, W773–W775 +4.0 to +4.9 ns (raw crate/cable offsets; full list in the source). With the database offsets applied (`module_timing_tcal.pdf`, 10-26) the blocks vanish (modules with \|mean − median\| > 3 ns: 74 → 0; median σ 2.64 → 1.04 ns), so they are the offsets themselves, not a detector effect. | `module_timing_veto_summary.txt` |
+| **No time gate or timing cut helps beyond the working point** | no W helps e-p or C; Ta gains 0.05–0.16 pp, already taken at W = 16; calibrated 2–3 ns windows cost 0.06–0.17 pp on e-p and C. A cut on t_module − t_veto cannot help: the veto exists only in H2 and is in time in 0.4–25 % of events | 20261025 §9.6 |
+
+### 3.10 CFD fraction (2026-10-27)
+
+The CFD fraction is hard-coded at 0.5 (`prad2dec/src/WaveAnalyzer.cpp:523`) and enters only the pulse time (20261026 §7). Above 10 ped_rms the production time is a log-normal fit evaluated at f, with the linear CFD as fallback. `cfd_fraction_scan.py` re-evaluates both at f = 0.2–0.7 with a numpy port of the C++ pickoff (σ_t within 1 % of that of the C++ `peak.time`), on one split per run type, and compares them with the best-50 MF time. σ_t is the per-module Gaussian-core width vs RF.
+
+Median σ_t in ns, E ≥ 100 MeV unless marked, modules in parentheses. "Production" is the linear CFD plus the log-normal refinement; "linear" is the linear CFD alone:
+
+| Method | 0.73 GeV H2 (108) | 2.24 GeV H2 (163) | 3.49 GeV H2 (274) | X17 Ta (133) |
+|---|---|---|---|---|
+| Production, f = 0.5 (current) | 0.207 | 0.208 | 0.207 | 0.226 |
+| Production, f = 0.6 | 0.187 | 0.180 | 0.178 | 0.204 |
+| Linear, f = 0.5 | 0.160 | 0.150 | 0.150 | 0.173 |
+| Linear, f = 0.6 | 0.154 | 0.140 | 0.139 | 0.167 |
+| MF (best-50) | 0.173 | 0.147 | 0.147 | 0.191 |
+| E ≥ 500 MeV: linear 0.6 / MF (55 / 145 / 232 / 86) | 0.112 / 0.116 | 0.098 / 0.098 | 0.100 / 0.106 | 0.102 / 0.106 |
+
+| Finding | Key numbers | Source |
+|---|---|---|
+| **The log-normal refinement worsens the time** | at f = 0.2–0.6 production is worse than linear in every split and band (e100 at f = 0.5: 0.207–0.226 vs 0.150–0.173 ns). The fit often does not converge (t0 on its bound): the port's fit-path times differ from C++ by 0.145 ns RMS, and the C++ differs from itself by 0.108 ns RMS between builds with and without FP contraction | `validation.txt`; 20261027 §5.2, §5.4 |
+| **f = 0.6 is best without a phase correction** | minimum for both variants in all eight split-band cells; production 0.6 vs 0.5 −10 to −14 % (e100), −12 to −19 % (e500); linear 0.6 beats MF by 6–12 % at e100 (per-module ratio 0.88–0.94) and ties it at e500 (0.95–0.98); production never beats MF | `sigma_t_medians.md` |
+| **σ_t(f) is not smooth (sub-sample-phase DNL)** | linear poor at 0.3 and 0.7; a one-split in-sample phase correction (25320) makes linear σ_t monotone, 0.117–0.144 ns for f = 0.2–0.7, so 0.6 is optimal only without a correction | `report.md` |
+
+**Decision pending.** No C++ change was made; changing the fraction or dropping the log-normal refinement awaits the user's decision. Study items: phase correction, finer scan at f = 0.55–0.65, walk check. Caveat: one split per run type; e500 at 0.73 GeV has 55 modules. Details in 20261027 §5; files in `output/cfd_scan_20261027/`.
+
 ## 4. Current best numbers
 
-Reference: **R2 = `output/scan_20261025/pos_all`**, R1 plus the position correction (`--pos-corr output/poscorr_20261025/{runtype}/poscorr_{runtype}_all.json`, bilinear, per run type; Ta with the 2.24 GeV H2 map; harness stages R + RX, 118 splits, no 24386.00060). R1 = `output/scan_20261025_ref`, the driver rerun of `output/scan_20261024_spline` (spline banks, κ = 1.0, centred rectangle, pooled gains `output/percrystal_spl/<run>/gains_<run>_all.tsv`) with the centroid columns; identical to it except `elapsed_s` and the two appended cluster-TSV columns. h50 baseline: `output/scan_20261024_pc` with `output/percrystal_rect/<run>/gains_<run>_all.tsv`. Rows: `output/scan_20261021_full` (rawsum), `output/scan_20261022_mf` (mf), `output/scan_20261023_pc` (mf + per-crystal, old rectangle), `output/scan_20261024_pc` (centred), `output/scan_20261024_spline` = R1 (spline), `output/scan_20261025/pos_all` (R2). σ/E in %, preferred fit, mean over splits. Δ is the step from the row above, legacy / gated, in pp: paired ± SE for the per-crystal, spline and R2 rows (R2 on the splits it shares with R1: 27 at 3.49 GeV), a difference of scan means for the mf row and the definition-change row.
+Throughout this note, *Gated* means the working point selected by the 10/21 gate scan (plans/plan_20261021.md §8): raw CFD times, seed time window W = 16 ns, pre-window 100–200 ns. All matched-filter scans from `scan_20261022_mf` onward, including the references R3 (`output/scan_20261025/pos_hybrid` and `pos_all`) and R4, were run at this point; *Legacy* is the same pipeline with no time cut. The working point was selected on the raw-sum pipeline and confirmed on the h50-template pipeline; it has not been re-selected on the spline/R3 pipeline (irrelevant for e-p, where the gate is flat; the Ta gain was measured with the 26138-only X17 template bank).
 
-**Gaussian definition (§3.7).** In the 2.24 and 0.73 GeV H2 tables (preferred fit Gaussian), the rows above "R1, ±2σ Gaussian" are fixed150; that row is the same scan refit with the ±2σ window, and the R2 row uses ±2σ. CB tables are unaffected.
+Reference (adopted 2026-10-28): **R4** = R3 with the best-50 template banks and gains. At 3.49, 2.24 and 0.73 GeV H2 and 2.24 GeV C: banks `output/templates_spline_best50_20261026/<runtype>/`, gains `output/percrystal_best50_20261026/<run>/gains_<run>_all.tsv`, splits `output/resolution_fit_20261027_best50/r4_splits` (each R3 `job.cmd` with only the output stem, `--mf-templates` and `--gain-file` changed). Ta X17 (25800, 26138, 26230): the best-50 Ta bank rebuilt from the same best-50 Ta pulses and options with `--n-max 200` (`output/templates_spline_ta_fix_20261028/n200/templates_2p24GeV_Ta_X17.npz`), gains `output/percrystal_ta_fix_20261028/n200/<run>/gains_<run>_all.tsv`, splits `output/resolution_fit_20261028_ta/n200/splits`. Everything else is R3's (position maps per run type, gate, rectangle, ±2σ Gaussian, 118 splits). Decision rule (user, 10-28): promote best-50 H2 and C plus the fixed Ta bank if the fixed Ta bank is within 1 SE of R3 on all three Ta runs; met (Ta table below, §3.1). R4 and R3 are equal on e-p (legacy Δ ≤ 0.008 pp, within 1.2 SE in every run type). Previous reference (adopted 2026-10-26, demoted 2026-10-28): **R3**, the position correction chosen per run type; 118 splits (no 24386.00060), no rescan. At 3.49 GeV H2, 2.24 GeV H2 and C, R3 uses the hybrid per-module map (`poscorr_hybrid_v1`, `--pos-corr output/poscorr_20261025/hybrid/{runtype}/poscorr_hybrid_{runtype}_all.json`; splits in `output/scan_20261025/pos_hybrid`). At 0.73 GeV H2 and Ta it keeps the bilinear map (`poscorr_v1`) and is identical to R2 (splits in `output/scan_20261025/pos_all`). All other settings are R2's: spline banks, `percrystal_spl` gains, centred rectangle, W = 16 ns raw, pre-window 100–200 ns, ±2σ Gaussian. The split is per run type because at 0.73 GeV the hybrid worsens σ/E (+0.191 ± 0.040 pp Gaussian, +0.127 ± 0.014 pp CB) and Ta has 0 of 40 own fits. Before R3: **R2 = `output/scan_20261025/pos_all`**, R1 plus the bilinear position correction (`--pos-corr output/poscorr_20261025/{runtype}/poscorr_{runtype}_all.json`, per run type; Ta with the 2.24 GeV H2 map; harness stages R + RX). R1 = `output/scan_20261025_ref`, the driver rerun of `output/scan_20261024_spline` (spline banks, κ = 1.0, centred rectangle, pooled gains `output/percrystal_spl/<run>/gains_<run>_all.tsv`) with the centroid columns; identical to it except `elapsed_s` and the two appended cluster-TSV columns. h50 baseline: `output/scan_20261024_pc` with `output/percrystal_rect/<run>/gains_<run>_all.tsv`. Rows: `output/scan_20261021_full` (rawsum), `output/scan_20261022_mf` (mf), `output/scan_20261023_pc` (mf + per-crystal, old rectangle), `output/scan_20261024_pc` (centred), `output/scan_20261024_spline` = R1 (spline), `output/scan_20261025/pos_all` (R2), `pos_hybrid` + `pos_all` (R3). σ/E in %, preferred fit, mean over splits. Δ is the step from the row above, legacy / gated, in pp: paired ± SE for the per-crystal, spline, R2, R3 and R4 rows (R2 on the splits it shares with R1: 27 at 3.49 GeV; R3 vs R2 and R4 vs R3 on all 118 splits; the Ta R4 row per run), a difference of scan means for the mf row and the definition-change row.
 
-**3.49 GeV H2 (CB, 28 splits; rawsum and R2 27)**
+**Gaussian definition (§3.7).** In the 2.24 and 0.73 GeV H2 tables (preferred fit Gaussian), the rows above "R1, ±2σ Gaussian" are fixed150; that row is the same scan refit with the ±2σ window, and the R2, R3 and R4 rows use ±2σ. CB tables are unaffected.
+
+**3.49 GeV H2 (CB, 28 splits; rawsum, R2 and R3 27)**
 
 | Configuration | Legacy | Gated | Δ legacy / gated |
 |---|---|---|---|
-| rawsum | 1.936 | 1.971 | |
+| rawsum | 1.936 | 1.971† | |
 | mf | 1.873 | 1.873 | −0.063 / −0.098 |
 | mf + per-crystal, old rectangle | 1.826 | 1.825 | −0.048 ± 0.004 / −0.048 ± 0.004 |
 | mf + per-crystal, centred | 1.823 | 1.823 | −0.003 ± 0.010 / −0.002 ± 0.010 |
 | spline + refitted per-crystal, centred | 1.709 | 1.710 | −0.114 ± 0.006 / −0.113 ± 0.006 |
-| spline + position correction (R2) | **1.610** | 1.609 | −0.099 ± 0.005 / −0.101 ± 0.005 |
+| spline + position correction (R2, previous reference) | 1.610 | 1.609 | −0.099 ± 0.005 / −0.101 ± 0.005 |
+| hybrid position map (R3, previous reference) | 1.492 | 1.491 | −0.118 ± 0.007 / −0.118 ± 0.007 |
+| best-50 bank and gains (R4) | **1.494** | 1.493 | +0.002 ± 0.005 / +0.003 ± 0.004 |
+
+† Raw-sum Gated values were produced at W = 8 (per-run pre-window; see Caveats, *Gate matching*). W = 8 fails the peak-efficiency cut at 3.49, 2.24 GeV and C (`plans/plan_20261021.md` §8), so the raw-sum Gated values are not comparable with the other Gated rows.
 
 **2.24 GeV H2 (Gaussian, 42 splits)**
 
 | Configuration | Legacy | Gated | Δ legacy / gated |
 |---|---|---|---|
-| rawsum | 2.263 | 2.293 | |
+| rawsum | 2.263 | 2.293† | |
 | mf | 2.223 | 2.220 | −0.040 / −0.073 |
 | mf + per-crystal, old rectangle | 2.132 | 2.129 | −0.091 ± 0.001 / −0.090 ± 0.001 |
 | mf + per-crystal, centred | 2.071 | 2.069 | −0.061 ± 0.002 / −0.060 ± 0.002 |
 | spline + refitted per-crystal, centred | 1.952 | 1.950 | −0.119 ± 0.002 / −0.119 ± 0.002 |
 | R1, ±2σ Gaussian | 1.908 | 1.907 | −0.044 / −0.044 (definition change) |
-| spline + position correction (R2), ±2σ Gaussian | **1.898** | 1.897 | −0.010 ± 0.001 / −0.010 ± 0.001 |
+| spline + position correction (R2, previous reference), ±2σ Gaussian | 1.898 | 1.897 | −0.010 ± 0.001 / −0.010 ± 0.001 |
+| hybrid position map (R3, previous reference), ±2σ Gaussian | 1.854 | 1.853 | −0.044 ± 0.002 / −0.044 ± 0.002 |
+| best-50 bank and gains (R4), ±2σ Gaussian | **1.855** | 1.854 | +0.001 ± 0.002 / +0.001 ± 0.002 |
+
+† See the footnote under the 3.49 GeV H2 table.
 
 Footnote: Gaussian fixed150 in the rows above "R1, ±2σ Gaussian" (§3.7).
 
@@ -290,13 +476,17 @@ Footnote: Gaussian fixed150 in the rows above "R1, ±2σ Gaussian" (§3.7).
 
 | Configuration | Legacy | Gated | Δ legacy / gated |
 |---|---|---|---|
-| rawsum | 4.655 | 4.680 | |
+| rawsum | 4.655 | 4.680† | |
 | mf | 4.350 | 4.352 | −0.304 / −0.328 |
 | mf + per-crystal, old rectangle | 4.285 | 4.285 | −0.065 ± 0.020 / −0.066 ± 0.020 |
 | mf + per-crystal, centred | 4.440 | 4.440 | +0.154 ± 0.019 / +0.154 ± 0.019 |
 | spline + refitted per-crystal, centred | 4.366 | 4.364 | −0.074 ± 0.021 / −0.075 ± 0.021 |
 | R1, ±2σ Gaussian | 3.713 | 3.712 | −0.653 / −0.652 (definition change) |
-| spline + position correction (R2), ±2σ Gaussian | **3.718** | 3.714 | +0.005 ± 0.008 / +0.002 ± 0.007 |
+| spline + position correction (R2, previous reference), ±2σ Gaussian | 3.718 | 3.714 | +0.005 ± 0.008 / +0.002 ± 0.007 |
+| R3 (bilinear map kept, = R2; previous reference), ±2σ Gaussian | 3.718 | 3.714 | 0 (same splits) |
+| best-50 bank and gains (R4), ±2σ Gaussian | **3.714** | 3.711 | −0.004 ± 0.011 / −0.003 ± 0.010 |
+
+† See the footnote under the 3.49 GeV H2 table.
 
 Footnote: Gaussian fixed150 in the rows above "R1, ±2σ Gaussian" (§3.7).
 
@@ -304,12 +494,16 @@ Footnote: Gaussian fixed150 in the rows above "R1, ±2σ Gaussian" (§3.7).
 
 | Configuration | Legacy | Gated | Δ legacy / gated |
 |---|---|---|---|
-| rawsum | 2.166 | 2.19 | |
+| rawsum | 2.166 | 2.19† | |
 | mf | 2.093 | 2.092 | −0.073 / −0.095 |
 | mf + per-crystal, old rectangle | 2.003 | 2.002 | −0.090 ± 0.004 / −0.090 ± 0.004 |
 | mf + per-crystal, centred | 1.966 | 1.965 | −0.037 ± 0.004 / −0.038 ± 0.004 |
 | spline + refitted per-crystal, centred | 1.858 | 1.856 | −0.108 ± 0.005 / −0.109 ± 0.007 |
-| spline + position correction (R2) | **1.831** | 1.830 | −0.027 ± 0.003 / −0.026 ± 0.003 |
+| spline + position correction (R2, previous reference) | 1.831 | 1.830 | −0.027 ± 0.003 / −0.026 ± 0.003 |
+| hybrid position map (R3, previous reference) | 1.797 | 1.797 | −0.034 ± 0.005 / −0.033 ± 0.005 |
+| best-50 bank and gains (R4) | **1.789** | 1.786 | −0.008 ± 0.007 / −0.011 ± 0.008 |
+
+† See the footnote under the 3.49 GeV H2 table.
 
 **2.24 GeV Ta, X17 (CB, 25 splits; reported, not interpreted)**
 
@@ -320,19 +514,45 @@ Footnote: Gaussian fixed150 in the rows above "R1, ±2σ Gaussian" (§3.7).
 | mf + per-crystal, old rectangle | 2.395 | 2.274 | +0.036 ± 0.039 / +0.014 ± 0.031 |
 | mf + per-crystal, centred | 2.082 | 2.016 | −0.313 ± 0.055 / −0.258 ± 0.054 |
 | spline + refitted per-crystal, centred | 2.000 | 1.909 | −0.082 ± 0.029 / −0.107 ± 0.032 |
-| spline + position correction (R2) | **1.978** | 1.878 | −0.021 ± 0.021 / −0.031 ± 0.024 |
+| spline + position correction (R2, previous reference) | 1.978 | 1.878 | −0.021 ± 0.021 / −0.031 ± 0.024 |
+| R3 (bilinear map kept, = R2; previous reference; pooled, superseded) | 1.978 | 1.878 | 0 (same splits) |
+| R4 (best-50 bank, Ta n200 rebuild), per run 25800 / 26138 / 26230, no pooled value | **1.983 / 1.949 / 1.981** | **1.909 / 1.890 / 1.889** | vs R3, paired per run: legacy −0.003 ± 0.009 / −0.001 ± 0.006 / −0.002 ± 0.031; gated −0.030 ± 0.021 / −0.029 ± 0.028 / +0.061 ± 0.038 (R3 per run: legacy 1.986 / 1.950 / 1.983, gated 1.938 / 1.920 / 1.828) |
 
-**Per-module median σ/E post, h50 centred → spline → R1 (±2σ) → R2 (`--group-runs`, N > 1000)**
+**Per-module median σ/E post, h50 centred → spline → R1 (±2σ) → R2 → R3 → R4 (`--group-runs`, N > 1000)**
 
 | Run type | Median σ/E (%) | Modules |
 |---|---|---|
-| 3.49 GeV H2 | 1.74 → 1.61 → 1.61 → 1.58 | 112 → 111 → 111 → 111 |
-| 2.24 GeV H2 | 2.05 → 1.92 → 1.87 → 1.88 | 125 → 124 → 124 → 123 |
-| 0.73 GeV H2 | 3.70 → 3.60 → 3.52 → 3.50 | 97 → 99 → 99 → 98 |
-| 2.24 GeV C | 1.98 → 1.83 → 1.83 → 1.83 | 78 → 78 → 78 → 78 |
-| 2.24 GeV Ta (X17) | 1.93 → 1.99 → 1.99 → 1.91 | 8 → 8 → 8 → 8 |
+| 3.49 GeV H2 | 1.74 → 1.61 → 1.61 → 1.58 → 1.52 → 1.52 | 112 → 111 → 111 → 111 → 111 → 111 |
+| 2.24 GeV H2 | 2.05 → 1.92 → 1.87 → 1.88 → 1.84 → 1.85 | 125 → 124 → 124 → 123 → 122 → 123 |
+| 0.73 GeV H2 | 3.70 → 3.60 → 3.52 → 3.50 → 3.50 → 3.50 | 97 → 99 → 99 → 98 → 98 → 98 |
+| 2.24 GeV C | 1.98 → 1.83 → 1.83 → 1.83 → 1.81 → 1.80 | 78 → 78 → 78 → 78 → 78 → 78 |
+| 2.24 GeV Ta (X17) | 1.93 → 1.99 → 1.99 → 1.91 → 1.91 → 1.93 | 8 → 8 → 8 → 8 → 8 → 8 |
 
-The 2.24 and 0.73 GeV H2 medians come from per-module Gaussian fits: fixed150 for h50 centred and spline, ±2σ for R1 and R2.
+The 2.24 and 0.73 GeV H2 medians come from per-module Gaussian fits: fixed150 for h50 centred and spline, ±2σ for R1, R2, R3 and R4. R3 takes the `pos_hybrid` module maps at 3.49 GeV, 2.24 GeV H2 and C (R2 → R3 at three decimals: 1.582 → 1.519, 1.879 → 1.842, 1.827 → 1.810) and the R2 maps at 0.73 GeV and Ta. R4 (best-50 banks) at three decimals, R3 → R4: 1.519 → 1.524, 1.842 → 1.845, 3.497 → 3.502, 1.810 → 1.797, Ta 1.908 → 1.929 (pooled over runs, 8 modules; no per-run fit; Ta with the n200 bank, the 50-pulse bank gave 2.001), i.e. −0.013 to +0.021 pp; the Ta median rests on 8 modules.
+
+**Hybrid per-module position map, tested 10-25; adopted per run type as R3 on 10-26.**
+- **What it is.** Study B's form (d): its own poly8 for each seed module with ≥ 3000 training clusters, the R2 bilinear map elsewhere (20261025 §4.9).
+- **Own fits** (modules; share of training events):
+
+| Run type | Own fits | Share of training events |
+|---|---|---|
+| 3.49 GeV H2 | 52 of 170 | 78 % |
+| 2.24 GeV H2 | 76 of 165 | 88 % |
+| C | 28 of 191 | 56 % |
+| 0.73 GeV H2 | 25 of 141 | 56 % |
+| Ta | 0 of 40 (hybrid equals R2 by construction) | 0 |
+
+- **Δ vs R2**, preferred fit, legacy, pp:
+
+| Run type | In-sample full scan (`output/scan_20261025/pos_hybrid`, 118 splits) | Held-out, Study B protocol |
+|---|---|---|
+| 3.49 GeV H2 | −0.118 ± 0.007 | −0.097 ± 0.007 |
+| 2.24 GeV H2 | −0.044 ± 0.002 | −0.035 ± 0.002 |
+| C | −0.034 ± 0.005 | −0.016 ± 0.004 |
+| 0.73 GeV H2 | **+0.191 ± 0.040** (CB +0.127 ± 0.014) | not studied |
+
+- **Why per run type.** Applied everywhere, it degrades 0.73 GeV by 4.8 SE (Gaussian; CB +0.127 ± 0.014 pp), and Ta has 0 of 40 own fits. R3 keeps the bilinear map there. It needs no new scan, since every job uses only its own run type's map and the `pos_hybrid` and `pos_all` splits combine per run type.
+- **In-sample gains.** The in-sample gains exceed Study B's held-out gains by 1.9–3.2 SE: the all-split maps cover twice as many modules and are applied to the splits they were fitted on.
 
 Sources:
 
@@ -341,21 +561,27 @@ Sources:
 - C and Ta rawsum → mf Δ (25308; 25800, 26138, 26230): 20261022 §4.2. C rawsum gated: 20261021 §4.1 (two decimals); C mf gated: `plans/plan_20261023.md` Results.
 - Old → centred: 20261023 §8a.3 and `plans/plan_20261023.md` "Centred exclusion rectangle" (`output/scan_20261024_pc/compare/rect_old_vs_centred.tsv`).
 - Centred → spline: `output/scan_20261024_spline/compare/arms.md` (20261023 §9.5).
-- Per-module medians: `output/module_resolution_20261024/summary/types_summary.tsv` → `output/module_resolution_20261024_spline/summary/types_summary.tsv` → `output/module_resolution_20261025_ref/summary/types_summary.tsv` (R1) → `output/module_resolution_20261025_pos/summary/types_summary.tsv` (R2).
+- Per-module medians: `output/module_resolution_20261024/summary/types_summary.tsv` → `output/module_resolution_20261024_spline/summary/types_summary.tsv` → `output/module_resolution_20261025_ref/summary/types_summary.tsv` (R1) → `output/module_resolution_20261025_pos/summary/types_summary.tsv` (R2) → `output/module_resolution_20261025_hybrid/summary/types_summary.tsv` (R3 at 3.49 GeV, 2.24 GeV H2 and C; the R2 file at 0.73 GeV and Ta).
 - R1 identity with `scan_20261024_spline`: `plans/plan_20261025.md` log 10-24 17:16. Definition change (R1 fixed150 → ±2σ): `output/regauss_20261025/r1.{md,tsv}` (log 10-24 19:30).
 - R1 → R2: `output/scan_20261025/pos_all/compare/pos_vs_r1.{md,tsv}` (log 10-24 21:39).
+- R2 → R3 (hybrid vs R2): `output/scan_20261025/pos_hybrid/compare/hybrid_vs_r2.{md,tsv}`, `hybrid_vs_r2_per_run.md`, `hybrid_vs_r2_pooled.md`; held-out `output/offline_20261025/hybrid_heldout/heldout.md`; module maps `output/module_resolution_20261025_hybrid/` (20261025 §4.9).
+- R3 → R4 (H2 and C, best-50 bank and gains): `output/resolution_fit_20261027_best50/compare/r4_vs_r3.{md,tsv}`, `r4_vs_r3_splits.tsv`, and `output/resolution_fit_20261027_best50/compare_vs_r3.md` (its verdict, written 10-27 before the Ta fix, keeps R3; superseded by the 10-28 decision), module medians `output/resolution_fit_20261027_best50/module_resolution/{r3_ref,r4}/summary/types_summary.tsv` (20261027 §2).
+- R3 → R4 (Ta, n200 bank, per run): `output/resolution_fit_20261028_ta/compare/n200_vs_r3.{md,tsv}`, `n200_vs_r3_splits.tsv` (arm `Fix_n200`); Ta module median `output/resolution_fit_20261028_ta/module_resolution/n200/summary/types_summary.tsv` (`plot_module_resolution.py --scan-dir output/resolution_fit_20261028_ta/n200/splits --group-runs`); bank `output/templates_spline_ta_fix_20261028/n200/`, gains `output/percrystal_ta_fix_20261028/n200/` (20261028 §3, §4).
 
 Caveats:
 
-- **In-sample gains.** The `_all` tables (`percrystal_rect` and `percrystal_spl`) are fitted on the splits they are applied to. A held-out test exists only for S_dev (§3.5). R2 applies the all-split position map in-sample; the held-out halves give the same size at 3.49 GeV (−0.098 ± 0.005 vs −0.099 ± 0.005, §3.5).
+- **In-sample gains.** The `_all` tables (`percrystal_rect` and `percrystal_spl`) are fitted on the splits they are applied to. A held-out test exists only for S_dev (§3.5). R2 applies the all-split position map in-sample; the held-out halves give the same size at 3.49 GeV (−0.098 ± 0.005 vs −0.099 ± 0.005, §3.5). R3's hybrid maps are also in-sample; their held-out gains are smaller by 0.02 pp at 3.49 GeV and C and by 0.01 pp at 2.24 GeV H2 (hybrid paragraph above).
+- **R4 in-sample gains and maps.** `percrystal_best50` and `percrystal_ta_fix` are fitted on the splits they are applied to, as for R3. The hybrid and bilinear position maps are the R3 maps, fitted on R3 energies, and were not refitted on the best-50 energies.
+- **R4 Ta fix: cause inferred.** The 50-pulse Ta bank was worse than R3 on all three runs (legacy +0.029 ± 0.015 / +0.055 ± 0.035 / +0.026 ± 0.036 pp); the n200 rebuild lowers legacy σ/E vs the 50-pulse bank by −0.032 ± 0.022 / −0.056 ± 0.039 / −0.027 ± 0.027 pp and is within 1 SE of R3 legacy, but gated 26230 stays +0.061 ± 0.038 pp. The evidence rests on per-run SEs of 0.006–0.031 pp, 26138 has 4 splits, and the Ta median rests on 8 modules. H2 and C keep n 50 (equal to R3 already).
+- **R4 and the G1-7 gate.** The G1-7 gate fails as for the best-50 banks. Timing/pile-up were measured with the best-50 banks on 10-26 (§3.10, 20261026 §9); not with the Ta n200 bank.
 - **Gains not refit after the position correction.** The pooled gains are fitted on member energies, which the cluster-level factor does not touch; the map has mean 1 (`plans/plan_20261025.md` §5.3).
 - **Peak yield with the position correction.** Peak-yield ratio R2/R1 0.986 at 0.73 GeV and 0.994 at 3.49 GeV; harness ε_peak 1.0000–1.0003; not investigated.
 - **The centred row measures a sample change.** The centred rectangle removes high-rate top/left modules and halves the calibrated-block events at 2.24 and 3.49 GeV; at 0.73 GeV it adds bottom/right modules (W667, W700, W701), and σ/E rises by 0.15 pp (Møller contamination is an untested hypothesis). The calibration method is the same in both rows (20261023 §8a.3).
 - **Gate matching.** The rawsum scan ran at W = 8 with the per-run pre-window (130–200 ns for 24xxx); the mf scans ran at W = 16 and 100–200 ns. The gated rawsum → mf step and the 24xxx legacy step mix gate and pulse-method effects. Gate-matched mf gains are in §3.1 (20261022 §4.1).
 - **Ta statistics.** ≈ 16 calibrated modules per split.
-- **Uncommitted.** The benchmark changes that produce R1 and R2 (centroid columns, `--pos-corr`, `--gauss-window`) are uncommitted, and `position_corr.py` is untracked (§5.2).
+- **Git.** The benchmark changes that produce R1 and R2 (centroid columns, `--pos-corr`, `--gauss-window`) and `position_corr.py` are committed in `3566071`; the hybrid-map changes to both, which produce R3, are uncommitted (§5.2).
 
-## 5. Status and open items (`plans/plan_20261025.md` log to 10-25 01:42)
+## 5. Status and open items (`plans/plan_20261025.md` log to 10-25 23:50)
 
 ### 5.1 Work items
 
@@ -365,18 +591,32 @@ Caveats:
 | Item 4: clustering checks | `non_linear_corr` off: exact null (identity job). P4 done at full scale: cc1, mme2, mme0p5, mme5. `cc1` misses the winner rule (gains at 0.73 GeV and on C); `mme2` and `mme0p5` exact nulls; `mme5` neutral. No winner, no confirmation pass; nothing running | `plans/plan_20261025.md` log 10-24 19:50, 21:39, 22:47; 10-25 00:45, 01:42 |
 | Add-on: Gaussian definition | Done: ±2σ default in the benchmark and tools since 10-24 19:50; old scans refit from stored histograms; at 0.73 GeV 5 of 16 post spectra per path end at the 5-refit cap (§3.7) | `plans/plan_20261025.md` Decisions; log 10-24 19:30, 19:50 |
 | Add-on: software Møller veto | Done: 40k-event matrix and full-statistics confirmation (`vf30`, `vf50p20`); no setting lowers 0.73 GeV CB σ/E; no veto in the 0.73 GeV reference configuration (§3.5) | `plans/plan_20261025.md` log 10-24 20:55, 22:15 |
-| Decomposition refit | Done with R1 and R2; CB for all 2-term b 1.20 → 0.98 % (§3.6) | `plans/plan_20261025.md` log 10-24 20:14, 21:41 |
+| Decomposition refit | Done with R1, R2, R3 and R4; CB for all 2-term b 1.20 → 0.98 → 0.68 → 0.70 % (R4, H2 only; Ta per-run points excluded) (§3.6) | `plans/plan_20261025.md` log 10-24 20:14, 21:41; 10-26; `output/resolution_fit_20261027_best50/out_r4.txt` |
 | Note `notes/PbWO4_energy_resolution_20261025.md` | Complete, including P4 (§6.2); the veto confirmation is in §7 | `plans/plan_20261025.md` log 10-24 20:20; 10-25 01:42 |
 | Phase 3 of `plan_20261024` (spline banks in the calibration) | Done: driver scan `output/scan_20261024_spline/` (119/119 splits, no failures); arm B in every run type; B − A −0.074 to −0.119 pp legacy; success at 2.24 and 3.49 GeV H2 (§3.1, §3.5, §4) | `plans/plan_20261024.md` §8, progress log 10-24 11:50; 20261023 §9.5 |
-| Pile-up fix rescans | Done: rates `output/pileup_20261024_fix/` (119 splits); efficiency `output/pileup_eff_20261024_fix/` unchanged (0 points in all 30 cells) (§3.3) | 20261023 §9.3, §9.4 |
+| Pile-up fix rescans | Done: rates `output/pileup_20261024_fix/` (119 splits); efficiency `output/pileup_eff_20261024_fix/` unchanged (0 points in all 30 cells) (§3.8) | 20261023 §9.3, §9.4 |
 | f(A) residual (item 2 of `plan_20261025`) | Done, rejected: per-module f(A) flattens the study pulses (spread 0.17–0.19 %) and worsens σ/E (+0.029 to +0.044 pp at 2.24 and 3.49 GeV); the current f(A) stays; option (ii) feasible offline, its filter implementation needs a separate go (§3.1) | 20261023 §9.2, §9.5; `plans/plan_20261025.md` log 10-24 15:30–18:53, 20:20 |
-| Origin of the ≈ 23 ns second bump | Not identified; ask DAQ whether it is a reflection (§3.3) | 20261023 §9.3 |
+| Origin of the ≈ 23 ns second bump | Not identified; ask DAQ whether it is a reflection (§3.8) | 20261023 §9.3 |
 | X17 statistics | Waiting for new X17 evio files (disk space; "next week") | 20261023 §10; `plans/plan_20261023.md` Decisions |
 | C++ deconvolver, `PulseTemplate`, `WaveAnalyzer.deconvolve` | Still two-τ; later task | `plans/plan_20261024.md` §12 |
 | Energy-dependent W(E) (C++ change) | Approved in principle; not started | `plans/plan_20261022.md` §1, §9 |
-| Position-dependent correction (Phase 2 of `plan_20261023`, item 1 of `plan_20261025`) | Done, adopted: R2 = `output/scan_20261025/pos_all` (held-out −0.098 ± 0.005, full −0.099 ± 0.005 pp at 3.49 GeV); ring dependence and edge width not corrected (§3.5, §4). The Phase 4 quick checks became item 4 | `plans/plan_20261025.md` log 10-24 18:58–21:39 |
+| Position-dependent correction (Phase 2 of `plan_20261023`, item 1 of `plan_20261025`) | Done, adopted: R2 = `output/scan_20261025/pos_all` (held-out −0.098 ± 0.005, full −0.099 ± 0.005 pp at 3.49 GeV); ring dependence and edge width not corrected (§3.5, §4). The Phase 4 quick checks became item 4. Superseded by R3 at 3.49 GeV, 2.24 GeV H2 and C | `plans/plan_20261025.md` log 10-24 18:58–21:39 |
+| Hybrid per-module position map (Study B form (d)) | Adopted per run type as R3 (10-26): hybrid at 3.49 GeV, 2.24 GeV H2 and C (in-sample −0.118 / −0.044 / −0.034 pp vs R2, held-out −0.097 / −0.035 / −0.016); bilinear kept at 0.73 GeV (hybrid +0.191 ± 0.040 pp) and Ta (0 of 40 own fits) (§4) | 20261025 §4.9; `plans/plan_20261025.md` log 10-25 23:45; 10-26 |
+| Module timing | Done: veto, event-median, seed and RF references; counter offsets; 4.008 ns bunch comb; X17 RF timing (§3.9) | 20261025 §9; `plans/plan_20261025.md` log 10-25 23:50 |
+| RF time calibration | Done 10-26: 12 usable runs, 24386 unusable, 24503 drift; gates (ii) held-out (over dhalf-defined pairs; 0.9802 < 0.99 over all measured; denominator open), (v) 33-module branch and (vi) event-median consistency PASS; median σ 0.183–0.203 ns; phase change is global (+1.990 ns 25800 → 26230), the central block is shifted in 26230 only. Python matched-filter time definition, not transferable to `Replay.cpp` without a per-type constant; not adopted into `database/`. Files in `output/rf_calib_20261026/` (§3.9) | 20261025 §9.7; `plans/plan_rf_calib_20261026.md` |
+| Run 24386 timing | Open: two RF phases and the +18.5 ns veto coincidence; flag to DAQ / run log; excluded from timing studies | 20261025 §9.5 |
+| Veto hardware | Open: V1 has two timing populations at 0.73 GeV; 24386 at +18.5 ns; no coincidence peak in 25228, 25257, 25260 | 20261025 §9.2 |
+| RF period in the docs | Open: `docs/REPLAYED_DATA.md:201` and `test/evio_dump.cpp:685` quote ≈ 131 ns; measured 128.25 ns | 20261025 §9.5 |
+| `module_timing_tcal.pdf` | Open: not regenerated after the counter alignment | 20261025 §9 |
 | mf time offsets | Failed acceptance (§3.3); open physics item | 20261022 §6 |
 | Hot channels | Pile-up: W335 (≈ 90 % at 0.73 GeV), W1 (37–56 %), W1019/W1020 (20–64 %), W934 (+25 ns echo). Resolution: W461, W427, W462. Template: W335 at 0.73 GeV broken in the reference bank, not rebuilt (§3.1) | `plans/plan_20261024.md` log 10-23 21:50; 20261023 §8a.4; `plans/plan_20261025.md` log 10-24 17:10, 20:20 |
+| Best-50 spline templates (`plan_20261025` Todo 40) | Done 10-26; adopted as R4 (10-28); full scan and Ta fix: row below. 119 splits selected, five banks with held-out λ and oscillation escalation, outer loop converged (2.24 H2, Ta), gains for five runs, 20-split benchmark Δσ/E within 1.4 SE of zero vs R3. Open: MF-energy phase bias (±0.4 %); 3.49 GeV G1-8 (1065 < 1100); G1-7 fails | 20261025 §4.10; `plans/plan_20261025.md` log 10-26; 20261027 §2; 20261028 §3, §4 |
+| Best-50 pipeline, reduced scope (10-26) | Done: pile-up efficiency with the best-50 bank pooled Δ +0.07 to +0.67 points per run type (worst cell −4, Ta); σ_t per module (RF, E ≥ 100 MeV) median −0.014 to −0.026 ns; σ_t per cluster (seed) 0.107 / 0.097 ns vs 0.135 / 0.143 ns at 2.24 / 3.49 GeV H2, unchanged at 0.73 GeV. Full-scan and per-module σ_E/E not run | 20261026 §9 |
+| Best-50 full scan and Ta degradation (S2–S4 of `plans/plan_best50_pipeline_20261026.md`) | Done 10-27/10-28: gains, 118-split scan `output/resolution_fit_20261027_best50/r4_splits`, module medians; H2 and C equal to R3. Ta with the 50-pulse bank worse per run (+0.029 ± 0.015 / +0.055 ± 0.035 / +0.026 ± 0.036 pp legacy); diagnosis (§3.1): not a module, region, gain or selection effect, ascribed (inference) to the 8 central modules' 50-pulse pools (n200 − 50-pulse bank, legacy −0.032 ± 0.022 / −0.056 ± 0.039 / −0.027 ± 0.027); `--n-max 200` within 1 SE of R3 on all three runs (−0.003 ± 0.009 / −0.001 ± 0.006 / −0.002 ± 0.031), gated 26230 +0.061 ± 0.038; promoted as R4 (§4) | 20261027 §2; 20261028 §3, §4; `output/ta_b50_diag_20261028/` |
+| Amplitude dependence of the pulse shape (Part A, 10-28) | Done: FWHM −0.17 ± 0.02 ns from 490 to 1560 ADC, rise and w99 flat, f(A) flat in 300–2500 ADC; explains ≲ 10 % of the per-module Ta − H2 scatter and not the 0.73 GeV bank FWHM offset; < 300 ADC untested; banks unchanged (§3.1) | 20261028 §2; `template_amp_binned.py` |
+| CFD fraction / log-normal refinement | Scan done 10-27, Python only: f = 0.6 best without a phase correction; the log-normal refinement worsens σ_t; linear CFD at 0.6 beats MF at E ≥ 100 MeV. **C++ decision pending** (fraction, dropping or fixing the refinement). Study items: phase correction, f = 0.55–0.65, walk (§3.10) | 20261027 §5; `output/cfd_scan_20261027/` |
+
+- Gate working point not re-selected on the final (spline, R3) pipeline; only Ta depends on the gate. A Ta-only re-scan (W ∈ {8, 12, 16, legacy}) on the final pipeline is deferred until more X17 data are available.
 
 ### 5.2 Git state
 
@@ -385,10 +625,11 @@ Caveats:
 | Committed in `315e4af` (10-21) and `5359d63` (10-23) | benchmark, driver, `gate_scan_2026102{1,2}.py`, `mf_pulse.py`, `mf_validate.py`, `percrystal_calib.py`, 20261021 and 20261022 notes, plans 10-21 to 10-23, `docs/research-lms-gain-tracking.md` |
 | Committed in `80e19b6` (10-24) | benchmark, driver, `mf_pulse.py`, `percrystal_calib.py`, `pileup_generator.py`, `spline_template_extract.py`, `mf_fit_pulse.py`, `mf_fit_study.py`, `plot_module_resolution.py`, `plot_pileup_examples.py`, `benchmark_pileup_mf.py`, `pileup_artefact_study.py`, `compare_scan_dirs.py`, 20261021–20261023 notes, this note, `plans/plan_20261024.md`, the move of the plans into `plans/`, `docs/research-spline-template-pipeline.md`, `dev.md` |
 | Reference, unchanged since `5359d63` | `benchmark_hycal_timing.py` |
-| Modified since `80e19b6`, uncommitted | `benchmark_hycal_timing_test_20261021.py`, `spline_template_extract.py`, `mf_pulse.py`, `mf_fit_study.py`, `plot_module_resolution.py`, `compare_scan_dirs.py`, this note (this update) |
-| Untracked | `position_corr.py`, `mf_ampshape_diag.py`, `regauss_tables.py`, `plans/plan_20261025.md`, `notes/PbWO4_energy_resolution_20261025.md` |
+| Committed in `3566071` (10-25 14:14) | benchmark, `compare_scan_dirs.py`, `mf_ampshape_diag.py`, `mf_fit_study.py`, `mf_pulse.py`, `plot_module_resolution.py`, `position_corr.py`, `regauss_tables.py`, `spline_template_extract.py`, the 20261025 note, this note, `plans/plan_20261025.md` |
+| Modified since `3566071`, uncommitted | `benchmark_hycal_timing_test_20261021.py`, `position_corr.py` (hybrid), the 20261025 note, this note, `plans/plan_20261025.md` |
+| Untracked | `module_timing_dump.py`, `plot_module_energy.py`, `plot_module_timing.py`, `plot_module_timing_rf.py`, `plot_module_timing_vs_integral.py`, `plot_template_overlay.py`, `rf_time_dump.py` |
 
-`output/` is gitignored. Checked with `git status --short` and `git show --stat 80e19b6` (read-only) on 10-24 21:42.
+`output/` is gitignored, including `output/module_timing_20261025/dump/` (4.9 GB) and `rf/` (582 MB). Checked with `git status --short` and `git show --stat 3566071` (read-only) on 10-25 23:40.
 
 ### 5.3 Source disagreements
 
@@ -475,12 +716,23 @@ python3 benchmark_hycal_timing_scan.py --pulse-method mf --window 16 --pre-windo
   --parallel 11 --timeout-seconds 1800 --output-dir output/scan_20261024_spline
 python3 compare_scan_dirs.py --scans A=output/scan_20261024_pc B=output/scan_20261024_spline --out output/scan_20261024_spline/compare/arms
 MPLBACKEND=Agg python3 plot_module_resolution.py --scan-dir output/scan_20261024_spline --out output/module_resolution_20261024_spline --group-runs
+# pile-up 10/23, one run (h50 templates, κ 1.010 defaults; splits per run in pileup_rate_<run>.txt; G2-1 reproduces 25320.00050 exactly)
+MPLBACKEND=Agg python3 plot_pileup_examples.py --runs 25320 --splits 00050 --dominant-frac 0.5 --out output/<tag>
+# pile-up 10/24, raw (no fix)
+MPLBACKEND=Agg python3 plot_pileup_examples.py --jobs 12 --splits all --mf-templates "$T/{runtype}/templates_{runtype}.npz" --dominant-min-mev 50 --mf-scale 1.0 --out output/pileup_20261024
+# +12–40 ns artefact study (default splits 25320:50 25320:100 24503:10 24503:20 24590:10 24590:20) -> output/pileup_20261024/artefact/
+MPLBACKEND=Agg python3 pileup_artefact_study.py all --jobs 6
 # pile-up with the fix (rates, maps, examples; then efficiency per run type)
 MPLBACKEND=Agg python3 plot_pileup_examples.py --jobs 12 --splits all --mf-templates "$T/{runtype}/templates_{runtype}.npz" --dominant-min-mev 50 --mf-scale 1.0 --burst-veto 10 --window-rule 40:0.16 --out output/pileup_20261024_fix
-python3 benchmark_pileup_mf.py output/pileup_eff_20261024_fix/2p24GeV_H2/synth --templates $T/2p24GeV_H2/templates_2p24GeV_H2.npz --out output/pileup_eff_20261024_fix/2p24GeV_H2 --tolerance-ns 4 --window-rule 40:0.16
+# synth (settings.synth_cli in eff_<slug>.json); other bases: 0p73GeV_H2 024590.00010, 2p24GeV_C 025308.00050, 3p49GeV_H2 024503.00010, 2p24GeV_Ta_X17 025800.* (all splits)
+python3 pileup_generator.py $E/prad_025320.evio.00050 --template $T/2p24GeV_H2/templates_2p24GeV_H2.npz --out-dir output/pileup_eff_20261024_fix/2p24GeV_H2/synth \
+  --material PbWO4 --n-per-config 50 --height-min 500 --t0-min 22 --residual-veto-sigma 999 --noise-model none --post-pad 20 --seed 12345 --force
+# efficiency per slug (r)
+for SL in 0p73GeV_H2 2p24GeV_C 2p24GeV_H2 2p24GeV_Ta_X17 3p49GeV_H2; do
+  python3 benchmark_pileup_mf.py output/pileup_eff_20261024_fix/$SL/synth --templates $T/$SL/templates_$SL.npz --out output/pileup_eff_20261024_fix/$SL --tolerance-ns 4 --window-rule 40:0.16; done
 ```
 
-(f) Package of `plans/plan_20261025.md`: R1, position maps and fit, held-out and full harness runs (R2), veto matrix, LMS two-run check, P4 variants, Gaussian tables, decomposition (20261025 §10). Configs (`cfgs_20261025_p2.json`, `cfgs_veto.json`, `cfgs_p34_withpos.json`) and `run_*.sh` are in `$S`. The tools do not log argv; (r) marks commands reconstructed from the plan and `--help`.
+(f) Package of `plans/plan_20261025.md`: R1, position maps and fit, held-out and full harness runs (R2), veto matrix, LMS two-run check, P4 variants, Gaussian tables, decomposition (20261025 §11). Configs (`cfgs_20261025_p2.json`, `cfgs_veto.json`, `cfgs_p34_withpos.json`) and `run_*.sh` are in `$S`. The tools do not log argv; (r) marks commands reconstructed from the plan and `--help`.
 
 ```bash
 S=output/scan_20261025/configs
@@ -517,11 +769,11 @@ for X in spline:scan_20261024_spline pc:scan_20261024_pc r1:scan_20261025_ref; d
 (cd output/resolution_fit_20261025 && python3 phase0.py --also-fixed150 > out.txt)   # (r) cwd and redirect
 ```
 
-**Plan §13 caveat.** The commands in `plans/plan_20261024.md` §13 are stale (old `_spl` path, `A=scan_20261023_pc`, no `ampcorr` step, no Ta `--trigger physics-any`, no fix flags); use (e). The `pileup_generator.py` synth step and `mf_fit_study.py --arm sampled` stay in §13 (κ = 1.0, `_fix` output dirs).
+**Plan §13 caveat.** The commands in `plans/plan_20261024.md` §13 are stale (old `_spl` path, `A=scan_20261023_pc`, no `ampcorr` step, no Ta `--trigger physics-any`, no fix flags); use (e). The `pileup_generator.py` synth step is now in (e); `mf_fit_study.py --arm sampled` stays in §13 (κ = 1.0).
 
 **Rectangle caveat.** For scans up to `scan_20261023_pc`, pass `--exclude-rowcol 16 21 16 21` to the benchmark, `percrystal_calib.py fit` and `plot_module_resolution.py`. The driver has no rectangle flag, so older driver scans do not reproduce with the current benchmark.
 
-Other commands: harness variant scans in `plans/plan_20261023.md` §13 (configs file in a scratch directory); gate scans in `plans/plan_20261021.md` §3.7 and 20261022 §10; spline templates, spline gains, reference scan and pile-up fix in (e); the `plan_20261025` package in (f) and 20261025 §10.
+Other commands: harness variant scans in `plans/plan_20261023.md` §13 (configs file in a scratch directory); gate scans in `plans/plan_20261021.md` §3.7 and 20261022 §10; spline templates, spline gains, reference scan and pile-up fix in (e); the `plan_20261025` package in (f) and 20261025 §11.
 
 ### See also
 
