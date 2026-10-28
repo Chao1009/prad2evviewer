@@ -1032,7 +1032,7 @@ def stage_report(a):
         lo = x["pooled"] / math.sqrt(NW)
         drows.append((nm(g), float(np.nanmedian(x["drift"][:, 0])), float(np.nanmedian(x["drift"][:, 1])),
                       float(np.nanmedian(lo)), float(np.nanmedian(lo) * math.sqrt(g30)), float(np.nanmedian(x["drift"][:, 0] / lo)),
-                      float(np.nanmedian(x["drift"][:, 1] / (lo * math.sqrt(g30))))))
+                      float(np.nanmedian(x["drift"][:, 1] / (lo * math.sqrt(g30)))) if g30_raw > 1e-3 else float("nan")))
     tsv(OUT / "noise_drift.tsv", ["sample", "rms_between_events", "highpass_rms_consecutive_rows", "sigma/sqrt30", "sigma/sqrt30*sqrt(acf factor)",
                                   "between/white", "highpass/acf-corrected"], drows)
     R["drift"] = dict(ep=[float(np.mean([d[i] for d in drows[:len(EP)]])) for i in (1, 2, 3, 4, 5, 6)], lms=[float(v) for v in drows[-1][1:]], acf_factor=float(g30_raw), acf_factor_used=float(g30))
@@ -1209,8 +1209,8 @@ def stage_report(a):
         ax[1].set_xlabel("common-variance fraction f per board (corrected)"); ax[1].legend(fontsize=6)
         for g in G + ["lms"]:
             ax[2].hist(ALL[g]["drift"][:, 0] / (ALL[g]["pooled"] / math.sqrt(NW)), np.linspace(0, 8, 80), histtype="step", color=colr[g])
-        ax[2].axvline(1, color="k", lw=.6); ax[2].axvline(math.sqrt(g30), color="gray", ls=":")
-        ax[2].set_xlabel("RMS of window mean across events / (sigma / sqrt30)"); ax[2].set_title("pedestal wander (dotted: acf-corrected white)", fontsize=9)
+        ax[2].axvline(1, color="k", lw=.6)
+        ax[2].set_xlabel("RMS of window mean across events / (sigma / sqrt30)"); ax[2].set_title("pedestal wander", fontsize=9)
         fig.tight_layout(); sv(fig); plt.close(fig)
         # fixed-pattern / alternation / noise-limited onset error
         fig, ax = plt.subplots(1, 3, figsize=(14, 4.5))
