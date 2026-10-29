@@ -407,7 +407,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
         if (event.n_clusters != 1) continue;
         if (event.cl_nblocks[0] < 3) continue;
-        if (fabs(event.cl_energy[0] - run_config.Ebeam) > 3.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.)) continue;
+        if (fabs(event.cl_energy[0] - run_config.Ebeam) > 4.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.)) continue;
 
         HCHit hc_hit;
         GEMHit gem_hit;
