@@ -263,7 +263,7 @@ int main(int argc, char *argv[])
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 400) fit[0] = 0;
                 const double energy = fit[0] != 0
                     ? (fit_count++, fit[0]) : (mean_count++, merged->h1_energy_grid_allModule[m][i][j]->GetMean());
-                energy_bias[m][i][j] = std::clamp(energy / expected_energy - 1.0, -0.03, 0.05);
+                energy_bias[m][i][j] = std::clamp(energy / expected_energy - 1.0, -0.03, 0.08);
             }
         }
     }
