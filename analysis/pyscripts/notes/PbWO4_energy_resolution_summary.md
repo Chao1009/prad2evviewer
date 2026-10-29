@@ -1,6 +1,7 @@
 # PbWO4 energy resolution from waveforms: summary of the 2026-10-21 to 10-25 work
 
 **Author:** Jingyi Zhou (jyzhou), documented 2026-10-24; §3–§6 updated from `plans/plan_20261025.md` (progress log to 10-25 23:50, including the module-timing work of §3.9). Reference updated to R4 on 2026-10-28 (best-50 banks for H2/C, best-200 Ta bank; see §4), previously R3 on 2026-10-26 (§3.6, §4, §5.1). CFD-fraction scan added 2026-10-27 (§3.3, §3.10, §5.1).
+Merged origin/main 6e638c6 on 2026-10-28 (2daedc9); R4 reproduced bit-identically (20261028 §9).
 **Branch:** `waveform_jz` (HEAD `3566071`, 10-25 14:14; later work is uncommitted, §5.2)
 **Plans:** `plans/plan_benchmark_hycal_timing_test_20261021.md`, `plans/plan_20261021.md`, `plans/plan_20261022.md`, `plans/plan_20261023.md`, `plans/plan_20261024.md`, `plans/plan_20261025.md`
 **Previous notes:** `notes/PbWO4_energy_resolution_20261021.md`, `notes/PbWO4_energy_resolution_20261022.md`, `notes/PbWO4_energy_resolution_20261023.md`, `notes/PbWO4_energy_resolution_20261025.md`
@@ -40,12 +41,14 @@ Numbers: 118-split scan, mean ± SE over splits, R4 reference chain (R3 with the
 | 3.49 GeV H2 | 27 | **1.491 ± 0.007** | CB, gated (= legacy 1.492) | 1.491 | common chain + hybrid bowl position correction |
 | 2.24 GeV H2 | 42 | **1.853 ± 0.004** | Gauss ±2σ, gated (= legacy 1.854) | 1.804 ± 0.005 | common chain + hybrid bowl |
 | 2.24 GeV C | 8 | **1.786 ± 0.016** | CB, gated (legacy 1.789; R3 1.797 ± 0.012, Δ R4 − R3 −0.011 ± 0.008) | 1.786 | common chain + hybrid bowl, best-50 bank (R4) |
-| 0.73 GeV H2 | 16 | **3.711 ± 0.009** | Gauss ±2σ, gated (legacy 3.714; R3 3.714 ± 0.011, Δ R4 − R3 −0.003 ± 0.010) | 2.973 ± 0.024 (R3) | common chain + bilinear position correction, best-50 bank (R4) |
+| 0.73 GeV H2 ‡ | 16 | **3.711 ± 0.009** | Gauss ±2σ, gated (legacy 3.714; R3 3.714 ± 0.011, Δ R4 − R3 −0.003 ± 0.010) | 2.973 ± 0.024 (R3) | common chain + bilinear position correction, best-50 bank (R4) |
 | 2.24 GeV Ta, run 25800 | 8 | **1.909 ± 0.041** | CB, gated (legacy 1.983; R3 1.938 ± 0.030, Δ R4 − R3 −0.030 ± 0.021) | — | common chain + bilinear; 16 ns gate essential; Ta n200 bank (R4) |
 | 2.24 GeV Ta, run 26138 | 4 | **1.890 ± 0.116** | CB, gated (legacy 1.949; R3 1.920 ± 0.111, Δ R4 − R3 −0.029 ± 0.028) | — | same |
 | 2.24 GeV Ta, run 26230 | 13 | **1.828 ± 0.056** | CB, gated (legacy 1.983) | — | same |
 
 Note on the rows: the bold figure is the gated value. 3.49 GeV H2 (R3 1.491 ± 0.007; R4 1.493 ± 0.008, Δ +0.003 ± 0.004), 2.24 GeV H2 (R3 1.853 ± 0.004; R4 1.854 ± 0.004, Δ +0.001 ± 0.002) and Ta 26230 (R3 1.828 ± 0.056, legacy 1.983; R4 1.889 ± 0.043, legacy 1.981, gated Δ +0.061 ± 0.038, legacy Δ −0.002 ± 0.031) keep the R3 value because it is the lower one; every R3 − R4 difference is within 1.6 SE, so treat R3 and R4 as equal and the choice of the lower value as no result. CB cores of the preferred-Gaussian rows are the R3 values (R4: 1.805 ± 0.005 at 2.24 GeV H2, 2.975 ± 0.020 at 0.73 GeV, 1.493 ± 0.008 at 3.49 GeV).
+
+‡ 0.73 GeV: the R4 value is Møller-biased (20261028 §10). With Møller rejection (`--moller-reject kin`, n = 3, m = 2), legacy σ_E/E is 3.447 (Gauss) / 3.417 (CB) on the four 0.73 GeV splits of the 16 e-p/C reference splits, against R4 3.673 / 2.952 on the same splits (`output/moller_reject_20261028/tables/eval_summary.tsv`, §3.11). Not yet a reference promotion.
 
 Common chain (R4; R3 differs only in the template banks and gains, the production banks `output/templates_spline/` with `percrystal_spl`): FADC waveform → pedestal → matched-filter pulse fit with the best-50 spline template bank (per module, per run type; Ta: the n200 rebuild) → MF-amplitude energy with per-crystal spline gains refitted for that bank (`percrystal_best50`; Ta `percrystal_ta_fix`; elastic peak vs E_beam) → island clustering with seed-anchored coincidence (|t_hit − t_seed| ≤ 16 ns, pre-window 100–200 ns) → position correction (hybrid bowl at 3.49/2.24 H2 and C, bilinear at 0.73 and Ta) → 2-ring edge exclusion → elastic window → fit (CB for 3.49 H2, 2.24 C, Ta; iterative ±2σ Gaussian for 2.24 and 0.73 H2) → mean ± SE over splits. "CB core width" gives the Crystal Ball σ where the Gaussian is the preferred fit; the two estimators are not interchangeable (CB excludes the radiative tail). Methods tried and not adopted: see `notes/PbWO4_methods_summary_20261027.md` §7.
 
@@ -431,11 +434,38 @@ Median σ_t in ns, E ≥ 100 MeV unless marked, modules in parentheses. "Product
 
 **Decision pending.** No C++ change was made; changing the fraction or dropping the log-normal refinement awaits the user's decision. Study items: phase correction, finer scan at f = 0.55–0.65, walk check. Caveat: one split per run type; e500 at 0.73 GeV has 55 modules. Details in 20261027 §5; files in `output/cfd_scan_20261027/`.
 
+### 3.11 Møller rejection (kinematic) (2026-10-28)
+
+At 0.73 GeV the 15 modules above 2× the median σ/μ form a ring at r 79–98 mm outside the 6×6 box; their low peak is single-arm Møller at E_ee(θ) (~48 % of their events); gain drift and over-iteration were excluded on the 2.24 GeV H2 ring (20261028 §10).
+- `--moller-reject kin` (n = 3, m = 2): reject a cluster with |E − E_ee(θ)| < 3σ_E and |E − E'(θ)| > 2σ_E. Flag off reproduces R4 (max|Δ| 0.00000 pp).
+- Legacy, 4 reference splits per run type, off → on: 0.73 GeV Gauss 3.673 → 3.447 (−0.226 ± 0.013 pp), CB 2.952 → 3.417; 2.24 GeV H2 CB −0.022 ± 0.005, Gauss, 3.49 GeV and C |Δ| ≤ 0.001; Ta per run −0.027 ± 0.014 / −0.003 ± 0.003 / −0.003 ± 0.006.
+- 0.73 GeV per module: modules above 2× median 15 → 0, fitted modules 98 → 85. Proposed for R5.
+- Source: `output/moller_reject_20261028/`, `output/twopeak_diag_20261028/`; 20261028 §10.
+
+### 3.12 Two-peak CB fit at 0.73 GeV (2026-10-28)
+
+- `--cb-two-peak` (elastic CB + Møller CB), 16 splits, rejection off: legacy elastic CB 3.265 % against Gauss 3.714 % and single CB 2.974 %; χ²/ndf 2.6 against ~50 for the single and the σ-tied CB.
+- The σ-tied option tracks its FRAC (3.31 / 3.13 / 3.00 % at 0.10 / 0.15 / 0.25); not recommended. Fitted Møller fraction 0.34–0.48 per split (overstates the event fraction).
+- Use it only if Møller events are kept; not needed with rejection on. Source: `output/moller_reject_20261028/cbfit_0p73/`, `tables/cbfit_0p73_splits.tsv`; 20261028 §10.
+
+### 3.13 main-branch energy_bias / leakage / Geant4 profile evaluation (2026-10-28)
+
+- After the merge (20261028 §9) the benchmark gets none of main's cluster corrections (`_make_cluster` copies 8 fields); they were enabled in-process for this test (4 reference splits per e-p run type, Ta per run).
+- energy_bias partly duplicates pos-corr and is weaker: alone −0.108 ± 0.006 pp at 3.49 GeV, where removing pos-corr costs +0.182 ± 0.009; nothing at 2.24 GeV H2. Stacked on pos-corr it costs +0.118 to +0.126 pp (3.49, 2.24 GeV H2, C). Keep pos-corr, flag off.
+- Leakage inert (|Δ| ≤ 0.002 pp on e-p and C). Geant4 cluster profile −0.011 … −0.047 pp on e-p, Ta noise; mechanism unverified, needs a `_make_cluster` option.
+- Source: `output/energy_bias_20261028/`; 20261028 §11.
+
 ## 4. Current best numbers
 
 Throughout this note, *Gated* means the working point selected by the 10/21 gate scan (plans/plan_20261021.md §8): raw CFD times, seed time window W = 16 ns, pre-window 100–200 ns. All matched-filter scans from `scan_20261022_mf` onward, including the references R3 (`output/scan_20261025/pos_hybrid` and `pos_all`) and R4, were run at this point; *Legacy* is the same pipeline with no time cut. The working point was selected on the raw-sum pipeline and confirmed on the h50-template pipeline; it has not been re-selected on the spline/R3 pipeline (irrelevant for e-p, where the gate is flat; the Ta gain was measured with the 26138-only X17 template bank).
 
 Reference (adopted 2026-10-28): **R4** = R3 with the best-50 template banks and gains. At 3.49, 2.24 and 0.73 GeV H2 and 2.24 GeV C: banks `output/templates_spline_best50_20261026/<runtype>/`, gains `output/percrystal_best50_20261026/<run>/gains_<run>_all.tsv`, splits `output/resolution_fit_20261027_best50/r4_splits` (each R3 `job.cmd` with only the output stem, `--mf-templates` and `--gain-file` changed). Ta X17 (25800, 26138, 26230): the best-50 Ta bank rebuilt from the same best-50 Ta pulses and options with `--n-max 200` (`output/templates_spline_ta_fix_20261028/n200/templates_2p24GeV_Ta_X17.npz`), gains `output/percrystal_ta_fix_20261028/n200/<run>/gains_<run>_all.tsv`, splits `output/resolution_fit_20261028_ta/n200/splits`. Everything else is R3's (position maps per run type, gate, rectangle, ±2σ Gaussian, 118 splits). Decision rule (user, 10-28): promote best-50 H2 and C plus the fixed Ta bank if the fixed Ta bank is within 1 SE of R3 on all three Ta runs; met (Ta table below, §3.1). R4 and R3 are equal on e-p (legacy Δ ≤ 0.008 pp, within 1.2 SE in every run type). Previous reference (adopted 2026-10-26, demoted 2026-10-28): **R3**, the position correction chosen per run type; 118 splits (no 24386.00060), no rescan. At 3.49 GeV H2, 2.24 GeV H2 and C, R3 uses the hybrid per-module map (`poscorr_hybrid_v1`, `--pos-corr output/poscorr_20261025/hybrid/{runtype}/poscorr_hybrid_{runtype}_all.json`; splits in `output/scan_20261025/pos_hybrid`). At 0.73 GeV H2 and Ta it keeps the bilinear map (`poscorr_v1`) and is identical to R2 (splits in `output/scan_20261025/pos_all`). All other settings are R2's: spline banks, `percrystal_spl` gains, centred rectangle, W = 16 ns raw, pre-window 100–200 ns, ±2σ Gaussian. The split is per run type because at 0.73 GeV the hybrid worsens σ/E (+0.191 ± 0.040 pp Gaussian, +0.127 ± 0.014 pp CB) and Ta has 0 of 40 own fits. Before R3: **R2 = `output/scan_20261025/pos_all`**, R1 plus the bilinear position correction (`--pos-corr output/poscorr_20261025/{runtype}/poscorr_{runtype}_all.json`, per run type; Ta with the 2.24 GeV H2 map; harness stages R + RX). R1 = `output/scan_20261025_ref`, the driver rerun of `output/scan_20261024_spline` (spline banks, κ = 1.0, centred rectangle, pooled gains `output/percrystal_spl/<run>/gains_<run>_all.tsv`) with the centroid columns; identical to it except `elapsed_s` and the two appended cluster-TSV columns. h50 baseline: `output/scan_20261024_pc` with `output/percrystal_rect/<run>/gains_<run>_all.tsv`. Rows: `output/scan_20261021_full` (rawsum), `output/scan_20261022_mf` (mf), `output/scan_20261023_pc` (mf + per-crystal, old rectangle), `output/scan_20261024_pc` (centred), `output/scan_20261024_spline` = R1 (spline), `output/scan_20261025/pos_all` (R2), `pos_hybrid` + `pos_all` (R3). σ/E in %, preferred fit, mean over splits. Δ is the step from the row above, legacy / gated, in pp: paired ± SE for the per-crystal, spline, R2, R3 and R4 rows (R2 on the splits it shares with R1: 27 at 3.49 GeV; R3 vs R2 and R4 vs R3 on all 118 splits; the Ta R4 row per run), a difference of scan means for the mf row and the definition-change row.
+
+**R5 candidates (not promoted; R4 stays the reference).**
+- Seed `min_center_energy` 30 MeV: validated on 60 odd-rank splits, −0.033 to −0.059 pp on e-p and C, Ta inconclusive; promotion needs gains and position maps re-derived at seed 30, a merging check and the 118-split rerun (20261028 §8).
+- Møller rejection `--moller-reject kin` (n = 3, m = 2): 0.73 GeV Gauss −0.226 ± 0.013 pp on the 4 reference splits, neutral or slightly better elsewhere (§3.11; 20261028 §10).
+- Geant4 cluster profile: −0.011 … −0.047 pp on e-p, pending verification of the mechanism (§3.13; 20261028 §11).
+- The a/√E ⊕ b fit must be redone once the 0.73 GeV point is Møller-free. R4 values: a = 2.48 ± 0.02 %·√GeV, b = 0.70 ± 0.03 % (§3.6).
 
 **Gaussian definition (§3.7).** In the 2.24 and 0.73 GeV H2 tables (preferred fit Gaussian), the rows above "R1, ±2σ Gaussian" are fixed150; that row is the same scan refit with the ±2σ window, and the R2, R3 and R4 rows use ±2σ. CB tables are unaffected.
 

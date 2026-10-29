@@ -208,6 +208,7 @@ _SUMMARY_COLS = [
     "n_peaks_detected", "secondary_peak_present",
     "peak_prominence_values",
     "sigma_over_E_CB",   # backward-compat alias for sigma_over_E_cb_post
+    "preferred_fit", "sigma_over_E_pref",   # per-split gauss|cb choice (--fit-select chi2); "" if absent
 ]
 
 # Runinfo pre-window [lo, hi] ns used for each run family
@@ -499,6 +500,10 @@ def _parse_float(s: str) -> float:
         return float("nan")
 
 
+# calibration-table columns kept as raw strings (the rest are float-parsed)
+_CAL_STR_COLS = frozenset({"preferred_fit", "cb_mode", "cb_mode_pre"})
+
+
 def parse_tsv(tsv_path: Path) -> dict:
     """Parse benchmark_hycal_timing TSV.
 
@@ -644,7 +649,8 @@ def parse_tsv(tsv_path: Path) -> dict:
                     continue
                 row  = dict(zip(cal_cols, parts))
                 name = row.pop("path")
-                calibration[name] = {k: _parse_float(v) for k, v in row.items()}
+                calibration[name] = {k: (v.strip() if k in _CAL_STR_COLS else _parse_float(v))
+                                     for k, v in row.items()}
 
     return {
         "headline":          headline,
@@ -889,6 +895,8 @@ def extract_row(
         "sigma_over_E_cb_pre":           nan,
         "sigma_over_E_cb_post":          nan,
         "sigma_over_E_CB":               nan,   # backward-compat alias
+        "preferred_fit":                 "",
+        "sigma_over_E_pref":             nan,
         # Pre-calibration peak columns
         "primary_peak_mu_pre_MeV":       nan,
         "primary_peak_sigma_pre_MeV":    nan,
@@ -939,6 +947,13 @@ def extract_row(
             row["sigma_over_E_post_G"] = sigma_post / mu_post
         else:
             row["sigma_over_E_post_G"] = nan
+
+    # Per-split preferred fit (benchmark --fit-select chi2): post Gauss or post CB;
+    # without the column the legacy CB value is kept.
+    pf = cal.get("preferred_fit", "")
+    row["preferred_fit"] = pf if pf in ("gauss", "cb") else ""
+    row["sigma_over_E_pref"] = (row["sigma_over_E_post_G"] if row["preferred_fit"] == "gauss"
+                                else row["sigma_over_E_cb_post"])
 
     # Peak detection on the inner-ring histogram — run on BOTH pre and post columns.
     target_peak = _TARGET_PEAK_MAP.get(run, _DEFAULT_TARGET_PEAK)
@@ -1001,7 +1016,8 @@ def _fmt(val, col: str) -> str:
                    "n_modules_used", "n_peaks_detected"):
             return f"{val:.0f}"
         if col in ("sigma_over_E_pre_G", "sigma_over_E_post_G",
-                   "sigma_over_E_cb_pre", "sigma_over_E_cb_post", "sigma_over_E_CB"):
+                   "sigma_over_E_cb_pre", "sigma_over_E_cb_post", "sigma_over_E_CB",
+                   "sigma_over_E_pref"):
             return f"{val:.4f}"
         return f"{val:.2f}"
     return str(val)
@@ -1274,14 +1290,16 @@ def write_findings_md(rows: list[dict], out_path: Path,
     )
     lines.append("")
     lines.append("## Per-Run Summary\n")
+    # sigma_over_E_pref = the CB value unless a split has preferred_fit (--fit-select chi2)
+    fit_lab = ("preferred fit" if any(r.get("preferred_fit") for r in rows) else "CB")
 
     for run in sorted(run_groups.keys()):
         rrows = run_groups[run]
         sigmas = [
-            r["sigma_over_E_CB"] * 100.0
+            r["sigma_over_E_pref"] * 100.0
             for r in rrows
-            if isinstance(r["sigma_over_E_CB"], float)
-            and not math.isnan(r["sigma_over_E_CB"])
+            if isinstance(r.get("sigma_over_E_pref"), float)
+            and not math.isnan(r["sigma_over_E_pref"])
         ]
         sec_rows = [r for r in rrows if r.get("secondary_peak_present") == "Y"]
         n_files  = len(rrows)
@@ -1291,8 +1309,8 @@ def write_findings_md(rows: list[dict], out_path: Path,
 
         lines.append(f"### Run {run}  (beam energy: {beam_e:.1f} MeV)\n")
         lines.append(f"- Files scanned: **{n_files}**")
-        lines.append(f"- σ_E/E (CB): mean = **{mean_s:.2f}%**, stdev = {std_s:.2f}%"
-                     if not math.isnan(mean_s) else "- σ_E/E (CB): insufficient data")
+        lines.append(f"- σ_E/E ({fit_lab}): mean = **{mean_s:.2f}%**, stdev = {std_s:.2f}%"
+                     if not math.isnan(mean_s) else f"- σ_E/E ({fit_lab}): insufficient data")
         lines.append(
             f"- Secondary peaks detected: **{len(sec_rows)}** / {n_files} files"
         )
@@ -1317,7 +1335,7 @@ def write_findings_md(rows: list[dict], out_path: Path,
     # Overall summary table
     lines.append("## Summary Table: Secondary Peaks by Run\n")
     lines.append(
-        "| Run | Beam E (MeV) | Files | Secondary peaks | Mean σ_E/E CB (%) | Assessment |"
+        f"| Run | Beam E (MeV) | Files | Secondary peaks | Mean σ_E/E {fit_lab} (%) | Assessment |"
     )
     lines.append(
         "|-----|-------------|-------|-----------------|-------------------|------------|"
@@ -1327,10 +1345,10 @@ def write_findings_md(rows: list[dict], out_path: Path,
         rrows    = run_groups[run]
         sec_rows = [r for r in rrows if r.get("secondary_peak_present") == "Y"]
         sigmas   = [
-            r["sigma_over_E_CB"] * 100.0
+            r["sigma_over_E_pref"] * 100.0
             for r in rrows
-            if isinstance(r["sigma_over_E_CB"], float)
-            and not math.isnan(r["sigma_over_E_CB"])
+            if isinstance(r.get("sigma_over_E_pref"), float)
+            and not math.isnan(r["sigma_over_E_pref"])
         ]
         mean_s  = float(np.mean(sigmas)) if sigmas else float("nan")
         has_sec = len(sec_rows) > 0
@@ -1396,6 +1414,21 @@ def write_findings_md(rows: list[dict], out_path: Path,
 # §7b — Combined calibrated-plot PDF
 # ===========================================================================
 
+def _pref_sigma_str(row: dict, default: str, fmt: str) -> str:
+    """σ_E/E text; with a per-split preferred fit: '3.27% (CB, preferred; Gauss 3.71%)'."""
+    pf = row.get("preferred_fit", "")
+    if pf not in ("gauss", "cb"):
+        return default
+    try:
+        pref = float(row["sigma_over_E_pref"]) * 100.0
+        other = float(row["sigma_over_E_post_G" if pf == "cb" else "sigma_over_E_cb_post"]) * 100.0
+    except (KeyError, TypeError, ValueError):
+        return default
+    f = lambda v: (fmt % v + "%") if not math.isnan(v) else "N/A"   # noqa: E731
+    return (f"{f(pref)} ({'CB' if pf == 'cb' else 'Gauss'}, preferred; "
+            f"{'Gauss' if pf == 'cb' else 'CB'} {f(other)})")
+
+
 def generate_combined_pdf(
     rows: list[dict],
     output_dir: Path,
@@ -1446,6 +1479,7 @@ def generate_combined_pdf(
             sigma_str = (
                 f"{sigma_e_f * 100.0:.2f}%" if not math.isnan(sigma_e_f) else "N/A"
             )
+            sigma_str = _pref_sigma_str(row, sigma_str, "%.2f")
 
             sec_present = row.get("secondary_peak_present", "N")
             sec_mu = row.get("secondary_peak_mu_post_MeV", float("nan"))
@@ -1779,6 +1813,7 @@ def main(argv=None) -> int:
             sec_post = row.get("secondary_peak_post_present", "N")
             sigma_cb = float(row["sigma_over_E_CB"])
             sigma_str = f"{sigma_cb * 100.0:.3f}%" if not math.isnan(sigma_cb) else "N/A"
+            sigma_str = _pref_sigma_str(row, sigma_str, "%.3f")
             log.info(
                 "  run=%d split=%05d  events=%s"
                 "  pre: μ=%s sec=%s  post: μ=%s sec=%s  σ_E/E=%s",

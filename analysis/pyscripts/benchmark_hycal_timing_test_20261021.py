@@ -94,6 +94,74 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
     argmax (earlier tables).  Gains, windows, CB columns, cluster TSVs and
     the peak-yield s_ref always use the fixed-window fit.
 
+  Moller rejection (--moller-reject {off,pair,kin,any}, default off; needs
+    --calibrate --cal-method elastic-window).  At low beam energy the ring
+    just outside the central box is bimodal: single-arm Moller (e-e)
+    electrons at E_ee(theta) lie under the e-p peak.  Per accepted event
+    two tags are computed.  pair: another reconstructed cluster with
+    |E1 + E2 - Ebeam| <= --moller-pair-tol * Ebeam (default 0.10) and
+    |dphi - 180| <= --moller-pair-dphi deg (default 10) from the selected
+    one.  kin: |E - E_ee(theta)| < --moller-kin-n * sigma and
+    |E - E'(theta)| > --moller-kin-m * sigma (defaults 3, 2; chosen on the 0.73 GeV ring,
+    output/moller_reject_20261028), E the cluster
+    energy after --gain-file / --pos-corr, theta from the cluster centroid,
+    sigma = res * E' with res = --moller-kin-res or the R4 two-term model
+    sqrt((0.025/sqrt(E'/1000))^2 + 0.007^2).  The mode selects pair, kin
+    or either as the rejection.  The elastic-window refinement sample is
+    filtered too unless --moller-reject-gains off (gains from the full
+    sample as without the flag); the headline inner-ring sample (pre/post
+    fits, CB, histograms, plots) and the peak yield always use the
+    filtered events.  Not affected: the bulk whole-spectrum fit, the
+    --cluster-dump npz, percrystal, the cb-peak / median refinements.
+    --write-cluster-tsv keeps every event and appends moller_pair,
+    moller_kin, moller_rej, partner_E_MeV, partner_acop_deg; result.tsv
+    gets a `# moller_reject` line with the counts.  Off: outputs unchanged.
+
+  Cluster-level CB fit options (--calibrate; --cb-two-peak is the default,
+    --no-cb-two-peak = the plain CB of earlier outputs).  At low beam energy
+    (0.73 GeV) single-arm Moller electrons
+    sit a few sigma below the e-p peak and the CB tail swallows them.
+    --cb-two-peak: simultaneous fit of two CBs (elastic + Moller) with a
+    common alpha and n and independent mu, sigma, amplitude; Moller mu
+    starts at E_ee(mean polar angle of the fitted sample) scaled by
+    mu / Ē' of the same spectrum (fixed-window Gaussian mu), mu_M is
+    bounded to [mu_el - (mu0 - E_ee) - 4σ, mu_el - σ] (σ = reported
+    Gaussian sigma, mu0 = elastic seed), sigma_M to [0.5, 2]·σ; the fit
+    range is extended down to E_ee-4σ within the histogram range
+    (target -800·kE).  No fallback flag when the histogram is empty.  The elastic CB mu / sigma fill the usual CB columns.
+    --cb-sigma-tie [FRAC]: single CB with sigma bounded to
+    sigma_G·(1±FRAC) (FRAC default 0.15), sigma_G = the reported Gaussian
+    sigma of the same histogram.  The options are mutually exclusive,
+    applied to legacy / gated and pre / post alike.  Either one appends
+    chi2/ndf (+ Moller mu, sigma, amplitude, integral fraction and a
+    fallback flag) columns to the calibration table and a `# cb_fit` line;
+    a failed fit falls back to the plain CB (flag = 1).
+    Two-peak falls back to the single (plain) CB, flag 0, when the Moller
+    component is not supported: --moller-reject on, E_ee outside the
+    histogram range or not below mu0 - σ, Moller amplitude < 2 x its fit
+    error, or mu_M outside [E_ee(r98) - 2σ_E, E_ee(r2) + 2σ_E] (r2 / r98 =
+    2nd / 98th percentile of the cluster radius in the fitted pool, E_ee
+    scaled as the seed above, σ_E = --moller-kin-res or the two-term model
+    of --moller-reject evaluated at mu_M; reason mu_M_off_kinematics; the
+    bounds go to the header as <spec>_tie_lo / _tie_hi).  cb_mode / cb_mode_pre columns (two_peak | single | sigma_tie)
+    and per-spectrum `<spec>_cb_mode` / `<spec>_single_reason` header tokens
+    record the outcome.
+
+  Fit selection (--fit-select {chi2,legacy}; default chi2).  chi2 (needs
+    --calibrate): per path, the post-calibration reported Gaussian and the
+    CB (two-peak or single) are compared on the same bins, mu ± 3σ of the
+    reported Gaussian (CMP_NSIGMA): Pearson chi2 with
+    variance max(model, 1), ndf = bins - free parameters (Gauss 3, single
+    CB 5, two-peak CB 8).  The lower chi2/ndf is the preferred fit (tie:
+    Gauss; na when the window has too few bins for the CB, ndf <= 0, so
+    readers fall back to their run-type table, printed as a NOTE; one fit
+    failed: the other).  Appends preferred_fit, chi2ndf_gauss (over its own
+    fit range: the final ±2σ window, fixed150: ±150·kS), chi2ndf_cmp_gauss,
+    chi2ndf_cmp_cb to the calibration table (chi2ndf_cb = the CB over its
+    own fit range is already there) and shows both on the calibrated plot,
+    the preferred one starred.  legacy: no preferred_fit column; readers use
+    their static run-type table.
+
 Outputs:
   <out>.tsv               — summary + histogram bins
   <out>.png               — energy spectrum + Gaussian fits
@@ -179,6 +247,9 @@ PREFIT_RANGE   = (-0.15, 0.10)   # per-module CB pre-fit range, fractions of mu_
                                  # divided by kS at other energies)
 MIN_FIT_EVENTS = 100             # min events in the pre-fit range for a CB fit
 MOLLER_GAP_NSIGMA = 3.0          # exclude a module if its elastic-Moller gap < this × sigma_M
+# R4 two-term resolution, rounded: sigma_E/E = sqrt((A/sqrt(E/GeV))^2 + B^2)
+MOLLER_RES_A = 0.025
+MOLLER_RES_B = 0.007
 
 
 def energy_loss(theta_deg):
@@ -253,6 +324,240 @@ def fit_peak_cb(values, e_lo, e_hi, bin_width, mu0_hint=None, escale=1.0):
     except Exception as e:
         sys.stderr.write(f"[WARN] crystal-ball fit failed: {e}\n")
         return nan, nan, nan, nan, nan, int(y.sum()), edges, counts
+
+
+def _cb_integral(A, sigma, alpha, n):
+    """Integral of crystal_ball(x, A, mu, sigma, alpha, n) over x (n > 1)."""
+    a = abs(alpha)
+    tail = n / (a * (n - 1.0)) * math.exp(-0.5 * a * a)
+    core = math.sqrt(math.pi / 2.0) * (1.0 + math.erf(a / math.sqrt(2.0)))
+    return A * sigma * (tail + core)
+
+
+def _cb_chi2(x, y, model, npar):
+    """Pearson chi2/ndf of counts y against model on bin centres x
+    (variance = max(model, 1)).  Returns (chi2/ndf, ndf)."""
+    m = np.asarray(model, dtype=float)
+    chi2 = float(np.sum((y - m) ** 2 / np.maximum(m, 1.0)))
+    ndf = int(len(x)) - int(npar)
+    return (chi2 / ndf if ndf > 0 else float('nan')), ndf
+
+
+def fit_cal_cb(values, lo, hi, bin_width, *, mode='default', mu0_hint=None,
+               escale=1.0, sigma_gauss=None, e_moller=None, tie_frac=0.15,
+               moller_reject=False, e_moller_range=None, moller_kin_res=None):
+    """Cluster-level CB fit of `values` histogrammed on [lo, hi].  Returns
+    a dict: mu, sigma, alpha, n, A (the CB columns; elastic component in
+    two-peak mode), n_in_fit, edges, counts, chi2ndf / ndf over the fit
+    range (x, y of the fitted bins), fit_lo / fit_hi, `model(x)` (total
+    fitted curve), mu_M / sigma_M / A_M / frac_M (two-peak only, else NaN;
+    frac_M = Moller share of the integral of the two CBs), `fallback`
+    (1 = requested mode failed, plain CB returned), `mode` (requested),
+    `cb_mode` (two_peak | single | sigma_tie, what was returned),
+    `single_reason` (two-peak only: why the single CB was returned) and
+    `sig_A_M` (Moller amplitude / its fit error) and `tie_lo` / `tie_hi`
+    (with e_moller_range = (E_ee at the largest, at the smallest radius)
+    given, two-peak needs tie_lo <= mu_M <= tie_hi, the range widened by
+    MOLLER_TIE_NSIGMA × σ_E(mu_M), σ_E/E = moller_kin_res or the two-term
+    model).
+      default   : fit_peak_cb exactly.
+      sigma-tie : one CB, sigma in sigma_gauss*(1 -+ tie_frac).
+      two-peak  : two CBs, shared alpha, n; Moller mu = mu_el - delta,
+                  initial mean `e_moller`, sigma0 = sigma_gauss; single
+                  CB when moller_reject, e_moller outside [lo, hi] or not
+                  below mu0 - sigma_gauss, or A_M < 2 err(A_M); see the
+                  module docstring."""
+    nan = float('nan')
+    mu, sig, alpha, n_, A, n_in, edges, counts = fit_peak_cb(
+        values, lo, hi, bin_width, mu0_hint=mu0_hint, escale=escale)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    out = dict(mode=mode, mu=mu, sigma=sig, alpha=alpha, n=n_, A=A,
+               n_in_fit=n_in, edges=edges, counts=counts, chi2ndf=nan,
+               ndf=0, fit_lo=nan, fit_hi=nan, mu_M=nan, sigma_M=nan,
+               A_M=nan, frac_M=nan, fallback=0, e_moller_init=nan,
+               model=None, cb_mode='single', single_reason='', sig_A_M=nan,
+               tie_lo=nan, tie_hi=nan)
+
+    def _plain():
+        """Chi2 / model of the plain-CB result above (fit mask as in
+        fit_peak_cb)."""
+        if not math.isfinite(mu):
+            return
+        mu0 = float(mu0_hint) if mu0_hint is not None \
+            else float(centres[int(np.argmax(counts))])
+        win = max(400.0 * escale, 12.0 * bin_width)
+        msk = (centres > mu0 - win) & (centres < mu0 + 0.5 * win)
+        out['chi2ndf'], out['ndf'] = _cb_chi2(
+            centres[msk], counts[msk].astype(float),
+            crystal_ball(centres[msk], A, mu, sig, alpha, n_), 5)
+        out['fit_lo'], out['fit_hi'] = float(centres[msk][0]), float(centres[msk][-1])
+        out['model'] = lambda x: crystal_ball(x, A, mu, sig, alpha, n_)
+
+    if mode == 'default' or not HAVE_SCIPY or counts.sum() == 0:
+        _plain()
+        return out
+    sg = float(sigma_gauss) if sigma_gauss is not None else nan
+    if not (math.isfinite(sg) and sg > 0):
+        out['fallback'] = 1
+        _plain()
+        return out
+
+    mu0 = float(mu0_hint) if mu0_hint is not None \
+        else float(centres[int(np.argmax(counts))])
+    win = max(400.0 * escale, 12.0 * bin_width)
+    if mode == 'two-peak':
+        em_ok = e_moller is not None and math.isfinite(e_moller)
+        if em_ok:
+            out['e_moller_init'] = float(e_moller)
+        reason = ('moller_reject' if moller_reject else
+                  'no_e_ee' if not em_ok else
+                  'e_ee_out_of_range' if not (lo <= e_moller <= hi) else
+                  'e_ee_not_below_peak' if e_moller > mu0 - 1.0 * sg else '')
+        if reason:
+            out['single_reason'] = reason
+            _plain()
+            return out
+    try:
+        if mode == 'sigma-tie':
+            msk = (centres > mu0 - win) & (centres < mu0 + 0.5 * win)
+            x, y = centres[msk], counts[msk].astype(float)
+            if y.sum() < 50:
+                raise RuntimeError("too few entries")
+            s_lo = max(1.0, sg * (1.0 - tie_frac))
+            s_hi = max(s_lo * 1.0001, sg * (1.0 + tie_frac))
+            p0 = [float(y.max()), mu0, min(max(sg, s_lo), s_hi), 1.5, 2.0]
+            bnd = ([0, lo - 200.0 * escale, s_lo, 0.1, 1.01],
+                   [np.inf, hi + 200.0 * escale, s_hi, 20.0, 50.0])
+            popt, _ = curve_fit(crystal_ball, x, y, p0=p0, bounds=bnd,
+                                maxfev=10000)
+            A_, mu_, sg_, al_, n2 = (float(v) for v in popt)
+            out.update(mu=mu_, sigma=abs(sg_), alpha=al_, n=n2, A=A_,
+                       n_in_fit=int(y.sum()))
+            out['chi2ndf'], out['ndf'] = _cb_chi2(
+                x, y, crystal_ball(x, *popt), 5)
+            out['fit_lo'], out['fit_hi'] = float(x[0]), float(x[-1])
+            out['model'] = lambda xx: crystal_ball(xx, A_, mu_, abs(sg_), al_, n2)
+            out['cb_mode'] = 'sigma_tie'
+            return out
+
+        if mode != 'two-peak':
+            raise ValueError(f"unknown cb mode {mode!r}")
+        em0 = float(e_moller)
+        x_lo = min(mu0 - win, em0 - 4.0 * sg)
+        msk = (centres > x_lo) & (centres < mu0 + 0.5 * win)
+        x, y = centres[msk], counts[msk].astype(float)
+        if y.sum() < 50:
+            raise RuntimeError("too few entries")
+        near_el = np.abs(x - mu0) < max(sg, bin_width)
+        near_mo = np.abs(x - em0) < max(sg, bin_width)
+        a_el0 = float(y[near_el].max()) if near_el.any() else float(y.max())
+        a_mo0 = float(y[near_mo].mean()) if near_mo.any() else 1.0
+        d_hi = (mu0 - em0) + 4.0 * sg
+
+        def two_cb(xx, Ael, muel, sgel, al, nn, Amo, dlt, sgmo):
+            return (crystal_ball(xx, Ael, muel, sgel, al, nn)
+                    + crystal_ball(xx, Amo, muel - dlt, sgmo, al, nn))
+
+        p0 = [a_el0, mu0, sg, 1.5, 2.0, max(a_mo0, 1.0), mu0 - em0, sg]
+        bnd = ([0, mu0 - 3.0 * sg, 1.0, 0.1, 1.01, 0, 1.0 * sg, 0.5 * sg],
+               [np.inf, mu0 + 3.0 * sg, win, 20.0, 50.0, np.inf, d_hi, 2.0 * sg])
+        popt, pcov = curve_fit(two_cb, x, y, p0=p0, bounds=bnd, maxfev=20000)
+        Ael, muel, sgel, al, nn, Amo, dlt, sgmo = (float(v) for v in popt)
+        if not all(math.isfinite(v) for v in popt):
+            raise RuntimeError("non-finite parameters")
+        vA = float(pcov[5, 5]) if np.ndim(pcov) == 2 else nan
+        eA = math.sqrt(vA) if (math.isfinite(vA) and vA >= 0) else nan
+        out['sig_A_M'] = Amo / eA if (math.isfinite(eA) and eA > 0) else nan
+        if not Amo > 2.0 * eA:            # NaN / inf error -> not supported
+            out['single_reason'] = 'moller_amp_zero'
+            _plain()
+            return out
+        if e_moller_range is not None:    # Moller CB must sit in E_ee(r)
+            mu_m = muel - dlt
+            res_ = (moller_kin_res if moller_kin_res is not None
+                    else math.sqrt((MOLLER_RES_A / math.sqrt(max(mu_m, 1.0) / 1000.0)) ** 2
+                                   + MOLLER_RES_B ** 2))
+            es = MOLLER_TIE_NSIGMA * res_ * mu_m
+            out['tie_lo'] = float(e_moller_range[0]) - es
+            out['tie_hi'] = float(e_moller_range[1]) + es
+            if not out['tie_lo'] <= mu_m <= out['tie_hi']:
+                out['single_reason'] = 'mu_M_off_kinematics'
+                _plain()
+                return out
+        i_el = _cb_integral(Ael, sgel, al, nn)
+        i_mo = _cb_integral(Amo, sgmo, al, nn)
+        out.update(mu=muel, sigma=abs(sgel), alpha=al, n=nn, A=Ael,
+                   n_in_fit=int(y.sum()), mu_M=muel - dlt, sigma_M=sgmo,
+                   A_M=Amo,
+                   frac_M=(i_mo / (i_el + i_mo) if (i_el + i_mo) > 0 else nan))
+        out['chi2ndf'], out['ndf'] = _cb_chi2(x, y, two_cb(x, *popt), 8)
+        out['fit_lo'], out['fit_hi'] = float(x[0]), float(x[-1])
+        out['model'] = lambda xx: two_cb(xx, *popt)
+        out['cb_mode'] = 'two_peak'
+        return out
+    except Exception as e:
+        sys.stderr.write(f"[WARN] CB fit mode {mode} failed ({e}); "
+                         f"falling back to the plain CB\n")
+        out.update(mode=mode, fallback=1, mu_M=nan, sigma_M=nan, A_M=nan,
+                   frac_M=nan, mu=mu, sigma=sig, alpha=alpha, n=n_, A=A,
+                   n_in_fit=n_in, cb_mode='single',
+                   single_reason=('fit_failed' if mode == 'two-peak' else ''))
+        _plain()
+        return out
+
+
+def select_fit_chi2(centres, counts, gfit, gwin, cbr, bin_width, escale=1.0):
+    """--fit-select chi2: compare the reported Gaussian gfit = (mu, sigma, A)
+    and the CB result `cbr` (fit_cal_cb dict) on the bins with centres in
+    mu ± CMP_NSIGMA·sigma.  The Gaussian's own-range chi2 uses its final
+    window gwin = (lo, hi) (lo <= centre <= hi, as the ±2σ refit); gwin
+    None / NaN = the fixed ±max(150·escale, 4·bin) window around the argmax.
+    Pearson chi2 (_cb_chi2), ndf = bins - free parameters (3 / 5 / 8).
+    Returns dict(chi2ndf_gauss (own range), chi2ndf_cmp_gauss, ndf_gauss
+    (window), chi2ndf_cb (own range), chi2ndf_cmp_cb, ndf_cmp_cb, lo, hi
+    (window), preferred = the lower
+    chi2/ndf ('gauss' on a tie); 'na' when the CB ndf <= 0 (too few bins in
+    the window) or both are undefined; the other one when one fit failed)."""
+    nan = float('nan')
+    centres = np.asarray(centres, dtype=float)
+    y_all = np.asarray(counts, dtype=float)
+    if gwin is not None and all(math.isfinite(v) for v in gwin):
+        own = (centres >= gwin[0]) & (centres <= gwin[1])
+    else:
+        mu0 = float(centres[int(np.argmax(y_all))]) if y_all.sum() > 0 else nan
+        win = max(150.0 * escale, 4.0 * bin_width)
+        own = (centres > mu0 - win) & (centres < mu0 + win)
+    mu, sg, A = (float(v) for v in gfit)
+    g_ok = all(math.isfinite(v) for v in (mu, sg, A)) and sg > 0
+    lo, hi = ((mu - CMP_NSIGMA * sg, mu + CMP_NSIGMA * sg) if g_ok else (nan, nan))
+    mask = (centres >= lo) & (centres <= hi)
+    x, y = centres[mask], y_all[mask]
+    out = dict(chi2ndf_gauss=nan, chi2ndf_cmp_gauss=nan, ndf_gauss=0,
+               chi2ndf_cb=float(cbr['chi2ndf']) if cbr is not None else nan,
+               chi2ndf_cmp_cb=nan, ndf_cmp_cb=0, lo=lo, hi=hi, preferred='na')
+    if g_ok and own.any():
+        out['chi2ndf_gauss'] = _cb_chi2(centres[own], y_all[own],
+                                        gauss(centres[own], A, mu, sg), 3)[0]
+    if len(x) and g_ok:
+        out['chi2ndf_cmp_gauss'], out['ndf_gauss'] = _cb_chi2(
+            x, y, gauss(x, A, mu, sg), 3)
+    if len(x) and cbr is not None and cbr['model'] is not None:
+        npar = 8 if cbr['cb_mode'] == 'two_peak' else 5
+        with np.errstate(over='ignore', invalid='ignore'):
+            m = np.asarray(cbr['model'](x), dtype=float)
+        if np.all(np.isfinite(m)):
+            out['chi2ndf_cmp_cb'], out['ndf_cmp_cb'] = _cb_chi2(x, y, m, npar)
+    cg, cc = out['chi2ndf_cmp_gauss'], out['chi2ndf_cmp_cb']
+    if math.isfinite(cg) and math.isfinite(cc):
+        out['preferred'] = 'cb' if cc < cg else 'gauss'
+    elif len(x) and len(x) <= (8 if cbr is not None and cbr['cb_mode'] == 'two_peak'
+                               else 5):
+        pass                              # ndf <= 0: comparison undefined -> na
+    elif math.isfinite(cg):
+        out['preferred'] = 'gauss'        # CB fit failed
+    elif math.isfinite(cc):
+        out['preferred'] = 'cb'           # Gaussian failed
+    return out
 
 
 def per_module_peak(values, bin_width, escale=1.0):
@@ -686,6 +991,12 @@ def fit_peak(values, e_lo, e_hi, bin_width, escale=1.0):
 
 
 GAUSS_WINDOWS = ('2sigma', 'fixed150')
+FIT_SELECTS = ('chi2', 'legacy')
+FIT_SELECT_DEFAULT = 'chi2'       # --fit-select default
+CB_TWO_PEAK_DEFAULT = True        # --cb-two-peak default (with --calibrate)
+CMP_NSIGMA = 3.0                  # --fit-select chi2 window: Gauss mu ± CMP_NSIGMA·σ
+MOLLER_TIE_NSIGMA = 2.0           # two-peak: mu_M within E_ee(r98..r2) ± this × σ_E(mu_M)
+MOLLER_TIE_PCT = (2.0, 98.0)      # cluster-radius percentiles of the tie range
 
 
 def _hist_geometry(centres, bin_width, e_lo, e_hi):
@@ -1839,11 +2150,57 @@ def main(argv=None):
                     help="Clustering: override non_linear_corr on both "
                          "clusterers (the cluster-energy nl1/nl2 correction; "
                          "the binding default is on).  Default: untouched.")
+    ap.add_argument("--cluster-profile", choices=("simple", "geant4"),
+                    default="simple",
+                    help="Clustering: energy-sharing profile of both "
+                         "clusterers.  simple (default) = SimpleProfile "
+                         "(R4).  geant4 = the Geant4 tables that "
+                         "PipelineBuilder loads (database/cluster_profiles/"
+                         "prof_{pwo,lg}.dat); all other cluster settings "
+                         "unchanged.  The profile only enters the split of "
+                         "groups with 2-9 local maxima.  geant4 adds a "
+                         "`# cluster_profile` header line.")
     ap.add_argument("--moller-gap-nsigma", type=float,
                     default=MOLLER_GAP_NSIGMA, metavar="X",
                     help="Elastic-window: exclude a seed module if its "
                          "elastic-Moller gap is < X sigma_M (default "
                          f"{MOLLER_GAP_NSIGMA:g}; 0 disables the exclusion).")
+    ap.add_argument("--moller-reject", choices=("off", "pair", "kin", "any"),
+                    default="off",
+                    help="Reject single-arm Moller events from the elastic-"
+                         "window headline sample and peak yield (needs "
+                         "--calibrate --cal-method elastic-window).  pair: "
+                         "a second cluster with E1+E2 within --moller-pair-tol "
+                         "of Ebeam, back-to-back within --moller-pair-dphi; "
+                         "kin: cluster energy near E_ee(theta) and away "
+                         "from E'(theta); any: either.  Default off "
+                         "(outputs unchanged).")
+    ap.add_argument("--moller-reject-gains", choices=("on", "off"),
+                    default="on",
+                    help="--moller-reject: on = the elastic-window gain "
+                         "refinement also uses the filtered sample; off = "
+                         "gains from the unfiltered sample, the rejection "
+                         "applies to the headline sample, peak yield and "
+                         "the cluster-TSV tags only (default on).")
+    ap.add_argument("--moller-kin-n", type=float, default=3.0, metavar="N",
+                    help="--moller-reject kin: Moller if |E - E_ee| < N sigma "
+                         "(default 3).")
+    ap.add_argument("--moller-kin-m", type=float, default=2.0, metavar="M",
+                    help="--moller-reject kin: and |E - E'| > M sigma "
+                         "(default 2).")
+    ap.add_argument("--moller-kin-res", type=float, default=None,
+                    metavar="FRAC",
+                    help="--moller-reject kin: sigma_E/E (fraction).  "
+                         "Default: sqrt((0.025/sqrt(E'/GeV))^2 + 0.007^2) "
+                         "at the elastic energy E' of the cluster angle.")
+    ap.add_argument("--moller-pair-tol", type=float, default=0.10,
+                    metavar="FRAC",
+                    help="--moller-reject pair: |E1+E2-Ebeam| <= FRAC*Ebeam "
+                         "(default 0.10).")
+    ap.add_argument("--moller-pair-dphi", type=float, default=10.0,
+                    metavar="DEG",
+                    help="--moller-reject pair: |dphi-180| <= DEG between "
+                         "the two clusters (default 10).")
     ap.add_argument("--cluster-times", action="store_true",
                     help="With --write-cluster-tsv: append columns evnum, "
                          "seed_time_ns, n_members, members "
@@ -1985,10 +2342,57 @@ def main(argv=None):
                     help="--mf-nb-amp: onset at the seed time (fixed, default) "
                          "or the largest amplitude over onset shifts of "
                          "-2..+2 ns (search).")
+    ap.add_argument("--cb-two-peak", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Cluster-level CB fit (--calibrate): two Crystal "
+                         "Balls, elastic + Moller, single CB when the Moller "
+                         "component is not supported (see the module "
+                         "docstring).  Default "
+                         + ("on with --calibrate unless --cb-sigma-tie"
+                            if CB_TWO_PEAK_DEFAULT else "off")
+                         + "; exclusive with --cb-sigma-tie.")
+    ap.add_argument("--fit-select", choices=FIT_SELECTS, default=None,
+                    help="Preferred cluster-level fit per path (--calibrate): "
+                         "chi2 = lower chi2/ndf of the Gaussian and the CB in "
+                         "the Gaussian's ±3σ window (preferred_fit + chi2 "
+                         "columns); legacy = no preferred_fit column (readers "
+                         "use their run-type table).  Default "
+                         f"{FIT_SELECT_DEFAULT}.")
+    ap.add_argument("--cb-sigma-tie", type=float, nargs='?', const=0.15,
+                    default=None, metavar="FRAC",
+                    help="Cluster-level CB fit (--calibrate): single CB with "
+                         "sigma within sigma_G*(1+-FRAC) (FRAC 0.15 when "
+                         "given without a value; see the module docstring).  "
+                         "Default off; exclusive with --cb-two-peak.")
     args = ap.parse_args(argv)
+    if args.fit_select is None:
+        args.fit_select = FIT_SELECT_DEFAULT
+    if args.cb_two_peak is None:          # not given: the default, if usable
+        args.cb_two_peak = bool(CB_TWO_PEAK_DEFAULT and args.calibrate
+                                and args.cb_sigma_tie is None)
+
+    if args.cb_two_peak and args.cb_sigma_tie is not None:
+        sys.stderr.write("[ERROR] --cb-two-peak and --cb-sigma-tie are "
+                         "mutually exclusive.\n")
+        sys.exit(2)
+    if args.cb_sigma_tie is not None and not (0.0 < args.cb_sigma_tie < 1.0):
+        sys.stderr.write("[ERROR] --cb-sigma-tie FRAC must be in (0, 1).\n")
+        sys.exit(2)
+    if (args.cb_two_peak or args.cb_sigma_tie is not None) \
+            and not args.calibrate:
+        sys.stderr.write("[ERROR] --cb-two-peak / --cb-sigma-tie require "
+                         "--calibrate.\n")
+        sys.exit(2)
 
     if args.veto_dphi is not None and args.veto_second_cluster is None:
         ap.error("--veto-dphi requires --veto-second-cluster")
+
+    if args.moller_reject != 'off' and not (
+            args.calibrate and args.cal_method == 'elastic-window'):
+        sys.stderr.write(
+            "[ERROR] --moller-reject requires --calibrate with "
+            "--cal-method elastic-window.\n")
+        sys.exit(2)
 
     if args.cluster_times and not args.write_cluster_tsv:
         sys.stderr.write(
@@ -2293,10 +2697,42 @@ def main(argv=None):
         if args.cluster_non_linear_corr is not None:
             cfg.non_linear_corr = bool(args.cluster_non_linear_corr)
         cl = det.HyCalCluster(p.hycal)
+        if args.cluster_profile == 'geant4':
+            # The profile is a C++-only config field; the builder's config
+            # carries its Geant4 profile and SetConfig installs it.  The
+            # second set_config (profile unset) keeps that profile and
+            # restores every other field to cfg.
+            cl.set_config(base_cfg)
         cl.set_config(cfg)
         return cl
     cl_legacy = _make_cluster(-1.0)
     cl_new    = _make_cluster(W)
+    if args.cluster_profile == 'geant4':
+        # Self-check: a 1000/50/200 MeV row of three PbWO4 modules has two
+        # maxima; the split must differ from SimpleProfile.
+        w_ = {(m_.row, m_.column): i_ for i_, m_ in
+              enumerate(p.hycal.module(j_) for j_ in
+                        range(p.hycal.module_count()))
+              if m_.name.startswith('W') and not (m_.flag >> 5) & 1}
+        r_, c_ = next(k_ for k_ in sorted(w_) if (k_[0], k_[1] + 1) in w_
+                      and (k_[0], k_[1] + 2) in w_)
+        cl_s = det.HyCalCluster(p.hycal)            # SimpleProfile twin
+        cl_s.set_config(cl_legacy.get_config())     # (its profile is unset)
+        split_E = []
+        for cl_ in (cl_s, cl_legacy):
+            cl_.clear()
+            for dc_, e_ in ((0, 1000.0), (1, 50.0), (2, 200.0)):
+                cl_.add_hit(w_[(r_, c_ + dc_)], e_, 0.0)
+            cl_.form_clusters()
+            split_E.append(sorted(round(x_.hit.energy, 3)
+                                  for x_ in cl_.reconstruct_matched()))
+            cl_.clear()
+        print(f"[setup] cluster profile: geant4 (builder table); split check "
+              f"simple {split_E[0]} vs geant4 {split_E[1]} MeV", flush=True)
+        if split_E[0] == split_E[1]:
+            sys.exit("[ERROR] --cluster-profile geant4: split identical to "
+                     "SimpleProfile; the builder did not load the Geant4 "
+                     "profile (see the '[setup] HC profile' line).")
 
     # Bulk: single-cluster energies for the bulk Gaussian fit.
     # Per-event: (seed_id, x, y, row, col, seed_E, cluster_E, f_eff) —
@@ -2306,6 +2742,11 @@ def main(argv=None):
     # members_t, seed_t); the last two are None unless --cluster-times.
     energies_legacy, energies_new = [], []
     events_legacy,   events_new   = [], []
+    # --moller-reject: per event (pair, partner_E, partner_acop, x_cl, y_cl),
+    # aligned 1:1 with events_legacy / events_new; empty when off.
+    mr_mode = args.moller_reject
+    mr_on = mr_mode != 'off'
+    mtag_legacy, mtag_new = [], []
     n_legacy = n_new = n_phys = n_kept = n_read = n_files_open = 0
     ncl_l = [0, 0, 0]       # events with 0 / 1 / >=2 clusters > signal-min
     ncl_n = [0, 0, 0]
@@ -2383,6 +2824,27 @@ def main(argv=None):
                 return True
         return False
 
+    def moller_pair_tag(recs, prim):
+        """--moller-reject: (pair, partner_E, partner_acop, x_cl, y_cl) for
+        the selected cluster `prim` against the other clusters in `recs`."""
+        e1 = prim.hit.energy
+        ebeam_ = float(p.geo.Ebeam)
+        phi1 = math.atan2(prim.hit.y, prim.hit.x)
+        pair = 0
+        best_acop, best_e = float('nan'), float('nan')
+        for r2 in recs:
+            if r2 is prim:
+                continue
+            e2 = r2.hit.energy
+            dphi = math.degrees(math.atan2(r2.hit.y, r2.hit.x) - phi1)
+            acop = abs(dphi % 360.0 - 180.0)
+            if (abs(e1 + e2 - ebeam_) <= args.moller_pair_tol * ebeam_
+                    and acop <= args.moller_pair_dphi):
+                pair = 1
+            if math.isnan(best_acop) or acop < best_acop:
+                best_acop, best_e = acop, e2
+        return (pair, best_e, best_acop, prim.hit.x, prim.hit.y)
+
     def finish_event(fvec, npulse=None, evnum=-1):
         """Cluster the buffered hits of one event and accumulate the energies.
 
@@ -2422,6 +2884,8 @@ def main(argv=None):
                                           cluster_lms_feff(r.cluster, fvec))
                                          + (member_rec(r, evnum, 'legacy')
                                             if rec_ext else ()))
+                    if mr_on:
+                        mtag_legacy.append(moller_pair_tag(rec_l, r))
         if (len(big_n) == 1 and not (veto_on and veto_other(
                 rec_n, big_n[0], 'new', cl_new))):
             r = big_n[0]
@@ -2439,6 +2903,8 @@ def main(argv=None):
                                        cluster_lms_feff(r.cluster, fvec))
                                       + (member_rec(r, evnum, 'new')
                                          if rec_ext else ()))
+                    if mr_on:
+                        mtag_new.append(moller_pair_tag(rec_n, r))
         return big_l, big_n
 
     ch = dec.EvChannel()
@@ -2803,6 +3269,41 @@ def main(argv=None):
                  f"with own fit" if pcd['form'] == 'hybrid' else ""),
               flush=True)
 
+    # ---- --moller-reject: kin tag, rejection flags, filtered lists --------
+    evf_legacy, evf_new = events_legacy, events_new
+    mr_tags = {}
+    if mr_on:
+        ebeam_mr = float(p.geo.Ebeam)
+        hz_mr = float(p.geo.hycal_z)
+
+        def moller_kin(e_cl, x_cl, y_cl):
+            th_ = math.degrees(math.atan(math.hypot(x_cl, y_cl) / hz_mr))
+            ep_ = expected_energy_elastic(th_, ebeam_mr, m_target)
+            ee_ = expected_energy_ee(th_, ebeam_mr)
+            res_ = (args.moller_kin_res if args.moller_kin_res is not None
+                    else math.sqrt((MOLLER_RES_A / math.sqrt(ep_ / 1000.0)) ** 2
+                                   + MOLLER_RES_B ** 2))
+            sig_ = res_ * ep_
+            return int(abs(e_cl - ee_) < args.moller_kin_n * sig_
+                       and abs(e_cl - ep_) > args.moller_kin_m * sig_)
+
+        for lab_, evs_, mt_ in (('legacy', events_legacy, mtag_legacy),
+                                ('new', events_new, mtag_new)):
+            assert len(evs_) == len(mt_), (lab_, len(evs_), len(mt_))
+            kin_ = [moller_kin(e_[6], t_[3], t_[4])
+                    for e_, t_ in zip(evs_, mt_)]
+            if mr_mode == 'pair':
+                rej_ = [t_[0] for t_ in mt_]
+            elif mr_mode == 'kin':
+                rej_ = kin_
+            else:
+                rej_ = [int(t_[0] or k_) for t_, k_ in zip(mt_, kin_)]
+            mr_tags[lab_] = (kin_, rej_)
+        evf_legacy = [e_ for e_, r_ in zip(events_legacy, mr_tags['legacy'][1])
+                      if not r_]
+        evf_new = [e_ for e_, r_ in zip(events_new, mr_tags['new'][1])
+                   if not r_]
+
     # ---- Optional: per-seed-module calibration on the inner ring ----------
     cal = None
     rows_by_path = {}
@@ -2812,6 +3313,7 @@ def main(argv=None):
     gw_cal = None
     pcm = bool(args.calibrate and args.cal_method == 'percrystal')
     pc_res, pc_ecal, pc_modinfo = {}, {}, {}
+    mr_stats = {}
     if args.calibrate:
         ew = args.cal_method == 'elastic-window'
         print()
@@ -2840,10 +3342,51 @@ def main(argv=None):
                   f"{args.window_nsigma:g}σ, target {target} ({kin_label}, "
                   f"M {m_target:.1f} MeV)")
             if ew:
+                if mr_on:
+                    for lab_, evs_, mt_ in (('legacy', events_legacy,
+                                             mtag_legacy),
+                                            ('new', events_new, mtag_new)):
+                        kin_, rej_ = mr_tags[lab_]
+                        pool_k = _select_pool(
+                            [e_ + (k_,) for k_, e_ in enumerate(evs_)],
+                            inner_r=args.inner_radius,
+                            min_seed_E=args.min_seed_energy,
+                            exclude_rowcol=excl)
+                        mr_stats[lab_] = dict(
+                            events=len(evs_),
+                            pair=sum(t_[0] for t_ in mt_), kin=sum(kin_),
+                            rejected=sum(rej_), pool=len(pool_k),
+                            pool_rejected=sum(rej_[e_[-1]] for e_ in pool_k))
+                    print(f"  moller-reject   : mode {mr_mode}, gains "
+                          f"{args.moller_reject_gains}; "
+                          + "; ".join(
+                              f"{lab_} events {st_['events']} pair "
+                              f"{st_['pair']} kin {st_['kin']} rejected "
+                              f"{st_['rejected']}, pool {st_['pool']} "
+                              f"rejected {st_['pool_rejected']}"
+                              for lab_, st_ in mr_stats.items()),
+                          flush=True)
+                fit_l, fit_n = ((evf_legacy, evf_new)
+                                if mr_on and args.moller_reject_gains == 'on'
+                                else (events_legacy, events_new))
                 gains_l, raw_l, corr_l, nmod_l, rows_l, sg_l, ep_l, mg_l = \
-                    fit_elastic_window_gains(events_legacy, **ew_kw)
+                    fit_elastic_window_gains(fit_l, **ew_kw)
                 gains_n, raw_n, corr_n, nmod_n, rows_n, sg_n, ep_n, mg_n = \
-                    fit_elastic_window_gains(events_new, **ew_kw)
+                    fit_elastic_window_gains(fit_n, **ew_kw)
+                if mr_on:
+                    # headline inner-ring sample: always the filtered events
+                    pool_l = _select_pool(evf_legacy, inner_r=args.inner_radius,
+                                          min_seed_E=args.min_seed_energy,
+                                          exclude_rowcol=excl)
+                    pool_n = _select_pool(evf_new, inner_r=args.inner_radius,
+                                          min_seed_E=args.min_seed_energy,
+                                          exclude_rowcol=excl)
+                    raw_l = np.array([e[6] for e in pool_l if e[0] in gains_l])
+                    corr_l = np.array([e[6] * gains_l[e[0]] for e in pool_l
+                                       if e[0] in gains_l])
+                    raw_n = np.array([e[6] for e in pool_n if e[0] in gains_n])
+                    corr_n = np.array([e[6] * gains_n[e[0]] for e in pool_n
+                                       if e[0] in gains_n])
             else:
                 # Per-crystal solver (percrystal_calib.py): the window
                 # machinery stays fit_elastic_window_gains, re-run on the
@@ -2933,6 +3476,8 @@ def main(argv=None):
         # Peak-yield s_ref stays on the fixed-window Gaussian (as the CB
         # seeds above), whatever --gauss-window reports.
         s_ref_fixed = _ratio(sig_l_post, mu_l_post)
+        mu_fix = dict(l_pre=mu_l_pre, n_pre=mu_n_pre,
+                      l_post=mu_l_post, n_post=mu_n_post)
         if args.gauss_window == '2sigma':
             gw_cal = {}
             for key, cnt, mu0_, sg0_ in (
@@ -2948,7 +3493,81 @@ def main(argv=None):
             mu_l_post, sig_l_post, A_l_post, _ = gw_cal['l_post'][:4]
             mu_n_post, sig_n_post, A_n_post, _ = gw_cal['n_post'][:4]
 
+        # --cb-two-peak / --cb-sigma-tie / --fit-select chi2: refit the
+        # cluster-level CB (the default fits above stay untouched when none
+        # is given; 'default' = the same plain CB plus its chi2 / model).
+        cb_mode = ('two-peak' if args.cb_two_peak else
+                   'sigma-tie' if args.cb_sigma_tie is not None else
+                   'default' if args.fit_select == 'chi2' else None)
+        cbx = None
+        if cb_mode is not None:
+            hz_cb = float(p.geo.hycal_z)
+            gl_cb = {'l': (evf_legacy, gains_l, 'legacy'),
+                     'n': (evf_new, gains_n, 'new')}
+            cbx = {}
+            for key, vals, sgG in (
+                    ('l_pre', raw_l, sig_l_pre), ('n_pre', raw_n, sig_n_pre),
+                    ('l_post', corr_l, sig_l_post),
+                    ('n_post', corr_n, sig_n_post)):
+                evs_cb, gns_cb, lab_cb = gl_cb[key[0]]
+                e_m = e_rng = None
+                if cb_mode == 'two-peak' and not mr_on:
+                    pool_cb = [e for e in _select_pool(
+                        evs_cb, inner_r=args.inner_radius,
+                        min_seed_E=args.min_seed_energy, exclude_rowcol=excl)
+                        if e[0] in gns_cb]
+                    if pool_cb:
+                        th_cb = np.mean([module_theta_deg(
+                            *((e[10], e[11]) if len(e) > 11 else (e[1], e[2])),
+                            hz_cb) for e in pool_cb])
+                        epm = eprime_by_path.get(lab_cb, float('nan'))
+                        if not math.isfinite(epm):
+                            epm = target_ref
+                        mg_cb = mu_fix[key]     # measured scale of this spectrum
+                        sc_cb = (mg_cb / epm if (math.isfinite(mg_cb)
+                                 and math.isfinite(epm) and epm > 0) else 1.0)
+                        e_m = expected_energy_ee(th_cb, ebeam) * sc_cb
+                        r_lo, r_hi = np.percentile([math.hypot(
+                            *((e[10], e[11]) if len(e) > 11 else (e[1], e[2])))
+                            for e in pool_cb], MOLLER_TIE_PCT)
+                        e_rng = tuple(expected_energy_ee(
+                            math.degrees(math.atan(r_ / hz_cb)), ebeam) * sc_cb
+                            for r_ in (r_hi, r_lo))
+                cbx[key] = fit_cal_cb(
+                    vals, cal_lo, cal_hi, bw, mode=cb_mode,
+                    mu0_hint=mu_fix[key], escale=kS, sigma_gauss=sgG,
+                    e_moller=e_m, moller_reject=mr_on, e_moller_range=e_rng,
+                    moller_kin_res=args.moller_kin_res,
+                    tie_frac=(args.cb_sigma_tie if cb_mode == 'sigma-tie'
+                              else 0.15))
+            r_ = cbx['l_post']
+            mu_cb_l_post, sig_cb_l_post, alpha_l_post, n_l_post, A_cb_l_post = (
+                r_['mu'], r_['sigma'], r_['alpha'], r_['n'], r_['A'])
+            r_ = cbx['n_post']
+            mu_cb_n_post, sig_cb_n_post, alpha_n_post, n_n_post, A_cb_n_post = (
+                r_['mu'], r_['sigma'], r_['alpha'], r_['n'], r_['A'])
+            r_ = cbx['l_pre']
+            mu_cb_l_pre, sig_cb_l_pre, alpha_l_pre, n_l_pre, A_cb_l_pre = (
+                r_['mu'], r_['sigma'], r_['alpha'], r_['n'], r_['A'])
+            r_ = cbx['n_pre']
+            mu_cb_n_pre, sig_cb_n_pre, alpha_n_pre, n_n_pre, A_cb_n_pre = (
+                r_['mu'], r_['sigma'], r_['alpha'], r_['n'], r_['A'])
+
+        # --fit-select chi2: Gaussian vs CB chi2/ndf in the Gaussian window.
+        fsel = None
+        if cbx is not None and args.fit_select == 'chi2':
+            fsel = {k: select_fit_chi2(
+                        cal_centres, cnt_, (mu_, sg_, A_),
+                        gw_cal[k][4:6] if gw_cal is not None else None,
+                        cbx[k], bw, kS)
+                    for k, cnt_, mu_, sg_, A_ in (
+                        ('l_post', counts_l_post, mu_l_post, sig_l_post,
+                         A_l_post),
+                        ('n_post', counts_n_post, mu_n_post, sig_n_post,
+                         A_n_post))}
+
         cal = dict(
+            cb_mode=cb_mode, cbx=cbx, fsel=fsel,
             n_modules_l=nmod_l, n_modules_n=nmod_n,
             n_events_l=len(raw_l), n_events_n=len(raw_n),
             mu_l_pre=mu_l_pre, sig_l_pre=sig_l_pre,
@@ -2980,8 +3599,8 @@ def main(argv=None):
         common = set(gains_l) & set(gains_n)
         tgt_m = {r['module']: r['target'] for r in rows_l} if (ew or pcm) else {}
         py_n = {}
-        for lab, evs, gns in (('legacy', events_legacy, gains_l),
-                              ('new', events_new, gains_n)):
+        for lab, evs, gns in (('legacy', evf_legacy, gains_l),
+                              ('new', evf_new, gains_n)):
             n_in = 0
             if math.isfinite(s_ref) and s_ref > 0:
                 pool = _select_pool(evs, inner_r=args.inner_radius,
@@ -3027,6 +3646,24 @@ def main(argv=None):
               f"(α_l={alpha_l_pre:.2f} n_l={n_l_pre:.1f}  α_n={alpha_n_pre:.2f} n_n={n_n_pre:.1f})")
         print(f"  σ_E / E (CB pr) | {sigE_l_cb_pre*100:>12.2f}% | {sigE_n_cb_pre*100:>12.2f}%  "
               f"(Δ = {(sigE_n_cb_pre - sigE_l_cb_pre)*100:+.2f} pp)")
+        if cbx is not None:
+            print(f"  CB mode post    | {cbx['l_post']['cb_mode']:>13s} | "
+                  f"{cbx['n_post']['cb_mode']:>13s}")
+        if fsel is not None:
+            print(f"  χ²/ndf G (win)  | {fsel['l_post']['chi2ndf_gauss']:>13.2f} | "
+                  f"{fsel['n_post']['chi2ndf_gauss']:>13.2f}")
+            print(f"  χ²/ndf CB (win) | {fsel['l_post']['chi2ndf_cmp_cb']:>13.2f} | "
+                  f"{fsel['n_post']['chi2ndf_cmp_cb']:>13.2f}  (own range: "
+                  f"{fsel['l_post']['chi2ndf_cb']:.2f} | "
+                  f"{fsel['n_post']['chi2ndf_cb']:.2f})")
+            print(f"  preferred fit   | {fsel['l_post']['preferred']:>13s} | "
+                  f"{fsel['n_post']['preferred']:>13s}")
+            for k_, lab_ in (('l_post', 'legacy'), ('n_post', 'gated')):
+                if fsel[k_]['preferred'] == 'na':
+                    print(f"  NOTE: {lab_}: preferred_fit=na (CB ndf "
+                          f"{fsel[k_]['ndf_cmp_cb']} in the ±{CMP_NSIGMA:g}σ window"
+                          f" {fsel[k_]['lo']:.1f}-{fsel[k_]['hi']:.1f} MeV); "
+                          f"readers use their run-type table")
 
         if ew or pcm:
             print()
@@ -3080,6 +3717,14 @@ def main(argv=None):
             idx_name = [p.hycal.module(i).name
                         for i in range(p.hycal.module_count())]
 
+        def _mcols(lab_, k_):
+            if not mr_on:
+                return ""
+            t_ = (mtag_legacy if lab_ == 'legacy' else mtag_new)[k_]
+            kin_, rej_ = mr_tags[lab_]
+            return (f"\t{t_[0]}\t{kin_[k_]}\t{rej_[k_]}"
+                    f"\t{t_[1]:.3f}\t{t_[2]:.3f}")
+
         def _tcols(ex_):
             if not args.cluster_times:
                 return ""
@@ -3093,14 +3738,18 @@ def main(argv=None):
                      "seed_energy_MeV\tcluster_E_raw_MeV\tcluster_E_cal_MeV\t"
                      "cluster_x_mm\tcluster_y_mm"
                      + ("\tevnum\tseed_time_ns\tn_members\tmembers"
-                        if args.cluster_times else "") + "\n")
+                        if args.cluster_times else "")
+                     + ("\tmoller_pair\tmoller_kin\tmoller_rej\t"
+                        "partner_E_MeV\tpartner_acop_deg"
+                        if mr_on else "") + "\n")
             for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_legacy):
                 g = gains_l.get(sid, float('nan'))
                 ce_cal = ce * g if not math.isnan(g) else float('nan')
                 cf.write(f"{ev_idx}\tlegacy\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
                          f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
-                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}\n")
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}"
+                         f"{_mcols('legacy', ev_idx)}\n")
                 n_rows_l += 1
             for ev_idx, (sid, x, y, row, col, se, ce, *ex_) in enumerate(events_new):
                 g = gains_n.get(sid, float('nan'))
@@ -3108,7 +3757,8 @@ def main(argv=None):
                 cf.write(f"{ev_idx}\tgated\t{_mod_name(sid)}\t"
                          f"{x:.3f}\t{y:.3f}\t{row}\t{col}\t"
                          f"{se:.3f}\t{ce:.3f}\t{ce_cal:.3f}\t"
-                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}\n")
+                         f"{ex_[3]:.3f}\t{ex_[4]:.3f}{_tcols(ex_)}"
+                         f"{_mcols('new', ev_idx)}\n")
                 n_rows_n += 1
         print(f"\n  wrote: {clust_path}  "
               f"(N rows: {n_rows_l} legacy + {n_rows_n} gated)")
@@ -3127,6 +3777,25 @@ def main(argv=None):
                     f"dphi={args.veto_dphi if args.veto_dphi is not None else 'off'} "
                     f"legacy_vetoed={veto_n['legacy'][1]} of {veto_n['legacy'][0]} "
                     f"new_vetoed={veto_n['new'][1]} of {veto_n['new'][0]}\n")
+        if mr_on and mr_stats:
+            _ml, _mn = mr_stats['legacy'], mr_stats['new']
+            f.write(f"# moller_reject mode={mr_mode} "
+                    f"gains={args.moller_reject_gains} "
+                    f"kin_n={args.moller_kin_n:g} kin_m={args.moller_kin_m:g} "
+                    f"kin_res="
+                    f"{'auto' if args.moller_kin_res is None else format(args.moller_kin_res, 'g')} "
+                    f"pair_tol={args.moller_pair_tol:g} "
+                    f"pair_dphi={args.moller_pair_dphi:g} "
+                    f"legacy_events={_ml['events']} legacy_pair={_ml['pair']} "
+                    f"legacy_kin={_ml['kin']} legacy_rejected={_ml['rejected']} "
+                    f"legacy_pool={_ml['pool']} "
+                    f"legacy_pool_rejected={_ml['pool_rejected']} "
+                    f"new_events={_mn['events']} new_pair={_mn['pair']} "
+                    f"new_kin={_mn['kin']} new_rejected={_mn['rejected']} "
+                    f"new_pool={_mn['pool']} "
+                    f"new_pool_rejected={_mn['pool_rejected']}\n")
+        if args.cluster_profile != 'simple':
+            f.write(f"# cluster_profile={args.cluster_profile}\n")
         if (args.cluster_min_module_energy is not None
                 or args.cluster_corner_conn is not None
                 or args.cluster_non_linear_corr is not None):
@@ -3260,6 +3929,39 @@ def main(argv=None):
                        if gw_cal is not None else "")
                     + f" headline_legacy={_gwin(*gwh_l[4:])}"
                       f" headline_new={_gwin(*gwh_n[4:])}\n")
+        if cal is not None and cal['cbx'] is not None:
+            _cbx = cal['cbx']
+            f.write(f"# cb_fit mode={cal['cb_mode']}"
+                    + (f" tie_frac={args.cb_sigma_tie:g}"
+                       if cal['cb_mode'] == 'sigma-tie' else "")
+                    + "".join(f" {nm}_fallback={_cbx[k]['fallback']}"
+                              for nm, k in (('legacy_post', 'l_post'),
+                                            ('legacy_pre', 'l_pre'),
+                                            ('new_post', 'n_post'),
+                                            ('new_pre', 'n_pre')))
+                    + ("".join(f" {nm}_moller_init={_cbx[k]['e_moller_init']:.1f}"
+                               for nm, k in (('legacy_post', 'l_post'),
+                                             ('legacy_pre', 'l_pre'),
+                                             ('new_post', 'n_post'),
+                                             ('new_pre', 'n_pre')))
+                       if cal['cb_mode'] == 'two-peak' else "")
+                    + f" fit_select={args.fit_select}"
+                    + "".join(f" {nm}_cb_mode={_cbx[k]['cb_mode']}"
+                              + (f" {nm}_single_reason={_cbx[k]['single_reason'] or '-'}"
+                                 f" {nm}_sig_A_moller={_cbx[k]['sig_A_M']:.2f}"
+                                 f" {nm}_tie_lo={_cbx[k]['tie_lo']:.1f}"
+                                 f" {nm}_tie_hi={_cbx[k]['tie_hi']:.1f}"
+                                 if cal['cb_mode'] == 'two-peak' else "")
+                              for nm, k in (('legacy_post', 'l_post'),
+                                            ('legacy_pre', 'l_pre'),
+                                            ('new_post', 'n_post'),
+                                            ('new_pre', 'n_pre')))
+                    + ("".join(f" {nm}_cmp_window={_fs['lo']:.1f}-{_fs['hi']:.1f}"
+                               f" {nm}_ndf_cmp_gauss={_fs['ndf_gauss']}"
+                               f" {nm}_ndf_cmp_cb={_fs['ndf_cmp_cb']}"
+                               for nm, _fs in (('legacy_post', cal['fsel']['l_post']),
+                                               ('new_post', cal['fsel']['n_post'])))
+                       if cal['fsel'] is not None else "") + "\n")
         f.write("\n")
         f.write("path\tn_events\tgauss_mu_MeV\tgauss_sigma_MeV\tn_in_fit\n")
         f.write(f"legacy\t{n_legacy}\t{mu_l:.2f}\t{sig_l:.2f}\t{nf_l}\n")
@@ -3280,7 +3982,18 @@ def main(argv=None):
                     "\tmu_cb_MeV\tsigma_cb_MeV\talpha_cb\tn_cb"
                     "\tsigma_over_E_cb"
                     "\tmu_cb_pre_MeV\tsigma_cb_pre_MeV\talpha_cb_pre\tn_cb_pre"
-                    "\tsigma_over_E_cb_pre\n")
+                    "\tsigma_over_E_cb_pre"
+                    + (("\tchi2ndf_cb\tchi2ndf_cb_pre\tcb_fallback"
+                        "\tcb_fallback_pre"
+                        + ("\tmu_moller_MeV\tsigma_moller_MeV\tA_moller"
+                           "\tfrac_moller\tmu_moller_pre_MeV"
+                           "\tsigma_moller_pre_MeV\tA_moller_pre"
+                           "\tfrac_moller_pre"
+                           if cal['cb_mode'] == 'two-peak' else "")
+                        + "\tcb_mode\tcb_mode_pre"
+                        + ("\tpreferred_fit\tchi2ndf_gauss\tchi2ndf_cmp_gauss"
+                           "\tchi2ndf_cmp_cb" if cal['fsel'] is not None else ""))
+                       if cal['cbx'] is not None else "") + "\n")
             for path, nmod, ne, mu_pre, sig_pre, mu_post, sig_post, \
                 mu_cb, sig_cb, a_cb, n_cb, \
                 mu_cb_pre, sig_cb_pre, a_cb_pre, n_cb_pre in [
@@ -3306,7 +4019,24 @@ def main(argv=None):
                         f"\t{mu_cb:.2f}\t{sig_cb:.2f}\t{a_cb:.3f}\t{n_cb:.3f}"
                         f"\t{ratio_cb:.4f}"
                         f"\t{mu_cb_pre:.2f}\t{sig_cb_pre:.2f}\t{a_cb_pre:.3f}\t{n_cb_pre:.3f}"
-                        f"\t{ratio_cb_pre:.4f}\n")
+                        f"\t{ratio_cb_pre:.4f}")
+                if cal['cbx'] is not None:
+                    k_ = 'l' if path == 'legacy' else 'n'
+                    po_, pr_ = cal['cbx'][k_ + '_post'], cal['cbx'][k_ + '_pre']
+                    f.write(f"\t{po_['chi2ndf']:.3f}\t{pr_['chi2ndf']:.3f}"
+                            f"\t{po_['fallback']}\t{pr_['fallback']}")
+                    if cal['cb_mode'] == 'two-peak':
+                        f.write(f"\t{po_['mu_M']:.2f}\t{po_['sigma_M']:.2f}"
+                                f"\t{po_['A_M']:.2f}\t{po_['frac_M']:.4f}"
+                                f"\t{pr_['mu_M']:.2f}\t{pr_['sigma_M']:.2f}"
+                                f"\t{pr_['A_M']:.2f}\t{pr_['frac_M']:.4f}")
+                    f.write(f"\t{po_['cb_mode']}\t{pr_['cb_mode']}")
+                    if cal['fsel'] is not None:
+                        fs_ = cal['fsel'][k_ + '_post']
+                        f.write(f"\t{fs_['preferred']}\t{fs_['chi2ndf_gauss']:.3f}"
+                                f"\t{fs_['chi2ndf_cmp_gauss']:.3f}"
+                                f"\t{fs_['chi2ndf_cmp_cb']:.3f}")
+                f.write("\n")
             f.write("\n# inner-ring histogram bin centres + counts (pre/post recal)\n")
             f.write("e_centre\tlegacy_pre\tlegacy_post\tnew_pre\tnew_post\n")
             for c, lp, lq, np_, nq in zip(cal['centres'],
@@ -3399,19 +4129,19 @@ def main(argv=None):
             fig, axes = plt.subplots(1, 2, figsize=(14, 5.5), sharey=True)
 
             for ax, label, c_pre, c_post, mu_pre, sig_pre, mu_post, sig_post, \
-                mu_cb, sig_cb, alpha_cb, n_cb, A_cb, A_g, base_col in [
+                mu_cb, sig_cb, alpha_cb, n_cb, A_cb, A_g, base_col, cbk in [
                 (axes[0], 'legacy',
                  cal['counts_l_pre'], cal['counts_l_post'],
                  cal['mu_l_pre'], cal['sig_l_pre'],
                  cal['mu_l_post'], cal['sig_l_post'],
                  cal['mu_cb_l_post'], cal['sig_cb_l_post'], cal['alpha_l_post'],
-                 cal['n_l_post'], cal['A_cb_l_post'], cal['A_l_post'], '#888'),
+                 cal['n_l_post'], cal['A_cb_l_post'], cal['A_l_post'], '#888', 'l_post'),
                 (axes[1], f'new (W={W:g} ns)',
                  cal['counts_n_pre'], cal['counts_n_post'],
                  cal['mu_n_pre'], cal['sig_n_pre'],
                  cal['mu_n_post'], cal['sig_n_post'],
                  cal['mu_cb_n_post'], cal['sig_cb_n_post'], cal['alpha_n_post'],
-                 cal['n_n_post'], cal['A_cb_n_post'], cal['A_n_post'], '#1f77b4'),
+                 cal['n_n_post'], cal['A_cb_n_post'], cal['A_n_post'], '#1f77b4', 'n_post'),
             ]:
                 ax.step(cal['centres'], c_pre, where='mid', color=base_col,
                         alpha=0.45, lw=1.3,
@@ -3420,18 +4150,66 @@ def main(argv=None):
                         lw=1.8,
                         label=f'post  μ={mu_post:.0f}  σ_G={sig_post:.0f} MeV')
                 # Crystal-ball curve overlay (guard against numeric overflow)
+                cbr = cal['cbx'][cbk] if cal['cbx'] is not None else None
+                two_on = (cbr is not None and cbr['cb_mode'] == 'two_peak'
+                          and cbr['model'] is not None)
+                fs_ = cal['fsel'][cbk] if cal['fsel'] is not None else None
+                star = {k_: ('  ★ preferred' if fs_ is not None
+                             and fs_['preferred'] == k_ else '')
+                        for k_ in ('gauss', 'cb')}
+                cb_chi = (f"  χ²/ndf={fs_['chi2ndf_cb']:.2f}, in ±{CMP_NSIGMA:g}σ win "
+                          f"{fs_['chi2ndf_cmp_cb']:.2f}{star['cb']}"
+                          if fs_ is not None else "")
                 if not math.isnan(mu_cb) and A_cb > 0:
                     try:
                         xfine = np.linspace(mu_cb - 6 * sig_cb,
                                             mu_cb + 4 * sig_cb, 400)
+                        if two_on:
+                            xfine = np.linspace(
+                                min(mu_cb - 6 * sig_cb,
+                                    cbr['mu_M'] - 5 * cbr['sigma_M']),
+                                mu_cb + 4 * sig_cb, 600)
                         with np.errstate(over='ignore', invalid='ignore'):
                             yfine = crystal_ball(xfine, A_cb, mu_cb, sig_cb,
                                                  alpha_cb, n_cb)
                         # Filter out NaN/inf from the overflow
                         yfine = np.where(np.isfinite(yfine), yfine, 0.0)
-                        ax.plot(xfine, yfine, color='#d62728', lw=1.4,
-                                label=f'CB    μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  '
-                                      f'(α={alpha_cb:.2f} n={n_cb:.1f})')
+                        cb_lab = (f'CB    μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  '
+                                  f'(α={alpha_cb:.2f} n={n_cb:.1f})')
+                        if two_on:
+                            ax.plot(xfine, yfine, color='#d62728', lw=1.4,
+                                    label='CB elastic  ' + cb_lab[2:].lstrip())
+                            cb_lab = None
+                            with np.errstate(over='ignore', invalid='ignore'):
+                                ymol = crystal_ball(
+                                    xfine, cbr['A_M'], cbr['mu_M'],
+                                    cbr['sigma_M'], alpha_cb, n_cb)
+                                ysum = cbr['model'](xfine)
+                            ymol = np.where(np.isfinite(ymol), ymol, 0.0)
+                            ysum = np.where(np.isfinite(ysum), ysum, 0.0)
+                            ax.plot(xfine, ymol, color='#2ca02c', lw=1.4,
+                                    label=f"CB Moller  μ={cbr['mu_M']:.0f}  "
+                                          f"σ={cbr['sigma_M']:.0f} MeV  "
+                                          f"(frac {cbr['frac_M']*100:.1f} %)")
+                            ax.plot(xfine, ysum, color='#9467bd', lw=1.4,
+                                    ls='-.',
+                                    label=(f"sum of two CBs" + cb_chi
+                                           if fs_ is not None else
+                                           f"sum of two CBs  "
+                                           f"χ²/ndf={cbr['chi2ndf']:.2f}"))
+                        elif cbr is not None and cal['cb_mode'] == 'sigma-tie':
+                            cb_lab = (f"CB tied σ=σ_G(1±{args.cb_sigma_tie:g})  "
+                                      f"μ={mu_cb:.0f}  σ={sig_cb:.0f} MeV  "
+                                      f"(χ²/ndf={cbr['chi2ndf']:.2f})")
+                        if cb_lab is not None:
+                            if cbr is not None and cbr['fallback']:
+                                cb_lab += '  [fallback: plain CB]'
+                            elif cbr is not None and cbr['single_reason']:
+                                cb_lab += '  [single CB]'
+                            if fs_ is not None:
+                                cb_lab += '\n     ' + cb_chi.lstrip()
+                            ax.plot(xfine, yfine, color='#d62728', lw=1.4,
+                                    label=cb_lab)
                     except Exception as cb_exc:
                         sys.stderr.write(
                             f"[WARN] CB curve overlay failed for {label}: {cb_exc}\n"
@@ -3444,7 +4222,11 @@ def main(argv=None):
                     ax.plot(xg, gauss(xg, A_g, mu_post, sig_post),
                             color='#d62728', lw=1.4, ls='--',
                             label=f'Gauss μ={mu_post:.0f}  σ={sig_post:.0f} MeV '
-                                  f'(dashed)')
+                                  f'(dashed)'
+                                  + (f"\n     χ²/ndf={fs_['chi2ndf_gauss']:.2f}, "
+                                     f"in ±{CMP_NSIGMA:g}σ win "
+                                     f"{fs_['chi2ndf_cmp_gauss']:.2f}{star['gauss']}"
+                                     if fs_ is not None else ""))
                 ax.axvline(target_ref, color='#444', ls=':', lw=0.8)
                 ax.set_xlabel('cluster energy (MeV)')
                 ax.set_title(label)
@@ -3469,7 +4251,12 @@ def main(argv=None):
                 f"[{lms_tag}, {args.cal_method}]\n"
                 f"σ_E/E (Gauss):  legacy = {cal['sig_l_post']/cal['mu_l_post']*100:.2f} %   "
                 f"new = {cal['sig_n_post']/cal['mu_n_post']*100:.2f} %     "
-                f"(CB):  legacy = {sigEcb_l:.2f} %   new = {sigEcb_n:.2f} %",
+                f"(CB):  legacy = {sigEcb_l:.2f} %   new = {sigEcb_n:.2f} %"
+                + (f"\npreferred (lower χ²/ndf in the Gauss ±{CMP_NSIGMA:g}σ "
+                   f"window):  "
+                   f"legacy = {cal['fsel']['l_post']['preferred']}   "
+                   f"new = {cal['fsel']['n_post']['preferred']}"
+                   if cal['fsel'] is not None else ""),
                 fontsize=10.5)
             fig.tight_layout()
             fig.savefig(cal_png, dpi=130)

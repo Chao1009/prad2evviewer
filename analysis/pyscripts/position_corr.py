@@ -488,7 +488,11 @@ def cmd_map(a):
             continue
         d["hdr"]["gw"] = a.gauss_window
         slugs.append(slug)
-        kind = G.R_PREF[rt]
+        kind = G.R_PREF[rt]       # per-split preferred_fit (benchmark --fit-select chi2) wins
+        votes = R.split_votes([scan_dir / f"scan_{r:06d}" / f"split_{s:05d}"
+                               for r, s in d["splits"]], a.path)
+        if votes:
+            kind = R.majority_fit(votes, rs[0])
         g = fit_grid(d["u"], d["v"], d["r"], d["hdr"], kind, a.bins, a.range, a.min_n, a.boot, pool)
         pop = populated(g)
         mu, n = g["mu"], g["n"]

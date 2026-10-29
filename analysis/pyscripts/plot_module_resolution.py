@@ -14,6 +14,7 @@ Input: a benchmark scan directory (benchmark_hycal_timing_scan.py with
   pool: chosen path, seed radius < --inner-radius, seed energy >= the run's
   min_seed_energy, outside the --exclude-rowcol rectangle, finite
   cluster_E_cal.  pre = cluster_E_raw, post = cluster_E_cal on the same events.
+  Rows with moller_rej == 1 (benchmark --moller-reject) are dropped first.
 
 Output, <out>/<run>/ (names <run>_<what>):
   sigma_post.png sigma_pre.png   heat map of sigma_M/mu_M (%), common scale
@@ -112,6 +113,33 @@ def complete_splits(run_dir, wanted=None):
             and all((d / f).exists() for f in NEEDED)]
 
 
+def split_votes(splits, path):
+    """preferred_fit ('gauss'|'cb') of each split's result.tsv calibration row for `path`
+    (legacy -> row 'legacy', gated -> row 'new'); splits without the column give no vote."""
+    name = "legacy" if path == "legacy" else "new"
+    votes = []
+    for d in splits:
+        cols = None
+        for line in (d / "result.tsv").read_text(errors="replace").splitlines():
+            f = line.split("\t")
+            if cols is None:
+                cols = f if line.startswith("path\tn_modules\t") else None
+            elif not line.strip() or line.startswith("#"):
+                break
+            elif f[0] == name and len(f) >= len(cols):
+                v = dict(zip(cols, f)).get("preferred_fit")
+                if v in ("gauss", "cb"):
+                    votes.append(v)
+                break
+    return votes
+
+
+def majority_fit(votes, run):
+    """Majority of the per-split preferred fits; no votes or a tie -> the static GAUSS_RUNS choice."""
+    g, c = votes.count("gauss"), votes.count("cb")
+    return "gauss" if g > c else "cb" if c > g else ("gauss" if run in GAUSS_RUNS else "cb")
+
+
 def load_run(scan_dir, run, args):
     """Pool events of all complete splits of a run.  Returns dict or None."""
     splits = complete_splits(scan_dir / f"scan_{run:06d}", args.splits)
@@ -125,6 +153,8 @@ def load_run(scan_dir, run, args):
         h = parse_header(d / "result.tsv")
         df = pd.read_csv(d / "result_clusters.tsv", sep="\t")
         df = df[df.config_name == cfg]
+        if "moller_rej" in df.columns:
+            df = df[df.moller_rej != 1]
         inrect = (df.seed_row + 1).between(r0, r1) & (df.seed_col + 1).between(c0, c1)  # 1-based
         df = df[(df.seed_x_mm ** 2 + df.seed_y_mm ** 2 < r2)
                 & (df.seed_energy_MeV >= h["min_seed"]) & ~inrect
@@ -142,7 +172,7 @@ def load_run(scan_dir, run, args):
                                               nsplit=("nsplit", "sum"))
     return dict(hdr=parse_header(splits[0] / "result.tsv"), mod=np.concatenate(mods),
                 post=np.concatenate(post), pre=np.concatenate(pre), win=win,
-                splits=splits)
+                splits=splits, votes=split_votes(splits, args.path))
 
 
 def load_geometry(run):
@@ -451,7 +481,7 @@ def process_run(scan_dir, run, args):
         print(f"[skip] run {run}: no complete split")
         return None
     hdr = d["hdr"]
-    fit = args.fit if args.fit != "auto" else ("gauss" if run in GAUSS_RUNS else "cb")
+    fit = args.fit if args.fit != "auto" else majority_fit(d["votes"], run)
     geo = load_geometry(run)
     df, st = analyze(d, run, f"run {run}", fit, geo, args)
     row = dict(run=run, type=RUN_TYPE.get(run, f"{hdr['ebeam'] / 1000:.2f} GeV {hdr['target']}"),
@@ -463,6 +493,9 @@ def process_type(typ, rs, args):
     """Pool the events of all runs of a type before the per-module fits."""
     d = pool_runs(rs)
     fit = rs[0]["row"]["fit"]
+    votes = [v for r in rs for v in r["d"]["votes"]]
+    if args.fit == "auto" and votes:
+        fit = majority_fit(votes, rs[0]["row"]["run"])
     df, st = analyze(d, SLUG[typ], f"{typ} ({len(rs)} runs)", fit, rs[0]["geo"], args)
     row = dict(type=typ, runs=",".join(str(r["row"]["run"]) for r in rs), fit=fit,
                n_runs=len(rs), n_pool=len(d["mod"]), **st)
@@ -526,7 +559,8 @@ def main(argv=None):
     ap.add_argument("--group-runs", action="store_true",
                     help="primary output: one map set per run type, events of its runs pooled before the fits")
     ap.add_argument("--fit", choices=("auto", "gauss", "cb"), default="auto",
-                    help="auto: CB for 3.49 GeV/C/Ta runs, Gaussian for 2.24 and 0.73 GeV H2")
+                    help="auto: majority of the splits' preferred_fit in result.tsv (benchmark --fit-select chi2) "
+                         "when present, else CB for 3.49 GeV/C/Ta runs, Gaussian for 2.24 and 0.73 GeV H2")
     ap.add_argument("--no-pdf", action="store_true")
     ap.add_argument("--gauss-window", choices=("2sigma", "fixed150"), default="2sigma",
                     help="Gaussian fit window: 2sigma (default) = iterative refit in [mu-2s, mu+2s] "

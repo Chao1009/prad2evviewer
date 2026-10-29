@@ -13,7 +13,11 @@ Quantities (calibrated-block sigma/E, fractions in the TSVs are printed in perce
   post  = per-crystal gains with the seed-indexed refinement   (sigma_post, sigma_cb)
   pre   = pooled gains only, no seed-indexed step              (sigma_pre,  sigma_cb_pre)
   fit   = the run type's preferred fit (gate_scan_20261022.R_PREF): CB for 3.49 GeV H2,
-          2.24 GeV C and Ta; Gauss for 2.24 and 0.73 GeV H2
+          2.24 GeV C and Ta; Gauss for 2.24 and 0.73 GeV H2.  A result.tsv with a per-split
+          preferred_fit column (benchmark --fit-select chi2) overrides this for that split and
+          path (the "fit" label then reads "chi2 (n G / n CB)"); a paired delta uses ONE fit
+          per split for both arms, the reference arm's (its preferred_fit, else the table),
+          named in the "delta_fit" / "Δ fit" column
   path  = legacy and gated ("new" in result.tsv), reported side by side.
 Per run type the mean is over splits; delta = cmp - ref is paired per split with
 SE = SD/sqrt(n) over splits (SD = the split-to-split SD of delta).
@@ -153,10 +157,29 @@ def pref_fit(run: int) -> str:
     return "cb" if G.R_PREF.get(_run_type(run), "gauss") == "cb" else "gauss"
 
 
+def eff_fit(rec, path, run) -> str:
+    """'gauss' | 'cb': the record's per-split preferred_fit if present, else the run-type table."""
+    pf = (rec["cal"].get(path) or {}).get("preferred_fit")
+    return pf if pf in ("gauss", "cb") else pref_fit(run)
+
+
+def has_pref(rec, path) -> bool:
+    return (rec["cal"].get(path) or {}).get("preferred_fit") in ("gauss", "cb")
+
+
+def fit_label(scans, labels, ks, path, default) -> str:
+    """'CB' / 'Gauss' (run-type table) unless a record used has a per-split preferred_fit."""
+    recs = [(scans[lab][k], k[0]) for lab in labels for k in ks]
+    if not any(has_pref(r, path) for r, _ in recs):
+        return default
+    nc = sum(eff_fit(r, path, run) == "cb" for r, run in recs)
+    return f"chi2 ({len(recs) - nc} G / {nc} CB)"
+
+
 def sig(rec, path, run, kind) -> float:
     """sigma/E in percent; kind in KINDS or 'pref_post' / 'pref_pre'."""
     if kind.startswith("pref_"):
-        kind = ("CB_" if pref_fit(run) == "cb" else "G_") + kind[5:]
+        kind = ("CB_" if eff_fit(rec, path, run) == "cb" else "G_") + kind[5:]
     return G.sigma(rec, path, kind) * 100
 
 
@@ -220,9 +243,30 @@ def type_keys(keys, rt):
     return [k for k in keys if _run_type(k[0]) == rt]
 
 
-def arm_sig(scans, labels, arm, key, path) -> float:
+def arm_sig(scans, labels, arm, key, path, fit=None) -> float:
+    """sigma/E (%) of an arm; fit None = the record's own preferred fit, else 'gauss'|'cb'."""
     rec = scans[labels[arm["scan"]]][key]
-    return sig(rec, path, key[0], "pref_" + arm["kind"])
+    if fit is None:
+        return sig(rec, path, key[0], "pref_" + arm["kind"])
+    return sig(rec, path, key[0], ("CB_" if fit == "cb" else "G_") + arm["kind"])
+
+
+def delta_fit(scans, labels, ref_arm, key, path) -> str:
+    """One fit for both arms of a paired delta: the reference arm's preferred_fit, else the table."""
+    return eff_fit(scans[labels[ref_arm["scan"]]][key], path, key[0])
+
+
+def paired(scans, labels, ref_arm, cmp_arm, ks, path):
+    """(per-split cmp - ref deltas with one fit per split, label of that fit choice)."""
+    fits = [delta_fit(scans, labels, ref_arm, k, path) for k in ks]
+    d = [arm_sig(scans, labels, cmp_arm, k, path, f) - arm_sig(scans, labels, ref_arm, k, path, f)
+         for k, f in zip(ks, fits)]
+    if any(has_pref(scans[labels[ref_arm["scan"]]][k], path) for k in ks):
+        nc = fits.count("cb")
+        lab = f"ref {ref_arm['name']} pref ({len(fits) - nc} G / {nc} CB)"
+    else:
+        lab = "table (" + ("CB" if fits and fits[0] == "cb" else "Gauss") + ")"
+    return d, lab
 
 
 def eps_of(scans, labels, ks, i) -> tuple[float, float]:
@@ -247,6 +291,7 @@ def type_table(scans, labels, arms, keys):
         fit = "CB" if G.R_PREF[rt] == "cb" else "Gauss"
         slug = G.runtype_slug(ks[0][0])
         for p, pname in PATHS:
+            fit_p = fit_label(scans, labels, ks, p, fit)
             for a in arms:
                 v = [arm_sig(scans, labels, a, k, p) for k in ks]
                 m, sd, se, n = mean_sd_se(v)
@@ -255,20 +300,21 @@ def type_table(scans, labels, arms, keys):
                 nev = np.nanmean([calfield(scans[lab][k], p, "n_inner_events") for k in ks])
                 ey, ep = eps_of(scans, labels, ks, a["scan"])
                 armstat[(rt, pname, a["name"])] = dict(mean=m, se_mean=se, n=n, nmod=nmod,
-                                                       nev=nev, eps_yield=ey, eps_peak=ep)
+                                                       nev=nev, eps_yield=ey, eps_peak=ep,
+                                                       fit=fit_p)
             for ref, cmp_ in comparisons(arms):
                 ar = next(x for x in arms if x["name"] == ref)
                 ac = next(x for x in arms if x["name"] == cmp_)
-                d = [arm_sig(scans, labels, ac, k, p) - arm_sig(scans, labels, ar, k, p)
-                     for k in ks]
+                d, dfit = paired(scans, labels, ar, ac, ks, p)
                 dm, dsd, dse_, n = mean_sd_se(d)
                 sr, sc = armstat[(rt, pname, ref)], armstat[(rt, pname, cmp_)]
-                rows.append(dict(type=rt, slug=slug, path=pname, fit=fit, n_splits=n,
+                rows.append(dict(type=rt, slug=slug, path=pname, fit=fit_p, n_splits=n,
                                  ref=ref, cmp=cmp_, ref_mean=sr["mean"], cmp_mean=sc["mean"],
                                  delta=dm, delta_sd=dsd, delta_se=dse_,
                                  nmod_ref=sr["nmod"], nmod_cmp=sc["nmod"],
                                  nev_ref=sr["nev"], nev_cmp=sc["nev"],
-                                 eps_yield=sc["eps_yield"], eps_peak=sc["eps_peak"]))
+                                 eps_yield=sc["eps_yield"], eps_peak=sc["eps_peak"],
+                                 delta_fit=dfit))
     return rows, armstat
 
 
@@ -316,7 +362,7 @@ def decide(rows, arms):
 # ---------------------------------------------------------------------------
 TSV_COLS = ["type", "slug", "path", "fit", "n_splits", "ref", "cmp", "ref_mean", "cmp_mean",
             "delta", "delta_sd", "delta_se", "nmod_ref", "nmod_cmp", "nev_ref", "nev_cmp",
-            "eps_yield", "eps_peak"]
+            "eps_yield", "eps_peak", "delta_fit"]
 
 
 def write_tsv(path: Path, cols, rows, nd=5):
@@ -331,8 +377,9 @@ def split_rows(scans, labels, keys):
     rows = []
     for k in keys:
         for p, pname in PATHS:
+            fits = {eff_fit(scans[lab][k], p, k[0]) for lab in labels}
             r = dict(type=_run_type(k[0]), run=k[0], split=k[1], path=pname,
-                     fit="CB" if pref_fit(k[0]) == "cb" else "Gauss")
+                     fit=("CB" if fits == {"cb"} else "Gauss" if fits == {"gauss"} else "mixed"))
             for lab in labels:
                 rec = scans[lab][k]
                 for kind in KINDS:
@@ -367,6 +414,10 @@ def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -
         "0.73 GeV H2. sigma/E in percent, mean over splits; Δ = cmp − ref, paired per "
         "split, mean ± SE (SD/√n over splits) in pp, the split-to-split SD in brackets. "
         "Modules and events are the calibrated-block values per split.", ""]
+    if any(has_pref(r, p) for s in scans.values() for r in s.values() for p, _ in PATHS):
+        L[-2] += (" Splits whose result.tsv has a preferred_fit column (benchmark --fit-select "
+                  "chi2) use it instead of the run-type choice; the fit label then gives the "
+                  "number of (scan, split) records fitted with each.")
 
     get = {(r["type"], r["path"], r["ref"], r["cmp"]): r for r in rows}
     for pname in ("legacy", "gated"):
@@ -378,7 +429,7 @@ def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -
             if (rt, pname, arms[0]["name"]) not in armstat:
                 continue
             s0 = armstat[(rt, pname, "A")]
-            row = [rt, "CB" if G.R_PREF[rt] == "cb" else "Gauss", str(s0["n"])]
+            row = [rt, s0["fit"], str(s0["n"])]
             row += [fnum(armstat[(rt, pname, a["name"])]["mean"]) for a in arms]
             sb = armstat.get((rt, pname, "B"), s0)
             row += [f"{s0['nmod']:.1f}, {sb['nmod']:.1f}",
@@ -386,16 +437,18 @@ def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -
             L.append("| " + " | ".join(row) + " |")
         L.append("")
         L += [f"### Paired Δ (pp), {pname} path", ""]
-        head = ["Run type"] + [f"{c} − {r}" for r, c in comparisons(arms)]
+        head = ["Run type"] + [f"{c} − {r}" for r, c in comparisons(arms)] + ["Δ fit"]
         L += ["| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
         for rt in TYPE_ORDER:
-            cells = []
+            cells, dfits = [], []
             for r, c in comparisons(arms):
                 x = get.get((rt, pname, r, c))
                 if x is not None:
                     cells.append(f"{dse(x['delta'], x['delta_se'])} [{fnum(x['delta_sd'])}]")
+                    if x["delta_fit"] not in dfits:
+                        dfits.append(x["delta_fit"])
             if cells:
-                L.append("| " + " | ".join([rt] + cells) + " |")
+                L.append("| " + " | ".join([rt] + cells + ["; ".join(dfits)]) + " |")
         L.append("")
 
     if dec:
@@ -426,7 +479,8 @@ def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -
               "checked only for a worse result; Ta is reported, not interpreted.", ""]
 
     two = len(scans) > 1
-    head = ["run", "type", "splits"] + [a["name"] for a in arms] + (["\u0394 (B \u2212 A) pp"] if two else [])
+    head = (["run", "type", "splits"] + [a["name"] for a in arms]
+            + (["\u0394 (B \u2212 A) pp", "\u0394 fit"] if two else []))
     L += ["## Per run, preferred fit, legacy path (%)", "",
           "| " + " | ".join(head) + " |", "|" + "---|" * len(head)]
     for run in sorted({k[0] for k in keys}):
@@ -436,9 +490,9 @@ def report(scans, labels, dirs, arms, keys, rows, armstat, dec, skipped, args) -
         row = [str(run), _run_type(run), str(len(ks))] + cells
         if two:
             ar, ac = arms[0], arms[2]
-            m, _sd, se, _n = mean_sd_se([arm_sig(scans, labels, ac, k, "legacy")
-                                         - arm_sig(scans, labels, ar, k, "legacy") for k in ks])
-            row.append(dse(m, se))
+            d, dfit = paired(scans, labels, ar, ac, ks, "legacy")
+            m, _sd, se, _n = mean_sd_se(d)
+            row += [dse(m, se), dfit]
         L.append("| " + " | ".join(row) + " |")
     L.append("")
     return "\n".join(L) + "\n"
