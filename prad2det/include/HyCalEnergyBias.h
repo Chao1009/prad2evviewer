@@ -60,7 +60,7 @@ struct HyCalEnergyBias {
     float ep_threshold() const
     {
         if (beam_energy <= 0.f) return 0.f;
-        return beam_energy - 4.f * 0.03f * beam_energy /
+        return beam_energy - 3.5f * 0.03f * beam_energy /
                              std::sqrt(beam_energy / 1000.f);
     }
 
