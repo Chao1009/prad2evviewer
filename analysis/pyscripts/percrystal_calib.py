@@ -557,6 +557,23 @@ def load_dump(path):
     return hdr, ev, modinfo
 
 
+def moller_kin_mask(path, ev, gains, g0, kin_n, kin_m, res_a, res_b):
+    """True for the dump clusters of `path` (same order as `ev`) tagged Moller
+    by the benchmark's `moller_kin` rule: |E_cal - E_ee| < n sigma and
+    |E_cal - E'| > m sigma, E_cal = sum g_i E_i with the gains of a preceding
+    fit (modules missing from the table: its g0, the prior of the tool),
+    sigma = E' sqrt((res_a/sqrt(E'/GeV))^2 + res_b^2)."""
+    with np.load(path, allow_pickle=False) as z:
+        ep, ee = z['eprime_MeV'].astype(np.float64), z['emoller_MeV'].astype(np.float64)
+    nmod = 1 + max(max(gains), max((int(e[8].max()) for e in ev if len(e[8])), default=0))
+    gv = np.full(nmod, g0)
+    for k, v in gains.items():
+        gv[k] = v
+    ecal = np.array([np.dot(gv[e[8]], e[9]) for e in ev])
+    sig = ep * np.sqrt((res_a / np.sqrt(ep / 1000.0)) ** 2 + res_b ** 2)
+    return (np.abs(ecal - ee) < kin_n * sig) & (np.abs(ecal - ep) > kin_m * sig)
+
+
 def window_fn_from_header(hdr, bench, exclude_rowcol):
     h = hdr
     excl = exclude_rowcol if exclude_rowcol is not None else \
@@ -581,6 +598,13 @@ def cmd_fit(args):
         h = json.loads(str(d['header']))
         byrun.setdefault(int(h['run']), []).append((int(h['split']), f))
     os.makedirs(args.out, exist_ok=True)
+    kin = args.moller_reject == 'kin'
+    if kin:
+        if not args.moller_gains:
+            print("[ERROR] --moller-reject kin needs --moller-gains",
+                  file=sys.stderr)
+            return 2
+        kgains, kg0 = read_gain_table(args.moller_gains)
     for run, lst in sorted(byrun.items()):
         lst.sort()
         # even/odd parity must match the harness (position in the run's full
@@ -601,11 +625,17 @@ def cmd_fit(args):
         if not sel:
             print(f"[WARN] run {run}: no splits for --splits {args.splits}")
             continue
-        events, modinfo, hdr0 = [], {}, None
+        events, modinfo, hdr0, n_rej = [], {}, None, 0
         for sp, f in sel:
             hdr, ev, mi = load_dump(f)
             if hdr0 is None:
                 hdr0 = hdr
+            if kin:
+                rej = moller_kin_mask(f, ev, kgains, kg0, args.moller_kin_n,
+                                      args.moller_kin_m, bench.MOLLER_RES_A,
+                                      bench.MOLLER_RES_B)
+                n_rej += int(rej.sum())
+                ev = [e for e, r in zip(ev, rej) if not r]
             events.extend(ev)
             modinfo.update(mi)
         wfn, excl = window_fn_from_header(hdr0, bench, args.exclude_rowcol and
@@ -615,7 +645,8 @@ def cmd_fit(args):
                                   exclude_rowcol=excl)
         print(f"[fit] run {run}: splits {[s for s, _ in sel]} "
               f"({args.splits}), {len(events)} dump events -> pool {len(pool)} "
-              f"after rectangle {excl}", flush=True)
+              f"after rectangle {excl}"
+              + (f"; moller kin rejected {n_rej}" if kin else ""), flush=True)
         res = solve(pool, wfn, verbose=True, max_iter=args.max_iter,
                     fixed_windows=args.fixed_windows)
         if res is None:
@@ -644,6 +675,11 @@ def cmd_fit(args):
                     sigma_glob_first=res['sigma_glob_first'],
                     n_sel_events=res['n_sel'], calibration_sha1=calsha,
                     dump_header=hdr0)
+        if kin:
+            prov.update(n_rejected=n_rej, moller_reject='kin',
+                        moller_kin_n=args.moller_kin_n,
+                        moller_kin_m=args.moller_kin_m,
+                        moller_gains=args.moller_gains)
         with open(base + ".json", "w") as f:
             json.dump(prov, f, indent=1, default=str)
         g = res['g']
@@ -794,6 +830,12 @@ def main(argv=None):
                         "inclusive rows/cols (default: the dump header's "
                         "value; the dumps of output/scan_20261023 carry 15 "
                         "20 15 20, now read 1-based, i.e. centred).")
+    f.add_argument("--moller-reject", choices=['off', 'kin'], default='off',
+                   help="kin: drop clusters tagged Moller by the benchmark's kinematic rule (|E_cal - E_ee| < N sigma and |E_cal - E'| > M sigma), once, before the selection; needs --moller-gains (default off)")
+    f.add_argument("--moller-kin-n", type=float, default=3.0, metavar="N")
+    f.add_argument("--moller-kin-m", type=float, default=2.0, metavar="M")
+    f.add_argument("--moller-gains", default=None, metavar="TSV",
+                   help="gain table of a preceding no-rejection fit of the same dumps (E_cal of the kin rule)")
     s = sub.add_parser("stability", help="run-to-run vs split-to-split gain "
                                          "spread from per-job gain tables")
     s.add_argument("--gains", nargs="+", required=True, metavar="GLOB")

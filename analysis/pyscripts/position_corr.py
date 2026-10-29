@@ -131,6 +131,8 @@ def load_pool(scan_dir, run, args, geo):
             sys.exit(f"{d}: result_clusters.tsv has no cluster_x_mm/cluster_y_mm columns "
                      f"(scan with --write-cluster-tsv from the centroid-column benchmark)")
         df = df[df.config_name == cfg]
+        if "moller_rej" in df.columns and not args.keep_moller:     # Moller-flagged clusters out of the pool
+            df = df[df.moller_rej != 1]
         inrect = (df.seed_row + 1).between(r0, r1) & (df.seed_col + 1).between(c0, c1)  # 1-based
         df = df[(df.seed_x_mm ** 2 + df.seed_y_mm ** 2 < r2)
                 & (df.seed_energy_MeV >= h["min_seed"]) & ~inrect
@@ -1032,6 +1034,8 @@ def main(argv=None):
     m.add_argument("--inner-radius", type=float, default=200.0, help="pool seed radius (mm)")
     m.add_argument("--boot", type=int, default=30,
                    help="bootstrap refits per bin for mu_err (0: sigma/sqrt(n_in_fit))")
+    m.add_argument("--keep-moller", action="store_true", help="keep moller_rej == 1 clusters (dropped by default "
+                   "when result_clusters.tsv has the column)")
     m.add_argument("--workers", type=int, default=1, help="processes for the bootstrap (capped at 6)")
     m.set_defaults(func=cmd_map)
     f = sub.add_parser("fit", help="poscorr_v1 JSON from a map (or the pooled global map), or a poscorr_hybrid_v1 (--per-module)")
@@ -1055,6 +1059,8 @@ def main(argv=None):
     f.add_argument("--exclude-rowcol", type=int, nargs=4, default=(15, 20, 15, 20),
                    metavar=("ROW0", "ROW1", "COL0", "COL1"), help="excluded seed rectangle, 1-based inclusive")
     f.add_argument("--inner-radius", type=float, default=200.0, help="pool seed radius (mm)")
+    f.add_argument("--keep-moller", action="store_true", help="with --per-module: keep moller_rej == 1 clusters "
+                   "(dropped by default when result_clusters.tsv has the column)")
     f.set_defaults(func=cmd_fit)
     args = ap.parse_args(argv)
     return args.func(args)

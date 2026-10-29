@@ -47,6 +47,8 @@ This 20261021 test version adds two things on top of benchmark_hycal_timing.py
     Single pass: the window is fixed in pre-refinement energy, so a second
     pass would return gain 1 exactly.  --cal-method cb-peak / median are
     the unchanged old refinements (use --target-peak, 2 iterations).
+    --gain-refine {on,off} (default off): off measures the refinement (window
+    table) but applies gain 1, so post = pre; on = earlier outputs.
 
   Per-crystal calibration (plan_20261023 section 4; percrystal_calib.py).
     --cal-method percrystal solves one gain per cluster-member module from
@@ -2102,6 +2104,15 @@ def main(argv=None):
                          "= e-nucleus recoil kinematics).  Default: from the "
                          "per-run map RUN_TARGET; an unmapped run needs this "
                          "flag with elastic-window (exit 2 otherwise).")
+    ap.add_argument("--gain-refine", choices=("on", "off"), default="off",
+                    help="--calibrate: apply the per-seed-module gain "
+                         "refinement of --cal-method (elastic-window, median, "
+                         "cb-peak) to the post spectra.  off (default) = the "
+                         "refinement is still measured (result_window.tsv "
+                         "gain column) but not applied: gain 1 on the same "
+                         "modules, post = pre, cluster_E_cal = cluster_E_raw.  "
+                         "on = the refined post spectra of earlier outputs.  "
+                         "No effect with percrystal.")
     ap.add_argument("--window-nsigma", type=float, default=2.0,
                     help="Half-width of the elastic-window refinement window "
                          "in units of the per-module CB sigma (default 2).")
@@ -3449,6 +3460,15 @@ def main(argv=None):
                 exclude_rowcol=excl, method=args.cal_method,
                 bin_width=args.bin_width, escale=kS)
 
+        if args.gain_refine == 'off' and not pcm:
+            # --gain-refine off: keep the measured refinement (window rows)
+            # but apply gain 1 on the same modules, so post = pre.
+            gains_l = {sid: 1.0 for sid in gains_l}
+            gains_n = {sid: 1.0 for sid in gains_n}
+            corr_l, corr_n = np.array(raw_l, copy=True), np.array(raw_n, copy=True)
+            print("  gain refinement : off (measured, not applied; post = pre)",
+                  flush=True)
+
         # Fit window wider than the post-cal peak so a poorly-calibrated
         # pre-cal histogram still falls inside.
         cal_lo, cal_hi = target_ref - 800 * kE, target_ref + 800 * kE
@@ -3881,7 +3901,8 @@ def main(argv=None):
                 f"calib_file={calib_file} calib_match={calib_match}\n")
         f.write(f"# cal_method={args.cal_method} "
                 f"target_mean_MeV={target_ref:.2f} "
-                f"window_nsigma={args.window_nsigma}\n")
+                f"window_nsigma={args.window_nsigma} "
+                f"gain_refine={args.gain_refine}\n")
         if mu_global_by_path:
             f.write("# window_mu_global " + " ".join(
                 f"{lab}={mg:.2f}MeV(offset={(mg / eprime_by_path[lab] - 1) * 100:+.2f}%)"
