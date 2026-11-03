@@ -6,7 +6,7 @@ Run from anywhere (reads existing outputs only, no replay, nothing under databas
     MPLBACKEND=Agg python3 analysis/pyscripts/notes/figures/methods_20261027/make_figures.py [fig01 fig02 ...]
 
 Writes PNGs next to this file.  New plots (this script):
-  fig01_dataflow           matplotlib box diagram (same chain as dataflow.mmd; mmdc is not installed)
+  fig01_dataflow           matplotlib box diagram (same chain as dataflow.md; mmdc is not installed)
   fig02_waveform           one real waveform: pedestal, WaveAnalyzer walk-out range, linear CFD 0.5, MF fit
   fig03_template_banks     one module, production / best-50 / Wassim single-pulse bank
   fig04a_pileup_example    pseudo-data pile-up (dt_peak = 20 ns, ratio 1), MF decomposition

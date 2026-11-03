@@ -1,4 +1,6 @@
 # Plan: ML pile-up work (M2+) on ANL LCRC Swing, with the Mac keeping the benchmark jobs
+**Status (2026-10-29): ON HOLD** — user decision: the LCRC/Swing work waits until the resource situation (allocation, project name, access) is clear. Local results since the plan was written: M2b passes all e-p criteria (`output/ml_pileup_20261027/M2b/`); M3 Ta per run done (`output/ml_pileup_20261027/M3/`) — Ta MF singles are 6–18 % contaminated by unresolved pile-up, so arm (c) must use cleaned negatives and a per-run operating point set by close-pair excess (< 0.5 %/channel); arm (d) sweep is not needed. S0 questions remain open.
+
 
 **Date:** 2026-10-28. **Status:** draft for user approval; nothing executed on LCRC. No LCRC access was used to write this plan (web docs only); every LCRC-specific name below carries a docs URL or "confirm on login".
 **Reads first:** `plans/plan_ml_pileup_20261027.md` (user decisions, U0–U7, M1–M3 naming); `notes/PbWO4_energy_resolution_20261027.md` §8, §10; `notes/PbWO4_energy_resolution_20261028.md` §5; `output/ml_pileup_20261027/U0/report.md`, `U5/report.md`; `output/ml_pileup_20261027/M1/tools/m1_{data,model,train,eval}.py`; root `README.md` "Building", root `CMakeLists.txt` (BUILD_PYTHON), `python/CMakeLists.txt`.

@@ -58,6 +58,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_VERSION = "module_timing_dump 1.0 (20261025)"
 EVIO_DIR = "/Users/L00338853/work/PRad/data/evio"
 CALIB_DIR = "/Users/L00338853/work/PRad/prad2evviewer/database/calibration"
+CALIB_FALLBACK = CALIB_DIR + "/old"   # 10-30: the 0.73/2.24/3.49 GeV fadc files now live here
 PRE_LO, PRE_HI = 100.0, 200.0
 BLOCK_EVENTS = 256
 
@@ -101,6 +102,8 @@ def process_split(path, out_dir, max_events=0, templates_root=None):
         sys.exit(f"[ERROR] run {run} not in RUN_CFG")
     tmpl = os.path.join(templates_root or os.path.join(HERE, TEMPLATES_ROOT), RUN_CFG[run][0])
     calib = os.path.join(CALIB_DIR, RUN_CFG[run][1])
+    if not os.path.exists(calib):
+        calib = os.path.join(CALIB_FALLBACK, RUN_CFG[run][1])
     t_start = time.monotonic()
 
     # setup_pipeline takes a single file path unchanged (no split expansion);

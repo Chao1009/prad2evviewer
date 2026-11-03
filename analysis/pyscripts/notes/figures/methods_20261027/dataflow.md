@@ -1,3 +1,4 @@
+```mermaid
 flowchart TD
   A["Raw FADC waveform<br/>100 samples x 4 ns"] --> B["Pedestal<br/>first 30 samples, iterative clip: mean, rms"]
   B --> C1["WaveAnalyzer (C++)<br/>smooth, local max, walk-out integral,<br/>linear CFD 0.5 + log-normal time"]
@@ -12,3 +13,4 @@ flowchart TD
   I --> J["Resolution fit<br/>Gaussian (iterative +-2 sigma) and Crystal Ball"]
   J --> K["Per-split sigma_E/E"]
   K --> L["Per-module medians, run-type means,<br/>2-term fit a, b (headline)"]
+```

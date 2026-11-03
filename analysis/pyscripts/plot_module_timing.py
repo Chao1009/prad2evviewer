@@ -1027,6 +1027,9 @@ def nogate_output(args, gp, page_mods, H, T, fits, vlo, seed_tags, d0, d0_hist, 
         S, B = sum(q["S"] for q in ok), sum(q["B"] for q in ok)
         pool[t] = dict(n_ev=n_ev, ppe=npair / max(n_ev, 1), lev=sum(q["level"] for q in ok) / max(n_ev, 1),
                        fin=S / max(npair, 1), SB=S / B if B > 0 else np.inf, nmod=len(ok))
+    np.savez(str(tsv_path).replace(".tsv", "_pooled.npz"), x=x, d0=np.array([d0[t] for t in vt_tags]),
+             tags=np.array(vt_tags), **{f"h_{t}": H[t]["ng"].sum(axis=0) for t in vt_tags},
+             **{f"hm_{t}": H[t]["ng"].astype(np.int32) for t in vt_tags})
     with open(tsv_path, "w") as fh:
         fh.write("module\tid\trun_type\tN_pairs\tpeak_ns\tpeak_height_per_ns\taccidental_per_ns\t"
                  "S_10ns\tB_10ns\tS_over_B_10ns\n")
