@@ -24,7 +24,7 @@
 // Usage: physics_calib <input_raw.root|dir> [more files/dirs...]
 //                      [-i iteration] [-o output_dir]
 //                      [-c seed_calib.json] [-j num_threads]
-//                      [-f gaus|crystalball] [-a]
+//                      [-f gaus|crystalball] [-a] [-k]
 //   - input_raw.root|dir: input ROOT file or directory containing *_raw.root
 //   - iteration: calibration iteration, starting from 1 (default: 1)
 //   - output_dir: base output directory (default: current directory)
@@ -33,6 +33,7 @@
 //   - num_threads: number of worker threads (default: 4)
 //   - -f: peak-fit function, gaus or crystalball (default: gaus)
 //   - -a: disable the central-region cut
+//   - -k: keep current calibration constants for transition and beam-hole modules
 //
 // Outputs are written under output_dir/Physics_calib/run<run_number>/:
 //   - calib_factor_iterN.json: updated HyCal calibration constants
@@ -199,19 +200,21 @@ int main(int argc, char *argv[])
     int  num_threads = 4;
     bool use_crystal_ball = false;
     bool central_region = true;
+    bool keep_transition_beam_hole = false;
 
     std::string db_dir = prad2::database_dir();
 
     std::string recon_config_file = db_dir + "/reconstruction_config.json";
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:j:c:f:a")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:j:c:f:ak")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_path = optarg; break;
             case 'c': seed_calib_file  = optarg; break;
             case 'j': num_threads      = std::atoi(optarg); break;
             case 'a': central_region = false; break;
+            case 'k': keep_transition_beam_hole = true; break;
             case 'f': {
                 std::string mode = optarg;
                 std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
@@ -356,6 +359,7 @@ int main(int argc, char *argv[])
     std::vector<CalibrationResult> calib_results;
 
     int n_calibrated = 0;
+    int n_kept_unchanged = 0;
     int n_good_fit = 0;
     for (int i = 0; i < 1156; ++i) {
         if (!merged->h1_E_modules[i]) continue;
@@ -404,9 +408,16 @@ int main(int argc, char *argv[])
 
         double current_factor = hycal.GetCalibConstant(mod_id);
         double new_factor = current_factor * ratio;
+        const bool keep_unchanged = keep_transition_beam_hole &&
+            (fdec::test_bit(mod->flag, fdec::kTransition) || fdec::test_bit(mod->flag, fdec::kInnerBound));
+        if (keep_unchanged) {
+            new_factor = current_factor;
+            ++n_kept_unchanged;
+        } else {
+            ++n_calibrated;
+        }
         hycal.SetCalibConstant(mod_id, new_factor);
         hycal.SetCalibBaseEnergy(mod_id, expected_peak);
-        n_calibrated++;
 
         calib_results.push_back({mod_id, 
             static_cast<float>(current_factor), 
@@ -417,7 +428,9 @@ int main(int argc, char *argv[])
     }
 
     std::cout << "Calibration iteration " << iteration << " completed. "
-              << n_calibrated << " modules calibrated. " << n_good_fit << " fits were good.\n";
+              << n_calibrated << " modules calibrated, "
+              << n_kept_unchanged << " transition/beam-hole modules kept unchanged. "
+              << n_good_fit << " fits were good.\n";
 
     // Write calibration results to a json file
     hycal.PrintCalibConstants(output_calib_file);
