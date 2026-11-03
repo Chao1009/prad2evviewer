@@ -197,7 +197,7 @@ int main(int argc, char *argv[])
         }
         const double angle = std::atan2(
             std::sqrt(module->x * module->x + module->y * module->y),
-            gRunConfig.hycal_z);
+            gRunConfig.hycal_z) * 180.f / 3.14159265f;
         expected_energies[m] = analysis::PhysicsTools::ExpectedEnergy(
             angle, gRunConfig.Ebeam, "ep");
 
@@ -251,7 +251,7 @@ int main(int argc, char *argv[])
         ++analyzed_module_count;
         const double angle = std::atan2(
             std::sqrt(module->x * module->x + module->y * module->y),
-            gRunConfig.hycal_z);
+            gRunConfig.hycal_z) * 180.f / 3.14159265f;
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
             angle, gRunConfig.Ebeam, "ep");
         for (int i = 0; i < grids; ++i) {
