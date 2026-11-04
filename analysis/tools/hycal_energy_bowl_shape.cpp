@@ -223,19 +223,26 @@ int main(int argc, char *argv[])
     bowl_modules.Divide(8, 8, 0.002, 0.002);
     for (int m = 0; m < module_count; ++m) {
         bowl_modules.cd(module_canvas_pads[m]);
-        gPad->SetLeftMargin(0.12);
-        gPad->SetRightMargin(0.14);
-        gPad->SetBottomMargin(0.12);
+        gPad->SetLeftMargin(0.10);
+        gPad->SetRightMargin(0.10);
+        gPad->SetBottomMargin(0.05);
+        gStyle->SetPalette(kRainBow);
         bowl_shapes[m]->SetStats(0);
         bowl_shapes[m]->SetMinimum(0.98);
         bowl_shapes[m]->SetMaximum(1.02);
-        bowl_shapes[m]->GetXaxis()->SetTitleSize(0.06);
-        bowl_shapes[m]->GetYaxis()->SetTitleSize(0.06);
+        bowl_shapes[m]->GetXaxis()->SetTitleSize(0.05);
+        bowl_shapes[m]->GetYaxis()->SetTitleSize(0.05);
         bowl_shapes[m]->GetZaxis()->SetTitleSize(0.05);
-        bowl_shapes[m]->GetXaxis()->SetLabelSize(0.05);
-        bowl_shapes[m]->GetYaxis()->SetLabelSize(0.05);
-        bowl_shapes[m]->GetZaxis()->SetLabelSize(0.045);
-        bowl_shapes[m]->Draw("COLZ");
+        bowl_shapes[m]->GetXaxis()->SetTitleOffset(1.8);
+        bowl_shapes[m]->GetYaxis()->SetTitleOffset(2.0);
+        bowl_shapes[m]->GetZaxis()->SetTitleOffset(1.3);
+        bowl_shapes[m]->GetXaxis()->CenterTitle();
+        bowl_shapes[m]->GetYaxis()->CenterTitle();
+        bowl_shapes[m]->GetZaxis()->CenterTitle();
+        bowl_shapes[m]->Draw("LEGO2");
+        gPad->SetTheta(30.);
+        gPad->SetPhi(40.);
+        gPad->Update();
     }
     bowl_modules.Update();
 
@@ -308,7 +315,7 @@ int main(int argc, char *argv[])
     // Restore W701 after all fits before persisting the combined canvas.
     bowl_modules.cd(module_canvas_pads.back());
     gPad->Clear();
-    bowl_shapes.back()->Draw("COLZ");
+    bowl_shapes.back()->Draw("LEGO2");
     bowl_modules.Modified();
     bowl_modules.Update();
 
