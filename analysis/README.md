@@ -672,14 +672,15 @@ templates documented in
 
 Builds position-dependent HyCal energy-bias maps from reconstructed ROOT
 files. The `-g` option selects the per-module grid resolution; it defaults
-to 5 and accepts 10 for higher-resolution maps:
+to 5 and accepts 8 or 10 for higher-resolution maps:
 
 ```bash
-prad2ana_hycal_energy_bowl_shape <recon.root|directory> -o <output_prefix> [-g 5|10]
+prad2ana_hycal_energy_bowl_shape <recon.root|directory> -o <output_prefix> [-g 5|8|10]
 ```
 
 The generated JSON records `grid_size`; the reconstruction pipeline reads
-either resolution and uses the matching grid when applying the correction.
+the selected resolution and uses the matching grid when applying the
+correction.
 
 ## Adding a tool
 

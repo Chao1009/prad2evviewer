@@ -3,8 +3,9 @@
 //
 // Measure the reconstructed-energy response at different positions within each
 // module and compare its fitted peak with the expected energy. Each module is divided into
-// a 5x5 or 10x10 grid with one reconstructed-energy histogram per cell (map below).
-// The diagram shows the default 5x5 layout; 10x10 uses the same orientation.
+// a 5x5, 8x8, or 10x10 grid with one reconstructed-energy histogram per cell
+// (map below). The diagram shows the default 5x5 layout; larger grids use the
+// same orientation.
 // The histograms use h1_energy_grid_allModule[module][column][row]. Columns increase
 // with the local HyCal X coordinate, and rows increase with local HyCal Y.
 // column   0   1   2   3   4
@@ -131,10 +132,9 @@ int main(int argc, char *argv[])
             case 'j': num_threads     = std::atoi(optarg); break;
             case 'g':
                 if (!ParseIntOption(optarg, grids) ||
-                    (grids != fdec::HyCalEnergyBias::GRID_SIZE &&
-                     grids != fdec::HyCalEnergyBias::MAX_GRID_SIZE)) {
+                    !fdec::HyCalEnergyBias::supports_grid_size(grids)) {
                     std::cerr << "Invalid grid size: " << optarg
-                              << " (supported values: 5 or 10).\n";
+                              << " (supported values: 5, 8, or 10).\n";
                     return 2;
                 }
                 break;
@@ -147,7 +147,7 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_energy_bowl_shape <input_recon.root|dir> [more...] "
                  "-o <output_name> [-n max_events] [-f nfiles] [-j threads] "
-                 "[-g 5|10]\n";
+                 "[-g 5|8|10]\n";
         return 1;
     }
 
@@ -272,7 +272,7 @@ int main(int argc, char *argv[])
     // output energy bias for each module and grid to a json file to put in database
     // structure of the JSON file:
     // {
-    //     "grid_size": 5 or 10,
+    //     "grid_size": 5, 8, or 10,
     //     "W555": { "yN": { "xN": bias, ... }, ... }
     // }
     const std::string output_json_name = output_name + ".json";

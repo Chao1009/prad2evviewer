@@ -2,7 +2,7 @@
 //=============================================================================
 // HyCalEnergyBias.h — position-dependent HyCal cluster-energy correction.
 //
-// Each input JSON contains one 5x5 or 10x10 bias map per PbWO4 module:
+// Each input JSON contains one 5x5, 8x8, or 10x10 bias map per PbWO4 module:
 //   "W1": { "y0": { "x0": bias, ... }, ... }
 // where bias = E_rec / E_expected - 1.  The correction factor is therefore
 // 1 / (1 + bias).  The optional top-level "grid_size" selects the map
@@ -46,8 +46,15 @@ inline HyCalEnergyBiasSet SelectHyCalEnergyBiasSet(float beam_energy)
 
 struct HyCalEnergyBias {
     static constexpr int GRID_SIZE = 5;
+    static constexpr int MEDIUM_GRID_SIZE = 8;
     static constexpr int MAX_GRID_SIZE = 10;
     using Grid = std::array<float, MAX_GRID_SIZE * MAX_GRID_SIZE>;
+
+    static constexpr bool supports_grid_size(int grid_size)
+    {
+        return grid_size == GRID_SIZE || grid_size == MEDIUM_GRID_SIZE ||
+               grid_size == MAX_GRID_SIZE;
+    }
 
     float beam_energy = 0.f;
     std::vector<Grid> ee;
@@ -77,7 +84,7 @@ struct HyCalEnergyBias {
     {
         if (!std::isfinite(x) || !std::isfinite(y) ||
             module.size_x <= 0. || module.size_y <= 0. ||
-            (grid_size != GRID_SIZE && grid_size != MAX_GRID_SIZE))
+            !supports_grid_size(grid_size))
             return false;
         const auto [local_x, local_y] = module.cell_offset(x, y);
         column = std::clamp(
@@ -152,8 +159,7 @@ inline int LoadHyCalEnergyBiasFile(const std::string &path,
             return 0;
         }
         grid_size = grid_size_it->get<int>();
-        if (grid_size != HyCalEnergyBias::GRID_SIZE &&
-            grid_size != HyCalEnergyBias::MAX_GRID_SIZE) {
+        if (!HyCalEnergyBias::supports_grid_size(grid_size)) {
             std::cerr << "Warning: unsupported grid_size " << grid_size
                       << " in HyCal energy-bias file " << path
                       << ", using zero bias.\n";

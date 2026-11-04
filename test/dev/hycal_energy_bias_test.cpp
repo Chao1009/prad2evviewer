@@ -111,6 +111,25 @@ int main()
                                 threshold), 0.37f),
           "10x10 edge cell lookup");
 
+    const fs::path ee8_path = fixture_dir / "ee8.json";
+    const fs::path ep8_path = fixture_dir / "ep8.json";
+    write_fixture(ee8_path, 0.13f, 0.38f, 8);
+    write_fixture(ep8_path, -0.23f, -0.32f, 8);
+    auto bias8 = fdec::LoadHyCalEnergyBias(
+        ee8_path.string(), ep8_path.string(), hycal, 2200.f);
+    check(bias8->ee_grid_size == 8 && bias8->ep_grid_size == 8,
+          "load 8x8 grid sizes");
+    check(bias8->ee_cells_loaded == 64 && bias8->ep_cells_loaded == 64,
+          "load 64 cells from each 8x8 table");
+    check(close_to(bias8->bias(*w1, static_cast<float>(w1->x),
+                               static_cast<float>(w1->y), threshold), 0.13f),
+          "8x8 center cell lookup");
+    check(close_to(bias8->bias(*w1,
+                               static_cast<float>(w1->x - 0.49 * w1->size_x),
+                               static_cast<float>(w1->y + 0.49 * w1->size_y),
+                               threshold), 0.38f),
+          "8x8 edge cell lookup");
+
     check(close_to(fdec::SelectHyCalEnergyBiasSet(728.9f).nominal_mev, 700.f),
           "select nearest 0.7 GeV parameter set");
     check(close_to(fdec::SelectHyCalEnergyBiasSet(2108.8f).nominal_mev, 2200.f),

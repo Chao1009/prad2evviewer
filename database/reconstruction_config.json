@@ -25,7 +25,7 @@
         "least_leakage_fraction": 0.01,
         "max_leakage_fraction": 0.30,
         "leakage_convergence_rel": 0.001,
-        "energy_resolution": [3.3, 0.0, 0.0],
+        "energy_resolution": [3.0, 0.0, 0.0],
         "split_iter":         6,
         "least_split":        0.01,
         "log_weight_thres":   5.2,
