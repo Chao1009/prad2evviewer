@@ -226,7 +226,6 @@ int main(int argc, char *argv[])
         gPad->SetLeftMargin(0.10);
         gPad->SetRightMargin(0.10);
         gPad->SetBottomMargin(0.05);
-        gStyle->SetPalette(kRainBow);
         bowl_shapes[m]->SetStats(0);
         bowl_shapes[m]->SetMinimum(0.98);
         bowl_shapes[m]->SetMaximum(1.02);
