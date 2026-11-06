@@ -40,7 +40,7 @@ long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, c
     std::map<int, TH1F*> &energy_hists, float Ebeam, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
 
-float resolution = 0.035; // pre-defined energy resolution
+float resolution = 0.03; // pre-defined energy resolution
 
 // One beam-energy data set (-a/-b/-c): its inputs, per-module energy
 // histograms and output directory.
@@ -504,7 +504,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     }
                     if(veto) break;
                 }
-                if(theta > 1.3) veto = false;
+                if(theta > 1.1) veto = false;
 
             if(veto && energy > 600. && Ebeam < 1000.f) continue;
 

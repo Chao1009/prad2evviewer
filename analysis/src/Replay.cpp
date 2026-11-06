@@ -1166,7 +1166,6 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
                     float time_offset = mod->time_offset;
 
                     float gain = gain_corr.ModuleGain(mod->id, gRunConfig.gain_ref_pmt);
-                    if (gain <= 0.f || gain == 1.0f) gain = in->gain_factor[j];
                     
                     if (has_waveform) {
                         ana.SetChannelKey(crate, slot, ch);
