@@ -53,16 +53,17 @@ typedef std::vector<MollerEvent> MollerData;
 
 // Nominal PbWO4 module size (mm): size_y from hycal_map.json (size_x is 20.77).
 // The fiducial ring bounds below are multiples of it in both x and y.
-inline constexpr double kPbWO4Pitch = 20.75;
+inline constexpr double kPbWO4PitchX = 20.77;
+inline constexpr double kPbWO4PitchY = 20.75;
 
 // Square-annulus fiducial cut: outside the inner square of half-width
 // inner*pitch and inside the outer square of half-width outer*pitch.
 // Frame-agnostic; the caller picks lab, HyCal or module-centre coordinates.
 inline bool InHyCalRing(double x, double y, double inner, double outer,
-                        double pitch = kPbWO4Pitch)
+                        double pitch_x = kPbWO4PitchX, double pitch_y = kPbWO4PitchY)
 {
-    return (std::fabs(x) > pitch * inner || std::fabs(y) > pitch * inner)
-        && (std::fabs(x) < pitch * outer && std::fabs(y) < pitch * outer);
+    return (std::fabs(x) > pitch_x * inner || std::fabs(y) > pitch_y * inner)
+        && (std::fabs(x) < pitch_x * outer && std::fabs(y) < pitch_y * outer);
 }
 
 class PhysicsTools
