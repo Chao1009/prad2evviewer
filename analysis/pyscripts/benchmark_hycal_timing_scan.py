@@ -88,6 +88,8 @@ _BENCHMARK_SCRIPT = str(
 _DATABASE_DIR = Path(os.environ.get("PRAD2_DATABASE_DIR",
                                     str(_REPO_ROOT / "database")))
 
+from calib_resolve import resolve_calib, check_calib_json  # noqa: E402
+
 _DEFAULT_EVIO_DIR  = "/Users/L00338853/work/PRad/data/evio"
 _DEFAULT_OUTPUT_DIR = str(_REPO_ROOT / "analysis" / "pyscripts" / "output")
 _DEFAULT_MAX_EVENTS: Optional[int] = None   # None → process full EVIO file
@@ -271,21 +273,6 @@ _E_RANGE_MAP: dict[int, tuple[float, float]] = {
 }
 _DEFAULT_E_RANGE = (500.0, 4500.0)
 
-# HyCal calibration file per run (FADC-integral calibrations), relative to
-# $PRAD2_DATABASE_DIR/calibration.  X17 runs use the _fadc variant of their
-# runinfo period file.  Runs not listed fall back to the runinfo default,
-# which the benchmark checks against E_beam (exit 2 on mismatch).
-_HC_CALIB_MAP: dict[int, str] = {
-    **{r: "calibration_factor_fadc_3p5.json" for r in (24386, 24503, 24512)},
-    **{r: "calibration_factor_fadc_0p7.json" for r in (24578, 24590, 24603)},
-    **{r: "calibration_factor_2p2_fadc.json"
-       for r in (25228, 25257, 25260, 25299, 25308, 25320)},
-    25800: "x17_25825_fadc.json",
-    26138: "x17_26094_fadc.json",
-    26230: "x17_26214_fadc.json",
-}
-
-
 def gain_corr_path(run: int) -> Path:
     """LMS gain_corr file the benchmark's --lms-corr auto would use."""
     return (_DATABASE_DIR / "gain_factor" / "gain_correction"
@@ -415,9 +402,9 @@ def run_benchmark(
         # elastic-window (default); target from the benchmark's run map
         "--lms-corr", "auto" if gain_corr_path(run).exists() else "off",
     ]
-    if run in _HC_CALIB_MAP:
-        cmd.extend(["--hc-calib-file",
-                    str(_DATABASE_DIR / "calibration" / _HC_CALIB_MAP[run])])
+    calib = resolve_calib(run)
+    print(f"[calib] run {run}: {calib} ({check_calib_json(calib)} modules)", flush=True)
+    cmd.extend(["--hc-calib-file", calib])
     # Only pass --max-events when an explicit limit is requested.
     # When max_events is None the subprocess processes the full EVIO file.
     if max_events is not None:

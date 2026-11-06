@@ -62,8 +62,9 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from calib_resolve import resolve_calib
 from benchmark_hycal_timing_scan import (          # read-only use of the driver
-    _HC_CALIB_MAP, _PRE_WINDOW_MAP, _DEFAULT_PRE_WINDOW, _DATABASE_DIR,
+    _PRE_WINDOW_MAP, _DEFAULT_PRE_WINDOW, _DATABASE_DIR,
     _BENCHMARK_SCRIPT, _DEFAULT_EVIO_DIR, gain_corr_path, _EXCLUDED_RUNS,
     parse_tsv, _run_type, _RUN_TARGET_LABEL, _RUN_TYPE_MARKERS,
     _TARGET_PEAK_MAP, _DEFAULT_PROMINENCE, _DEFAULT_PEAK_DIST_MEV,
@@ -353,9 +354,7 @@ def build_cmd(cfg, run, evio, stem, lo, hi, bench_args) -> list[str]:
            "--pre-window", str(float(lo)), str(float(hi)),
            "--inner-radius", "200", "--min-per-module", "30",
            "--lms-corr", "auto" if gain_corr_path(run).exists() else "off"]
-    if run in _HC_CALIB_MAP:
-        cmd += ["--hc-calib-file",
-                str(_DATABASE_DIR / "calibration" / _HC_CALIB_MAP[run])]
+    cmd += ["--hc-calib-file", resolve_calib(run)]
     cmd += ["--window", str(float(cfg["W"])), "--time-calib", cfg["time_calib"]]
     if cfg.get("pulse", "rawsum") == "mf":
         cmd += ["--pulse-method", "mf"]

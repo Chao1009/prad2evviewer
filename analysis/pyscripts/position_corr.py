@@ -873,10 +873,17 @@ def grid_estimates(u, v, r, bins, rng, min_n):
     return a[:, 0], a[:, 1], a[:, 2], a[:, 3], a[:, 4]
 
 
-def fit_poly8_bins(uc, vc, Rv, se):
-    X = poly_basis(uc, vc)
+# per-module forms: active columns of poly_basis (the others stay 0 in the 8-vector c)
+HYB_FORMS = {"poly8": (0, 1, 2, 3, 4, 5, 6, 7), "even6": (0, 1, 2, 3, 4, 5), "even4": (0, 1, 2)}
+
+
+def fit_poly8_bins(uc, vc, Rv, se, form="poly8"):
+    cols = list(HYB_FORMS[form])
+    X = poly_basis(uc, vc)[:, cols]
     w = 1.0 / se
-    coef, *_ = np.linalg.lstsq(X * w[:, None], Rv * w, rcond=None)
+    sol, *_ = np.linalg.lstsq(X * w[:, None], Rv * w, rcond=None)
+    coef = np.zeros(8)
+    coef[cols] = sol
     a0 = coef[0]
     return np.concatenate([[a0], coef[1:] / a0])
 
@@ -896,7 +903,7 @@ def range_ok(p, clamp):
             float(Rv.min()), float(Rv.max()))
 
 
-def fit_events(u, v, r, clamp):
+def fit_events(u, v, r, clamp, form="poly8"):
     """6x6 truncated-mean estimator + poly8 fit + event normalisation.  Returns (p, reason)."""
     g = grid_estimates(u, v, r, HYB_GRID, clamp, HYB_MIN_BIN)
     if g is None:
@@ -905,7 +912,7 @@ def fit_events(u, v, r, clamp):
     if len(Rv) < HYB_MIN_BINS:
         return None, "few_bins"
     try:
-        p = fit_poly8_bins(uc, vc, Rv, se)
+        p = fit_poly8_bins(uc, vc, Rv, se, form)
     except Exception:
         return None, "fit_fail"
     if p is None or not np.isfinite(p).all():
@@ -930,6 +937,7 @@ def lifts(p, clamp):
 def cmd_fit_hybrid(a):
     if not (a.scan_dir and a.fallback):
         sys.exit("fit --per-module needs --scan-dir and --fallback")
+    mform = a.form if a.form in HYB_FORMS else "poly8"   # default (bilinear) = production poly8
     scan_dir = Path(a.scan_dir)
     fb_path = Path(a.fallback)
     fb_bytes = fb_path.read_bytes()
@@ -960,7 +968,7 @@ def cmd_fit_hybrid(a):
         rec = dict(module=name, id=mid, n=int(cnt[i]), own=0, reason=f"n<{a.min_clusters}")
         if cnt[i] >= a.min_clusters:
             n_elig += 1
-            p, reason = fit_events(u[ev], v[ev], r[ev], a.clamp)
+            p, reason = fit_events(u[ev], v[ev], r[ev], a.clamp, mform)
             rec["reason"] = reason
             if p is None:
                 failed[name] = reason
@@ -976,7 +984,7 @@ def cmd_fit_hybrid(a):
              "n_events": n_ev, "failed": failed}
     gi = G.git_info()
     js = {"schema": HYB_SCHEMA, "form": "hybrid", "run_type": rt, "slug": slug,
-          "module_form": "poly8", "clamp": float(a.clamp), "min_clusters": int(a.min_clusters),
+          "module_form": mform, "clamp": float(a.clamp), "min_clusters": int(a.min_clusters),
           "fallback": fb, "fallback_path": str(a.fallback),
           "fallback_sha1": hashlib.sha1(fb_bytes).hexdigest(),
           "modules": dict(sorted(mods.items(), key=lambda kv: kv[1]["id"])), "stats": stats,
@@ -999,6 +1007,8 @@ def cmd_fit_hybrid(a):
 
 
 def cmd_fit(a):
+    if a.form in ("even6", "even4") and not a.per_module:
+        sys.exit(f"--form {a.form} needs --per-module")
     if a.per_module:
         return cmd_fit_hybrid(a)
     if a.glob:
@@ -1040,7 +1050,8 @@ def main(argv=None):
     m.set_defaults(func=cmd_map)
     f = sub.add_parser("fit", help="poscorr_v1 JSON from a map (or the pooled global map), or a poscorr_hybrid_v1 (--per-module)")
     f.add_argument("--map", help="map_<slug>_<set>.tsv")
-    f.add_argument("--form", choices=("bilinear", "poly8", "both"), default="bilinear")
+    f.add_argument("--form", choices=("bilinear", "poly8", "both", "even6", "even4"), default="bilinear",
+                   help="even6/even4: only with --per-module (c6 = c7 = 0 [, c3..c5 = 0])")
     f.add_argument("--out", required=True, help="JSON path (DIR with --global)")
     f.add_argument("--global", dest="glob", action="store_true", help="pool the per-type maps")
     f.add_argument("--maps", help="with --global: glob of map_*_<set>.tsv")

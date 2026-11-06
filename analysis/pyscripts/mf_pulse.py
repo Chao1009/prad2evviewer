@@ -1,41 +1,46 @@
 #!/usr/bin/env python3
 """mf_pulse.py — matched-filter pulse reconstruction for HyCal PbWO4 FADC waveforms.
 
-Pure NumPy (no prad2 import).  Used by benchmark_hycal_timing_test_20261021.py
-with --pulse-method mf; see plan_20261022.md §4 and its "Decisions (user,
-2026-10-22)" section.
+Pure NumPy (no prad2 import).  Used by benchmark_hycal_timing_test_20261021.py with
+--pulse-method mf and by mf_raw_writer.py; see plans/plan_20261022.md §4.
 
-Model F4:  p(t) = (1 - exp(-t/tau_r)) exp(-t/tau_f) / T_max   (t > 0, else 0),
-unit peak.  Per-module (tau_r, tau_f) come from output/pulse_templates_h50.dat
-(25320 column); invalid / missing PbWO4 modules use the PbWO4 aggregate.
+Pipeline
+--------
+1. Template banks (per module index; both expose the same interface, so
+   MFReconstructor does not care which one it holds):
+     TemplateBank         analytic two-tau pulse  p(t) = (1 - exp(-t/tau_r)) exp(-t/tau_f) / T_max
+                          (t > 0, else 0; unit peak), (tau_r, tau_f) per module from the
+                          25320 column of output/pulse_templates_h50.dat; invalid or missing
+                          PbWO4 modules take the PbWO4 aggregate.
+     SampledTemplateBank  per-module sampled shapes of a spline_templates_v1 .npz.
+   build_bank(...) picks the class from the table path (".npz" -> sampled).  Both banks give
+   shape(m, t), shape_and_slope(m, t), kernel tables K/K2/Kn2/Kinv [module, phase, l],
+   t50 (leading-edge 50% time after onset), t_pk (peak time), I_tab/iint (energy integral).
 
-Reconstruction (MFReconstructor.run), batched over any number of channels:
-  1. baseline = clipped mean of samples 0..ped_nsamples-1, sigma = 1.4826 MAD
-  2. candidate channel: max 3-sample moving average > max(3 sigma, 3 ADC)
-  3. matched filter over onset t0 = 4 j - phi (phi = 0..3 ns), L = 24 samples
-  4. accept the best (j, phi) if A >= max(nsigma * sigma_A, A_min); a secondary
-     inside an accepted peak's kernel span also needs A >= r_model * A_parent
-  5. parabola on the 1 ns score grid + 3 Gauss-Newton steps on (a, t0)
-  6. subtract, repeat up to kmax peaks per channel
-  7. joint K x K amplitude fit (positivity drop), one (a, t0) refinement pass
-     for K >= 2, chi2/dof with a 0.03 model-error floor
-  8. clipped samples (>= overflow) are masked (weight 0); channels whose peak
-     window has < 6 unclipped samples or < 2 on the leading edge are flagged
-     for a WaveAnalyzer fallback (done by the caller).
+2. Detection and fit (MFReconstructor.run), batched over any number of channels:
+     a. baseline = clipped mean of the first ped_nsamples samples, sigma = 1.4826 MAD
+     b. candidate channel: max 3-sample moving average > max(3 sigma, 3 ADC)
+     c. matched filter over onset t0 = 4 j - phi (phi = 0..3 ns), L = 24 samples
+     d. accept the best (j, phi) if A >= max(nsigma * sigma_A, min_amp); a secondary
+        inside an accepted peak's kernel span also needs A >= r_model * A_parent
+     e. parabola on the 1 ns score grid, then 3 Gauss-Newton steps on (a, t0)
+     f. subtract, repeat up to kmax peaks per channel (each new peak triggers a joint
+        back-fit of all accepted peaks)
+     g. final amplitudes: closed form for K = 1, joint K x K solve (positivity drop) for
+        K >= 2; chi2/dof with the per-sample variance of `noise_model`
+     h. clipped samples (>= overflow) get weight 0; a channel whose peak window has < 6
+        unclipped samples or < 2 on the leading edge is flagged wa_fb (the caller falls
+        back to WaveAnalyzer).
+   Units: waveform samples in ADC, times in ns (sample i is at 4 i ns), onset t0 in ns.
+   Reported time is t0 + t50.
 
-Banks: TemplateBank (two-tau, above) or SampledTemplateBank (per-module
-sampled shapes from a spline_templates_v1 .npz, via build_bank on a ".npz"
-path).  Both provide shape(m, t) / shape_and_slope(m, t), K, t50, t_pk, I_tab,
-iint, so MFReconstructor does not care which one it holds.
-
-Energy: E_units = A * I_int[m](phase) * kappa [* f(A)], where I_int is the WaveAnalyzer
-walk-out integral (WaveAnalyzer.cpp:391-462, smoothing :235) of the noiseless
-sample-aligned unit template, in the high-amplitude limit (cut = int_tail_ratio
-* smoothed peak, tail_break_n consecutive sub-cut samples end the walk).
-The sampled bank (iint_mode "continuous", default) uses the phase average of that
-walk-out over the continuous template (I_cont = I_mean; no sub-sample phase
-dependence; continuous_walk_integral is kept as the I_cont_walk diagnostic) and may
-carry a global amplitude factor f(A) (ampcorr keys of the .npz); see SampledTemplateBank.
+3. Energy (pulse_energy_units): E_units = A * I_int[m](phase) * kappa [* f(A)], with I_int the
+   WaveAnalyzer walk-out integral (WaveAnalyzer.cpp:391-462, smoothing :235) of the noiseless
+   sample-aligned unit template in the high-amplitude limit (cut = int_tail_ratio * smoothed
+   peak, tail_break_n consecutive sub-cut samples end the walk).  The sampled bank
+   (iint_mode "continuous", default) uses the phase average of that walk-out (I_cont = I_mean,
+   no sub-sample phase dependence) and may carry a global or per-module amplitude factor
+   f(A) (ampcorr keys of the .npz).
 
     python3 mf_pulse.py --self-test
 """
@@ -51,21 +56,35 @@ import sys
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
+# ------------------------------------------------------------------ constants --
+# sample grid
 DT = 4.0                       # ns per sample
-TAU_R_RANGE = (1.0, 6.0)       # validity of a per-module pair (ns)
-TAU_F_RANGE = (15.0, 35.0)
 NPHASE = 4                     # kernel onset phases (1 ns grid)
-NIPH = 256                     # I_int phase grid points per 4 ns sample (+1 wrap)
-MODEL_FLOOR = 0.03
-LW = 32                        # fit window: samples [ceil(t0/4)-3, +LW)
+# two-tau parameter validity of a per-module (tau_r, tau_f) pair (ns)
+TAU_R_RANGE = (1.0, 6.0)
+TAU_F_RANGE = (15.0, 35.0)
+# reconstruction
+LW = 32                        # fit window: samples [ceil(t0/4) - LEAD, +LW)
 LEAD = 3
 MIN_SEP_NS = 12.0              # minimum onset separation of two pulses in a channel
 SIGMA_MIN = 0.3                # ADC floor on the raw sigma
-_TBL_N, _TBL_I0 = 64, 12       # I_int table waveform length / first-sample index
+CAND_NSIGMA = 3.0              # candidate threshold: moving average > max(CAND_NSIGMA sigma, 3 ADC)
+MODEL_FLOOR = 0.03             # chi2 model-error floor (fraction of the model), noise_model "mad"
+# noise_model "nps"/"nps_ped": sigma_i^2 = NPS_GAIN * S_i / NPS_DIV^2
+# (hycal_mf_fit_premodule_visual.C npsAmplitudeError)
+NPS_GAIN = 2.048
+NPS_DIV = 4.096
+# I_int tables
+NIPH = 256                     # phase grid points per 4 ns sample (+1 wrap point)
+_TBL_N, _TBL_I0 = 64, 12       # unit-template length / index of the onset sample in the walk
+_LUT_DT = 0.05                 # ns, lookup step of the sampled bank
+_CONT_DT, _CONT_TMAX, _CONT_CHUNK = 0.01, 400.0, 32   # continuous walk-out grid (ns, ns, rows)
+_PHASE_CHUNK = 128             # modules per phase-table batch (bounded memory)
 
 
-# ---------------------------------------------------------------- template --
+# ------------------------------------------------------------ analytic template --
 def tmax_of(tr, tf):
+    """Peak value of the un-normalised two-tau pulse (the T_max of the docstring)."""
     u = tr / (tr + tf)
     return (1.0 - u) * u ** (tr / tf)
 
@@ -86,8 +105,9 @@ def template_and_slope(t, tr, tf, tm):
     return s, ds
 
 
+# ------------------------------------------------- WaveAnalyzer integral (I_int) --
 def smooth_tri(x, order):
-    """Triangular smoothing of WaveAnalyzer::smooth (edges left unsmoothed)."""
+    """Triangular smoothing of WaveAnalyzer::smooth along the last axis (edges unsmoothed)."""
     x = np.asarray(x, dtype=np.float64)
     if order <= 1:
         return x.copy()
@@ -108,7 +128,7 @@ def walk_integral(v, ratio, nbreak, floor=None):
 
     A sample is 'below' if v < max(ratio * peak, floor) or v < 0; nbreak
     consecutive below samples end the walk and the pending ones are discarded
-    (WaveAnalyzer.cpp:391-462).  Returns the integral of the kept samples.
+    (WaveAnalyzer.cpp:391-462).  Returns the integral (sample sum) of the kept samples.
     """
     R, N = v.shape
     ar = np.arange(R)
@@ -141,24 +161,21 @@ def walk_integral(v, ratio, nbreak, floor=None):
     return integral
 
 
-def unit_integral(tr, tf, tm, u, smooth_order, ratio, nbreak, floor=None):
-    """I_int of unit templates sampled at tau_i = 4 (i - i0) + u.
-
-    tr, tf, tm, u (and floor, in unit-peak units) are 1-D arrays of equal length.
-    """
-    tau = DT * (np.arange(_TBL_N) - _TBL_I0)[None, :] + np.asarray(u)[:, None]
-    s = template(tau, np.asarray(tr)[:, None], np.asarray(tf)[:, None],
-                 np.asarray(tm)[:, None])
-    return walk_integral(smooth_tri(s, smooth_order), ratio, nbreak, floor)
-
-
 def unit_integral_fn(shape_fn, u, smooth_order, ratio, nbreak, floor=None):
-    """unit_integral for any shape: shape_fn maps times [R, N] (ns) to values [R, N].
+    """I_int of unit templates sampled at tau_i = 4 (i - i0) + u (ns), any shape.
 
-    The caller closes over the row -> module mapping; u (and floor) are 1-D, length R.
+    shape_fn maps times [R, N] (ns) to values [R, N]; the caller closes over the row ->
+    module mapping.  u (and floor, in unit-peak units) are 1-D arrays of length R.
     """
     tau = DT * (np.arange(_TBL_N) - _TBL_I0)[None, :] + np.asarray(u)[:, None]
     return walk_integral(smooth_tri(shape_fn(tau), smooth_order), ratio, nbreak, floor)
+
+
+def unit_integral(tr, tf, tm, u, smooth_order, ratio, nbreak, floor=None):
+    """unit_integral_fn for the two-tau pulse; tr, tf, tm, u, floor are 1-D arrays of equal length."""
+    tr, tf, tm = (np.asarray(x)[:, None] for x in (tr, tf, tm))
+    return unit_integral_fn(lambda tau: template(tau, tr, tf, tm), u, smooth_order, ratio,
+                            nbreak, floor)
 
 
 def _cont_smooth(shape_fn, smooth_order, dt, t_max, nrow):
@@ -235,7 +252,8 @@ def continuous_walk_integral(shape_fn, smooth_order, ratio, nbreak, floor=None,
     unit_integral_fn; R = len(floor) if floor (unit-peak units, per row) is
     given, else nrow.  Returns I[R]: the phase average of unit_integral_fn
     (see _cont_walk for the continuous walk rule).  Keep R modest (~32): the
-    working arrays are R x (t_max + 4 (order-1)) / dt.
+    working arrays are R x (t_max + 4 (order-1)) / dt.  Only the self-test
+    calls it (SampledTemplateBank uses _cont_smooth/_cont_walk directly).
     """
     R = len(floor) if floor is not None else nrow
     if R is None:
@@ -245,8 +263,8 @@ def continuous_walk_integral(shape_fn, smooth_order, ratio, nbreak, floor=None,
     return _cont_walk(S, ratio, nbreak, fl, dt)[0]
 
 
-# -------------------------------------------------------------- h50 loader --
-AGG_FALLBACK = (2.499476432800293, 24.406997680664062)
+# ------------------------------------------------------- two-tau table loaders --
+AGG_FALLBACK = (2.499476432800293, 24.406997680664062)   # PbWO4 aggregate (tau_r, tau_f) ns
 
 
 def table_columns(path):
@@ -284,16 +302,18 @@ def load_h50(path, column="25320"):
     The `column` run's median is used.  Only the h50 table (columns 25308 and
     25320, column 25320) has a secondary column: a NaN pair there takes the
     25308 value; any other table falls back to its own aggregate.  Rows failing
-    the validity rule (1<=tau_r<=6, 15<=tau_f<=35 ns) are dropped, as are modules the
+    the validity rule (TAU_R_RANGE, TAU_F_RANGE) are dropped, as are modules the
     run's JSON does not record as good_fit or with n_pulses_used >= min_pulses (the
-    table's own parameter block).  `json` is the
-    aggregate file named by the table's own `# Run #<column>: <json>` header line.
+    table's own parameter block).  `json` is the aggregate file named by the table's
+    own `# Run #<column>: <json>` header line.
     """
     with open(path, "rb") as fh:
         raw = fh.read()
     sha1 = hashlib.sha1(raw).hexdigest()
     column = str(column)
     lines = raw.decode().splitlines()
+
+    # header: the run's JSON and the min_pulses of its column
     jpath, min_pulses, runs = None, 50, []
     for line in lines:
         if line.startswith(f"# Run #{column}:"):
@@ -309,10 +329,10 @@ def load_h50(path, column="25320"):
     if jpath is None:
         raise ValueError(f"{path}: no '# Run #{column}: <json>' header line")
     if not os.path.isfile(jpath):
-        alt = os.path.join(os.path.dirname(os.path.abspath(path)),
-                           os.path.basename(jpath))
+        alt = os.path.join(os.path.dirname(os.path.abspath(path)), os.path.basename(jpath))
         if os.path.isfile(alt):
             jpath = alt
+
     # a column value is trusted only if the run's JSON has the channel as
     # good_fit or with n_pulses_used >= min_pulses (the table has no such filter)
     with open(jpath) as fh:
@@ -320,15 +340,13 @@ def load_h50(path, column="25320"):
     trusted = {k for k, e in jch.items()
                if isinstance(e, dict) and (e.get("good_fit")
                                            or e.get("n_pulses_used", 0) >= min_pulses)}
-    cols = None
-    rows = {}
-    other = None
+
+    cols, other, rows = None, None, {}
     for line in lines:
         if line.startswith("# module"):
             cols = [c.strip() for c in line[2:].split("\t")]
             if f"tau_r_mean_{column}" not in cols:
-                raise ValueError(f"{path}: no column {column} (have "
-                                 f"{table_columns(path)})")
+                raise ValueError(f"{path}: no column {column} (have {table_columns(path)})")
             if column == "25320" and "tau_r_mean_25308" in cols:
                 other = "25308"
             continue
@@ -355,15 +373,60 @@ def load_h50(path, column="25320"):
 
 
 def load_aggregate(json_path):
-    """PbWO4 aggregate (tau_r, tau_f) from a template JSON's `_by_type`."""
+    """PbWO4 aggregate (tau_r, tau_f) ns from a template JSON's `_by_type`."""
     with open(json_path) as fh:
         d = json.load(fh)["_by_type"]["PbWO4"]
     return (float(d["tau_r_ns"]["median"]), float(d["tau_f_ns"]["median"]))
 
 
-# ------------------------------------------------------------ template bank --
-class TemplateBank:
-    """Per-module kernel bank, t50 and I_int tables (indexed by module index)."""
+# ------------------------------------------------------------- template banks --
+class _BankBase:
+    """Tables shared by both banks; a subclass provides shape(m, t, dtype), L, t_pk,
+    pwo4 (length n_modules), smooth_order, int_tail_ratio and tail_break_n."""
+
+    def _build_kernels_and_t50(self):
+        """K[m, phi, l] = p(4 l + phi) and its norms; t50[m] = leading-edge 50% time (ns)."""
+        mi = np.arange(self.pwo4.size)
+        tl = DT * np.arange(self.L)[None, None, :] + np.arange(NPHASE)[None, :, None]
+        K = self.shape(mi[:, None, None], tl, dtype=np.float64)
+        self.K = K.astype(np.float32)
+        self.K2 = (K * K).astype(np.float32)
+        self.Kn2 = (K * K).sum(axis=2).astype(np.float32)          # [nm, 4]
+        self.Kinv = (1.0 / np.sqrt(np.maximum(self.Kn2, 1e-12))).astype(np.float32)
+        g = np.linspace(0.0, 1.0, 4001)[None, :] * self.t_pk[:, None]
+        sg = self.shape(mi[:, None], g, dtype=np.float64)
+        i1 = np.argmax(sg >= 0.5, axis=1)
+        i0 = np.maximum(i1 - 1, 0)
+        s0, s1 = sg[mi, i0], sg[mi, i1]
+        fr = np.where(s1 > s0, (0.5 - s0) / np.maximum(s1 - s0, 1e-300), 0.0)
+        self.t50 = g[mi, i0] + fr * (g[mi, i1] - g[mi, i0])
+
+    def _build_phase_table(self):
+        """I_tab[m, NIPH + 1] (float32, one 4 ns sample of onset phase), I_mean, area."""
+        nm = self.pwo4.size
+        u = DT * np.arange(NIPH + 1) / NIPH
+        tab = np.empty((nm, u.size))
+        for a in range(0, nm, _PHASE_CHUNK):
+            mrow = np.repeat(np.arange(a, min(a + _PHASE_CHUNK, nm)), u.size)
+            tab[a:a + _PHASE_CHUNK] = unit_integral_fn(
+                lambda tau: self.shape(mrow[:, None], tau, dtype=np.float64),
+                np.tile(u, mrow.size // u.size), self.smooth_order,
+                self.int_tail_ratio, self.tail_break_n).reshape(-1, u.size)
+        self.I_tab = tab.astype(np.float32)
+        self.I_mean = tab[:, :NIPH].mean(axis=1)
+        self.area = self.shape(np.arange(nm)[:, None], DT * np.arange(400)[None, :],
+                               dtype=np.float64).sum(axis=1)
+
+    def _iint_phase(self, m, t0):
+        """I_int at module index m for onset t0 (ns), interpolated in the phase table."""
+        u = np.mod(-np.asarray(t0, dtype=np.float64), DT) * (NIPH / DT)
+        k = np.minimum(np.floor(u).astype(np.int64), NIPH - 1)
+        fr = u - k
+        return self.I_tab[m, k] * (1.0 - fr) + self.I_tab[m, k + 1] * fr
+
+
+class TemplateBank(_BankBase):
+    """Analytic two-tau bank: per-module kernels, t50 and I_int tables (module-index rows)."""
 
     kind = "two_tau"
 
@@ -372,37 +435,17 @@ class TemplateBank:
         self.names = None              # build_bank sets the module names
         self.fallback = []             # names on the aggregate (build_bank)
         self.T_end = 400.0             # ns, unused: the analytic shape has no end
-        self.tau_r = np.asarray(tau_r, dtype=np.float64)
-        self.tau_f = np.asarray(tau_f, dtype=np.float64)
         self.pwo4 = np.asarray(pwo4, dtype=bool)
-        nm = self.tau_r.size
         self.L = L
         self.smooth_order = int(smooth_order)
         self.int_tail_ratio = float(int_tail_ratio)
         self.tail_break_n = int(tail_break_n)
         # non-PbWO4 rows hold the aggregate so the arrays stay finite
-        self.tau_r = np.where(self.pwo4, self.tau_r, AGG_FALLBACK[0])
-        self.tau_f = np.where(self.pwo4, self.tau_f, AGG_FALLBACK[1])
+        self.tau_r = np.where(self.pwo4, np.asarray(tau_r, dtype=np.float64), AGG_FALLBACK[0])
+        self.tau_f = np.where(self.pwo4, np.asarray(tau_f, dtype=np.float64), AGG_FALLBACK[1])
         self.tmx = tmax_of(self.tau_r, self.tau_f)
         self.t_pk = self.tau_r * np.log1p(self.tau_f / self.tau_r)
-        # kernel bank K[m, phi, l] = p(4 l + phi)
-        tl = (DT * np.arange(L)[None, None, :]
-              + np.arange(NPHASE)[None, :, None])
-        K = template(tl, self.tau_r[:, None, None], self.tau_f[:, None, None],
-                     self.tmx[:, None, None])
-        self.K = K.astype(np.float32)
-        self.K2 = (K * K).astype(np.float32)
-        self.Kn2 = (K * K).sum(axis=2).astype(np.float32)          # [nm, 4]
-        self.Kinv = (1.0 / np.sqrt(np.maximum(self.Kn2, 1e-12))).astype(np.float32)
-        # leading-edge 50% time relative to onset
-        g = np.linspace(0.0, 1.0, 4001)[None, :] * self.t_pk[:, None]
-        sg = template(g, self.tau_r[:, None], self.tau_f[:, None], self.tmx[:, None])
-        i1 = np.argmax(sg >= 0.5, axis=1)
-        i0 = np.maximum(i1 - 1, 0)
-        ar = np.arange(nm)
-        s0, s1 = sg[ar, i0], sg[ar, i1]
-        fr = np.where(s1 > s0, (0.5 - s0) / np.maximum(s1 - s0, 1e-300), 0.0)
-        self.t50 = g[ar, i0] + fr * (g[ar, i1] - g[ar, i0])
+        self._build_kernels_and_t50()
         self.build_iint(int_tail_ratio)
 
     def shape(self, m, t, dtype=np.float32):
@@ -416,33 +459,17 @@ class TemplateBank:
 
     def shape_and_slope(self, m, t, dtype=np.float32):
         """(shape, d shape/dt); both 0 for t <= 0."""
-        return template_and_slope(t, self.tau_r[m].astype(dtype),
-                                  self.tau_f[m].astype(dtype),
+        return template_and_slope(t, self.tau_r[m].astype(dtype), self.tau_f[m].astype(dtype),
                                   self.tmx[m].astype(dtype))
 
     def build_iint(self, ratio):
-        """I_int[m, phase-grid] (NIPH+1 points over one 4 ns sample)."""
+        """Rebuild I_tab / I_mean / area for the tail cut `ratio`."""
         self.int_tail_ratio = float(ratio)
-        nm = self.tau_r.size
-        u = DT * np.arange(NIPH + 1) / NIPH
-        tr = np.repeat(self.tau_r, u.size)
-        tf = np.repeat(self.tau_f, u.size)
-        tm = np.repeat(self.tmx, u.size)
-        uu = np.tile(u, nm)
-        tab = unit_integral(tr, tf, tm, uu, self.smooth_order, self.int_tail_ratio,
-                            self.tail_break_n).reshape(nm, u.size)
-        self.I_tab = tab.astype(np.float32)
-        self.I_mean = tab[:, :NIPH].mean(axis=1)
-        self.area = np.array([
-            template(DT * np.arange(400), a, b, c).sum()
-            for a, b, c in zip(self.tau_r, self.tau_f, self.tmx)])
+        self._build_phase_table()
 
     def iint(self, m, t0):
         """I_int at module index m for onset t0 (ns): sample-aligned phase."""
-        u = np.mod(-np.asarray(t0, dtype=np.float64), DT) * (NIPH / DT)
-        k = np.minimum(np.floor(u).astype(np.int64), NIPH - 1)
-        fr = u - k
-        return (self.I_tab[m, k] * (1.0 - fr) + self.I_tab[m, k + 1] * fr)
+        return self._iint_phase(m, t0)
 
     def iint_floor(self, m, t0, amp, ped_rms):
         """I_int with the ped_rms floor (v < max(ratio*h, ped_rms)), per pulse."""
@@ -451,9 +478,6 @@ class TemplateBank:
         return unit_integral(self.tau_r[m], self.tau_f[m], self.tmx[m], u,
                              self.smooth_order, self.int_tail_ratio,
                              self.tail_break_n, floor=fl)
-
-
-_LUT_DT = 0.05                  # ns, lookup step of the sampled bank
 
 
 class _ClippedSpline:
@@ -470,10 +494,20 @@ class _ClippedSpline:
         return _ClippedSpline(self.spl.derivative())
 
 
-_CONT_DT, _CONT_TMAX, _CONT_CHUNK = 0.01, 400.0, 32   # continuous walk-out grid
+def _check_ampcorr(ampcorr, n_modules):
+    """Validate ampcorr = (log A, f) and return it as float64 arrays."""
+    la, fa = (np.asarray(x, dtype=np.float64) for x in ampcorr)
+    per_module = fa.ndim == 2
+    if (la.ndim != 1 or la.size < 1
+            or (la.shape != fa.shape and not (per_module and fa.shape == (n_modules, la.size)))
+            or not (np.isfinite(la).all() and np.isfinite(fa).all())
+            or (np.diff(la) <= 0).any()):
+        raise ValueError("ampcorr: need equal-length 1-D finite arrays (f may be "
+                         "[n_modules, len(log A)]), log A strictly increasing")
+    return la, fa
 
 
-class SampledTemplateBank:
+class SampledTemplateBank(_BankBase):
     """TemplateBank interface on per-module sampled shapes (spline_templates_v1).
 
     shape_rows: one entry per module (bank order) -- a callable f(t) of ns after
@@ -486,7 +520,8 @@ class SampledTemplateBank:
     Energy integral: iint_mode "continuous" (default) takes I_cont[nm] = I_mean, the
     phase average of the discrete walk-out over the continuous template (no
     sub-sample phase dependence); "phase" keeps the 256-phase table I_tab.
-    I_tab and the strictly continuous walk I_cont_walk are kept as diagnostics.
+    I_tab and the strictly continuous walk I_cont_walk (sits 0.1-0.7 % below I_mean
+    because the discrete cut uses the sample peak) are kept as diagnostics.
     ampcorr = (log A, f) (optional, from_npz) is a global amplitude-dependent
     integral factor applied by pulse_energy_units through f_amp(amp).  f may also
     be a per-module table [n_modules, len(log A)] (rows = this bank's modules; from_npz
@@ -502,18 +537,7 @@ class SampledTemplateBank:
         if iint_mode not in ("continuous", "phase"):
             raise ValueError(f"iint_mode must be 'continuous' or 'phase', got {iint_mode!r}")
         self.iint_mode = iint_mode
-        if ampcorr is not None:
-            la, fa = (np.asarray(x, dtype=np.float64) for x in ampcorr)
-            per_module = fa.ndim == 2
-            if (la.ndim != 1 or la.size < 1
-                    or (la.shape != fa.shape and not (
-                        per_module and fa.shape == (len(names), la.size)))
-                    or not (np.isfinite(la).all() and np.isfinite(fa).all())
-                    or (np.diff(la) <= 0).any()):
-                raise ValueError("ampcorr: need equal-length 1-D finite arrays (f may be "
-                                 "[n_modules, len(log A)]), log A strictly increasing")
-            ampcorr = (la, fa)
-        self.ampcorr = ampcorr
+        self.ampcorr = None if ampcorr is None else _check_ampcorr(ampcorr, len(names))
         self.ampcorr_meta = dict(ampcorr_meta or {})
         self.names = list(names)
         self.pwo4 = np.asarray(pwo4, dtype=bool)
@@ -530,6 +554,14 @@ class SampledTemplateBank:
         self.n_file = int(self.pwo4.sum()) - self.n_fallback   # rows with own shape
         self.meta = dict(meta or {})
         self.run_type = self.meta.get("run_type")
+        self._tabulate(shape_rows)
+        self.t_pk = np.argmax(self.lut, axis=1) * _LUT_DT
+        self._build_kernels_and_t50()
+        self.build_iint(int_tail_ratio)
+
+    def _tabulate(self, shape_rows):
+        """Fill lut/dlut[nm, n_lut] (value and slope on the 0.05 ns grid)."""
+        nm = len(self.names)
         n = self.n_lut = int(round(self.T_end / _LUT_DT)) + 1
         tg = _LUT_DT * np.arange(n)
         self.lut = np.empty((nm, n), dtype=np.float32)
@@ -551,27 +583,9 @@ class SampledTemplateBank:
             self.lut[i], self.dlut[i] = cache[id(f)]
         self._lut = self.lut.reshape(-1)
         self._dlut = self.dlut.reshape(-1)
-        mi = np.arange(nm)
-        # kernel bank K[m, phi, l] = p(4 l + phi)
-        tl = (DT * np.arange(L)[None, None, :]
-              + np.arange(NPHASE)[None, :, None])
-        K = self.shape(mi[:, None, None], tl, dtype=np.float64)
-        self.K = K.astype(np.float32)
-        self.K2 = (K * K).astype(np.float32)
-        self.Kn2 = (K * K).sum(axis=2).astype(np.float32)          # [nm, 4]
-        self.Kinv = (1.0 / np.sqrt(np.maximum(self.Kn2, 1e-12))).astype(np.float32)
-        self.t_pk = np.argmax(self.lut, axis=1) * _LUT_DT
-        # leading-edge 50% time relative to onset (grid search as TemplateBank)
-        g = np.linspace(0.0, 1.0, 4001)[None, :] * self.t_pk[:, None]
-        sg = self.shape(mi[:, None], g, dtype=np.float64)
-        i1 = np.argmax(sg >= 0.5, axis=1)
-        i0 = np.maximum(i1 - 1, 0)
-        s0, s1 = sg[mi, i0], sg[mi, i1]
-        fr = np.where(s1 > s0, (0.5 - s0) / np.maximum(s1 - s0, 1e-300), 0.0)
-        self.t50 = g[mi, i0] + fr * (g[mi, i1] - g[mi, i0])
-        self.build_iint(int_tail_ratio)
 
     def _locate(self, m, t, dtype):
+        """Flat table index, interpolation fraction and inside-(0, T_end) mask."""
         t = np.asarray(t, dtype=dtype)
         x = t * dtype(1.0 / _LUT_DT)
         i = np.clip(np.floor(x), 0, self.n_lut - 2)
@@ -579,7 +593,8 @@ class SampledTemplateBank:
         base = np.asarray(m, dtype=np.int64) * self.n_lut + i.astype(np.int64)
         return base, f, (t > 0) & (t < self.T_end)
 
-    def _interp(self, tab, base, f, inside, dtype):
+    @staticmethod
+    def _interp(tab, base, f, inside, dtype):
         v = tab[base].astype(dtype) * (1 - f) + tab[base + 1].astype(dtype) * f
         return np.where(inside, v, dtype(0))
 
@@ -598,45 +613,29 @@ class SampledTemplateBank:
                 self._interp(self._dlut, base, f, inside, dtype))
 
     def build_iint(self, ratio):
-        """I_int[m, phase-grid] (NIPH+1 points over one 4 ns sample)."""
+        """Rebuild the I_int tables for the tail cut `ratio`: phase table, then the
+        continuous walk-out I_cont_walk / h_cont (rows with an identical shape done once)."""
         self.int_tail_ratio = float(ratio)
-        nm = len(self.names)
-        u = DT * np.arange(NIPH + 1) / NIPH
-        tab = np.empty((nm, u.size))
-        for a in range(0, nm, 128):                  # bounded memory
-            mrow = np.repeat(np.arange(a, min(a + 128, nm)), u.size)
-            tab[a:a + 128] = unit_integral_fn(
-                lambda tau: self.shape(mrow[:, None], tau, dtype=np.float64),
-                np.tile(u, mrow.size // u.size), self.smooth_order,
-                self.int_tail_ratio, self.tail_break_n).reshape(-1, u.size)
-        self.I_tab = tab.astype(np.float32)
-        self.I_mean = tab[:, :NIPH].mean(axis=1)
-        self.area = self.shape(np.arange(nm)[:, None], DT * np.arange(400)[None, :],
-                               dtype=np.float64).sum(axis=1)
-        # continuous walk-out integral; rows with an identical shape computed once
+        self._build_phase_table()
         _, first, inv = np.unique(self.lut, axis=0, return_index=True, return_inverse=True)
         Iu, hu = np.empty(len(first)), np.empty(len(first))
         for a in range(0, len(first), _CONT_CHUNK):
             mu = np.arange(a, min(a + _CONT_CHUNK, len(first)))
             mrow = first[mu]
             S = _cont_smooth(lambda tau: self.shape(mrow[:, None], tau, dtype=np.float64),
-                             self.smooth_order,
-                             _CONT_DT, _CONT_TMAX, mu.size)
+                             self.smooth_order, _CONT_DT, _CONT_TMAX, mu.size)
             Iu[mu], hu[mu] = _cont_walk(S, self.int_tail_ratio, self.tail_break_n,
                                         None, _CONT_DT)
-        # I_cont_walk: walk-out on the continuous smoothed template (cut from the true
-        # smoothed peak); it sits 0.1-0.7 % below the phase average of the discrete
-        # rule because the discrete cut uses the sample peak.  The energy integral
-        # I_cont is the phase average of the exact discrete walk-out (I_mean): no
-        # sub-sample phase dependence and equal to the C++ rule averaged over phase.
         self.I_cont_walk = Iu[inv.reshape(-1)]
+        # energy integral: the phase average of the exact discrete walk-out (no sub-sample
+        # phase dependence, equal to the C++ rule averaged over phase)
         self.I_cont = np.asarray(self.I_mean, dtype=np.float64).copy()
         self.h_cont = hu[inv.reshape(-1)]          # peak of the smoothed unit template
 
     def iint(self, m, t0):
         """I_int at module index m for onset t0 (ns); continuous mode: no t0 dependence."""
         if self.iint_mode == "phase":
-            return TemplateBank.iint(self, m, t0)
+            return self._iint_phase(m, t0)
         return self.I_cont[np.asarray(m, dtype=np.int64)] + np.zeros(np.shape(t0))
 
     def iint_floor(self, m, t0, amp, ped_rms):
@@ -772,18 +771,18 @@ class SampledTemplateBank:
 
 def build_bank(names, pwo4, table_path, wave_cfg, *, column="25320",
                int_tail_ratio=None, L=24, iint_mode="continuous"):
-    """TemplateBank for a geometry (names/pwo4 indexed by module index).
+    """Template bank for a geometry (names/pwo4 indexed by module index).
 
-    Modules missing from the table or failing the validity rule get the PbWO4
-    aggregate of the JSON named in the table header.  Returns (bank, info);
+    wave_cfg needs smooth_order, tail_break_n and (unless int_tail_ratio is given)
+    int_tail_ratio.  Modules missing from the two-tau table or failing the validity rule
+    get the PbWO4 aggregate of the JSON named in the table header.  Returns (bank, info);
     info has sha1, n_module, fallback (names), column, agg, agg_json, kind.
-    A table_path ending in ".npz" (spline_templates_v1) gives a
-    SampledTemplateBank instead (column "sampled", agg None; info also has
-    n_fallback, run_type, iint_mode and ampcorr (description or None));
-    iint_mode applies to the .npz bank only.
+    A table_path ending in ".npz" (spline_templates_v1) gives a SampledTemplateBank instead
+    (column "sampled", agg None; info also has n_fallback, run_type, iint_mode and
+    ampcorr (description or None)); iint_mode applies to the .npz bank only.
     """
-    ratio = (wave_cfg["int_tail_ratio"] if int_tail_ratio is None
-             else int_tail_ratio)
+    ratio = wave_cfg["int_tail_ratio"] if int_tail_ratio is None else int_tail_ratio
+    tail_break_n = int(wave_cfg["tail_break_n"])
     if str(table_path).endswith(".npz"):
         with open(table_path, "rb") as fh:
             sha1 = hashlib.sha1(fh.read()).hexdigest()
@@ -794,7 +793,7 @@ def build_bank(names, pwo4, table_path, wave_cfg, *, column="25320",
         info = dict(sha1=sha1, n_module=bank.n_file, fallback=list(bank.fallback),
                     column="sampled", agg=None, agg_json=None,
                     int_tail_ratio=float(ratio),
-                    tail_break_n=int(wave_cfg["tail_break_n"]), kind="sampled",
+                    tail_break_n=tail_break_n, kind="sampled",
                     n_fallback=bank.n_fallback, run_type=bank.run_type,
                     iint_mode=bank.iint_mode, ampcorr=bank.ampcorr_str())
         return bank, info
@@ -812,37 +811,65 @@ def build_bank(names, pwo4, table_path, wave_cfg, *, column="25320",
         else:
             fallback.append(nm)
     bank = TemplateBank(tr, tf, pwo4, smooth_order=wave_cfg["smooth_order"],
-                        int_tail_ratio=ratio,
-                        tail_break_n=wave_cfg["tail_break_n"], L=L)
+                        int_tail_ratio=ratio, tail_break_n=wave_cfg["tail_break_n"], L=L)
     bank.names = list(names)
     bank.fallback = fallback
     info = dict(sha1=sha1, n_module=n_file, fallback=fallback, column=column,
                 agg=agg, agg_json=agg_json, int_tail_ratio=float(ratio),
-                tail_break_n=int(wave_cfg["tail_break_n"]), kind="two_tau")
+                tail_break_n=tail_break_n, kind="two_tau")
     return bank, info
 
 
-# ---------------------------------------------------------- reconstruction --
+# ------------------------------------------------------------ reconstruction --
 class MFResult:
-    """Output of MFReconstructor.run (channel-level and pulse-level arrays)."""
+    """Output of MFReconstructor.run.
+
+    Channel-level arrays [n_channels]: ped (ADC), sigma (ADC), clipped, cand, npk (pulses),
+    wa_fb (caller must fall back to WaveAnalyzer).  Pulse-level arrays [n_pulses], sorted by
+    (p_ch, p_t0): p_ch (channel row), p_t0 (onset, ns), p_amp (ADC), p_chi2 (chi2/dof),
+    p_time (t0 + t50, ns), p_onset (t0 / 4, samples).  stats: dict of counters.
+    """
     __slots__ = ("ped", "sigma", "clipped", "cand", "npk", "wa_fb",
                  "p_ch", "p_t0", "p_amp", "p_chi2", "p_time", "p_onset",
                  "stats")
 
 
 class MFReconstructor:
+    """Matched-filter reconstructor over a template bank (see the module docstring).
+
+    Constructor defaults are the original plan_20261022 values; note r_model=0.05 here
+    while the benchmark and mf_raw_writer.py both pass r_model=0.3 (--mf-r-model).
+
+    noise_model sets the per-sample variance of the chi2 only:
+      "mad" (default, frozen behaviour): sigma_ped^2 + (MODEL_FLOOR * model)^2, with
+          sigma_ped = 1.4826 MAD of the first ped_nsamples (floor SIGMA_MIN);
+      "nps": NPS_GAIN * S_i / NPS_DIV^2 + (model_floor * model)^2 with
+          S_i = max(y_i - ped, 1) from the data (Wassim/NPS prescription; ped is this
+          module's own pedestal estimate, not the macro's baseline15);
+      "nps_ped": sigma_ped^2 + NPS_GAIN * max(y_i - ped, 0) / NPS_DIV^2 + (model_floor * model)^2;
+          the Poisson-like term is floored at 0 (not 1) because sigma_ped already
+          carries the baseline noise.
+    model_floor is MODEL_FLOOR for "mad" and 0 for the two NPS models.  Detection
+    thresholds (sigma_A, candidate) and all amplitude/time solves are unweighted and use
+    sigma_ped in every mode.
+    """
+
     def __init__(self, bank, *, nsigma=5.0, min_amp=5.0, kmax=4, r_model=0.05,
-                 ped_nsamples=30, jmax=None, cand_nsigma=3.0):
+                 ped_nsamples=30, noise_model="mad"):
+        if noise_model not in ("mad", "nps", "nps_ped"):
+            raise ValueError(
+                f"noise_model must be 'mad', 'nps' or 'nps_ped', got {noise_model!r}")
+        self.noise_model = noise_model
+        self.model_floor = MODEL_FLOOR if noise_model == "mad" else 0.0
         self.b = bank
         self.nsigma, self.min_amp, self.kmax = nsigma, min_amp, int(kmax)
         self.r_model = r_model
         self.ped_n = int(ped_nsamples)
-        self.jmax = jmax
-        self.cand_ns = cand_nsigma
         self.L = bank.L
 
-    # -- pieces -----------------------------------------------------------
+    # -- noise ------------------------------------------------------------------
     def _pedestal(self, Y):
+        """(ped, sigma) [n] in ADC of channels Y[n, ns]: clipped mean and 1.4826 MAD."""
         x = Y[:, :self.ped_n]
         med = np.median(x, axis=1)
         mad = np.median(np.abs(x - med[:, None]), axis=1)
@@ -853,68 +880,94 @@ class MFReconstructor:
         ped = ((x * ok).sum(axis=1) / cnt).astype(np.float32)
         return ped, sig
 
-    def _J(self, ns):
-        J = ns - self.L + 1
-        if self.jmax is not None:
-            J = min(J, self.jmax + 1)
-        return J
+    def _var(self, y, mdl, sig):
+        """Per-sample chi2 variance: y, mdl [n, k] pedestal-subtracted data / model, sig [n]."""
+        if self.noise_model == "nps":
+            S = np.maximum(y, 1.0)
+            return NPS_GAIN * S / NPS_DIV ** 2 + (self.model_floor * mdl) ** 2
+        if self.noise_model == "nps_ped":
+            S = np.maximum(y, 0.0)
+            return (sig[:, None] ** 2 + NPS_GAIN * S / NPS_DIV ** 2
+                    + (self.model_floor * mdl) ** 2)
+        return sig[:, None] ** 2 + (self.model_floor * mdl) ** 2
 
+    # -- model pieces -----------------------------------------------------------
     def _corr(self, r, Kb):
-        J = self._J(r.shape[1])
+        """Correlation of rows r[n, ns] with kernels Kb[n, 4, L] -> [n, J, 4]."""
+        J = r.shape[1] - self.L + 1
         Wv = sliding_window_view(r, self.L, axis=1)[:, :J]
-        return np.matmul(Wv, Kb.transpose(0, 2, 1))             # [n, J, 4]
+        return np.matmul(Wv, Kb.transpose(0, 2, 1))
 
     def _basis(self, m, t0, ns):
-        """Full-length unit model s(4 i - t0) for peaks (arrays of equal length)."""
-        b = self.b
+        """Full-length unit model s(4 i - t0) [n, ns] for peaks (m, t0 arrays of equal length)."""
         tau = DT * np.arange(ns, dtype=np.float32)[None, :] - t0[:, None]
-        return b.shape(m[:, None], tau).astype(np.float32)
+        return self.b.shape(m[:, None], tau).astype(np.float32)
+
+    @staticmethod
+    def _window_start(t0):
+        """First sample of the fit window of onset t0 (ns)."""
+        return np.ceil(t0 / DT).astype(np.int64) - LEAD
 
     def _window(self, t0, ns):
-        """(sample idx [n, LW], valid [n, LW]) fit window of onset t0."""
-        w0 = np.ceil(t0 / DT).astype(np.int64) - LEAD
-        idx = w0[:, None] + np.arange(LW)[None, :]
+        """(clipped sample idx [n, LW], valid [n, LW], raw idx [n, LW]) of the fit window of t0."""
+        idx = self._window_start(t0)[:, None] + np.arange(LW)[None, :]
         return np.clip(idx, 0, ns - 1), (idx >= 0) & (idx < ns), idx
 
-    def amp_at(self, y, m, t0, w=None, sigma=None):
-        """Fixed-onset LS template amplitude (the K = 1 closed form of _group).
+    def _window_mask(self, t0, ns):
+        """bool [n, ns]: samples inside the fit window of onset t0."""
+        w0 = self._window_start(t0)[:, None]
+        ii = np.arange(ns)[None, :]
+        return (ii >= w0) & (ii < w0 + LW)
 
-        y [n, ns] pedestal-subtracted, m [n] module indices, t0 [n] onsets in ns
+    def _fixed_onset(self, y, w, m, t0):
+        """Closed-form LS amplitude at fixed onset over the fit window.
+
+        y [n, ns], w [n, ns] or None, m [n], t0 [n] float32 ns.  Returns
+        (A, Gss, s, ww, yy): A = <y, s>/<s, s>, Gss = <s, s>, and the window model s,
+        weights ww and data yy [n, LW].
+        """
+        ic, valid, idx = self._window(t0, y.shape[1])
+        ww = self._window_weights(valid, ic, w)
+        yy = np.take_along_axis(y, ic, axis=1)
+        s = self.b.shape(m[:, None], DT * idx.astype(np.float32) - t0[:, None])
+        Gss = (ww * s * s).sum(1)
+        return (ww * s * yy).sum(1) / np.maximum(Gss, 1e-20), Gss, s, ww, yy
+
+    @staticmethod
+    def _window_weights(valid, ic, w):
+        ww = valid.astype(np.float32)
+        if w is not None:
+            ww = ww * np.take_along_axis(w, ic, axis=1)
+        return ww
+
+    def amp_at(self, y, m, t0, w=None, sigma=None):
+        """Fixed-onset LS template amplitude (the K = 1 closed form of _final_fit).
+
+        y [n, ns] pedestal-subtracted (ADC), m [n] module indices, t0 [n] onsets in ns
         (same convention as MFResult.p_t0), w [n, ns] optional sample weights.
         Returns (A [n], sigma_A [n] or None); A = <y, s>/<s, s> over the fit
         window of t0, no threshold, no positivity cut; sigma_A = sigma/sqrt(<s, s>).
         """
-        b = self.b
         y = np.asarray(y, dtype=np.float32)
         m = np.asarray(m, dtype=np.int64)
         t0 = np.asarray(t0, dtype=np.float32)
-        ic, valid, idx = self._window(t0, y.shape[1])
-        ww = valid.astype(np.float32)
-        if w is not None:
-            ww = ww * np.take_along_axis(w, ic, axis=1)
-        yy = np.take_along_axis(y, ic, axis=1)
-        s = b.shape(m[:, None], DT * idx.astype(np.float32) - t0[:, None])
-        Gss = (ww * s * s).sum(1)
-        A = (ww * s * yy).sum(1) / np.maximum(Gss, 1e-20)
+        A, Gss = self._fixed_onset(y, w, m, t0)[:2]
         sA = None if sigma is None else (
             np.asarray(sigma, dtype=np.float32) / np.sqrt(np.maximum(Gss, 1e-20)))
         return A, sA
 
+    # -- peak finding -----------------------------------------------------------
     def _gn(self, r, w, m, t0, a, nit=3):
-        """3 Gauss-Newton steps on (a, t0) for one peak per row of r."""
-        b = self.b
-        ns = r.shape[1]
-        ic, valid, idx = self._window(t0, ns)
+        """nit Gauss-Newton steps on (a, t0) for one peak per row of the residual r."""
+        ic, valid, idx = self._window(t0, r.shape[1])
         rr = np.take_along_axis(r, ic, axis=1)
-        ww = valid.astype(np.float32)
-        if w is not None:
-            ww = ww * np.take_along_axis(w, ic, axis=1)
+        ww = self._window_weights(valid, ic, w)
         mc = m[:, None]
         xt = DT * idx.astype(np.float32)
         t0 = t0.astype(np.float32).copy()
         a = a.astype(np.float32).copy()
         for _ in range(nit):
-            s, ds = b.shape_and_slope(mc, xt - t0[:, None])
+            s, ds = self.b.shape_and_slope(mc, xt - t0[:, None])
             g = -a[:, None] * ds
             res = rr - a[:, None] * s
             Gss = (ww * s * s).sum(1)
@@ -933,22 +986,73 @@ class MFReconstructor:
             t0 = t0 + dt
         return t0, a
 
+    def _best_new_peak(self, r, w, m, sig, pv, pt0, pa, k):
+        """Best matched-filter peak of the residual r[n, ns] (w, pv, pt0, pa: same rows).
+
+        pv/pt0/pa [n, kmax] hold the k already accepted peaks.  Returns
+        (t0 [n] ns float32, A [n] ADC, ok [n]): the best (j, phi) refined by a parabola
+        on the 1 ns score grid, and whether it passes the amplitude, separation and
+        r_model tests.
+        """
+        b = self.b
+        n, ns = r.shape
+        J = ns - self.L + 1
+        C = self._corr(r, b.K[m])
+        if w is None:
+            S = C * b.Kinv[m][:, None, :]
+        else:
+            D = self._corr(w, b.K2[m])
+            S = np.where(D >= 0.05 * b.Kn2[m][:, None, :],
+                         C / np.sqrt(np.maximum(D, 1e-12)), -np.inf)
+        Sg = np.ascontiguousarray(S[:, :, ::-1]).reshape(n, 4 * J)   # index q = 4 j + (3 - phi)
+        if k > 0:
+            # no new pulse within MIN_SEP_NS of an accepted one (both sides)
+            tg = np.arange(4 * J, dtype=np.float32)[None, :] - 3.0
+            near = np.zeros((n, 4 * J), dtype=bool)
+            for kk in range(k):
+                near |= pv[:, kk][:, None] & (np.abs(tg - pt0[:, kk][:, None]) < MIN_SEP_NS)
+            Sg = np.where(near, -np.inf, Sg)
+        q = np.argmax(Sg, axis=1)
+        ar = np.arange(n)
+        j = q // 4
+        ph = 3 - (q % 4)
+        Db = np.maximum(b.Kn2[m, ph] if w is None else D[ar, j, ph], 1e-12)
+        A = C[ar, j, ph] / Db
+        sA = sig / np.sqrt(Db)
+        t0 = (q - 3).astype(np.float32)
+        # parabola on the 1 ns score grid
+        qm = np.clip(q - 1, 0, 4 * J - 1)
+        qp = np.clip(q + 1, 0, 4 * J - 1)
+        s0, sm, sp = Sg[ar, q], Sg[ar, qm], Sg[ar, qp]
+        with np.errstate(invalid="ignore"):          # -inf neighbours
+            den = sm - 2.0 * s0 + sp
+            okp = (q > 0) & (q < 4 * J - 1) & (den < 0) & np.isfinite(den)
+            delta = np.where(okp, 0.5 * (sm - sp) / np.where(okp, den, 1.0), 0.0)
+        t0 = t0 + np.clip(delta, -1.0, 1.0).astype(np.float32)
+        # acceptance
+        ok = np.isfinite(s0) & (A >= np.maximum(self.nsigma * sA, self.min_amp))
+        if k > 0:
+            ok &= ~(pv & (np.abs(t0[:, None] - pt0) < MIN_SEP_NS)).any(axis=1)
+            cov = pv & (t0[:, None] >= pt0) & (t0[:, None] < pt0 + DT * self.L)
+            parent = np.where(cov, pa, 0.0).max(axis=1)
+            ok &= (A >= self.r_model * parent)
+        return t0, A, ok
+
     def _solve_joint(self, y, w, m, t0, a, valid, ns):
-        """Joint amplitudes for padded peaks [c, kmax]; drops non-positive ones."""
+        """Joint amplitudes for padded peaks [c, kmax]; drops non-positive ones.
+
+        Returns (amplitudes, valid, model rows S [c, kmax, ns], window weights [c, ns]).
+        """
         c, kmax = t0.shape
         valid = valid.copy()
         wm = np.zeros((c, ns), dtype=np.float32)
-        ii = np.arange(ns)[None, :]
         S = np.zeros((c, kmax, ns), dtype=np.float32)
         for k in range(kmax):
-            vk = valid[:, k]
-            if not vk.any():
+            rows = np.nonzero(valid[:, k])[0]
+            if rows.size == 0:
                 continue
-            rows = np.nonzero(vk)[0]
             S[rows, k] = self._basis(m[rows], t0[rows, k], ns)
-            w0 = np.ceil(t0[rows, k] / DT).astype(np.int64) - LEAD
-            inw = (ii >= w0[:, None]) & (ii < w0[:, None] + LW)
-            wm[rows] = np.maximum(wm[rows], inw.astype(np.float32))
+            wm[rows] = np.maximum(wm[rows], self._window_mask(t0[rows, k], ns).astype(np.float32))
         if w is not None:
             wm = wm * w
         eye = np.eye(kmax, dtype=np.float32)[None]
@@ -970,16 +1074,20 @@ class MFReconstructor:
         return anew, valid, S, wm
 
     def _refine_multi(self, y, w, m, t0, a, valid, ns, nit=4):
-        """Joint amplitude solve, joint Gauss-Newton on all (a_k, t0_k), solve."""
+        """Joint amplitude solve, joint Gauss-Newton on all (a_k, t0_k), solve again.
+
+        Peaks closer than MIN_SEP_NS after the GN steps are merged (the smaller is
+        dropped) and the GN is redone for those channels.  Returns
+        (t0, a, valid, model rows S [c, kmax, ns], window weights).
+        """
         c, kmax = t0.shape
         t0 = t0.astype(np.float32).copy()
         a, valid, S, wmask = self._solve_joint(y, w, m, t0, a, valid, ns)
-        b = self.b
         mc = m[:, None]
         xt = DT * np.arange(ns, dtype=np.float32)[None, :]
         eye = np.eye(2 * kmax, dtype=np.float32)[None]
         redo = np.ones(c, dtype=bool)        # stage 2 only for channels that dropped
-        for stage in range(2):
+        for _ in range(2):
             upd = valid & redo[:, None]
             for _ in range(nit):
                 Sk = np.zeros((c, kmax, ns), dtype=np.float32)
@@ -987,7 +1095,7 @@ class MFReconstructor:
                 for k in range(kmax):
                     if not valid[:, k].any():
                         continue
-                    s_, ds_ = b.shape_and_slope(mc, xt - t0[:, k, None])
+                    s_, ds_ = self.b.shape_and_slope(mc, xt - t0[:, k, None])
                     vk = valid[:, k, None]
                     Sk[:, k] = s_ * vk
                     Gk[:, k] = -a[:, k, None] * ds_ * vk
@@ -1004,7 +1112,6 @@ class MFReconstructor:
                 dt = np.where(upd, np.clip(sol[:, kmax:], -2.0, 2.0), 0.0)
                 a = np.where(valid, np.maximum(a + da, 0.2 * a), 0.0).astype(np.float32)
                 t0 = (t0 + dt).astype(np.float32)
-            # pulses closer than MIN_SEP_NS are one pulse: drop the smaller, refit
             tsep = np.abs(t0[:, :, None] - t0[:, None, :])
             both = valid[:, :, None] & valid[:, None, :] & ~np.eye(kmax, dtype=bool)[None]
             close = both & (tsep < MIN_SEP_NS)
@@ -1022,13 +1129,15 @@ class MFReconstructor:
         a, valid, S, wmask = self._solve_joint(y, w, m, t0, a, valid, ns)
         return t0, a, valid, S, wmask
 
-    # -- group reconstruction (all channels share the weights mode) ------------
-    def _group(self, y, w, m, sig):
-        """y [n,ns] baseline-subtracted (clipped samples zeroed if w), w or None."""
-        b = self.b
+    def _find_peaks(self, y, w, m, sig):
+        """Iterative peak search: up to kmax peaks per channel.
+
+        y [n, ns] baseline-subtracted ADC (clipped samples zeroed if w), w [n, ns] or None,
+        m [n] module indices, sig [n].  Returns (pt0, pa, pv) [n, kmax]: onsets (ns),
+        amplitudes (ADC) and slot-in-use flags.
+        """
         n, ns = y.shape
-        kmax, L = self.kmax, self.L
-        J = self._J(ns)
+        kmax = self.kmax
         res = y.copy()
         pt0 = np.zeros((n, kmax), dtype=np.float32)
         pa = np.zeros((n, kmax), dtype=np.float32)
@@ -1036,59 +1145,10 @@ class MFReconstructor:
         active = np.ones(n, dtype=bool)
         for k in range(kmax):
             ia = np.nonzero(active)[0]
-            na = ia.size
-            if na == 0:
+            if ia.size == 0:
                 break
-            r = res[ia]
-            mk = m[ia]
-            Kb = b.K[mk]
-            C = self._corr(r, Kb)
-            if w is None:
-                S = C * b.Kinv[mk][:, None, :]
-            else:
-                D = self._corr(w[ia], b.K2[mk])
-                S = np.where(D >= 0.05 * b.Kn2[mk][:, None, :],
-                             C / np.sqrt(np.maximum(D, 1e-12)), -np.inf)
-            Sg = np.ascontiguousarray(S[:, :, ::-1]).reshape(na, 4 * J)
-            if k > 0:
-                # no new pulse within MIN_SEP_NS of an accepted one (both sides)
-                tg = np.arange(4 * J, dtype=np.float32)[None, :] - 3.0
-                near = np.zeros((na, 4 * J), dtype=bool)
-                for kk in range(k):
-                    near |= (pv[ia, kk][:, None]
-                             & (np.abs(tg - pt0[ia, kk][:, None]) < MIN_SEP_NS))
-                Sg = np.where(near, -np.inf, Sg)
-            q = np.argmax(Sg, axis=1)
-            ar = np.arange(na)
-            j = q // 4
-            ph = 3 - (q % 4)
-            Cb = C[ar, j, ph]
-            if w is None:
-                Db = b.Kn2[mk, ph]
-            else:
-                Db = D[ar, j, ph]
-            Db = np.maximum(Db, 1e-12)
-            A = Cb / Db
-            sA = sig[ia] / np.sqrt(Db)
-            t0 = (q - 3).astype(np.float32)
-            # parabola on the 1 ns score grid
-            qm = np.clip(q - 1, 0, 4 * J - 1)
-            qp = np.clip(q + 1, 0, 4 * J - 1)
-            s0, sm, sp = Sg[ar, q], Sg[ar, qm], Sg[ar, qp]
-            with np.errstate(invalid="ignore"):          # -inf neighbours
-                den = sm - 2.0 * s0 + sp
-                okp = (q > 0) & (q < 4 * J - 1) & (den < 0) & np.isfinite(den)
-                delta = np.where(okp, 0.5 * (sm - sp) / np.where(okp, den, 1.0),
-                                 0.0)
-            t0 = t0 + np.clip(delta, -1.0, 1.0).astype(np.float32)
-            # acceptance
-            ok = np.isfinite(s0) & (A >= np.maximum(self.nsigma * sA, self.min_amp))
-            if k > 0:
-                ok &= ~(pv[ia] & (np.abs(t0[:, None] - pt0[ia]) < MIN_SEP_NS)).any(axis=1)
-                cov = (pv[ia] & (t0[:, None] >= pt0[ia])
-                       & (t0[:, None] < pt0[ia] + DT * L))
-                parent = np.where(cov, pa[ia], 0.0).max(axis=1)
-                ok &= (A >= self.r_model * parent)
+            t0, A, ok = self._best_new_peak(res[ia], None if w is None else w[ia], m[ia],
+                                            sig[ia], pv[ia], pt0[ia], pa[ia], k)
             active[:] = False
             io = np.nonzero(ok)[0]
             if io.size == 0:
@@ -1097,15 +1157,12 @@ class MFReconstructor:
             wg = None if w is None else w[g]
             t0r, ar_ = self._gn(res[g], wg, m[g], t0[io], A[io])
             pos = ar_ > 0
-            g, io = g[pos], io[pos]
-            t0r, ar_ = t0r[pos], ar_[pos]
+            g, t0r, ar_ = g[pos], t0r[pos], ar_[pos]
             if g.size == 0:
                 break
             pt0[g, k], pa[g, k], pv[g, k] = t0r, ar_, True
             if k == 0:
                 res[g] -= ar_[:, None] * self._basis(m[g], t0r, ns)
-                if w is not None:
-                    res[g] *= w[g]
             else:
                 # back-fit every accepted peak of these channels with the new one
                 wg = None if w is None else w[g]
@@ -1113,37 +1170,34 @@ class MFReconstructor:
                     y[g], wg, m[g], pt0[g].copy(), pa[g].copy(), pv[g].copy(), ns)
                 pt0[g], pa[g], pv[g] = tt, aa, vv
                 res[g] = y[g] - np.matmul(aa[:, None, :], Sg_)[:, 0, :]
-                if w is not None:
-                    res[g] *= w[g]
+            if w is not None:
+                res[g] *= w[g]
             active[g] = True
+        return pt0, pa, pv
 
-        npk = pv.sum(axis=1)
-        # ---- joint amplitude fit -------------------------------------------
-        n_joint = int((npk >= 2).sum())
+    def _final_fit(self, y, w, m, sig, pt0, pa, pv):
+        """Final amplitudes and chi2/dof; updates pt0, pa, pv in place, returns chi2 [n].
+
+        K = 1: closed form on the fit window (a non-positive amplitude drops the peak).
+        K >= 2: joint solve with positivity drop on the windows of the back-fit.
+        """
+        n, ns = y.shape
         chi2 = np.zeros(n, dtype=np.float32)
-        have = npk > 0
-        # K = 1: closed form on the fit window
+        npk = pv.sum(axis=1)
         one = np.nonzero(npk == 1)[0]
         if one.size:
             k1 = pv[one].argmax(axis=1)        # the surviving slot
             t1 = pt0[one, k1]
-            ic, valid, idx = self._window(t1, ns)
-            ww = valid.astype(np.float32)
-            if w is not None:
-                ww = ww * np.take_along_axis(w[one], ic, axis=1)
-            yy = np.take_along_axis(y[one], ic, axis=1)
-            s = b.shape(m[one][:, None], DT * idx.astype(np.float32) - t1[:, None])
-            Gss = (ww * s * s).sum(1)
-            a1 = (ww * s * yy).sum(1) / np.maximum(Gss, 1e-20)
+            a1, _, s, ww, yy = self._fixed_onset(
+                y[one], None if w is None else w[one], m[one], t1)
             keep = a1 > 0
             pa[one, k1] = np.where(keep, a1, 0.0)
             pv[one[~keep], k1[~keep]] = False
             mdl = a1[:, None] * s
-            var = sig[one][:, None] ** 2 + (MODEL_FLOOR * mdl) ** 2
+            var = self._var(yy, mdl, sig[one])
             x2 = (ww * (yy - mdl) ** 2 / var).sum(1)
             dof = np.maximum(ww.sum(1) - 2.0, 1.0)
             chi2[one] = x2 / dof
-        # K >= 2: joint solve, refinement pass, joint solve
         mul = np.nonzero(npk >= 2)[0]
         if mul.size:
             ym, mm, sm_ = y[mul], m[mul], sig[mul]
@@ -1154,16 +1208,40 @@ class MFReconstructor:
             # windows (positivity drop) and evaluate chi2
             am, vm, S, wmask = self._solve_joint(ym, wm_, mm, t0m, am, vm, ns)
             mdl = np.matmul(am[:, None, :], S)[:, 0, :]
-            var = sm_[:, None] ** 2 + (MODEL_FLOOR * mdl) ** 2
+            var = self._var(ym, mdl, sm_)
             x2 = (wmask * (ym - mdl) ** 2 / var).sum(1)
             dof = np.maximum(wmask.sum(1) - 2.0 * vm.sum(1), 1.0)
             chi2[mul] = x2 / dof
             pt0[mul], pa[mul], pv[mul] = t0m, am, vm
-        return pt0, pa, pv, chi2, n_joint
+        return chi2
 
-    # -- public ------------------------------------------------------------
+    def _clipped_fallback(self, vg, t0g, w, ms, ns):
+        """bool [n]: clipped channels needing the WaveAnalyzer fallback.
+
+        A channel is bad if any fitted peak has < 6 unclipped samples in its window or
+        < 2 on its leading edge (t0 - 4 ns, t_pk], or if it has no fitted pulse at all.
+        """
+        bad = np.zeros(vg.shape[0], dtype=bool)
+        ii = np.arange(ns)[None, :]
+        for k in range(self.kmax):
+            rows = np.nonzero(vg[:, k])[0]
+            if rows.size == 0:
+                continue
+            t0k = t0g[rows, k]
+            n_ok = (self._window_mask(t0k, ns) * w[rows]).sum(1)
+            tt = DT * ii - t0k[:, None]
+            lead = (tt > -DT) & (tt <= self.b.t_pk[ms[rows]][:, None])
+            n_lead = (lead * w[rows]).sum(1)
+            bad[rows] |= (n_ok < 6) | (n_lead < 2)
+        return bad | ~vg.any(axis=1)
+
+    # -- public ----------------------------------------------------------------
     def run(self, Y, midx, overflow=4095):
-        """Reconstruct channels Y[n, ns] (uint16 or float) of module indices midx."""
+        """Reconstruct channels Y[n, ns] (uint16 or float ADC) of module indices midx[n].
+
+        Channels with a sample >= overflow are fitted with those samples masked.
+        Returns an MFResult.
+        """
         b = self.b
         Y = np.asarray(Y)
         n, ns = Y.shape
@@ -1174,42 +1252,26 @@ class MFReconstructor:
         y = Yf - ped[:, None]
         clipped = (Yf >= overflow).any(axis=1)
         ma = (y[:, :-2] + y[:, 1:-1] + y[:, 2:]) * (1.0 / 3.0)
-        cand = ma.max(axis=1) > np.maximum(self.cand_ns * sig, 3.0)
+        cand = ma.max(axis=1) > np.maximum(CAND_NSIGMA * sig, 3.0)
         res.ped, res.sigma, res.clipped, res.cand = ped, sig, clipped, cand
         res.npk = np.zeros(n, dtype=np.int64)
         res.wa_fb = np.zeros(n, dtype=bool)
-        pch, pt0_, pamp, pchi, = [], [], [], []
-        n_joint = 0
-        sat_fb = 0
-        for masked in (False, True):
+        pch, pt0_, pamp, pchi = [], [], [], []
+        n_joint = sat_fb = 0
+        for masked in (False, True):                 # unclipped group, then clipped group
             sel = np.nonzero(cand & (clipped == masked))[0]
             if sel.size == 0:
                 continue
-            ys = y[sel]
-            ms = midx[sel]
+            ys, ms = y[sel], midx[sel]
+            w = None
             if masked:
                 w = (Yf[sel] < overflow).astype(np.float32)
                 ys = ys * w
-            else:
-                w = None
-            t0g, ag, vg, chig, nj = self._group(ys, w, ms, sig[sel])
-            n_joint += nj
+            t0g, ag, vg = self._find_peaks(ys, w, ms, sig[sel])
+            n_joint += int((vg.sum(axis=1) >= 2).sum())
+            chig = self._final_fit(ys, w, ms, sig[sel], t0g, ag, vg)
             if masked:
-                bad = np.zeros(sel.size, dtype=bool)
-                ii = np.arange(ns)[None, :]
-                for k in range(self.kmax):
-                    rows = np.nonzero(vg[:, k])[0]
-                    if rows.size == 0:
-                        continue
-                    t0k = t0g[rows, k]
-                    w0 = np.ceil(t0k / DT).astype(np.int64) - LEAD
-                    inw = (ii >= w0[:, None]) & (ii < w0[:, None] + LW)
-                    n_ok = (inw * w[rows]).sum(1)
-                    tt = DT * ii - t0k[:, None]
-                    lead = ((tt > -DT) & (tt <= b.t_pk[ms[rows]][:, None]))
-                    n_lead = (lead * w[rows]).sum(1)
-                    bad[rows] |= (n_ok < 6) | (n_lead < 2)
-                bad |= ~vg.any(axis=1)          # clipped channel with no pulse
+                bad = self._clipped_fallback(vg, t0g, w, ms, ns)
                 res.wa_fb[sel[bad]] = True
                 sat_fb += int(bad.sum())
                 vg = vg & ~bad[:, None]
@@ -1235,17 +1297,18 @@ class MFReconstructor:
         res.p_ch, res.p_t0, res.p_amp, res.p_chi2 = p_ch, p_t0, p_amp, p_chi2
         res.p_time = p_t0 + b.t50[midx[p_ch]]
         res.p_onset = p_t0 / DT
-        n_multi = int((res.npk >= 2).sum())
         res.stats = dict(n_cand=int(cand.sum()), n_peaks=int(p_ch.size),
-                         n_multi=n_multi, n_joint=int(n_joint),
+                         n_multi=int((res.npk >= 2).sum()), n_joint=int(n_joint),
                          n_sat=int(clipped.sum()), n_sat_fallback=int(sat_fb))
         return res
 
 
+# ---------------------------------------------------------------------- energy --
 def pulse_energy_units(bank, midx_of_pulse, t0, amp, kappa=1.0, ped_rms=None):
-    """A * I_int(phase) * kappa; with ped_rms (per pulse) the ped floor is applied.
+    """E_units = A * I_int(phase) * kappa (ADC * samples); A in ADC, t0 in ns.
 
-    A bank carrying ampcorr (sampled) also multiplies I_int by f(A).
+    With ped_rms (per pulse, ADC) the ped floor is applied to the walk-out.  A bank
+    carrying ampcorr (sampled) also multiplies I_int by f(A).
     """
     if ped_rms is None:
         I = bank.iint(midx_of_pulse, t0)
@@ -1257,9 +1320,9 @@ def pulse_energy_units(bank, midx_of_pulse, t0, amp, kappa=1.0, ped_rms=None):
     return amp * I * kappa
 
 
-# ---------------------------------------------------------------- self test --
+# --------------------------------------------------------------------- self test --
 def _synth(bank, m, pulses, ns=100, ped=200.0, noise=0.0, rng=None, clip=None):
-    """pulses: list of (onset ns, amplitude).  Returns float waveform."""
+    """Waveform [ns] (float ADC) of module m; pulses: list of (onset ns, amplitude ADC)."""
     t = DT * np.arange(ns)
     y = np.full(ns, ped, dtype=np.float64)
     for t0, a in pulses:
@@ -1271,13 +1334,51 @@ def _synth(bank, m, pulses, ns=100, ped=200.0, noise=0.0, rng=None, clip=None):
     return y
 
 
+def _synth_batch(bank, mi, t0, amp, **kw):
+    """float32 waveforms [n, 100] of single pulses (module mi[i], onset t0[i], amplitude amp[i])."""
+    return np.stack([_synth(bank, mi[i], [(t0[i], amp[i])], **kw)
+                     for i in range(len(mi))]).astype(np.float32)
+
+
+def _log_uniform(rng, lo, hi, n):
+    return np.exp(rng.uniform(np.log(lo), np.log(hi), n))
+
+
+def _single_errors(r, amp, t0):
+    """(|dA|/A, |dt| ns) per channel of the fitted pulses r.p_* (NaN where none)."""
+    dA, dt = np.full(len(amp), np.nan), np.full(len(amp), np.nan)
+    for c, a_, t_ in zip(r.p_ch, r.p_amp, r.p_t0):
+        dA[c], dt[c] = abs(a_ - amp[c]) / amp[c], abs(t_ - t0[c])
+    return dA, dt
+
+
+def _pad(rows):
+    """Stack ragged rows into a NaN-padded array."""
+    w = max(len(r) for r in rows)
+    return np.array([np.r_[r, np.full(w - len(r), np.nan)] for r in rows])
+
+
+def _write_spline_npz(path, spl, **extra):
+    """Minimal spline_templates_v1 file of the three splines `spl` (names A, B, C)."""
+    np.savez(path, names=np.array(["A", "B", "C"]), valid=np.ones(3, dtype=int),
+             fallback=np.zeros(3, dtype=int), T_end=400.0, spline_k=3,
+             spline_t=_pad([x.t for x in spl]), spline_c=_pad([x.c for x in spl]),
+             spline_nt=np.array([len(x.t) for x in spl]),
+             spline_nc=np.array([len(x.c) for x in spl]),
+             avg_spline_t=spl[0].t, avg_spline_c=spl[0].c,
+             meta=json.dumps(dict(run_type="selftest")), **extra)
+
+
 def self_test(verbose=True):
+    """Synthetic-waveform regression of the reconstructor, the banks and the energy integral."""
+    import tempfile
+    from scipy.interpolate import make_interp_spline
+
     rng = np.random.default_rng(12345)
     wcfg = dict(smooth_order=2, int_tail_ratio=0.1, tail_break_n=2)
     nm = 3
     taus = [(2.499, 24.41), (2.0, 20.0), (3.2, 28.0)]
-    bank = TemplateBank([t[0] for t in taus], [t[1] for t in taus], [True] * nm,
-                        smooth_order=2, int_tail_ratio=0.1, tail_break_n=2)
+    bank = TemplateBank([t[0] for t in taus], [t[1] for t in taus], [True] * nm, **wcfg)
     rec = MFReconstructor(bank)
     ok_all = True
     print(f"template peak check: max p = "
@@ -1291,17 +1392,11 @@ def self_test(verbose=True):
     # ---- single pulses
     N = 600
     mi = rng.integers(0, nm, N)
-    amp = np.exp(rng.uniform(np.log(20), np.log(3000), N))
+    amp = _log_uniform(rng, 20, 3000, N)
     t0 = rng.uniform(80.0, 160.0, N)
-    Y = np.stack([_synth(bank, mi[i], [(t0[i], amp[i])]) for i in range(N)]
-                 ).astype(np.float32)
-    r = rec.run(Y, mi)
+    r = rec.run(_synth_batch(bank, mi, t0, amp), mi)
     found = r.npk == 1
-    dA = np.full(N, np.nan)
-    dt = np.full(N, np.nan)
-    for c, a_, t_ in zip(r.p_ch, r.p_amp, r.p_t0):
-        dA[c] = abs(a_ - amp[c]) / amp[c]
-        dt[c] = abs(t_ - t0[c])
+    dA, dt = _single_errors(r, amp, t0)
     report("single", found.all() and np.nanmax(dA) < 2e-3 and np.nanmax(dt) < 0.05,
            f"N={N} found={int(found.sum())} max|dA|/A={np.nanmax(dA)*100:.4f}% "
            f"max|dt|={np.nanmax(dt):.4f} ns")
@@ -1309,62 +1404,52 @@ def self_test(verbose=True):
     print(f"        reported-time check (t - (t0+t50)): max|.|={np.abs(tt).max():.4f} ns")
 
     # ---- pairs
-    cells = []
+    worst, allfound, lines = 0.0, True, []
     for dT in (16, 20, 24, 32, 48, 64):
         for ratio in (0.2, 0.5, 1.0, 2.0):
-            cells.append((dT, ratio))
-    worst = 0.0
-    allfound = True
-    lines = []
-    for dT, ratio in cells:
-        n = 40
-        mi = rng.integers(0, nm, n)
-        a1 = np.exp(rng.uniform(np.log(200), np.log(3500.0 / (1.0 + ratio)), n))
-        a2 = a1 * ratio
-        ta = rng.uniform(90.0, 130.0, n)
-        tb = ta + dT
-        Y = np.stack([_synth(bank, mi[i], [(ta[i], a1[i]), (tb[i], a2[i])])
-                      for i in range(n)]).astype(np.float32)
-        r = rec.run(Y, mi)
-        nf = 0
-        eA = []
-        eT = []
-        for c in range(n):
-            sel = np.nonzero(r.p_ch == c)[0]
-            tc, ac = r.p_t0[sel], r.p_amp[sel]
-            if sel.size < 2:
-                continue
-            ia = np.argmin(np.abs(tc - ta[c]))
-            ib = np.argmin(np.abs(tc - tb[c]))
-            if ia == ib:
-                continue
-            if abs(tc[ia] - ta[c]) < 3 and abs(tc[ib] - tb[c]) < 3:
-                nf += 1
-                eA.append(max(abs(ac[ia] - a1[c]) / a1[c], abs(ac[ib] - a2[c]) / a2[c]))
-                eT.append(max(abs(tc[ia] - ta[c]), abs(tc[ib] - tb[c])))
-        mx = max(eA) if eA else float('nan')
-        lines.append(f"dT={dT:>2} ratio={ratio:<3} both found {nf}/{n} "
-                     f"max|dA|/A={mx*100:6.3f}% max|dt|={max(eT) if eT else float('nan'):.3f} ns")
-        if dT >= 24:
-            allfound &= (nf == n)
-            worst = max(worst, mx if eA else 1.0)
+            n = 40
+            mi = rng.integers(0, nm, n)
+            a1 = _log_uniform(rng, 200, 3500.0 / (1.0 + ratio), n)
+            a2 = a1 * ratio
+            ta = rng.uniform(90.0, 130.0, n)
+            tb = ta + dT
+            Y = np.stack([_synth(bank, mi[i], [(ta[i], a1[i]), (tb[i], a2[i])])
+                          for i in range(n)]).astype(np.float32)
+            r = rec.run(Y, mi)
+            nf, eA, eT = 0, [], []
+            for c in range(n):
+                sel = np.nonzero(r.p_ch == c)[0]
+                tc, ac = r.p_t0[sel], r.p_amp[sel]
+                if sel.size < 2:
+                    continue
+                ia = np.argmin(np.abs(tc - ta[c]))
+                ib = np.argmin(np.abs(tc - tb[c]))
+                if ia == ib:
+                    continue
+                if abs(tc[ia] - ta[c]) < 3 and abs(tc[ib] - tb[c]) < 3:
+                    nf += 1
+                    eA.append(max(abs(ac[ia] - a1[c]) / a1[c], abs(ac[ib] - a2[c]) / a2[c]))
+                    eT.append(max(abs(tc[ia] - ta[c]), abs(tc[ib] - tb[c])))
+            mx = max(eA) if eA else float('nan')
+            lines.append(f"dT={dT:>2} ratio={ratio:<3} both found {nf}/{n} "
+                         f"max|dA|/A={mx*100:6.3f}% max|dt|={max(eT) if eT else float('nan'):.3f} ns")
+            if dT >= 24:
+                allfound &= (nf == n)
+                worst = max(worst, mx if eA else 1.0)
     report("pairs (dT>=24)", allfound and worst < 0.01,
            f"all found={allfound} worst max|dA|/A={worst*100:.3f}%")
     if verbose:
-        for l in lines:
-            print("        " + l)
+        for line in lines:
+            print("        " + line)
 
     # ---- clipped
     n = 200
     mi = rng.integers(0, nm, n)
-    amp = np.exp(rng.uniform(np.log(300), np.log(3000), n))
+    amp = _log_uniform(rng, 300, 3000, n)
     t0 = rng.uniform(80.0, 160.0, n)
-    Y = np.empty((n, 100), dtype=np.float32)
-    clv = np.empty(n)
-    for i in range(n):
-        pk = 200.0 + amp[i]
-        clv[i] = 200.0 + 0.6 * amp[i]
-        Y[i] = _synth(bank, mi[i], [(t0[i], amp[i])], clip=clv[i])
+    clv = 200.0 + 0.6 * amp
+    Y = np.stack([_synth(bank, mi[i], [(t0[i], amp[i])], clip=clv[i])
+                  for i in range(n)]).astype(np.float32)
     errs, nfb, nfound = [], 0, 0
     for i in range(n):
         r = rec.run(Y[i:i + 1], mi[i:i + 1], overflow=clv[i] - 1e-3)
@@ -1378,18 +1463,16 @@ def self_test(verbose=True):
            f"N={n} fit={nfound} wa_fallback={nfb} max|dA|/A={max(errs)*100:.4f}% "
            f"median={np.median(errs)*100:.4f}%")
 
-    # ---- fixed-onset amplitude amp_at (P3-1)
+    # ---- fixed-onset amplitude amp_at
     n = 400
     mi = rng.integers(0, nm, n)
-    amp = np.exp(rng.uniform(np.log(20), np.log(3000), n))
+    amp = _log_uniform(rng, 20, 3000, n)
     t0 = rng.uniform(80.0, 160.0, n)
-    Y = np.stack([_synth(bank, mi[i], [(t0[i], amp[i])]) for i in range(n)]
-                 ).astype(np.float32)
+    Y = _synth_batch(bank, mi, t0, amp)
     r = rec.run(Y, mi)
     one = np.nonzero(r.npk == 1)[0]
     sel = np.searchsorted(r.p_ch, one)
-    yp = Y - r.ped[:, None]
-    A, sA = rec.amp_at(yp[one], mi[one], r.p_t0[sel].astype(np.float32),
+    A, sA = rec.amp_at((Y - r.ped[:, None])[one], mi[one], r.p_t0[sel].astype(np.float32),
                        sigma=r.sigma[one])
     dr = np.max(np.abs(A - r.p_amp[sel]) / r.p_amp[sel])
     report("amp_at == K=1 closed form", one.size == n and dr <= 1e-5,
@@ -1397,11 +1480,9 @@ def self_test(verbose=True):
 
     n = 400
     mi = rng.integers(0, nm, n)
-    amp = np.exp(rng.uniform(np.log(5), np.log(3000), n))
+    amp = _log_uniform(rng, 5, 3000, n)
     t0 = rng.uniform(80.0, 160.0, n)
-    Y = np.stack([_synth(bank, mi[i], [(t0[i], amp[i])], ped=0.0)
-                  for i in range(n)]).astype(np.float32)
-    A, _ = rec.amp_at(Y, mi, t0)
+    A, _ = rec.amp_at(_synth_batch(bank, mi, t0, amp, ped=0.0), mi, t0)
     e0 = np.max(np.abs(A / amp - 1.0))
     report("amp_at dt=0", e0 <= 2e-3,
            f"N={n} A 5-3000 ADC max|A/A_true-1|={e0*100:.5f}% (<=0.2%)")
@@ -1410,8 +1491,7 @@ def self_test(verbose=True):
     f7 = {0.5: 0.2, 1.0: 1.0, 1.5: 2.6, 2.0: 5.0, 3.0: 8.0}
     n = 2000
     t0 = rng.uniform(80.0, 160.0, n)
-    Y = np.stack([_synth(bank, 0, [(t0[i], 1.0)], ped=0.0)
-                  for i in range(n)]).astype(np.float32)
+    Y = _synth_batch(bank, np.zeros(n, dtype=np.int64), t0, np.ones(n), ped=0.0)
     m0 = np.zeros(n, dtype=np.int64)
     print("        F7 loss curve (module 0, 2.499/24.41 ns), mean A/A_true-1 over "
           f"{n} random phases:")
@@ -1425,14 +1505,11 @@ def self_test(verbose=True):
     # ---- noisy sanity (not a gate)
     n = 400
     mi = rng.integers(0, nm, n)
-    amp = np.exp(rng.uniform(np.log(30), np.log(1500), n))
+    amp = _log_uniform(rng, 30, 1500, n)
     t0 = rng.uniform(90.0, 150.0, n)
-    Y = np.stack([_synth(bank, mi[i], [(t0[i], amp[i])], noise=1.5, rng=rng)
-                  for i in range(n)]).astype(np.float32)
-    r = rec.run(Y, mi)
+    r = rec.run(_synth_batch(bank, mi, t0, amp, noise=1.5, rng=rng), mi)
     one = np.nonzero(r.npk == 1)[0]
-    dA = np.zeros(n) + np.nan
-    dT_ = np.zeros(n) + np.nan
+    dA, dT_ = np.full(n, np.nan), np.full(n, np.nan)
     for c, a_, t_ in zip(r.p_ch, r.p_amp, r.p_t0):
         dA[c], dT_[c] = (a_ - amp[c]), (t_ - t0[c])
     big = amp > 150
@@ -1451,15 +1528,16 @@ def self_test(verbose=True):
            f"I_tab[0,0]={float(agg_bank.I_tab[0, 0]):.9f} (ref {ref_00:.9f}, rel {e_00:.1e})")
 
     # ---- sampled bank built from the analytic shapes
-    import tempfile
-    from scipy.interpolate import make_interp_spline
     rng2 = np.random.default_rng(777)
     tg = np.arange(0.0, 400.0 + 1e-9, 0.1)       # T_end 400: analytic tail kept
     spl = [make_interp_spline(tg, template(tg, tr_, tf_, tmax_of(tr_, tf_)), k=3)
            for tr_, tf_ in taus]
-    sb = SampledTemplateBank(spl, [f"M{i}" for i in range(nm)], [True] * nm,
-                             smooth_order=2, int_tail_ratio=0.1, tail_break_n=2,
-                             T_end=400.0)
+
+    def sampled(**kw):
+        return SampledTemplateBank(spl, [f"M{i}" for i in range(nm)], [True] * nm, smooth_order=2,
+                                   int_tail_ratio=0.1, tail_break_n=2, T_end=400.0, **kw)
+
+    sb = sampled()
     dK = np.abs(sb.K - bank.K).max()
     dt50 = np.abs(sb.t50 - bank.t50).max()
     rI = np.abs(sb.I_tab - bank.I_tab) / bank.I_tab
@@ -1480,9 +1558,7 @@ def self_test(verbose=True):
         nrow=nm)
     rc_an = np.abs(I_an / bank.I_mean - 1.0)
     pk2 = bank.iint(np.zeros(5, dtype=int), np.linspace(100, 104, 5))   # two-tau still phase-dependent
-    sb_ph = SampledTemplateBank(spl, [f"M{i}" for i in range(nm)], [True] * nm,
-                                smooth_order=2, int_tail_ratio=0.1, tail_break_n=2,
-                                T_end=400.0, iint_mode="phase")
+    sb_ph = sampled(iint_mode="phase")
     t0s = np.linspace(100.0, 104.0, 64, endpoint=False)
     Ic_ = sb.iint(np.full(64, 1), t0s)
     Ip_ = sb_ph.iint(np.full(64, 1), t0s)
@@ -1506,14 +1582,10 @@ def self_test(verbose=True):
     def single_gate(tag, sbank):
         n = 600
         mi_ = rng2.integers(0, nm, n)
-        amp_ = np.exp(rng2.uniform(np.log(50), np.log(3000), n))   # A>=50: the analytic gate itself reaches ~0.2-0.3 % near A~24 (onset-kink GN difference)
+        amp_ = _log_uniform(rng2, 50, 3000, n)   # A>=50: the analytic gate itself reaches ~0.2-0.3 % near A~24 (onset-kink GN difference)
         t0_ = rng2.uniform(80.0, 160.0, n)
-        Y_ = np.stack([_synth(bank, mi_[i], [(t0_[i], amp_[i])])
-                       for i in range(n)]).astype(np.float32)
-        r_ = MFReconstructor(sbank).run(Y_, mi_)
-        dA_, dt_ = np.full(n, np.nan), np.full(n, np.nan)
-        for c, a_, t_ in zip(r_.p_ch, r_.p_amp, r_.p_t0):
-            dA_[c], dt_[c] = abs(a_ - amp_[c]) / amp_[c], abs(t_ - t0_[c])
+        r_ = MFReconstructor(sbank).run(_synth_batch(bank, mi_, t0_, amp_), mi_)
+        dA_, dt_ = _single_errors(r_, amp_, t0_)
         report(tag, (r_.npk == 1).all() and np.nanmax(dA_) < 2e-3 and np.nanmax(dt_) < 0.05,
                f"N={n} found={int((r_.npk == 1).sum())} max|dA|/A={np.nanmax(dA_)*100:.4f}% "
                f"max|dt|={np.nanmax(dt_):.4f} ns (analytic waveforms)")
@@ -1521,19 +1593,10 @@ def self_test(verbose=True):
     single_gate("sampled single", sb)
 
     # ---- round trip through the spline_templates_v1 .npz and build_bank
-    def pad(rows_):
-        w = max(len(r_) for r_ in rows_)
-        return np.array([np.r_[r_, np.full(w - len(r_), np.nan)] for r_ in rows_])
-
+    mp, pe_t0, pe_amp = np.array([0, 1]), np.array([100.0, 101.3]), np.array([500.0, 800.0])
     with tempfile.TemporaryDirectory() as td:
         path = os.path.join(td, "spline_test.npz")
-        np.savez(path, names=np.array(["A", "B", "C"]), valid=np.ones(3, dtype=int),
-                 fallback=np.zeros(3, dtype=int), T_end=400.0, spline_k=3,
-                 spline_t=pad([x.t for x in spl]), spline_c=pad([x.c for x in spl]),
-                 spline_nt=np.array([len(x.t) for x in spl]),
-                 spline_nc=np.array([len(x.c) for x in spl]),
-                 avg_spline_t=spl[0].t, avg_spline_c=spl[0].c,
-                 meta=json.dumps(dict(run_type="selftest")))
+        _write_spline_npz(path, spl)
         gn, gp = ["A", "B", "C", "D", "E"], [True, True, True, True, False]
         fb_bank, info = build_bank(gn, gp, path, wcfg)
         ph_bank, _ = build_bank(gn, gp, path, wcfg, iint_mode="phase")
@@ -1554,44 +1617,32 @@ def self_test(verbose=True):
                f"max|dK|={dK2:.2e} median rel|dI_tab|={dI2:.2e} fallback D==avg: {dav:.1e} "
                f"info={ {k_: info[k_] for k_ in ('n_module', 'n_fallback', 'run_type', 'column')} }")
         single_gate("sampled single (npz round trip)", fb_bank)
-        pe = pulse_energy_units(ph_bank, np.array([0, 1]), np.array([100.0, 101.3]),
-                                np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
-        pe0 = pulse_energy_units(bank, np.array([0, 1]), np.array([100.0, 101.3]),
-                                 np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
+        pe = pulse_energy_units(ph_bank, mp, pe_t0, pe_amp, ped_rms=np.array([1.0, 2.0]))
+        pe0 = pulse_energy_units(bank, mp, pe_t0, pe_amp, ped_rms=np.array([1.0, 2.0]))
         report("sampled pulse_energy_units (ped floor)", np.abs(pe / pe0 - 1).max() < 1e-3,
                f"max rel diff to analytic = {np.abs(pe / pe0 - 1).max():.2e}")
-        pc = pulse_energy_units(fb_bank, np.array([0, 1]), np.array([100.0, 101.3]),
-                                np.array([500.0, 800.0]), ped_rms=np.array([1.0, 2.0]))
-        pc2 = pulse_energy_units(fb_bank, np.array([0, 1]), np.array([100.0, 101.3]),
-                                 np.array([500.0, 800.0]))
-        pm_ = np.array([500.0, 800.0]) * bank.I_mean[:2]
+        pc = pulse_energy_units(fb_bank, mp, pe_t0, pe_amp, ped_rms=np.array([1.0, 2.0]))
+        pc2 = pulse_energy_units(fb_bank, mp, pe_t0, pe_amp)
+        pm_ = pe_amp * bank.I_mean[:2]
         report("sampled pulse_energy_units (continuous)",
                np.array_equal(pc, pc2) and np.abs(pc / pm_ - 1).max() < 2e-3,
                f"max rel diff to A*I_mean = {np.abs(pc / pm_ - 1).max():.2e}")
-        pb = pulse_energy_units(bank, np.array([0, 1]), np.array([100.0, 101.3]),
-                                np.array([500.0, 800.0]), 1.01)
+        pb = pulse_energy_units(bank, mp, pe_t0, pe_amp, 1.01)
         report("two-tau pulse_energy_units unchanged (no ampcorr)",
-               np.array_equal(pb, np.array([500.0, 800.0])
-                              * bank.iint(np.array([0, 1]), np.array([100.0, 101.3])) * 1.01)
+               np.array_equal(pb, pe_amp * bank.iint(mp, pe_t0) * 1.01)
                and not hasattr(bank, "ampcorr"), "A * I_int * kappa exactly")
 
         # ---- amplitude correction f(A) from the .npz keys
         kn_la, kn_f = np.log([200.0, 1000.0]), np.array([1.01, 0.99])
         path2 = os.path.join(td, "spline_test_ampcorr.npz")
-        np.savez(path2, names=np.array(["A", "B", "C"]), valid=np.ones(3, dtype=int),
-                 fallback=np.zeros(3, dtype=int), T_end=400.0, spline_k=3,
-                 spline_t=pad([x.t for x in spl]), spline_c=pad([x.c for x in spl]),
-                 spline_nt=np.array([len(x.t) for x in spl]),
-                 spline_nc=np.array([len(x.c) for x in spl]),
-                 avg_spline_t=spl[0].t, avg_spline_c=spl[0].c,
-                 meta=json.dumps(dict(run_type="selftest")),
-                 ampcorr_logA=kn_la, ampcorr_f=kn_f,
-                 ampcorr_meta=json.dumps(dict(scope="global", note="selftest")))
+        _write_spline_npz(path2, spl, ampcorr_logA=kn_la, ampcorr_f=kn_f,
+                          ampcorr_meta=json.dumps(dict(scope="global", note="selftest")))
         ac_bank, ac_info = build_bank(gn, gp, path2, wcfg)
         Aa = np.array([100.0, 200.0, 447.0, 1000.0, 3000.0])
         ma = np.array([0, 1, 2, 0, 1])
         ta = np.linspace(100, 103, 5)
-        got = pulse_energy_units(ac_bank, ma, ta, Aa, 1.01) / pulse_energy_units(fb_bank, ma, ta, Aa, 1.01)
+        got = (pulse_energy_units(ac_bank, ma, ta, Aa, 1.01)
+               / pulse_energy_units(fb_bank, ma, ta, Aa, 1.01))
         got_p = (pulse_energy_units(ac_bank, ma, ta, Aa, ped_rms=np.full(5, 1.0))
                  / pulse_energy_units(fb_bank, ma, ta, Aa, ped_rms=np.full(5, 1.0)))
         fx = np.interp(np.log(np.maximum(Aa, 1.0)), kn_la, kn_f)

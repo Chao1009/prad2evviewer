@@ -89,8 +89,9 @@ from matplotlib.backends.backend_pdf import PdfPages  # noqa: E402
 import _common as C                                   # noqa: E402
 from prad2py import dec                               # noqa: E402
 import mf_pulse                                       # noqa: E402
+from calib_resolve import resolve_calib               # noqa: E402
 from benchmark_hycal_timing_scan import (             # noqa: E402
-    _DATABASE_DIR, _DEFAULT_EVIO_DIR, _EXCLUDED_RUNS, _HC_CALIB_MAP)
+    _DATABASE_DIR, _DEFAULT_EVIO_DIR, _EXCLUDED_RUNS)
 from benchmark_hycal_timing_test_20261021 import X17_RUNS  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -508,8 +509,7 @@ def scan_task(job):
     run, split, fpath, first = job["run"], job["split"], job["path"], job["first"]
     sdir = Path(a.out) / "scan"
     t_start = time.monotonic()
-    calib = _HC_CALIB_MAP.get(run)
-    calib_path = str(_DATABASE_DIR / "calibration" / calib) if calib else ""
+    calib_path = resolve_calib(run)
     p = C.setup_pipeline(evio_path=fpath, run_num=run, hc_calib_file=calib_path)
     ebeam = float(p.geo.Ebeam)
     mf_path, column, _ = resolve_templates(a.mf_templates, run)

@@ -57,26 +57,21 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_VERSION = "module_timing_dump 1.0 (20261025)"
 EVIO_DIR = "/Users/L00338853/work/PRad/data/evio"
-CALIB_DIR = "/Users/L00338853/work/PRad/prad2evviewer/database/calibration"
-CALIB_FALLBACK = CALIB_DIR + "/old"   # 10-30: the 0.73/2.24/3.49 GeV fadc files now live here
+from calib_resolve import CALIB_DIR, resolve_calib, check_pipeline
 PRE_LO, PRE_HI = 100.0, 200.0
 BLOCK_EVENTS = 256
 
 TEMPLATES_ROOT = "output/templates_spline"     # --templates-root default (relative to pyscripts)
 
-# run -> (template npz relative to the templates root, calibration file name)
+# run -> (template npz relative to the templates root, calibration file from runinfo)
 _T = "{0}/templates_{0}.npz"
 _TYPES = {
-    "3p49": (_T.format("3p49GeV_H2"), "calibration_factor_fadc_3p5.json",
-             (24386, 24503, 24512)),
-    "2p24": (_T.format("2p24GeV_H2"), "calibration_factor_2p2_fadc.json",
-             (25228, 25257, 25260, 25299, 25320)),
-    "0p73": (_T.format("0p73GeV_H2"), "calibration_factor_fadc_0p7.json",
-             (24590, 24603)),
-    "x17": (_T.format("2p24GeV_Ta_X17"), "x17_25825_fadc.json",
-            (25800, 26138, 26230)),
+    "3p49": ("3p49GeV_H2", (24386, 24503, 24512)),
+    "2p24": ("2p24GeV_H2", (25228, 25257, 25260, 25299, 25320)),
+    "0p73": ("0p73GeV_H2", (24590, 24603)),
+    "x17": ("2p24GeV_Ta_X17", (25800, 26138, 26230)),
 }
-RUN_CFG = {r: (t, c) for t, c, runs in _TYPES.values() for r in runs}
+RUN_CFG = {r: (_T.format(s), resolve_calib(r)) for s, runs in _TYPES.values() for r in runs}
 
 
 def split_of(path):
@@ -101,14 +96,13 @@ def process_split(path, out_dir, max_events=0, templates_root=None):
     if run not in RUN_CFG:
         sys.exit(f"[ERROR] run {run} not in RUN_CFG")
     tmpl = os.path.join(templates_root or os.path.join(HERE, TEMPLATES_ROOT), RUN_CFG[run][0])
-    calib = os.path.join(CALIB_DIR, RUN_CFG[run][1])
-    if not os.path.exists(calib):
-        calib = os.path.join(CALIB_FALLBACK, RUN_CFG[run][1])
+    calib = RUN_CFG[run][1]
     t_start = time.monotonic()
 
     # setup_pipeline takes a single file path unchanged (no split expansion);
     # only that file is opened below.
     p = C.setup_pipeline(evio_path=path, hc_calib_file=calib)
+    ncal = check_pipeline(p, calib)
     hy = [p.hycal.module(i) for i in range(p.hycal.module_count())]
     names = np.array([m.name for m in hy])
     pwo4 = [bool(m.is_pwo4()) for m in hy]
@@ -123,7 +117,7 @@ def process_split(path, out_dir, max_events=0, templates_root=None):
         int_tail_ratio=None)
     rec = mf_pulse.MFReconstructor(bank, nsigma=5.0, min_amp=5.0, kmax=4,
                                    r_model=0.3, ped_nsamples=int(wcfg.ped_nsamples))
-    print(f"[setup] run {run} templates {tmpl} ({info['kind']}) calib {calib}",
+    print(f"[setup] run {run} templates {tmpl} ({info['kind']}) calib {calib} ({ncal} PbWO4 calibrated)",
           flush=True)
 
     # outputs (lists of per-block / per-row chunks)

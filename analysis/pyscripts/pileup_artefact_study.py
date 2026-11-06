@@ -57,8 +57,9 @@ import _common as C                                   # noqa: E402
 from prad2py import dec                               # noqa: E402
 import mf_pulse                                       # noqa: E402
 import plot_pileup_examples as ppe                    # noqa: E402
+from calib_resolve import resolve_calib               # noqa: E402
 from benchmark_hycal_timing_scan import (             # noqa: E402
-    _DATABASE_DIR, _DEFAULT_EVIO_DIR, _HC_CALIB_MAP)
+    _DATABASE_DIR, _DEFAULT_EVIO_DIR)
 
 HERE = Path(__file__).resolve().parent
 OUT_DEFAULT = HERE / "output" / "pileup_20261024" / "artefact"
@@ -383,8 +384,7 @@ def scan_task(job):
     run, split, fpath = job["run"], job["split"], job["path"]
     sdir = Path(a.out) / "scan"
     t_start = time.monotonic()
-    calib = _HC_CALIB_MAP.get(run)
-    calib_path = str(_DATABASE_DIR / "calibration" / calib) if calib else ""
+    calib_path = resolve_calib(run)
     p = C.setup_pipeline(evio_path=fpath, run_num=run, hc_calib_file=calib_path)
     ebeam = float(p.geo.Ebeam)
     slug = run_slug(run)
@@ -1506,8 +1506,7 @@ def nb_task(job):
     neighbouring modules of the same event show a pulse at the same time as the
     candidate's secondary (a second shower would; a channel-level feature would not)."""
     run, split, fpath, targets = job["run"], job["split"], job["path"], job["targets"]
-    calib = _HC_CALIB_MAP.get(run)
-    calib_path = str(_DATABASE_DIR / "calibration" / calib) if calib else ""
+    calib_path = resolve_calib(run)
     p = C.setup_pipeline(evio_path=fpath, run_num=run, hc_calib_file=calib_path)
     mods = [p.hycal.module(i) for i in range(p.hycal.module_count())]
     wcfg = p.wave_ana.cfg

@@ -70,7 +70,7 @@ import numpy as np
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_VERSION = "pileup_rates 1.0 (20261027)"
 EVIO_DIR = "/Users/L00338853/work/PRad/data/evio"
-CALIB_DIR = "/Users/L00338853/work/PRad/prad2evviewer/database/calibration"
+from calib_resolve import resolve_calib, check_pipeline
 TEMPLATES_ROOT = "output/templates_spline_best50_20261026"
 PRE_LO, PRE_HI = 100.0, 200.0
 BLOCK_EVENTS = 256
@@ -82,20 +82,19 @@ NEAR_NS = 60.0
 INC_DT, INC_RATIO = 16.0, 0.3          # MF-incomplete region
 
 _T = "{0}/templates_{0}.npz"
-# group -> (label, template slug, calibration file, runs)
+# group -> (label, template slug, runs); calibration file comes from runinfo
 GROUPS = {
-    "0p73": ("0.73 GeV H2", "0p73GeV_H2", "calibration_factor_fadc_0p7.json", (24590, 24603)),
-    "2p24": ("2.24 GeV H2", "2p24GeV_H2", "calibration_factor_2p2_fadc.json",
-             (25228, 25257, 25260, 25299, 25320)),
-    "3p49": ("3.49 GeV H2", "3p49GeV_H2", "calibration_factor_fadc_3p5.json", (24386, 24503, 24512)),
-    "c2p24": ("2.24 GeV C", "2p24GeV_C", "calibration_factor_2p2_fadc.json", (25308,)),
-    "x17_25800": ("Ta 25800", "2p24GeV_Ta_X17", "x17_25825_fadc.json", (25800,)),
-    "x17_26138": ("Ta 26138", "2p24GeV_Ta_X17", "x17_25825_fadc.json", (26138,)),
-    "x17_26230": ("Ta 26230", "2p24GeV_Ta_X17", "x17_25825_fadc.json", (26230,)),
+    "0p73": ("0.73 GeV H2", "0p73GeV_H2", (24590, 24603)),
+    "2p24": ("2.24 GeV H2", "2p24GeV_H2", (25228, 25257, 25260, 25299, 25320)),
+    "3p49": ("3.49 GeV H2", "3p49GeV_H2", (24386, 24503, 24512)),
+    "c2p24": ("2.24 GeV C", "2p24GeV_C", (25308,)),
+    "x17_25800": ("Ta 25800", "2p24GeV_Ta_X17", (25800,)),
+    "x17_26138": ("Ta 26138", "2p24GeV_Ta_X17", (26138,)),
+    "x17_26230": ("Ta 26230", "2p24GeV_Ta_X17", (26230,)),
 }
 ORDER = list(GROUPS)
-RUN_GROUP = {r: g for g, v in GROUPS.items() for r in v[3]}
-RUN_CFG = {r: (_T.format(v[1]), v[2]) for g, v in GROUPS.items() for r in v[3]}
+RUN_GROUP = {r: g for g, v in GROUPS.items() for r in v[2]}
+RUN_CFG = {r: (_T.format(v[1]), resolve_calib(r)) for g, v in GROUPS.items() for r in v[2]}
 
 # built-in sample: (run, split) pairs spread over the run(s) of each type
 SAMPLE = [
@@ -130,10 +129,11 @@ def process_split(path, out_dir, max_events=0, templates_root=None):
     if run not in RUN_CFG:
         sys.exit(f"[ERROR] run {run} not in RUN_CFG")
     tmpl = os.path.join(templates_root or os.path.join(HERE, TEMPLATES_ROOT), RUN_CFG[run][0])
-    calib = os.path.join(CALIB_DIR, RUN_CFG[run][1])
+    calib = RUN_CFG[run][1]
     t_start = time.monotonic()
 
     p = C.setup_pipeline(evio_path=path, hc_calib_file=calib)
+    ncal = check_pipeline(p, calib)
     hy = [p.hycal.module(i) for i in range(p.hycal.module_count())]
     names = np.array([m.name for m in hy])
     pwo4 = [bool(m.is_pwo4()) for m in hy]
@@ -158,7 +158,7 @@ def process_split(path, out_dir, max_events=0, templates_root=None):
     ccfg.seed_time_window = -1.0
     cl = det.HyCalCluster(p.hycal)
     cl.set_config(ccfg)
-    print(f"[setup] run {run} templates {tmpl} ({info['kind']}) calib {calib} "
+    print(f"[setup] run {run} templates {tmpl} ({info['kind']}) calib {calib} ({ncal} PbWO4 cal) "
           f"min_cluster_energy {ccfg.min_cluster_energy}", flush=True)
 
     PU_DT = dict(ev=np.int32, idx=np.int16, t=np.float32, A=np.float32, E=np.float32, fb=bool)
@@ -861,7 +861,7 @@ def write_report(a, R, CLD, TAB, MODR, DAT):
     p_on = rng("pair_on_260_400", "pair_n_260_400", ta)
     p_gr = rng("pair_grid_260_400", "pair_n_260_400", ta)
     nn = [R[g]["pair_n_260_400"] for g in R if not ta(g)]
-    nh = (min(nn), max(nn))
+    nh = f"{min(nn)}-{max(nn)}" if nn else "n/a"
     L.append("Caveats: (1) MF secondary search (mf_pulse.py ~1054-1091: 12 ns MIN_SEP, 0.3*A_parent gate only after the "
              "parent onset, argmax-then-stop) misses |dt|<16-20 ns and ratio<0.3 (output/templates_wassim_20261027/why_hard_cells.md): all "
              "rates are lower limits for true pile-up, and the 'any' rate includes out-of-time background pulses far from pulse 1. "
@@ -873,9 +873,9 @@ def write_report(a, R, CLD, TAB, MODR, DAT):
              "so the on-comb fraction of pulse-1 dt (%.0f-%.0f %% over the groups, random 25 %%) equals the 4.000 ns grid fraction (%.0f-%.0f %%) "
              "and is NOT separable from grid locking. The grid-decorrelated test is the within-channel pulse pairs (separation from the earliest pulse) at "
              "|sep| 260-400 ns (`rf_comb.tsv`): Ta on-comb %.0f-%.0f %% vs grid %.0f-%.0f %% (random 25 %%), i.e. a real but smaller RF excess than the "
-             "pulse-1 numbers suggest; H2/C have only %d-%d such pairs per group, too few for the test."
+             "pulse-1 numbers suggest; H2/C have only %s such pairs per group, too few for the test."
              % (a.max_events_note, fb, a.map_min_fired, a.min_fired, on_lo, on_hi, gr_lo, gr_hi,
-                p_on[0], p_on[1], p_gr[0], p_gr[1], nh[0], nh[1]))
+                p_on[0], p_on[1], p_gr[0], p_gr[1], nh))
     L.append("")
     L.append("Command: `python3 pileup_rates.py dump --sample --parallel 8 --out output/pileup_rates_20261027/dump --max-events %d`; "
              "`python3 pileup_rates.py analyse --dump-dir output/pileup_rates_20261027/dump --out output/pileup_rates_20261027`." % a.max_events_note)

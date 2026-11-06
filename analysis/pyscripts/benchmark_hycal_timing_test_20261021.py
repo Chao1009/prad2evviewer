@@ -2104,6 +2104,11 @@ def main(argv=None):
                          "= e-nucleus recoil kinematics).  Default: from the "
                          "per-run map RUN_TARGET; an unmapped run needs this "
                          "flag with elastic-window (exit 2 otherwise).")
+    ap.add_argument("--nl-members", choices=("on", "off"), default="off",
+                    help="on: scale the member energies of every cluster record "
+                         "(dump E, --gain-file rebuild) by r.hit.energy / sum(h.energy), "
+                         "the C++ non-linearity factor, so the gain fit and the "
+                         "--gain-file passes carry it.  off (default): raw members.")
     ap.add_argument("--gain-refine", choices=("on", "off"), default="off",
                     help="--calibrate: apply the per-seed-module gain "
                          "refinement of --cal-method (elastic-window, median, "
@@ -2783,6 +2788,8 @@ def main(argv=None):
         mi = np.fromiter((h.index for h in hits), np.int32, len(hits))
         me = np.fromiter((h.energy for h in hits), np.float64, len(hits))
         e = r.hit.energy
+        if args.nl_members == "on" and me.sum() > 0:
+            me *= e / me.sum()
         dev = abs(float(me.sum()) - e)
         st = ident[lab]
         st[0] += 1
@@ -3902,7 +3909,8 @@ def main(argv=None):
         f.write(f"# cal_method={args.cal_method} "
                 f"target_mean_MeV={target_ref:.2f} "
                 f"window_nsigma={args.window_nsigma} "
-                f"gain_refine={args.gain_refine}\n")
+                f"gain_refine={args.gain_refine}"
+                f"{' nl_members=on' if args.nl_members == 'on' else ''}\n")
         if mu_global_by_path:
             f.write("# window_mu_global " + " ".join(
                 f"{lab}={mg:.2f}MeV(offset={(mg / eprime_by_path[lab] - 1) * 100:+.2f}%)"
