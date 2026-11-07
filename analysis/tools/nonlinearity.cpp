@@ -4,11 +4,13 @@
 #include "EventData.h"
 #include "EventData_io.h"
 #include "InstallPaths.h"
+#include "ConfigSetup.h"
 #include "ToolUtils.h"
 
 #include <TFile.h>
 #include <TTree.h>
 #include <TH1F.h>
+#include <TH2F.h>
 #include <TF1.h>
 #include <TGraph.h>
 #include <TLine.h>
@@ -37,7 +39,8 @@ using EventVars_Recon = prad2::ReconEventData;
 
 // returns the number of events passing the sum-trigger selection
 long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, float Ebeam, int max_events = -1,
+    std::map<int, TH1F*> &energy_hists, TH2F *energy_vs_theta,
+    float Ebeam, const RunConfig &run_config, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
 
 float resolution = 0.03; // pre-defined energy resolution
@@ -50,7 +53,9 @@ struct BeamSet {
     float Ebeam;        // MeV
     float min_ee_sep;   // fit the e-e peak only if it is this far (MeV) from the e-p peak
     std::vector<std::string> inputs;
+    RunConfig run_config;
     std::map<int, TH1F*> hists;
+    TH2F *energy_vs_theta = nullptr;
     long long n_sum = 0;
     TDirectory *dir = nullptr;
 };
@@ -96,6 +101,12 @@ int main(int argc, char *argv[]){
 
     std::string dbDir = prad2::database_dir();
 
+    for (auto &beam : beams) {
+        if (beam.inputs.empty()) continue;
+        const int run_num = get_run_int(beam.inputs.front());
+        beam.run_config = LoadRunConfig(dbDir + "/runinfo/general.json", run_num);
+    }
+
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
     PhysicsTools physics(hycal);
@@ -112,6 +123,14 @@ int main(int argc, char *argv[]){
             h->SetDirectory(nullptr);
             beam.hists[m.id] = h;
         }
+    }
+    for (auto &beam : beams) {
+        beam.energy_vs_theta = new TH2F(
+            Form("h2_energy_vs_theta_%s", beam.tag),
+            Form("Cluster Energy vs Scattering Angle (%s GeV);Scattering angle (deg);Cluster energy (MeV)",
+                 beam.label),
+            45, 0., 4.5, 4000, 0., 4000.);
+        beam.energy_vs_theta->SetDirectory(nullptr);
     }
 
     std::mutex io_mtx;
@@ -134,7 +153,8 @@ int main(int argc, char *argv[]){
                       << chain.GetEntries() << " event(s)\n";
         }
         beam.n_sum = process_event(use_GEM, &chain, ev, hycal, beam.hists,
-                                   beam.Ebeam, max_events, label, &io_mtx);
+                                   beam.energy_vs_theta, beam.Ebeam, beam.run_config,
+                                   max_events, label, &io_mtx);
         {
             std::lock_guard<std::mutex> lk(io_mtx);
             std::cerr << "[" << label << "] Selected " << beam.n_sum
@@ -170,8 +190,7 @@ int main(int argc, char *argv[]){
         int mod_id = mod.id;
         if (!mod.is_pwo4()) continue;
 
-        float x = mod.x, y = mod.y, z = 6275.f;
-        float theta = std::atan2(std::sqrt(x*x + y*y), z) * 180.f / M_PI;
+        float x = mod.x, y = mod.y;
 
         int _fit_uid = mod_id * 10;
 
@@ -231,6 +250,7 @@ int main(int argc, char *argv[]){
             const BeamSet &beam = beams[b];
             const bool top = (b == 0), bottom = (b == kNBeams - 1);
             TH1F *h = beam.hists.at(mod_id);
+            float theta = std::atan2(std::sqrt(x*x + y*y), beam.run_config.hycal_z) * 180.f / M_PI;
             exp_ep[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ep");
             exp_ee[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ee");
             float sigma_ep = resolution * exp_ep[b] / sqrt(exp_ep[b]/1000.f);
@@ -411,6 +431,7 @@ int main(int argc, char *argv[]){
     for (auto &beam : beams) {
         beam.dir->cd();
         for (auto &[id, h] : beam.hists) if (h) h->Write();
+        if (beam.energy_vs_theta) beam.energy_vs_theta->Write();
     }
     outFile.cd();
     h_energy_peak_3p5->Write();
@@ -422,7 +443,8 @@ int main(int argc, char *argv[]){
 }
 
 long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
-    std::map<int, TH1F*> &energy_hists, float Ebeam, int max_events,
+    std::map<int, TH1F*> &energy_hists, TH2F *energy_vs_theta,
+    float Ebeam, const RunConfig &run_config, int max_events,
     const std::string &label, std::mutex *io_mtx)
 {
     auto log_msg = [&](const std::string &msg, bool flush = false) {
@@ -450,11 +472,27 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     + "/" + std::to_string(tree->GetEntries()) + "\r", true);
         }
         if ((ev.trigger_bits & prad2::TBIT_sum) == 0) continue;
+        if (ev.n_clusters > 2) continue;
+        if (ev.n_clusters == 2) {
+            const MollerEvent moller(
+                {ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], ev.cl_energy[0]},
+                {ev.cl_x[1], ev.cl_y[1], ev.cl_z[1], ev.cl_energy[1]});
+            const float theta1 = PhysicsTools::GetThetaAngle(
+                moller.first.x, moller.first.y, moller.first.z);
+            const float theta2 = PhysicsTools::GetThetaAngle(
+                moller.second.x, moller.second.y, moller.second.z);
+            const bool is_moller =
+                std::isfinite(theta1) && std::isfinite(theta2)
+                && PhysicsTools::isMoller_kinematic(
+                    theta1, moller.first.E, theta2, moller.second.E, Ebeam, 0.03f * 2.5f)
+                && PhysicsTools::isBackToBack(moller, 10.f);
+            if (!is_moller) continue;
+        }
         n_accepted++;
 
         for( int j = 0; j < ev.n_clusters; j++) {
             int mod_id = ev.cl_center[j];
-            if (ev.cl_nblocks[j] < 4) continue;
+            if (ev.cl_nblocks[j] < 3) continue;
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue;
 
@@ -473,10 +511,10 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     if(match[0]) ev.first_match(j, 0, c_x, c_y, c_z);
                     else ev.first_match(j, 1, c_x, c_y, c_z);
                     //projection onto the HyCal module plane
-                    float scale = 6275.f / c_z;
+                    float scale = run_config.hycal_z / c_z;
                     c_x *= scale;
                     c_y *= scale;
-                    c_z = 6275.f;
+                    c_z = run_config.hycal_z;
                 }
                 else{
                     c_x = -999.f;
@@ -486,11 +524,11 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                 
             }
 
-            // require the hit near the seed module centre (|xd|,|yd| < 0.2 module sizes)
+            // require the hit near the seed module centre (|xd|,|yd| < 0.3 module sizes)
             const auto [xd, yd] = mod->cell_offset<float>(c_x, c_y);
-            if (std::abs(xd) >= 0.2f || std::abs(yd) >= 0.2f) continue;
+            if (std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f) continue;
 
-            float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), 6275.f) * 180.f / M_PI;
+            float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), run_config.hycal_z) * 180.f / M_PI;
             float energy = ev.cl_energy[j];
 
             bool veto = false;
@@ -509,6 +547,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
             if(veto && energy > 600. && Ebeam < 1000.f) continue;
 
             energy_hists[mod_id]->Fill(energy);
+            energy_vs_theta->Fill(theta, energy);
         }
     }
     return n_accepted;
