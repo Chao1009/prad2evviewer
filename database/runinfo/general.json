@@ -53,17 +53,18 @@
             "gain_factor": {"data_dir": "", "ref_run":  24827}
         },
         {
-            "// Reuses the 24185 calibration, time cuts, and gain reference":  "",
+            "// Reuses the 24185 time cuts":  "",
             "// — chained inheritance fills in the rest.":                     "",
             "from_run":    24551,
-            "beam_energy": 728.9
+            "beam_energy": 728.9,
+            "calibration": {"file": "calibration/PRad2_2p2_round2_5.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25353, "ref_PMT": 12}
         },
         {
             "from_run":    24670,
             "beam_energy": 3485.41,
-            "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
-            "time_cuts":   {"hc_time_window": [130.0, 200.0]},
-            "gain_factor": {"data_dir": "", "ref_run":  24827}
+            "calibration": {"file": "calibration/PRad2_2p2_round2_5.json"},
+            "gain_factor": {"data_dir": "", "ref_run":  25353, "ref_PMT": 12}
         },
 
         {
