@@ -42,8 +42,14 @@ if [[ ! -d "${WORK_DIR}" ]]; then
 fi
 WORK_DIR="$(cd "${WORK_DIR}" && pwd)"
 
-read -rp "Enter output directory [${WORK_DIR}/slurm_out]: " OUTPUT_DIR
-OUTPUT_DIR="${OUTPUT_DIR:-${WORK_DIR}/slurm_out}"
+DEFAULT_OUTPUT_DIR="/farm_out/$(whoami)/slurm_out"
+read -rp "Enter output directory [${DEFAULT_OUTPUT_DIR}]: " OUTPUT_DIR
+OUTPUT_DIR="${OUTPUT_DIR:-${DEFAULT_OUTPUT_DIR}}"
+if [[ "${OUTPUT_DIR}" != "/farm_out/"* && "${OUTPUT_DIR}" != "/dev/null" ]]; then
+    echo "WARNING: Slurm requires --output/--error to start with /farm_out/ or be /dev/null."
+    echo "Using default output directory: ${DEFAULT_OUTPUT_DIR}"
+    OUTPUT_DIR="${DEFAULT_OUTPUT_DIR}"
+fi
 mkdir -p "${OUTPUT_DIR}"
 
 read -rp "Enter ROOT setup script, or 'none' to rely on the current environment [none]: " ROOT_SETUP
