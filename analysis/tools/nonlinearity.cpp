@@ -21,6 +21,7 @@
 #include <TChain.h>
 #include <TMarker.h>
 #include <TLegend.h>
+#include <TNamed.h>
 
 #include <iostream>
 #include <string>
@@ -42,8 +43,6 @@ long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, c
     std::map<int, TH1F*> &energy_hists, TH2F *energy_vs_theta,
     float Ebeam, const RunConfig &run_config, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
-
-float resolution = 0.03; // pre-defined energy resolution
 
 // One beam-energy data set (-a/-b/-c): its inputs, per-module energy
 // histograms and output directory.
@@ -80,20 +79,60 @@ int main(int argc, char *argv[]){
 
     std::string output;
     std::string pngDir = "module_hists";
+    std::string seed_calib_file;
+    int base_beam_index = 1;
 
     int max_events = -1;
     bool use_GEM = false;
+    auto print_usage = [&]() {
+        std::cerr << "Usage: nonlinearity [-a files...] [-b files...] [-c files...] "
+                     "[-g] [-o output.root] [-n max_events] [-p png_dir] "
+                     "[-s seed_calibration.json] [-B 3.5|2.2|0.7]\n"
+                     "  -a  3.5 GeV input files\n"
+                     "  -b  2.2 GeV input files\n"
+                     "  -c  0.7 GeV input files\n"
+                     "  -s  seed calibration JSON (default: built-in calibration)\n"
+                     "  -B  base beam energy for non-linearity fit (default: 2.2 GeV)\n";
+    };
     {
         std::vector<std::string> *cur = nullptr;
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
-            if (arg == "-a")       { cur = &beams[0].inputs; }
+            if (arg == "-h")       { print_usage(); return 0; }
+            else if (arg == "-a")  { cur = &beams[0].inputs; }
             else if (arg == "-b")  { cur = &beams[1].inputs; }
             else if (arg == "-c")  { cur = &beams[2].inputs; }
             else if (arg == "-g")  { cur = nullptr; use_GEM = true; }
             else if (arg == "-o")  { cur = nullptr; if (++i < argc) output = argv[i]; }
             else if (arg == "-n")  { cur = nullptr; if (++i < argc) max_events = std::atoi(argv[i]); }
             else if (arg == "-p")  { cur = nullptr; if (++i < argc) pngDir = argv[i]; }
+            else if (arg == "-s")  {
+                cur = nullptr;
+                if (++i >= argc) {
+                    std::cerr << "Option -s requires a seed calibration file.\n";
+                    print_usage();
+                    return 1;
+                }
+                seed_calib_file = argv[i];
+            }
+            else if (arg == "-B") {
+                cur = nullptr;
+                if (++i >= argc) {
+                    std::cerr << "Option -B requires 3.5, 2.2, or 0.7.\n";
+                    print_usage();
+                    return 1;
+                }
+                const std::string base = argv[i];
+                if (base == "3.5" || base == "3p5") base_beam_index = 0;
+                else if (base == "2.2" || base == "2p2") base_beam_index = 1;
+                else if (base == "0.7" || base == "0p7") base_beam_index = 2;
+                else {
+                    std::cerr << "Invalid base beam energy '" << base
+                              << "'. Choose 3.5, 2.2, or 0.7 GeV.\n";
+                    print_usage();
+                    return 1;
+                }
+            }
             else if (!arg.empty() && arg[0] != '-' && cur) { cur->push_back(arg); }
         }
     }
@@ -115,6 +154,7 @@ int main(int argc, char *argv[]){
     for (int i = 0; i < hycal.module_count(); ++i) {
         const auto &m = hycal.module(i);
         if (!m.is_pwo4()) continue;
+        if (!InHyCalRing(m.x, m.y, 2.0, 16.)) continue;
         std::string hname = "h_energy_" + m.name;
         std::string htitle = "Energy " + m.name + ";E (MeV);Counts";
         for (auto &beam : beams) {
@@ -173,16 +213,23 @@ int main(int argc, char *argv[]){
         return 1;
     }
 
-    std::string calib_file = dbDir + "/" + "calibration/calibration_factor_3p5_June1.json";
+    std::string calib_file = seed_calib_file.empty()
+        ? dbDir + "/calibration/calibration_factor_3p5_June1.json"
+        : seed_calib_file;
     int nmatched = hycal.LoadCalibration(calib_file);
-    if (nmatched >= 0)
-        std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
+    if (nmatched <= 0) {
+        std::cerr << "Failed to load seed calibration from " << calib_file << "\n";
+        return 1;
+    }
+    std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
 
     TH1F *h_energy_peak_3p5 = new TH1F("h_energy_peak_3p5", "Energy Peak Distribution;Energy (MeV);Counts", 4000, 0, 4000);
 
     // calculate non-linearity module by module and save to output file
     gSystem->mkdir(pngDir.c_str(), true);
     TFile outFile(output.empty() ? "nonlinearity_results.root" : output.c_str(), "RECREATE");
+    TNamed base_beam_energy("base_beam_energy_GeV", beams[base_beam_index].label);
+    base_beam_energy.Write();
     for (auto &beam : beams) beam.dir = outFile.mkdir(Form("energy_%sGeV", beam.tag));
     TDirectory *dir_lin = outFile.mkdir("linearity");
     for (int i = 0; i < hycal.module_count(); i++) {
@@ -191,51 +238,29 @@ int main(int argc, char *argv[]){
         if (!mod.is_pwo4()) continue;
 
         float x = mod.x, y = mod.y;
+        if (!InHyCalRing(x, y, 2.0, 16.)) continue;
 
-        int _fit_uid = mod_id * 10;
-
-        // Peak fit in [Eexp±6σ]: the weighted centroid seeds a two-stage
-        // Gaussian fit (mean±2σ, then mean±1σ); returns the final fitted mean.
-        auto fitPeakAndDraw = [&](TH1F *h, double Eexp, double sigma, int color) -> float {
-            ++_fit_uid;
-            int b0 = std::max(1, h->FindBin(Eexp - 6.*sigma));
-            int b1 = std::min(h->GetNbinsX(), h->FindBin(Eexp + 6.*sigma));
+        // Fit and draw a peak using the same adaptive Gaussian fit as physics_calib.
+        auto fitPeakAndDraw = [&](TH1F *h, double Eexp, int color) -> float {
             double ypad_min = 0;
             double ypad = h->GetMaximum() * 1.2;
-            // search-window: dashed, full y-axis height
-            TLine *wl = new TLine(Eexp - 6.*sigma, ypad_min, Eexp - 6.*sigma, ypad);
+            // Candidate peak search range used by PhysicsTools::fitPeak.
+            TLine *wl = new TLine(0.8 * Eexp, ypad_min, 0.8 * Eexp, ypad);
             wl->SetLineColor(6); wl->SetLineStyle(7); wl->SetLineWidth(2); wl->Draw();
-            TLine *wr = new TLine(Eexp + 6.*sigma, ypad_min, Eexp + 6.*sigma, ypad);
+            TLine *wr = new TLine(1.2 * Eexp, ypad_min, 1.2 * Eexp, ypad);
             wr->SetLineColor(6); wr->SetLineStyle(7); wr->SetLineWidth(2); wr->Draw();
-            // weighted mean within search window
-            double wsum = 0., wpos = 0.;
-            for (int ib = b0; ib <= b1; ++ib) {
-                double c = h->GetBinContent(ib);
-                if (c > 0.) { wsum += c; wpos += c * h->GetBinCenter(ib); }
+            auto fit = physics.fitPeak(h, static_cast<float>(Eexp), false);
+            const double mean = fit[0];
+            if (mean <= 0.) return 0.f;
+
+            TF1 *g = h->GetFunction("_fg_");
+            if (g) {
+                g->SetLineColor(color);
+                g->SetLineWidth(3);
+                g->Draw("same");
             }
-            if (wsum <= 0.) return 0.f;
-            double mean = wpos / wsum;
-            // first Gaussian fit within [mean ± 2σ]
-            auto estimateSig = [](double E) -> double {
-                return (E > 0.) ? E * 0.035 / std::sqrt(E / 1000.) : 1.;
-            };
-            double sig = estimateSig(mean);
-            {
-                TF1 g1(Form("_fpk_g1_%d", _fit_uid), "gaus", mean - 2.*sig, mean + 2.*sig);
-                g1.SetParameters(h->GetMaximum(), mean, sig);
-                h->Fit(&g1, "RQ0");
-                mean = g1.GetParameter(1);
-            }
-            // final Gaussian fit within [mean ± 1σ]
-            sig = estimateSig(mean);
-            TF1 *g = new TF1(Form("_gfit_%d", _fit_uid), "gaus", mean - sig, mean + sig);
-            g->SetParameters(h->GetMaximum(), mean, sig);
-            h->Fit(g, "RQ0");
-            mean = g->GetParameter(1);
-            double fit_amp = g->GetParameter(0);
-            g->SetLineColor(color); g->SetLineWidth(3); g->Draw("same");
             // draw a marker at the fitted mean, at Gaussian peak height
-            TMarker *mk = new TMarker(mean, fit_amp, 29); // star symbol
+            TMarker *mk = new TMarker(mean, g ? g->GetParameter(0) : h->GetMaximum(), 29); // star symbol
             mk->SetMarkerColor(color); mk->SetMarkerSize(2.5); mk->Draw();
             return static_cast<float>(mean);
         };
@@ -253,8 +278,6 @@ int main(int argc, char *argv[]){
             float theta = std::atan2(std::sqrt(x*x + y*y), beam.run_config.hycal_z) * 180.f / M_PI;
             exp_ep[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ep");
             exp_ee[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ee");
-            float sigma_ep = resolution * exp_ep[b] / sqrt(exp_ep[b]/1000.f);
-            float sigma_ee = resolution * exp_ee[b] / sqrt(exp_ee[b]/1000.f);
 
             ch->cd(b + 1);
             gPad->SetTopMargin(top ? 0.10 : 0.005);
@@ -270,9 +293,9 @@ int main(int argc, char *argv[]){
             h->SetLineWidth(2);
             h->SetStats(0);
             h->Draw("HIST");
-            peak_ep[b] = fitPeakAndDraw(h, exp_ep[b], sigma_ep, kRed);
+            peak_ep[b] = fitPeakAndDraw(h, exp_ep[b], kRed);
             if (std::abs(exp_ep[b] - exp_ee[b]) > beam.min_ee_sep)
-                peak_ee[b] = fitPeakAndDraw(h, exp_ee[b], sigma_ee, kBlue);
+                peak_ee[b] = fitPeakAndDraw(h, exp_ee[b], kBlue);
 
             TLatex lat;
             lat.SetNDC(); lat.SetTextSize(0.050);
@@ -289,9 +312,9 @@ int main(int argc, char *argv[]){
         ch->SaveAs(Form("%s/mod_W%d.png", pngDir.c_str(), mod_id-1000));
         delete ch;
 
-        // if the anchor point (3.5 GeV e-p) has no clean peak, skip this module
-        if (peak_ep[0] == 0.f) continue;
-        const float E_base = exp_ep[0];
+        // The selected base-energy e-p peak anchors the non-linearity fit.
+        if (peak_ep[base_beam_index] == 0.f) continue;
+        const float E_base = exp_ep[base_beam_index];
 
         h_energy_peak_3p5->Fill(peak_ep[0]);
 
@@ -352,13 +375,13 @@ int main(int argc, char *argv[]){
         fitLine2->SetLineColor(kMagenta+1);
         fitLine2->SetLineWidth(2);
         fitLine2->SetLineStyle(7);
-        g->Fit(fitLine2, "RQ0+");
+        const int fit_status_2 = g->Fit(fitLine2, "RQ0+");
         fitLine2->Draw("same");
 
-        double nl2_1     = fitLine2->GetParameter(0);
-        double nl2_1_err = fitLine2->GetParError(0);
-        double nl2_2     = fitLine2->GetParameter(1);
-        double nl2_2_err = fitLine2->GetParError(1);
+        double nl2_1     = (fit_status_2 == 0 && points.size() >= 3) ? fitLine2->GetParameter(0) : 0.;
+        double nl2_1_err = (fit_status_2 == 0 && points.size() >= 3) ? fitLine2->GetParError(0) : 0.;
+        double nl2_2     = (fit_status_2 == 0 && points.size() >= 3) ? fitLine2->GetParameter(1) : 0.;
+        double nl2_2_err = (fit_status_2 == 0 && points.size() >= 3) ? fitLine2->GetParError(1) : 0.;
         double chi2_2    = fitLine2->GetChisquare();
         int    ndf_2     = fitLine2->GetNDF();
 
@@ -424,12 +447,19 @@ int main(int argc, char *argv[]){
         delete g;
 
         // outermost ring or absorber/beam-hole region: no non-linearity correction
-        if (fdec::test_bit(mod.flag, fdec::kTransition) || fdec::test_bit(mod.flag, fdec::kInnerBound))
-            nl = 0.0;
-        hycal.SetCalibNonLinearity(mod_id, nl);
+        const bool force_zero = fdec::test_bit(mod.flag, fdec::kTransition)
+                             || fdec::test_bit(mod.flag, fdec::kInnerBound);
+        if (force_zero) {
+            nl2_1 = 0.0;
+            nl2_2 = 0.0;
+        }
+        hycal.SetCalibBaseEnergy(mod_id, E_base);
+        hycal.SetCalibNonLinearity(mod_id, nl2_1, nl2_2);
     }
     for (auto &beam : beams) {
         beam.dir->cd();
+        TNamed hycal_z("hycal_z_mm", Form("%.9g", beam.run_config.hycal_z));
+        hycal_z.Write();
         for (auto &[id, h] : beam.hists) if (h) h->Write();
         if (beam.energy_vs_theta) beam.energy_vs_theta->Write();
     }
@@ -495,6 +525,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
             if (ev.cl_nblocks[j] < 3) continue;
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue;
+            if (!InHyCalRing(mod->x, mod->y, 2.0, 16.)) continue;
 
             float c_x, c_y, c_z;
             if(!use_GEM){

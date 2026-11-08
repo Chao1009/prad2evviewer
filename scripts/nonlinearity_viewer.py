@@ -67,13 +67,13 @@ MODULES_JSON = find_database_file("hycal_map.json", use_env=False)
 
 # Tool constants
 
-Z_HYCAL    = 6270.0    # mm
-RESOLUTION = 0.035     # 3.5% / sqrt(E/1000)
+Z_HYCAL    = 6270.0    # Legacy ROOT files without run-geometry metadata.
+RESOLUTION = 0.03      # 3% / sqrt(E/1000), matching PhysicsTools::findPeakWindow.
 
 
 def estimate_sigma(E: float) -> float:
-    """Energy resolution estimate: σ = E × 3.5% / √(E/1000)."""
-    return E * RESOLUTION / math.sqrt(max(E, 1.0) / 1000.0)
+    """Expected peak width used to initialize PhysicsTools::fitPeak."""
+    return RESOLUTION * math.sqrt(max(E, 0.0) * 1000.0)
 
 
 # Gaussian fit helpers
@@ -111,65 +111,100 @@ def _gauss_fit_range(
     return float(popt[1]), abs(float(popt[2])), float(popt[0])
 
 
-def _gauss_fit_window(
-    centers: np.ndarray,
+def _find_peak_window(
     counts: np.ndarray,
-    mu0: float,
-    half_width: float,
-) -> Optional[Tuple[float, float, float]]:
-    """Fit Gaussian in [mu0 ± half_width].  Returns (mean, sigma, amp) or None."""
-    bw = float(centers[1] - centers[0]) if len(centers) > 1 else 1.0
-    try:
-        return _gauss_fit_range(centers, counts, mu0 - half_width, mu0 + half_width,
-                                max(half_width / 3.0, bw), half_width * 2.0, mu0=mu0)
-    except Exception:
+    edges: np.ndarray,
+    Eexp: float,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """Mirror PhysicsTools::findPeakWindow for the Gaussian peak fit."""
+    n_bins = len(counts)
+    if n_bins < 4:
         return None
+
+    first = max(0, int(np.searchsorted(edges, 0.8 * Eexp, side="right") - 1))
+    last = min(n_bins - 1, int(np.searchsorted(edges, 1.2 * Eexp, side="right") - 1))
+    peak_bin = -1
+    peak_height = 0.0
+    if first <= last:
+        for i in range(first, last + 1):
+            left = counts[i - 1] if i > 0 else counts[i]
+            right = counts[i + 1] if i < n_bins - 1 else counts[i]
+            if counts[i] > 0.0 and counts[i] >= left and counts[i] >= right and counts[i] > peak_height:
+                peak_bin, peak_height = i, float(counts[i])
+
+    if peak_bin < 0:
+        peak_bin = int(np.argmax(counts))
+        peak_height = float(counts[peak_bin])
+    if peak_height <= 0.0:
+        return None
+
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    peak0 = float(centers[peak_bin])
+    sigma0 = estimate_sigma(peak0)
+    left_bin = right_bin = peak_bin
+    threshold = 0.4 * peak_height
+
+    while left_bin > 0 and counts[left_bin] > threshold:
+        left_bin -= 1
+    while right_bin < n_bins - 1 and counts[right_bin] > threshold:
+        right_bin += 1
+    while centers[right_bin] - centers[left_bin] < 2.5 * sigma0 and (
+        left_bin > 0 or right_bin < n_bins - 1
+    ):
+        if left_bin > 0:
+            left_bin -= 1
+        if right_bin < n_bins - 1:
+            right_bin += 1
+    while centers[right_bin] - centers[left_bin] > 4.5 * sigma0 and (
+        left_bin > 0 or right_bin < n_bins - 1
+    ):
+        left_bin += 1
+        right_bin -= 1
+
+    lo, hi = float(centers[left_bin]), float(centers[right_bin])
+    if not (hi > lo and math.isfinite(sigma0) and sigma0 > 0.0):
+        return None
+    return peak_height, peak0, sigma0, lo, hi
 
 
 def fit_peak_full(
     counts: np.ndarray,
     edges: np.ndarray,
     Eexp: float,
-    sigma_exp: float,
+    entries: float,
 ) -> Tuple[float, float, float]:
     """
-    3-step Gaussian fit following nonlinearity.cpp fitPeakAndDraw.
-
-    Step 2: weighted mean in search window [Eexp ± 6σ_exp]
-    Step 3: first Gaussian fit in [mean ± 2σ(mean)]
-    Step 4: final Gaussian fit in [mean ± 1σ(mean)]
-
+    Adaptive Gaussian fit matching PhysicsTools::fitPeak(h, Eexp, false).
     Returns (mean_MeV, sigma_MeV, amplitude).  mean=0 on failure.
     """
-    centers = 0.5 * (edges[:-1] + edges[1:])
-
-    # Step 2: weighted mean in search window
-    mask = (centers >= Eexp - 6.0 * sigma_exp) & (centers <= Eexp + 6.0 * sigma_exp)
-    w = counts[mask]
-    x = centers[mask]
-    if w.sum() <= 0.0:
+    if entries < 100.0 or not HAS_SCIPY:
+        return 0.0, 0.0, 0.0
+    window = _find_peak_window(counts, edges, Eexp)
+    if window is None:
         return 0.0, 0.0, 0.0
 
-    mean = float((x * w).sum() / w.sum())
+    height, peak0, sigma0, lo, hi = window
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    mask = (centers >= lo) & (centers <= hi) & (counts > 0.0)
+    if np.count_nonzero(mask) < 4:
+        return 0.0, 0.0, 0.0
 
-    if not HAS_SCIPY:
-        return mean, estimate_sigma(mean), float(w.max())
-
-    best: Optional[Tuple[float, float, float]] = None
-
-    # Step 3: first fit in [mean ± 2σ]
-    r = _gauss_fit_window(centers, counts, mean, 2.0 * estimate_sigma(mean))
-    if r is not None:
-        mean = r[0]
-        best = r
-
-    # Step 4: final fit in [mean ± 1σ]
-    r = _gauss_fit_window(centers, counts, mean, estimate_sigma(mean))
-    if r is not None:
-        return r
-    if best is not None:
-        return best
-    return mean, estimate_sigma(mean), float(w.max())
+    xf = centers[mask]
+    yf = counts[mask].astype(float)
+    try:
+        params, _ = curve_fit(
+            _gauss, xf, yf,
+            p0=[height, peak0, sigma0],
+            sigma=np.sqrt(yf),
+            absolute_sigma=True,
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError, FloatingPointError):
+        return 0.0, 0.0, 0.0
+    amp, mean, sigma = (float(v) for v in params)
+    if not all(math.isfinite(v) for v in (amp, mean, sigma)) or abs(sigma) <= 0.0:
+        return 0.0, 0.0, 0.0
+    return mean, abs(sigma), amp
 
 
 # Non-linearity model & fit  (match nonlinearity.cpp)
@@ -205,7 +240,8 @@ def fit_nonlinearity(
     ratio = E_rec / np.where(E_exp > 0, E_exp, 1.0)
     try:
         popt, pcov = curve_fit(model, E_rec, ratio,
-                               p0=[nl1_init] + [0.0] * (order - 1), maxfev=5000)
+                               p0=[nl1_init] + [0.0] * (order - 1),
+                               absolute_sigma=True, maxfev=5000)
         perr = np.sqrt(np.maximum(np.diag(pcov), 0.0))
         chi2 = float(np.sum((ratio - model(E_rec, *popt)) ** 2))
         return popt, perr, chi2, len(E_rec) - order
@@ -217,7 +253,8 @@ def fit_nonlinearity(
 
 # Beam tag (ROOT dir energy_<tag>GeV, histogram h_energy_<name>_<tag>) and
 # beam energy [MeV].
-_BEAMS = (("3p5", 3485.0), ("2p2", 2239.0), ("0p7", 729.0))
+_BEAMS = (("3p5", 3485.41), ("2p2", 2239.51), ("0p7", 728.9))
+_BASE_BEAMS = (("3p5", "3.5"), ("2p2", "2.2"), ("0p7", "0.7"))
 _KINDS = (("ep", "e-p", "tomato"), ("ee", "e-e", "cornflowerblue"))
 _BEAM_TAGS = [tag for tag, _ in _BEAMS]
 
@@ -231,7 +268,8 @@ for _kind, _name, _color in _KINDS:
             "kind": _kind, "color": _color, "tag": _tag, "energy_label": _energy,
         }
         if _kind == "ee":
-            _cfg.update(skip_if_close_to=f"ep_{_tag}", min_separation=170.0)
+            _cfg.update(skip_if_close_to=f"ep_{_tag}",
+                        min_separation=170.0 if _tag == "0p7" else 0.0)
         _PEAK_CONFIGS.append(_cfg)
 del _kind, _name, _color, _tag, _ebeam, _energy, _cfg
 _PEAK_KEYS = [cfg["key"] for cfg in _PEAK_CONFIGS]
@@ -259,19 +297,26 @@ def should_fit_peak(d: "ModuleData", key: str) -> bool:
 class ModuleData:
     """All non-linearity data for one PbWO4 module."""
 
-    def __init__(self, name: str, x: float, y: float, row: int = -1, col: int = -1):
+    def __init__(
+        self, name: str, x: float, y: float, row: int = -1, col: int = -1,
+        hycal_z_by_beam: Optional[Dict[str, float]] = None,
+    ):
         self.name  = name
         self.x     = float(x)
         self.y     = float(y)
         self.row   = int(row)
         self.col   = int(col)
-        self.theta = math.degrees(math.atan2(math.hypot(x, y), Z_HYCAL))
+        hycal_z_by_beam = hycal_z_by_beam or {}
+        self.theta = math.degrees(math.atan2(
+            math.hypot(x, y), hycal_z_by_beam.get("3p5", Z_HYCAL)))
 
         self.e_exp:     Dict[str, float] = {}
         self.sigma_exp: Dict[str, float] = {}
         for cfg in _PEAK_CONFIGS:
             key = str(cfg["key"])
-            E = expected_energy(self.theta, float(cfg["ebeam"]), str(cfg["kind"]))
+            z = hycal_z_by_beam.get(str(cfg["tag"]), Z_HYCAL)
+            theta = math.degrees(math.atan2(math.hypot(x, y), z))
+            E = expected_energy(theta, float(cfg["ebeam"]), str(cfg["kind"]))
             self.e_exp[key]     = E
             self.sigma_exp[key] = estimate_sigma(E) if E > 0.0 else 1.0
 
@@ -302,6 +347,7 @@ class ModuleData:
         # raw histograms loaded from ROOT (counts, edges), keyed by beam tag
         self.hists: Dict[str, Optional[Tuple[np.ndarray, np.ndarray]]] = {
             t: None for t in _BEAM_TAGS}
+        self.hist_entries: Dict[str, float] = {t: 0.0 for t in _BEAM_TAGS}
 
     def measured_peak(self, key: str) -> float:
         """Manual peak center when set, else the fitted peak (0 = none)."""
@@ -313,8 +359,10 @@ class ModuleData:
         return (layers > 0 and self.row >= 0 and self.col >= 0
                 and edge_depth(self.row + 1, self.col + 1) <= layers)
 
-    def linearity_points(self) -> List[Tuple[str, float, float]]:
+    def linearity_points(self, base_beam_tag: str = "2p2") -> List[Tuple[str, float, float]]:
         """(key, E_expected, E_rec) for every enabled peak with a valid measurement."""
+        if self.measured_peak(f"ep_{base_beam_tag}") <= 0.0:
+            return []
         pts = []
         for key in _PEAK_KEYS:
             p = self.measured_peak(key)
@@ -323,25 +371,26 @@ class ModuleData:
         return pts
 
     def auto_fit_peaks(self) -> bool:
-        """3-step auto fit (fitPeakAndDraw) of every peak; True if any peak was fit."""
+        """Adaptive PhysicsTools Gaussian fit of every peak; True if any succeeded."""
         any_ok = False
         for key in _PEAK_KEYS:
             hist = hist_for_key(self, key)
             E = self.e_exp[key]
             if hist is None or E <= 0.0 or not should_fit_peak(self, key):
                 continue
-            mu, sigma_f, amp = fit_peak_full(hist[0], hist[1], E, self.sigma_exp[key])
+            entries = self.hist_entries[str(peak_cfg(key)["tag"])]
+            mu, sigma_f, amp = fit_peak_full(hist[0], hist[1], E, entries)
             if mu > 0.0:
                 self.peaks[key], self.peak_sigma[key], self.peak_amp[key] = mu, sigma_f, amp
                 any_ok = True
         return any_ok
 
-    def refit_nl(self, outer_zero_layers: int = 1) -> None:
+    def refit_nl(self, outer_zero_layers: int = 1, base_beam_tag: str = "2p2") -> None:
         """Re-run the 1st and 2nd order non-linearity fits from current measured peaks."""
-        pts = self.linearity_points()
+        pts = self.linearity_points(base_beam_tag)
         E_exp = np.array([p[1] for p in pts])
         E_rec = np.array([p[2] for p in pts])
-        E_base = self.e_exp["ep_3p5"]
+        E_base = self.e_exp[f"ep_{base_beam_tag}"]
         force_zero = self.is_outer_layer(outer_zero_layers) or self.is_absorber
         (nl,), (err,), self.chi2_nl, self.ndf_nl = fit_nonlinearity(E_exp, E_rec, E_base)
         self.nl     = 0.0 if force_zero else float(nl)
@@ -379,14 +428,41 @@ class ModuleData:
 
 def _load_json_geometry(path: Path) -> Dict[str, Tuple[float, float, int, int]]:
     """Read hycal_map.json and return {name: (x, y, row_0based, col_0based)}
-    for PbWO4 modules only."""
+    for in-fiducial PbWO4 modules, matching nonlinearity.cpp."""
     result: Dict[str, Tuple[float, float, int, int]] = {}
     try:
         result = {m.name: (float(m.x), float(m.y), m.row - 1, m.col - 1)
-                  for m in load_modules(path) if m.mod_type == "PbWO4"}
+                  for m in load_modules(path)
+                  if m.mod_type == "PbWO4"
+                  and (abs(m.x) > 2.0 * 20.77 or abs(m.y) > 2.0 * 20.75)
+                  and abs(m.x) < 16.0 * 20.77
+                  and abs(m.y) < 16.0 * 20.75}
     except Exception as e:
         print(f"Warning: cannot read geometry from {path}: {e}", file=sys.stderr)
     return result
+
+
+def _read_hycal_z(root_dir) -> Optional[float]:
+    """Read the per-beam HyCal Z metadata written by nonlinearity.cpp."""
+    if root_dir is None:
+        return None
+    try:
+        value = float(root_dir["hycal_z_mm"].member("fTitle"))
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0.0 else None
+
+
+def _read_base_beam_tag(root_path: Path) -> Optional[str]:
+    """Read the selected base beam written by nonlinearity.cpp."""
+    if not HAS_UPROOT:
+        return None
+    try:
+        with uproot.open(str(root_path)) as root_file:
+            label = str(root_file["base_beam_energy_GeV"].member("fTitle")).strip()
+    except (OSError, KeyError, AttributeError, TypeError, ValueError):
+        return None
+    return next((tag for tag, energy in _BASE_BEAMS if label == energy), None)
 
 
 def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
@@ -395,10 +471,29 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
         print("Warning: hycal_map.json not found", file=sys.stderr)
         return {}
 
+    hycal_z_by_beam = {}
+    root_dirs = {}
+    if root_path is not None and root_path.is_file() and HAS_UPROOT:
+        try:
+            with uproot.open(str(root_path)) as f:
+                root_dirs = {t: f.get(f"energy_{t}GeV") for t in _BEAM_TAGS}
+                for tag, root_dir in root_dirs.items():
+                    z = _read_hycal_z(root_dir)
+                    if z is not None:
+                        hycal_z_by_beam[tag] = z
+            if not hycal_z_by_beam:
+                print(
+                    "Warning: ROOT file has no hycal_z_mm metadata; "
+                    f"using legacy {Z_HYCAL:g} mm geometry.",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"ROOT read error: {e}", file=sys.stderr)
+
     geo = _load_json_geometry(MODULES_JSON)
     data: Dict[str, ModuleData] = {}
     for name, (x, y, row, col) in geo.items():
-        data[name] = ModuleData(name, x, y, row, col)
+        data[name] = ModuleData(name, x, y, row, col, hycal_z_by_beam)
 
     if root_path is not None and root_path.is_file() and HAS_UPROOT:
         try:
@@ -409,7 +504,9 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
                         if root_dir is None:
                             continue
                         try:
-                            d.hists[t] = root_dir[f"h_energy_{name}_{t}"].to_numpy()
+                            hist = root_dir[f"h_energy_{name}_{t}"]
+                            d.hists[t] = hist.to_numpy()
+                            d.hist_entries[t] = float(hist.member("fEntries"))
                         except Exception:
                             pass
         except Exception as e:
@@ -475,6 +572,8 @@ class NLViewerWindow(QMainWindow):
         self._peak_use_cb: Dict[str, QCheckBox] = {}
         self._peak_center_edit: Dict[str, QLineEdit] = {}
         self._fit_order_cb: Optional[QComboBox] = None
+        self._base_energy_cb: Optional[QComboBox] = None
+        self._base_beam_tag = "2p2"
 
         # scan state
         self._scan_timer  = QTimer(self)
@@ -506,6 +605,15 @@ class NLViewerWindow(QMainWindow):
         self._file_lbl = QLabel("No file loaded")
         self._file_lbl.setStyleSheet(f"color: {THEME.TEXT_DIM};")
         top.addWidget(self._file_lbl, stretch=1)
+        top.addWidget(QLabel("Base energy:"))
+        self._base_energy_cb = QComboBox()
+        for tag, energy in _BASE_BEAMS:
+            self._base_energy_cb.addItem(f"{energy} GeV", tag)
+        self._base_energy_cb.setCurrentIndex(1)
+        self._base_energy_cb.setToolTip(
+            "Beam energy whose e-p expected energy defines E_base for both nl fits.")
+        self._base_energy_cb.currentIndexChanged.connect(self._on_base_energy_changed)
+        top.addWidget(self._base_energy_cb)
         top.addWidget(QLabel("Color map:"))
         self._mode_cb = QComboBox()
         self._mode_cb.addItems([
@@ -555,8 +663,8 @@ class NLViewerWindow(QMainWindow):
         top.addSpacing(12)
         self._export_btn = QPushButton("↩ Export nl → JSON")
         self._export_btn.setToolTip(
-            "Read a base calibration JSON, fill in nl1/nl2 values from the current\n"
-            "analysis results, and save a new JSON in the current directory.")
+            "Read a base calibration JSON and save nl1/nl2 coefficients from the current\n"
+            "fit (2nd order by default) and selected base beam energy.")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export_nl)
         top.addWidget(self._export_btn)
@@ -623,7 +731,8 @@ class NLViewerWindow(QMainWindow):
         self._clear_range_btn = QPushButton("✕ Clear")
         self._clear_range_btn.setFixedWidth(60)
         self._clear_range_btn.setEnabled(False)
-        self._clear_range_btn.setToolTip("Clear the drag-selected fit range and revert to auto (Eexp ± 6σ)")
+        self._clear_range_btn.setToolTip(
+            "Clear the drag-selected fit range and revert to the adaptive PhysicsTools fit window.")
         self._clear_range_btn.clicked.connect(self._clear_span_range)
         row1.addWidget(self._clear_range_btn)
 
@@ -632,7 +741,7 @@ class NLViewerWindow(QMainWindow):
         self._refit_peak_btn = QPushButton("Refit All Peaks")
         self._refit_peak_btn.setEnabled(False)
         self._refit_peak_btn.setToolTip(
-            "Re-run 3-step auto Gaussian fit on all 6 peaks (clears manual drag ranges).\n"
+            "Re-run the adaptive PhysicsTools Gaussian fit on all 6 peaks (clears manual drag ranges).\n"
             "Updates the linearity plot.")
         self._refit_peak_btn.clicked.connect(self._do_refit_all_peaks)
         row1.addWidget(self._refit_peak_btn)
@@ -652,11 +761,12 @@ class NLViewerWindow(QMainWindow):
         row1.addWidget(QLabel("Export fit:"))
         self._fit_order_cb = QComboBox()
         self._fit_order_cb.addItems(["2nd order", "1st order"])
+        self._fit_order_cb.setCurrentIndex(0)
         self._fit_order_cb.setEnabled(False)
         self._fit_order_cb.setToolTip(
             "Coefficient order used when exporting JSON for this module.\n"
-            "2nd order writes nl1/nl2 from the 2nd-order fit.\n"
-            "1st order writes nl1 from the 1st-order fit and nl2 = 0.")
+            "2nd order is the default and matches the C++ calibration output.\n"
+            "1st order writes the linear coefficient and nl2 = 0.")
         self._fit_order_cb.currentIndexChanged.connect(self._on_fit_order_changed)
         row1.addWidget(self._fit_order_cb)
 
@@ -748,7 +858,7 @@ class NLViewerWindow(QMainWindow):
             if d is None:
                 self._fit_order_cb.setCurrentIndex(0)
             else:
-                self._fit_order_cb.setCurrentIndex(1 if d.fit_order == "1st" else 0)
+                self._fit_order_cb.setCurrentIndex(0 if d.fit_order == "2nd" else 1)
             self._fit_order_cb.blockSignals(False)
 
     def _refresh_current_fit_display(self, status: Optional[str] = None, refit: bool = True):
@@ -756,7 +866,7 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return
         if refit:
-            d.refit_nl(self._outer_zero_layers())
+            d.refit_nl(self._outer_zero_layers(), self._base_beam_tag)
             self._refresh_map()
         self._draw_module(d)
         self._mod_lbl.setText(
@@ -806,13 +916,31 @@ class NLViewerWindow(QMainWindow):
         d = self._cur
         if d is None or self._fit_order_cb is None:
             return
-        d.fit_order = "1st" if self._fit_order_cb.currentIndex() == 1 else "2nd"
+        d.fit_order = "2nd" if self._fit_order_cb.currentIndex() == 0 else "1st"
         self._status_lbl.setText(
             f"{d.name} export will use {self._fit_order_cb.currentText()} coefficients.")
+
+    def _on_base_energy_changed(self, _idx: int):
+        if self._base_energy_cb is None:
+            return
+        self._base_beam_tag = str(self._base_energy_cb.currentData())
+        if not self._data:
+            return
+        self._refit_all_nl()
+        self._refresh_map()
+        self._refresh_current_fit_display(refit=False)
+        energy = dict(_BASE_BEAMS)[self._base_beam_tag]
+        self._status_lbl.setText(f"Base beam energy set to {energy} GeV.")
 
     def _load(self, path: Path):
         self._file_lbl.setText(f"Loading {path.name} …")
         QApplication.processEvents()
+        root_base = _read_base_beam_tag(path)
+        if root_base is not None and self._base_energy_cb is not None:
+            self._base_energy_cb.setCurrentIndex(
+                next(i for i, (tag, _) in enumerate(_BASE_BEAMS) if tag == root_base))
+        else:
+            self._base_beam_tag = str(self._base_energy_cb.currentData())
         self._data   = load_all(path)
         self._refit_all_nl()
         self._cur    = None
@@ -853,7 +981,7 @@ class NLViewerWindow(QMainWindow):
     def _refit_all_nl(self):
         layers = self._outer_zero_layers()
         for d in self._data.values():
-            d.refit_nl(layers)
+            d.refit_nl(layers, self._base_beam_tag)
 
     def _on_outer_layers_changed(self, _value: int):
         if not self._data:
@@ -966,7 +1094,7 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return
         self._refresh_current_fit_display(
-            "Fit ranges cleared; peaks refit with auto windows.",
+            "Fit ranges cleared; peaks refit with adaptive windows.",
             refit=d.auto_fit_peaks())
 
     # ── drawing ────────────────────────────────────────────────────────────
@@ -998,7 +1126,7 @@ class NLViewerWindow(QMainWindow):
         self._setup_span_selectors(d)
 
     def _draw_energy_hist_single(self, ax, d: ModuleData, key: str):
-        """Draw histogram for one peak key with x-range [Eexp ± 8σ]."""
+        """Draw histogram for one peak key in the expected-energy search range."""
         cfg = peak_cfg(key)
         hist = hist_for_key(d, key)
         if hist is None:
@@ -1012,9 +1140,9 @@ class NLViewerWindow(QMainWindow):
         Eexp  = d.e_exp[key]
         sig   = d.sigma_exp[key]
 
-        # X range: [Eexp ± 8σ], clipped to histogram bounds
-        xlo = max(float(edges[0]),  Eexp - 8.0 * sig)
-        xhi = min(float(edges[-1]), Eexp + 8.0 * sig)
+        # Show the same expected-energy search range used by PhysicsTools::fitPeak.
+        xlo = max(float(edges[0]), 0.8 * Eexp)
+        xhi = min(float(edges[-1]), 1.2 * Eexp)
         ax.set_xlim(xlo, xhi)
 
         ax.step(centers, counts, where="mid",
@@ -1034,8 +1162,8 @@ class NLViewerWindow(QMainWindow):
                        linewidth=1.2, linestyle="-", alpha=0.8, zorder=3)
 
         if Eexp > 0.0:
-            # Search window shading [Eexp ± 6σ]
-            ax.axvspan(Eexp - 6.0 * sig, Eexp + 6.0 * sig,
+            # Candidate peak search range [0.8 Eexp, 1.2 Eexp].
+            ax.axvspan(0.8 * Eexp, 1.2 * Eexp,
                        alpha=0.07, color=color, linewidth=0)
             # Expected energy marker
             ax.axvline(Eexp, color=color, linewidth=0.8, linestyle=":", alpha=0.5)
@@ -1070,8 +1198,8 @@ class NLViewerWindow(QMainWindow):
                     fontsize=7, color=THEME.TEXT_DIM, ha="left", va="top")
 
     def _draw_linearity(self, ax, d: ModuleData):
-        E_base = d.e_exp["ep_3p5"]
-        pts = d.linearity_points()
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        pts = d.linearity_points(self._base_beam_tag)
         if not pts:
             ax.text(0.5, 0.5, "No valid peaks found", ha="center", va="center",
                     transform=ax.transAxes, color=THEME.TEXT_DIM, fontsize=9)
@@ -1087,12 +1215,12 @@ class NLViewerWindow(QMainWindow):
         ax.axhline(1.0, color="tomato", linestyle="--",
                    linewidth=1.5, alpha=0.75, label="y = 1 (ideal)")
 
-        if E_base > 0.0 and len(pts) >= 2:
+        if E_base > 0.0 and len(pts) >= 2 and d.ndf_nl > 0:
             y1fit = nl_ratio_1st(xplot, d.nl, E_base)
             ax.plot(xplot, y1fit, color="cornflowerblue", linewidth=2.0,
                     label="1st order fit")
 
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 >= 0:
+        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 > 0:
             y2fit = nl_ratio_2nd(xplot, d.nl2_1, d.nl2_2, E_base)
             ax.plot(xplot, y2fit, color="violet", linewidth=2.0,
                     linestyle="--", label="2nd order fit")
@@ -1108,7 +1236,7 @@ class NLViewerWindow(QMainWindow):
                         color=str(cfg["color"]), fontsize=6.5)
 
         # Corrected points — 1st order: E_corr = E_rec / (1 + nl*(E_rec-E_base)/1000)
-        if E_base > 0.0 and len(pts) >= 2:
+        if E_base > 0.0 and len(pts) >= 2 and d.ndf_nl > 0:
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_1st(ye_rec, d.nl, E_base)
                 E_corr = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1117,7 +1245,7 @@ class NLViewerWindow(QMainWindow):
                            marker="s", edgecolors="white", linewidths=0.5)
 
         # Corrected points — 2nd order
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 >= 0:
+        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 > 0:
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_2nd(ye_rec, d.nl2_1, d.nl2_2, E_base)
                 E_corr2 = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1142,7 +1270,7 @@ class NLViewerWindow(QMainWindow):
                 f"2nd: nl₁={d.nl2_1:.4f}±{d.nl2_1_err:.4f}"
                 f"  nl₂={d.nl2_2:.4f}±{d.nl2_2_err:.4f}\n"
                 f"     {chi2_str}\n"
-                f"E_base={E_base:.1f} MeV"
+                f"E_base={E_base:.1f} MeV ({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
             )
             ax.text(0.03, 0.97, note,
                     transform=ax.transAxes, fontsize=7.0,
@@ -1245,14 +1373,14 @@ class NLViewerWindow(QMainWindow):
         return True
 
     def _do_refit_all_peaks(self):
-        """Refit all 6 peaks with auto windows (clears manual ranges)."""
+        """Refit all 6 peaks with adaptive windows (clears manual ranges)."""
         d = self._cur
         if d is None:
             return
         self._reset_spans()
         ok = d.auto_fit_peaks()
         self._refresh_current_fit_display(
-            "All 6 peaks refit with auto windows." if ok else None, refit=ok)
+            "All 6 peaks refit with adaptive windows." if ok else None, refit=ok)
 
     def _do_refit_nl(self):
         d = self._cur
@@ -1327,13 +1455,15 @@ class NLViewerWindow(QMainWindow):
                 n_skipped += 1
                 continue
 
-            has_fit = d.ndf_nl > 0
-            force_zero = d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber
+            has_fit = d.ndf_nl2 > 0
+            has_anchor = d.measured_peak(f"ep_{self._base_beam_tag}") > 0.0
+            force_zero = has_anchor and (
+                d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber)
             if not (has_fit or force_zero):
                 n_skipped += 1
                 continue
 
-            entry["base_energy"] = round(float(d.e_exp["ep_3p5"]), 6)
+            entry["base_energy"] = round(float(d.e_exp[f"ep_{self._base_beam_tag}"]), 6)
             if force_zero:
                 nl1, nl2 = 0.0, 0.0
             elif d.fit_order == "1st":
