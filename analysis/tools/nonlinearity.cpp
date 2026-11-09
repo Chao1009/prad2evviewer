@@ -83,16 +83,30 @@ int main(int argc, char *argv[]){
     int base_beam_index = 1;
 
     int max_events = -1;
+    int num_threads = kNBeams;
     bool use_GEM = false;
     auto print_usage = [&]() {
-        std::cerr << "Usage: nonlinearity [-a files...] [-b files...] [-c files...] "
+        std::cerr << "Usage: nonlinearity -a <recon.root|dir> -b <recon.root|dir> "
+                     "-c <recon.root|dir> [more files/dirs...] "
                      "[-g] [-o output.root] [-n max_events] [-p png_dir] "
-                     "[-s seed_calibration.json] [-B 3.5|2.2|0.7]\n"
-                     "  -a  3.5 GeV input files\n"
-                     "  -b  2.2 GeV input files\n"
-                     "  -c  0.7 GeV input files\n"
+                     "[-s seed_calibration.json] [-B 3.5|2.2|0.7] [-j cores]\n"
+                     "  -a  3.5 GeV recon ROOT files or directories (repeatable)\n"
+                     "  -b  2.2 GeV recon ROOT files or directories (repeatable)\n"
+                     "  -c  0.7 GeV recon ROOT files or directories (repeatable)\n"
                      "  -s  seed calibration JSON (default: built-in calibration)\n"
-                     "  -B  base beam energy for non-linearity fit (default: 2.2 GeV)\n";
+                     "  -B  base beam energy for non-linearity fit (default: 2.2 GeV)\n"
+                     "  -j  number of worker threads (default: 3; may exceed beam count)\n";
+    };
+    if (argc == 1) {
+        print_usage();
+        return 0;
+    }
+
+    auto require_value = [&](int &i, const std::string &option) -> bool {
+        if (i + 1 < argc && argv[i + 1][0] != '-') return true;
+        std::cerr << "Option " << option << " requires a value.\n";
+        print_usage();
+        return false;
     };
     {
         std::vector<std::string> *cur = nullptr;
@@ -103,26 +117,19 @@ int main(int argc, char *argv[]){
             else if (arg == "-b")  { cur = &beams[1].inputs; }
             else if (arg == "-c")  { cur = &beams[2].inputs; }
             else if (arg == "-g")  { cur = nullptr; use_GEM = true; }
-            else if (arg == "-o")  { cur = nullptr; if (++i < argc) output = argv[i]; }
-            else if (arg == "-n")  { cur = nullptr; if (++i < argc) max_events = std::atoi(argv[i]); }
-            else if (arg == "-p")  { cur = nullptr; if (++i < argc) pngDir = argv[i]; }
+            else if (arg == "-o")  { cur = nullptr; if (!require_value(i, arg)) return 1; output = argv[++i]; }
+            else if (arg == "-n")  { cur = nullptr; if (!require_value(i, arg)) return 1; max_events = std::atoi(argv[++i]); }
+            else if (arg == "-p")  { cur = nullptr; if (!require_value(i, arg)) return 1; pngDir = argv[++i]; }
+            else if (arg == "-j")  { cur = nullptr; if (!require_value(i, arg)) return 1; num_threads = std::atoi(argv[++i]); }
             else if (arg == "-s")  {
                 cur = nullptr;
-                if (++i >= argc) {
-                    std::cerr << "Option -s requires a seed calibration file.\n";
-                    print_usage();
-                    return 1;
-                }
-                seed_calib_file = argv[i];
+                if (!require_value(i, arg)) return 1;
+                seed_calib_file = argv[++i];
             }
             else if (arg == "-B") {
                 cur = nullptr;
-                if (++i >= argc) {
-                    std::cerr << "Option -B requires 3.5, 2.2, or 0.7.\n";
-                    print_usage();
-                    return 1;
-                }
-                const std::string base = argv[i];
+                if (!require_value(i, arg)) return 1;
+                const std::string base = argv[++i];
                 if (base == "3.5" || base == "3p5") base_beam_index = 0;
                 else if (base == "2.2" || base == "2p2") base_beam_index = 1;
                 else if (base == "0.7" || base == "0p7") base_beam_index = 2;
@@ -133,11 +140,28 @@ int main(int argc, char *argv[]){
                     return 1;
                 }
             }
-            else if (!arg.empty() && arg[0] != '-' && cur) { cur->push_back(arg); }
+            else if (!arg.empty() && arg[0] != '-' && cur) {
+                auto inputs = ExpandInputPath(arg, IsReconRootName);
+                cur->insert(cur->end(), inputs.begin(), inputs.end());
+            } else {
+                std::cerr << "Unexpected argument: " << arg << "\n";
+                print_usage();
+                return 1;
+            }
         }
     }
-    
 
+    for (const auto &beam : beams) {
+        if (beam.inputs.empty()) {
+            std::cerr << "No input files specified for " << beam.label << " GeV.\n";
+            print_usage();
+            return 1;
+        }
+    }
+    if (num_threads <= 0) {
+        std::cerr << "Thread count must be greater than zero.\n";
+        return 1;
+    }
     std::string dbDir = prad2::database_dir();
 
     for (auto &beam : beams) {
@@ -173,35 +197,99 @@ int main(int argc, char *argv[]){
         beam.energy_vs_theta->SetDirectory(nullptr);
     }
 
-    std::mutex io_mtx;
-
-    auto run_energy = [&](BeamSet &beam) {
-        const std::string label = std::string(beam.label) + " GeV";
-        TChain chain("recon");
-        for (const auto &f : beam.inputs) {
-            chain.Add(f.c_str());
-            std::lock_guard<std::mutex> lk(io_mtx);
-            std::cerr << "[" << label << "] Added file: " << f << "\n";
+    struct InputJob {
+        size_t beam_index;
+        std::string path;
+        Long64_t max_events;
+    };
+    std::vector<InputJob> jobs;
+    for (size_t b = 0; b < beams.size(); ++b) {
+        const auto &inputs = beams[b].inputs;
+        if (max_events > 0) {
+            const auto limits = DistributeEventBudget(inputs, "recon", max_events);
+            for (size_t i = 0; i < inputs.size(); ++i)
+                if (limits[i] > 0) jobs.push_back({b, inputs[i], limits[i]});
+        } else {
+            for (const auto &path : inputs) jobs.push_back({b, path, -1});
         }
+    }
+    if (jobs.empty()) {
+        std::cerr << "No input ROOT files contain events to process.\n";
+        return 1;
+    }
 
+    struct WorkerData {
+        std::array<std::map<int, TH1F *>, kNBeams> hists;
+        std::array<TH2F *, kNBeams> energy_vs_theta{};
+        std::array<long long, kNBeams> n_sum{};
+    };
+    const int worker_count = std::min(num_threads, static_cast<int>(jobs.size()));
+    std::vector<WorkerData> workers(static_cast<size_t>(worker_count));
+    for (int w = 0; w < worker_count; ++w) {
+        for (size_t b = 0; b < beams.size(); ++b) {
+            for (const auto &[id, source] : beams[b].hists) {
+                auto *hist = dynamic_cast<TH1F *>(
+                    source->Clone(Form("%s_worker%d", source->GetName(), w)));
+                if (!hist) {
+                    std::cerr << "Failed to create worker histogram for "
+                              << source->GetName() << "\n";
+                    return 1;
+                }
+                hist->SetDirectory(nullptr);
+                hist->Reset();
+                workers[w].hists[b].emplace(id, hist);
+            }
+            auto *source = beams[b].energy_vs_theta;
+            workers[w].energy_vs_theta[b] = dynamic_cast<TH2F *>(
+                source->Clone(Form("%s_worker%d", source->GetName(), w)));
+            if (!workers[w].energy_vs_theta[b]) {
+                std::cerr << "Failed to create worker histogram for "
+                          << source->GetName() << "\n";
+                return 1;
+            }
+            workers[w].energy_vs_theta[b]->SetDirectory(nullptr);
+            workers[w].energy_vs_theta[b]->Reset();
+        }
+    }
+
+    std::mutex io_mtx;
+    std::cerr << "Processing " << jobs.size() << " input file(s) with "
+              << worker_count << " worker thread(s)\n";
+    ParallelFor(jobs.size(), worker_count, [&](size_t job_index, int worker_index) {
+        const auto &job = jobs[job_index];
+        auto &beam = beams[job.beam_index];
+        auto &worker = workers[static_cast<size_t>(worker_index)];
+        const std::string label = std::string(beam.label) + " GeV: " + job.path;
+
+        TChain chain("recon");
+        if (chain.Add(job.path.c_str()) == 0) {
+            std::lock_guard<std::mutex> lk(io_mtx);
+            std::cerr << "Failed to add input ROOT file: " << job.path << "\n";
+            return;
+        }
         EventVars_Recon ev;
         prad2::SetReconReadBranches(&chain, ev);
+        const Long64_t entries = chain.GetEntries();
+        {
+            std::lock_guard<std::mutex> lk(io_mtx);
+            std::cerr << "[" << label << "] Processing " << entries << " event(s)\n";
+        }
+        worker.n_sum[job.beam_index] += process_event(
+            use_GEM, &chain, ev, hycal, worker.hists[job.beam_index],
+            worker.energy_vs_theta[job.beam_index], beam.Ebeam, beam.run_config,
+            static_cast<int>(job.max_events), label, &io_mtx);
+    });
 
-        {
-            std::lock_guard<std::mutex> lk(io_mtx);
-            std::cerr << "[" << label << "] Processing "
-                      << chain.GetEntries() << " event(s)\n";
+    for (size_t b = 0; b < beams.size(); ++b) {
+        for (auto &worker : workers) {
+            beams[b].n_sum += worker.n_sum[b];
+            for (const auto &[id, source] : worker.hists[b])
+                beams[b].hists.at(id)->Add(source);
+            beams[b].energy_vs_theta->Add(worker.energy_vs_theta[b]);
         }
-        beam.n_sum = process_event(use_GEM, &chain, ev, hycal, beam.hists,
-                                   beam.energy_vs_theta, beam.Ebeam, beam.run_config,
-                                   max_events, label, &io_mtx);
-        {
-            std::lock_guard<std::mutex> lk(io_mtx);
-            std::cerr << "[" << label << "] Selected " << beam.n_sum
-                      << " sum-trigger event(s)\n";
-        }
-    };
-    ParallelFor(beams.size(), kNBeams, [&](size_t b, int) { run_energy(beams[b]); });
+        std::cerr << "[" << beams[b].label << " GeV] Selected "
+                  << beams[b].n_sum << " sum-trigger event(s)\n";
+    }
 
     // a file with no sum-trigger events would silently produce an all-default
     // calibration (every module skipped); refuse to write output in that case
