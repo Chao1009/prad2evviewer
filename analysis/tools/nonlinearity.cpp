@@ -39,7 +39,7 @@ using namespace analysis;
 using EventVars_Recon = prad2::ReconEventData;
 
 // returns the number of events passing the sum-trigger selection
-long long process_event( bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
+long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
     std::map<int, TH1F*> &energy_hists, TH2F *energy_vs_theta,
     float Ebeam, const RunConfig &run_config, int max_events = -1,
     const std::string &label = "", std::mutex *io_mtx = nullptr);
@@ -84,11 +84,10 @@ int main(int argc, char *argv[]){
 
     int max_events = -1;
     int num_threads = kNBeams;
-    bool use_GEM = false;
     auto print_usage = [&]() {
         std::cerr << "Usage: nonlinearity -a <recon.root|dir> -b <recon.root|dir> "
                      "-c <recon.root|dir> [more files/dirs...] "
-                     "[-g] [-o output.root] [-n max_events] [-p png_dir] "
+                     "[-o output.root] [-n max_events] [-p png_dir] "
                      "[-s seed_calibration.json] [-B 3.5|2.2|0.7] [-j cores]\n"
                      "  -a  3.5 GeV recon ROOT files or directories (repeatable)\n"
                      "  -b  2.2 GeV recon ROOT files or directories (repeatable)\n"
@@ -116,7 +115,6 @@ int main(int argc, char *argv[]){
             else if (arg == "-a")  { cur = &beams[0].inputs; }
             else if (arg == "-b")  { cur = &beams[1].inputs; }
             else if (arg == "-c")  { cur = &beams[2].inputs; }
-            else if (arg == "-g")  { cur = nullptr; use_GEM = true; }
             else if (arg == "-o")  { cur = nullptr; if (!require_value(i, arg)) return 1; output = argv[++i]; }
             else if (arg == "-n")  { cur = nullptr; if (!require_value(i, arg)) return 1; max_events = std::atoi(argv[++i]); }
             else if (arg == "-p")  { cur = nullptr; if (!require_value(i, arg)) return 1; pngDir = argv[++i]; }
@@ -275,7 +273,7 @@ int main(int argc, char *argv[]){
             std::cerr << "[" << label << "] Processing " << entries << " event(s)\n";
         }
         worker.n_sum[job.beam_index] += process_event(
-            use_GEM, &chain, ev, hycal, worker.hists[job.beam_index],
+            &chain, ev, hycal, worker.hists[job.beam_index],
             worker.energy_vs_theta[job.beam_index], beam.Ebeam, beam.run_config,
             static_cast<int>(job.max_events), label, &io_mtx);
     });
@@ -560,7 +558,7 @@ int main(int argc, char *argv[]){
 
 }
 
-long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
+long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCalSystem &hycal,
     std::map<int, TH1F*> &energy_hists, TH2F *energy_vs_theta,
     float Ebeam, const RunConfig &run_config, int max_events,
     const std::string &label, std::mutex *io_mtx)
@@ -615,33 +613,15 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
             if ( !mod || !mod->is_pwo4()) continue;
             if (!InHyCalRing(mod->x, mod->y, 2.0, 16.)) continue;
 
-            float c_x, c_y, c_z;
-            if(!use_GEM){
-                c_x = ev.cl_x[j];
-                c_y = ev.cl_y[j];
-                c_z = ev.cl_z[j];
-            }
-            else{
-                bool match[4] = {false, false, false, false};
-                for(int d = 0; d < 4; d++){
-                    if(ev.matchFlag[j] & 1 << d) match[d] = true;
-                }
-                if( (match[0] || match[1]) && (match[2] || match[3]) ){
-                    if(match[0]) ev.first_match(j, 0, c_x, c_y, c_z);
-                    else ev.first_match(j, 1, c_x, c_y, c_z);
-                    //projection onto the HyCal module plane
-                    float scale = run_config.hycal_z / c_z;
-                    c_x *= scale;
-                    c_y *= scale;
-                    c_z = run_config.hycal_z;
-                }
-                else{
-                    c_x = -999.f;
-                    c_y = -999.f;
-                    c_z = -999.f;
-                }
-                
-            }
+            HCHit hc_hit;
+            hc_hit.x = ev.cl_x[j];
+            hc_hit.y = ev.cl_y[j];
+            hc_hit.z = ev.cl_z[j];
+            ApplyToHyCal(hc_hit, run_config);
+
+            const float c_x = hc_hit.x;
+            const float c_y = hc_hit.y;
+            const float c_z = hc_hit.z;
 
             // require the hit near the seed module centre (|xd|,|yd| < 0.3 module sizes)
             const auto [xd, yd] = mod->cell_offset<float>(c_x, c_y);
