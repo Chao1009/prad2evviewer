@@ -13,6 +13,7 @@
 #include <TH2F.h>
 #include <TF1.h>
 #include <TGraph.h>
+#include <TGraphErrors.h>
 #include <TLine.h>
 #include <TLatex.h>
 #include <TCanvas.h>
@@ -327,7 +328,8 @@ int main(int argc, char *argv[]){
         if (!InHyCalRing(x, y, 2.0, 16.)) continue;
 
         // Fit and draw a peak using the same adaptive Gaussian fit as physics_calib.
-        auto fitPeakAndDraw = [&](TH1F *h, double Eexp, int color) -> float {
+        auto fitPeakAndDraw = [&](TH1F *h, double Eexp, int color,
+                                  double &mean_error) -> float {
             double ypad_min = 0;
             double ypad = h->GetMaximum() * 1.2;
             // Candidate peak search range used by PhysicsTools::fitPeak.
@@ -335,9 +337,10 @@ int main(int argc, char *argv[]){
             wl->SetLineColor(6); wl->SetLineStyle(7); wl->SetLineWidth(2); wl->Draw();
             TLine *wr = new TLine(1.2 * Eexp, ypad_min, 1.2 * Eexp, ypad);
             wr->SetLineColor(6); wr->SetLineStyle(7); wr->SetLineWidth(2); wr->Draw();
-            auto fit = physics.fitPeak(h, static_cast<float>(Eexp), false);
+            auto fit = physics.fitPeak(h, static_cast<float>(Eexp), true);
             const double mean = fit[0];
             if (mean <= 0.) return 0.f;
+            mean_error = fit[3] > 0. ? fit[3] : 1.0;
 
             TF1 *g = h->GetFunction("_fg_");
             if (g) {
@@ -357,6 +360,7 @@ int main(int argc, char *argv[]){
         ch->Divide(1, kNBeams, 0, 0);
 
         float exp_ep[kNBeams], exp_ee[kNBeams], peak_ep[kNBeams] = {}, peak_ee[kNBeams] = {};
+        double peak_ep_err[kNBeams] = {}, peak_ee_err[kNBeams] = {};
         for (int b = 0; b < kNBeams; ++b) {
             const BeamSet &beam = beams[b];
             const bool top = (b == 0), bottom = (b == kNBeams - 1);
@@ -379,9 +383,9 @@ int main(int argc, char *argv[]){
             h->SetLineWidth(2);
             h->SetStats(0);
             h->Draw("HIST");
-            peak_ep[b] = fitPeakAndDraw(h, exp_ep[b], kRed);
+            peak_ep[b] = fitPeakAndDraw(h, exp_ep[b], kRed, peak_ep_err[b]);
             if (std::abs(exp_ep[b] - exp_ee[b]) > beam.min_ee_sep)
-                peak_ee[b] = fitPeakAndDraw(h, exp_ee[b], kBlue);
+                peak_ee[b] = fitPeakAndDraw(h, exp_ee[b], kBlue, peak_ee_err[b]);
 
             TLatex lat;
             lat.SetNDC(); lat.SetTextSize(0.050);
@@ -404,18 +408,33 @@ int main(int argc, char *argv[]){
 
         h_energy_peak_3p5->Fill(peak_ep[0]);
 
-        // (E_exp, E_rec) of every valid peak, the anchor first
-        std::vector<std::pair<double, float>> points;
+        struct FitPoint {
+            double E_exp;
+            double E_rec;
+            double E_rec_error;
+            double weight;
+        };
+        // Give every peak at the selected base beam twice the statistical weight.
+        std::vector<FitPoint> points;
         for (int b = 0; b < kNBeams; ++b) {
-            if (peak_ep[b] != 0.f) points.emplace_back(exp_ep[b], peak_ep[b]);
-            if (peak_ee[b] != 0.f) points.emplace_back(exp_ee[b], peak_ee[b]);
+            const double weight = (b == base_beam_index) ? 2.0 : 1.0;
+            if (peak_ep[b] != 0.f)
+                points.push_back({exp_ep[b], peak_ep[b], peak_ep_err[b], weight});
+            if (peak_ee[b] != 0.f)
+                points.push_back({exp_ee[b], peak_ee[b], peak_ee_err[b], weight});
         }
 
         // make a canvas, E_rec/E_exp vs E_rec
         TCanvas *c = new TCanvas(Form("c_mod_W%d", mod_id-1000), Form("Module W%d Non-linearity", mod_id-1000), 1400, 800);
         c->SetGrid();
-        TGraph *g = new TGraph();
-        for (const auto &[Eexp, peak] : points) g->SetPoint(g->GetN(), peak, peak / Eexp);
+        TGraphErrors *g = new TGraphErrors();
+        for (const auto &point : points) {
+            const int index = g->GetN();
+            const double ratio_error = point.E_rec_error / point.E_exp
+                                     / std::sqrt(point.weight);
+            g->SetPoint(index, point.E_rec, point.E_rec / point.E_exp);
+            g->SetPointError(index, 0.0, ratio_error);
+        }
         g->SetMarkerStyle(20);
         g->SetMarkerSize(1.5);
         g->SetTitle(Form("Module W%d Non-linearity;E_{rec} (MeV);E_{rec}/E_{exp}", mod_id-1000));
@@ -499,7 +518,9 @@ int main(int argc, char *argv[]){
         gCorr->SetMarkerStyle(24);
         gCorr->SetMarkerSize(1.0);
         gCorr->SetMarkerColor(kGreen+2);
-        for (const auto &[Eexp, peak] : points) {
+        for (const auto &point : points) {
+            const double Eexp = point.E_exp;
+            const double peak = point.E_rec;
             double denom = 1.0 + nl * (peak - E_base)/1000.0;
             double E_corr = (denom != 0.) ? peak / denom : peak;
             gCorr->SetPoint(gCorr->GetN(), E_corr, E_corr / Eexp);
@@ -511,7 +532,9 @@ int main(int argc, char *argv[]){
         gCorr2->SetMarkerStyle(25);
         gCorr2->SetMarkerSize(1.0);
         gCorr2->SetMarkerColor(kOrange+2);
-        for (const auto &[Eexp, peak] : points) {
+        for (const auto &point : points) {
+            const double Eexp = point.E_exp;
+            const double peak = point.E_rec;
             double t = (peak - E_base) / 1000.0;
             double denom = 1.0 + nl2_1 * t + nl2_2 * t * t;
             double E_corr = (denom != 0.) ? peak / denom : peak;

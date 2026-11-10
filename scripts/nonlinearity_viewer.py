@@ -91,10 +91,10 @@ def _gauss_fit_range(
     sig_max: float,
     mu0: Optional[float] = None,
     maxfev: int = 2000,
-) -> Optional[Tuple[float, float, float]]:
+) -> Optional[Tuple[float, float, float, float]]:
     """Fit a Gaussian with its mean bounded to [lo, hi] to the non-empty bins
     in that range; ``mu0`` defaults to their weighted mean.  Returns
-    (mean, sigma, amp), or None with fewer than 4 bins.  curve_fit errors
+    (mean, sigma, amp, mean_error), or None with fewer than 4 bins.  curve_fit errors
     propagate."""
     mask = (centers >= lo) & (centers <= hi) & (counts > 0)
     if mask.sum() < 4:
@@ -102,13 +102,14 @@ def _gauss_fit_range(
     xf, yf = centers[mask], counts[mask].astype(float)
     if mu0 is None:
         mu0 = float((xf * yf).sum() / yf.sum())
-    popt, _ = curve_fit(
+    popt, pcov = curve_fit(
         _gauss, xf, yf,
         p0=[float(yf.max()), mu0, sig0],
         bounds=([0.0, lo, 1e-6], [np.inf, hi, sig_max]),
         maxfev=maxfev,
     )
-    return float(popt[1]), abs(float(popt[2])), float(popt[0])
+    mean_error = math.sqrt(max(float(pcov[1, 1]), 0.0))
+    return float(popt[1]), abs(float(popt[2])), float(popt[0]), mean_error
 
 
 def _find_peak_window(
@@ -172,27 +173,28 @@ def fit_peak_full(
     edges: np.ndarray,
     Eexp: float,
     entries: float,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, float]:
     """
-    Adaptive Gaussian fit matching PhysicsTools::fitPeak(h, Eexp, false).
-    Returns (mean_MeV, sigma_MeV, amplitude).  mean=0 on failure.
+    Adaptive Gaussian fit matching PhysicsTools::fitPeak(h, Eexp, true).
+    Returns (mean_MeV, sigma_MeV, amplitude, mean_error_MeV).
+    mean=0 on failure.
     """
     if entries < 100.0 or not HAS_SCIPY:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     window = _find_peak_window(counts, edges, Eexp)
     if window is None:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
 
     height, peak0, sigma0, lo, hi = window
     centers = 0.5 * (edges[:-1] + edges[1:])
     mask = (centers >= lo) & (centers <= hi) & (counts > 0.0)
     if np.count_nonzero(mask) < 4:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
 
     xf = centers[mask]
     yf = counts[mask].astype(float)
     try:
-        params, _ = curve_fit(
+        params, pcov = curve_fit(
             _gauss, xf, yf,
             p0=[height, peak0, sigma0],
             sigma=np.sqrt(yf),
@@ -200,11 +202,12 @@ def fit_peak_full(
             maxfev=2000,
         )
     except (RuntimeError, ValueError, FloatingPointError):
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0
     amp, mean, sigma = (float(v) for v in params)
-    if not all(math.isfinite(v) for v in (amp, mean, sigma)) or abs(sigma) <= 0.0:
-        return 0.0, 0.0, 0.0
-    return mean, abs(sigma), amp
+    mean_error = math.sqrt(max(float(pcov[1, 1]), 0.0))
+    if not all(math.isfinite(v) for v in (amp, mean, sigma, mean_error)) or abs(sigma) <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    return mean, abs(sigma), amp, mean_error
 
 
 # Non-linearity model & fit  (match nonlinearity.cpp)
@@ -239,8 +242,11 @@ def fit_nonlinearity(
     E_base: float,
     order: int = 1,
     nl1_init: float = 0.01,
+    sigma_Erec: Optional[np.ndarray] = None,
+    point_weights: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, int]:
-    """Fit the 1st- or 2nd-order nl model to E_rec/E_exp vs E_rec.
+    """Fit E_rec/E_exp vs E_rec using propagated peak-mean uncertainties.
+    ``point_weights`` multiplies each point's chi-square weight.
     Returns (params, errors, chi2, ndf) with ``order`` params each;
     all zeros when the fit cannot run or fails."""
     failed = (np.zeros(order), np.zeros(order), 0.0, 0)
@@ -259,13 +265,24 @@ def fit_nonlinearity(
             float(np.clip(nl1_init, -nl1_limit * 0.999, nl1_limit * 0.999)),
             0.0,
         ]
-    ratio = E_rec / np.where(E_exp > 0, E_exp, 1.0)
+    safe_E_exp = np.where(E_exp > 0, E_exp, 1.0)
+    ratio = E_rec / safe_E_exp
+    if sigma_Erec is None:
+        sigma_ratio = np.ones_like(ratio)
+    else:
+        errors = np.asarray(sigma_Erec, dtype=float)
+        errors = np.where(np.isfinite(errors) & (errors > 0.0), errors, 1.0)
+        sigma_ratio = errors / safe_E_exp
+    if point_weights is not None:
+        sigma_ratio /= np.sqrt(np.maximum(np.asarray(point_weights, dtype=float), 1.0))
+    sigma_ratio = np.maximum(sigma_ratio, 1e-12)
     try:
         popt, pcov = curve_fit(model, E_rec, ratio,
                                p0=p0, bounds=bounds,
+                               sigma=sigma_ratio,
                                absolute_sigma=True, maxfev=5000)
         perr = np.sqrt(np.maximum(np.diag(pcov), 0.0))
-        chi2 = float(np.sum((ratio - model(E_rec, *popt)) ** 2))
+        chi2 = float(np.sum(((ratio - model(E_rec, *popt)) / sigma_ratio) ** 2))
         return popt, perr, chi2, len(E_rec) - order
     except Exception:
         return failed
@@ -345,6 +362,7 @@ class ModuleData:
         # fitted peak results (0 = not found / invalid)
         self.peaks:      Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_sigma: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
+        self.peak_mean_error: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_amp:   Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_enabled: Dict[str, bool] = {k: True for k in _PEAK_KEYS}
         self.manual_peaks: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
@@ -402,9 +420,10 @@ class ModuleData:
             if hist is None or E <= 0.0 or not should_fit_peak(self, key):
                 continue
             entries = self.hist_entries[str(peak_cfg(key)["tag"])]
-            mu, sigma_f, amp = fit_peak_full(hist[0], hist[1], E, entries)
+            mu, sigma_f, amp, mean_error = fit_peak_full(hist[0], hist[1], E, entries)
             if mu > 0.0:
                 self.peaks[key], self.peak_sigma[key], self.peak_amp[key] = mu, sigma_f, amp
+                self.peak_mean_error[key] = mean_error
                 any_ok = True
         return any_ok
 
@@ -413,13 +432,25 @@ class ModuleData:
         pts = self.linearity_points(base_beam_tag)
         E_exp = np.array([p[1] for p in pts])
         E_rec = np.array([p[2] for p in pts])
+        # A manually entered peak without covariance gets a conservative 1 MeV error.
+        sigma_Erec = np.array([
+            error if math.isfinite(error) and error > 0.0 else 1.0
+            for error in (self.peak_mean_error[p[0]] for p in pts)
+        ])
+        point_weights = np.array([
+            2.0 if peak_cfg(p[0])["tag"] == base_beam_tag else 1.0
+            for p in pts
+        ])
         E_base = self.e_exp[f"ep_{base_beam_tag}"]
         force_zero = self.is_outer_layer(outer_zero_layers) or self.is_absorber
-        (nl,), (err,), self.chi2_nl, self.ndf_nl = fit_nonlinearity(E_exp, E_rec, E_base)
+        (nl,), (err,), self.chi2_nl, self.ndf_nl = fit_nonlinearity(
+            E_exp, E_rec, E_base, sigma_Erec=sigma_Erec,
+            point_weights=point_weights)
         self.nl     = 0.0 if force_zero else float(nl)
         self.nl_err = float(err)
         (nl1, nl2), (nl1_err, nl2_err), self.chi2_nl2, self.ndf_nl2 = fit_nonlinearity(
-            E_exp, E_rec, E_base, order=2, nl1_init=self.nl)
+            E_exp, E_rec, E_base, order=2, nl1_init=self.nl,
+            sigma_Erec=sigma_Erec, point_weights=point_weights)
         self.nl2_1     = 0.0 if force_zero else float(nl1)
         self.nl2_1_err = float(nl1_err)
         self.nl2_2     = 0.0 if force_zero else float(nl2)
@@ -701,6 +732,10 @@ class NLViewerWindow(QMainWindow):
         stop_sc.activated.connect(self._stop_scan)
         stop_sc2 = QShortcut(QKeySequence(Qt.Key.Key_Enter), self)
         stop_sc2.activated.connect(self._stop_scan)
+        prev_module_sc = QShortcut(QKeySequence(Qt.Key.Key_PageUp), self)
+        prev_module_sc.activated.connect(lambda: self._shortcut_jump_module(-1))
+        next_module_sc = QShortcut(QKeySequence(Qt.Key.Key_PageDown), self)
+        next_module_sc.activated.connect(lambda: self._shortcut_jump_module(1))
 
         # horizontal splitter: map | plots+controls
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -724,10 +759,22 @@ class NLViewerWindow(QMainWindow):
         right_lay.setContentsMargins(4, 0, 4, 4)
         right_lay.setSpacing(4)
 
+        module_nav = QHBoxLayout()
         self._mod_lbl = QLabel("← click a W module on the map")
         self._mod_lbl.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         self._mod_lbl.setStyleSheet(f"color: {THEME.ACCENT};")
-        right_lay.addWidget(self._mod_lbl)
+        module_nav.addWidget(self._mod_lbl, stretch=1)
+        self._prev_module_btn = QPushButton("← Previous module")
+        self._prev_module_btn.setEnabled(False)
+        self._prev_module_btn.setToolTip("Select the previous module by W number (PageUp).")
+        self._prev_module_btn.clicked.connect(lambda: self._jump_module(-1))
+        module_nav.addWidget(self._prev_module_btn)
+        self._next_module_btn = QPushButton("Next module →")
+        self._next_module_btn.setEnabled(False)
+        self._next_module_btn.setToolTip("Select the next module by W number (PageDown).")
+        self._next_module_btn.clicked.connect(lambda: self._jump_module(1))
+        module_nav.addWidget(self._next_module_btn)
+        right_lay.addLayout(module_nav)
 
         right_lay.addWidget(self._build_refit_panel())
         right_lay.addWidget(self._build_histogram_grid(), stretch=3)
@@ -862,6 +909,7 @@ class NLViewerWindow(QMainWindow):
         self._refit_nl_btn.setEnabled(False)
         self._refit_nl_btn.setToolTip(
             "Re-run the non-linearity fit using current measurement points.\n"
+            "Weighted by each peak-fit mean uncertainty; peaks at the selected base beam have 2x weight.\n"
             "1st: E_rec/E_exp = 1 + nl1*(E_rec-E_base)/1000\n"
             "2nd: + nl2*((E_rec-E_base)/1000)^2")
         self._refit_nl_btn.clicked.connect(self._do_refit_nl)
@@ -903,6 +951,8 @@ class NLViewerWindow(QMainWindow):
     def _after_load(self):
         self._scan_btn.setEnabled(bool(self._data))
         self._export_btn.setEnabled(bool(self._data))
+        self._prev_module_btn.setEnabled(bool(self._data))
+        self._next_module_btn.setEnabled(bool(self._data))
 
     def _set_peak_controls_enabled(self, enabled: bool):
         for key in _PEAK_KEYS:
@@ -1175,6 +1225,11 @@ class NLViewerWindow(QMainWindow):
         idx = self._current_index(names, -1 if step > 0 else 0)
         self._show_module_at(names, (idx + step) % len(names))
 
+    def _shortcut_jump_module(self, step: int):
+        if isinstance(QApplication.focusWidget(), QLineEdit):
+            return
+        self._jump_module(step)
+
     def keyPressEvent(self, event):
         focus = QApplication.focusWidget()
         if isinstance(focus, QLineEdit):
@@ -1274,9 +1329,11 @@ class NLViewerWindow(QMainWindow):
         Eexp  = d.e_exp[key]
         sig   = d.sigma_exp[key]
 
-        # Show the same expected-energy search range used by PhysicsTools::fitPeak.
-        xlo = max(float(edges[0]), 0.8 * Eexp)
-        xhi = min(float(edges[-1]), 1.2 * Eexp)
+        # Show a 50% wider display window for e-e peaks while keeping the
+        # actual peak-search and fit range aligned with PhysicsTools::fitPeak.
+        display_half_width = 0.3 if key.startswith("ee_") else 0.2
+        xlo = max(float(edges[0]), (1.0 - display_half_width) * Eexp)
+        xhi = min(float(edges[-1]), (1.0 + display_half_width) * Eexp)
         ax.set_xlim(xlo, xhi)
 
         ax.step(centers, counts, where="mid",
@@ -1506,7 +1563,7 @@ class NLViewerWindow(QMainWindow):
             self._status_lbl.setText(
                 f"Not enough bins in [{xmin:.0f}, {xmax:.0f}] MeV — try wider.")
             return False
-        mu, sigma_f, amp = r
+        mu, sigma_f, amp, mean_error = r
         range_note = f"  (drag [{xmin:.0f}, {xmax:.0f}] MeV)"
         if mu <= 0.0:
             self._status_lbl.setText(
@@ -1515,6 +1572,7 @@ class NLViewerWindow(QMainWindow):
         d.peaks[key]      = mu
         d.peak_sigma[key] = sigma_f
         d.peak_amp[key]   = amp
+        d.peak_mean_error[key] = mean_error
         self._status_lbl.setText(
             f"{cfg['label']}: μ={mu:.2f} MeV, σ={sigma_f:.2f} MeV{range_note}")
         return True
