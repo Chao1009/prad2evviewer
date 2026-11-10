@@ -213,6 +213,7 @@ def fit_peak_full(
 # Non-linearity model & fit  (match nonlinearity.cpp)
 _NL_FIT_ENERGY_MAX = 3500.0
 _NL_FIT_MAX_DEVIATION = 0.2
+_NL_MANUAL_COEFFICIENT_LIMIT = 1_000_000.0
 
 
 def _nl_coefficient_bounds(E_base: float, order: int) -> Tuple[List[float], List[float]]:
@@ -855,14 +856,14 @@ class NLViewerWindow(QMainWindow):
     def _new_nl_spin(self, coefficient: str) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setDecimals(6)
-        spin.setRange(-1.0, 1.0)
+        spin.setRange(-_NL_MANUAL_COEFFICIENT_LIMIT, _NL_MANUAL_COEFFICIENT_LIMIT)
         spin.setSingleStep(0.001)
         spin.setKeyboardTracking(True)
         spin.setFixedWidth(105)
         spin.setEnabled(False)
         spin.setToolTip(
-            "Coefficient is bounded so the fitted curve stays within ±20% "
-            "over 0–3500 MeV.")
+            "Manual coefficients can exceed the automatic fit bounds. "
+            "Large values may move the curve outside the visible plot range.")
         spin.valueChanged.connect(
             lambda value, name=coefficient: self._on_manual_nl_changed(name, value))
         self._manual_nl_spins[coefficient] = spin
@@ -992,20 +993,13 @@ class NLViewerWindow(QMainWindow):
             for spin in self._manual_nl_spins.values():
                 spin.setEnabled(False)
             return
-        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
-        lower_1st, upper_1st = _nl_coefficient_bounds(E_base, 1)
-        lower_2nd, upper_2nd = _nl_coefficient_bounds(E_base, 2)
-        limits = {
-            "nl1": (lower_1st[0], upper_1st[0]),
-            "nl2_1": (lower_2nd[0], upper_2nd[0]),
-            "nl2_2": (lower_2nd[1], upper_2nd[1]),
-        }
         values = {"nl1": d.nl, "nl2_1": d.nl2_1, "nl2_2": d.nl2_2}
         for key, spin in self._manual_nl_spins.items():
-            low, high = limits[key]
             spin.blockSignals(True)
-            spin.setRange(low, high)
-            spin.setValue(float(np.clip(values[key], low, high)))
+            spin.setRange(-_NL_MANUAL_COEFFICIENT_LIMIT, _NL_MANUAL_COEFFICIENT_LIMIT)
+            spin.setValue(float(np.clip(
+                values[key], -_NL_MANUAL_COEFFICIENT_LIMIT,
+                _NL_MANUAL_COEFFICIENT_LIMIT)))
             spin.setEnabled(True)
             spin.blockSignals(False)
 
@@ -1403,8 +1397,8 @@ class NLViewerWindow(QMainWindow):
 
         ax.set_ylim(0.85, 1.15)
 
-        margin = (E_rec_arr.max() - E_rec_arr.min()) * 0.15 if len(E_rec_arr) > 1 else E_rec_arr.max() * 0.15
-        xplot = np.linspace(max(0, E_rec_arr.min() - margin), E_rec_arr.max() + margin, 300)
+        xlo, xhi = ax.get_xlim()
+        xplot = np.linspace(xlo, xhi, 500)
 
         ax.axhline(1.0, color="tomato", linestyle="--",
                    linewidth=1.5, alpha=0.75, label="y = 1 (ideal)")
@@ -1500,6 +1494,33 @@ class NLViewerWindow(QMainWindow):
         ax.legend(h_pt, l_pt,
                   loc="upper right", bbox_to_anchor=(1.0, 1.0),
                   **_leg_kw)
+
+        y_values = []
+        for line in ax.lines:
+            x_data = np.asarray(line.get_xdata(), dtype=float)
+            y_data = np.asarray(line.get_ydata(), dtype=float)
+            visible = np.isfinite(x_data) & np.isfinite(y_data) & (x_data >= xlo) & (x_data <= xhi)
+            if np.any(visible):
+                y_values.append(y_data[visible])
+        for collection in ax.collections:
+            offsets = np.asarray(collection.get_offsets(), dtype=float)
+            if offsets.ndim == 2 and offsets.shape[1] >= 2:
+                visible = (
+                    np.isfinite(offsets[:, 0]) & np.isfinite(offsets[:, 1])
+                    & (offsets[:, 0] >= xlo) & (offsets[:, 0] <= xhi)
+                )
+                if np.any(visible):
+                    y_values.append(offsets[visible, 1])
+        if y_values:
+            visible_y = np.concatenate(y_values)
+            y_min, y_max = float(np.min(visible_y)), float(np.max(visible_y))
+            y_span = max(y_max - y_min, 0.3)
+            padding = 0.05 * y_span
+            current_min, current_max = 0.85, 1.15
+            ax.set_ylim(
+                min(current_min, y_min - padding),
+                max(current_max, y_max + padding),
+            )
 
     # ── span selector ──────────────────────────────────────────────────────
 

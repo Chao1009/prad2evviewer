@@ -17,6 +17,7 @@
 #include <TString.h>
 #include <TCanvas.h>
 #include <TLegend.h>
+#include <TLine.h>
 #include <TPad.h>
 
 #include <iostream>
@@ -199,7 +200,7 @@ int main(int argc, char *argv[])
             ? 0.03f * peak / std::sqrt(peak / 1000.f) : 0.f;
         const bool fit_good = peak > 0.f && expected_sigma > 0.f
             && sigma > 0.5f * expected_sigma
-            && sigma < 1.5f * expected_sigma;
+            && sigma < 2.5f * expected_sigma;
         if (fit_good) {
             const float delta_energy = peak - expected_energy;
             float resolution = sigma / peak * std::sqrt(peak / 1000.f) * 100.f;
@@ -217,7 +218,8 @@ int main(int argc, char *argv[])
     }
     // Per angle bin fits of all clusters (0), center hits (1) and edge hits (2).
     struct FitSeries {
-        std::vector<double> angle, energy, energy_error, resolution, resolution_error;
+        std::vector<double> angle, energy, energy_error, expected_energy;
+        std::vector<double> resolution, resolution_error;
     };
     std::array<FitSeries, 3> series;
     std::vector<double> expected_angle_points;
@@ -238,6 +240,7 @@ int main(int argc, char *argv[])
             s.angle.push_back(angle);
             s.energy.push_back(fit[0]);
             s.energy_error.push_back(fit[3]);
+            s.expected_energy.push_back(expected_energy);
             s.resolution.push_back(100.0 * fit[1] / fit[0] * std::sqrt(fit[0] / 1000.0));
             s.resolution_error.push_back(100.0 * fit[4] / fit[0] * std::sqrt(fit[0] / 1000.0));
             has_fit = true;
@@ -375,6 +378,59 @@ int main(int argc, char *argv[])
     draw_series(gResolution_vs_theta);
     c_reconE.Update();
 
+    std::array<TGraphErrors, 3> gRelativeEnergy_vs_theta;
+    double relative_energy_min = std::numeric_limits<double>::max();
+    double relative_energy_max = std::numeric_limits<double>::lowest();
+    for (int k = 0; k < 3; ++k) {
+        const FitSeries &s = series[k];
+        std::vector<double> relative_energy;
+        std::vector<double> relative_energy_error;
+        for (size_t i = 0; i < s.angle.size(); ++i) {
+            if (s.expected_energy[i] <= 0.0) continue;
+            const double residual = (s.energy[i] - s.expected_energy[i])
+                                  / s.expected_energy[i];
+            const double error = s.energy_error[i] / s.expected_energy[i];
+            const int point = gRelativeEnergy_vs_theta[k].GetN();
+            gRelativeEnergy_vs_theta[k].SetPoint(point, s.angle[i], residual);
+            gRelativeEnergy_vs_theta[k].SetPointError(point, 0.0, error);
+            relative_energy.push_back(residual);
+            relative_energy_error.push_back(error);
+        }
+        include_range(relative_energy_min, relative_energy_max,
+                      relative_energy, relative_energy_error);
+    }
+    if (!(relative_energy_max > relative_energy_min)) {
+        relative_energy_min = -0.1;
+        relative_energy_max = 0.1;
+    }
+
+    TCanvas c_relative_energy(
+        "c_relative_energy", "Relative reconstructed energy difference vs angle", 900, 600);
+    c_relative_energy.SetGrid();
+    TGraphErrors &gRelativeEnergy_frame = gRelativeEnergy_vs_theta[0];
+    gRelativeEnergy_frame.SetTitle(
+        "Relative reconstructed energy difference vs angle;"
+        "Scattering angle [deg];(E_{recon}-E_{expect})/E_{expect}");
+    gRelativeEnergy_frame.GetXaxis()->SetLimits(binEdge[0], binEdge[Nbins]);
+    gRelativeEnergy_frame.GetYaxis()->SetTitleOffset(1.15);
+    gRelativeEnergy_frame.GetYaxis()->CenterTitle();
+    gRelativeEnergy_frame.SetMinimum(relative_energy_min);
+    gRelativeEnergy_frame.SetMaximum(relative_energy_max);
+    draw_series(gRelativeEnergy_vs_theta.data());
+    TLine expected_energy_line(binEdge[0], 0.0, binEdge[Nbins], 0.0);
+    expected_energy_line.SetLineColor(kRed + 1);
+    expected_energy_line.SetLineStyle(2);
+    expected_energy_line.SetLineWidth(2);
+    expected_energy_line.Draw("SAME");
+    TLegend relative_energy_legend(0.72, 0.78, 0.93, 0.92);
+    for (int k = 0; k < 3; ++k)
+        relative_energy_legend.AddEntry(&gRelativeEnergy_vs_theta[k],
+                                        series_style[k].label,
+                                        series_style[k].legend_option);
+    relative_energy_legend.AddEntry(&expected_energy_line, "Zero difference", "l");
+    relative_energy_legend.Draw();
+    c_relative_energy.Update();
+
     const std::string output_file_name = output_name + ".root";
     TFile output_file(output_file_name.c_str(), "RECREATE");
     if (output_file.IsZombie()) {
@@ -389,6 +445,7 @@ int main(int argc, char *argv[])
     h1_resolution_module->Write();
     h2_resolution_module_map->Write();
     c_reconE.Write("recon_energy_resolution_vs_angle");
+    c_relative_energy.Write("relative_energy_difference_vs_angle");
     output_file.cd();
     output_file.mkdir("Erecon_theta");
     output_file.cd("Erecon_theta");
