@@ -433,10 +433,17 @@ int main(int argc, char *argv[]){
         ref->Draw();
 
         // 1st order fit: E_rec/E_exp = 1 + nl1 * (E_rec - E_base)/1000
+        constexpr double kNlFitEnergyMax = 3500.0;
+        constexpr double kNlFitMaxDeviation = 0.2;
+        const double max_abs_t = std::max(
+            std::abs(static_cast<double>(E_base)),
+            std::abs(kNlFitEnergyMax - static_cast<double>(E_base))) / 1000.0;
+        const double nl1_limit = kNlFitMaxDeviation / max_abs_t;
         TF1 *fitLine = new TF1("fitLine",
             [](double *x, double *p){ return 1.0 + p[0] * (x[0] - p[1])/1000.0; },
             xmin, xmax, 2);
         fitLine->SetParameter(0, 0.01);
+        fitLine->SetParLimits(0, -nl1_limit, nl1_limit);
         fitLine->FixParameter(1, E_base);
         fitLine->SetLineColor(kBlue);
         fitLine->SetLineWidth(2);
@@ -455,8 +462,12 @@ int main(int argc, char *argv[]){
                 return 1.0 + p[0] * t + p[1] * t * t;
             },
             xmin, xmax, 3);
-        fitLine2->SetParameter(0, nl);
+        const double nl2_nl1_limit = (kNlFitMaxDeviation / 2.0) / max_abs_t;
+        const double nl2_nl2_limit = (kNlFitMaxDeviation / 2.0) / (max_abs_t * max_abs_t);
+        fitLine2->SetParameter(0, std::clamp(nl, -nl2_nl1_limit, nl2_nl1_limit));
         fitLine2->SetParameter(1, 0.0);
+        fitLine2->SetParLimits(0, -nl2_nl1_limit, nl2_nl1_limit);
+        fitLine2->SetParLimits(1, -nl2_nl2_limit, nl2_nl2_limit);
         fitLine2->FixParameter(2, E_base);
         fitLine2->SetLineColor(kMagenta+1);
         fitLine2->SetLineWidth(2);
@@ -583,7 +594,7 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             break;
         }
         tree->GetEntry(i);
-        if( i % 1000 == 0) {
+        if( i % 10000 == 0) {
             log_msg("[" + label + "] Processing event " + std::to_string(i)
                     + "/" + std::to_string(tree->GetEntries()) + "\r", true);
         }

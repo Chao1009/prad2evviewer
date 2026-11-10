@@ -34,7 +34,7 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
-    QSizePolicy, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 import matplotlib
 matplotlib.use("QtAgg")
@@ -208,6 +208,19 @@ def fit_peak_full(
 
 
 # Non-linearity model & fit  (match nonlinearity.cpp)
+_NL_FIT_ENERGY_MAX = 3500.0
+_NL_FIT_MAX_DEVIATION = 0.2
+
+
+def _nl_coefficient_bounds(E_base: float, order: int) -> Tuple[List[float], List[float]]:
+    max_abs_t = max(E_base, abs(_NL_FIT_ENERGY_MAX - E_base)) / 1000.0
+    deviation = _NL_FIT_MAX_DEVIATION if order == 1 else _NL_FIT_MAX_DEVIATION / 2.0
+    nl1_limit = deviation / max_abs_t
+    if order == 1:
+        return [-nl1_limit], [nl1_limit]
+    nl2_limit = deviation / max_abs_t**2
+    return [-nl1_limit, -nl2_limit], [nl1_limit, nl2_limit]
+
 
 def nl_ratio_1st(E_rec: np.ndarray, nl1: float, E_base: float) -> np.ndarray:
     """1st order: E_rec/E_exp = 1 + nl1*(E_rec-E_base)/1000"""
@@ -235,12 +248,21 @@ def fit_nonlinearity(
         return failed
     if order == 1:
         model = lambda x, nl1: nl_ratio_1st(x, nl1, E_base)
+        bounds = _nl_coefficient_bounds(E_base, order)
+        nl1_limit = bounds[1][0]
+        p0 = [float(np.clip(nl1_init, -nl1_limit * 0.999, nl1_limit * 0.999))]
     else:
         model = lambda x, nl1, nl2: nl_ratio_2nd(x, nl1, nl2, E_base)
+        bounds = _nl_coefficient_bounds(E_base, order)
+        nl1_limit = bounds[1][0]
+        p0 = [
+            float(np.clip(nl1_init, -nl1_limit * 0.999, nl1_limit * 0.999)),
+            0.0,
+        ]
     ratio = E_rec / np.where(E_exp > 0, E_exp, 1.0)
     try:
         popt, pcov = curve_fit(model, E_rec, ratio,
-                               p0=[nl1_init] + [0.0] * (order - 1),
+                               p0=p0, bounds=bounds,
                                absolute_sigma=True, maxfev=5000)
         perr = np.sqrt(np.maximum(np.diag(pcov), 0.0))
         chi2 = float(np.sum((ratio - model(E_rec, *popt)) ** 2))
@@ -340,6 +362,7 @@ class ModuleData:
         self.nl2_2_err:  float = 0.0
         self.chi2_nl2:   float = 0.0
         self.ndf_nl2:    int   = 0
+        self.nl_coefficients_manual: bool = False
 
         # geometry flags (0-based row/col)
         self.is_absorber = self.row >= 0 and hole_ring(self.row + 1, self.col + 1) <= 1
@@ -401,7 +424,13 @@ class ModuleData:
         self.nl2_1_err = float(nl1_err)
         self.nl2_2     = 0.0 if force_zero else float(nl2)
         self.nl2_2_err = float(nl2_err)
+        self.nl_coefficients_manual = False
 
+        self.update_correction_residuals(E_base, E_exp, E_rec)
+
+    def update_correction_residuals(
+        self, E_base: float, E_exp: np.ndarray, E_rec: np.ndarray,
+    ) -> None:
         # Mean |corrected ratio - 1| for map colouring
         self.mean_corr_resid_1st: float = 0.0
         self.mean_corr_resid_2nd: float = 0.0
@@ -520,20 +549,14 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
     return data
 
 
-# Matplotlib canvas  (2x3 peak histograms + 1 large linearity plot)
+# Matplotlib canvas
 
-class TripleCanvas(FigureCanvas):
+class PlotCanvas(FigureCanvas):
     def __init__(self):
         fc = THEME.CANVAS
         self.fig = Figure(facecolor=fc)
-        # Peak histograms: top row e-p, second row e-e; columns 3.5, 2.2, 0.7 GeV.
-        gs = self.fig.add_gridspec(3, 3, height_ratios=[1, 1, 2],
-                                   hspace=0.60, wspace=0.42,
-                                   left=0.07, right=0.97, top=0.96, bottom=0.07)
-        self.axes: List = [self.fig.add_subplot(gs[r, c]) for r in range(2) for c in range(3)]
-        self.axes.append(self.fig.add_subplot(gs[2, :]))
-        for ax in self.axes:
-            ax.set_facecolor(fc)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor(fc)
         super().__init__(self.fig)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -571,6 +594,9 @@ class NLViewerWindow(QMainWindow):
 
         self._peak_use_cb: Dict[str, QCheckBox] = {}
         self._peak_center_edit: Dict[str, QLineEdit] = {}
+        self._manual_nl_spins: Dict[str, QDoubleSpinBox] = {}
+        self._hist_canvases: Dict[str, PlotCanvas] = {}
+        self._linearity_canvas: Optional[PlotCanvas] = None
         self._fit_order_cb: Optional[QComboBox] = None
         self._base_energy_cb: Optional[QComboBox] = None
         self._base_beam_tag = "2p2"
@@ -664,7 +690,7 @@ class NLViewerWindow(QMainWindow):
         self._export_btn = QPushButton("↩ Export nl → JSON")
         self._export_btn.setToolTip(
             "Read a base calibration JSON and save nl1/nl2 coefficients from the current\n"
-            "fit (2nd order by default) and selected base beam energy.")
+            "fit or manual adjustment (2nd order by default) and selected base beam energy.")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export_nl)
         top.addWidget(self._export_btn)
@@ -703,13 +729,97 @@ class NLViewerWindow(QMainWindow):
         self._mod_lbl.setStyleSheet(f"color: {THEME.ACCENT};")
         right_lay.addWidget(self._mod_lbl)
 
-        self._canvas = TripleCanvas()
-        right_lay.addWidget(self._canvas, stretch=1)
-
         right_lay.addWidget(self._build_refit_panel())
+        right_lay.addWidget(self._build_histogram_grid(), stretch=3)
+        self._build_manual_nl_controls(right_lay)
+        self._linearity_canvas = PlotCanvas()
+        right_lay.addWidget(self._linearity_canvas, stretch=2)
 
         splitter.addWidget(right)
         splitter.setSizes([460, 900])
+
+    def _build_manual_nl_controls(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Manual non-linearity coefficients")
+        row = QHBoxLayout(group)
+        row.setContentsMargins(8, 3, 8, 3)
+        row.setSpacing(6)
+        row.addWidget(QLabel("1st nl₁:"))
+        row.addWidget(self._new_nl_spin("nl1"))
+        row.addSpacing(8)
+        row.addWidget(QLabel("2nd nl₁:"))
+        row.addWidget(self._new_nl_spin("nl2_1"))
+        row.addWidget(QLabel("nl₂:"))
+        row.addWidget(self._new_nl_spin("nl2_2"))
+        hint = QLabel("Edit or use arrows; curves and corrected points update live.")
+        hint.setStyleSheet(f"color: {THEME.TEXT_DIM}; font-size: 10px;")
+        row.addWidget(hint)
+        parent_layout.addWidget(group)
+
+    def _build_histogram_grid(self) -> QWidget:
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        for idx, key in enumerate(_PEAK_KEYS):
+            cell = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(0)
+            canvas = PlotCanvas()
+            canvas.setMinimumHeight(100)
+            self._hist_canvases[key] = canvas
+            cell_lay.addWidget(canvas, stretch=1)
+            cell_lay.addWidget(self._build_peak_control_cell(key))
+            grid.addWidget(cell, idx // 3, idx % 3)
+        return grid_widget
+
+    def _build_peak_control_cell(self, key: str) -> QWidget:
+        cell = QWidget()
+        cell_lay = QHBoxLayout(cell)
+        cell_lay.setContentsMargins(2, 0, 2, 0)
+        cell_lay.setSpacing(4)
+
+        use_cb = QCheckBox("Use")
+        use_cb.setChecked(True)
+        use_cb.setEnabled(False)
+        use_cb.setToolTip("Include this peak point in the linearity fit.")
+        use_cb.toggled.connect(
+            lambda checked, _key=key: self._on_peak_use_changed(_key, checked))
+
+        center_edit = QLineEdit()
+        center_edit.setPlaceholderText("μ (MeV)")
+        center_edit.setFixedWidth(78)
+        center_edit.setEnabled(False)
+        center_edit.setToolTip(
+            "Manual peak center in MeV. Leave empty to use the fitted peak.")
+        center_edit.editingFinished.connect(
+            lambda _key=key: self._on_peak_center_edit(_key))
+
+        cell_lay.addStretch()
+        cell_lay.addWidget(use_cb)
+        cell_lay.addWidget(center_edit)
+        cell_lay.addStretch()
+
+        self._peak_use_cb[key] = use_cb
+        self._peak_center_edit[key] = center_edit
+        return cell
+
+    def _new_nl_spin(self, coefficient: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(6)
+        spin.setRange(-1.0, 1.0)
+        spin.setSingleStep(0.001)
+        spin.setKeyboardTracking(True)
+        spin.setFixedWidth(105)
+        spin.setEnabled(False)
+        spin.setToolTip(
+            "Coefficient is bounded so the fitted curve stays within ±20% "
+            "over 0–3500 MeV.")
+        spin.valueChanged.connect(
+            lambda value, name=coefficient: self._on_manual_nl_changed(name, value))
+        self._manual_nl_spins[coefficient] = spin
+        return spin
 
     def _build_refit_panel(self) -> QGroupBox:
         box = QGroupBox("Peak re-fit  (drag on histogram to auto-fit)")
@@ -773,41 +883,6 @@ class NLViewerWindow(QMainWindow):
         row1.addStretch()
         lay.addLayout(row1)
 
-        peak_grid = QGridLayout()
-        peak_grid.setHorizontalSpacing(8)
-        peak_grid.setVerticalSpacing(2)
-        for idx, key in enumerate(_PEAK_KEYS):
-            cfg = peak_cfg(key)
-            cell = QWidget()
-            cell_lay = QHBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(3)
-
-            use_cb = QCheckBox("Use")
-            use_cb.setChecked(True)
-            use_cb.setEnabled(False)
-            use_cb.setToolTip("Include this peak point in the linearity fit.")
-            use_cb.toggled.connect(lambda checked, _key=key: self._on_peak_use_changed(_key, checked))
-
-            center_edit = QLineEdit()
-            center_edit.setPlaceholderText("μ MeV")
-            center_edit.setFixedWidth(62)
-            center_edit.setEnabled(False)
-            center_edit.setToolTip("Manual peak center in MeV. Leave empty to use the fitted peak.")
-            center_edit.editingFinished.connect(lambda _key=key: self._on_peak_center_edit(_key))
-
-            label = QLabel(str(cfg["label"]).replace("  ", " "))
-            label.setStyleSheet(f"color: {cfg['color']}; font-size: 10px;")
-            cell_lay.addWidget(label)
-            cell_lay.addWidget(use_cb)
-            cell_lay.addWidget(center_edit)
-            cell_lay.addStretch()
-
-            self._peak_use_cb[key] = use_cb
-            self._peak_center_edit[key] = center_edit
-            peak_grid.addWidget(cell, idx // 3, idx % 3)
-        lay.addLayout(peak_grid)
-
         self._status_lbl = QLabel("(select a module first)")
         self._status_lbl.setFont(QFont("Monospace", 9))
         self._status_lbl.setWordWrap(True)
@@ -860,6 +935,50 @@ class NLViewerWindow(QMainWindow):
             else:
                 self._fit_order_cb.setCurrentIndex(0 if d.fit_order == "2nd" else 1)
             self._fit_order_cb.blockSignals(False)
+        self._sync_manual_nl_controls(d)
+
+    def _sync_manual_nl_controls(self, d: Optional[ModuleData]) -> None:
+        if d is None:
+            for spin in self._manual_nl_spins.values():
+                spin.setEnabled(False)
+            return
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        lower_1st, upper_1st = _nl_coefficient_bounds(E_base, 1)
+        lower_2nd, upper_2nd = _nl_coefficient_bounds(E_base, 2)
+        limits = {
+            "nl1": (lower_1st[0], upper_1st[0]),
+            "nl2_1": (lower_2nd[0], upper_2nd[0]),
+            "nl2_2": (lower_2nd[1], upper_2nd[1]),
+        }
+        values = {"nl1": d.nl, "nl2_1": d.nl2_1, "nl2_2": d.nl2_2}
+        for key, spin in self._manual_nl_spins.items():
+            low, high = limits[key]
+            spin.blockSignals(True)
+            spin.setRange(low, high)
+            spin.setValue(float(np.clip(values[key], low, high)))
+            spin.setEnabled(True)
+            spin.blockSignals(False)
+
+    def _on_manual_nl_changed(self, coefficient: str, value: float) -> None:
+        d = self._cur
+        if d is None:
+            return
+        if coefficient == "nl1":
+            d.nl = float(value)
+        elif coefficient == "nl2_1":
+            d.nl2_1 = float(value)
+        else:
+            d.nl2_2 = float(value)
+        d.nl_coefficients_manual = True
+        points = d.linearity_points(self._base_beam_tag)
+        E_exp = np.array([p[1] for p in points])
+        E_rec = np.array([p[2] for p in points])
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        d.update_correction_residuals(E_base, E_exp, E_rec)
+        self._refresh_map()
+        self._refresh_current_fit_display(refit=False)
+        self._status_lbl.setText(
+            f"{d.name}: manual coefficients updated; click Refit Linearity to restore fitted values.")
 
     def _refresh_current_fit_display(self, status: Optional[str] = None, refit: bool = True):
         d = self._cur
@@ -868,11 +987,18 @@ class NLViewerWindow(QMainWindow):
         if refit:
             d.refit_nl(self._outer_zero_layers(), self._base_beam_tag)
             self._refresh_map()
+        self._sync_manual_nl_controls(d)
         self._draw_module(d)
-        self._mod_lbl.setText(
-            f"Module: {d.name}   θ={d.theta:.3f}°   "
-            f"nl = {d.nl:.4f} ± {d.nl_err:.4f}   "
-            f"χ²/ndf = {d.chi2_nl:.2f}/{d.ndf_nl}")
+        if d.nl_coefficients_manual:
+            self._mod_lbl.setText(
+                f"Module: {d.name}   θ={d.theta:.3f}°   "
+                f"manual 1st nl₁={d.nl:.6f}; "
+                f"2nd (nl₁, nl₂)=({d.nl2_1:.6f}, {d.nl2_2:.6f})")
+        else:
+            self._mod_lbl.setText(
+                f"Module: {d.name}   θ={d.theta:.3f}°   "
+                f"nl = {d.nl:.4f} ± {d.nl_err:.4f}   "
+                f"χ²/ndf = {d.chi2_nl:.2f}/{d.ndf_nl}")
         if status is not None:
             self._status_lbl.setText(status)
 
@@ -1100,29 +1226,37 @@ class NLViewerWindow(QMainWindow):
     # ── drawing ────────────────────────────────────────────────────────────
 
     def _clear_plots(self):
-        for ax in self._canvas.axes:
+        canvases = [*self._hist_canvases.values()]
+        if self._linearity_canvas is not None:
+            canvases.append(self._linearity_canvas)
+        for canvas in canvases:
+            ax = canvas.ax
             ax.cla()
             ax.set_facecolor(THEME.CANVAS)
-        self._canvas.redraw()
+            canvas.redraw()
 
     def _draw_module(self, d: ModuleData):
-        axes = self._canvas.axes
-        for ax in axes:
+        for key in _PEAK_KEYS:
+            canvas = self._hist_canvases[key]
+            ax = canvas.ax
             ax.cla()
             ax.set_facecolor(THEME.CANVAS)
-
-        for i, key in enumerate(_PEAK_KEYS):
-            self._draw_energy_hist_single(axes[i], d, key)
+            self._draw_energy_hist_single(ax, d, key)
             cfg = peak_cfg(key)
-            self._canvas._style(axes[i],
+            canvas._style(ax,
                 title=f"{cfg['label']}  ({cfg['energy_label']})",
                 xlabel="E (MeV)", ylabel="Counts")
+            canvas.redraw()
 
-        # Large linearity plot on bottom row
-        self._draw_linearity(axes[6], d)
-        self._canvas._style(axes[6], title="Non-linearity",
-                            xlabel="E_rec (MeV)", ylabel="E_rec / E_exp")
-        self._canvas.redraw()
+        if self._linearity_canvas is not None:
+            ax = self._linearity_canvas.ax
+            ax.cla()
+            ax.set_facecolor(THEME.CANVAS)
+            self._draw_linearity(ax, d)
+            self._linearity_canvas._style(
+                ax, title="Non-linearity",
+                xlabel="E_rec (MeV)", ylabel="E_rec / E_exp")
+            self._linearity_canvas.redraw()
         self._setup_span_selectors(d)
 
     def _draw_energy_hist_single(self, ax, d: ModuleData, key: str):
@@ -1166,7 +1300,7 @@ class NLViewerWindow(QMainWindow):
             ax.axvspan(0.8 * Eexp, 1.2 * Eexp,
                        alpha=0.07, color=color, linewidth=0)
             # Expected energy marker
-            ax.axvline(Eexp, color=color, linewidth=0.8, linestyle=":", alpha=0.5)
+            ax.axvline(Eexp, color="orange", linewidth=1.5, linestyle="-", alpha=0.95)
             ax.text(0.97, 0.97, f"exp={Eexp:.0f}\nσ={sig:.0f}",
                     transform=ax.transAxes, fontsize=6, ha="right", va="top",
                     color=THEME.TEXT_DIM)
@@ -1186,7 +1320,7 @@ class NLViewerWindow(QMainWindow):
                         xy=(mu, amp), xytext=(0, 6), textcoords="offset points",
                         color=color, fontsize=7, ha="center", va="bottom")
         elif Eexp > 0.0:
-            ax.axvline(Eexp, color=color, linewidth=1.0, linestyle=":", alpha=0.5)
+            ax.axvline(Eexp, color="orange", linewidth=1.5, linestyle="-", alpha=0.95)
         if manual_mu > 0.0:
             ax.axvline(manual_mu, color=color, linewidth=1.5, linestyle="--", alpha=0.9)
             ax.annotate(f"manual {manual_mu:.1f}",
@@ -1198,6 +1332,7 @@ class NLViewerWindow(QMainWindow):
                     fontsize=7, color=THEME.TEXT_DIM, ha="left", va="top")
 
     def _draw_linearity(self, ax, d: ModuleData):
+        ax.set_xlim(0, 4500)
         E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
         pts = d.linearity_points(self._base_beam_tag)
         if not pts:
@@ -1206,6 +1341,8 @@ class NLViewerWindow(QMainWindow):
             return
 
         E_rec_arr = np.array([p[2] for p in pts])
+        has_1st_coefficients = d.ndf_nl > 0 or d.nl_coefficients_manual
+        has_2nd_coefficients = d.ndf_nl2 > 0 or d.nl_coefficients_manual
 
         ax.set_ylim(0.85, 1.15)
 
@@ -1215,12 +1352,12 @@ class NLViewerWindow(QMainWindow):
         ax.axhline(1.0, color="tomato", linestyle="--",
                    linewidth=1.5, alpha=0.75, label="y = 1 (ideal)")
 
-        if E_base > 0.0 and len(pts) >= 2 and d.ndf_nl > 0:
+        if E_base > 0.0 and len(pts) >= 2 and has_1st_coefficients:
             y1fit = nl_ratio_1st(xplot, d.nl, E_base)
             ax.plot(xplot, y1fit, color="cornflowerblue", linewidth=2.0,
                     label="1st order fit")
 
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 > 0:
+        if E_base > 0.0 and len(pts) >= 3 and has_2nd_coefficients:
             y2fit = nl_ratio_2nd(xplot, d.nl2_1, d.nl2_2, E_base)
             ax.plot(xplot, y2fit, color="violet", linewidth=2.0,
                     linestyle="--", label="2nd order fit")
@@ -1236,7 +1373,7 @@ class NLViewerWindow(QMainWindow):
                         color=str(cfg["color"]), fontsize=6.5)
 
         # Corrected points — 1st order: E_corr = E_rec / (1 + nl*(E_rec-E_base)/1000)
-        if E_base > 0.0 and len(pts) >= 2 and d.ndf_nl > 0:
+        if E_base > 0.0 and len(pts) >= 2 and has_1st_coefficients:
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_1st(ye_rec, d.nl, E_base)
                 E_corr = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1245,7 +1382,7 @@ class NLViewerWindow(QMainWindow):
                            marker="s", edgecolors="white", linewidths=0.5)
 
         # Corrected points — 2nd order
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 > 0:
+        if E_base > 0.0 and len(pts) >= 3 and has_2nd_coefficients:
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_2nd(ye_rec, d.nl2_1, d.nl2_2, E_base)
                 E_corr2 = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1265,13 +1402,22 @@ class NLViewerWindow(QMainWindow):
                         if d.ndf_nl > 0 else "")
             chi2_str = (f"χ²/ndf={d.chi2_nl2:.2f}/{d.ndf_nl2}"
                         if d.ndf_nl2 > 0 else "")
-            note = (
-                f"1st: nl₁={d.nl:.4f}±{d.nl_err:.4f}  {chi1_str}\n"
-                f"2nd: nl₁={d.nl2_1:.4f}±{d.nl2_1_err:.4f}"
-                f"  nl₂={d.nl2_2:.4f}±{d.nl2_2_err:.4f}\n"
-                f"     {chi2_str}\n"
-                f"E_base={E_base:.1f} MeV ({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
-            )
+            if d.nl_coefficients_manual:
+                note = (
+                    f"MANUAL COEFFICIENTS\n"
+                    f"1st: nl₁={d.nl:.6f}\n"
+                    f"2nd: nl₁={d.nl2_1:.6f}  nl₂={d.nl2_2:.6f}\n"
+                    f"E_base={E_base:.1f} MeV "
+                    f"({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
+                )
+            else:
+                note = (
+                    f"1st: nl₁={d.nl:.4f}±{d.nl_err:.4f}  {chi1_str}\n"
+                    f"2nd: nl₁={d.nl2_1:.4f}±{d.nl2_1_err:.4f}"
+                    f"  nl₂={d.nl2_2:.4f}±{d.nl2_2_err:.4f}\n"
+                    f"     {chi2_str}\n"
+                    f"E_base={E_base:.1f} MeV ({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
+                )
             ax.text(0.03, 0.97, note,
                     transform=ax.transAxes, fontsize=7.0,
                     va="top", ha="left", color="lightcyan",
@@ -1304,10 +1450,11 @@ class NLViewerWindow(QMainWindow):
         """Attach SpanSelectors to all 6 peak histogram axes.
         Must be called after every canvas redraw (axes are recreated)."""
         self._span_selectors.clear()
-        for ax, key in zip(self._canvas.axes[:6], _PEAK_KEYS):
+        for key in _PEAK_KEYS:
             hist = hist_for_key(d, key)
             if hist is None:
                 continue
+            ax = self._hist_canvases[key].ax
             sel = SpanSelector(
                 ax,
                 lambda xmin, xmax, _key=key: self._on_span_select(_key, xmin, xmax),
@@ -1455,7 +1602,7 @@ class NLViewerWindow(QMainWindow):
                 n_skipped += 1
                 continue
 
-            has_fit = d.ndf_nl2 > 0
+            has_fit = d.ndf_nl2 > 0 or d.nl_coefficients_manual
             has_anchor = d.measured_peak(f"ep_{self._base_beam_tag}") > 0.0
             force_zero = has_anchor and (
                 d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber)
@@ -1464,7 +1611,7 @@ class NLViewerWindow(QMainWindow):
                 continue
 
             entry["base_energy"] = round(float(d.e_exp[f"ep_{self._base_beam_tag}"]), 6)
-            if force_zero:
+            if force_zero and not d.nl_coefficients_manual:
                 nl1, nl2 = 0.0, 0.0
             elif d.fit_order == "1st":
                 nl1, nl2 = d.nl, 0.0
