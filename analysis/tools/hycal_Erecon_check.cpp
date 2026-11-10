@@ -46,9 +46,7 @@ const int energy_bins = 500; const double energy_min = 0., energy_max = 5000.;
 
 struct HistResult {
     std::unique_ptr<TH2F> h2_hit_module_hycal;
-    std::unique_ptr<TH2F> h2_hit_module_gem;
     std::unique_ptr<TH2F> h2_hit_hycal;
-    std::unique_ptr<TH2F> h2_hit_gem;
     std::unique_ptr<TH1F> h1_yield_theta;
     std::unique_ptr<TH2F> h2_Erecon_theta;
     std::unique_ptr<TH2F> h2_Erecon_theta_center;
@@ -62,8 +60,9 @@ struct HistResult {
 };
 
 static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix);
+enum class EnergyMode { Ep, Ee };
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
-                            const std::string &db_dir, long long max_events,
+                            const std::string &db_dir, long long max_events, EnergyMode mode,
                             HistResult *result);
 
 static void mergeHistResult(HistResult &destination, const HistResult &source)
@@ -81,20 +80,34 @@ int main(int argc, char *argv[])
     int  max_events  = -1;
     int  num_threads = 4;
     int  num_files   = -1;
+    EnergyMode mode = EnergyMode::Ep;
 
     // getopt_long_only reports an unknown word option such as '-xyz' as one
     // unrecognized option instead of splitting it into short options.
     static option long_options[] = {
+        {"ep_mode", no_argument, nullptr, 1000},
+        {"ee_mode", no_argument, nullptr, 1001},
         {nullptr, 0, nullptr, 0}
     };
     int opt;
-    while ((opt = getopt_long_only(argc, argv, "o:n:f:j:",
+    while ((opt = getopt_long_only(argc, argv, "o:n:f:j:m:",
                                    long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_name = optarg; break;
             case 'n': max_events       = std::atoi(optarg); break;
             case 'f': num_files        = std::atoi(optarg); break;
             case 'j': num_threads     = std::atoi(optarg); break;
+            case 'm':
+                if (std::string(optarg) == "ep") mode = EnergyMode::Ep;
+                else if (std::string(optarg) == "ee") mode = EnergyMode::Ee;
+                else {
+                    std::cerr << "Invalid energy mode '" << optarg
+                              << "'. Choose ep or ee.\n";
+                    return 1;
+                }
+                break;
+            case 1000: mode = EnergyMode::Ep; break;
+            case 1001: mode = EnergyMode::Ee; break;
         }
     }
 
@@ -103,7 +116,8 @@ int main(int argc, char *argv[])
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_Erecon_check <input_recon.root|dir> [more...] "
-                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads]\n";
+                 "-o <output_name> [-n max_events] [-f nfiles] [-j threads] "
+                 "[-m ep|ee] [--ep_mode|--ee_mode]\n";
         return 1;
     }
 
@@ -124,7 +138,7 @@ int main(int argc, char *argv[])
         [&](int idx, int slot) {
             auto result = makeHistResult(Form("worker%d", slot));
             const bool ok = processRootFile(root_files[idx], gRunConfig, db_dir,
-                                            file_limits[idx], result.get());
+                                            file_limits[idx], mode, result.get());
             results[idx] = std::move(result);
             return ok;
         },
@@ -174,7 +188,7 @@ int main(int argc, char *argv[])
             std::sqrt(mod->x * mod->x + mod->y * mod->y),
             gRunConfig.hycal_z) * 180.0f / M_PI;
         const float expected_energy = analysis::PhysicsTools::ExpectedEnergy(
-            theta, gRunConfig.Ebeam, "ep");
+            theta, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
         auto fit_result = physics.fitPeak(energy_histogram, expected_energy, true);
         const float peak = static_cast<float>(fit_result[0]);
         const float sigma = static_cast<float>(fit_result[1]);
@@ -211,7 +225,7 @@ int main(int argc, char *argv[])
     for (int i = 0; i < Nbins; ++i) {
         const double angle = 0.5 * (binEdge[i] + binEdge[i + 1]);
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
-            angle, gRunConfig.Ebeam, "ep");
+            angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
         TH1F *const hists[3] = {merged->h1_Erecon_theta[i].get(),
                                 merged->h1_Erecon_theta_center[i].get(),
                                 merged->h1_Erecon_theta_edge[i].get()};
@@ -368,9 +382,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     merged->h2_hit_hycal->Write();
-    merged->h2_hit_gem->Write();
     merged->h2_hit_module_hycal->Write();
-    merged->h2_hit_module_gem->Write();
     merged->h1_yield_theta->Write();
     h1_deltaE_module->Write();
     h2_deltaE_module_map->Write();
@@ -407,16 +419,9 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
         Form("h2_hit_module_hycal%s", name_suffix.c_str()),
         "HyCal Hit Distribution (Module);(X_{hycal}-X_{cell center})/d_{cell size};(Y_{hycal}-Y_{cell center})/d_{cell size}",
         100, -0.5, 0.5, 100, -0.5, 0.5);
-    result->h2_hit_module_gem = Book<TH2F>(result->all,
-        Form("h2_hit_module_gem%s", name_suffix.c_str()),
-        "GEM Hit Distribution (Module);(X_{gem}-X_{cell center})/d_{cell size};(Y_{gem}-Y_{cell center})/d_{cell size}",
-        100, -0.5, 0.5, 100, -0.5, 0.5);
     result->h2_hit_hycal = Book<TH2F>(result->all,
         Form("h2_hit_hycal%s", name_suffix.c_str()),
         "HyCal Hit Distribution;X [mm];Y [mm]", 720, -360, 360, 720, -360, 360);
-    result->h2_hit_gem = Book<TH2F>(result->all,
-        Form("h2_hit_gem%s", name_suffix.c_str()),
-        "GEM Hit Distribution;X [mm];Y [mm]", 720, -360, 360, 720, -360, 360);
     result->h1_yield_theta = Book<TH1F>(result->all,
         Form("h1_yield_theta%s", name_suffix.c_str()),
         "Yield vs Theta;#theta [deg];Yield/binWidth", Nbins, binEdge);
@@ -461,7 +466,7 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix)
 }
 
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
-                            const std::string &db_dir, long long max_events,
+                            const std::string &db_dir, long long max_events, EnergyMode mode,
                             HistResult *result)
 {
     TFile input(input_file.c_str(), "READ");
@@ -485,56 +490,116 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
     for (Long64_t entry = 0; entry < entries; ++entry) {
         tree->GetEntry(entry);
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
-        if (event.n_clusters != 1) continue;
-        if (event.cl_nblocks[0] < 3) continue;
 
-        HCHit hc_hit;
-        GEMHit gem_hit;
-        hc_hit.x = event.cl_x[0];
-        hc_hit.y = event.cl_y[0];
-        hc_hit.z = event.cl_z[0];
-        hc_hit.energy = event.cl_energy[0];
-        gem_hit.x = event.mHit_gx[0][0];
-        gem_hit.y = event.mHit_gy[0][0];
+        if (mode == EnergyMode::Ep) {
+            if (event.n_clusters != 1) continue;
+            if (event.cl_nblocks[0] < 3) continue;
 
-        ApplyToHyCal(hc_hit, run_config);
-        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
+            HCHit hc_hit;
+            hc_hit.x = event.cl_x[0];
+            hc_hit.y = event.cl_y[0];
+            hc_hit.z = event.cl_z[0];
+            hc_hit.energy = event.cl_energy[0];
 
-        const auto *mod = hycal.module_by_id(event.cl_center[0]);
-        if (!mod) continue;
-        const int module_index = mod->id - 1001;
-        if (module_index < 0 || module_index >= 1156) continue;
-        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
-        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
+            ApplyToHyCal(hc_hit, run_config);
+            if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
 
-        const float theta = std::atan2(
-            std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
-            * 180.0f / M_PI;
-        const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta);
-        if (theta_bin >= 1 && theta_bin <= Nbins) {
-            result->h1_yield_theta->Fill(
-                theta, 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
-            result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[0]);
-            if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
-                result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[0]);
-            } else {
-                result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[0]);
+            const auto *mod = hycal.module_by_id(event.cl_center[0]);
+            if (!mod) continue;
+            const int module_index = mod->id - 1001;
+            if (module_index < 0 || module_index >= 1156) continue;
+            const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
+
+            const float theta = std::atan2(
+                std::sqrt(hc_hit.x * hc_hit.x + hc_hit.y * hc_hit.y), hc_hit.z)
+                * 180.0f / M_PI;
+            const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta);
+            if (theta_bin >= 1 && theta_bin <= Nbins) {
+                result->h1_yield_theta->Fill(
+                    theta, 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
+                result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[0]);
+                if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                    result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[0]);
+                } else {
+                    result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[0]);
+                }
             }
+
+            result->h2_Erecon_theta->Fill(theta, event.cl_energy[0]);
+            if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[0]);
+                result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
+            } else {
+                result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[0]);
+            }
+
+            result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
+            result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+            ++result->events_processed;
         }
 
-        result->h2_Erecon_theta->Fill(theta, event.cl_energy[0]);
-        if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
-            result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[0]);
-            result->h1_E_modules[module_index]->Fill(event.cl_energy[0]);
-        } else {
-            result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[0]);
-        }
+        if (mode == EnergyMode::Ee) {
+            if (event.n_clusters != 2) continue;
+            if (event.cl_nblocks[0] < 3 || event.cl_nblocks[1] < 3) continue;
 
-        result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
-        result->h2_hit_gem->Fill(gem_hit.x, gem_hit.y);
-        result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
-        result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
-        ++result->events_processed;
+            HCHit hc_hit[2];
+            hc_hit[0].x = event.cl_x[0];
+            hc_hit[0].y = event.cl_y[0];
+            hc_hit[0].z = event.cl_z[0];
+            hc_hit[0].energy = event.cl_energy[0];
+
+            hc_hit[1].x = event.cl_x[1];
+            hc_hit[1].y = event.cl_y[1];
+            hc_hit[1].z = event.cl_z[1];
+            hc_hit[1].energy = event.cl_energy[1];
+
+            ApplyToHyCal(hc_hit[0], run_config);
+            ApplyToHyCal(hc_hit[1], run_config);
+            if (!InHyCalRing(hc_hit[0].x, hc_hit[0].y, 2.0, 15.)) continue;
+            if (!InHyCalRing(hc_hit[1].x, hc_hit[1].y, 2.0, 15.)) continue;
+
+            const float theta0 = std::atan2(
+                std::sqrt(hc_hit[0].x * hc_hit[0].x + hc_hit[0].y * hc_hit[0].y), hc_hit[0].z) * 180.0f / M_PI;
+            const float theta1 = std::atan2(
+                std::sqrt(hc_hit[1].x * hc_hit[1].x + hc_hit[1].y * hc_hit[1].y), hc_hit[1].z) * 180.0f / M_PI;
+
+            if (!PhysicsTools::isMoller_kinematic(
+                    theta0, hc_hit[0].energy, theta1, hc_hit[1].energy,
+                    run_config.Ebeam, 0.03f))
+                continue;
+            const float theta[2] = {theta0, theta1};
+            for (int i = 0; i < 2; ++i) {
+                const auto *mod = hycal.module_by_id(event.cl_center[i]);
+                if (!mod) continue;
+                const int module_index = mod->id - 1001;
+                if (module_index < 0 || module_index >= 1156) continue;
+                const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit[i].x, hc_hit[i].y);
+
+                const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta[i]);
+                if (theta_bin >= 1 && theta_bin <= Nbins) {
+                    result->h1_yield_theta->Fill(
+                        theta[i], 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
+                    result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[i]);
+                    if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                        result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[i]);
+                    } else {
+                        result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[i]);
+                    }
+                }
+
+                result->h2_Erecon_theta->Fill(theta[i], event.cl_energy[i]);
+                if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                    result->h2_Erecon_theta_center->Fill(theta[i], event.cl_energy[i]);
+                    result->h1_E_modules[module_index]->Fill(event.cl_energy[i]);
+                } else {
+                    result->h2_Erecon_theta_edge->Fill(theta[i], event.cl_energy[i]);
+                }
+
+                result->h2_hit_hycal->Fill(hc_hit[i].x, hc_hit[i].y);
+                result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+            }
+            ++result->events_processed;
+        }
     }
     return true;
 }
