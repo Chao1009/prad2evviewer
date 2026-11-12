@@ -382,6 +382,8 @@ class ModuleData:
         self.chi2_nl2:   float = 0.0
         self.ndf_nl2:    int   = 0
         self.nl_coefficients_manual: bool = False
+        self.mean_abs_data_fit_deviation_2nd = math.nan
+        self.base_ee_corr_residual_2nd = math.nan
 
         # geometry flags (0-based row/col)
         self.is_absorber = self.row >= 0 and hole_ring(self.row + 1, self.col + 1) <= 1
@@ -458,17 +460,24 @@ class ModuleData:
         self.nl2_2_err = float(nl2_err)
         self.nl_coefficients_manual = False
 
-        self.update_correction_residuals(E_base, E_exp, E_rec)
+        self.update_correction_residuals(
+            E_base, E_exp, E_rec, [p[0] for p in pts], base_beam_tag)
 
     def update_correction_residuals(
         self, E_base: float, E_exp: np.ndarray, E_rec: np.ndarray,
+        keys: List[str], base_beam_tag: str,
     ) -> None:
         # Mean |corrected ratio - 1| for map colouring
         self.mean_corr_resid_1st: float = 0.0
         self.mean_corr_resid_2nd: float = 0.0
+        self.mean_abs_data_fit_deviation_2nd = math.nan
+        self.base_ee_corr_residual_2nd = math.nan
         if len(E_exp) > 0 and E_base > 0.0:
             resids1, resids2 = [], []
-            for Ee, Er in zip(E_exp, E_rec):
+            fit_deviations_2nd = []
+            base_ee_residual = None
+            has_2nd_fit = self.ndf_nl2 > 0 or self.nl_coefficients_manual
+            for key, Ee, Er in zip(keys, E_exp, E_rec):
                 if Ee <= 0.0:
                     continue
                 d1 = nl_ratio_1st(Er, self.nl, E_base)
@@ -479,10 +488,20 @@ class ModuleData:
                 if d2 != 0.0:
                     Ec2 = Er / d2
                     resids2.append(abs(Ec2 / Ee - 1.0))
+                    if has_2nd_fit:
+                        fit_deviations_2nd.append(
+                            abs(Er / Ee - d2))
+                        if key == f"ee_{base_beam_tag}":
+                            base_ee_residual = Ec2 / Ee - 1.0
             if resids1:
                 self.mean_corr_resid_1st = float(np.mean(resids1))
             if resids2:
                 self.mean_corr_resid_2nd = float(np.mean(resids2))
+            if fit_deviations_2nd:
+                self.mean_abs_data_fit_deviation_2nd = float(
+                    np.mean(fit_deviations_2nd))
+            if base_ee_residual is not None:
+                self.base_ee_corr_residual_2nd = float(base_ee_residual)
 
 
 # Data loading
@@ -678,6 +697,8 @@ class NLViewerWindow(QMainWindow):
             "Non-linearity (nl)",
             "Mean |corr/exp-1| (1st order)",
             "Mean |corr/exp-1| (2nd order)",
+            "Mean |data - 2nd-order fit| (E_rec/E_exp)",
+            "Base-energy e-e (corr/exp - 1), 2nd order",
             "Flat",
         ])
         self._mode_cb.currentIndexChanged.connect(self._on_mode_changed)
@@ -1018,7 +1039,8 @@ class NLViewerWindow(QMainWindow):
         E_exp = np.array([p[1] for p in points])
         E_rec = np.array([p[2] for p in points])
         E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
-        d.update_correction_residuals(E_base, E_exp, E_rec)
+        d.update_correction_residuals(
+            E_base, E_exp, E_rec, [p[0] for p in points], self._base_beam_tag)
         self._refresh_map()
         self._refresh_current_fit_display(refit=False)
         self._status_lbl.setText(
@@ -1182,6 +1204,26 @@ class NLViewerWindow(QMainWindow):
                     std  = float(np.std(arr))
                     self._range_ctrl.set_range(mean - 3.0 * std,
                                                mean + 3.0 * std)
+        elif "data - 2nd-order fit" in mode:
+            values = {
+                name: d.mean_abs_data_fit_deviation_2nd
+                for name, d in self._data.items()
+            }
+            if mode_changed:
+                vals = [v for v in values.values() if math.isfinite(v)]
+                vmax = float(np.percentile(np.array(vals), 95)) if vals else 0.01
+                self._range_ctrl.set_range(0.0, max(vmax, 1e-6))
+        elif "Base-energy e-e" in mode:
+            values = {
+                name: d.base_ee_corr_residual_2nd
+                for name, d in self._data.items()
+            }
+            if mode_changed:
+                vals = [v for v in values.values() if math.isfinite(v)]
+                vmax = (float(np.percentile(np.abs(vals), 95))
+                        if vals else 0.01)
+                vmax = max(vmax, 1e-6)
+                self._range_ctrl.set_range(-vmax, vmax)
         elif "order" in mode:
             attr = "mean_corr_resid_1st" if "1st" in mode else "mean_corr_resid_2nd"
             values = {name: getattr(d, attr) for name, d in self._data.items()}
