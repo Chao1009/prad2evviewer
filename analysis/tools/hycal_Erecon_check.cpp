@@ -610,6 +610,9 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             hc_hit[1].z = event.cl_z[1];
             hc_hit[1].energy = event.cl_energy[1];
 
+            MollerEvent moller_event = {DataPoint(hc_hit[0].x, hc_hit[0].y, hc_hit[0].z, hc_hit[0].energy),
+                        DataPoint(hc_hit[1].x, hc_hit[1].y, hc_hit[1].z, hc_hit[1].energy)};
+
             ApplyToHyCal(hc_hit[0], run_config);
             ApplyToHyCal(hc_hit[1], run_config);
             if (!InHyCalRing(hc_hit[0].x, hc_hit[0].y, 2.0, 15.)) continue;
@@ -624,6 +627,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     theta0, hc_hit[0].energy, theta1, hc_hit[1].energy,
                     run_config.Ebeam, 0.03f))
                 continue;
+            if (!PhysicsTools::isBackToBack(moller_event, 5.0f)) continue;
             const float theta[2] = {theta0, theta1};
             for (int i = 0; i < 2; ++i) {
                 const auto *mod = hycal.module_by_id(event.cl_center[i]);
@@ -637,7 +641,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     result->h1_yield_theta->Fill(
                         theta[i], 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
                     result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[i]);
-                    if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                    if (std::fabs(xd_hycal) < 0.1f && std::fabs(yd_hycal) < 0.1f) {
                         result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[i]);
                     } else {
                         result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[i]);
@@ -645,7 +649,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 }
 
                 result->h2_Erecon_theta->Fill(theta[i], event.cl_energy[i]);
-                if (std::fabs(xd_hycal) < 0.3f && std::fabs(yd_hycal) < 0.3f) {
+                if (std::fabs(xd_hycal) < 0.1f && std::fabs(yd_hycal) < 0.1f) {
                     result->h2_Erecon_theta_center->Fill(theta[i], event.cl_energy[i]);
                     result->h1_E_modules[module_index]->Fill(event.cl_energy[i]);
                 } else {
