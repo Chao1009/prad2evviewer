@@ -95,7 +95,9 @@ prad2evviewer directory entered at the prompt.
 
 ## Output Files
 
-All output files are written to `<OUTPUT_BASE>/prad_<RUN>/`:
+Replay data products are written to `<OUTPUT_BASE>/prad_<RUN>/`. Slurm stdout
+and stderr logs are written separately to
+`/farm_out/<username>/slurm_out/` as required by the ifarm Slurm configuration.
 
 
 | File                                                                        | Description                                                                  |

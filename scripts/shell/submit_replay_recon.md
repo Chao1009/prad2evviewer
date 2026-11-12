@@ -212,7 +212,7 @@ After you receive the staging notification, run `submit_replay_recon.sh` again.
 
 ## Output Files
 
-All files for one run are written to:
+Replay data products and the generated batch script for one run are written to:
 
 ```text
 <OUTPUT_BASE>/prad_<RUN>/
@@ -223,8 +223,6 @@ Expected outputs:
 | File | Description |
 |------|-------------|
 | `replay_recon_<RUN>.sbatch` | Generated Slurm batch script |
-| `replay_recon_<RUN>-<JOBID>.out` | Slurm stdout |
-| `replay_recon_<RUN>-<JOBID>.err` | Slurm stderr |
 | `prad_<RUN>.evio.XXXXX_recon.root` | Per-split recon ROOT output from replay |
 | `prad_<RUN>_recon_000.root`, `prad_<RUN>_recon_001.root`, ... | Merged recon ROOT files, grouped by `REPLAY_MERGE_FILES` |
 | `prad_<RUN>_filter_000.root`, `prad_<RUN>_filter_001.root`, ... | Filtered ROOT files, one per recon input |
@@ -246,17 +244,18 @@ The generated batch script uses:
 #SBATCH --job-name=recon<RUN>
 #SBATCH --account=<SLURM_ACCOUNT>
 #SBATCH --partition=<SLURM_PARTITION>
-#SBATCH --output=<OUT_DIR>/replay_recon_<RUN>-%j.out
-#SBATCH --error=<OUT_DIR>/replay_recon_<RUN>-%j.err
+#SBATCH --output=/farm_out/<username>/slurm_out/replay_recon_<RUN>-%j.out
+#SBATCH --error=/farm_out/<username>/slurm_out/replay_recon_<RUN>-%j.err
 #SBATCH --mail-user=<username>@jlab.org
 #SBATCH --time=<SLURM_TIME>
 #SBATCH --mem-per-cpu=<SLURM_MEM_PER_CPU>
 #SBATCH --cpus-per-task=<REPLAY_CORES>
 ```
 
+Slurm stdout/stderr logs are written under
+`/farm_out/<username>/slurm_out/` as required by the ifarm Slurm configuration.
 Inside the job, the script changes into the run output directory before running
-the replay pipeline. This helps keep logs and automatically named outputs close
-to the final ROOT/JSON files.
+the replay pipeline, so data products remain under `<OUTPUT_BASE>/prad_<RUN>/`.
 
 ---
 
@@ -338,7 +337,7 @@ squeue -u $USER
 After the job starts, follow the Slurm stdout log:
 
 ```bash
-tail -f /volatile/halla/user/recon/prad_024650/replay_recon_024650-12345678.out
+tail -f /farm_out/$USER/slurm_out/replay_recon_024650-12345678.out
 ```
 
 ---

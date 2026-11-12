@@ -319,6 +319,7 @@ run_replay_pipeline() {
 submit_replay_job() {
     local run="$1"
     local out_dir="${OUTPUT_BASE}/prad_${run}"
+    local slurm_log_dir="/farm_out/$(whoami)/slurm_out"
     local sbatch_script="${out_dir}/replay_recon_${run}.sbatch"
 
     if [[ ! -x "${PRAD2_BIN}/prad2ana_replay_recon" ]]; then
@@ -326,14 +327,15 @@ submit_replay_job() {
         return 1
     fi
     mkdir -p "${out_dir}" || return 1
+    mkdir -p "${slurm_log_dir}" || return 1
 
     cat > "${sbatch_script}" <<EOF || return 1
 #!/bin/bash
 #SBATCH --job-name=recon${run}
 #SBATCH --account=${SLURM_ACCOUNT}
 #SBATCH --partition=${SLURM_PARTITION}
-#SBATCH --output=${out_dir}/replay_recon_${run}-%j.out
-#SBATCH --error=${out_dir}/replay_recon_${run}-%j.err
+#SBATCH --output=${slurm_log_dir}/replay_recon_${run}-%j.out
+#SBATCH --error=${slurm_log_dir}/replay_recon_${run}-%j.err
 #SBATCH --mail-user=$(whoami)@jlab.org
 #SBATCH --time=${SLURM_TIME}
 #SBATCH --mem-per-cpu=${SLURM_MEM_PER_CPU}
