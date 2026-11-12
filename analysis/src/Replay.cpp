@@ -748,6 +748,8 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
             ev->trigger_type = event->info.trigger_type;
             ev->trigger_bits = event->info.trigger_bits;
             ev->timestamp    = event->info.timestamp;
+            ev->hycal_center_x = hc_xform.x;
+            ev->hycal_center_y = hc_xform.y;
             ev->ssp_raw      = ssp_raw;
             ev->vtp_roc_tags = vtp_banks.roc_tags;
             ev->vtp_nwords   = vtp_banks.nwords;
@@ -1066,6 +1068,8 @@ bool Replay::ProcessRaw2Recon(const std::string &input_raw, const std::string &o
         ev->trigger_type = in->trigger_type;
         ev->trigger_bits = in->trigger_bits;
         ev->timestamp    = in->timestamp;
+        ev->hycal_center_x = hc_xform.x;
+        ev->hycal_center_y = hc_xform.y;
         ev->ssp_raw      = in->ssp_raw;
         ev->vtp_roc_tags = in->vtp_roc_tags;
         ev->vtp_nwords   = in->vtp_nwords;

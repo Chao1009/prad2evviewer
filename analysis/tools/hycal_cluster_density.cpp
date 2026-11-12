@@ -259,8 +259,11 @@ int main(int argc, char *argv[])
         g_hit.z = ev.mHit_gz[0][0];
         GetProjection(g_hit, hc_hit.z);
 
-        ApplyToHyCal(g_hit, gRunConfig);
-        ApplyToHyCal(hc_hit, gRunConfig);
+        // Move back to HyCal center coordinates
+        hc_hit.x -= ev.hycal_center_x;
+        hc_hit.y -= ev.hycal_center_y;
+        g_hit.x -= ev.hycal_center_x;
+        g_hit.y -= ev.hycal_center_y;
 
         const auto &mod = hycal.module_by_id(ev.cl_center[0]);
         if (!InHyCalRing(hc_hit.x, hc_hit.y, 3.0, 15.)) continue;
