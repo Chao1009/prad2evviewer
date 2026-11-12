@@ -1512,8 +1512,10 @@ void usage(const char *prog)
         "+ EPICS).  Writes a single ROOT file with the kept physics events\n"
         "and the full scaler/epics streams concatenated, plus a JSON report\n"
         "with per-(cut, slow-event) pass/fail status for chart plotting.\n"
-        "With multiple inputs, -o is an output directory; one filtered ROOT\n"
-        "is written per input as prad_<run>_filter_<index>.root,\n"
+        "With a single input, -o may be an output ROOT file or directory; when\n"
+        "it is a directory, the output name is derived from the input. With\n"
+        "multiple inputs, -o is an output directory; one filtered ROOT\n"
+        "is written per input using a derived name,\n"
         "plus prad_<run>_epics.root and one run-level JSON report.\n"
         "\n"
         "With a \"split\" block events are instead classified by a PV level\n"
@@ -1571,6 +1573,23 @@ int main(int argc, char *argv[])
         return 1;
     }
     num_threads = std::max(1, num_threads);
+
+    if (inputs.size() == 1) {
+        std::error_code ec;
+        const bool output_is_directory = std::filesystem::is_directory(output, ec);
+        const bool has_root_extension =
+            std::filesystem::path(output).extension() == ".root";
+        if (output_is_directory || !has_root_extension) {
+            std::filesystem::create_directories(output, ec);
+            if (ec) {
+                std::cerr << "replay_filter: cannot create output directory "
+                          << output << ": " << ec.message() << "\n";
+                return 1;
+            }
+            output = filtered_output_path(output, inputs.front());
+        }
+    }
+
     if (report_path.empty()) {
         if (inputs.size() > 1) {
             int rn = run_override >= 0 ? run_override : analysis::get_run_int(inputs.front());

@@ -87,8 +87,9 @@ output; the default is 80, and `-m 0` leaves only the per-split files.
 
 ### replay_filter
 
-Applies slow-control quality cuts to a replayed run.  With one input it
-writes one filtered ROOT file; with multiple inputs, `-o` is an output
+Applies slow-control quality cuts to a replayed run.  With one input,
+`-o` may be a ROOT filename or an output directory; directory output names
+are derived from the input. With multiple inputs, `-o` is an output
 directory and one filtered ROOT is written per input file.
 
 ```bash
@@ -96,6 +97,13 @@ prad2ana_replay_filter <input.root> [more.root ...] \
     -o <output.root|output_dir> -c <cuts.json> \
     [-j <report.json>] [-r <run_num>] [-t threads]
 ```
+
+For a single input, use an explicit `.root` filename to select file output;
+other paths (including existing directories) select directory output. For
+example, `-o 0.7GeV/` writes
+`0.7GeV/prad_024597_filter_000.root` for input
+`prad_024597_recon_000.root`. The default JSON report is written beside that
+filtered ROOT file.
 
 Inputs may be either `replay_rawdata` (`events`) or `replay_recon`
 (`recon`) outputs; the tree name is auto-detected and preserved.  All
