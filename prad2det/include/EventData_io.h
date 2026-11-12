@@ -315,6 +315,8 @@ inline void SetReconWriteBranches(TTree *tree, ReconEventData &ev, bool x17_mode
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
     tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
+    tree->Branch("hycal_center_x", &ev.hycal_center_x, "hycal_center_x/F");
+    tree->Branch("hycal_center_y", &ev.hycal_center_y, "hycal_center_y/F");
     tree->Branch("total_energy", &ev.total_energy, "total_energy/F");
 
     // HyCal cluster branches (lab frame: target/beam-centred).
@@ -466,6 +468,8 @@ inline ReconReadStatus SetReconReadBranches(TTree *tree, ReconEventData &ev)
     bind("trigger_type", &ev.trigger_type);
     bind("trigger_bits", &ev.trigger_bits);
     bind("timestamp",    &ev.timestamp);
+    bind("hycal_center_x", &ev.hycal_center_x);
+    bind("hycal_center_y", &ev.hycal_center_y);
     bind("total_energy", &ev.total_energy);
 
     bind("n_clusters", &ev.n_clusters);

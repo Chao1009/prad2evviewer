@@ -558,7 +558,9 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             hc_hit.z = event.cl_z[0];
             hc_hit.energy = event.cl_energy[0];
 
-            ApplyToHyCal(hc_hit, run_config);
+            // Move back to HyCal center coordinates
+            hc_hit.x -= event.hycal_center_x;
+            hc_hit.y -= event.hycal_center_y;
             if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
 
             const auto *mod = hycal.module_by_id(event.cl_center[0]);
@@ -613,8 +615,12 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             MollerEvent moller_event = {DataPoint(hc_hit[0].x, hc_hit[0].y, hc_hit[0].z, hc_hit[0].energy),
                         DataPoint(hc_hit[1].x, hc_hit[1].y, hc_hit[1].z, hc_hit[1].energy)};
 
-            ApplyToHyCal(hc_hit[0], run_config);
-            ApplyToHyCal(hc_hit[1], run_config);
+            // Move back to HyCal center coordinates
+            hc_hit[0].x -= event.hycal_center_x;
+            hc_hit[0].y -= event.hycal_center_y;
+            hc_hit[1].x -= event.hycal_center_x;
+            hc_hit[1].y -= event.hycal_center_y;
+
             if (!InHyCalRing(hc_hit[0].x, hc_hit[0].y, 2.0, 15.)) continue;
             if (!InHyCalRing(hc_hit[1].x, hc_hit[1].y, 2.0, 15.)) continue;
 

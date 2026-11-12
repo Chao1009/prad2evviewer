@@ -248,6 +248,10 @@ struct ReconEventData {
     uint32_t trigger_bits = 0;   // FP trigger bits (multi-bit, from TI master d[5])
     long long  timestamp    = 0;
 
+    // HyCal center after beam position correction (mm, target-beam-center coordinates)
+    float hycal_center_x = 0.f;
+    float hycal_center_y = 0.f;
+
     // HyCal clusters
     float total_energy = 0.f;
     int     n_clusters = 0;
@@ -397,6 +401,8 @@ struct ReconEventData {
         trigger_type = 0;
         trigger_bits = 0;
         timestamp    = 0;
+        hycal_center_x = 0.f;
+        hycal_center_y = 0.f;
         total_energy = 0.f;
         n_clusters   = 0;
         n_gem_hits   = 0;
