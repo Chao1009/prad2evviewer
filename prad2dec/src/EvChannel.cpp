@@ -172,10 +172,17 @@ bool EvChannel::Scan()
     cached_event_idx = -1;
     clearCache();
 
+    if (buffer.size() < BankHeader::size()) return false;
     BankHeader evh(&buffer[0]);
-    if (evh.length + 1 > buffer.size()) return false;
+    size_t evlen = static_cast<size_t>(evh.length) + 1;
+    if (evlen > buffer.size()) return false;
 
-    scanBank(0, 0, -1);
+    // children are bounded by their parent, so stale words past the event
+    // (file mode) or past the buffer (ET mode) are never scanned
+    if (scanBank(0, 0, -1, evlen) == 0) {
+        nodes.clear();
+        return false;
+    }
 
     evtype = classify_event(evh.tag, config);
 
@@ -224,74 +231,94 @@ void EvChannel::SelectEvent(int i) const
 }
 
 // --- scan a SEGMENT or TAGSEGMENT (1-word header) ----------------------------
+// The scan helpers return the words consumed, or 0 when the structure
+// overruns `end` (the parent's data end); the caller then rejects the event.
 template <class Hdr>
-size_t EvChannel::scanSegment(size_t off, int depth, int parent)
+size_t EvChannel::scanSegment(size_t off, int depth, int parent, size_t end)
 {
     Hdr h(&buffer[off]);
     size_t total = 1 + h.length;
+    if (total > end - off) return 0;
 
     int idx = static_cast<int>(nodes.size());
     nodes.push_back({h.tag, h.type, 0, depth, parent,
                      off + 1, h.length, 0, 0});
 
-    if (IsContainer(h.type))
-        scanChildren(off + 1, h.length, h.type, depth + 1, idx);
+    if (IsContainer(h.type) &&
+        !scanChildren(off + 1, h.length, h.type, depth + 1, idx))
+        return 0;
     return total;
 }
 
 // --- scan a BANK (2-word header) --------------------------------------------
-size_t EvChannel::scanBank(size_t off, int depth, int parent)
+size_t EvChannel::scanBank(size_t off, int depth, int parent, size_t end)
 {
+    if (end - off < BankHeader::size()) return 0;
     BankHeader h(&buffer[off]);
-    size_t total = h.length + 1;
+    size_t total = static_cast<size_t>(h.length) + 1;
+    if (total > end - off) return 0;
 
     int idx = static_cast<int>(nodes.size());
     nodes.push_back({h.tag, h.type, h.num, depth, parent,
                      off + BankHeader::size(), h.data_words(), 0, 0});
 
     if (IsContainer(h.type)) {
-        scanChildren(off + BankHeader::size(), h.data_words(), h.type, depth + 1, idx);
+        if (!scanChildren(off + BankHeader::size(), h.data_words(), h.type, depth + 1, idx))
+            return 0;
     } else if (h.type == DATA_COMPOSITE) {
         size_t doff = off + BankHeader::size();
         size_t dwords = h.data_words();
         size_t first_child = nodes.size();
+        size_t count = 0;
 
         if (dwords >= 1) {
-            size_t consumed = scanSegment<TagSegmentHeader>(doff, depth + 1, idx);
-            if (consumed < dwords)
-                scanBank(doff + consumed, depth + 1, idx);
+            size_t consumed = scanSegment<TagSegmentHeader>(doff, depth + 1, idx, doff + dwords);
+            if (consumed == 0) return 0;
+            ++count;
+            if (consumed < dwords) {
+                nodes[first_child].next_sibling = static_cast<int>(nodes.size());
+                if (scanBank(doff + consumed, depth + 1, idx, doff + dwords) == 0)
+                    return 0;
+                ++count;
+            }
         }
 
         nodes[idx].child_first = first_child;
-        nodes[idx].child_count = nodes.size() - first_child;
+        nodes[idx].child_count = count;
     }
     return total;
 }
 
 // --- scan children of a container -------------------------------------------
-void EvChannel::scanChildren(size_t off, size_t nwords, uint32_t ptype, int depth, int pidx)
+bool EvChannel::scanChildren(size_t off, size_t nwords, uint32_t ptype, int depth, int pidx)
 {
     size_t first_child = nodes.size();
     size_t count = 0, pos = 0;
+    size_t end = off + nwords;
+    int prev = -1;
 
     while (pos < nwords) {
+        int cur = static_cast<int>(nodes.size());
         size_t consumed = 0;
         switch (ptype) {
         case DATA_BANK: case DATA_BANK2:
-            consumed = scanBank(off + pos, depth, pidx); break;
+            consumed = scanBank(off + pos, depth, pidx, end); break;
         case DATA_SEGMENT: case DATA_SEGMENT2:
-            consumed = scanSegment<SegmentHeader>(off + pos, depth, pidx); break;
+            consumed = scanSegment<SegmentHeader>(off + pos, depth, pidx, end); break;
         case DATA_TAGSEGMENT:
-            consumed = scanSegment<TagSegmentHeader>(off + pos, depth, pidx); break;
-        default: return;
+            consumed = scanSegment<TagSegmentHeader>(off + pos, depth, pidx, end); break;
+        default: return true;
         }
-        if (consumed == 0) break;
+        if (consumed == 0) return false;
+        if (prev >= 0) nodes[prev].next_sibling = cur;
+        prev = cur;
         pos += consumed;
         ++count;
     }
 
     nodes[pidx].child_first = first_child;
     nodes[pidx].child_count = count;
+    return true;
 }
 
 // === accessors ==============================================================
@@ -535,7 +562,7 @@ void EvChannel::decodeInfoInto(fdec::EventInfo &info) const
         auto &n = nodes[ni];
         if (n.depth != 1) continue;
         for (size_t ci = 0; ci < n.child_count; ++ci) {
-            auto &child = nodes[n.child_first + ci];
+            auto &child = GetChild(n, ci);
             if (child.tag == config.run_info_tag && child.type == DATA_UINT32)
                 decodeRunInfo(child, info);
         }
@@ -700,7 +727,7 @@ bool EvChannel::decodeSyncInto(psync::SyncInfo &out) const
     {
         const auto &evn = nodes[0];
         for (size_t ci = 0; ci < evn.child_count; ++ci) {
-            const auto &child = nodes[evn.child_first + ci];
+            const auto &child = GetChild(evn, ci);
             if (child.type != DATA_UINT32 || child.data_words == 0) continue;
             const uint32_t *d = GetData(child);
             size_t nw = child.data_words;

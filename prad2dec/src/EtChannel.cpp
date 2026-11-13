@@ -132,6 +132,10 @@ status EtChannel::Read()
                 std::cerr << "EtChannel Error: failed to put back et_event after reading.\n";
                 return status::eof;
             }
+            // headers-only blocks or filtered-out events leave nothing to read
+            if (buffers.empty()) {
+                return status::empty;
+            }
             // get an event from the buffers
             buffer = std::move(buffers.front());
             buffers.pop_front();

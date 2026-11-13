@@ -148,7 +148,7 @@ done:
               << "Total physics events: " << total << "\n"
               << "LMS events: " << lms_count << "\n"
               << "First TI timestamp: " << first_ts << "\n"
-              << "TI tick: " << fdec::TI_TICK_SEC << " sec (250 MHz)\n";
+              << "TI tick: " << std::defaultfloat << fdec::TI_TICK_SEC << " sec (250 MHz)\n";
     if (first_ts != 0 && total > 0) {
         double total_time = static_cast<double>(event->info.timestamp - first_ts) * fdec::TI_TICK_SEC;
         std::cout << "Time span: " << std::fixed << std::setprecision(2)
