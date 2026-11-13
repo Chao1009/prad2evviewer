@@ -219,10 +219,12 @@ class PedestalWorker(QObject):
     """Builds per-strip pedestals from up to ``max_events`` events of
     ``path`` that carry full-readout APVs (online-ZS APVs are skipped).
     Writes the APV-block pedestal text file (det.GemPedestal.write) to
-    ``output_path``.
+    ``output_path``.  A cancelled run writes nothing and ends with
+    ``failed(CANCELLED)``.
     """
 
     PROGRESS_EVERY = 50
+    CANCELLED = "cancelled"
 
     progress = pyqtSignal(int, int)           # (done, target)
     finished = pyqtSignal(str, int, int)      # (output_path, napvs, events_used)
@@ -270,6 +272,9 @@ class PedestalWorker(QObject):
             ch.close()
         self.progress.emit(n_used, target)
 
+        if self._cancel:
+            self.failed.emit(self.CANCELLED)
+            return
         if n_used == 0:
             self.failed.emit("no full-readout events found in file")
             return
@@ -1189,10 +1194,11 @@ class AdvancedDock(QDockWidget):
         spin.setValue(val)
         spin.setMaximumWidth(90)
 
+        # Not blocked: the spin box's valueChanged is the pair's one
+        # change signal, so a slider move must reach it (b2s blocks the
+        # slider, which ends the round trip).
         def s2b(tick: int):
-            spin.blockSignals(True)
             spin.setValue(lo + tick * step)
-            spin.blockSignals(False)
 
         def b2s(v: float):
             slider.blockSignals(True)
@@ -1797,6 +1803,9 @@ class GemEventViewer(QMainWindow):
 
         def _on_failed(msg: str):
             dlg.close()
+            if msg == PedestalWorker.CANCELLED:
+                self._set_status("Auto-pedestal generation cancelled")
+                return
             QMessageBox.critical(self, "Pedestal generation failed", msg)
 
         worker.progress.connect(_on_progress)

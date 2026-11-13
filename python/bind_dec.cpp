@@ -37,6 +37,8 @@
 #include "EpicsStore.h"
 #include "HVDecoder.h"
 
+#include <cstddef>
+#include <cstring>
 #include <memory>
 #include <string>
 
@@ -56,12 +58,13 @@ U16Span u16_span(const U16Array &a, const char *what = "samples")
     return {a.data(), static_cast<int>(a.shape(0))};
 }
 
-fdec::WaveResult run_analyze(const fdec::WaveAnalyzer &self, const U16Array &samples)
+fdec::WaveResult run_analyze(const fdec::WaveAnalyzer &self, const U16Array &samples,
+                             float time_offset = 0.f)
 {
     const U16Span s = u16_span(samples);
     fdec::WaveResult res;
     py::gil_scoped_release rel;
-    self.Analyze(s.p, s.n, res);
+    self.Analyze(s.p, s.n, res, time_offset);
     return res;
 }
 
@@ -392,21 +395,25 @@ void bind_fadc(py::module_ &m)
              py::arg("cfg") = fdec::WaveConfig{})
         .def_readwrite("cfg", &fdec::WaveAnalyzer::cfg)
         .def("analyze",
-            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
-                const fdec::WaveResult r = run_analyze(self, samples);
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples,
+               float time_offset) {
+                const fdec::WaveResult r = run_analyze(self, samples, time_offset);
                 return py::make_tuple(r.ped.mean, r.ped.rms, list_of(r.peaks, r.npeaks));
             },
-            py::arg("samples"),
+            py::arg("samples"), py::arg("time_offset") = 0.f,
             "Analyze one channel's FADC waveform (uint16 numpy array). "
             "Returns (pedestal_mean, pedestal_rms, peaks_list).  Peaks "
             "above ``max(cfg.peak_nsigma × ped.rms, cfg.min_peak_height)`` "
-            "are kept; up to ``MAX_PEAKS`` per call.")
+            "are kept; up to ``MAX_PEAKS`` per call.  ``time_offset`` (ns, "
+            "e.g. HyCal Module.time_offset) is subtracted from every peak "
+            "time, as the C++ replay does.")
         .def("analyze_full",
-            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
-                const fdec::WaveResult r = run_analyze(self, samples);
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples,
+               float time_offset) {
+                const fdec::WaveResult r = run_analyze(self, samples, time_offset);
                 return py::make_tuple(r.ped, list_of(r.peaks, r.npeaks));
             },
-            py::arg("samples"),
+            py::arg("samples"), py::arg("time_offset") = 0.f,
             "Like analyze() but returns the full (Pedestal, [Peak, ...]) "
             "tuple — Pedestal exposes nused / quality / slope, each Peak "
             "exposes its quality bitmask.  Use this when documenting the "
@@ -472,10 +479,12 @@ void bind_fadc(py::module_ &m)
             "template.  Pass any negative value to disable deconv.")
         .def("clear_channel_key", &fdec::WaveAnalyzer::ClearChannelKey)
         .def("analyze_result", &run_analyze,
-            py::arg("samples"),
+            py::arg("samples"), py::arg("time_offset") = 0.f,
             "Like analyze() but returns the full WaveResult object — pass "
             "this back to deconvolve() so the deconvolver sees the same "
-            "pedestal and peak set the analyzer found.")
+            "pedestal and peak set the analyzer found.  Leave "
+            "``time_offset`` at 0 for a WaveResult fed to deconvolve(): "
+            "the deconvolver reads the peak times as sample-time ns.")
         .def("deconvolve",
             [](const fdec::WaveAnalyzer &self, const U16Array &samples,
                const fdec::WaveResult &wres, const fdec::PulseTemplate &tmpl) {
@@ -794,13 +803,17 @@ void bind_tdc(py::module_ &m)
                 fields.append(py::make_tuple("edge",    "u1"));
                 fields.append(py::make_tuple("_pad",    "u1"));
                 fields.append(py::make_tuple("value",   "<u4"));
+                static_assert(sizeof(tdc::TdcHit) == 12 &&
+                              offsetof(tdc::TdcHit, value) == 8,
+                              "hits_numpy dtype no longer matches tdc::TdcHit");
                 py::dtype dt = py::dtype::from_args(fields);
-                // Pass the buffer address; py::array copies when no base
-                // handle is given, so the returned array is independent of
-                // the TdcEventData (safe across the next decode call).
-                const void *src = (e.n_hits > 0) ? (const void*)e.hits
-                                                  : nullptr;
-                return py::array(dt, (py::ssize_t)e.n_hits, src);
+                // Allocate, then copy (bind_common.h rule): the array is
+                // independent of the TdcEventData across the next decode.
+                py::array out(dt, (py::ssize_t)e.n_hits);
+                if (e.n_hits > 0)
+                    std::memcpy(out.mutable_data(), e.hits,
+                                sizeof(tdc::TdcHit) * e.n_hits);
+                return out;
             },
             "Hits as a numpy structured array (fresh copy, length n_hits).\n"
             "Fields: roc_tag <u4, slot u1, channel u1, edge u1, _pad u1, "
@@ -1107,7 +1120,12 @@ void bind_epics(py::module_ &m)
         .def("get_channel_names", &epics::EpicsStore::GetChannelNames,
              py::return_value_policy::reference_internal)
         .def("get_snapshot_count", &epics::EpicsStore::GetSnapshotCount)
-        .def("get_snapshot",       &epics::EpicsStore::GetSnapshot,
+        .def("get_snapshot",
+             [](const epics::EpicsStore &self, int index)
+                 -> const epics::EpicsStore::Snapshot & {
+                 return self.GetSnapshot(checked_index(index, self.GetSnapshotCount(),
+                                                       "snapshot index out of range"));
+             },
              py::arg("index"), py::return_value_policy::reference_internal)
         .def("trim", &epics::EpicsStore::Trim, py::arg("max_count"),
              "Drop oldest snapshots so at most `max_count` remain.")

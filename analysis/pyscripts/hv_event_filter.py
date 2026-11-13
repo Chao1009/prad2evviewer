@@ -249,7 +249,7 @@ def main():
         col = dv_2d[:, ch_idx].astype(np.float64)
         rs  = _rolling_std(col, win)
         bad = np.zeros(n_snap, dtype=bool)
-        valid = ~np.isnan(rs)
+        valid = ~np.isnan(col)      # _rolling_std reports 0, not NaN, offline
 
         if args.abs_threshold is not None:
             bad |= (rs > args.abs_threshold)

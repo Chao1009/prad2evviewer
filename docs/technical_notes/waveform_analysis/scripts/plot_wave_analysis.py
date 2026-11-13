@@ -172,7 +172,7 @@ def soft_analyze(s, *, smooth_order=2, peak_nsigma=5.0, min_peak_height=10.0,
 
     ped_height  = float(buf[pk.pos]) - ped.mean
     tail_cut    = ped_height * int_tail_ratio
-    thr         = max(threshold * ped.rms, min_threshold)
+    thr         = max(peak_nsigma * ped.rms, min_peak_height)
     t_subsample = pk.time * clk_mhz / 1000.0 - pk.pos
 
     return dict(
@@ -216,7 +216,7 @@ print("Soft analyzer  (WaveAnalyzer)")
 print("=" * 60)
 print(f"  pedestal             : mean={sa['ped_mean']:.2f}, rms={sa['ped_rms']:.2f},"
       f" nused={sa['ped_nused']}/30 (median/MAD bootstrap)")
-print(f"  threshold            : {sa['threshold']:.2f} (= max(5*rms, 3))")
+print(f"  threshold            : {sa['threshold']:.2f} (= max(5*rms, 10))")
 print(f"  raw peak             : sample {sa['pos']} (h={sa['height']:.0f})")
 print(f"  integration          : [{sa['int_left']}, {sa['int_right']}]"
       f" inclusive (tail-cut={sa['tail_cut']:.0f}, N_break=2)")
@@ -356,7 +356,7 @@ ax.plot(TIME, sa['buf'], color='#ff7f0e', lw=1.2,
 ax.axhline(sa['ped_mean'], color='#888', lw=0.8, ls='--',
            label=f"pedestal = {sa['ped_mean']:.2f} ± {sa['ped_rms']:.2f}")
 ax.axhline(sa['ped_mean'] + sa['threshold'], color='#d62728', lw=0.8,
-           ls=':', label=f"threshold = max(5·rms, 3) = {sa['threshold']:.2f}")
+           ls=':', label=f"threshold = max(5·rms, 10) = {sa['threshold']:.2f}")
 ax.axhline(sa['ped_mean'] + sa['tail_cut'], color='#2ca02c', lw=0.8,
            ls=':', label=f"tail cut-off = 10% × peak height")
 

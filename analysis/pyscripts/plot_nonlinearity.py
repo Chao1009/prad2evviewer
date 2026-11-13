@@ -13,10 +13,18 @@ args = parser.parse_args()
 with open(args.json) as f:
     data = json.load(f)
 
-nl_values = [entry["non_linear"] for entry in data
-             if entry.get("name", "").startswith("W") and entry["non_linear"] != 0.0]
+def _nl(entry):
+    # "nl1" in the current calibration format; "non_linear" in legacy files.
+    v = entry.get("nl1", entry.get("non_linear"))
+    return 0.0 if v is None else v
+
+
+nl_values = [_nl(entry) for entry in data
+             if entry.get("name", "").startswith("W") and _nl(entry) != 0.0]
 
 print(f"W modules with non-zero nl: {len(nl_values)}")
+if not nl_values:
+    raise SystemExit(0)
 print(f"  mean  = {np.mean(nl_values):.4f}")
 print(f"  std   = {np.std(nl_values):.4f}")
 print(f"  min   = {np.min(nl_values):.4f}")

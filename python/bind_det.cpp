@@ -59,6 +59,16 @@
 #include <string>
 
 // ---- GEM ----------------------------------------------------------------
+// Range checks for GemSystem's unchecked accessors (IndexError, not UB).
+static int gem_det(const gem::GemSystem &s, int det)
+{ return checked_index(det, s.GetNDetectors(), "detector index out of range"); }
+static int gem_plane(int plane)
+{ return checked_index(plane, 2, "plane out of range (0=X, 1=Y)"); }
+static int gem_apv(const gem::GemSystem &s, int apv)
+{ return checked_index(apv, s.GetNApvs(), "APV index out of range"); }
+static int gem_strip(int ch)
+{ return checked_index(ch, ssp::APV_STRIP_SIZE, "channel out of range"); }
+
 static void bind_gem(py::module_ &m)
 {
     // --- stateless strip-mapping (shared with GemSystem::buildStripMap) -----
@@ -392,16 +402,29 @@ static void bind_gem(py::module_ &m)
         .def("get_n_detectors", &gem::GemSystem::GetNDetectors)
         .def("get_detectors",   &gem::GemSystem::GetDetectors,
              py::return_value_policy::reference_internal)
-        .def("get_plane_hits", &gem::GemSystem::GetPlaneHits,
+        .def("get_plane_hits",
+             [](const gem::GemSystem &self, int det, int plane)
+                 -> const std::vector<gem::StripHit> & {
+                 return self.GetPlaneHits(gem_det(self, det), gem_plane(plane));
+             },
              py::arg("det"), py::arg("plane"),
              py::return_value_policy::reference_internal,
              "Per-plane StripHit list (plane=0 for X, 1 for Y).")
-        .def("get_plane_clusters", &gem::GemSystem::GetPlaneClusters,
+        .def("get_plane_clusters",
+             [](const gem::GemSystem &self, int det, int plane)
+                 -> const std::vector<gem::StripCluster> & {
+                 return self.GetPlaneClusters(gem_det(self, det), gem_plane(plane));
+             },
              py::arg("det"), py::arg("plane"),
              py::return_value_policy::reference_internal,
              "Per-plane StripCluster list (plane=0 for X, 1 for Y).  Populated "
              "after reconstruct().")
-        .def("get_hits", &gem::GemSystem::GetHits, py::arg("det"),
+        .def("get_hits",
+             [](const gem::GemSystem &self, int det)
+                 -> const std::vector<gem::GEMHit> & {
+                 return self.GetHits(gem_det(self, det));
+             },
+             py::arg("det"),
              py::return_value_policy::reference_internal,
              "Per-detector reconstructed 2-D GEMHits.")
         .def("get_all_hits", &gem::GemSystem::GetAllHits,
@@ -410,7 +433,11 @@ static void bind_gem(py::module_ &m)
 
         // APV diagnostics
         .def("get_n_apvs", &gem::GemSystem::GetNApvs)
-        .def("get_apv_config", &gem::GemSystem::GetApvConfig, py::arg("index"),
+        .def("get_apv_config",
+             [](const gem::GemSystem &self, int index) -> const gem::ApvConfig & {
+                 return self.GetApvConfig(gem_apv(self, index));
+             },
+             py::arg("index"),
              py::return_value_policy::reference_internal)
         .def("find_apv_index", &gem::GemSystem::FindApvIndex,
              py::arg("crate"), py::arg("mpd"), py::arg("adc"),
@@ -425,14 +452,24 @@ static void bind_gem(py::module_ &m)
              "strip numbers.  plane: 0=X, 1=Y.")
 
         // post-process-event diagnostics
-        .def("is_channel_hit", &gem::GemSystem::IsChannelHit,
+        .def("is_channel_hit",
+             [](const gem::GemSystem &self, int apv_index, int ch) {
+                 return self.IsChannelHit(gem_apv(self, apv_index), gem_strip(ch));
+             },
              py::arg("apv_index"), py::arg("ch"),
              "True if this strip survived zero suppression in the last "
              "process_event().")
-        .def("has_apv_zs_hits", &gem::GemSystem::HasApvZsHits,
+        .def("has_apv_zs_hits",
+             [](const gem::GemSystem &self, int apv_index) {
+                 return self.HasApvZsHits(gem_apv(self, apv_index));
+             },
              py::arg("apv_index"),
              "True if any channel in this APV survived zero suppression.")
-        .def("get_processed_adc", &gem::GemSystem::GetProcessedAdc,
+        .def("get_processed_adc",
+             [](const gem::GemSystem &self, int apv_index, int ch, int ts) {
+                 return self.GetProcessedAdc(gem_apv(self, apv_index), gem_strip(ch),
+                     checked_index(ts, ssp::SSP_TIME_SAMPLES, "time sample out of range"));
+             },
              py::arg("apv_index"), py::arg("ch"), py::arg("ts"),
              "Pedestal + common-mode-corrected ADC for (APV, channel, time "
              "sample); valid after process_event().")
@@ -455,6 +492,7 @@ static void bind_gem(py::module_ &m)
             "charges to 0.1.")
         .def("get_apv_frame",
             [](const gem::GemSystem &self, int apv_idx) {
+                gem_apv(self, apv_idx);
                 // Copy into a fresh (128, 6) float32 array in strip-major
                 // order.  Underlying storage is time-major (raw[ts*128+ch])
                 // — single-APV transposed copy is ~3 kB, negligible.
@@ -472,6 +510,7 @@ static void bind_gem(py::module_ &m)
             "every strip of this APV.  Valid after process_event().")
         .def("get_apv_hit_mask",
             [](const gem::GemSystem &self, int apv_idx) {
+                gem_apv(self, apv_idx);
                 constexpr int NS = ssp::APV_STRIP_SIZE;
                 py::array_t<bool> out(NS);
                 auto buf = out.mutable_unchecked<1>();
@@ -487,7 +526,7 @@ static void bind_gem(py::module_ &m)
                 constexpr int NS = ssp::APV_STRIP_SIZE;
                 py::array_t<float> out(NS);
                 auto buf = out.mutable_unchecked<1>();
-                const auto &cfg = self.GetApvConfig(apv_idx);
+                const auto &cfg = self.GetApvConfig(gem_apv(self, apv_idx));
                 for (int ch = 0; ch < NS; ++ch)
                     buf(ch) = cfg.pedestal[ch].noise;
                 return out;
@@ -622,6 +661,7 @@ static void bind_hycal(py::module_ &m)
         .def_readonly("cal_base_energy", &fdec::Module::cal_base_energy)
         .def_readonly("cal_non_linear_1",  &fdec::Module::cal_non_linear_1)
         .def_readonly("cal_non_linear_2",  &fdec::Module::cal_non_linear_2)
+        .def_readonly("time_offset",     &fdec::Module::time_offset)
         .def("energize", &fdec::Module::energize, py::arg("adc"),
              "Convert a pedestal-subtracted ADC value to MeV "
              "(cal_factor * adc; 0 for adc < 0).")
@@ -657,8 +697,10 @@ static void bind_hycal(py::module_ &m)
 
         .def("module_count", &fdec::HyCalSystem::module_count)
         .def("module",
-            static_cast<const fdec::Module &(fdec::HyCalSystem::*)(int) const>(
-                &fdec::HyCalSystem::module),
+            [](const fdec::HyCalSystem &self, int index) -> const fdec::Module & {
+                return self.module(checked_index(index, self.module_count(),
+                                                 "module index out of range"));
+            },
             py::arg("index"),
             py::return_value_policy::reference_internal,
             "Module by array index (0 .. module_count()-1).")
@@ -715,7 +757,11 @@ static void bind_hycal(py::module_ &m)
                "sigma(E) in MeV: E*sqrt(A^2/E_GeV + C^2 + B^2/E_GeV^2)/100.")
 
         .def("sector_info",
-            &fdec::HyCalSystem::sector_info, py::arg("sector"),
+            [](const fdec::HyCalSystem &self, int sector) -> const fdec::SectorInfo & {
+                return self.sector_info(checked_index(sector,
+                    static_cast<int>(fdec::Sector::Max), "sector out of range"));
+            },
+            py::arg("sector"),
             py::return_value_policy::reference_internal)
         .def("get_sector_id", &fdec::HyCalSystem::get_sector_id,
              py::arg("x"), py::arg("y"),
@@ -746,6 +792,8 @@ static void bind_hycal(py::module_ &m)
         .def("for_each_neighbor",
             [](const fdec::HyCalSystem &self, int module_index,
                bool include_corners, const py::function &fn) {
+                checked_index(module_index, self.module_count(),
+                              "module index out of range");
                 self.for_each_neighbor(module_index, include_corners,
                     [&](int ni) { fn(ni); });
             },
