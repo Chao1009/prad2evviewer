@@ -651,34 +651,36 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             hc_hit.x = ev.cl_x[j];
             hc_hit.y = ev.cl_y[j];
             hc_hit.z = ev.cl_z[j];
-            ApplyToHyCal(hc_hit, run_config);
+
+            // get the energy ratio of measured energy to expected energy calculated with beam position correction
+            // then multiply by the expected energy calculated with module center position correction
+            // to produce a corrected energy value that is independent of the beam position
+            float theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
+            float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
+            float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
+            float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, Ebeam, "ee");
+            float energy = ev.cl_energy[j] / expect_energy * expect_energy_moduleCenter;
+
             // Move back to HyCal center coordinates
             hc_hit.x -= ev.hycal_center_x;
             hc_hit.y -= ev.hycal_center_y;
 
-            const float c_x = hc_hit.x;
-            const float c_y = hc_hit.y;
-            const float c_z = hc_hit.z;
-
-            // require the hit near the seed module centre (|xd|,|yd| < 0.3 module sizes)
-            const auto [xd, yd] = mod->cell_offset<float>(c_x, c_y);
+            // require the hit near the seed module centre (|xd|,|yd| < 0.1 module sizes)
+            const auto [xd, yd] = mod->cell_offset<float>(hc_hit.x, hc_hit.y);
             if (std::abs(xd) >= 0.1f || std::abs(yd) >= 0.1f) continue;
 
-            float theta = std::atan2(std::sqrt(c_x*c_x + c_y*c_y), run_config.hycal_z) * 180.f / M_PI;
-            float energy = ev.cl_energy[j];
-
             bool veto = false;
-                float sci_time, sci_int;
-                for(int k = 0; k < ev.veto_nch; k++){
-                    for(int p = 0; p < ev.veto_npeaks[k]; p++){
-                        sci_time = ev.veto_peak_time[k][p];
-                        sci_int = ev.veto_peak_integral[k][p];
-                        veto = Vetoed(ev.cl_time[j], sci_time, sci_int);
-                        if(veto) break;
-                    }
+            float sci_time, sci_int;
+            for(int k = 0; k < ev.veto_nch; k++){
+                for(int p = 0; p < ev.veto_npeaks[k]; p++){
+                    sci_time = ev.veto_peak_time[k][p];
+                    sci_int = ev.veto_peak_integral[k][p];
+                    veto = Vetoed(ev.cl_time[j], sci_time, sci_int);
                     if(veto) break;
                 }
-                if(theta > 1.1) veto = false;
+                if(veto) break;
+            }
+            if(theta > 1.1) veto = false;
 
             if(veto && energy > 600. && Ebeam < 1000.f) continue;
 
