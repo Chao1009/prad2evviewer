@@ -49,6 +49,13 @@ import urllib.error
 
 import numpy as np
 
+from prad2_env import fix_qt_lib_path
+
+# Main program only: multiprocessing workers re-import this module (as
+# __mp_main__) with the parent's environment and must not re-exec.
+if __name__ == "__main__":
+    fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QDoubleSpinBox, QLineEdit, QProgressBar,
@@ -652,10 +659,13 @@ class WaveformCollector:
                 return False
         channels  = data.get("channels", {})
         ev_num    = data.get("event_number", data.get("event", 0))
+        # /api/waveform/ is addressed by the 1-based file index ("event"),
+        # not by the DAQ event number.
+        ev_idx    = data.get("event", ev_num)
         scint_ch  = channels.get(scint_key, {})
         hycal_ch  = channels.get(hycal_key, {})
-        scint_sp  = self._get_samples(ev_num, scint_ch, scint_key)
-        hycal_sp  = self._get_samples(ev_num, hycal_ch, hycal_key)
+        scint_sp  = self._get_samples(ev_idx, scint_ch, scint_key)
+        hycal_sp  = self._get_samples(ev_idx, hycal_ch, hycal_key)
         scint_int = max((pk.get("i", 0.0) for pk in scint_ch.get("pk", [])), default=0.0)
         hycal_int = max((pk.get("i", 0.0) for pk in hycal_ch.get("pk", [])), default=0.0)
         with self._lock:
@@ -906,9 +916,20 @@ class ProcessWorkerET(_CoincWorker):
                     continue
 
                 # Sequence numbers increase monotonically, so anything above
-                # last_seq has not been processed yet.
-                new_seqs = sorted(
-                    s for s in ring_data.get("ring", []) if s > last_seq)
+                # last_seq has not been processed yet -- until the server
+                # clears its online accumulators, which restarts the
+                # numbering from 0.  The ring (in push order) may then still
+                # hold old-numbering entries before the drop: use only the
+                # entries after the last drop, and start over once the
+                # newest one is below last_seq.
+                ring = ring_data.get("ring", [])
+                for i in range(len(ring) - 1, 0, -1):
+                    if ring[i] < ring[i - 1]:
+                        ring = ring[i:]
+                        break
+                if ring and ring[-1] < last_seq:
+                    last_seq = 0
+                new_seqs = sorted(s for s in ring if s > last_seq)
 
                 if new_seqs:
                     futures = {
@@ -1086,6 +1107,19 @@ class ProcessWorkerLocal(_CoincWorker):
             # worker per UI cycle even when the worker pushes more often.
             latest_progress: Dict[int, dict] = {}
 
+            # A worker process cannot exit until its queue feeder thread has
+            # written every message to the pipe, and one message can fill
+            # the pipe buffer.  So keep reading until each worker has sent
+            # its last ("finished") message or raised, and only then join.
+            done_workers: set = set()
+
+            def _take(msg):
+                counters.merge(msg)
+                if "worker_id" in msg:
+                    latest_progress[msg["worker_id"]] = msg
+                    if msg.get("finished"):
+                        done_workers.add(msg["worker_id"])
+
             last_emit = time.monotonic()
             try:
                 while not self._stop_evt.is_set():
@@ -1095,9 +1129,7 @@ class ProcessWorkerLocal(_CoincWorker):
                             msg = update_q.get(timeout=0.1)
                         except Exception:
                             break
-                        counters.merge(msg)
-                        if "worker_id" in msg:
-                            latest_progress[msg["worker_id"]] = msg
+                        _take(msg)
                         drained = True
 
                     n_chunks_total = len(async_results)
@@ -1111,30 +1143,33 @@ class ProcessWorkerLocal(_CoincWorker):
                         latest_progress.clear()
                         last_emit = now
 
-                    if n_done >= n_chunks_total:
+                    if all(i in done_workers
+                           or (ar.ready() and not ar.successful())
+                           for i, ar in enumerate(async_results)):
                         break
             finally:
                 if self._stop_evt.is_set():
                     pool.terminate()
+                    pool.join()
+                else:
+                    # Keep reading while the workers exit: one that raised
+                    # may still be flushing earlier messages.
+                    joiner = threading.Thread(target=pool.join, daemon=True)
+                    joiner.start()
+                    while joiner.is_alive():
+                        try:
+                            msg = update_q.get(timeout=0.1)
+                        except Exception:
+                            continue
+                        _take(msg)
 
-                # Wait for worker processes to fully exit.  Each worker's queue
-                # feeder thread flushes pending messages on process exit, so
-                # this is when the *final* per-worker _flush() lands in the
-                # OS pipe buffer.  Without this wait, the parent would see
-                # ar.ready()==True and proceed before the worker's last delta
-                # message arrived, silently losing the tail of each chunk.
-                pool.join()
-
-                # Drain everything that's now sitting in the queue, including
-                # the final flushes from every worker.
+                # Drain whatever is left in the queue.
                 while True:
                     try:
                         msg = update_q.get_nowait()
                     except Exception:
                         break
-                    counters.merge(msg)
-                    if "worker_id" in msg:
-                        latest_progress[msg["worker_id"]] = msg
+                    _take(msg)
                 for prog in latest_progress.values():
                     self.worker_progress.emit(prog)
                 latest_progress.clear()
@@ -1342,6 +1377,8 @@ class InstantDisplayWorker(QThread):
                 continue
 
             latest = ring_data.get("latest", 0)
+            if latest < last_seq:   # server restarted its numbering (cleared)
+                last_seq = 0
             if latest == 0 or latest <= last_seq:
                 time.sleep(self.POLL_INTERVAL)
                 continue
@@ -2550,7 +2587,7 @@ class MainWindow(QMainWindow):
 
     def _apply_config(self, cfg: dict) -> None:
         """Update UI state from a /api/config response dict."""
-        n            = cfg.get("event_count", 0)
+        n            = cfg.get("total_events", cfg.get("event_count", 0))
         mode         = cfg.get("mode", "unknown")
         et_connected = cfg.get("et_connected", False)
         self._n_events = n
@@ -3074,6 +3111,8 @@ class MainWindow(QMainWindow):
         self._step_continue_btn.setEnabled(False)
         if msg == "stopped":
             self._status_label.setText("Stopped.")
+        elif msg.startswith("error"):
+            self._status_label.setText(msg)
         else:
             n = self._snapshot.get("processed", 0)
             self._status_label.setText(f"Done — {n:,} events processed.")

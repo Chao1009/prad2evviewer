@@ -47,6 +47,11 @@ echo "Found ${NFILES} evio files for run ${RUN}"
 
 mkdir -p "${OUTPUTDIR}"
 
+# No more jobs than files
+if [ "${NCPU}" -gt "${NFILES}" ]; then
+    NCPU=${NFILES}
+fi
+
 # Divide files among CPUs
 BASE=$(( NFILES / NCPU ))
 REM=$(( NFILES % NCPU ))
@@ -75,17 +80,30 @@ for (( i=0; i<NCPU; i++ )); do
 done
 
 echo "Waiting for ${#PIDS[@]} jobs..."
+NFAILED=0
 for PID in "${PIDS[@]}"; do
-    wait "${PID}"
+    if ! wait "${PID}"; then
+        NFAILED=$(( NFAILED + 1 ))
+    fi
 done
+if [ "${NFAILED}" -gt 0 ]; then
+    echo "ERROR: ${NFAILED} of ${#PIDS[@]} prad2ana_gain_monitor jobs failed for run ${RUN}"
+    exit 1
+fi
 echo "All jobs done."
 
 FINALFILE="${OUTPUTDIR}/prad_${RUN}_LMS.root"
 echo "Merging into ${FINALFILE}"
-hadd -f "${FINALFILE}" "${PARTFILES[@]}"
+if ! hadd -f "${FINALFILE}" "${PARTFILES[@]}"; then
+    echo "ERROR: hadd failed for run ${RUN}; part files kept in ${OUTPUTDIR}"
+    exit 1
+fi
 rm -f "${PARTFILES[@]}"
 
 echo "Fitting ${FINALFILE}"
-prad2ana_gain_fitter -r "${RUN}" -d "${OUTPUTDIR}"
+if ! prad2ana_gain_fitter -r "${RUN}" -d "${OUTPUTDIR}"; then
+    echo "ERROR: prad2ana_gain_fitter failed for run ${RUN}"
+    exit 1
+fi
 
 echo "Done."

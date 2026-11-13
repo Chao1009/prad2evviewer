@@ -32,6 +32,10 @@ try:
 except ImportError:
     _UPROOT_OK = False
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QLineEdit, QSpinBox,
@@ -1720,10 +1724,16 @@ class DoItAllDialog(_ProcessDialog):
         # Bash: a single loop covers both single-run and batch.  In batch
         # mode each iteration ends with `rm -rf` of the local run dir.
         runs_string = " ".join(run_numbers)
+        # A failed analysis stops the script (set -e) before this; also
+        # keep the raw files when the fit left no .dat result.
         cleanup_block = (
             "    echo \"\"\n"
-            "    echo \"=== Run $RUN: cleanup — removing $LRD ===\"\n"
-            "    rm -rf \"$LRD\"\n"
+            "    if [ -s \"$OUTDIR/prad_${RUN}_LMS.dat\" ]; then\n"
+            "        echo \"=== Run $RUN: cleanup — removing $LRD ===\"\n"
+            "        rm -rf \"$LRD\"\n"
+            "    else\n"
+            "        echo \"=== Run $RUN: no $OUTDIR/prad_${RUN}_LMS.dat — keeping $LRD ===\" >&2\n"
+            "    fi\n"
         ) if batch_mode else ""
 
         bash_cmd = (
@@ -2350,6 +2360,7 @@ class GainMonitorWindow(QMainWindow):
 
         self._runs = load_all_runs(folder)
         self._current_folder = folder
+        self._hist_cache.clear()
         if not self._runs:
             self._status_lbl.setText("No data files found")
             self._status_lbl.setStyleSheet(themed("color:#f85149;"))
