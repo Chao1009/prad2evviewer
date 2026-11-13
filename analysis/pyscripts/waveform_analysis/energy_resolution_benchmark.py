@@ -4,6 +4,8 @@
     python3 waveform_analysis/energy_resolution_benchmark.py scan <out.npz> <evio file> [<evio file> ...]
     python3 waveform_analysis/energy_resolution_benchmark.py report [--out <dir>] <scan dir> <gate_ns> [<gate_ns> ...]
     python3 waveform_analysis/energy_resolution_benchmark.py summary <out dir>     # <out dir>/summary.pdf from the five reports
+  scan and report also take `--set NAME=VALUE` (repeatable, NAME in OVERRIDABLE): a module constant is overridden for the run and
+  recorded in regions_splits.tsv / regions.tsv (`# overrides:` line) and the scan file (key overrides).
 
 Algorithm
   scan (one run, no clustering): physics events -> every PbWO4 channel through the matched filter MF of
@@ -29,6 +31,7 @@ import os
 for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_v, "1")                     # one BLAS thread per process
 
+import ast
 import csv
 import hashlib
 import json
@@ -75,6 +78,7 @@ LMS_BIT = 0x1000000                    # light-monitoring trigger bit, vetoed on
 NS_EXPECT, OVERFLOW, BLOCK = 100, 4095, 256   # samples per PbWO4 channel, ADC overflow, events per matched-filter block
 PRE_LO, PRE_HI = 100.0, 200.0          # ns: a hit needs PRE_LO < t < PRE_HI (no time offsets)
 N_PHASE = 256                          # sampling phases of the walk-out integral table (1.8 % peak to peak per module)
+PHASE_CORR = True                      # False: each module's table row replaced by its phase average (no phase correction of the hit energy)
 N_REF_EVENTS = 20000                   # first decoded events of an EVIO file that set its per-module noise reference
 MIN_REF_WAVEFORMS = 20                 # modules with fewer reference waveforms take the median reference sigma
 START_NSIGMA = 3.0                     # baseline farther than this many reference sigma from the reference starts the fit at it
@@ -104,6 +108,7 @@ CLUSTER_FIELDS = ("min_module_energy", "min_center_energy", "min_cluster_energy"
                   "corner_conn", "split_iter", "least_split", "log_weight_thres")   # copied from the builder configuration
 MIN_CENTER_E = 30.0                    # MeV, seed threshold (database default 10)
 LEGACY_WINDOW = -1.0                   # seed_time_window of the legacy path (no time coincidence)
+CLUSTER_SET = {}                       # clusterer fields set after CLUSTER_FIELDS (e.g. {"log_weight_thres": 3.5}), every path
 
 # --- pool selection (MeV at E_REF; times kE at other beam energies)
 E_REF = 2239.51                        # reference beam energy (MeV)
@@ -111,6 +116,15 @@ SIGNAL_MIN = 500.0                     # events with exactly one cluster above t
 SEED_MIN = 200.0                       # pool: seed module energy >= this
 INNER_R = 200.0                        # pool: seed module centre radius < this (mm)
 EXCLUDE_ROWCOL = (15, 20, 15, 20)      # pool: seed not in rows 15-20 and columns 15-20 (1-based, inclusive)
+EVAL_REGIONS = False                   # also keep and fit the clusters with any PbWO4 seed, per region (regions_splits.tsv); training stays on the pool
+REGION_EDGES = (120.0, 160.0, 200.0, 300.0)   # mm: seed centre radius edges of I1 | I2 | I3 | M | O
+TRANSITION_LAYERS = 2                  # T: seed in the outermost this many PbWO4 rows or columns
+REGION_MIN_N = 2000                    # regions.tsv: fewer in-range clusters over the run type -> status ep-starved
+EDGE_UV = 0.35                         # pool_edge: |u| or |v| of the impact position in the seed module above this
+LG_COINC_MM = 60.0                     # T cluster with a lead-glass hit of the event within this distance of the seed centre (any time)
+MOLLER_PAIRS = False                   # keep events with two back-to-back PbWO4 clusters above SIGNAL_MIN: the moller2 row
+PAIR_DPHI_DEG = 10.0                   # back to back: | |phi1 - phi2| - 180 deg | below this
+SECONDARY_DUMP = False                 # write secondaries.npz: extra pulses of the legacy pool clusters' member modules
 
 # --- module set (elastic-window method, no gain applied)
 MIN_PER_MODULE = 30                    # events within mu_M +- WINDOW_NSIGMA sigma_M
@@ -130,6 +144,12 @@ MOLLER_TIE_PCT = (2.0, 98.0)           # cluster-radius percentiles of the tie r
 YIELD_NSIGMA = 2.5                     # peak yield: |E / E' - 1| <= this x s_ref
 TAIL_NSIGMA = 3.0                      # tail fraction outside mu_CB +- this x sigma_CB
 NPROC = 8                              # report: worker processes (one split each)
+SEP_GAP_MEV = 144.7                    # distance of the pi0 p threshold above the elastic peak, MeV at E' = Ebeam (scales with E' / Ebeam)
+SEP_CUT_MEV = {"0p73GeV_H2": 49.0, "2p24GeV_H2": 84.0, "3p49GeV_H2": 110.0, "3p49GeV_H2_old": 110.0,
+               "2p24GeV_Ta_X17": 84.0}   # elastic cut E > mu - c (MeV), 2 sigma_E of the 11-12 baseline, frozen
+SEP_Q = ("med", "sigma_e", "sep_pi", "tail_lo3", "tail_hi3", "tail_lo_f", "tail_hi_f", "eff_cut", "leak_cut")   # separation keys of fit_path (cut given)
+REG_Q = ("res_cb", "res_g2", "mu") + SEP_Q   # fitted columns of regions_splits.tsv (mu: mu_ep) and regions.tsv
+REGION_MIN_FIT = 50                    # a region split with fewer in-range clusters gets NaN fitted columns
 
 # --- gains (percrystal_calib.py solve, windows refitted in the first passes)
 GAIN_SEED_FRAC = 0.64                  # mean seed energy fraction; sets the prior strength
@@ -151,6 +171,8 @@ PC_ACCEPT = (0.9, 1.1)                 # hybrid: own fit kept only if R stays in
 
 # --- Moller rejection and non-linearity (old chain: --moller-reject kin, --nl-members on)
 MOLLER_REJECT = False                  # kinematic Moller rejection in the arms that have it: event selection and gain fit (default off pending user confirmation, 2026-11-12)
+TWO_PEAK_WITH_REJECT = True            # False: a single Crystal Ball instead of the two-peak fit in an arm with Moller rejection on
+MOLLER_BEAM_OFFSET = (0.0, 0.0)        # mm (x, y): beam position on HyCal, subtracted before the Moller angle of the moller rows (tag and E_ee)
 MOLLER_KIN_N, MOLLER_KIN_M = 3.0, 2.0  # Moller if |E - E_ee| < N sigma and |E - E'| > M sigma (cluster polar angle)
 NONLINEAR = False                      # calibration non-linearity factor in the arms that have it (clusterer's factor, per cluster; default off pending user confirmation, 2026-11-12)
 
@@ -165,6 +187,9 @@ CORR_Q = ("res_cb", "res_g2", "mu_ep")   # quantities kept per arm
 OOS_Q = tuple(f"{q}_oos" for q in CORR_Q) if OUT_OF_SAMPLE else ()   # out-of-sample columns (default arm, legacy and every gate)
 RATIO_EDGES = np.arange(0.6, 1.4 + 1e-9, 0.004)   # bins of E / E' stored in spectra.npz (summary pages)
 NAN2 = (float("nan"),) * 2             # failed (mu, sigma) fit
+OVERRIDABLE = ("EVAL_REGIONS", "TWO_PEAK_WITH_REJECT", "CLUSTER_SET", "MOLLER_BEAM_OFFSET", "MOLLER_PAIRS", "SECONDARY_DUMP",
+               "PHASE_CORR", "MOLLER_REJECT", "NONLINEAR", "MIN_SEP_NS", "R_MODEL")   # constants that --set may replace
+OVERRIDES = "none"                     # the --set assignments of this run, in command-line order
 
 
 class Bank:
@@ -855,7 +880,8 @@ def scan(out, evios):
             r, j = np.nonzero(v & ~tm[:, None] & (t > PRE_LO) & (t < PRE_HI))
             x = (-(t0[r, j] % DT) / DT * N_PHASE) % N_PHASE          # table position of the onset phase
             i0 = x.astype(np.int64)
-            ph = ptab[bank.row[mi[r]], i0] * (1 - x + i0) + ptab[bank.row[mi[r]], i0 + 1] * (x - i0)
+            ph = (ptab[bank.row[mi[r]], i0] * (1 - x + i0) + ptab[bank.row[mi[r]], i0 + 1] * (x - i0) if PHASE_CORR
+                  else ptab[bank.row[mi[r]], :N_PHASE].mean(axis=1))
             hits.append((ev[r], mi[r], t[r, j], gain[mi[r]] * iint[mi[r]] * ph * a[r, j], a[r, j], v.sum(1)[r]))
             fb = np.nonzero((Y >= OVERFLOW).any(axis=1) & ~v.any(axis=1))[0]   # clipped, no usable pulse
             n_fb += fb.size
@@ -907,7 +933,8 @@ def scan(out, evios):
                         mod_name=names, mod_pwo4=pwo4, ev_number=np.array(ev_number, dtype=np.int64),
                         ev_split=np.array(ev_split, dtype=np.int32), h_ev=h_ev.astype(np.int32),
                         h_mod=h_mod.astype(np.int16), h_t=h_t.astype(np.float32), h_e=h_e.astype(np.float32),
-                        h_a=h_a.astype(np.float32), h_k=h_k.astype(np.int8), h_extra=extra)
+                        h_a=h_a.astype(np.float32), h_k=h_k.astype(np.int8), h_extra=extra,
+                        **({"overrides": OVERRIDES} if OVERRIDES != "none" else {}))
     top = lambda c: ", ".join(f"{names[i]} {c[i]}" for i in np.argsort(-c)[:3])   # noqa: E731
     print(f"[done] {out}: {n_seen} events, {len(ev_number)} physics, {h_ev.size} in-window hits ({int(extra.sum())} extra), "
           f"{n_fb} clipped channels on WaveAnalyzer, {int(n_base_ref.sum())} baseline starts from b_ref; {wall:.0f} s\n"
@@ -934,6 +961,8 @@ def clusterers(run, calib, gates):
             setattr(cfg, f, getattr(base, f))
         cfg.min_center_energy = MIN_CENTER_E
         cfg.seed_time_window = window
+        for f, v in CLUSTER_SET.items():
+            setattr(cfg, f, v)
         cl = det.HyCalCluster(hycal)
         cl.set_config(base)                # installs the builder's Geant4 profile (a C++-only field) ...
         cl.set_config(cfg)                 # ... which this one keeps while setting every other field
@@ -986,19 +1015,56 @@ def pool_modules(geo):
     return (geo["x"] ** 2 + geo["y"] ** 2 < INNER_R ** 2) & ~((rl <= row) & (row <= rh) & (cl <= col) & (col <= ch))
 
 
-def cluster_events(h, cls, geo, signal_min, seed_min):
+REGION_NAMES = ("I1", "I2", "I3", "M", "O", "H", "T")   # seed module regions, index = code (D2); I1 + I2 + I3 = the pool
+SEC = ("n_extra", "dt", "ar", "rank", "e_extra")        # SECONDARY_DUMP fields per legacy cluster
+PAIR_REC = ("seed", "x", "y", "e", "er", "mi", "me")    # MOLLER_PAIRS: per cluster, the two clusters of a pair consecutive
+
+
+def module_regions(geo):
+    """[n modules] index into REGION_NAMES of a PbWO4 seed module (H, then T, then the radius), -1 for lead glass."""
+    code = np.digitize(np.hypot(geo["x"], geo["y"]), REGION_EDGES)
+    rl, rh, cl, ch = EXCLUDE_ROWCOL
+    row, col, pw = geo["row"], geo["col"], geo["pwo4"]
+    h = (rl <= row + 1) & (row + 1 <= rh) & (cl <= col + 1) & (col + 1 <= ch)
+    t = ((row < row[pw].min() + TRANSITION_LAYERS) | (row > row[pw].max() - TRANSITION_LAYERS)
+         | (col < col[pw].min() + TRANSITION_LAYERS) | (col > col[pw].max() - TRANSITION_LAYERS))
+    return np.where(~pw, -1, np.where(h, 5, np.where(t, 6, code)))
+
+
+def secondary(mi, me, s, f, mod, t, e, a, extra):
+    """SEC fields of a cluster (members mi, member energies me) from the event's hits [s, f): number of extra pulses on its member modules
+    and, for the one with the largest energy, dt to that module's main pulse (ns), amplitude ratio, rank of the module among the members
+    by energy (0 = seed), energy; (0, nan, nan, -1, nan) without one."""
+    ms = mi.tolist()
+    ex = [i for i in range(s, f) if extra[i] and mod[i] in ms]
+    if not ex:
+        return 0, float("nan"), float("nan"), -1, float("nan")
+    i = max(ex, key=lambda j: e[j])
+    j = next(j for j in range(s, f) if mod[j] == mod[i] and not extra[j])      # hits are sorted per module, largest energy first
+    return len(ex), t[i] - t[j], a[i] / a[j], int((me > me[ms.index(mod[i])]).sum()), e[i]
+
+
+def cluster_events(h, cls, geo, signal_min, seed_min, pairs=None):
     """Per path, the pool clusters (seed in pool_modules, seed energy >= seed_min) of the events of h with exactly one cluster
     above signal_min (fields REC): cluster energy e with the calibration's non-linearity factor, er without it (sum of the raw
     member energies me of modules mi), pile-up flag (a member module with >= 2 in-window pulses), clip flag (PbWO4 seed on
-    WaveAnalyzer).  Also {path: number of such events}."""
-    ev, pwo4, ok_mod = h["h_ev"], geo["pwo4"], pool_modules(geo)
-    out = {p: {q: [] for q in REC} for p in cls}
+    WaveAnalyzer).  Also {path: number of such events}.  EVAL_REGIONS: every PbWO4 seed is kept, with fields reg (REGION_NAMES code)
+    and lg (T seed, a lead-glass hit of the event within LG_COINC_MM).  SECONDARY_DUMP: the legacy clusters also carry SEC.
+    MOLLER_PAIRS: pairs (a dict) receives {path: clusters (PAIR_REC) of the events with two back-to-back PbWO4 clusters above
+    signal_min}."""
+    ev, pwo4 = h["h_ev"], geo["pwo4"]
+    ok_mod = pwo4 if EVAL_REGIONS else pool_modules(geo)
+    reg, gx, gy = module_regions(geo) if EVAL_REGIONS else None, geo["x"], geo["y"]
+    out = {p: {q: [] for q in REC + (("reg", "lg") if EVAL_REGIONS else ()) + (SEC if SECONDARY_DUMP and p == "legacy" else ())}
+           for p in cls}
+    two = {p: {q: [] for q in PAIR_REC} for p in cls}
     n_single = dict.fromkeys(cls, 0)
     if ev.size:
         lo = np.flatnonzero(np.r_[True, ev[1:] != ev[:-1]])
         hi = np.r_[lo[1:], ev.size]
         keep = np.add.reduceat(h["h_e"].astype(np.float64), lo) > 0.5 * signal_min   # a cluster above signal_min needs > half of it in hits
         mod, t, e, k, extra = (h[q].tolist() for q in ("h_mod", "h_t", "h_e", "h_k", "h_extra"))
+        a = h["h_a"].tolist() if SECONDARY_DUMP else None
         for s, f in zip(lo[keep].tolist(), hi[keep].tolist()):
             multi = {m for m, c in Counter(mod[s:f]).items() if c >= 2}
             wa = {m for m, kk in zip(mod[s:f], k[s:f]) if kk == 0}
@@ -1010,6 +1076,14 @@ def cluster_events(h, cls, geo, signal_min, seed_min):
                 cl.form_clusters()
                 big = [r for r in cl.reconstruct_matched() if r.hit.energy > signal_min]
                 if len(big) != 1:
+                    if (MOLLER_PAIRS and len(big) == 2 and all(pwo4[r.cluster.center.index] for r in big)
+                            and abs(abs(math.degrees(math.atan2(big[0].hit.y, big[0].hit.x) - math.atan2(big[1].hit.y, big[1].hit.x)))
+                                    - 180.0) < PAIR_DPHI_DEG):
+                        for r in big:
+                            mi = np.array([x.index for x in r.cluster.hits], np.int64)
+                            me = np.array([x.energy for x in r.cluster.hits])
+                            for q, v in zip(PAIR_REC, (r.cluster.center.index, r.hit.x, r.hit.y, r.hit.energy, me.sum(), mi, me)):
+                                two[p][q].append(v)
                     continue
                 r = big[0]
                 n_single[p] += 1
@@ -1021,7 +1095,17 @@ def cluster_events(h, cls, geo, signal_min, seed_min):
                 for q, v in zip(REC, (ev[s], seed, r.cluster.center.energy, r.hit.energy, me.sum(), r.hit.x, r.hit.y,
                                       bool(multi.intersection(mi.tolist())), seed in wa and pwo4[seed], mi, me)):
                     out[p][q].append(v)
-    return {p: {q: objects(v) if q in ("mi", "me") else np.array(v) for q, v in d.items()} for p, d in out.items()}, n_single
+                if EVAL_REGIONS:
+                    out[p]["reg"].append(reg[seed])
+                    out[p]["lg"].append(bool(reg[seed] == 6 and any(
+                        not pwo4[m] and (gx[m] - gx[seed]) ** 2 + (gy[m] - gy[seed]) ** 2 <= LG_COINC_MM ** 2 for m in set(mod[s:f]))))
+                if SECONDARY_DUMP and p == "legacy":
+                    for q, v in zip(SEC, secondary(mi, me, s, f, mod, t, e, a, extra)):
+                        out[p][q].append(v)
+    fin = lambda d: {p: {q: objects(v) if q in ("mi", "me") else np.array(v) for q, v in c.items()} for p, c in d.items()}   # noqa: E731
+    if pairs is not None:
+        pairs.update(fin(two))
+    return fin(out), n_single
 
 
 # kinematics and fits (benchmark_hycal_timing_test_20261021.py) ================
@@ -1211,15 +1295,40 @@ def module_set(seed, E, geo, m_target, kE, kS):
     return used, ep_mean, dict(win=win, sigma_glob=sigma_glob, mu_global=mu_global)
 
 
-def fit_path(pool, used, ep_mean, ref, geo, kE, kS):
-    """Fits of the used-module spectrum on ref +- FIT_HALF kE: (results, spectrum); two-peak Crystal Ball (res_cb), Gaussian within
-    2 sigma (res_g2), interquartile range / 1.349 (res_iqr), peak / E' - 1 (mu_ep), tail, pile-up and clip fractions, all in %."""
+def ep_lookup(used, n):
+    """[n modules] E' of the used modules {module: E'} (NaN elsewhere)."""
+    a = np.full(n, np.nan)
+    a[list(used)] = list(used.values())
+    return a
+
+
+def sep_stats(inr, ep_seed, mu, sig, res, ep_mean, ebeam, cut):
+    """Separation columns (SEP_Q) of a fit (D1) from its in-range energies inr, the E' of their seeds, the Crystal Ball peak mu and
+    sigma sig (MeV), res = sigma / mu (%), the mean E' and the elastic cut cut (MeV): median E / E'(seed); sigma_E = res E' and
+    sep_pi = gap / sigma_E, gap = SEP_GAP_MEV E' / Ebeam; the tails (%) beyond mu -+ 3 sigma and mu -+ gap; the shares (%) above
+    mu - cut (eff_cut) and above mu + gap - cut (leak_cut)."""
+    out = dict.fromkeys(SEP_Q, float("nan"))
+    if not inr.size:
+        return out
+    out["med"] = float(np.median(inr / ep_seed))
+    if sig > 0 and math.isfinite(mu):
+        gap, d, pct = SEP_GAP_MEV * ep_mean / ebeam, inr - mu, lambda m: 100.0 * float(np.mean(m))   # noqa: E731
+        out |= dict(sigma_e=res / 100.0 * ep_mean, sep_pi=gap / (res / 100.0 * ep_mean), tail_lo3=pct(d < -TAIL_NSIGMA * sig),
+                    tail_hi3=pct(d > TAIL_NSIGMA * sig), tail_lo_f=pct(inr < mu - gap), tail_hi_f=pct(inr > mu + gap),
+                    eff_cut=pct(inr > mu - cut), leak_cut=pct(inr > mu + (gap - cut)))
+    return out
+
+
+def fit_path(pool, used, ep_mean, ref, geo, kE, kS, single=False, cut=None):
+    """Fits of the used-module spectrum on ref +- FIT_HALF kE: (results, spectrum); two-peak Crystal Ball (res_cb; single: the single
+    one), Gaussian within 2 sigma (res_g2), interquartile range / 1.349 (res_iqr), peak / E' - 1 (mu_ep), tail, pile-up and clip
+    fractions, all in %; n_range = clusters within the range; with cut (MeV) also the SEP_Q columns."""
     bw, hz, ebeam = BIN * kS, geo["hz"], geo["ebeam"]
     u = np.isin(pool["seed"], list(used))
     E, xc, yc = pool["e"][u], pool["x"][u], pool["y"][u]
     if E.size == 0 or not math.isfinite(ref):
         return dict.fromkeys(("mu_fix", "sig_fix", "mu_g2", "sig_g2", "mu_cb", "sig_cb", "res_cb", "res_g2", "res_iqr",
-                              "tail", "mu_ep", "pu", "clip"), float("nan")) | dict(n_used=int(E.size), cb_mode="none"), E
+                              "tail", "mu_ep", "pu", "clip") + SEP_Q, float("nan")) | dict(n_used=int(E.size), n_range=0, cb_mode="none"), E
     lo, hi = ref - FIT_HALF * kE, ref + FIT_HALF * kE
     c, y = hist(E, lo, hi, bw)
     mu_f, sig_f = gauss_fixed(c, y, lo, hi, bw, kS)
@@ -1230,15 +1339,19 @@ def fit_path(pool, used, ep_mean, ref, geo, kE, kS):
         em0 = float(e_moller(np.mean(theta_deg(xc, yc, hz)), ebeam)) * sc
         r_lo, r_hi = np.percentile(np.hypot(xc, yc), MOLLER_TIE_PCT)
         em_rng = tuple(float(e_moller(theta_deg(r, 0.0, hz), ebeam)) * sc for r in (r_hi, r_lo))
-        mu_cb, sig_cb, mode = cb_two_peak(c, y, lo, hi, bw, kS, mu_f, sig_2, em0, em_rng)
+        mu_cb, sig_cb, mode = ((*cb_single(c, y, lo, hi, bw, kS, mu_f), "single") if single
+                               else cb_two_peak(c, y, lo, hi, bw, kS, mu_f, sig_2, em0, em_rng))
     inr = E[(E >= lo) & (E <= hi)]
     q25, q50, q75 = np.percentile(inr, (25, 50, 75)) if inr.size else (np.nan,) * 3
     tail = float(np.mean(np.abs(inr - mu_cb) > TAIL_NSIGMA * sig_cb)) if inr.size and sig_cb > 0 else np.nan
     pct = lambda a, b: 100.0 * a / b if (b and math.isfinite(b) and b > 0) else float("nan")   # noqa: E731
-    return dict(n_used=int(E.size), mu_fix=mu_f, sig_fix=sig_f, mu_g2=mu_2, sig_g2=sig_2, mu_cb=mu_cb, sig_cb=sig_cb,
-                cb_mode=mode, res_cb=pct(sig_cb, mu_cb), res_g2=pct(sig_2, mu_2), res_iqr=pct((q75 - q25) / 1.349, q50),
+    res_cb = pct(sig_cb, mu_cb)
+    sep = {} if cut is None else sep_stats(inr, ep_lookup(used, geo["x"].size)[pool["seed"][u][(E >= lo) & (E <= hi)].astype(np.int64)],
+                                           mu_cb, sig_cb, res_cb, ep_mean, ebeam, cut)
+    return dict(n_used=int(E.size), n_range=int(inr.size), mu_fix=mu_f, sig_fix=sig_f, mu_g2=mu_2, sig_g2=sig_2, mu_cb=mu_cb, sig_cb=sig_cb,
+                cb_mode=mode, res_cb=res_cb, res_g2=pct(sig_2, mu_2), res_iqr=pct((q75 - q25) / 1.349, q50),
                 tail=100.0 * tail, mu_ep=pct(mu_cb, ep_mean) - 100.0, pu=100.0 * float(np.mean(pool["pu"][u])) if u.any() else np.nan,
-                clip=100.0 * float(np.mean(pool["clip"][u])) if u.any() else np.nan), E
+                clip=100.0 * float(np.mean(pool["clip"][u])) if u.any() else np.nan) | sep, E
 
 
 def peak_yield(pool, used, s_ref, common):
@@ -1249,12 +1362,13 @@ def peak_yield(pool, used, s_ref, common):
     return int(np.sum(np.abs(pool["e"] / tgt - 1.0) <= YIELD_NSIGMA * s_ref))
 
 
-def evaluate(pools, geo, mass, kE, kS):
+def evaluate(pools, geo, mass, kE, kS, single=False, cut=None):
     """Module set and fits of every path's pool on a fit range centred on the legacy pool's mean E'; peak yield = events within
-    YIELD_NSIGMA s_ref of E' (s_ref: legacy Gaussian width) on the modules both paths use.  Returns {path: fields}, {path: spectrum}."""
+    YIELD_NSIGMA s_ref of E' (s_ref: legacy Gaussian width) on the modules both paths use.  single, cut: see fit_path.  Returns
+    {path: fields}, {path: spectrum}, {path: module_set result}."""
     sets = {p: module_set(pl["seed"].astype(np.int64), pl["e"], geo, mass, kE, kS) for p, pl in pools.items()}
     ref = sets["legacy"][1]
-    fits = {p: fit_path(pl, *sets[p][:2], ref, geo, kE, kS) for p, pl in pools.items()}
+    fits = {p: fit_path(pl, *sets[p][:2], ref, geo, kE, kS, single, cut) for p, pl in pools.items()}
     s_ref = fits["legacy"][0]["sig_fix"] / fits["legacy"][0]["mu_fix"]
     out = {}
     for p, pl in pools.items():
@@ -1263,7 +1377,7 @@ def evaluate(pools, geo, mass, kE, kS):
                       yield_n=peak_yield(pl, sets[p][0], s_ref, common),
                       yield_legacy_n=peak_yield(pools["legacy"], sets["legacy"][0], s_ref, common),
                       modules=",".join(sorted(str(geo["name"][s]) for s in sets[p][0])))
-    return out, {p: f[1] for p, f in fits.items()}
+    return out, {p: f[1] for p, f in fits.items()}, sets
 
 
 # per-crystal gains (percrystal_calib.py solve, windows refitted) ==============
@@ -1528,11 +1642,16 @@ def arm_name(a):
     return ARM_LABEL[a] + (" (switch off)" if switches(ARMS[a]) != ARMS[a] else "")
 
 
-def moller_tag(pool, geo, mass):
+def kin_theta(pool, geo, off=(0.0, 0.0)):
+    """Polar angle (degrees) of the clusters of a pool about the beam position off (mm)."""
+    return theta_deg(pool["x"] - off[0], pool["y"] - off[1], geo["hz"])
+
+
+def moller_tag(pool, geo, mass, off=(0.0, 0.0)):
     """Old chain's kinematic Moller tag (benchmark_hycal_timing_test_20261021.py moller_kin, lines 3297-3306): at the cluster's polar
     angle |E - E_ee| < MOLLER_KIN_N sigma and |E - E'| > MOLLER_KIN_M sigma, sigma = E' sqrt((A / sqrt(E' / GeV))^2 + B^2), E the
-    corrected cluster energy."""
-    th = theta_deg(pool["x"], pool["y"], geo["hz"])
+    corrected cluster energy; angle about the beam position off (mm; MOLLER_BEAM_OFFSET for the moller rows only)."""
+    th = kin_theta(pool, geo, off)
     ep, ee = e_elastic(th, geo["ebeam"], mass), e_moller(th, geo["ebeam"])
     sig = ep * np.hypot(MOLLER_RES_A / np.sqrt(ep / 1000.0), MOLLER_RES_B)
     return (np.abs(pool["e"] - ee) < MOLLER_KIN_N * sig) & (np.abs(pool["e"] - ep) > MOLLER_KIN_M * sig)
@@ -1546,15 +1665,16 @@ def nl_view(pool, nonlinear):
     return pool | {"me": objects([w * f for w, f in zip(pool["me"], pool["e"] / pool["er"])])}
 
 
-def apply_arm(pool, sw, corr, geo, mass):
-    """Pool with the arm's corrected energy: gains, then position correction (corr[sw] = (gains, correction)), then Moller rejection."""
+def apply_arm(pool, sw, corr, geo, mass, reject=True):
+    """Pool with the arm's corrected energy: gains, then position correction (corr[sw] = (gains, correction)), then Moller rejection
+    (not with reject False)."""
     g, m, n = sw
     pool = nl_view(pool, n)
     if g:
         gains, pc = corr[sw]
         e = np.array([gains[i] @ w for i, w in zip(pool["mi"], pool["me"])])
         pool = pool | {"e": e / pc_eval(pc, pool, geo)}
-    return take(pool, ~moller_tag(pool, geo, mass)) if m else pool
+    return take(pool, ~moller_tag(pool, geo, mass)) if m and reject else pool
 
 
 def gains_job(a):
@@ -1619,6 +1739,77 @@ def corrections(workers, rt, res, out_root, out, write=True):
 
 
 # report =======================================================================
+REGION_ORDER = ("pool", "I1", "I2", "I3", "pool_edge", "pool_centre", "H", "M", "O", "T", "T_lg", "T_nolg", "all")
+KINDS = ("ep", "moller", "moller2")
+
+
+def reg_entry(r, mods, floor=REGION_MIN_FIT):
+    """Row fields of a region from a fit result r (fit_path fields, or mu_ep / res_g2 / med of a ratio fit): counts, the module indices
+    mods and the REG_Q values (mu = mu_ep), NaN with fewer than floor clusters in range."""
+    nan = float("nan")
+    return dict(n=r["n_used"], n_range=r["n_range"], n_modules=len(mods), mods=list(mods)) | {
+        q: r.get("mu_ep" if q == "mu" else q, nan) if r["n_range"] >= floor else nan for q in REG_Q}
+
+
+def ratio_entry(r, seeds):
+    """Region row of a ratio spectrum r (Moller rows: E / E_ee or (E1 + E2) / Ebeam): iterated Gaussian within 2 sigma of 1000 r on
+    [800, 1200], bin 4; mu = peak - 1 (%), res_g2 = sigma / peak (%), med = median of r."""
+    c, y = hist(1000.0 * r, 800.0, 1200.0, 4.0)
+    fit = dict(n_used=int(r.size), n_range=int(y.sum()))
+    if fit["n_range"] >= REGION_MIN_FIT:
+        mu, sg = gauss_2sigma(c, y, *gauss_fixed(c, y, 800.0, 1200.0, 4.0, 1.0))
+        if math.isfinite(mu):
+            fit |= dict(mu_ep=100.0 * (mu / 1000.0 - 1.0), res_g2=100.0 * sg / mu, med=float(np.median(r)))
+    return reg_entry(fit, seeds)
+
+
+def region_rows(full, pairs, sets, c, geo, mass, kE, kS, cut, single):
+    """Region rows other than the pool row, {(kind, region, path): reg_entry}, of the default arm with the corrections c on the full
+    pools.  EVAL_REGIONS: kind ep, pool subsets (fit_path with the pool's module set sets) and the regions outside the pool (spectrum
+    E <E'> / E'(seed) of the region's seeds, used = its seeds), T_lg / T_nolg unfitted; kind moller, kin-tagged clusters without the
+    rejection, E / E_ee at the angle about MOLLER_BEAM_OFFSET.  MOLLER_PAIRS: kind moller2, (E1 + E2) / Ebeam of the pairs."""
+    sw, ref, eb, nan = switches(ARMS[DEFAULT_ARM]), sets["legacy"][1], geo["ebeam"], float("nan")
+    ep_mod = e_elastic(theta_deg(geo["x"], geo["y"], geo["hz"]), eb, mass)      # E' of a seed at its module centre
+    ids = lambda d: np.unique(d["seed"].astype(np.int64))                      # noqa: E731
+    mean_ep = lambda sids: float(ep_mod[sids].mean()) if sids.size else nan    # noqa: E731
+    out = {}
+    for p, pl in full.items():
+        used = sets[p][0]
+        if EVAL_REGIONS:
+            fp = apply_arm(pl, sw, c, geo, mass, reject=False)
+            fr = take(fp, ~moller_tag(fp, geo, mass)) if sw[1] else fp
+            inner = take(fr, fr["reg"] <= 2)
+            u, v = uv(inner, geo)
+            edge = (np.abs(u) > EDGE_UV) | (np.abs(v) > EDGE_UV)
+            for name, sub in (("I1", take(inner, inner["reg"] == 0)), ("I2", take(inner, inner["reg"] == 1)),
+                              ("I3", take(inner, inner["reg"] == 2)), ("pool_edge", take(inner, edge)), ("pool_centre", take(inner, ~edge))):
+                sids = ids(sub)
+                out["ep", name, p] = reg_entry(fit_path(sub, used, mean_ep(sids), ref, geo, kE, kS, single, cut)[0],
+                                               sorted(set(sids.tolist()) & set(used)))
+            for name, code in (("H", 5), ("M", 3), ("O", 4), ("T", 6)):
+                sub = take(fr, fr["reg"] == code)
+                sids = ids(sub)
+                m = mean_ep(sids)
+                sub = sub | {"e": sub["e"] * m / ep_mod[sub["seed"].astype(np.int64)]}
+                out["ep", name, p] = reg_entry(fit_path(sub, dict.fromkeys(sids.tolist(), m), m, m, geo, kE, kS, single, cut)[0],
+                                               sids.tolist())
+                if name == "T":
+                    lg = sub["lg"].astype(bool)
+                    inr = (sub["e"] >= m - FIT_HALF * kE) & (sub["e"] <= m + FIT_HALF * kE)
+                    for nm, sel in (("T_lg", lg), ("T_nolg", ~lg)):
+                        out["ep", nm, p] = reg_entry(dict(n_used=int(sel.sum()), n_range=int((sel & inr).sum()),
+                                                          med=float(np.median(sub["e"][sel & inr] / m)) if (sel & inr).any() else nan),
+                                                     ids(take(sub, sel)), 0) | {"vals": sub["e"][sel & inr] / m}   # pooled median
+            tag, ee = moller_tag(fp, geo, mass, MOLLER_BEAM_OFFSET), e_moller(kin_theta(fp, geo, MOLLER_BEAM_OFFSET), eb)
+            for name, code in (("pool", None), ("I1", 0), ("I2", 1), ("I3", 2), ("M", 3), ("O", 4), ("T", 6)):
+                sel = tag & ((fp["reg"] <= 2) if code is None else (fp["reg"] == code))
+                out["moller", name, p] = ratio_entry(fp["e"][sel] / ee[sel], ids(take(fp, sel)))
+        if MOLLER_PAIRS:
+            pe = apply_arm(pairs[p], sw, c, geo, mass, reject=False)["e"] if pairs[p]["e"].size else np.zeros(0)
+            out["moller2", "all", p] = ratio_entry((pe[0::2] + pe[1::2]) / eb, ids(pairs[p]))
+    return out
+
+
 def split_job(job):
     """One split of one scan file.  corr None (first pass, legacy path only): the legacy pool with its members, input of the
     corrections.  Else corr = {switches: (gains of the run, position correction)}: the default arm for every path (variants all and
@@ -1632,22 +1823,29 @@ def split_job(job):
     kE, kS, mass = round(geo["ebeam"] / E_REF, 6), round(math.sqrt(geo["ebeam"] / E_REF), 6), pool_mass(rt)
     evs, h_ev = np.flatnonzero(z["ev_split"] == split), z["h_ev"]
     lo, hi = (np.searchsorted(h_ev, [evs[0], evs[-1] + 1]) if evs.size else (0, 0))
-    h = {q: z[q][lo:hi] for q in ("h_mod", "h_t", "h_e", "h_k", "h_extra")} | {"h_ev": h_ev[lo:hi]}
+    h = {q: z[q][lo:hi] for q in ("h_mod", "h_t", "h_e", "h_k", "h_extra") + (("h_a",) if SECONDARY_DUMP else ())} | {"h_ev": h_ev[lo:hi]}
     t0 = time.monotonic()
-    base, n_single = cluster_events(h, cls, geo, SIGNAL_MIN * kE, SEED_MIN * kE)
+    pairs = {}
+    base, n_single = cluster_events(h, cls, geo, SIGNAL_MIN * kE, SEED_MIN * kE, pairs)
     t_cl = time.monotonic() - t0
+    full = base
+    if EVAL_REGIONS:                   # the corrections, arms, spectra and the pool row run on the pool clusters as without it
+        in_pool = pool_modules(geo)
+        base = {p: take(pl, in_pool[pl["seed"].astype(np.int64)]) for p, pl in full.items()}
     if corr is None:
         return dict(run=run, pool=base["legacy"], geo=geo, kE=kE, kS=kS)
     arm_pools = lambda arm, paths, c=corr: {p: apply_arm(base[p], switches(ARMS[arm]), c, geo, mass) for p in paths}   # noqa: E731
     arm_paths = [p for p in base if p in ("legacy", f"g{ARM_GATE:g}")]
-    arms = {a: evaluate(arm_pools(a, arm_paths), geo, mass, kE, kS)[0] for a in OTHER_ARMS}
-    if oos:
-        arms["oos"] = evaluate(arm_pools(DEFAULT_ARM, list(base), oos), geo, mass, kE, kS)[0]   # every path: the gate choice is out-of-sample
+    cut = SEP_CUT_MEV[rt]
+    one = lambda arm: not TWO_PEAK_WITH_REJECT and bool(switches(ARMS[arm])[1])   # noqa: E731  single Crystal Ball (arm with rejection on)
+    arms = {a: evaluate(arm_pools(a, arm_paths), geo, mass, kE, kS, one(a))[0] for a in OTHER_ARMS}
+    if oos:       # every path: the gate choice is out-of-sample
+        arms["oos"], _, sets_oos = evaluate(arm_pools(DEFAULT_ARM, list(base), oos), geo, mass, kE, kS, one(DEFAULT_ARM), cut)
     main = arm_pools(DEFAULT_ARM, base)
     rows = []
     for variant in ("all", "nopu"):
         pools = main if variant == "all" else {p: take(pl, ~pl["pu"].astype(bool)) for p, pl in main.items()}
-        res, spec = evaluate(pools, geo, mass, kE, kS)
+        res, spec, sets = evaluate(pools, geo, mass, kE, kS, one(DEFAULT_ARM), cut if variant == "all" else None)
         for p, r in res.items():
             row = dict(run_type=rt, run=run, split=split, path=p, variant=variant, n_single=n_single[p],
                        n_pool=int(pools[p]["e"].size), **r)
@@ -1655,10 +1853,23 @@ def split_job(job):
                 row |= {f"{q}_{a}": res_a[p][q] for a, res_a in arms.items() if p in res_a for q in CORR_Q}
             rows.append(row)
         if variant == "all":
-            spectra, ref = spec, res["legacy"]["eprime"]
+            spectra, ref, res_all, sets_all = spec, res["legacy"]["eprime"], res, sets
             ratio = {p: np.histogram(spec[p] / ref, RATIO_EDGES)[0] for p in spec}      # E / E' of the used-module clusters
+    ent = {("ep", "pool", p): reg_entry(r, list(sets_all[p][0]), 0) for p, r in res_all.items()}
+    ent |= region_rows(full, pairs, sets_all, corr, geo, mass, kE, kS, cut, one(DEFAULT_ARM))
+    ent_o = ({("ep", "pool", p): reg_entry(r, list(sets_oos[p][0]), 0) for p, r in arms["oos"].items()}
+             | region_rows(full, pairs, sets_oos, oos, geo, mass, kE, kS, cut, one(DEFAULT_ARM))) if oos else {}
+    regions = [dict(run_type=rt, run=run, split=split, path=p, kind=kd, region=rg) | m
+               | {f"{q}_oos": ent_o.get((kd, rg, p), {}).get(q, float("nan")) for q in REG_Q}
+               | {"vals_oos": ent_o.get((kd, rg, p), {}).get("vals")} for (kd, rg, p), m in ent.items()]
+    sec = None
+    if SECONDARY_DUMP:        # the clusters that define the legacy pu column
+        d = take(main["legacy"], np.isin(main["legacy"]["seed"], list(sets_all["legacy"][0])))
+        sec = dict(run=np.full(d["e"].size, run), split=np.full(d["e"].size, split),
+                   e_over_ep=d["e"] / ep_lookup(sets_all["legacy"][0], geo["x"].size)[d["seed"].astype(np.int64)],
+                   n_extra=d["n_extra"], dt=d["dt"], ar=d["ar"], member_rank=d["rank"], e_extra=d["e_extra"])
     print(f"  [split] run {run} split {split}: {evs.size} events, clustering {t_cl:.0f} s", flush=True)
-    return dict(rows=rows, spectra=spectra, ratio=ratio, ref=ref, kE=kE, kS=kS)
+    return dict(rows=rows, spectra=spectra, ratio=ratio, ref=ref, kE=kE, kS=kS, regions=regions, sec=sec)
 
 
 COLS = ("run_type", "run", "split", "path", "variant", "n_single", "n_pool", "n_modules", "n_used", "eprime", "mu_fix",
@@ -1844,14 +2055,51 @@ def write_pdf(summ, spectra, rows, rt, gates, out):
         plt.close(fig)
 
 
+def write_regions(regs, names, paths, out, scan_ovr=()):
+    """regions_splits.tsv (one row per run, split, path, kind and region) and regions.tsv (aggregated over splits) of the run type;
+    prior_frac_mean from the gains.tsv rows of the default arm (a module without one counts as 1); med of T_lg / T_nolg pooled over
+    the splits; `# overrides:` first line (with the scan files' overrides scan_ovr)."""
+    combo, pf = switches(ARMS[DEFAULT_ARM])[1:], {}
+    for g in tsv_rows(out / "gains.tsv"):
+        if (int(g["moller"]), int(g["nonlinear"])) == combo:
+            pf[int(g["run"]), g["module"]] = float(g["prior_frac"])
+    for r in regs:
+        r["prior_frac_mean"] = float(np.mean([pf.get((r["run"], str(names[m])), 1.0) for m in r["mods"]])) if r["mods"] else float("nan")
+    regs.sort(key=lambda r: (r["run"], r["split"], paths.index(r["path"]), KINDS.index(r["kind"]), REGION_ORDER.index(r["region"])))
+    qs = REG_Q + tuple(f"{q}_oos" for q in REG_Q)
+    ids = ("run_type", "run", "split", "path", "kind", "region", "n", "n_range", "n_modules", "prior_frac_mean")
+    comment = f"# overrides: {OVERRIDES}" + (f"; scan: {', '.join(sorted(scan_ovr))}" if scan_ovr else "")
+    write_tsv(out / "regions_splits.tsv", ids + qs, [[r[c] for c in ids + qs] for r in regs], comment)
+    groups = {}
+    for r in regs:
+        groups.setdefault((r["path"], r["kind"], r["region"]), []).append(r)
+    se = ("res_cb", "mu")                                  # columns that also get a standard error over splits
+    rows = []
+    for (p, kind, rg), g in sorted(groups.items(), key=lambda kv: (paths.index(kv[0][0]), KINDS.index(kv[0][1]), REGION_ORDER.index(kv[0][2]))):
+        n_range, m = sum(x["n_range"] for x in g), {q: mean_se([x[q] for x in g]) for q in qs}
+        for q in ("med", "med_oos"):
+            v = [x[f"vals{q[3:]}"] for x in g if x.get(f"vals{q[3:]}") is not None]
+            if v:
+                m[q] = (float(np.median(np.concatenate(v))) if sum(map(len, v)) else float("nan"), float("nan"))
+        good = math.isfinite(m["res_cb" if kind == "ep" else "mu"][0])
+        status = ("not-fitted" if rg in ("T_lg", "T_nolg") else "ok" if good and (kind != "ep" or n_range >= REGION_MIN_N)
+                  else "ep-starved" if kind == "ep" else "no-fit")
+        rows.append([p, kind, rg, len(g), sum(x["n"] for x in g), n_range, len(set().union(*(x["mods"] for x in g))),
+                     mean_se([x["prior_frac_mean"] for x in g])[0], status]
+                    + [v for q in qs for v in (m[q] if q.removesuffix("_oos") in se else m[q][:1])])
+    write_tsv(out / "regions.tsv", ("path", "kind", "region", "n_splits", "n", "n_range", "n_modules", "prior_frac_mean", "status")
+              + tuple(c for q in qs for c in ((q, f"{q}_se") if q.removesuffix("_oos") in se else (q,))), rows, comment)
+
+
 def report(scan_dir, gates, out_root=OUT_ROOT):
     files = sorted(Path(scan_dir).glob("*.npz"))
     if not files:
         sys.exit(f"[ERROR] no *.npz in {scan_dir}")
-    jobs, run_of, types = [], {}, set()
+    jobs, run_of, types, scan_ovr = [], {}, set(), set()
     for fn in files:
         with np.load(fn, allow_pickle=False) as z:
             types.add(str(z["run_type"]))
+            scan_ovr |= {str(z["overrides"])} if "overrides" in z.files else set()
             run_of[str(fn)] = int(z["run"])
             jobs += [(str(fn), int(s)) for s in z["splits"]]
     if len(types) != 1:
@@ -1881,6 +2129,9 @@ def report(scan_dir, gates, out_root=OUT_ROOT):
     ref = [x["ref"] for x in res if math.isfinite(x["ref"])]
     spectra.update(ref=ref[0] if ref else np.nan, kE=res[0]["kE"], kS=res[0]["kS"])
     write_tables(rows, summ, rt, sorted(set(run_of.values())), gates, out)
+    write_regions([r for x in res for r in x["regions"]], first[0]["geo"]["name"], paths, out, scan_ovr)
+    if SECONDARY_DUMP:
+        np.savez_compressed(out / "secondaries.npz", **{q: np.concatenate([x["sec"][q] for x in res]) for q in res[0]["sec"]})
     write_pdf(summ, spectra, rows, rt, gates, out)
     np.savez_compressed(out / "spectra.npz", edges=RATIO_EDGES, **{p: sum(x["ratio"][p] for x in res) for p in paths})
     print(f"[done] {rt}: {len(jobs)} splits, gates {', '.join(f'{g:g}' for g in gates)} ns, {time.monotonic() - t0:.0f} s -> {out}", flush=True)
@@ -2088,8 +2339,37 @@ def write_summary(root):
     print(f"[done] {root / 'summary.pdf'}", flush=True)
 
 
+def take_overrides(a):
+    """Remove the `--set NAME=VALUE` pairs from the argument list a and assign them to the module constants (NAME in OVERRIDABLE, VALUE a
+    Python literal of the default's type, an int for a float default becomes float); records OVERRIDES.  Returns the other arguments."""
+    global OVERRIDES
+    rest, todo, it = [], [], iter(a)
+    for x in it:
+        if x == "--set":
+            todo.append(next(it, ""))
+        else:
+            rest.append(x)
+    for t in todo:
+        name, eq, text = t.partition("=")
+        if not eq or name not in OVERRIDABLE:
+            sys.exit(f"[ERROR] --set {t!r}: expected NAME=VALUE with NAME in {', '.join(OVERRIDABLE)}")
+        try:
+            value = ast.literal_eval(text)
+        except (ValueError, SyntaxError):
+            sys.exit(f"[ERROR] --set {t}: VALUE is not a Python literal")
+        if type(globals()[name]) is float and type(value) is int:
+            value = float(value)
+        if type(value) is not type(globals()[name]):
+            sys.exit(f"[ERROR] --set {t}: {name} takes a {type(globals()[name]).__name__}")
+        globals()[name] = value
+    OVERRIDES = " ".join(todo) or "none"
+    return rest
+
+
 def main():
     a = sys.argv[1:]
+    if a[:1] in (["scan"], ["report"]):
+        a = [a[0]] + take_overrides(a[1:])
     if len(a) == 2 and a[0] == "summary":
         write_summary(Path(a[1]))
     elif len(a) >= 3 and a[0] == "scan":
