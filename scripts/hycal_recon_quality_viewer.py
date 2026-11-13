@@ -1363,7 +1363,7 @@ class MainWindow(QMainWindow):
 
         self.spec_canvas.ax.grid(alpha=0.25)
         self.spec_canvas.ax.set_title(f"Spectrum: {mname} @ run {run} (drag to refit)", color=THEME.TEXT)
-        self.spec_canvas.ax.set_xlim(1800.0, 2600.0)
+        self.spec_canvas.ax.set_xlim(*self._spectrum_xlim(group, mname, mod, counts, edges))
         self.spec_canvas.draw_idle()
 
         self._reset_span_selector()
@@ -1376,6 +1376,32 @@ class MainWindow(QMainWindow):
             interactive=False,
             drag_from_anywhere=True,
         )
+
+    def _spectrum_xlim(self, group: RunGroup, mname: str, mod: dict,
+                       counts: np.ndarray, edges: np.ndarray) -> Tuple[float, float]:
+        """x-range around the module's elastic e-p peak for the run's beam
+        energy (0.8-1.2 x expected, i.e. ~1750-2650 MeV at 2.2 GeV), widened
+        to the fit window; the filled bins when there is no expectation."""
+        lo = hi = None
+        xy = self.module_xy.get(mname)
+        if xy is not None and group.ebeam > 0:
+            exp_e = expected_energy(_theta_from_module(xy[0], xy[1], group.hycal_z), group.ebeam)
+            if exp_e > 0:
+                lo, hi = 0.8 * exp_e, 1.2 * exp_e
+        if lo is None:
+            nz = np.flatnonzero(counts > 0)
+            if nz.size:
+                lo, hi = float(edges[nz[0]]), float(edges[nz[-1] + 1])
+        fx0, fx1 = mod.get("fit_xmin"), mod.get("fit_xmax")
+        if fx0 is not None and fx1 is not None:
+            lo = float(fx0) if lo is None else min(lo, float(fx0))
+            hi = float(fx1) if hi is None else max(hi, float(fx1))
+        if lo is not None and hi > lo:
+            pad = 0.05 * (hi - lo)
+            lo, hi = max(float(edges[0]), lo - pad), min(float(edges[-1]), hi + pad)
+            if hi > lo:
+                return lo, hi
+        return float(edges[0]), float(edges[-1])
 
     def _reset_span_selector(self):
         if self.span_selector is not None:

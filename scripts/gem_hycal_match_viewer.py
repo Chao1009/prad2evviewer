@@ -39,7 +39,10 @@ from typing import List, Optional, Tuple
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_DIR = _SCRIPT_DIR.parent
 
-from prad2_env import database_dir, import_prad2py
+from prad2_env import database_dir, fix_qt_lib_path, import_prad2py
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 prad2py, PRAD2PY_ERROR = import_prad2py()
 HAVE_PRAD2PY = prad2py is not None
 
@@ -52,7 +55,7 @@ if _ANA_PY.is_dir() and str(_ANA_PY) not in sys.path:
 try:
     import _common as C  # type: ignore
     HAVE_COMMON = True
-except Exception as _exc:
+except (Exception, SystemExit) as _exc:   # _common exits without prad2py
     C = None  # type: ignore
     HAVE_COMMON = False
     PRAD2PY_ERROR = (PRAD2PY_ERROR + "\n" if PRAD2PY_ERROR else "") + \
@@ -653,10 +656,13 @@ class GemHycalMatchViewer(QMainWindow):
         """Show _cur_event in the views and match table, and sync the
         event spinbox and status bar to _cur_idx."""
         ev = self._cur_event
+        # a failed decode clears the views rather than leave the last event
+        self._front.set_event(ev)
+        self._side.set_event(ev)
         if ev is not None:
-            self._front.set_event(ev)
-            self._side.set_event(ev)
             self._populate_match_table(ev)
+        else:
+            self._tbl.setRowCount(0)
         self._sb_idx.blockSignals(True)
         self._sb_idx.setValue(self._cur_idx); self._sb_idx.blockSignals(False)
         self._update_status_bar()
@@ -763,7 +769,8 @@ class GemHycalMatchViewer(QMainWindow):
             return
         if self._cur_event is None:
             self._status.showMessage(
-                f"event {self._cur_idx + 1} / {len(self._physics_index)}  (decoding…)")
+                f"event {self._cur_idx + 1} / {len(self._physics_index)}  "
+                "(decode / reconstruction failed)")
             return
         ev = self._cur_event
         per_det = matches_per_det(ev.matches)

@@ -9,7 +9,8 @@ Quick Start
      • Run number       — 6-digit run number, e.g. 024388
      • File index range — range of EVIO file indices to download (default 0–99)
      • Threads          — number of parallel replay threads (default 25)
-     • Filter cut JSON  — slow-control cut config for replay_filter (optional)
+     • Filter cut JSON  — slow-control cut config for replay_filter (optional;
+                          without it the filter step is skipped)
      • GEM zero-sup     — GEM zero-suppression threshold (default 5)
    Click "Start Pipeline" to run the full pipeline:
      SCP → Replay Recon → hadd → Replay Filter → Quick Check
@@ -213,13 +214,18 @@ _HIST_PLOTS = (
     ("energy_plots/h2_energy_theta",       "_ev_theta_widget"),
     ("physics_yields/ep_yield",            "_h_ep"),
     ("physics_yields/ee_yield",            "_h_ee"),
-    ("physics_yields/yield_ratio",         "_h_ratio"),
-    ("moller_analysis/h_moller_z",         "_h_moller_z"),
+    ("physics_yields/ep_ee_ratio",         "_h_ratio"),
+    ("ee_vertex_z_hc",                     "_h_moller_z"),
     ("moller_analysis/h_moller_phi_diff",  "_h_moller_phi"),
-    ("moller_analysis/h_moller_x",         "_h_moller_x"),
-    ("moller_analysis/h_moller_y",         "_h_moller_y"),
-    ("moller_analysis/h2_moller_pos",      "_moller_2arm"),
+    ("ee_center_x_hc",                     "_h_moller_x"),
+    ("ee_center_y_hc",                     "_h_moller_y"),
+    ("ee_hits_hc",                         "_moller_2arm"),
 )
+
+# 1-D histograms booked finer than a plot can show (bars narrower than a
+# pixel are not drawn): merge this many adjacent bins on load.
+# ee_center_*: 800 bins / 40 mm -> 0.2 mm; ee_vertex_z: 8000 bins / 4 m -> 10 mm.
+_REBIN = {"ee_center_x_hc": 4, "ee_center_y_hc": 4, "ee_vertex_z_hc": 20}
 
 
 def _load_root(path: str) -> dict:
@@ -236,7 +242,12 @@ def _load_root(path: str) -> dict:
                 out[key] = (obj.values().tolist(),
                             *(ax.edges().tolist() for ax in obj.axes))
             except Exception:
-                pass
+                continue
+            n = _REBIN.get(key, 1)
+            vals, edges = out[key][0], out[key][1]
+            if n > 1 and len(out[key]) == 2 and len(vals) % n == 0:
+                out[key] = ([sum(vals[i:i + n]) for i in range(0, len(vals), n)],
+                            edges[::n])
 
         # ---- module_energy: per-module hit counts and mean energies ----
         me = f.get("module_energy")
@@ -914,13 +925,16 @@ class ControlPanel(QWidget):
         self._pending_steps: List[str] = []   # ["scp", "replay", "hadd", "filter", "qcheck"]
         self._current_step: str = ""          # step currently running
         self._evio_dir: str = ""              # set after SCP completes
+        self._replay_input: str = ""          # EVIO path the last replay read
         self._recon_dir: str = ""             # set after replay completes
         self._hadd_out: str = ""              # merged ROOT file from hadd
         self._hadd_inputs: List[str] = []     # individual files to delete after hadd
         self._filter_out: str = ""            # filtered ROOT file from replay filter
         self._filter_report: str = ""         # JSON report written by replay filter
         self._qcheck_out: str = ""            # final ROOT file path
+        self._pending_filter: Tuple[str, str] = ("", "")  # (out, report) while filter runs
         self._build_ui()
+        self._run_edit.textChanged.connect(self._on_run_changed)
 
     # -- UI construction --
 
@@ -1037,7 +1051,6 @@ class ControlPanel(QWidget):
         self._evio_edit   = QLineEdit()
         self._outdir_edit = QLineEdit()
         self._threads_spin = QSpinBox(); self._threads_spin.setRange(1, 256); self._threads_spin.setValue(50)
-        self._max_events_rep = QLineEdit("-1")
         self._max_files_spin = QSpinBox(); self._max_files_spin.setRange(-1, 9999); self._max_files_spin.setValue(-1)
         self._max_files_spin.setSpecialValueText("all")
         self._daq_config_edit = QLineEdit()
@@ -1046,7 +1059,7 @@ class ControlPanel(QWidget):
         self._zerosup_edit    = QLineEdit("5")
         self._prad1_chk = QCheckBox()
         for w in (self._evio_edit, self._outdir_edit, self._threads_spin,
-                  self._max_events_rep, self._max_files_spin, self._daq_config_edit,
+                  self._max_files_spin, self._daq_config_edit,
                   self._hycal_map_edit, self._gem_ped_edit, self._zerosup_edit,
                   self._prad1_chk):
             _hlay.addWidget(w)
@@ -1055,9 +1068,8 @@ class ControlPanel(QWidget):
         self._filter_input_edit  = QLineEdit()
         self._filter_output_edit = QLineEdit()
         self._filter_cut_edit    = QLineEdit()   # -c cut JSON for replay filter
-        self._max_events_flt     = QLineEdit("-1")
         for w in (self._filter_input_edit, self._filter_output_edit,
-                  self._filter_cut_edit, self._max_events_flt):
+                  self._filter_cut_edit):
             _hlay.addWidget(w)
 
         # Quick Check params
@@ -1111,7 +1123,7 @@ class ControlPanel(QWidget):
         cut_e, cut_row = _browse_row(dlg, self._filter_cut_edit.text(),
                                      "Select cut JSON",
                                      "JSON files (*.json);;All files (*)")
-        cut_e.setPlaceholderText("(optional) path/to/cut.json")
+        cut_e.setPlaceholderText("(optional) path/to/cut.json — blank skips the filter")
 
         zsup_e = _le(QLineEdit(self._zerosup_edit.text()))
         zsup_e.setPlaceholderText("e.g. 5")
@@ -1208,18 +1220,16 @@ class ControlPanel(QWidget):
         evio_e, evio_row   = _browse_row(dlg, self._evio_edit.text(), "EVIO Directory")
         out_e,  out_row    = _browse_row(dlg, self._outdir_edit.text(), "Replay Output Directory")
         thr_sp = _sp(QSpinBox()); thr_sp.setRange(1, 256); thr_sp.setValue(self._threads_spin.value())
-        nev_e  = _le(QLineEdit(self._max_events_rep.text())); nev_e.setToolTip("-1 = no limit")
         nf_sp  = _sp(QSpinBox()); nf_sp.setRange(-1, 9999); nf_sp.setValue(self._max_files_spin.value()); nf_sp.setSpecialValueText("all")
         daq_e  = _le(QLineEdit(self._daq_config_edit.text())); daq_e.setPlaceholderText("(default)")
         hmap_e = _le(QLineEdit(self._hycal_map_edit.text())); hmap_e.setPlaceholderText("(default)")
         gem_e  = _le(QLineEdit(self._gem_ped_edit.text())); gem_e.setPlaceholderText("(none)")
         zsup_e = _le(QLineEdit(self._zerosup_edit.text()))
-        p1_chk = QCheckBox("PRad-1 mode (-p)"); p1_chk.setStyleSheet(_CHK_SS); p1_chk.setChecked(self._prad1_chk.isChecked())
+        p1_chk = QCheckBox("PRad-1 mode (-prad1)"); p1_chk.setStyleSheet(_CHK_SS); p1_chk.setChecked(self._prad1_chk.isChecked())
 
         form.addRow("EVIO dir / file:", evio_row)
         form.addRow("Output dir:", out_row)
         form.addRow("Threads (-j):", thr_sp)
-        form.addRow("Max events (-n):", nev_e)
         form.addRow("Max files (-f):", nf_sp)
         form.addRow("DAQ config (-c):", daq_e)
         form.addRow("HyCal map (-d):", hmap_e)
@@ -1231,7 +1241,6 @@ class ControlPanel(QWidget):
             self._evio_edit.setText(evio_e.text())
             self._outdir_edit.setText(out_e.text())
             self._threads_spin.setValue(thr_sp.value())
-            self._max_events_rep.setText(nev_e.text())
             self._max_files_spin.setValue(nf_sp.value())
             self._daq_config_edit.setText(daq_e.text())
             self._hycal_map_edit.setText(hmap_e.text())
@@ -1250,16 +1259,19 @@ class ControlPanel(QWidget):
                                      "Filter Input ROOT File",
                                      "ROOT files (*.root);;All files (*)")
         out_e = _le(QLineEdit(self._filter_output_edit.text())); out_e.setPlaceholderText("(auto: prad_XXXXXX_filter.root)")
-        nev_e = _le(QLineEdit(self._max_events_flt.text())); nev_e.setToolTip("-1 = no limit")
+        cut_e, cut_row = _browse_row(dlg, self._filter_cut_edit.text(),
+                                     "Select cut JSON",
+                                     "JSON files (*.json);;All files (*)")
+        cut_e.setPlaceholderText("path/to/cut.json — blank skips the filter")
 
         form.addRow("Input ROOT (-i):", inp_row)
         form.addRow("Output ROOT (-o):", out_e)
-        form.addRow("Max events (-n):", nev_e)
+        form.addRow("Cut JSON (-c):", cut_row)
 
         def accept():
             self._filter_input_edit.setText(inp_e.text())
             self._filter_output_edit.setText(out_e.text())
-            self._max_events_flt.setText(nev_e.text())
+            self._filter_cut_edit.setText(cut_e.text())
             dlg.accept()
 
         _ok_cancel_row(dlg, form, accept)
@@ -1402,11 +1414,13 @@ class ControlPanel(QWidget):
                 or os.path.basename(evio_path.rstrip("/")) + "_recon")
         os.makedirs(out_dir, exist_ok=True)
         self._recon_dir = out_dir
+        self._replay_input = evio_path
+        # a new replay: drop the files derived from the previous one
+        self._reset_derived()
 
         cmd = [_REPLAY_RECON_CMD, evio_path]
         cmd += ["-o", out_dir]
         cmd += ["-j", str(self._threads_spin.value())]
-        _opt(cmd, "-n", self._max_events_rep.text(), skip="-1")
         n_f = self._max_files_spin.value()
         if n_f > 0:
             cmd += ["-f", str(n_f)]
@@ -1415,7 +1429,7 @@ class ControlPanel(QWidget):
         _opt(cmd, "-g", self._gem_ped_edit.text())
         _opt(cmd, "-z", self._zerosup_edit.text())
         if self._prad1_chk.isChecked():
-            cmd.append("-p")
+            cmd.append("-prad1")
         self._run_cmd(cmd, "Running replay recon…")
 
     # -- hadd merge step --
@@ -1428,9 +1442,17 @@ class ControlPanel(QWidget):
             self._set_running(False)
             return
 
-        root_files = sorted(glob.glob(os.path.join(recon_dir, "*.root")))
+        # only this run's replay_recon outputs: per-split prad_<run>.<split>_recon.root
+        # and merged prad_<run>_recon_<nnn>.root (any *_recon* name without a run)
+        tag = _run_tag(self._run_edit.text())
+        if tag:
+            pat = re.compile(re.escape(tag) + r'(\.\d+_recon|_recon_\d+)\.root$')
+        else:
+            pat = re.compile(r'.*_recon.*\.root$')
+        root_files = sorted(f for f in glob.glob(os.path.join(recon_dir, "*.root"))
+                            if pat.match(os.path.basename(f)))
         if not root_files:
-            self._log("<span style='color:#8b949e'>No ROOT files in recon dir, skipping hadd.</span>")
+            self._log("<span style='color:#8b949e'>No recon ROOT files in recon dir, skipping hadd.</span>")
             self._run_next_step()
             return
 
@@ -1451,6 +1473,13 @@ class ControlPanel(QWidget):
     # -- Replay filter step --
 
     def _run_filter(self):
+        self._filter_out = self._filter_report = ""
+        if not self._filter_cut_edit.text().strip():
+            # replay_filter requires -c; without it quick check reads the unfiltered file
+            self._log("<span style='color:#d29922'>No filter cut JSON (-c) given — "
+                      "skipping replay filter.</span>")
+            self._run_next_step()
+            return
         flt_input = self._filter_input_edit.text().strip() or self._hadd_out
         if not flt_input:
             self._log("<span style='color:#f85149'>No input specified for replay filter (run hadd first).</span>")
@@ -1462,15 +1491,15 @@ class ControlPanel(QWidget):
             flt_out = os.path.join(
                 os.path.dirname(flt_input),
                 self._out_name(flt_input, "filter", "filter_out.root"))
-        self._filter_out = flt_out
         # JSON report path: same dir, replace .root → .report.json
-        self._filter_report = re.sub(r'\.root$', '.report.json', flt_out,
-                                      flags=re.IGNORECASE)
+        flt_report = re.sub(r'\.root$', '.report.json', flt_out,
+                            flags=re.IGNORECASE)
+        # published as _filter_out/_filter_report only once the step succeeds
+        self._pending_filter = (flt_out, flt_report)
 
         cmd = [_REPLAY_FILTER_CMD, flt_input, "-o", flt_out,
-               "-j", self._filter_report]
+               "-j", flt_report]
         _opt(cmd, "-c", self._filter_cut_edit.text())
-        _opt(cmd, "-n", self._max_events_flt.text(), skip="-1")
         self._run_cmd(cmd, "Running replay filter…")
 
     # -- Quick check step --
@@ -1571,19 +1600,28 @@ class ControlPanel(QWidget):
         # After replay: optionally delete the downloaded EVIO directory
         if exit_code == 0 and self._current_step == "replay" \
                 and self._auto_delete_evio_chk.isChecked():
-            evio_path = self._evio_edit.text().strip() or self._evio_dir
-            if evio_path and os.path.isdir(evio_path):
+            # only the directory this session's SCP step downloaded into,
+            # and only when the replay actually read it
+            evio_path = self._evio_dir
+            if evio_path and self._replay_input \
+                    and os.path.realpath(self._replay_input.rstrip("/")) \
+                    == os.path.realpath(evio_path.rstrip("/")) \
+                    and os.path.isdir(evio_path):
                 self._log(f"<span style='color:#f0883e'>Auto-deleting EVIO dir: {evio_path}</span>")
                 try:
                     shutil.rmtree(evio_path)
+                    self._evio_dir = ""
                     self._log("<span style='color:#3fb950'>EVIO files deleted.</span>")
                 except Exception as exc:
                     self._log(f"<span style='color:#f85149'>Delete failed: {exc}</span>")
 
-        # Emit filter report when filter step succeeded
-        if exit_code == 0 and self._current_step == "filter" \
-                and self._filter_report and os.path.isfile(self._filter_report):
-            self.filterReportReady.emit(self._filter_report)
+        # Publish the filter outputs (and emit the report) only on success
+        if self._current_step == "filter":
+            if exit_code == 0:
+                self._filter_out, self._filter_report = self._pending_filter
+                if self._filter_report and os.path.isfile(self._filter_report):
+                    self.filterReportReady.emit(self._filter_report)
+            self._pending_filter = ("", "")
 
         if exit_code == 0:
             self._run_next_step()
@@ -1599,6 +1637,20 @@ class ControlPanel(QWidget):
         # while quick_check is still running).
         if exit_code == 0 and self._qcheck_out and os.path.isfile(self._qcheck_out):
             self.rootFileReady.emit(self._qcheck_out)
+
+    def _reset_derived(self):
+        """Forget the files derived from a previous replay."""
+        self._hadd_out = ""
+        self._hadd_inputs = []
+        self._filter_out = ""
+        self._filter_report = ""
+        self._qcheck_out = ""
+
+    def _on_run_changed(self, _text: str):
+        # another run: the downloaded / replayed directories are not its own
+        self._evio_dir = ""
+        self._recon_dir = ""
+        self._reset_derived()
 
     def _on_stop(self):
         self._pending_steps.clear()
@@ -1736,6 +1788,8 @@ class FilterReportWidget(QWidget):
 
 class ResultsPanel(QWidget):
     """Tabbed display of quick_check ROOT file contents."""
+
+    logMessage = pyqtSignal(str)   # HTML line for the ControlPanel log
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1936,6 +1990,12 @@ class ResultsPanel(QWidget):
         self._data = data
         self._loading_lbl.setText(
             f"Loaded: {len(data)} datasets")
+        missing = [key for key, _attr in _HIST_PLOTS if key not in data]
+        if missing:
+            self.logMessage.emit(
+                "<span style='color:#f0883e'>Histogram(s) missing or unreadable in "
+                f"{html.escape(getattr(self, '_current_path', ''))}: "
+                f"{html.escape(', '.join(missing))}</span>")
         self._populate(data)
 
     # -- Populate widgets from loaded data --
@@ -2006,6 +2066,7 @@ class MainWindow(QMainWindow):
 
         self._ctrl.rootFileReady.connect(self._results.load_file)
         self._ctrl.filterReportReady.connect(self._results.load_filter_report)
+        self._results.logMessage.connect(self._ctrl._log)
 
         splitter.addWidget(self._ctrl)
         splitter.addWidget(self._results)

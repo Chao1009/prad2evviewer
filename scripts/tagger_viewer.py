@@ -48,6 +48,10 @@ import time as _time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 import numpy as np
 
 from PyQt6.QtCore import (
@@ -828,6 +832,15 @@ def _int_range(v: np.ndarray) -> Tuple[int, int]:
     """Integer (min, max) of ``v``, with max raised to min + 1 when equal."""
     lo, hi = int(v.min()), int(v.max())
     return lo, max(hi, lo + 1)
+
+
+def _int_edges(lo: int, hi: int, nbins: int) -> np.ndarray:
+    """At most ``nbins`` bin edges covering the integers lo..hi, each bin a
+    whole number of ticks wide (a fractional width makes bins hold
+    alternately n and n+1 integer values: a beat pattern)."""
+    w = max(1, -(-(hi - lo + 1) // max(1, nbins)))
+    n = -(-(hi - lo + 1) // w)
+    return (lo + w * np.arange(n + 1)).astype(float)
 
 
 # Resizable error dialog
@@ -1664,7 +1677,7 @@ class TdcViewer(QMainWindow):
         tdc_vals = sub["tdc"].astype(np.int64)
         tmin, tmax = _int_range(tdc_vals)
         nbins = self.bins_spin.value()
-        counts, edges = np.histogram(tdc_vals, bins=nbins, range=(tmin, tmax + 1))
+        counts, edges = np.histogram(tdc_vals, bins=_int_edges(tmin, tmax, nbins))
         self.tdc_hist.setData(counts, edges)
 
         edge_name = (
@@ -1716,7 +1729,7 @@ class TdcViewer(QMainWindow):
         dt = t_a - t_b
         dmin, dmax = _int_range(dt)
         nbins = self.bins_spin.value()
-        counts, edges = np.histogram(dt, bins=nbins, range=(dmin, dmax + 1))
+        counts, edges = np.histogram(dt, bins=_int_edges(dmin, dmax, nbins))
         self.diff_hist.setData(counts, edges)
         self.diff_hist.setTitle(
             f"Δt = A − B  (A={self._fmt_pair(a)},  B={self._fmt_pair(b)}) "
@@ -1743,7 +1756,8 @@ class TdcViewer(QMainWindow):
         amin, amax = _int_range(t_a)
         bmin, bmax = _int_range(t_b)
         counts, xedges, yedges = np.histogram2d(
-            t_a, t_b, bins=nbins, range=[[amin, amax + 1], [bmin, bmax + 1]]
+            t_a, t_b,
+            bins=[_int_edges(amin, amax, nbins), _int_edges(bmin, bmax, nbins)]
         )
         self.scatter_map.setData(counts, xedges, yedges)
         self.scatter_map.setLabels(

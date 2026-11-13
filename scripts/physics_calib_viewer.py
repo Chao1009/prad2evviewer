@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 import numpy as np
 from PyQt6.QtCore import Qt, QPointF, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QPen, QPolygonF
@@ -52,6 +56,10 @@ from hycal_geoview import (  # noqa: E402
 )
 
 DB_PATH = SCRIPT_DIR.parent / "database" / "hycal_map.json"
+
+# Damping of the expected/fitted peak correction; must equal the factor in
+# analysis/tools/physics_calib.cpp (``ratio = (ratio - 1.f) * 0.95f + 1.f``).
+CALIB_DAMPING = 0.95
 
 
 @dataclass
@@ -164,9 +172,11 @@ def load_histogram(root, key: str):
 		return None
 
 
-def load_root_data(item: Iteration, hist_mode: str) -> None:
+def load_root_data(item: Iteration, hist_mode: str) -> Dict[str, tuple]:
+	"""The ``hist_mode`` histograms of ``item``'s ROOT file (``item`` is not modified)."""
+	histograms: Dict[str, tuple] = {}
 	if not HAS_UPROOT or item.root_path is None or not item.root_path.is_file():
-		return
+		return histograms
 	try:
 		with uproot.open(item.root_path) as root:
 			prefix = "modules_5by5/h1_E_mod_" if hist_mode == "5by5" else "modules_island/h1_E_mod_"
@@ -174,15 +184,16 @@ def load_root_data(item: Iteration, hist_mode: str) -> None:
 			for module_id in range(1001, 2157):
 				data = load_histogram(root, f"{prefix}{module_id}{suffix}")
 				if data is not None and np.any(data[0] > 0):
-					item.histograms[module_name(module_id)] = data
+					histograms[module_name(module_id)] = data
 			for key in ("h2_energy_theta_merged", "hit_pos_merged",
 						"h_E_1cl_merged", "h_fit_peak_ratio",
 						"h_fit_peak_chi2ndf", "h_fit_peak_sigma"):
 				data = load_histogram(root, key)
 				if data is not None:
-					item.histograms[key] = data
+					histograms[key] = data
 	except Exception:
-		return
+		pass
+	return histograms
 
 
 def gaussian(x, amplitude, mean, sigma):
@@ -258,7 +269,7 @@ def fit_histogram(counts, edges, xmin=None, xmax=None, expected=0.0):
 def damped_ratio(expected: float, peak: float) -> float:
 	if expected <= 0 or peak <= 0:
 		raise ValueError("expected peak and fitted peak must be positive")
-	return min(2.0, max(0.5, 1.0 + 0.85 * (expected / peak - 1.0)))
+	return min(2.0, max(0.5, 1.0 + CALIB_DAMPING * (expected / peak - 1.0)))
 
 
 def is_fit_good(peak: float, sigma: float, chi2: float) -> bool:
@@ -426,7 +437,7 @@ class Canvas(FigureCanvas):
 
 
 class RootWorker(QThread):
-	ready = pyqtSignal(object)
+	ready = pyqtSignal(object, str, object)   # item, hist_mode, histograms
 
 	def __init__(self, item, hist_mode, parent=None):
 		super().__init__(parent)
@@ -434,8 +445,8 @@ class RootWorker(QThread):
 		self.hist_mode = hist_mode
 
 	def run(self):
-		load_root_data(self.item, self.hist_mode)
-		self.ready.emit(self.item)
+		self.ready.emit(self.item, self.hist_mode,
+						load_root_data(self.item, self.hist_mode))
 
 
 class Viewer(QMainWindow):
@@ -727,14 +738,16 @@ class Viewer(QMainWindow):
 	def _start_root_load(self):
 		if self.current is None:
 			return
-		if self.worker and self.worker.isRunning():
-			self.worker.quit()
 		self.worker = RootWorker(self.current, self.hist_mode, self)
 		self.worker.ready.connect(self._root_ready)
 		self.worker.start()
 
-	def _root_ready(self, item):
-		if item is self.current:
+	def _root_ready(self, item, hist_mode, histograms):
+		# a superseded load (other iteration or other mode) is dropped: a
+		# running worker cannot be stopped, it only delivers into its own dict
+		if item is self.current and hist_mode == self.hist_mode:
+			item.histograms.clear()
+			item.histograms.update(histograms)
 			self._draw_global()
 			if self.current_module:
 				self._show_module(self.current_module)
