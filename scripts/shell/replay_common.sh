@@ -250,11 +250,10 @@ run_replay_pipeline() {
         -z "${REPLAY_ZERO_SUPPRESS}" -f "${REPLAY_MAX_FILES}" -m "${REPLAY_MERGE_FILES}" \
         "${mode_args[@]}" "${gem_hit_args[@]}"
 
-    # Merged prad_<RUN>_recon_<NNN>.root, or the per-split recon files with -m 0.
-    mapfile -t recon_inputs < <(find "${OUT_DIR}" -maxdepth 1 -type f -name "prad_${RUN_NUMBER}_recon_*.root" | sort)
-    if [[ "${#recon_inputs[@]}" -eq 0 ]]; then
-        mapfile -t recon_inputs < <(find "${OUT_DIR}" -maxdepth 1 -type f -name "prad_${RUN_NUMBER}.*_recon.root" | sort)
-    fi
+    # Merged prad_<RUN>_recon_<NNN>.root plus any per-split recon files left
+    # unmerged (all of them with -m 0; a single-file last batch is not merged).
+    mapfile -t recon_inputs < <(find "${OUT_DIR}" -maxdepth 1 -type f \
+        \( -name "prad_${RUN_NUMBER}_recon_*.root" -o -name "prad_${RUN_NUMBER}.*_recon.root" \) | sort)
     if [[ "${#recon_inputs[@]}" -eq 0 ]]; then
         echo "ERROR: no reconstructed ROOT files found in ${OUT_DIR}."
         exit 1

@@ -69,7 +69,9 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/prad2ana
 install(DIRECTORY scripts/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/analysis/scripts
         FILES_MATCHING PATTERN "*.C" PATTERN "*.h")
 
-# Install pyscripts/ — both the standalone analysis tools and the shared
-# _common.py helper imported by scripts/gem_hycal_match_viewer.py.
-install(DIRECTORY pyscripts/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/analysis/pyscripts
-        FILES_MATCHING PATTERN "*.py")
+# Example cut JSON files for prad2ana_replay_filter -c.
+install(DIRECTORY cuts/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/analysis/cuts
+        FILES_MATCHING PATTERN "*.json")
+
+# pyscripts/ is installed from the top-level CMakeLists.txt (also needed
+# by the BUILD_PYTHON gem_hycal_match_viewer wrapper without ROOT).

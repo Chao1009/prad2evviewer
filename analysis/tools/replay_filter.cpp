@@ -980,7 +980,9 @@ int run(const std::vector<std::string> &input_files,
         if (iv.empty()) return false;
         auto it = std::upper_bound(
             iv.begin(), iv.end(), evn,
-            [](int32_t e, const std::pair<int32_t, int32_t> &p) { return e < p.first; });
+            // last interval with first < evn: contiguous intervals share an
+            // endpoint, and evn == b belongs to (a, b], not (b, c]
+            [](int32_t e, const std::pair<int32_t, int32_t> &p) { return e <= p.first; });
         if (it == iv.begin()) return false;
         --it;
         return evn > it->first && evn <= it->second;

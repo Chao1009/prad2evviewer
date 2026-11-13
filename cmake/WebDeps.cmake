@@ -31,6 +31,12 @@ FetchContent_Declare(asio
 )
 FetchContent_MakeAvailable(json websocketpp asio)
 
+# nlohmann's own install() is off as a sub-project, but the installed
+# prad2 headers include <nlohmann/json.hpp> (ACLiC macros built against
+# the install tree, see analysis/scripts/rootlogon.C), so ship it.
+install(DIRECTORY ${json_SOURCE_DIR}/include/nlohmann
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
 # Asio has no CMake target of its own; wrap the include dir as an
 # interface library and set the standalone define here so consumers
 # don't have to know.
