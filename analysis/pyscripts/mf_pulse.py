@@ -66,7 +66,7 @@ TAU_F_RANGE = (15.0, 35.0)
 # reconstruction
 LW = 32                        # fit window: samples [ceil(t0/4) - LEAD, +LW)
 LEAD = 3
-MIN_SEP_NS = 12.0              # minimum onset separation of two pulses in a channel
+MIN_SEP_NS = 8.0               # minimum onset separation of two pulses in a channel; 12 -> 8 ns on 2026-11-08 (synthetic pile-up study, waveform_analysis/pileup_analysis)
 SIGMA_MIN = 0.3                # ADC floor on the raw sigma
 CAND_NSIGMA = 3.0              # candidate threshold: moving average > max(CAND_NSIGMA sigma, 3 ADC)
 MODEL_FLOOR = 0.03             # chi2 model-error floor (fraction of the model), noise_model "mad"
