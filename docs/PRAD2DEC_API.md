@@ -16,24 +16,25 @@ function, and namespace constant exported by the library.
 | [`DaqConfig.h`](#daqconfigh) | `evc` | `DaqConfig`, `EventType`, `classify_event` |
 | [`DaqKey.h`](#daqkeyh) | `prad2` | `pack_daq_key` |
 | [`load_daq_config.h`](#load_daq_configh) | `evc` | `load_daq_config`, `load_pedestals`, `parse_hex`, `parse_hex_list` |
-| [`Fadc250Data.h`](#fadc250datah) | `fdec` | `TI_TICK_NS`, `TI_TICK_SEC`, `EventInfo`, `EventData`, `RocData`, `SlotData`, `ChannelData`, `ForEachChannel`, `ChannelKey`, `ParseChannelKey`, `Peak`, `Pedestal`, `DaqPeak`, `DaqWaveResult`, `PulseTemplate`, `DeconvOutput`, quality bitmasks (`Q_PEAK_*`, `Q_PED_*`, `Q_DAQ_*`, `Q_DECONV_*`) |
+| [`Fadc250Data.h`](#fadc250datah) | `fdec` | `TI_TICK_NS`, `TI_TICK_SEC`, `EventInfo`, `EventData`, `RocData`, `SlotData`, `ChannelData`, `ForEachChannel`, `ChannelKey`, `ParseChannelKey`, `Peak`, `Pedestal`, `DaqPeak`, `DaqWaveResult`, `PulseTemplate`, `DeconvOutput`, time-pickoff codes (`T_PICKOFF_*`), quality bitmasks (`Q_PEAK_*`, `Q_PED_*`, `Q_DAQ_*`, `Q_DECONV_*`) |
 | [`Fadc250Decoder.h`](#fadc250decoderh) | `fdec` | `Fadc250Decoder` |
 | [`Fadc250RawDecoder.h`](#fadc250rawdecoderh) | `fdec` | `Fadc250RawDecoder` |
 | [`Fadc250FwAnalyzer.h`](#fadc250fwanalyzerh) | `fdec` | `Fadc250FwAnalyzer` |
-| [`WaveAnalyzer.h`](#waveanalyzerh) | `fdec` | `WaveAnalyzer`, `WaveResult`, `WaveConfig` (incl. `NnlsDeconvConfig`) |
+| [`WaveAnalyzer.h`](#waveanalyzerh) | `fdec` | `WaveAnalyzer`, `WaveResult`, `LogNormalFitResult`, `WaveConfig` (incl. `NnlsDeconvConfig`) |
 | [`PulseTemplateStore.h`](#pulsetemplatestoreh) | `fdec` | `PulseTemplateStore` |
 | [`Adc1881mDecoder.h`](#adc1881mdecoderh) | `fdec` | `Adc1881mDecoder` |
 | [`SspData.h`](#sspdatah) | `ssp` | `SspEventData`, `MpdData`, `ApvData`, `ApvAddress` |
 | [`SspDecoder.h`](#sspdecoderh) | `ssp` | `SspDecoder` |
-| [`TdcData.h`](#tdcdatah) | `tdc` | `TdcEventData`, `TdcHit` |
-| [`TdcDecoder.h`](#tdcdecoderh) | `tdc` | `TdcDecoder` |
-| [`VtpData.h`](#vtpdatah) | `vtp` | `VtpEventData`, `EcPeak`, `EcCluster`, `VtpBlock` |
+| [`TdcData.h`](#tdcdatah) | `tdc` | `TdcEventData`, `TdcHit`, `RfTimeData`, `TDC_LSB_NS`, `RF_ROC_TAG`, `RF_SLOT`, `RF_CH_A`, `RF_CH_B` |
+| [`TdcDecoder.h`](#tdcdecoderh) | `tdc` | `TdcDecoder`, `RfTimeDecoder` |
+| [`VtpData.h`](#vtpdatah) | `vtp` | `VtpEventData`, `EcPeak`, `EcCluster`, `PradCluster`, `VtpBlock` |
 | [`VtpDecoder.h`](#vtpdecoderh) | `vtp` | `VtpDecoder` |
 | [`DscData.h`](#dscdatah) | `dsc` | `DscEventData`, `DSC2_NCH`, `delta_live_ratio` |
 | [`Dsc2Decoder.h`](#dsc2decoderh) | `dsc` | `Dsc2Decoder` |
 | [`SyncData.h`](#syncdatah) | `psync` | `SyncInfo` |
 | [`EpicsData.h`](#epicsdatah) | `epics` | `EpicsRecord`, `ParseEpicsText` |
 | [`EpicsStore.h`](#epicsstoreh) | `epics` | `EpicsStore` |
+| [`HVDecoder.h`](#hvdecoderh) | `hv` | `HVDecoder`, `HVSegment`, `ChEvent`, `BstEvent`, `Kind`, `Side`, `LookupResult`, `Interval` |
 | [`InstallPaths.h`](#installpathsh) | `prad2` | `module_dir`, `resolve_data_dir`, `database_dir`, `find_database_file`, `is_absolute_path`, `resolve_db_path` |
 | [`EvioFiles.h`](#eviofilesh) | `prad2` | `run_number_from_path`, `discover_split_files` |
 | [`JsonUtil.h`](#jsonutilh) | `prad2` | `read_json_file`, `read_json_elements`, `read_json_array` |
@@ -92,6 +93,9 @@ EventType GetEventType() const;             // valid after Scan()
 int    GetNEvents() const;                  // physics sub-events in this block
 ```
 
+`Scan()` returns `false` (with an empty node table) when the event header,
+or any child bank/segment, overruns its parent or the buffer.
+
 ### Tree walk
 
 ```cpp
@@ -112,6 +116,10 @@ const std::vector<uint32_t> &GetTdcTags() const;   // tags decoded by Tdc(), fro
 const std::vector<uint32_t> &GetVtpTags() const;   // tags decoded by Vtp(), from SetConfig
 ```
 
+`GetNodes()` is in depth-first order, so a node's children are not
+contiguous in it (`EvNode::next_sibling` links them); walk children with
+`GetChild(node, i)`, not `nodes[child_first + i]`.
+
 `GetString` returns an empty string for an empty or out-of-buffer bank;
 EVIO pads string banks with NULs and may pack several strings, and only
 the first is read. `ForEachLeafBank` visits, in scan order, every
@@ -122,18 +130,21 @@ roc_tag)`; `roc_tag` is the parent bank's tag (0 at top level).
 ### Lazy data-product accessors (preferred)
 
 ```cpp
-void SelectEvent(int i) const;              // pick sub-event; clears cache if i changed
+void SelectEvent(int i) const;              // set sub-event index; clears cache if i changed
 const fdec::EventInfo    &Info()  const;    // always cheap
 const fdec::EventData    &Fadc()  const;    // FADC250 + ADC1881M
 const ssp::SspEventData  &Gem()   const;    // SSP/MPD GEM strips
 const tdc::TdcEventData  &Tdc()   const;    // V1190 timing hits
-const vtp::VtpEventData  &Vtp()   const;    // VTP ECAL peaks/clusters
+const vtp::VtpEventData  &Vtp()   const;    // VTP trigger clusters / ECAL peaks
 const psync::SyncInfo    &Sync()  const;    // run-state snapshot, persists across events
 const dsc::DscEventData  &Dsc()   const;    // DSC2 scaler readout
 const epics::EpicsRecord &Epics() const;    // EPICS slow-control record
 ```
 
 References are invalidated by the next `Read`/`Scan`/`SelectEvent(i ≠ current)`.
+The decoders do not use the selected index: every sub-event of a block
+decodes the same banks, so `SelectEvent(i)` only invalidates the cache when
+`i` changes.
 `Sync()` is special: its cached `SyncInfo` persists across events and is
 only refreshed when a SYNC/EPICS or control event is scanned, so physics
 events have an absolute time anchor for their TI 48-bit tick delta.
@@ -169,6 +180,13 @@ std::string ExtractEpicsText() const;   // call when GetEventType() == Epics
 
 Returns the raw `value  channel_name\n` text payload, or empty string.
 
+```cpp
+std::string ExtractDaqConfigText() const;   // call when GetEventType() == Prestart
+```
+
+Returns the text of the DAQ-configuration STRING bank (`daq_config_tag`,
+0xE10E) carried by PRESTART events, or empty string if the bank is absent.
+
 ### Debug
 
 ```cpp
@@ -198,7 +216,9 @@ et_wrap::StationConfig &GetConfig();
 
 After `Connect` + `Open`, the per-event API is identical to `EvChannel`
 (`Scan` / `Info` / `Fadc` / …). Filters added via `AddEvFilter` short-
-circuit `Read` for events whose top-level header doesn't pass.
+circuit `Read` for events whose top-level header doesn't pass. `Read`
+returns `status::empty` when a fetched chunk yields no usable event
+(headers-only blocks or every event filtered out).
 
 ---
 
@@ -211,8 +231,9 @@ length }`, `TagSegmentHeader { tag, type, length }` — all parse a
 single header from a `const uint32_t *p` argument.
 
 `EvNode { tag, type, num, depth, parent, data_begin, data_words,
-child_first, child_count }` — one node in the flat event tree built
-by `Scan()`.
+child_first, child_count, next_sibling }` — one node in the flat event
+tree built by `Scan()`, in depth-first order; `next_sibling` is the index
+of the parent's next child (`-1` if last).
 
 `enum DataType` — every evio content-type code (`DATA_BANK`,
 `DATA_SEGMENT`, `DATA_TAGSEGMENT`, `DATA_COMPOSITE`, …).
@@ -241,7 +262,9 @@ stops at the first bank that overruns `words`).
 Plain struct, no JSON dependency; loaded from JSON via
 [`load_daq_config.h`](#load_daq_configh).
 
-Selected groups (every field is documented inline in the header):
+Selected groups (every field is documented inline in the header).
+Members a config file omits default to inert values (tags 0, word indices
+−1):
 
 - **Event-type tags** — `physics_tags`, `physics_base`, `monitoring_tags`,
   `prestart_tag`, `go_tag`, `end_tag`, `sync_tag`, `epics_tag`.
@@ -397,8 +420,18 @@ fields are present, `roc_tag >= 0`, `0 <= slot < MAX_SLOTS` and
 
 ### Soft-analyzer outputs
 
-`Peak { height, integral, time, pos, left, right, overflow, quality }` —
-`left`/`right` inclusive integration bounds; `quality` is a `Q_PEAK_*` bitmask.
+`Peak { height, integral, time, pos, left, right, overflow, quality,
+time_algo }` — `left`/`right` inclusive integration bounds; `quality` is a
+`Q_PEAK_*` bitmask. `time` (ns) is a leading-edge pick-off time whose
+source is recorded in `time_algo`:
+
+| `time_algo` | Value | Used when |
+|---|---|---|
+| `T_PICKOFF_FIT_CFD` | 2 | height > 10 × ped RMS and a log-normal fit to the rising edge succeeds: the fit's 50 % CFD time |
+| `T_PICKOFF_LINEAR_CFD` | 1 | otherwise, height > 5 × ped RMS: linearly interpolated 50 % crossing on the rising edge of the smoothed waveform |
+| `T_PICKOFF_PEAKING_SUBSAMPLE` | 0 | fallback: quadratic-interpolated peak position, moved 1.5 samples earlier for heights ≤ 5 × ped RMS (unshifted when a larger peak has no CFD crossing) |
+
+`WaveAnalyzer::Analyze` subtracts its `time_offset` argument from `time`.
 
 `Pedestal { mean, rms, nused, quality, slope }` — `quality` is `Q_PED_*`.
 
@@ -435,7 +468,9 @@ static int fdec::Fadc250Decoder::DecodeRoc(
 ```
 
 Decode one ROC's composite FADC250 payload (format `c,i,l,N(c,Ns)`,
-packed native-endian) into `roc`. Returns slot count or `-1` on error.
+packed native-endian) into `roc`. Returns the number of slots decoded (0
+for empty input); malformed data stops the decode, keeping what was
+decoded so far.
 
 ---
 
@@ -473,13 +508,24 @@ passed firmware TET, so the caller passes the soft analyzer's
 
 `fdec::WaveAnalyzer` — software waveform analysis (smoothing,
 local-maxima peak finding, iterative-outlier-rejection pedestal,
-integration, optional NNLS pile-up deconvolution).
+integration, optional per-pulse Levenberg–Marquardt pile-up
+deconvolution against per-module-type templates; the config block keeps
+its historical name `nnls_deconv`).
 
 ### `WaveResult`
 
 ```cpp
-struct WaveResult { Pedestal ped; int npeaks; Peak peaks[MAX_PEAKS]; };
+struct WaveResult {
+    Pedestal ped; int npeaks; Peak peaks[MAX_PEAKS];
+    LogNormalFitResult peaks_fit[MAX_PEAKS];   // per-peak log-normal CFD fit
+    void clear();
+};
+struct LogNormalFitResult { bool ok; float t_cfd_sample, chi2_per_dof, A, t0, mu, sigma; };
 ```
+
+`peaks_fit[i]` is the log-normal fit attempted for `peaks[i]` (only for
+heights > 10 × ped RMS; `ok = false` otherwise or when the fit failed).
+`t_cfd_sample` is the fitted CFD time in samples (before `time_offset`).
 
 ### `WaveConfig`
 
@@ -510,7 +556,8 @@ detailed semantics.
 
 ```cpp
 explicit WaveAnalyzer(const WaveConfig &cfg = {});
-void Analyze(const uint16_t *samples, int nsamples, WaveResult &result) const;
+void Analyze(const uint16_t *samples, int nsamples, WaveResult &result,
+             float time_offset = 0.f) const;   // time_offset (ns) subtracted from every Peak::time
 void smooth (const uint16_t *raw, int n, float *buf) const;
 
 void SetTemplateStore(const PulseTemplateStore *store);
@@ -525,6 +572,16 @@ static PulseFitResult        FitPulseShape       (const uint16_t *slice, int nsl
                                                   float ped, float ped_rms, float clk_ns,
                                                   float model_err_floor = 0.01f);
 static PulseFitTwoTauPResult FitPulseShapeTwoTauP(/* same args */);
+
+// Static — log-normal CFD helpers (waveform diagnostics / timing studies)
+static float log_normal_pulse_value(float t, float ped_mean, float A,
+                                    float t0, float mu, float sigma);
+static float log_normal_cfd_time_sample(float t0, float mu, float sigma,
+                                        float cfd_fraction);   // NaN unless 0 < fraction < 1
+static LogNormalFitResult fit_log_normal_cfd(const float *buf, int nsamples,
+                                             int fit_left_bound, int raw_pos,
+                                             float cfd_fraction,
+                                             float ped_mean, float ped_rms);
 
 // Power-user / diagnostic — explicit deconv against a caller-supplied template
 void Deconvolve(const uint16_t *samples, int nsamples,
@@ -654,6 +711,15 @@ V1190 TDC PODs — flat array of hits.
 `TdcEventData { n_hits, hits[MAX_TDC_HITS] }`. Helpers: `clear()`,
 `countSlot(slot)`, `countChannel(slot, channel)`.
 
+`TDC_LSB_NS = 23.436e-3` converts `TdcHit::value` to ns. The PRad-II RF
+reference cabling: `RF_ROC_TAG = 0x40`, `RF_SLOT = 16`, `RF_CH_A = 0`,
+`RF_CH_B = 8`.
+
+`RfTimeData { n_a, n_b, ns_a[16], ns_b[16] }` (`MAX_HITS_PER_CH = 16`) —
+leading-edge RF times in ns for the two RF channels. Helpers: `clear()`,
+`nearest_a(t_ref_ns)`, `nearest_b(t_ref_ns)` (the hit nearest `t_ref_ns`,
+NaN if the channel has no hits).
+
 ---
 
 ## `TdcDecoder.h`
@@ -667,28 +733,57 @@ Decodes one ROC's 0xE107 payload (flat array of hits, 25 ps LSB after
 rol2 normalization). Returns the number of hits appended; stops at
 `MAX_TDC_HITS`.
 
+```cpp
+static int tdc::TdcDecoder::DecodeReplay(
+    const std::vector<uint32_t> &roc_tags, const std::vector<uint32_t> &nwords,
+    const std::vector<uint32_t> &words, TdcEventData &evt);
+
+static void tdc::RfTimeDecoder::Extract(const TdcEventData &all, RfTimeData &out,
+    uint32_t rf_roc_tag = RF_ROC_TAG, uint8_t rf_slot = RF_SLOT,
+    uint8_t rf_ch_a = RF_CH_A, uint8_t rf_ch_b = RF_CH_B);
+static void tdc::RfTimeDecoder::DecodeReplay(
+    const std::vector<uint32_t> &roc_tags, const std::vector<uint32_t> &nwords,
+    const std::vector<uint32_t> &words, RfTimeData &out,
+    /* same RF defaults */);
+```
+
+`TdcDecoder::DecodeReplay` decodes the replay tree's flat bank list
+(`tdc_roc_tags` / `tdc_nwords` / `tdc_words`, walked with
+`evc::ForEachFlatBank`) into `evt`, which is cleared first, and returns the
+number of hits appended. `RfTimeDecoder` fills `RfTimeData` from an
+already-decoded `TdcEventData` or directly from the replay bank list; both
+clear `out` first, keep leading edges only and truncate at
+`MAX_HITS_PER_CH`.
+
 ---
 
 ## `VtpData.h`
 
-VTP (0xE122) records — only PRad-II-relevant ECAL records are stored;
-CLAS12 records are parsed past.
+VTP (0xE122) records — PRad-II trigger-level HyCal clusters
+(PRAD_CLUSTER, TAG_EXP tag 0x1CC) and the EC_PEAK / EC_CLUSTER records are
+stored; other CLAS12 records are parsed past.
 
 | Constant | Value |
 |---|---|
 | `MAX_EC_PEAKS`    | 512 |
 | `MAX_EC_CLUSTERS` | 64 |
+| `MAX_PRAD_CLUSTERS` | 256 |
 | `MAX_BLOCKS`      | 16 |
 
 `EcPeak { roc_tag, inst, view, time, coord, energy }`.
 
 `EcCluster { roc_tag, inst, time, energy, coordU, coordV, coordW }`.
 
+`PradCluster { roc_tag, energy, id, nhits, time }` — `energy` 14-bit
+trigger-level sum; `id` the 12-bit seed-module field. Helpers:
+`is_pbwo4()` (bit 11 of `id`), `module()` (module number within its type),
+`hycal_id()` (G<n> → n, W<n> → 1000 + n).
+
 `VtpBlock { roc_tag, slot, module_id, block_number, block_level, nwords,
 event_number, trigger_time, has_trailer, trailer_mismatch }`.
 
-`VtpEventData { n_peaks, n_clusters, n_blocks, peaks[], clusters[],
-blocks[] }`. `clear()`.
+`VtpEventData { n_peaks, n_clusters, n_prad_clusters, n_blocks, peaks[],
+clusters[], prad_clusters[], blocks[] }`. `clear()`.
 
 ---
 
@@ -702,8 +797,8 @@ static bool vtp::VtpDecoder::DecodeReplay(
     const std::vector<uint32_t> &words, VtpEventData &evt);
 ```
 
-`DecodeRoc` returns the number of ECAL records (peaks + clusters)
-appended; `0` for stub banks. `DecodeReplay` decodes the replay tree's
+`DecodeRoc` returns the number of EC_PEAK, EC_CLUSTER and PRAD_CLUSTER
+records appended; `0` for stub banks. `DecodeReplay` decodes the replay tree's
 flat bank list (`vtp_roc_tags` / `vtp_nwords` / `vtp_words`) into `evt`,
 which is cleared first; it returns `false` if the three vectors are
 inconsistent (see `evc::ForEachFlatBank`), keeping the banks before the
@@ -756,7 +851,8 @@ static bool dsc::Dsc2Decoder::ParsePayload(
 ```
 
 `DecodeBank` returns `true` only when the data matches a known layout
-and the slot matches `cfg.slot`; `false` otherwise (out unchanged).
+and the slot matches `cfg.slot`; `false` otherwise (`out` is cleared,
+except when `cfg` is not enabled, which returns before touching `out`).
 `ParsePayload` is the lower-level call that fills the per-channel + ref
 arrays without applying the (source, channel) selection — useful for
 diagnostic tools.  It probes payload offsets {0, 2}; the overload takes a
@@ -819,6 +915,76 @@ void Clear();
 
 ---
 
+## `HVDecoder.h`
+
+Reader for VMDF v2 high-voltage archive files (`vmon_YYYYMMDD.dat`,
+written by prad2hvd). The format is delta-based: VMon = dV + V0Set of the
+latest CHTABLE at or before the snapshot; booster (TDK-Lambda) lanes carry
+absolute VMon/IMon. Wrapped by the `prad2py.dec` bindings.
+
+```cpp
+hv::HVDecoder dec(const std::string &source);              // directory (vmon_*.dat) or one .dat
+hv::HVDecoder dec(const std::vector<std::string> &files);
+const std::vector<std::string> &files() const;
+HVSegment load_window(double t_start_unix, double t_end_unix,
+                      const std::vector<std::string> &channels = {},   // empty = all
+                      const std::string &cache_path = "") const;
+```
+
+`load_window` mmaps only the candidate files (UTC date ± 1 day of the
+window; files not named `vmon_YYYYMMDD.dat` are always tried) and keeps
+only the requested rows × columns. If `cache_path` exists it is returned
+verbatim (arguments are not re-validated); otherwise the result is written
+there. Unreadable or non-VMDF-v2 files throw `std::runtime_error`.
+
+`hv::HVSegment` — one time × channel window:
+
+- HV: `timestamps_ms`, `channels`, `dv` (row-major n_snapshots × n_channels),
+  `ch_events` (`ChEvent { abs_ts_ms, v0sets }`), `interval_ms`.
+- Booster: `booster_timestamps_ms`, `booster_names`, `booster_vmon`,
+  `booster_imon`, `booster_events` (`BstEvent { abs_ts_ms, vsets, isets }`).
+- Meta (not persisted): `source_files`, `window_start_unix`,
+  `window_end_unix`.
+
+```cpp
+int  n_channels() const;  int n_snapshots() const;
+int  n_boosters() const;  int n_booster_snapshots() const;  bool empty() const;
+int  channel_index(const std::string &name) const;
+int  booster_index(const std::string &name) const;
+std::vector<float> v0set_trace(int ch_idx) const;   // NaN if never in a CHTABLE
+
+LookupResult value_at(const std::string &name, double unix_time, Kind kind, Side side) const;
+LookupResult nearest     (const std::string &name, double unix_time, Kind kind = Kind::VMon) const;
+LookupResult nearest_next(const std::string &name, double unix_time, Kind kind = Kind::VMon) const;
+
+static EventAssoc associate_events(const std::vector<int64_t> &snapshot_ts_ms,
+                                   const std::vector<int32_t> &event_num,
+                                   const std::vector<int64_t> &event_ti_ticks,
+                                   int64_t anchor_ti_ticks, int64_t anchor_unix_time_ms);
+
+std::vector<Interval> find_stable_intervals(const std::vector<std::string> &channels_to_check,
+                                            double window_s = 5.0, double std_threshold = 0.5,
+                                            std::optional<double> dv_threshold = std::nullopt,
+                                            double min_duration_s = 5.0, double guard_s = 1.0) const;
+
+void             save(const std::string &path) const;   // writes a VMDF v2 file
+static HVSegment load(const std::string &path);         // any VMDF v2 file
+```
+
+`Kind` ∈ {`VMon`, `DV`, `V0Set`, `BoosterVMon`, `BoosterIMon`,
+`BoosterVSet`, `BoosterISet`}; `Side` ∈ {`Nearest`, `Next`} (first
+snapshot at or after the query). `LookupResult { ok, t_unix_s, value }` —
+`ok = false` when the query is out of range or NaN.
+`associate_events` tags each snapshot with the last physics event at or
+before it (`EventAssoc { event_number, ti_ticks }`, `-1` before the first
+event), converting times with one SYNC anchor at `TICKS_PER_MS = 250000`.
+`find_stable_intervals` returns `Interval { t_start_unix, t_end_unix }`
+ranges where every named channel has rolling-std(dV) ≤ `std_threshold`,
+non-NaN dV and, if given, |dV| ≤ `dv_threshold`; shorter runs than
+`min_duration_s` are dropped and `guard_s` is trimmed from each end.
+
+---
+
 ## `InstallPaths.h`
 
 ```cpp
@@ -865,11 +1031,14 @@ std::vector<std::string> prad2::discover_split_files(const std::string &path,
 ```
 
 `run_number_from_path` returns the run of the first `prad_<digits>` /
-`run_<digits>` in the file name (case-insensitive), or `-1`.
+`run_<digits>` in the last path component (case-insensitive), ignoring
+trailing path separators; if that component has none, the parent
+directory's name is tried; `-1` if neither matches.
 `discover_split_files` resolves an EVIO input to the split files to
 process: a glob (`.../prad_023881.evio.*`) or a directory gives every
 `prad_<run>.evio.<N>` of the run in that directory (run from the file or
-directory name), sorted by suffix, with gaps reported on stderr.  With
+directory name), sorted by suffix, with gaps reported on stderr (a trailing path separator
+is ignored).  With
 `expand_siblings`, an existing split file or a base name that is not
 itself a file (`prad_023881.evio`) does the same; any other path is
 returned unchanged as `{ path }`.  An empty list means the run or
@@ -906,8 +1075,12 @@ than two entries).
 
 ## Dependencies
 
-- [evio](https://github.com/JeffersonLab/evio) (≥ 6.0) — required.
+- [evio](https://github.com/JeffersonLab/evio) — required (the evio-6 or
+  evio-4 C API; the fetch fallback uses `evio-6.0`).
 - [et](https://github.com/JeffersonLab/et) — optional, for `EtChannel`.
+- nlohmann/json — required; the `nlohmann_json::nlohmann_json` target is
+  defined by the top-level build (`cmake/WebDeps.cmake`), so `prad2dec`
+  does not configure on its own.
 
 Both resolve from the Hall-B CODA installation by default; if not found,
 CMake fetches from GitHub. Override with `-DEVIO_SOURCE=fetch` or

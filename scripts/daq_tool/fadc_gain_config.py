@@ -35,6 +35,15 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+# scripts/ on sys.path for prad2_env (daq_common does the same, but it
+# imports PyQt6 and so cannot come first).
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from prad2_env import find_database_file, fix_qt_lib_path  # noqa: E402
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QPen, QFont, QDoubleValidator
 from PyQt6.QtWidgets import (
@@ -45,7 +54,6 @@ from PyQt6.QtWidgets import (
 )
 
 from daq_common import btn_style, iter_fav3, load_module_info, render_fav3
-from prad2_env import find_database_file
 from hycal_geoview import (
     HyCalMapWidget as _HyCalMapBase,
     AUX_TYPES, CHANNELS_PER_SLOT, CRATE_NAMES, Module,
@@ -882,9 +890,13 @@ class _GainEditor(QMainWindow):
             "Config Files (*.cnf);;All Files (*)")
         if not path:
             return
+        try:
+            with open(path, "w") as f:
+                f.write(self._text.toPlainText())
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.critical(self, "Save failed", f"{path}\n\n{exc}")
+            return
         self._output_path = path
-        with open(path, "w") as f:
-            f.write(self._text.toPlainText())
         self._status.setText(f"Saved to {path}")
 
     def _load_cnf_file(self) -> None:
@@ -893,9 +905,13 @@ class _GainEditor(QMainWindow):
             "Config Files (*.cnf);;All Files (*)")
         if not path:
             return
-        with open(path) as f:
-            text = f.read()
-        loaded = parse_cnf_text(text, self._daq)
+        try:
+            with open(path) as f:
+                text = f.read()
+            loaded = parse_cnf_text(text, self._daq)
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.critical(self, "Load failed", f"{path}\n\n{exc}")
+            return
         overrides = self._diff_overrides(loaded)
         merged = dict(self._base_gains)
         merged.update(loaded)

@@ -24,7 +24,7 @@ are always fetched automatically.
 Optional flags:
 
 - `-DBUILD_ANALYSIS=ON` — ROOT-based replay and analysis tools (requires ROOT 6.0+).
-- `-DBUILD_GUI=ON` — Qt standalone viewer and remote client (requires Qt6 or Qt5 WebEngine).
+- `-DBUILD_GUI=ON` — Qt remote client `prad2_client` (requires Qt6 or Qt5 WebEngine).
 - `-DBUILD_PYTHON=ON` — pybind11 bindings `prad2py` (also enables the Python GEM tools).
 - `-DPython_EXECUTABLE=<path>` — pin the interpreter explicitly (needed on systems with multiple `python3` versions in `PATH`, where CMake may otherwise pick the wrong one).
 - `-DWITH_ET=OFF` — disable ET (live monitoring); required on Windows.
@@ -220,7 +220,7 @@ The server reads three top-level configuration files from `database/`:
 
 - `monitor_config.json` (`-c`) — GUI/online server settings: waveform, hycal_hist, LMS, EPICS, livetime, beam status, physics display cuts, GEM diagnostics, elog, colour ranges, online/ET.
 - `reconstruction_config.json` (`-r`) — `runinfo` pointer plus cluster/hit reconstruction knobs (HyCal clustering, per-detector GEM `ClusterConfig` with `default` + per-id overrides, matching σ parameters).
-- `daq_config.json` (`-D`) — DAQ + raw decoding: event tags, bank tags, ROC layout, sync format, optional pulse-template and NNLS deconvolution, file pointers (`hycal_map_file`, `gem_map_file`, `pedestal_file`).
+- `daq_config.json` (`-D`) — DAQ + raw decoding: event tags, bank tags, ROC layout, sync format, optional pulse-template pile-up deconvolution (`nnls_deconv` block; Levenberg–Marquardt fit), file pointers (`hycal_map_file`, `gem_map_file`, `pedestal_file`).
 
 PRad support: use the mirrored `database/prad1/` set
 (`prad_daq_config.json`, `prad_monitor_config.json`,

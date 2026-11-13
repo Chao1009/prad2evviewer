@@ -14,7 +14,7 @@ front-end data from `prad2dec` and produces physics-level outputs
 | `GemCluster` | Per-plane strip clustering (group + split + charge-weighted position) followed by X/Y matching (Cartesian-with-cuts or ADC-sorted). See [`docs/technical_notes/gem_clustering/gem_clustering.md`](../docs/technical_notes/gem_clustering/gem_clustering.md). |
 | `GemPedestal` | Per-strip GEM pedestal accumulator; writes the APV-block text file `GemSystem::LoadPedestals` reads. |
 | `DetectorTransform` | 3×3 rotation + translation for the detector → lab-frame transform; the rotation matrix is cached and invalidated through the `set(...)` mutators. |
-| `RunInfoConfig` | Header-only loader for the run-period geometry / calibration JSON (`runinfo`). Picks the largest `run_number` ≤ the requested run. |
+| `RunInfoConfig` | Header-only loader for the run-period geometry / calibration JSON (`runinfo`). Overlays `defaults` and every `configurations` entry with `from_run` ≤ the requested run (chained, ascending); independent tables such as `gem_pedestals` pick their single entry with the largest `from_run` ≤ the run. |
 | `PipelineBuilder` | Fluent helper that wires up an entire reconstruction pipeline (HyCal + GEM + transforms + matching parameters) from the standard config files. |
 | `EventData`, `EventData_io` | Shared per-event data structures and ROOT-tree branch helpers used by both the live monitor and the offline replay. |
 
@@ -54,7 +54,7 @@ livetime, histograms); those stay in the caller.
 // GEM — per-event pipeline
 gem::GemSystem gsys;
 gsys.Init("database/gem_map.json");
-gsys.LoadPedestals("gem_ped.txt");      // required only for full-readout data
+gsys.LoadPedestals("gem_ped.txt");      // noise table drives the ZS cut on both full-readout and online-ZS data
 gem::GemCluster gcl;
 
 for each event {
@@ -69,7 +69,7 @@ for each event {
 // HyCal — feed per-module energies, cluster, read back
 fdec::HyCalSystem hsys;
 hsys.Init("database/hycal_map.json");
-hsys.LoadCalibration("database/hycal_calib.json");
+hsys.LoadCalibration("database/calibration/PRad2_2p2_round2_2.json");  // runinfo calibration.file
 fdec::HyCalCluster hcl(hsys);
 
 hcl.Clear();

@@ -247,8 +247,8 @@
             </div>
             <div class="tcut-bar">
                 <button id="cut-settings-btn" class="copy-btn" title="Edit peak filter ranges">Cut Settings…</button>
-                <label class="toggle-btn" title="Apply the filter on the server (affects all clients)"><input type="checkbox" id="cut-apply"> apply</label>
-                <label class="toggle-btn" title="Show cut-range overlays on histograms and the waveform plot"><input type="checkbox" id="cut-show"> show</label>
+                <label class="toggle-btn" title="Apply the filter on the server (affects all clients)"><input type="checkbox" id="cut-apply"><span>apply</span></label>
+                <label class="toggle-btn" title="Show cut-range overlays on histograms and the waveform plot"><input type="checkbox" id="cut-show"><span>show</span></label>
             </div>
         </div>
         <div class="geo-toolbar" id="geo-toolbar-cl" style="display:none">
@@ -344,8 +344,8 @@
                     <span id="wf-daq-info" style="display:none;color:var(--dim);font-size:11px"></span>
                 </div>
                 <div class="hc-right">
-                    <label class="toggle-btn" title="Overlay waveforms across events"><input type="checkbox" id="wf-stack"> Stack</label>
-                    <label class="toggle-btn" title="FADC250 firmware Mode 1/2/3 emulation: TET / NSB / NSA / Vp / T annotated"><input type="checkbox" id="wf-daq"> DAQ</label>
+                    <label class="toggle-btn" title="Overlay waveforms across events"><input type="checkbox" id="wf-stack"><span>Stack</span></label>
+                    <label class="toggle-btn" title="FADC250 firmware Mode 1/2/3 emulation: TET / NSB / NSA / Vp / T annotated"><input type="checkbox" id="wf-daq"><span>DAQ</span></label>
                     <button id="btn-copy-wf" class="copy-btn" title="Copy waveform data">copy</button>
                 </div>
             </div>
@@ -588,7 +588,13 @@ function linesToShapes(lines){
                 line:{color:color,width:width,dash:dash},layer:layer};
     });
 }
-function refShapes(key){ return linesToShapes(refLines[key]); }
+// `key` may be a list of names: the first one present in refLines is used
+// (server sub-block name first, legacy name as fallback).
+function refShapes(key){
+    var keys=[].concat(key);
+    for(var i=0;i<keys.length;i++) if(refLines[keys[i]]) return linesToShapes(refLines[keys[i]]);
+    return [];
+}
 </script>
 <script src="report.js"></script>
 <script src="epics.js"></script>

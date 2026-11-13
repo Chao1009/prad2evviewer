@@ -119,8 +119,8 @@ prad2ana_replay_filter "$RAW_DIR"/*_raw.root \
 Calculate live charge from the filtered outputs together:
 
 ```bash
-prad2ana_live_charge "$QC_DIR"/*_filter.root \
-    -j "$QC_DIR/prad_${RUN}_live_charge.json"
+prad2ana_live_charge "$RAW_DIR"/*_filter.root \
+    -j "$RAW_DIR/prad_${RUN}_live_charge.json"
 ```
 
 This branch of the workflow is useful for establishing good intervals and run
@@ -155,7 +155,7 @@ prad2ana_replay_recon "$RAW_DIR" \
 ```
 
 Add `-gem_hit` only when individual GEM-hit branches are needed; standard
-HyCal–GEM match branches are written without it. Add `-X17` for X17 runs.
+HyCal–GEM match branches are written without it. Add `-x17` for X17 runs.
 
 ### Shortcut: EVIO directly to reconstructed ROOT
 
@@ -283,9 +283,9 @@ Reference: `Replay::ProcessWithRecon`, `PipelineBuilder`, `HyCalCluster`,
 
 **Corrections**
 
-- Loads current gain corrections again by event number. If a valid current
-  correction is unavailable, it falls back to the raw file's stored
-  `hycal.gain_factor`.
+- Loads current gain corrections again by event number. If no valid
+  correction file is found for the run, every factor is 1 (no correction);
+  the raw file's stored `hycal.gain_factor` is not used.
 - Applies energy calibration, module time offset/window, clustering corrections,
   detector transforms, RF offset, and GEM reconstruction exactly at the
   raw-to-recon stage.
@@ -332,8 +332,6 @@ Reference: `Replay::Process_LMSgainFactor` and `GainCorrCompute.cpp`.
 | `LoadHyCalMap` | Builds `(crate,slot,channel) -> name`, module type, module ID, and reverse-location maps. |
 | `moduleName` / `moduleType` / `moduleID` | Convert DAQ addresses to detector identity. |
 | `moduleLocation` | Reverse lookup from global module ID to crate/slot/channel. |
-| `clear*Event` | Reset event buffers and default RF values before filling. |
-| `setup*Branches` | Delegate the exact ROOT schema to `EventData_io.h`. |
 
 ---
 
@@ -486,7 +484,7 @@ prad2ana_replay_recon <evio_or_raw_file_or_dir> [more inputs...] -o <output_dir>
 | `-gem_hit` | No | off | Write individual GEM-hit branches. Matching branches are present without it. |
 | `-no_dep` | No | correction on | Disable placing HyCal clusters at shower-max depth before lab transformation and projection. Applies to EVIO and raw ROOT input; changes positions and downstream matching, not cluster energies. |
 | `-prad1` | No | off | PRad-1 map, ADC1881M pedestal, and no GEM/RF path. EVIO input only. |
-| `-x17` | No | off | X17 blind mode; uses X17 config and retains only 3-cluster events whose event number ends in 8, while retaining raw-sum events. |
+| `-x17` | No | off | X17 blind mode; uses X17 config and drops every event with the 3-cluster bit unless its event number ends in 8 (even if it also carries the sum bit). Other sum, LMS and Alpha events are kept. |
 | `-x17_full` | No | off | X17 full mode without blind event-number thinning. |
 | `-random` | No | off | Treat events as sum-triggered and widen the HyCal time window to 0–400 ns. |
 
@@ -495,11 +493,12 @@ Mode notes:
 - With no mode flag, PRad-II mode is used.
 - `-prad1` and either X17 mode are rejected together.
 - `_raw.root` input does not support `-prad1`.
-- `-random` with PRad-1/X17 prints a warning and should not be treated as a
-  supported combined mode.
-- The source header mentions `-n max_events`, but the current parser has no
-  `-n` option and neither reconstruction function accepts a maximum-event
-  argument. Use `-f`, a smaller input list, or first make a limited raw file.
+- `-random` with `-prad1` or an X17 mode is rejected (exit code 2).
+- There is no `-n max_events` option and neither reconstruction function
+  accepts a maximum-event argument. Use `-f`, a smaller input list, or first
+  make a limited raw file.
+- Long options must be spelled out in full; an abbreviation such as `-n`,
+  `-p` or `-gem` is rejected as an invalid option.
 
 ### 4.3 Examples
 
@@ -651,7 +650,10 @@ prad2ana_replay_gainCorr /data/evio/prad_024327 \
     -o ./lms_plots -j 8 -p -w 565,735,892
 ```
 
-Quick limited-file configuration test:
+Quick limited-file configuration test. Caution: like every run of the tool, it
+writes `<db>/gain_factor/gain_correction/prad_024327_gain_corr.root` and so
+replaces that run's production correction file; point `PRAD2_DATABASE_DIR` at
+a scratch copy of the database first.
 
 ```bash
 prad2ana_replay_gainCorr /data/evio/prad_024327 \

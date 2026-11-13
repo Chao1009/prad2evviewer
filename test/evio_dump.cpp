@@ -1003,7 +1003,7 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
                 if (n.depth == 1 && n.tag == cfg.ti_master_tag) {
                     e.has_ti_master = true;
                     for (size_t ci = 0; ci < n.child_count; ++ci) {
-                        auto &child = nodes[n.child_first + ci];
+                        auto &child = ch.GetChild(n, ci);
                         if (child.tag == cfg.ti_bank_tag && child.type == DATA_UINT32) {
                             const uint32_t *d = ch.GetData(child);
                             size_t nw = child.data_words;
@@ -1335,7 +1335,7 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         // vs flat (some depth-1 children are data banks)
         bool has_container = false, has_leaf = false;
         for (size_t ci = 0; ci < ev.child_count; ++ci) {
-            auto &child = nodes[ev.child_first + ci];
+            auto &child = ch.GetChild(ev, ci);
             bool is_cont = IsContainer(child.type) || child.type == DATA_BANK2;
             if (is_cont) has_container = true;
             else         has_leaf = true;
@@ -1345,7 +1345,7 @@ static int doBankDebug(EvChannel &ch, bool verbose)
         else if (has_container && has_leaf)  n_mixed++;
 
         for (size_t ci = 0; ci < ev.child_count; ++ci) {
-            auto &d1 = nodes[ev.child_first + ci];
+            auto &d1 = ch.GetChild(ev, ci);
             bool is_cont = IsContainer(d1.type) || d1.type == DATA_BANK2;
 
             auto &d1s = depth1_tags[d1.tag];
@@ -1355,7 +1355,7 @@ static int doBankDebug(EvChannel &ch, bool verbose)
 
             if (is_cont) {
                 for (size_t di = 0; di < d1.child_count; ++di) {
-                    auto &d2 = nodes[d1.child_first + di];
+                    auto &d2 = ch.GetChild(d1, di);
                     uint64_t key = (uint64_t(d1.tag) << 32) | d2.tag;
                     auto &d2s = depth2_tags[key];
                     d2s.add(d2.data_words);

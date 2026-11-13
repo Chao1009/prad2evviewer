@@ -143,6 +143,9 @@ void EvioDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb*/,
     auto ssp_ptr = std::make_unique<ssp::SspEventData>();
     auto &ssp_evt = *ssp_ptr;
     uint64_t last_ti_ts = 0;
+    // Global index in the same space as index_ (see indexRecord): advances
+    // once per sub-event of every scanned non-monitoring record, decoded or not.
+    int gidx = 0;
 
     while (ch.Read() == status::success) {
         if (!ch.Scan()) continue;
@@ -180,11 +183,11 @@ void EvioDataSource::iterateAll(EventCallback ev_cb, ReconCallback /*recon_cb*/,
 
         // physics events (skip monitoring — no waveforms to process)
         if (cfg_.is_monitoring(ch.GetEvHeader().tag)) continue;
-        for (int i = 0; i < ch.GetNEvents(); ++i) {
+        for (int i = 0; i < ch.GetNEvents(); ++i, ++gidx) {
             ssp_evt.clear();
             if (!ch.DecodeEvent(i, event, &ssp_evt)) continue;
             last_ti_ts = event.info.timestamp;
-            if (ev_cb) ev_cb(i, event, &ssp_evt);
+            if (ev_cb) ev_cb(gidx, event, &ssp_evt);
         }
     }
     ch.Close();

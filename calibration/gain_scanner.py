@@ -19,6 +19,7 @@ import math
 import os
 import threading
 import time
+import traceback
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -578,6 +579,12 @@ class GainScanEngine:
                              level="error")
                     return
 
+        except Exception as e:
+            # an unexpected error must not be reported as COMPLETED below
+            traceback.print_exc()
+            self.log(f"Gain scan ABORTED by unexpected error: "
+                     f"{type(e).__name__}: {e}", level="error")
+            self.state = GainScanState.FAILED
         finally:
             if self._stop.is_set():
                 self.state = GainScanState.IDLE
@@ -1124,7 +1131,7 @@ class GainScanEngine:
             if self._stop.is_set() or self._redo.is_set() or self._skip.is_set():
                 return
             self._check_paused()
-            time.sleep(min(0.2, end - time.time()))
+            time.sleep(max(0.0, min(0.2, end - time.time())))
 
     def _wait_vmon_settle(self, mod: Module, expected_dvset: float,
                           prev_vmon: float) -> bool:

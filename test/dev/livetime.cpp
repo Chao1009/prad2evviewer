@@ -58,7 +58,16 @@ int main(int argc, char *argv[])
         switch (opt) {
         case 'D': daq_config_file = optarg; break;
         case 'f': pulser_freq = std::atof(optarg); break;
-        case 't': report_interval = std::atof(optarg); break;
+        case 't': {
+            char *end = nullptr;
+            report_interval = std::strtod(optarg, &end);
+            if (end == optarg || *end != '\0' || !(report_interval > 0)) {
+                std::cerr << "Invalid -t interval '" << optarg << "': must be > 0\n";
+                usage(argv[0]);
+                return 1;
+            }
+            break;
+        }
         default:
             usage(argv[0]);
             return opt == 'h' ? 0 : 1;
@@ -91,6 +100,7 @@ int main(int argc, char *argv[])
     auto event = std::make_unique<fdec::EventData>();
     std::map<uint32_t, uint64_t> tag_counts;
     uint64_t first_ts = 0, last_ts = 0;
+    double elapsed_base = 0;   // TI time of earlier runs (clock restarts per run)
     uint64_t total_physics = 0;
     uint32_t run_number = 0;
     uint32_t unix_start = 0, unix_end = 0;
@@ -203,10 +213,18 @@ int main(int argc, char *argv[])
 
                 uint64_t ts = event->info.timestamp;
                 if (ts != 0) {
-                    if (first_ts == 0) first_ts = ts;
+                    if (first_ts == 0) {
+                        first_ts = ts;
+                    } else if (ts < first_ts) {
+                        // TI clock restarted (next run in the input): continue
+                        // the time axis instead of underflowing ts - first_ts
+                        elapsed_base += static_cast<double>(last_ts - first_ts) * fdec::TI_TICK_SEC;
+                        first_ts = ts;
+                    }
                     last_ts = ts;
 
-                    double elapsed = static_cast<double>(ts - first_ts) * fdec::TI_TICK_SEC;
+                    double elapsed = elapsed_base
+                                   + static_cast<double>(ts - first_ts) * fdec::TI_TICK_SEC;
                     while (elapsed >= next_report) {
                         print_row(next_report);
                         next_report += report_interval;
@@ -218,8 +236,8 @@ int main(int argc, char *argv[])
     }
 
     // ---- final report ----
-    double elapsed_ti = (first_ts != 0 && last_ts > first_ts)
-        ? static_cast<double>(last_ts - first_ts) * fdec::TI_TICK_SEC : 0.0;
+    double elapsed_ti = (first_ts != 0)
+        ? elapsed_base + static_cast<double>(last_ts - first_ts) * fdec::TI_TICK_SEC : 0.0;
     double elapsed_unix = (unix_start != 0 && unix_end > unix_start)
         ? static_cast<double>(unix_end - unix_start) : 0.0;
     double elapsed = (elapsed_ti > 0) ? elapsed_ti : elapsed_unix;

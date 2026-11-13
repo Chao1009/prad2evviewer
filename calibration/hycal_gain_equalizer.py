@@ -188,6 +188,9 @@ class GainEqualizerWindow(ScanWindowBase):
 
     def _initState(self):
         self._gain_engine: Optional[GainScanEngine] = None
+        # set by _disableControls (observer / PV-error lockout); the 5 Hz
+        # refresh and _cmdStart honour it so the lockout cannot be undone
+        self._controls_locked = False
 
     def _onPathSet(self, path):
         if not path:
@@ -385,6 +388,7 @@ class GainEqualizerWindow(ScanWindowBase):
             self._ge_log_y.setStyleSheet("")
 
     def _disableControls(self):
+        self._controls_locked = True
         for w in (self._btn_start, self._btn_pause, self._btn_stop,
                   self._btn_redo, self._btn_skip):
             w.setEnabled(False)
@@ -398,6 +402,10 @@ class GainEqualizerWindow(ScanWindowBase):
         self._histogram.setLogY(on)
 
     def _cmdStart(self):
+        if self._controls_locked:
+            self._log("Start refused: controls are locked (observer mode or "
+                      "PV connection error)", level="error")
+            return
         if self._gain_engine and self._gain_engine.state not in (
                 GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED):
             return
@@ -426,7 +434,7 @@ class GainEqualizerWindow(ScanWindowBase):
         # sync start index from combo selection
         self._onStartSelected(0)
 
-        ro = self.simulation
+        ro = self.simulation or self.observer
         server_url = self._ge_server_edit.text().strip()
         hv_url = self._ge_hv_edit.text().strip()
         hv_pw = self._ge_hv_pw.text()
@@ -592,7 +600,7 @@ class GainEqualizerWindow(ScanWindowBase):
             self._gain_group.setVisible(True)
             self._hist_group.setVisible(False)
             self._btn_start.setText("Start")
-            self._btn_start.setEnabled(True)
+            self._btn_start.setEnabled(not self._controls_locked)
             self._btn_pause.setEnabled(False)
             self._btn_stop.setText("Stop")
             self._btn_stop.setEnabled(False)
@@ -624,13 +632,14 @@ class GainEqualizerWindow(ScanWindowBase):
 
         # Start button: "Resume" while resumable, "Start" otherwise
         self._btn_start.setText("Resume" if resumable else "Start")
-        self._btn_start.setEnabled(not running)
+        unlocked = not self._controls_locked
+        self._btn_start.setEnabled(unlocked and not running)
         # Stop button: "Reset" while resumable, "Stop" while running
         self._btn_stop.setText("Reset" if resumable else "Stop")
-        self._btn_stop.setEnabled(running or resumable)
-        self._btn_pause.setEnabled(running)
-        self._btn_redo.setEnabled(running)
-        self._btn_skip.setEnabled(running)
+        self._btn_stop.setEnabled(unlocked and (running or resumable))
+        self._btn_pause.setEnabled(unlocked and running)
+        self._btn_redo.setEnabled(unlocked and running)
+        self._btn_skip.setEnabled(unlocked and running)
 
         # show current module name on the per-module action buttons
         cur = eng.current_module

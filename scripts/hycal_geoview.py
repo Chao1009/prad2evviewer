@@ -363,6 +363,15 @@ def atomic_json_write_many(items: Iterable[Tuple[Path, object]], *,
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 json.dump(value, stream, indent=indent, **dump_kw)
                 stream.write("\n")
+            # mkstemp creates 0600; keep the destination's mode, else the
+            # umask default, so the file stays group/world readable.
+            try:
+                mode = path.stat().st_mode & 0o7777
+            except FileNotFoundError:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(temp_name, mode)
         for temp_name, path in temporary:
             os.replace(temp_name, path)
     except BaseException:
@@ -1380,8 +1389,13 @@ class HyCalMapWidget(QWidget):
             return
         pos = e.position()
         ratio = new_zoom / self._zoom
-        self._pan_x = pos.x() + (self._pan_x - pos.x()) * ratio
-        self._pan_y = pos.y() + (self._pan_y - pos.y()) * ratio
+        # Pan is an offset from the plot-area centre (see _recompute_layout).
+        cx = self._margin + (self.width() - 2 * self._margin) / 2
+        cy = self._margin_top + (self.height() - self._margin_top
+                                 - self._margin_bottom) / 2
+        dx, dy = pos.x() - cx, pos.y() - cy
+        self._pan_x = dx + (self._pan_x - dx) * ratio
+        self._pan_y = dy + (self._pan_y - dy) * ratio
         self._zoom = new_zoom
         self._layout_dirty = True
         self.update()
@@ -1980,7 +1994,10 @@ def start_worker_thread(owner: QObject, worker: QObject,
     worker.finished.connect(on_finished)
     worker.failed.connect(on_failed)
     if dialog is not None:
-        dialog.canceled.connect(worker.request_cancel)
+        # Direct: the worker's thread is blocked inside run(), so a queued
+        # call would only arrive after the work is done.
+        dialog.canceled.connect(worker.request_cancel,
+                                Qt.ConnectionType.DirectConnection)
     worker.finished.connect(thread.quit)
     worker.failed.connect(thread.quit)
     thread.finished.connect(worker.deleteLater)

@@ -39,7 +39,7 @@ edge fraction, etc.) should work out of the box.
 |-
 | Target ADC || 3200 || Spectrum right-edge target
 |-
-| Min counts || 5000  || Histogram counts before analysis
+| Min counts || 10000 || Histogram counts before analysis
 |-
 | Max iter   || 8     || Iterations per module
 |-
@@ -151,7 +151,7 @@ Controls below the map:
 * '''Auto''': auto-range the colour scale, excluding the top 5 hot channels
 * '''Min/Max + Apply''': manual range
 * '''Log''': log scale for the colour mapping
-* '''Palette button''': click to cycle through 5 colour palettes
+* '''Palette button''': click to cycle through 8 colour palettes
 
 == Safety ==
 

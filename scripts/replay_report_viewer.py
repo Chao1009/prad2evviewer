@@ -9,9 +9,10 @@ see at a glance which parts of a run survived the slow-control cuts.
 Two modes:
   * GUI (default): three linked rows — cut status, livetime + data rate,
     EPICS values — all sharing the x-axis (associated_timestamp by default,
-    switchable to associated_evn).  EPICS channels are picked from a
-    drop-down checklist.  Pan/zoom via the matplotlib navigation toolbar.
-    Buttons to open another report or save the current view as PNG/PDF.
+    switchable to associated_evn; `--evn` starts there).  EPICS channels
+    are picked from a drop-down checklist.  Pan/zoom via the matplotlib
+    navigation toolbar.  Buttons to open another report or save the
+    current view as PNG/PDF.
   * CLI (`--cli`): renders one static figure with a row per channel —
     status row on top, then livetime + rate, then one row per EPICS
     channel.  Total figure height scales with the number of EPICS rows so
@@ -58,7 +59,7 @@ class ReportData:
     stats:      dict
     cuts:       dict
     keep_intervals_evn: list[tuple[int, int]]
-    evns:       np.ndarray            # int64, sorted ascending
+    evns:       np.ndarray            # int64, one per checkpoint, non-decreasing
     times:      np.ndarray            # float seconds, NaN if missing
     overall_pass: np.ndarray          # bool, AND across channels
     channels:   dict[str, ChannelSeries] = field(default_factory=dict)
@@ -74,8 +75,13 @@ def load_report(path: str) -> ReportData:
     if not points:
         raise ValueError(f"{path}: report has no 'points' array")
 
-    by_evn: dict[int, dict[str, tuple[bool, float]]] = {}
-    times_by_evn: dict[int, float] = {}
+    # replay_filter writes one point per configured channel for every
+    # checkpoint, checkpoint after checkpoint (ascending event number, which
+    # several checkpoints can share).  A checkpoint ends where its event
+    # number changes or one of its channels comes round again.
+    cps: list[dict[str, tuple[bool, float]]] = []
+    cp_evns: list[int] = []
+    cp_times: list[float] = []
     channel_names: set[str] = set()
     for p in points:
         evn = int(p["associated_evn"])
@@ -84,19 +90,18 @@ def load_report(path: str) -> ReportData:
         st  = (p.get("status") == "pass")
         v   = p.get("value")
         v_f = float("nan") if v is None else float(v)
-        by_evn.setdefault(evn, {})[ch] = (st, v_f)
-        if evn not in times_by_evn:
-            t = p.get("associated_timestamp")
-            if t is not None:
-                times_by_evn[evn] = float(t)
+        if not cps or evn != cp_evns[-1] or ch in cps[-1]:
+            cps.append({})
+            cp_evns.append(evn)
+            cp_times.append(float("nan"))
+        cps[-1][ch] = (st, v_f)
+        t = p.get("associated_timestamp")
+        if t is not None and math.isnan(cp_times[-1]):
+            cp_times[-1] = float(t)
 
-    sorted_evns = sorted(by_evn.keys())
-    n_cp = len(sorted_evns)
-    evns_arr = np.asarray(sorted_evns, dtype=np.int64)
-    times_arr = np.asarray(
-        [times_by_evn.get(e, float("nan")) for e in sorted_evns],
-        dtype=np.float64,
-    )
+    n_cp = len(cps)
+    evns_arr = np.asarray(cp_evns, dtype=np.int64)
+    times_arr = np.asarray(cp_times, dtype=np.float64)
 
     # Stable ordering: livetime first, then EPICS alphabetically, then anything
     # else.  Keeps the status row's row labels identical between renders.
@@ -110,8 +115,8 @@ def load_report(path: str) -> ReportData:
     for ch in ordered:
         vals = np.full(n_cp, np.nan)
         passes = np.zeros(n_cp, dtype=bool)
-        for i, evn in enumerate(sorted_evns):
-            st_v = by_evn[evn].get(ch)
+        for i, cp in enumerate(cps):
+            st_v = cp.get(ch)
             if st_v is not None:
                 passes[i] = st_v[0]
                 vals[i]   = st_v[1]
@@ -424,7 +429,7 @@ def selected_series(report: ReportData, names: set[str]) -> list[ChannelSeries]:
                   key=lambda s: s.label)
 
 
-def run_gui(initial_path: Optional[str]) -> int:
+def run_gui(initial_path: Optional[str], x_kind: str = "time") -> int:
     import matplotlib
     matplotlib.use("QtAgg")
     from matplotlib.backends.backend_qtagg import (
@@ -501,6 +506,8 @@ def run_gui(initial_path: Optional[str]) -> int:
                 Qt.TextInteractionFlag.TextSelectableByMouse)
             v.addWidget(self.lbl_status)
 
+            self.cmb_x.setCurrentIndex(max(0, self.cmb_x.findData(x_kind)))
+
             if initial_path:
                 self._load(initial_path)
 
@@ -567,13 +574,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--cli", action="store_true",
                     help="Render a static figure and exit (no GUI).")
     ap.add_argument("-o", "--out", default=None,
-                    help="(--cli) output figure path "
+                    help="(--cli only) output figure path "
                          "(default: <report stem>.png).")
     ap.add_argument("--evn", action="store_true",
                     help="Use associated_evn for the x-axis "
                          "(default: associated_timestamp).")
     args = ap.parse_args(argv)
 
+    if args.out and not args.cli:
+        ap.error("-o/--out only applies with --cli")
     if args.cli:
         if not args.report:
             ap.error("--cli requires a report path")
@@ -585,7 +594,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         render_cli(report, out, "evn" if args.evn else "time")
         return 0
 
-    return run_gui(args.report)
+    from prad2_env import fix_qt_lib_path
+    fix_qt_lib_path()   # before the first PyQt6 import (GUI only: --cli needs no Qt)
+    return run_gui(args.report, "evn" if args.evn else "time")
 
 
 if __name__ == "__main__":

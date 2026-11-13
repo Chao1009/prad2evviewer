@@ -190,6 +190,13 @@ int main(int argc, char *argv[])
 
     std::cout << "Finished processing all files. Total HyCal Mollers: "
               << all_events.size() << "\n";
+    if (all_events.empty()) {
+        std::cerr << "Error: no Moller events selected; cannot extract alignment, "
+                     "no iteration config written.\n"
+                     "       The input must be replayed with -gem_hit (GEM hits and "
+                     "HyCal-GEM matches are required).\n";
+        return 1;
+    }
 
     // Create the histogram for saving the results
     // Hits position histograms
@@ -332,11 +339,13 @@ int main(int argc, char *argv[])
     //    and check the residuals between GEM layers and HyCal
     // Calculate and fill residuals between the two layers of GEM chambers for each Mott event
     for (auto& event : all_mott_events) {
-        // scale the GEM hit of det by HC_z / GEM_z (projection onto the HyCal plane)
+        // scale the GEM hit of det by HC_z / GEM_z (projection onto the HyCal plane);
+        // GEM_z is moved to HC_z as well so a repeated call is a no-op
         auto project = [&event](int det) {
             const float scale = event.HC_z / event.GEM_z[det];
             event.GEM_x[det] *= scale;
             event.GEM_y[det] *= scale;
+            event.GEM_z[det] = event.HC_z;
         };
         if (event.match[0] && event.match[1] && event.match[2] && event.match[3]) {
             for (int det = 0; det < 4; ++det) project(det);
@@ -454,15 +463,22 @@ int main(int argc, char *argv[])
 
     // 2. Extract Detector Z position from HyCal/GEMs Z alignment parameter
     // (the extracted Moller vertex-Z peaks)
-    in_run_config.hycal_z = alignment_params["moller_HC_z"];
-    in_run_config.gem_z[0] = alignment_params["moller_GEM0_z"];
-    in_run_config.gem_z[1] = alignment_params["moller_GEM1_z"];
-    in_run_config.gem_z[2] = alignment_params["moller_GEM2_z"];
-    in_run_config.gem_z[3] = alignment_params["moller_GEM3_z"];
+    // An empty histogram yields 0 from extract_peak; keep the previous z then.
+    auto set_z = [&alignment_params](TH1F *hist, const std::string &key, float &z) {
+        if (hist->GetEntries() > 0 && hist->GetBinContent(hist->GetMaximumBin()) > 0) {
+            z = alignment_params[key];
+        } else {
+            std::cerr << "Warning: no entries in " << hist->GetName() << ", keeping previous "
+                      << key << " = " << z << " mm\n";
+        }
+    };
+    set_z(h1_hycal_Zdistance, "moller_HC_z", in_run_config.hycal_z);
+    for (int det = 0; det < 4; ++det)
+        set_z(h1_gem_Zdistance[det], "moller_GEM" + std::to_string(det) + "_z", in_run_config.gem_z[det]);
 
     // 3. Extract GEMs X/Y alignment parameters(alignment to HyCal center)
     // should firstly complete the beam position extraction
-    if(beam_x < 0.1 && beam_y < 0.1) {
+    if(std::abs(beam_x) < 0.1 && std::abs(beam_y) < 0.1) {
         for (int det = 0; det < 4; ++det) {
             in_run_config.gem_x[det] -= 0.5 * alignment_params["moller_GEM" + std::to_string(det) + "_x"];
             in_run_config.gem_y[det] -= 0.5 * alignment_params["moller_GEM" + std::to_string(det) + "_y"];
@@ -895,7 +911,7 @@ static bool ProcessFile(const std::string &input_root,
             float sigma_sum = std::sqrt(sigma1*sigma1 + sigma2*sigma2);
 
             if (theta1 < 0.65 || theta2 < 0.65) continue;
-            if (std::abs(phi1 - phi2) - 180.0 > 8.0) continue;
+            if (std::abs(std::abs(phi1 - phi2) - 180.0) > 8.0) continue;
             if (std::abs(E1 + E2 - gRunConfig.Ebeam) > 3.0 * sigma_sum) continue;
             if (std::abs(E1 - expectE1) > 3.0 * sigma1) continue;
             if (std::abs(E2 - expectE2) > 3.0 * sigma2) continue;

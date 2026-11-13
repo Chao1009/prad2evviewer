@@ -101,8 +101,17 @@ int main(int argc, char *argv[])
 
     opterr = 0;
     int opt;
+    int long_index = -1;
     while ((opt = getopt_long_only(argc, argv, "o:f:r:c:d:j:g:z:m:",
-                                   long_options, nullptr)) != -1) {
+                                   long_options, &long_index)) != -1) {
+        // getopt_long_only accepts any unambiguous prefix of a long option
+        // (e.g. -n -> -no_dep, -p -> -prad1); require the exact name.
+        if (opt >= 1000) {
+            const std::string tok = argv[optind - 1];
+            const std::string name = long_options[long_index].name;
+            if (tok != "-" + name && tok != "--" + name)
+                return InvalidOption(argv, optind, 0);
+        }
         switch (opt) {
             case 'o': output_dir = optarg; break;
             case 'f':

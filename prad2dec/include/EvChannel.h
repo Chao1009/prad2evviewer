@@ -100,7 +100,13 @@ public:
     // --- tree accessors -----------------------------------------------------
     BankHeader                  GetEvHeader() const { return BankHeader(&buffer[0]); }
     const std::vector<EvNode>  &GetNodes()    const { return nodes; }
-    const EvNode               &GetChild(const EvNode &n, size_t i) const { return nodes[n.child_first + i]; }
+    // i-th direct child of n (i < n.child_count); O(i) sibling walk.
+    const EvNode               &GetChild(const EvNode &n, size_t i) const
+    {
+        size_t k = n.child_first;
+        while (i-- > 0) k = static_cast<size_t>(nodes[k].next_sibling);
+        return nodes[k];
+    }
     std::vector<const EvNode*>  FindByTag(uint32_t tag) const;
 
     // Find first node with given tag (no allocation). Returns nullptr if not found.
@@ -318,12 +324,14 @@ protected:
     // with the random-access cursor reset.  Returns the evio status code.
     int openHandle(const std::string &path, const char *mode);
 
-    size_t scanBank      (size_t off, int depth, int parent);
+    // Scan helpers stop at `end` (exclusive word index of the parent's data);
+    // a structure that overruns it makes them return 0 / false.
+    size_t scanBank      (size_t off, int depth, int parent, size_t end);
     // SEGMENT or TAGSEGMENT (1-word header): Hdr is SegmentHeader or
     // TagSegmentHeader.
     template <class Hdr>
-    size_t scanSegment   (size_t off, int depth, int parent);
-    void   scanChildren  (size_t off, size_t nwords, uint32_t ptype, int depth, int pidx);
+    size_t scanSegment   (size_t off, int depth, int parent, size_t end);
+    bool   scanChildren  (size_t off, size_t nwords, uint32_t ptype, int depth, int pidx);
 };
 
 } // namespace evc

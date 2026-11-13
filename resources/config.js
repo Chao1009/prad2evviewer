@@ -21,7 +21,6 @@ function clearFrontend(){
     // LMS tab
     lmsSummaryData=null; resetLmsSelection();
     document.getElementById('lms-tbody').innerHTML='';
-    document.getElementById('lms-ref-select').innerHTML='<option value="-1">None</option>';
 
     document.getElementById('ring-select').innerHTML='';
 
@@ -40,6 +39,8 @@ function clearFrontend(){
     gemApvSkippedSincePause=0;
     const apvBody=document.getElementById('gem-apv-body');
     if(apvBody) apvBody.innerHTML='';
+    gemApvCurrentEvent=-1; gemApvDataSource='';
+    gemApvSetStatus('');
     clearEpicsFrontend();
     clearPhysicsFrontend();
 
@@ -55,6 +56,17 @@ function clearFrontend(){
 // freshly-updated histConfig fields.
 function fetchConfigAndApply(){
     return fetch('/api/config').then(r=>r.json()).then(applyConfig);
+}
+
+// Apply the Waveform-Tab peak filter ({waveform_filter, waveform_filter_active})
+// from /api/config, the hist_config_updated broadcast or the POST
+// /api/hist_config reply, and sync the "apply" toggle.  Touches nothing else,
+// so a cut change by any client doesn't reset this client's view.
+function applyPeakFilterConfig(data){
+    histConfig.waveform_filter         = data.waveform_filter         || {};
+    histConfig.waveform_filter_active  = !!data.waveform_filter_active;
+    const cutApplyCb = document.getElementById('cut-apply');
+    if (cutApplyCb) cutApplyCb.checked = histConfig.waveform_filter_active;
 }
 
 // ET connection dialog
@@ -79,7 +91,7 @@ function applyConfig(data){
             roc:crateRoc[String(d.crate)]||0,sl:d.slot,ch:d.channel});}
     totalEvents=data.total_events||0;
     filterActive=data.filter_active||false;
-    filteredCount=data.filtered_count||totalEvents;
+    filteredCount=(data.filtered_count!=null)?data.filtered_count:totalEvents;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
     // Waveform-Tab peak filter — runtime-mutable via the Cut-Settings dialog.
@@ -87,13 +99,9 @@ function applyConfig(data){
     // toggle); `waveform_filter` is the {time, integral, height, quality_bits}
     // payload.  Distinct from `filter_active` (event-level filter loaded via
     // /api/filter/load).
-    histConfig.waveform_filter         = data.waveform_filter         || {};
-    histConfig.waveform_filter_active  = !!data.waveform_filter_active;
+    applyPeakFilterConfig(data);
     histConfig.waveform_filter_default = data.waveform_filter_default || {};
     histConfig.quality_bits            = data.quality_bits            || [];
-    // sync "apply" toggle to server's enable state
-    const cutApplyCb = document.getElementById('cut-apply');
-    if (cutApplyCb) cutApplyCb.checked = histConfig.waveform_filter_active;
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
     triggerTypeDef=data.trigger_type||[];
@@ -117,6 +125,9 @@ function applyConfig(data){
                 sel.appendChild(o);
             }
         }
+        // keep the user's reference across re-init; drop it if the channel is gone
+        sel.value=String(g_lmsRefIndex);
+        if(sel.value!==String(g_lmsRefIndex)){ g_lmsRefIndex=-1; sel.value='-1'; }
         // Drift baseline indicator pill — short label shows the run number
         // (extracted from the .dat filename, e.g. "prad_024352_LMS.dat" →
         // "Baseline: run 24352").  Tooltip carries the full path + per-type
@@ -189,6 +200,7 @@ function applyConfig(data){
     if(data.et_config) window._etConfig=data.et_config;
     fileAvailable=data.file_available||false;
     if(data.source) sourceCaps=data.source;
+    syncGemApvSourceUi();
     const appTitle=mode==='online'?'PRad-II HyCal Monitor':'PRad-II HyCal Event Viewer';
     document.title=appTitle;
     document.getElementById('app-title').textContent=appTitle;
@@ -215,16 +227,19 @@ function applyConfig(data){
         toggleBtn.style.display='none';
     }
 
-    // hide tabs based on data source capabilities
-    document.querySelectorAll('.tab').forEach(t=>{
-        const tab=t.dataset.tab;
-        if(tab==='lms')    t.style.display=sourceCaps.has_waveforms?'':'none';
-        if(tab==='epics')  t.style.display=sourceCaps.has_epics?'':'none';
-    });
+    // hide tabs based on data source capabilities — only once a source is
+    // open; with none (idle) every capability reads false.
+    if(sourceCaps.type){
+        document.querySelectorAll('.tab').forEach(t=>{
+            const tab=t.dataset.tab;
+            if(tab==='lms')    t.style.display=sourceCaps.has_waveforms?'':'none';
+            if(tab==='epics')  t.style.display=sourceCaps.has_epics?'':'none';
+        });
 
-    // auto-switch to cluster tab if source has no waveform data
-    if(!sourceCaps.has_waveforms && activeTab==='dq'){
-        switchTab('cluster');
+        // auto-switch to cluster tab if source has no waveform data
+        if(!sourceCaps.has_waveforms && activeTab==='dq'){
+            switchTab('cluster');
+        }
     }
 
     if(mode==='file'){
@@ -233,6 +248,13 @@ function applyConfig(data){
             fetch('/api/filter/indices').then(r=>r.json()).then(idx=>{
                 filteredIndices=idx;
                 if(idx.length>0) loadEvent(idx[0]);
+                else {
+                    // nothing passes (older servers report the full count here)
+                    filteredCount=0;
+                    document.getElementById('ev-total').textContent=`/ 0 (${totalEvents} total)`;
+                    document.getElementById('ev-input').value='0';
+                    document.getElementById('status-bar').textContent='Event filter: 0 events pass';
+                }
             }).catch(()=>{filteredIndices=null;});
         } else {
             document.getElementById('ev-total').textContent=`/ ${totalEvents}`;

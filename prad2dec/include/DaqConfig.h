@@ -3,7 +3,7 @@
 // DaqConfig.h — configurable DAQ bank tags and event type identification
 //
 // All tags are configurable to accommodate DAQ format changes.
-// Most fields have no defaults — a DAQ config JSON must be loaded before use.
+// Fields a config omits default to inert values (tag 0, word index -1).
 //
 // This is a plain struct — no JSON dependency. Loading from JSON is handled
 // by the application layer (see load_daq_config.h).
@@ -40,15 +40,15 @@ struct DaqConfig
 
     // control event tags (CODA2/JLab legacy — confirmed in PRad-II data)
     // CODA3 uses 0xFFD0-0xFFD4, recognized via is_control() range check
-    uint32_t prestart_tag;
-    uint32_t go_tag;
-    uint32_t end_tag;
+    uint32_t prestart_tag = 0;
+    uint32_t go_tag = 0;
+    uint32_t end_tag = 0;
 
     // sync event tag
-    uint32_t sync_tag;
+    uint32_t sync_tag = 0;
 
     // EPICS slow control event tag
-    uint32_t epics_tag;
+    uint32_t epics_tag = 0;
 
     // --- ADC format selection ------------------------------------------------
     // "fadc250"  — FADC250 composite format c,i,l,N(c,Ns) (PRad-II)
@@ -57,30 +57,30 @@ struct DaqConfig
 
     // Zero-suppression threshold for ADC1881M (in units of pedestal sigma).
     // Channels with (raw - ped_mean) < sparsify_sigma * ped_rms are suppressed.
-    float sparsify_sigma;
+    float sparsify_sigma = 0.f;
 
     // --- bank tags within physics events ------------------------------------
 
     // FADC250 composite data bank tag (used when adc_format == "fadc250")
-    uint32_t fadc_composite_tag;
+    uint32_t fadc_composite_tag = 0;
 
     // ADC1881M raw data bank tag (used when adc_format == "adc1881m")
-    uint32_t adc1881m_bank_tag;
+    uint32_t adc1881m_bank_tag = 0;
 
     // Trigger Interface (TI) data bank tag (present in every ROC data block)
-    uint32_t ti_bank_tag;
+    uint32_t ti_bank_tag = 0;
 
     // JLab event number/type bank (depth 1, single-event mode)
-    uint32_t trigger_bank_tag;
+    uint32_t trigger_bank_tag = 0;
 
     // Run info bank (in TI master crate only)
-    uint32_t run_info_tag;
+    uint32_t run_info_tag = 0;
 
     // DAQ configuration readback string bank
-    uint32_t daq_config_tag;
+    uint32_t daq_config_tag = 0;
 
     // EPICS data bank tag (within EPICS events)
-    uint32_t epics_bank_tag;
+    uint32_t epics_bank_tag = 0;
 
     // SSP/MPD raw data bank tags (GEM readout)
     // Multiple tags: 0xE10C (SSP trigger in TI master), 0x0DE9 (VTP/MPD GEM data —
@@ -156,11 +156,11 @@ struct DaqConfig
 
     // --- TI data format (fallback for single-event / non-CODA3 data) --------
     // TI bank layout: word[0]=header, word[1]=trigger#, word[2]=ts_low, word[3]=ts_high
-    int ti_trigger_word;
-    int ti_time_low_word;       // lower 32 bits of 48-bit timestamp
-    int ti_time_high_word;      // upper bits of timestamp (shifted)
-    uint32_t ti_time_high_mask;
-    int      ti_time_high_shift;    // right-shift before combining
+    int ti_trigger_word = -1;
+    int ti_time_low_word = -1;      // lower 32 bits of 48-bit timestamp
+    int ti_time_high_word = -1;     // upper bits of timestamp (shifted)
+    uint32_t ti_time_high_mask = 0;
+    int      ti_time_high_shift = 0;   // right-shift before combining
 
     // --- trigger bits extraction -----------------------------------------------
     // Two-layer extraction:
@@ -171,23 +171,23 @@ struct DaqConfig
     //      With tiSetFPInputReadout(1): d[5] = 32-bit FP trigger inputs.
     //      Bit 8 = total-energy sum (SSP0); bits 16-31 = v1495 triggers,
     //      bit 24 = LMS, bit 25 = alpha (see database/trigger_bits.json).
-    int ti_trigger_type_word;
-    int ti_trigger_type_shift;
-    uint32_t ti_trigger_type_mask;
+    int ti_trigger_type_word = -1;
+    int ti_trigger_type_shift = 0;
+    uint32_t ti_trigger_type_mask = 0;
 
     // --- JLab trigger bank format (tag 0xC000, single-event mode) -----------
     // 3 words: event_number, event_tag, reserved
-    int trig_event_number_word;
-    int trig_event_type_word;
+    int trig_event_number_word = -1;
+    int trig_event_type_word = -1;
 
     // --- run info bank format (tag 0xE10F, in TI master crate) --------------
-    int ri_run_number_word;
-    int ri_event_count_word;
-    int ri_unix_time_word;
+    int ri_run_number_word = -1;
+    int ri_event_count_word = -1;
+    int ri_unix_time_word = -1;
 
     // --- ROC identification -------------------------------------------------
     struct RocEntry {
-        uint32_t    tag;
+        uint32_t    tag = 0;
         std::string name;
         int         crate = -1;
         std::string type;   // "fadc" (default), "gem", etc.
@@ -230,7 +230,7 @@ struct DaqConfig
     }
 
     // TI master crate tag (contains run info bank)
-    uint32_t ti_master_tag;
+    uint32_t ti_master_tag = 0;
 
     // --- companion-file pointers (resolved relative to the database dir) ----
     // Loaded from daq_config.json; the application layer uses these to

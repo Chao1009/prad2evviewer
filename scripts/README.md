@@ -80,16 +80,31 @@ Per-module LMS-based gain factors.  Loads the text
 `prad_{run:06d}_LMS.dat` files produced by the offline gain analysis
 and plots the HyCal geo map, the LMS reference-channel stability,
 a run-to-run drift view, and a table of irregular `(module, run)`
-outliers.
+outliers.  `-dir FOLDER` loads a data folder on startup.  The
+**Get Data**, **Analyze Data** and **Do It All** dialogs copy a run's
+EVIO files from the DAQ machine, run `run_gain_monitor.sh` on them, or
+do both in sequence (optionally for several runs in batch mode).
 
 ```bash
-hycal_gain_monitor
+hycal_gain_monitor [-dir FOLDER]
+```
+
+### online_gain_monitor.py
+
+Online LMS gain monitor.  Polls clondaq2 for new EVIO files of a
+user-selected run, downloads missing files, updates the LMS
+gain-correction ROOT output through
+`prad2ana_online_gain_monitor_base`, and displays per-batch W-module
+gain time series.
+
+```bash
+python scripts/online_gain_monitor.py [run ...] [--theme dark|light]
 ```
 
 ### hycal_map_builder.py
 
 Generic HyCal geometry viewer that colour-maps user data loaded from
-JSON or plain text.  Supports day/night theme toggle, PbGlass alpha
+JSON or plain text.  Supports a `--theme` option, PbGlass alpha
 slider, zoom/pan, and palette cycling (click the colour bar).
 
 - **JSON**: `{"<module_name>": {"<field>": <value>, ...}, ...}` — the last entry of a history list is used; nested dicts are flattened with dot notation; non-numeric fields (timestamps) are ignored.
@@ -131,8 +146,10 @@ gem_hycal_match_viewer run.evio.00000 -r 23867
 ### coincidence_monitor.py
 
 Connects to a running `prad2_server` (HTTP REST API, port 5051 by
-default), iterates every event in the loaded file, and accumulates
-per-module coincidence statistics between the four upstream
+default) and iterates every event in the loaded file — or, with the
+server in online mode (**Switch to ET Mode**), accumulates live events
+from its ring buffer — or reads local EVIO files directly through
+`prad2py` with no server.  It accumulates per-module coincidence statistics between the four upstream
 scintillators (V1–V4) and every HyCal module.  Two event-selection
 modes are provided:
 
@@ -141,7 +158,7 @@ modes are provided:
 
 A channel is "fired" when at least one FADC peak height (above
 pedestal) exceeds the user threshold.  The bottom half of the window
-shows the currently selected scintillator waveform and the HyCal
+shows all four scintillator waveforms (V1–V4) overlaid and the HyCal
 module last clicked on the map, both fetched from the server for the
 event entered in the Event Browser.
 
@@ -239,7 +256,7 @@ After a manual fit is applied, its `peak`, `sigma`, `chi2/ndf`, `ratio`,
 `new_factor`, and `fit_good` fields are updated directly in
 `calib_result_iterN.json`; `old_factor` remains unchanged.  The calculated
 factor is written back to `calib_factor_iterN.json`.  The factor uses the producer rule
-`old_factor * clamp(1 + 0.7 * (expected_peak / peak - 1), 0.5, 2.0)`.
+`old_factor * clamp(1 + 0.95 * (expected_peak / peak - 1), 0.5, 2.0)`.
 
 ### replay_report_viewer.py
 
@@ -298,7 +315,7 @@ values per module type (`--pbwo4-gain` / `--pbglass-gain`).
 
 ```bash
 python scripts/daq_tool/fadc_gain_config.py
-python scripts/daq_tool/fadc_gain_config.py -c database/calibration/adc_to_mev_factors_cosmic.json
+python scripts/daq_tool/fadc_gain_config.py -c database/calibration/old/adc_to_mev_factors_cosmic.json
 python scripts/daq_tool/fadc_gain_config.py --pbwo4-gain 0.15 --pbglass-gain 0.12
 ```
 
@@ -346,7 +363,7 @@ from prad2py import dec                 # evio reader + event types
 
 cfg = dec.load_daq_config()             # installed daq_config.json
 ch  = dec.EvChannel(); ch.set_config(cfg)
-ch.open("/data/.../prad_023671.evio.00000")
+ch.open_sequential("/data/.../prad_023671.evio.00000")
 
 while ch.read() == dec.Status.success:
     if not ch.scan() or ch.get_event_type() != dec.EventType.Physics:
@@ -356,7 +373,7 @@ while ch.read() == dec.Status.success:
         info     = ch.info()            # cheapest: TI/trigger metadata
         fadc_evt = ch.fadc()            # FADC250 waveforms, cached
         tdc_evt  = ch.tdc()             # V1190 tagger hits, cached
-        # gem_evt = ch.gem();  vtp_evt = ch.vtp();  dsc_evt = ch.dsc()
+        # gem_evt = ch.gem();  vtp_evt = ch.vtp()
 ```
 
 Random-access mode (also used internally by `hycal_event_viewer` and
@@ -379,18 +396,18 @@ Full reconstruction helpers live in `det`:
 from prad2py import dec, det
 
 cfg = dec.load_daq_config()
-ch  = dec.EvChannel(); ch.set_config(cfg); ch.open("run.evio.00000")
+ch  = dec.EvChannel(); ch.set_config(cfg); ch.open_sequential("run.evio.00000")
 
 # --- GEM reconstruction -----------------------------------------------
 gsys = det.GemSystem()
 gsys.init("database/gem_map.json")
-gsys.load_pedestals("database/gem_ped.json")    # optional
+gsys.load_pedestals("database/gem_peds/gem_ped_24023.dat")    # optional
 gcl  = det.GemCluster()
 
 # --- HyCal reconstruction ---------------------------------------------
 hsys = det.HyCalSystem()
 hsys.init("database/hycal_map.json")
-hsys.load_calibration("database/hycal_calib.json")
+hsys.load_calibration("database/calibration/PRad2_2p2_round2_1.json")
 hcl  = det.HyCalCluster(hsys)
 
 while ch.read() == dec.Status.success:
@@ -416,9 +433,6 @@ while ch.read() == dec.Status.success:
         # for c in hcl.reconstruct_hits():
         #     print("HyCal", c.center_id, c.x, c.y, c.energy, c.time)
 ```
-
-`prad2py.load_tdc_hits(path, ...)` remains the convenience entry point
-for the common "one-shot flat table of hits" workflow.
 
 ## GEM tools
 

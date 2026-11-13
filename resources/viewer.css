@@ -354,12 +354,17 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 
 /* Toggle-button: a checkbox label styled as a button.  Visually matches
    .copy-btn; the underlying <input type="checkbox"> is kept (so the JS
-   .checked / .onchange contract is unchanged) but visually hidden, and
-   :has(:checked) drives the active highlight. */
+   .checked / .onchange contract is unchanged) but visually hidden.  The
+   button face is the <span> after the input so `input:checked + span`
+   drives the active highlight — no :has(), which Qt5 WebEngine lacks. */
 .toggle-btn {
+    display:inline-flex;
+    cursor:pointer; font-size:12px; user-select:none;
+}
+.toggle-btn > span {
     background:var(--border); color:var(--dim);
-    padding:2px 8px; border-radius:3px; cursor:pointer; font-size:12px;
-    opacity:0.7; user-select:none;
+    padding:2px 8px; border-radius:3px;
+    opacity:0.7;
     transition:background 0.1s, color 0.1s, opacity 0.1s;
 }
 .toggle-btn input[type="checkbox"] {
@@ -367,8 +372,8 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     width:0; height:0; margin:0; padding:0; border:0;
     position:absolute; opacity:0; pointer-events:none;
 }
-.toggle-btn:hover { opacity:1; }
-.toggle-btn:has(input:checked) {
+.toggle-btn:hover > span { opacity:1; }
+.toggle-btn input:checked + span {
     background:var(--accent); color:var(--theme-on-accent); opacity:1;
 }
 

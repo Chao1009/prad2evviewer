@@ -73,7 +73,7 @@ The output `run_config_iter{N}.json` of iteration $N$ is fed as input to iterati
 
 ### 4.1 Event Selection
 
-The program reads **reconstructed ROOT files** produced by `replay_recon` (filenames containing `_recon`, TTree named `recon`), which contain HyCal cluster reconstruction results and GEM matching information.
+The program reads **reconstructed ROOT files** produced by `replay_recon` (filenames containing `_recon`, TTree named `recon`), which contain HyCal cluster reconstruction results and GEM matching information. The input must be replayed with `replay_recon -gem_hit` (the GEM hit branches are needed); if no Møller events are selected the program stops with an error and writes no iteration config.
 
 **Basic requirements**:
 - Trigger type must be `TBIT_sum` (total-energy trigger)
@@ -325,9 +325,9 @@ make -j4 det_align
 
 # ... repeat until convergence
 
-# Iteration N with a custom input config
-./bin/prad2ana_det_align /data/X17/recon/ -o ./align_output/ -i 10 -j 12 \
-    -c ./align_output/run_config_iter9.json
+# Iteration 1 with a custom starting config (-c is ignored for -i > 1)
+./bin/prad2ana_det_align /data/X17/recon/ -o ./align_output/ -i 1 -j 12 \
+    -c ./my_start_config.json
 ```
 
 ### Script for looped iterations
@@ -354,7 +354,7 @@ done
 | `-o <dir>` | string | required | output directory (created automatically) |
 | `-i <N>` | int | 1 | iteration number; controls input/output file naming |
 | `-j <N>` | int | 4 | number of parallel threads |
-| `-c <file>` | string | `general.json` | input config file for this iteration (overrides auto-detection) |
+| `-c <file>` | string | `general.json` | input config file for iteration 1; ignored when `-i` > 1 (the previous iteration's output is always used) |
 | `-r <base>` | string | `<output_dir>/run_config.json` | base path for output config; written as `<base>_iter{N}.json` |
 | `-f <N>` | int | −1 (all) | maximum number of files to process |
 | `-n <N>` | int | −1 (all) | maximum number of events per file |
@@ -390,11 +390,13 @@ Convergence is reached when the Delta values no longer change appreciably (below
 
 ### Using the final configuration
 
-The converged `run_config_iter{N}.json` can be used as input for subsequent physics analysis replays:
+The converged `run_config_iter{N}.json` can be used as input for subsequent physics analysis replays. `replay_recon` has no run-config option (`-c` is the DAQ config); the detector transforms come from the `runinfo` entry of the reconstruction config, so set `"runinfo"` in a copy of `database/reconstruction_config.json` to the iteration file and pass that copy with `-r`:
 
 ```bash
-replay_recon ... -c align_output/run_config_iter20.json
+replay_recon ... -r my_reconstruction_config.json   # "runinfo": "/abs/path/align_output/run_config_iter20.json"
 ```
+
+The `hycal_z` plane that clusters are projected to and the HyCal–GEM matching settings are still read from `database/runinfo/general.json`.
 
 ---
 

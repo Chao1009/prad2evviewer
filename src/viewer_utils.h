@@ -135,9 +135,11 @@ struct Histogram {
     void init(const BasicHistAxis<T> &a) { init(a.nbins()); }
     void fill(float v, float bmin, float bstep) {
         if (v < bmin) { ++underflow; return; }
-        int b = (int)((v - bmin) / bstep);
-        if (b >= (int)bins.size()) { ++overflow; return; }
-        ++bins[b];
+        // Range check in float before converting: NaN, +Inf and huge values
+        // would otherwise convert to INT_MIN and index out of bounds.
+        const float fb = (v - bmin) / bstep;
+        if (!(fb < (float)bins.size())) { ++overflow; return; }
+        ++bins[(int)fb];
     }
     template <typename T>
     void fill(float v, const BasicHistAxis<T> &a) { fill(v, a.min, a.step); }
@@ -150,9 +152,12 @@ struct Histogram2D {
     void init(int nx_, int ny_) { nx = nx_; ny = ny_; bins.assign(nx * ny, 0); }
     void init(const HistAxis &ax, const HistAxis &ay) { init(ax.nbins(), ay.nbins()); }
     void fill(float vx, float vy, float xmin, float xstep, float ymin, float ystep) {
-        int ix = (int)((vx - xmin) / xstep);
-        int iy = (int)((vy - ymin) / ystep);
-        if (ix < 0 || ix >= nx || iy < 0 || iy >= ny) return;
+        // Range check in float first (NaN / Inf / huge values must not reach
+        // the int conversion); (-1, 0) still truncates to bin 0 as before.
+        const float fx = (vx - xmin) / xstep;
+        const float fy = (vy - ymin) / ystep;
+        if (!(fx > -1.f && fx < (float)nx && fy > -1.f && fy < (float)ny)) return;
+        const int ix = (int)fx, iy = (int)fy;
         bins[iy * nx + ix]++;
     }
     void fill(float vx, float vy, const HistAxis &ax, const HistAxis &ay) {

@@ -44,6 +44,25 @@ function postJson(url, body){
         body:JSON.stringify(body)}).then(r=>r.json());
 }
 
+// Copy text to the clipboard.  navigator.clipboard exists only in secure
+// contexts (https, localhost) — not on plain-http hosts or in the Qt client —
+// so fall back to a hidden textarea + execCommand('copy').
+function copyText(text){
+    const legacy=()=>new Promise((resolve,reject)=>{
+        const ta=document.createElement('textarea');
+        ta.value=text; ta.setAttribute('readonly','');
+        ta.style.cssText='position:fixed;left:-9999px;top:0;opacity:0';
+        document.body.appendChild(ta); ta.select();
+        let ok=false;
+        try{ ok=document.execCommand('copy'); }catch(e){}
+        document.body.removeChild(ta);
+        if(ok) resolve(); else reject(new Error('copy failed'));
+    });
+    if(navigator.clipboard && navigator.clipboard.writeText)
+        return navigator.clipboard.writeText(text).catch(legacy);
+    return legacy();
+}
+
 // ── Plotly plot registry ──────────────────────────────────────────────
 // All Plotly divs register here with their tab and empty-state title.
 const plotRegistry=[];  // [{id, tab, title, config}]
@@ -389,6 +408,7 @@ function loadEventData(reqId, data, manual) {
 
     currentEvent = data.event;
     currentEventNumber = data.event_number || 0;
+    if (mode === 'online') updateFollowStatus();   // "Paused at …" names this event
     currentTriggerBits = data.trigger_bits || 0;
     currentEventKind = data.event_kind || 'physics';
     if (data.run_number) {
@@ -581,10 +601,10 @@ function init(){
             const d=getData();
             if(!d) return;
             const text=`x: [${d.x.join(', ')}]\ny: [${d.y.join(', ')}]`;
-            navigator.clipboard.writeText(text).then(()=>{
+            copyText(text).then(()=>{
                 const btn=document.getElementById(btnId);
                 btn.textContent='✓'; setTimeout(()=>{btn.textContent='copy';},1000);
-            });
+            }).catch(()=>{});
         };
     }
     setupCopyBtn('btn-copy-wf', ()=>currentWaveform);
@@ -896,7 +916,7 @@ function init(){
             }
             else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
             const pct=occPct(key);
-            if(pct!==null) t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${isTimeCut()?' tcut':''})`;
+            if(pct!==null) t+=`\nOcc ${pct.toFixed(1)}%  (${occTotal} evts${occIsCut()?' tcut':''})`;
             else if(histEnabled===false){
                 t+=`\nOcc: not computed (enable histograms)`;
             }

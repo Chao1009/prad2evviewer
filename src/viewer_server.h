@@ -194,7 +194,8 @@ private:
 
     // ── Filters ──────────────────────────────────────────────────────────
     std::vector<int> filtered_indices_;   // 1-based event indices passing filter
-    void buildFilteredIndex();
+    // in_load: called as a phase of loadFileInternal, which owns progress_.loading.
+    void buildFilteredIndex(bool in_load = false);
     std::string applyFilter(const nlohmann::json &fj);
     std::string loadFilterFile(const std::string &path);  // read + applyFilter
     void clearFilter();
@@ -204,7 +205,7 @@ private:
     void resetAfterFilterChange();
 
     void buildHistograms();
-    void loadFileInternal(const std::string &filepath);
+    void loadFileInternal(const std::string &filepath, bool hist);
 
     std::string decodeRawEvent(int ev1, fdec::EventData &event,
                                ssp::SspEventData *ssp_evt = nullptr);

@@ -18,16 +18,28 @@ namespace prad2
 {
 
 // Run number from a name such as "prad_023881.evio.00000" or "run_1234"
-// (first "prad_"/"run_" followed by digits, case-insensitive; the directory
-// part of the path is ignored).  -1 if there is none.
+// (first "prad_"/"run_" followed by digits, case-insensitive) in the last
+// path component, ignoring trailing separators; if that component has none,
+// the parent directory's name is tried ("/data/prad_023867/x.dat" -> 23867).
+// -1 if there is none.
 inline int run_number_from_path(const std::string &path)
 {
-    const auto slash = path.find_last_of("/\\");
-    const std::string base = (slash == std::string::npos) ? path : path.substr(slash + 1);
     static const std::regex pat(R"((?:prad|run)_0*(\d+))", std::regex_constants::icase);
-    std::smatch m;
-    if (std::regex_search(base, m, pat)) {
-        try { return std::stoi(m[1].str()); } catch (...) {}
+    auto strip = [](std::string &s) {
+        while (s.size() > 1 && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+    };
+    std::string rest = path;
+    strip(rest);
+    for (int level = 0; level < 2; ++level) {
+        const auto slash = rest.find_last_of("/\\");
+        const std::string base = (slash == std::string::npos) ? rest : rest.substr(slash + 1);
+        std::smatch m;
+        if (std::regex_search(base, m, pat)) {
+            try { return std::stoi(m[1].str()); } catch (...) { return -1; }
+        }
+        if (slash == std::string::npos) break;
+        rest.erase(slash);
+        strip(rest);
     }
     return -1;
 }
@@ -53,7 +65,9 @@ discover_split_files(const std::string &path, bool expand_siblings = false)
 {
     namespace fs = std::filesystem;
     std::error_code ec;
-    const fs::path p(path);
+    fs::path p(path);
+    // ".../prad_023881/" has an empty filename(); drop the trailing separator(s)
+    while (!p.has_filename() && p.has_relative_path()) p = p.parent_path();
 
     const bool wants_glob = (path.find('*') != std::string::npos);
     const bool is_dir     = fs::is_directory(p, ec);

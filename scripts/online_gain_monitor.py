@@ -38,6 +38,10 @@ except ImportError:
     TrivialExecutor = None
     HAS_UPROOT = False
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtCore import QObject, QProcess, QThread, QTimer, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import (
@@ -2304,7 +2308,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             return None
         valid = (
             np.asarray(current_mask, dtype=bool)[None, :]
-            & np.isfinite(current)
+            & np.isfinite(current) & (current > 0.0)   # 0 = failed fit
             & np.isfinite(baseline)
             & (baseline > 0.0)
         )
@@ -2342,7 +2346,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
                 arr = base_by_run[run]
                 masks = self._run_masks(masks_by_run, run, arr.shape[0])
                 valid = (
-                    masks[:, None, :] & np.isfinite(arr)
+                    masks[:, None, :] & np.isfinite(arr) & (arr > 0.0)
                     & np.isfinite(baseline)[None, :, :]
                     & (baseline[None, :, :] > 0.0)
                 )
@@ -2380,7 +2384,7 @@ echo "__ONLINE_GAIN_STATUS__ run=$RUN remote=0 local=0 copied=0 lms=$LMS_COUNT o
             baseline = np.broadcast_to(early_baseline, values.shape) if early_baseline is not None else None
         if baseline is not None:
             valid = (
-                ref_masks[:, None, :] & np.isfinite(values)
+                ref_masks[:, None, :] & np.isfinite(values) & (values > 0.0)
                 & np.isfinite(baseline) & (baseline > 0.0)
             )
             changes = safe_divide(values - baseline, baseline, valid)

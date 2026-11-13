@@ -32,6 +32,10 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
+from prad2_env import PRAD2PY_HINT, fix_qt_lib_path, import_prad2py
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QAbstractItemView, QApplication, QMainWindow, QWidget,
     QVBoxLayout, QHBoxLayout, QFormLayout, QGridLayout,
@@ -59,7 +63,6 @@ from hycal_geoview import (
     config_to_editors, editors_to_config, start_worker_thread,
 )
 from evio_io import EvioCursor, iter_physics_records, open_evio
-from prad2_env import import_prad2py
 
 
 # ---- prad2py discovery ----
@@ -1356,6 +1359,8 @@ class HyCalClusterMap(HyCalMapWidget):
 
     def set_clusters(self, clusters):
         self._clusters = list(clusters) if clusters else []
+        # A selection index from the previous event means nothing here.
+        self._selected_cluster = None
         self._recompute_membership()
         self.update()
 
@@ -1776,6 +1781,25 @@ _WAVE_FIELDS = (
     ("ped_max_iter",     1,     100,   None, "pedestal iteration cap"),
     ("overflow",         0,   65535,   None, "overflow cutoff (ADC)"),
 )
+
+# WaveConfig is a pybind11 class (no __dict__): its bound fields for the
+# histogram JSON, beyond the _WAVE_FIELDS ones.
+_WAVE_EXTRA_FIELDS = ("tail_break_n", "peak_pileup_gap")
+_NNLS_FIELDS = (
+    "enabled", "template_file", "apply_to_all_peaks",
+    "tau_r_min_ns", "tau_r_max_ns", "tau_f_min_ns", "tau_f_max_ns",
+    "shape_window_factor", "t0_window_ns", "amp_max_factor",
+    "pre_samples", "post_samples",
+)
+
+
+def _wave_config_to_json(cfg) -> Dict:
+    out = {name: getattr(cfg, name)
+           for name in [f[0] for f in _WAVE_FIELDS] + list(_WAVE_EXTRA_FIELDS)}
+    out["nnls_deconv"] = {name: getattr(cfg.nnls_deconv, name)
+                          for name in _NNLS_FIELDS}
+    return out
+
 
 _CLUSTER_FIELDS = (
     ("min_module_energy",  0.0, 1e4, 0.1, "single-module threshold (MeV)"),
@@ -2341,11 +2365,12 @@ class HyCalEventViewer(QMainWindow):
             print(f"[hycal] HyCalCluster.set_config failed: "
                   f"{type(exc).__name__}: {exc}", file=sys.stderr)
         self._hc_cache.clear()
-        # PipelineBuilder leaves hycal_calib_path empty when no calibration
-        # file resolved (no runinfo / no energy_calib_file).  Truthy =
-        # calibration actually loaded → suppress the cluster-tab warning.
-        self._hycal_calib_loaded = bool(getattr(pipeline, "hycal_calib_path", "")
-                                        or "")
+        # PipelineBuilder sets hycal_calib_path even when the file failed to
+        # load, so judge by the factors: any positive one = calibration
+        # actually loaded → suppress the cluster-tab warning.
+        hc = pipeline.hycal
+        self._hycal_calib_loaded = any(hc.module(i).cal_factor > 0
+                                       for i in range(hc.module_count()))
         # Sync the Advanced dock's cluster editors to the new config so
         # the user sees the values that actually drive reconstruction.
         self._sync_advanced_dock_cluster_cfg()
@@ -2911,6 +2936,13 @@ class HyCalEventViewer(QMainWindow):
         if self._batch_thread is not None:
             QMessageBox.information(self, "Busy", "Batch already running.")
             return
+        # Histograms exist only for channels a viewed event has shown
+        # (_goto); with none viewed yet the batch would fill nothing while
+        # marking its events folded, so load the first event first.
+        if self._current_idx < 0:
+            self._goto(0)
+            if self._current_idx < 0:
+                return
         start_idx = max(0, self._current_idx + 1)
         if start_idx >= len(self._index):
             QMessageBox.information(self, "End of file",
@@ -3005,7 +3037,7 @@ class HyCalEventViewer(QMainWindow):
                    for spec in _HIST_SPECS},
                 "filter":        self._filter.to_json(),
                 "filter_active": self._filter.enable,
-                "wave_config":   self._wcfg.__dict__.copy(),
+                "wave_config":   _wave_config_to_json(self._wcfg),
                 "channels":      {},
             }
             for (roc, slot, ch), hits in sorted(self._channels.items()):
@@ -3076,6 +3108,10 @@ def main():
     ap.add_argument("--theme", choices=available_themes(), default="dark",
                     help="Colour theme (default: dark)")
     args = ap.parse_args()
+
+    if not _HAVE_PRAD2PY:
+        sys.exit(f"hycal_event_viewer: prad2py is not available "
+                 f"({_PRAD2PY_ERR}).\n{PRAD2PY_HINT}")
 
     set_theme(args.theme)
 

@@ -38,15 +38,6 @@ PhysicsTools::PhysicsTools(fdec::HyCalSystem &hycal)
     moller_phi_diff_ = std::make_unique<TH1F>(
         "h_moller_phi_diff", "Moller Phi Difference;Phi_{e1} - Phi_{e2} (deg);Counts",
         40, -20, 20);
-    moller_x_ = std::make_unique<TH1F>(
-        "h_moller_x", "Moller Center X Position (HyCal);X (mm);Counts",
-        100, -10, 10);
-    moller_y_ = std::make_unique<TH1F>(
-        "h_moller_y", "Moller Center Y Position (HyCal);Y (mm);Counts",
-        100, -10, 10);
-    moller_z_ = std::make_unique<TH1F>(
-        "h_moller_z", "Moller Z Position (HyCal);Z (mm);Counts",
-        1000, 5000, 8000);
 }
 
 PhysicsTools::~PhysicsTools() = default;

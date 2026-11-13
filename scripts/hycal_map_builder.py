@@ -45,6 +45,10 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from prad2_env import database_dir, find_database_file, fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QSlider, QCheckBox,
@@ -58,7 +62,6 @@ from hycal_geoview import (
     apply_theme_palette, set_theme, available_themes, THEME,
     ColorRangeControl, make_info_label,
 )
-from prad2_env import database_dir, find_database_file
 
 
 # ---- Paths -----------------------------------------------------------------

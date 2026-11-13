@@ -209,6 +209,19 @@ install(DIRECTORY scripts/
                                         #  (setup files live here and are
                                         #   installed explicitly via install(FILES …))
 )
+# Run by scripts/hycal_gain_monitor.py ("Analyze Data" / "Do It All") from
+# its own directory, so keep the scripts/shell/ relative location.
+install(PROGRAMS scripts/shell/run_gain_monitor.sh
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/scripts/shell)
+
+# Install analysis/pyscripts/ — both the standalone analysis tools and the
+# shared _common.py helper imported by scripts/gem_hycal_match_viewer.py
+# (a BUILD_PYTHON wrapper, so this must not depend on ROOT/BUILD_ANALYSIS).
+if(BUILD_ANALYSIS OR BUILD_PYTHON)
+    install(DIRECTORY analysis/pyscripts/
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/analysis/pyscripts
+        FILES_MATCHING PATTERN "*.py")
+endif()
 
 # Generate + install thin bin/ wrappers for each user-facing Python tool so
 # they can be launched without needing a sourced prad2_setup.sh (the wrappers set

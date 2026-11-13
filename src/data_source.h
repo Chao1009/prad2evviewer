@@ -69,6 +69,8 @@ public:
     // EVIO/ROOT raw sources call ev_cb for each physics event.
     // ROOT recon sources call recon_cb instead.
     // EVIO sources also call ctrl_cb (sync/control) and epics_cb.
+    // ev_cb/recon_cb's idx is the 0-based index in the same space as
+    // decodeEvent()/eventTypeAt() (i.e. /api/event/<idx+1>).
     using EventCallback   = std::function<void(int idx, fdec::EventData &evt,
                                                 ssp::SspEventData *ssp)>;
     using ReconCallback   = std::function<void(int idx, const prad2::ReconEventData &recon)>;

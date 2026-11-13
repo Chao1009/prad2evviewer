@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence, Tuple
 
 try:
+    import prad2py
     from prad2py import dec, det
 except ImportError as e:
     raise SystemExit(
@@ -59,13 +60,16 @@ def extract_run_number(path: str) -> int:
 
 
 def resolve_db_path(p: str) -> str:
-    """Resolve a possibly-relative database path against PRAD2_DATABASE_DIR."""
+    """Resolve a possibly-relative database path against PRAD2_DATABASE_DIR,
+    else against prad2py.DATABASE_DIR (the module's database location)."""
     if not p:
         return p
     if os.path.isabs(p):
         return p
     db = os.environ.get("PRAD2_DATABASE_DIR")
     if db is None:
+        db = prad2py.DATABASE_DIR
+    if not db:
         return p
     return os.path.join(db, p)
 
@@ -214,7 +218,15 @@ def setup_pipeline(*,
     file-discovery bits the analysis loop needs.
 
     `_file` args accept "" to fall back to runinfo / database defaults.
-    Run number defaults to a sniff from the EVIO basename when -1."""
+    Run number defaults to a sniff from the resolved EVIO input (file
+    name, then containing directory name) when -1."""
+    evio_files = discover_split_files(evio_path or "")
+    if run_num <= 0 and evio_files:
+        first = Path(evio_files[0])
+        run_num = extract_run_number(first.name)
+        if run_num < 0:
+            run_num = extract_run_number(first.parent.name)
+
     b = det.PipelineBuilder()
     if daq_config:    b.set_daq_config(daq_config)
     if hc_calib_file: b.set_hycal_calib(hc_calib_file)
@@ -247,7 +259,7 @@ def setup_pipeline(*,
     p.gem_pos_res    = gem_res + [0.1] * (4 - len(gem_res))
     p.target_pos_res = list(core.target_pos_res)
 
-    p.evio_files = discover_split_files(evio_path or "")
+    p.evio_files = evio_files
     print(f"[setup] EVIO       : {len(p.evio_files)} split file(s) for "
           f"input {evio_path or '(null)'}", flush=True)
     for f in p.evio_files:
@@ -306,8 +318,9 @@ def iter_hycal_peaks(p: Pipeline, fadc_evt,
                      window: Optional[Tuple[float, float]] = None
                      ) -> Iterator[tuple]:
     """Yield (module, peaks) for every HyCal channel of one decoded
-    EventData.  `peaks` is the list of WaveAnalyzer peaks, restricted to
-    lo < time < hi when window=(lo, hi) is given."""
+    EventData.  `peaks` is the list of WaveAnalyzer peaks, with the
+    module's time_offset subtracted from each peak time (as Replay.cpp
+    does), restricted to lo < time < hi when window=(lo, hi) is given."""
     for tag, s, c, cd in iter_fadc_channels(fadc_evt):
         crate = p.crate_map.get(tag)
         if crate is None:
@@ -315,7 +328,8 @@ def iter_hycal_peaks(p: Pipeline, fadc_evt,
         mod = p.hycal.module_by_daq(crate, s, c)
         if mod is None or not mod.is_hycal():
             continue
-        _, _, peaks = p.wave_ana.analyze(cd.samples)
+        _, _, peaks = p.wave_ana.analyze(cd.samples,
+                                         time_offset=mod.time_offset)
         if window is not None:
             lo, hi = window
             peaks = [pk for pk in peaks if lo < pk.time < hi]

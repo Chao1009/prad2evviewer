@@ -261,11 +261,13 @@ void AppState::feedClusterChannel(fdec::HyCalCluster &cl, const fdec::Module &mo
     } else if (cluster_cfg.seed_time_window > 0.f) {
         // Multi-pulse: hand every analyzer-detected peak to the clusterer,
         // which applies the seed-anchored time gate.  No pre-window — the
-        // gate is the cut.
+        // gate is the cut.  wres holds raw peak times (it also feeds the
+        // Waveform-tab/LMS consumers), so the per-module time calibration
+        // (calib_time = raw_time - time_offset, as in Replay) is applied here.
         for (int p = 0; p < wres.npeaks; ++p) {
             const auto &pk = wres.peaks[p];
             if (pk.integral <= 0) continue;
-            feed(pk.integral, pk.time);
+            feed(pk.integral, pk.time - static_cast<float>(mod.time_offset));
         }
     } else {
         // Largest-integral peak across all detected peaks (no time gate);
@@ -381,6 +383,9 @@ void AppState::recordSyncTime(uint32_t unix_time, uint64_t last_ti_ts)
 void AppState::processEvent(fdec::EventData &event, const ssp::SspEventData *ssp,
                             fdec::WaveAnalyzer &ana, fdec::WaveResult &wres)
 {
+    // Held for the whole event: gem_sys is rewritten here and read back by
+    // gemLabHits() below (lock order: gem_mtx before data_mtx / lms_mtx).
+    std::lock_guard<std::mutex> gem_lk(gem_mtx);
     if (ssp) processGemEvent(*ssp);
 
     uint32_t tb = event.info.trigger_bits;
@@ -562,18 +567,16 @@ void AppState::processReconEvent(const prad2::ReconEventData &recon)
     float total_cluster_energy = 0.f;
     for (int i = 0; i < ncl; ++i) {
         const float energy = recon.cl_energy[i];
-        cls.push_back(physCluster(recon.cl_x[i], recon.cl_y[i], recon.cl_center[i],
-                                  energy, recon.cl_nblocks[i]));
+        cls.push_back(physClusterLab(recon.cl_x[i], recon.cl_y[i], recon.cl_z[i],
+                                     energy, recon.cl_nblocks[i]));
         total_cluster_energy += energy;
     }
-    // Recon GEM hits carry detector-local x,y just like the live gem_sys hits.
+    // Recon GEM hits are already in the lab frame (Replay fillGemHits).
     std::vector<std::vector<LabHit>> gem_lab(gem_enabled ? gem_transforms.size() : 0);
     for (int k = 0; k < ngh; ++k) {
         const int d = recon.det_id[k];
-        if (d >= (int)gem_lab.size()) continue;
-        float lx, ly, lz;
-        gem_transforms[d].toLab(recon.gem_x[k], recon.gem_y[k], lx, ly, lz);
-        gem_lab[d].push_back({lx, ly, lz});
+        if (d < 0 || d >= (int)gem_lab.size()) continue;
+        gem_lab[d].push_back({recon.gem_x[k], recon.gem_y[k], recon.gem_z[k]});
     }
     fillClusterMonitors(cls, total_cluster_energy, gem_lab,
                         any && cluster_trigger(tb), any && physics_trigger(tb),
@@ -591,6 +594,18 @@ AppState::PhysCluster AppState::physCluster(float x, float y, int center_id,
     const float z_local = fdec::shower_depth(center_id, energy);
     hycal_transform.toLab(x, y, z_local, c.lx, c.ly, c.lz);
     float dx = c.lx - target_x, dy = c.ly - target_y, dz = c.lz - target_z;
+    float rv = std::sqrt(dx*dx + dy*dy);
+    c.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
+    return c;
+}
+
+AppState::PhysCluster AppState::physClusterLab(float lx, float ly, float lz,
+                                               float energy, int nblocks) const
+{
+    PhysCluster c{0.f, 0.f, lx, ly, lz, 0.f, energy, nblocks};
+    float local_z;
+    hycal_transform.labToLocal(lx, ly, lz, c.x, c.y, local_z);
+    float dx = lx - target_x, dy = ly - target_y, dz = lz - target_z;
     float rv = std::sqrt(dx*dx + dy*dy);
     c.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
     return c;
@@ -744,16 +759,18 @@ json AppState::encodeReconClustersJson(const prad2::ReconEventData &recon, int e
 
 void AppState::prepareGemForView(const ssp::SspEventData &ssp_evt)
 {
-    if (!gem_enabled || ssp_evt.nmpds == 0) return;
+    if (!gem_enabled) return;
+    // Clear even without SSP data so the previous event's hits don't linger.
     gem_sys.Clear();
+    if (ssp_evt.nmpds == 0) return;
     gem_sys.ProcessEvent(ssp_evt);
     gem_sys.Reconstruct(gem_clusterer);
 }
 
 void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
 {
-    if (!gem_enabled || ssp_evt.nmpds == 0) return;
     prepareGemForView(ssp_evt);
+    if (!gem_enabled || ssp_evt.nmpds == 0) return;
 
     // Strip-level diagnostic: per-detector occupancy over the active strip
     // extent, in detector-local coords.  No target assumption is made here —
@@ -789,6 +806,12 @@ nlohmann::json AppState::gemDetJson(int d) const
 }
 
 nlohmann::json AppState::apiGemHits() const
+{
+    std::lock_guard<std::mutex> lk(gem_mtx);
+    return gemHitsJson();
+}
+
+nlohmann::json AppState::gemHitsJson() const
 {
     json result = json::object();
     result["enabled"] = gem_enabled;

@@ -432,7 +432,7 @@ async function _summaryLms(){
     // Always include every drift+warn row, plus top 5 OK rows for context.
     const tableEntries=[...driftEntries, ...warnEntries, ...okEntries.slice(0,5)];
 
-    let s=`LMS events: ${d.events||0} | Modules: ${allEntries.length} (ref: LMS3)\n\n`;
+    let s=`LMS events: ${d.events||0} | Modules: ${allEntries.length} (ref: ${lms3>=0?'LMS3':'none'})\n\n`;
     // Per-type ranges + suppress list — show in the header so the reviewer
     // knows what counted as a flag.
     const fmtBand=(lo,hi)=> (lo!=null&&hi!=null)?`[${lo.toFixed(2)}, ${hi.toFixed(2)}]`:'?';
@@ -542,6 +542,9 @@ async function refreshDataForReport(){
         fetchLmsSummary(), fetchEpicsChannels(), fetchEpicsLatest(), fetchAllEpicsSlots(),
         fetchPhysics()];
     if(currentEvent>0) fetches.push(fetchGemApvData(currentEvent));
+    // captureTabScreenshot switches tabs with skipFetch, so the Clustering
+    // tab's per-event data (cleared by an autoclear) must be loaded here.
+    if(currentEvent>0) fetches.push(loadClusterData(currentEvent));
     await Promise.all(fetches);
     // Plotly.react schedules an async DOM update; give the browser a frame
     // to commit the latest plots before we start switching tabs.

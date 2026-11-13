@@ -67,6 +67,10 @@ void GemSystem::Init(const std::string &map_file)
     apv_map_.clear();
     if (j.contains("apvs")) {
         for (auto &entry : j["apvs"]) {
+            // the array also holds comment-only objects; they are not APVs
+            if (!entry.is_object() || !entry.contains("crate") ||
+                !entry.contains("mpd") || !entry.contains("adc"))
+                continue;
             ApvConfig apv;
             apv.crate_id    = entry.value("crate", -1);
             apv.mpd_id      = entry.value("mpd", -1);

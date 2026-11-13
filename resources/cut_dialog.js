@@ -121,11 +121,14 @@ function initCutDialog(){
         else redrawGeo();
     }
 
-    // Server roundtrip + force redraw once histConfig is refreshed.
-    // Used by both the Save button and the apply-toggle so changes
-    // appear immediately even if the user hasn't toggled show.
-    function refreshAfterServer(){
-        fetchConfigAndApply().then(redrawAll, redrawAll);
+    // Apply the filter echoed in the POST /api/hist_config reply, then force
+    // a redraw.  Used by both the Save button and the apply-toggle so changes
+    // appear immediately even if the user hasn't toggled show.  Only the
+    // peak filter is touched (no /api/config re-init of the whole UI).
+    function refreshAfterServer(d){
+        if (d && d.waveform_filter_active !== undefined) applyPeakFilterConfig(d);
+        else $('cut-apply').checked = !!histConfig.waveform_filter_active;
+        redrawAll();
     }
 
     $('cut-settings-btn').onclick = openCutDialog;
@@ -148,7 +151,7 @@ function initCutDialog(){
                 return;
             }
             closeCutDialog();
-            refreshAfterServer();
+            refreshAfterServer(d);
         }).catch(() => {
             $('cut-status-msg').textContent = 'Request failed';
         });

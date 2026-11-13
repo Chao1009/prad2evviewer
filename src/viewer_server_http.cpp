@@ -118,8 +118,10 @@ json ViewerServer::buildConfig()
     cfg["data_dir"] = cfg_.data_dir;
     cfg["hist_enabled"] = (mode_.load() == Mode::Online) ? true : hist_enabled_.load();
     cfg["filter_active"] = app_file_.filterActive();
-    cfg["filtered_count"] = filtered_indices_.empty() ? (data ? data->event_count : 0)
-                                                       : (int)filtered_indices_.size();
+    // An active filter that matches nothing reports 0, not "all events".
+    cfg["filtered_count"] = (filtered_indices_.empty() && !app_file_.filterActive())
+                                ? (data ? data->event_count : 0)
+                                : (int)filtered_indices_.size();
 
     // data source capabilities
     // In online mode without a file, report EVIO-native capabilities
@@ -335,14 +337,40 @@ json ViewerServer::handleElogPost(const std::string &body)
         }
     }
 
+    // On-demand auto-post handshake, run on EVERY exit past the
+    // request_id check (dry run, dedup skip and failures included): clear
+    // the pending slot so the autoclear countdown resumes and the watchdog
+    // does not re-dispatch a handled request, tell every connected client
+    // to drop their "Auto-reporting…" badge, and record the outcome.
+    auto finish_auto = [&](bool posted, const std::string &saved_xml,
+                           const std::string &stage, const std::string &error) {
+        if (!is_auto || request_id.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(pending_capture_mtx_);
+            if (pending_capture_ &&
+                pending_capture_->request_id == request_id) {
+                pending_capture_.reset();
+            }
+        }
+        json done = {{"type", "auto_capture_done"},
+                     {"run", run}, {"posted", posted},
+                     {"saved_xml", saved_xml}};
+        wsBroadcast(done.dump());
+        appendAutoReportSummary(run, saved_xml, posted, std::string(),
+                                stage, error, low_data);
+    };
+
     // Hard precondition: local archive must be configured.  Every elog
     // post is mirrored on disk first; the actual upload reads back from
     // that file so the local copy is the canonical artifact.
     if (app.auto_report_local_save_dir.empty()) {
+        finish_auto(false, std::string(), "save",
+                    "auto_report.local_save_dir is required");
         return {{"ok", false},
                 {"error", "auto_report.local_save_dir is required"}};
     }
     if (!save_dir_writable_) {
+        finish_auto(false, std::string(), "save", "local_save_dir not writable");
         return {{"ok", false},
                 {"error", "local_save_dir not writable"}};
     }
@@ -366,6 +394,7 @@ json ViewerServer::handleElogPost(const std::string &body)
             std::cerr << "Elog post: server-side dup skip for run "
                       << run << " (recent: " << latest->first
                       << ", " << (now_t - latest->second) << "s old)\n";
+            finish_auto(false, latest->first.string(), "dedup_skip", std::string());
             return {{"ok", true}, {"skipped", true},
                     {"detail", "server-side dedup: recent save within "
                               + std::to_string(window_sec / 60) + " min"},
@@ -378,6 +407,7 @@ json ViewerServer::handleElogPost(const std::string &body)
                                  xml_body, low_data);
     if (!sr.ok) {
         std::cerr << "Elog local-save: " << sr.error << "\n";
+        finish_auto(false, std::string(), "save", "local save failed: " + sr.error);
         return {{"ok", false},
                 {"error", "local save failed: " + sr.error}};
     }
@@ -388,6 +418,7 @@ json ViewerServer::handleElogPost(const std::string &body)
     if (is_auto && !app.auto_report_post_to_elog) {
         std::cerr << "Elog post: auto-mode dry run (post_to_elog=false)"
                   << " saved=" << saved_xml << "\n";
+        finish_auto(false, saved_xml, "dry_run", std::string());
         return {{"ok", true}, {"posted", false}, {"dry_run", true},
                 {"saved_dir", saved_dir}, {"saved_xml", saved_xml},
                 {"status", "dry_run"}};
@@ -419,7 +450,10 @@ json ViewerServer::handleElogPost(const std::string &body)
     } else {
         upload_name = "prad2_" + sr.xml.filename().string();
     }
-    std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + cert_flag
+    // Timeouts: this runs on the only asio thread, so an unreachable elog
+    // host must not freeze the server.
+    std::string cmd = "curl -s --connect-timeout 10 --max-time 120"
+                      " -o /dev/null -w '%{http_code}'" + cert_flag
                     + " --upload-file '" + saved_xml + "' '"
                     + app.elog_url + "/incoming/" + upload_name
                     + "' 2>/dev/null";
@@ -438,22 +472,8 @@ json ViewerServer::handleElogPost(const std::string &body)
     std::cerr << "Elog post: " << app.elog_url << " <- " << saved_xml
               << " -> HTTP " << http_code << (ok ? " OK" : " FAIL") << "\n";
 
-    // On-demand auto-post handshake: clear the pending slot and tell
-    // every connected client to drop their "Auto-reporting…" badge.
-    if (is_auto && !request_id.empty()) {
-        std::lock_guard<std::mutex> lk(pending_capture_mtx_);
-        if (pending_capture_ &&
-            pending_capture_->request_id == request_id) {
-            pending_capture_.reset();
-        }
-        json done = {{"type", "auto_capture_done"},
-                     {"run", run}, {"posted", ok},
-                     {"saved_xml", saved_xml}};
-        wsBroadcast(done.dump());
-        appendAutoReportSummary(run, saved_xml, ok, std::string(),
-                                std::string("upload"), std::string(),
-                                low_data);
-    }
+    finish_auto(ok, saved_xml, "upload",
+                ok ? std::string() : "upload failed (HTTP " + http_code + ")");
     return {{"ok", ok}, {"posted", ok}, {"status", http_code},
             {"saved_dir", saved_dir}, {"saved_xml", saved_xml}};
 }
@@ -968,6 +988,7 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             // (online mode would otherwise show old + new entries mixed).
             app_file_.clearHistograms();
             app_online_.clearHistograms();
+            { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
             wsBroadcast("{\"type\":\"hist_cleared\"}");
         }
         json payload = {
@@ -1135,6 +1156,7 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             // may still hold a different event's working buffers.  Force a
             // re-process (no histogram side effects) so apiGemApv reads the
             // requested event regardless of cache state.
+            std::lock_guard<std::mutex> lk(app_file_.gem_mtx);
             app_file_.prepareGemForView(ssp_evt);
             return app_file_.apiGemApv(ssp_evt, evnum);
         }).dump());

@@ -389,7 +389,7 @@ static bool processFile(const std::string &path,
                         {ev.cl_x[0], ev.cl_y[0], ev.cl_z[0], ev.cl_energy[0]},
                         {ev.cl_x[1], ev.cl_y[1], ev.cl_z[1], ev.cl_energy[1]});
                     physics.FillMollerPhiDiff(physics.GetMollerPhiDiff(mp));
-                    if (PhysicsTools::GetMollerPhiDiff(mp) < 10.f) {
+                    if (PhysicsTools::isBackToBack(mp, 10.f)) {
                         out.h2_ee_hits_hc->Fill(ev.cl_x[0], ev.cl_y[0]);
                         out.h2_ee_hits_hc->Fill(ev.cl_x[1], ev.cl_y[1]);
                         float t1 = std::atan2(std::sqrt(ev.cl_x[0]*ev.cl_x[0] + ev.cl_y[0]*ev.cl_y[0]), ev.cl_z[0]) * 180.f / M_PI;
@@ -804,7 +804,11 @@ int main(int argc, char *argv[])
         }
     }
     // collect input files (can be files, directories, or mixed)
-    const std::vector<std::string> root_files = CollectInputs(argc, argv, optind, IsReconRootName);
+    const std::vector<std::string> root_files = CollectInputs(argc, argv, optind,
+        [](const std::string &name) {
+            // skip this tool's own default-named outputs (X_recon_quick_check.root)
+            return IsReconRootName(name) && name.find("_quick_check") == std::string::npos;
+        });
     if (root_files.empty()) {
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: quick_check <input_recon.root|dir> [more files...] [-o out.root] [-n max_events] [-j threads]\n";
@@ -914,9 +918,6 @@ int main(int argc, char *argv[])
     outfile.cd();
     outfile.mkdir("moller_analysis"); outfile.cd("moller_analysis");
     if (physics.GetMollerPhiDiffHist()) physics.GetMollerPhiDiffHist()->Write();
-    if (physics.GetMollerXHist()) physics.GetMollerXHist()->Write();
-    if (physics.GetMollerYHist()) physics.GetMollerYHist()->Write();
-    if (physics.GetMollerZHist()) physics.GetMollerZHist()->Write();
     merged->h_ee_tDiff->Write();
     merged->h_ee_invariant_mass->Write();
 

@@ -37,17 +37,17 @@ applies the same policy via `prad2::find_database_file()`.
 
 ### Readout
 
-- **Two crates** — `0x31` (`gemroc1`) and `0x34` (`gemroc2`), 72 APVs each → **144 APVs total**, evenly distributed across the four detectors (36 APVs per GEM).
+- **Two crates** — ROC `0x92` (`gem_1`, crate 146, 67 APVs) and `0x93` (`gem_2`, crate 147, 77 APVs) → **144 APVs total**, 36 APVs per GEM (GEM1 is split across both crates).
 - **52 MPDs / event** (observed in run 001137).  Each MPD hosts up to 16 APVs over individual fibres.
 - **APV25 front-end:** 128 analogue channels multiplexed to a single ADC.  SSP firmware samples 6 time bins per trigger (13-bit signed ADC).
-- **Bank tag:** `0x0DE9` (Hall-A standard MPD raw format; confirmed in run 001137).  Nested under the ROC bank (`0x31` or `0x34`) inside the physics-event bank (`0x82`).
+- **Bank tag:** `0x0DE9` (Hall-A standard MPD raw format; confirmed in run 001137).  Nested under the ROC bank (`0x92` or `0x93`) inside the physics-event bank (`0x82`).
 
 ### Data modes
 
 | Mode | `ApvData.nstrips` | Typical use | Offline pipeline |
 |---|---|---|---|
 | **Full readout** | `== 128` (all channels sent) | Pedestal calibration runs and debug modes with CM passthrough. | `processApv` runs the full offline chain (pedestal subtract → sorting common-mode → `noise × zero_sup_threshold` ZS). |
-| **Online ZS** | `< 128` (firmware dropped some) | Production runs. | `processApv` short-circuits: every strip present in the bank is a surviving hit (firmware already did pedestal + CM + ZS); no pedestal file required. |
+| **Online ZS** | `< 128` (firmware dropped some) | Production runs. | `processApv` skips pedestal + CM subtraction (firmware already did them) but still applies the `noise × zero_sup_threshold` cut to the strips present; without a pedestal file the default noise (5000) suppresses every strip, so the pedestal noise is still needed. |
 
 The mode is auto-detected per APV from the `nstrips` count, **not**
 from `has_online_cm` — the MPD can emit type-`0xD` CM-debug headers
@@ -71,9 +71,6 @@ The same code is shared between the live reconstruction
 | `shared_pos` | −1 | "Share another APV's plane slot" (−1 = use `pos`). |
 | `hybrid_board` | `true` | MPD hybrid-board pin conversion (`false` for SRS). |
 | `match` | `""` | `"+Y"` or `"-Y"` marks split APVs above / below the beam hole. |
-
-Full geometry details — and the rationale for parameters that cannot
-be collapsed — live in `memory/project_gem_geometry.md`.
 
 ## Typical workflows
 
@@ -134,7 +131,8 @@ gem_event_viewer /volatile/.../gem0gem1_001137.evio.00000 \
 ```
 
 Production runs with online ZS skip step 1 — `processApv` bypasses
-the offline pedestal/CM chain automatically.
+the offline pedestal/CM subtraction automatically, but still needs the
+pedestal noise for its ZS cut (see the runinfo default below).
 
 **Runinfo default.** Without `-P` / `--gem-ped`, `gem_dump` and
 `gem_event_viewer` load the pedestal and common-mode files that
@@ -191,4 +189,3 @@ the strip-mapping pipeline.
 - `prad2dec/src/SspDecoder.cpp` — SSP / MPD / APV bitfield decoder.
 - `database/gem_map.json` — detector geometry and per-APV mapping (source of truth).
 - `docs/rols/banktags.md` — bank-tag reference, including MPD `0x0DE9`.
-- `memory/project_gem_geometry.md` — deep-dive on the six-step mapping pipeline.

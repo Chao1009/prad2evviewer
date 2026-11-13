@@ -120,8 +120,11 @@ function showProgress(filename) {
 function pollProgress() {
     fetch('/api/progress').then(r => r.json()).then(data => {
         if (!data.loading) {
-            // done — hide overlay, reload config + first event
+            // done — hide overlay, drop the previous file's data (no
+            // mode_changed arrives when already in file mode), reload config
+            // + first event
             document.getElementById('progress-overlay').classList.remove('active');
+            clearFrontend();
             fetchConfigAndApply();
             return;
         }

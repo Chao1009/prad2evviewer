@@ -158,11 +158,15 @@ REPLAY_CORES=32 \
 bash scripts/shell/submit_replay_recon.sh
 ```
 
-For example, if your setup script exports `PRAD2_SOFT`, you can do:
+`PRAD2_SOFT` defaults to the checkout that holds the script (with
+`PRAD2_BIN=<PRAD2_SOFT>/build/bin`), so from a source checkout no setup is
+needed.  `prad2_setup.sh` does not set `PRAD2_SOFT` or `PRAD2_BIN`, and it only
+works when sourced from an installed `<prefix>/bin/` (from the source tree it
+exports paths under `scripts/` that do not exist).  To use an installed build:
 
 ```bash
-source scripts/shell/prad2_setup.sh
-bash scripts/shell/submit_replay_recon.sh
+source <prefix>/bin/prad2_setup.sh
+PRAD2_BIN=<prefix>/bin bash scripts/shell/submit_replay_recon.sh
 ```
 
 | Variable | Description |
@@ -225,7 +229,7 @@ Expected outputs:
 | `replay_recon_<RUN>.sbatch` | Generated Slurm batch script |
 | `replay_recon_<RUN>-<JOBID>.out` | Slurm stdout |
 | `replay_recon_<RUN>-<JOBID>.err` | Slurm stderr |
-| `prad_<RUN>.evio.XXXXX_recon.root` | Per-split recon ROOT output from replay |
+| `prad_<RUN>.XXXXX_recon.root` | Per-split recon ROOT output from replay |
 | `prad_<RUN>_recon_000.root`, `prad_<RUN>_recon_001.root`, ... | Merged recon ROOT files, grouped by `REPLAY_MERGE_FILES` |
 | `prad_<RUN>_filter_000.root`, `prad_<RUN>_filter_001.root`, ... | Filtered ROOT files, one per recon input |
 | `prad_<RUN>_epics.root` | Run-level slow-control ROOT containing only `scalers`, `epics`, and `runinfo`; written only when there is more than one recon input |
@@ -234,7 +238,7 @@ Expected outputs:
 | `prad_<RUN>_quick_check.root` | Quick-check histograms from all recon ROOT files |
 
 If `REPLAY_MERGE_FILES=0`, the downstream filter and quick-check steps use the
-per-split `prad_<RUN>.evio.XXXXX_recon.root` files directly.
+per-split `prad_<RUN>.XXXXX_recon.root` files directly.
 
 ---
 

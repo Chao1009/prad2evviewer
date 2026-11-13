@@ -168,13 +168,8 @@ public:
     static float GetThetaAngle(float x, float y, float z);
 
     void FillMollerPhiDiff(float phi_diff) { if (moller_phi_diff_) moller_phi_diff_->Fill(phi_diff); }
-    void FillMollerXY(float x, float y) { if (moller_x_) moller_x_->Fill(x); if (moller_y_) moller_y_->Fill(y); }
-    void FillMollerZ(float z) { if (moller_z_) moller_z_->Fill(z); }
 
     TH1F *GetMollerPhiDiffHist() const { return moller_phi_diff_.get(); };
-    TH1F *GetMollerXHist() const { return moller_x_.get(); };
-    TH1F *GetMollerYHist() const { return moller_y_.get(); };
-    TH1F *GetMollerZHist() const { return moller_z_.get(); };
 
 private:
     fdec::HyCalSystem &hycal_;
@@ -183,9 +178,6 @@ private:
     std::unique_ptr<TH2F> h2_energy_theta_;
     std::unique_ptr<TH2F> h2_Nevents_moduleMap_;
     std::unique_ptr<TH1F> moller_phi_diff_;
-    std::unique_ptr<TH1F> moller_x_;
-    std::unique_ptr<TH1F> moller_y_;
-    std::unique_ptr<TH1F> moller_z_;
 };
 
 } // namespace analysis

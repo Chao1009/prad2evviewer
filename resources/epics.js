@@ -213,9 +213,9 @@ function initEpics(data){
                 text+=`value: [${data.value.join(', ')}]\n\n`;
             }
             if(!text) return;
-            navigator.clipboard.writeText(text).then(()=>{
+            copyText(text).then(()=>{
                 btn.textContent='\u2713'; setTimeout(()=>{btn.textContent='copy';},1000);
-            });
+            }).catch(()=>{});
         };
     });
 

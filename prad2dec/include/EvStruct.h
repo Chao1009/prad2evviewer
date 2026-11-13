@@ -104,6 +104,8 @@ struct TagSegmentHeader {
 };
 
 // --- EvNode: one node in the flat event tree --------------------------------
+// Nodes are stored depth-first, so only the first child sits right after its
+// parent; walk the others via next_sibling (child_count of them in total).
 struct EvNode {
     uint32_t tag;
     uint32_t type;
@@ -112,8 +114,9 @@ struct EvNode {
     int      parent;
     size_t   data_begin;    // word index of data in buffer
     size_t   data_words;    // number of data words
-    size_t   child_first;
-    size_t   child_count;
+    size_t   child_first;   // index of the first child
+    size_t   child_count;   // number of direct children
+    int      next_sibling = -1;   // index of the next child of parent, -1 if last
 };
 
 // --- flat bank list ---------------------------------------------------------

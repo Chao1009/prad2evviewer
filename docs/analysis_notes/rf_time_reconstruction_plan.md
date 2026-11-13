@@ -304,9 +304,9 @@ mirroring the structure of `det_calib.cpp` / `epCalib.cpp`. Invocation:
 hycal_rf_offset_calib                                    \
     -i prad_024340.*_recon.root                          \
     -o database/hycal_rf_offsets/24340.json              \
-    --min-cluster-energy 200                             \
-    --require-single-cluster                             \
-    [--fit-window 1.5]
+    --min-energy 200                                     \
+    [--fit-window 1.5]                                   \
+    [--allow-multi]      # default: only n_clusters == 1 events
 ```
 
 Cuts that filter out bad timing references:

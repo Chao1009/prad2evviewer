@@ -12,7 +12,7 @@ front-end electronics.
 | `Fadc250Decoder` | FADC250 composite (online-summed) waveform decoding. |
 | `Fadc250RawDecoder` | FADC250 raw-mode waveform decoding. |
 | `Fadc250FwAnalyzer` | Bit-faithful firmware Mode 1/2/3 emulator (TET / NSB / NSA / NSAT / NPED / MAXPED). |
-| `WaveAnalyzer` | Software pedestal (median + MAD), peak finding, integration, and per-channel pulse-template NNLS pile-up deconvolution. |
+| `WaveAnalyzer` | Software pedestal (median + MAD), peak finding, integration, and per-module-type pulse-template Levenberg–Marquardt pile-up deconvolution. |
 | `Adc1881mDecoder` | ADC1881M decoding (legacy PRad). |
 | `SspDecoder` | SSP/MPD/APV fiber decoder (GEM readout). |
 | `TdcDecoder` | V1190 multi-hit TDC decoder (tagger crate). |
@@ -44,7 +44,7 @@ while (ch.Read() == evc::status::success) {
     if (ch.GetEventType() != evc::EventType::Physics) continue;
 
     for (int i = 0; i < ch.GetNEvents(); ++i) {
-        ch.SelectEvent(i);                   // pick sub-event, clear cache
+        ch.SelectEvent(i);                   // set sub-event index, clear cache
         const auto &info = ch.Info();        // TI / trigger metadata
         const auto &fadc = ch.Fadc();        // decoded on first call,
                                              // cached thereafter
@@ -83,6 +83,9 @@ for (int i : {0, n / 2, n - 1}) {
 Random-access events are *evio* events (blocks); a CODA built-trigger
 block can hold several physics sub-events, so after `ReadEventByIndex` +
 `Scan` use `GetNEvents()` + `SelectEvent(i)` as in the sequential path.
+(The decoders do not currently use the selected index — every sub-event of
+a block decodes the same banks; `SelectEvent` only clears the cache when
+the index changes.)
 See `src/evio_data_source.cpp` for the two-pass pattern the server
 uses (one Scan-only indexing pass to record `{evio_event, sub_event}`
 pairs; subsequent random access via the index).
@@ -114,8 +117,12 @@ structs without touching the lazy cache. New code should prefer
 
 ## Dependencies
 
-- [evio](https://github.com/JeffersonLab/evio) (≥ 6.0) — required.
+- [evio](https://github.com/JeffersonLab/evio) — required (the evio-6 or
+  evio-4 C API; the fetch fallback uses `evio-6.0`).
 - [et](https://github.com/JeffersonLab/et) — optional, for `EtChannel`.
+- nlohmann/json — required; the `nlohmann_json::nlohmann_json` target is
+  defined by the top-level build (`cmake/WebDeps.cmake`), so `prad2dec`
+  does not configure on its own.
 
 Both resolve from the Hall-B CODA installation by default; if not found,
 CMake fetches from GitHub. Override with `-DEVIO_SOURCE=fetch` or

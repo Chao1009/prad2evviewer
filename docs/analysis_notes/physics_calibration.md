@@ -38,8 +38,9 @@ A_{i,\mathrm{corr}}=A_{i,\mathrm{integral}}g_i,
 E_i=\operatorname{energize}_i(A_{i,\mathrm{corr}};C_i^{(n)}).
 $$
 
-Here, $g_i$ comes from `hycal.gain_factor` in the raw ROOT file and corrects
-time-dependent gain drift. The physics calibration constant $C_i^{(n)}$ is the
+Here, $g_i$ comes from the run's gain-correction time series
+(`LoadGainCorrTimeSeries`, looked up by event number; identity when the run has
+no gain-correction file) and corrects time-dependent gain drift. The physics calibration constant $C_i^{(n)}$ is the
 quantity updated by this program. These two corrections serve different
 purposes and should not be confused.
 
@@ -52,10 +53,10 @@ R_i^{\mathrm{raw}}=
 \frac{E_{i,\mathrm{expect}}}{E_{i,\mathrm{fit}}}.
 $$
 
-Only 70% of the deviation is applied to reduce overshoot and oscillation:
+Only 95% of the deviation is applied to reduce overshoot and oscillation:
 
 $$
-R_i=1+0.7\left(R_i^{\mathrm{raw}}-1\right),
+R_i=1+0.95\left(R_i^{\mathrm{raw}}-1\right),
 \qquad R_i\in[0.5,2.0],
 $$
 
@@ -112,7 +113,7 @@ The following branches are enabled:
 ```text
 event_num, trigger_type, trigger_bits
 hycal.nch, hycal.module_id, hycal.module_type
-hycal.gain_factor, hycal.npeaks
+hycal.gain_factor, hycal.nsamples, hycal.samples, hycal.npeaks
 hycal.peak_height, hycal.peak_time, hycal.peak_integral
 ```
 
@@ -142,14 +143,14 @@ The relevant database inputs include:
 - `runinfo/general.json`: beam energy, HyCal $z$ position, dead modules, and
   other run-dependent settings;
 - run-dependent HyCal time cuts and time offsets loaded by `PipelineBuilder`;
-- the default iteration-1 calibration seed,
-  `calibration/calibration_factor_3p5_June7.json`.
+- the default iteration-1 calibration seed: the run's `energy_calib_file`
+  from the run info.
 
 ### 2.3 Calibration file used by each iteration
 
 | Iteration | Input calibration | Output calibration |
 |---|---|---|
-| `-i 1` | `-c <seed.json>`, or the database default | `calib_factor_iter1.json` |
+| `-i 1` | `-c <seed.json>`, or the run-info `energy_calib_file` | `calib_factor_iter1.json` |
 | `-i N`, $N>1$ | `calib_factor_iter(N-1).json` in the same run output directory | `calib_factor_iterN.json` |
 
 The `-c` option affects iteration 1 only. At higher iterations it is ignored
@@ -191,10 +192,10 @@ Processing then depends on `seed_time_window`.
 
 #### Multi-pulse mode: `seed_time_window > 0`
 
-- Every in-window peak is sent to the clusterer and stored in `valid_peaks`.
+- Every in-window peak is sent to the clusterer.
 - The clusterer applies seed-anchored timing consistency.
-- During the 5×5 sum, the code again requires
-  $|t_\mathrm{peak}-t_\mathrm{cluster}|\leq\texttt{seed_time_window}$.
+- In the clusterer's 5×5 sum, hits with
+  $|t_\mathrm{hit}-t_\mathrm{center}|>\texttt{seed_time_window}$ are excluded.
 
 #### Legacy mode: `seed_time_window <= 0`
 
@@ -210,10 +211,12 @@ mode therefore selects the largest integral, not the largest `peak_height`.
 After `FormClusters()` and `ReconstructHits()`, the event must satisfy:
 
 1. exactly one reconstructed cluster: `hits.size() == 1`;
-2. at least four blocks: `hits[0].nblocks > 3`;
+2. at least three blocks: `hits[0].nblocks >= 3`;
 3. a PbWO4 seed/center module;
 4. no `kDeadModule` flag on the cluster;
-5. a reconstructed position near the seed-crystal center.
+5. a reconstructed position near the seed-crystal center (only for clusters
+   inside `InHyCalRing(x, y, 2.0, 16.)`, i.e. between 2 and 16 PbWO4 pitches
+   from the beam; disabled entirely by `-a`).
 
 The normalized local coordinates are
 
@@ -250,76 +253,29 @@ effects are larger.
 
 ## 4. Constructing the 5×5 Energy
 
-### 4.1 Geometric window
-
-The code uses a fixed PbWO4 pitch:
-
-$$
-p=20.75\ \mathrm{mm}.
-$$
-
-Around the cluster center module, it retains `valid_peaks` satisfying
+The spectrum is filled with the clusterer's `hits[0].energy_square`
+(`HyCalCluster::calculate_energy_square`). It sums the energies of the
+cluster's hits whose module offset from the center module (`qdist`, in module
+units) satisfies
 
 $$
-|x_j-x_c|\leq2.5p,\qquad |y_j-y_c|\leq2.5p.
+|\Delta x|<2.51,\qquad |\Delta y|<2.51,
 $$
 
-The half-width is 51.875 mm, corresponding to offsets $-2,-1,0,1,2$
-in both directions on a regular PbWO4 grid. All geometrically and temporally
-accepted peak energies are summed:
+with the time cut of §3.2 in multi-pulse mode. Any leakage correction is added,
+and the same bias and nonlinearity factors applied to the cluster energy are
+applied to it:
 
 $$
 E_{5\times5}=\sum_{j\in5\times5}E_j.
 $$
 
-This sum is built from `valid_peaks`, rather than directly using
-`hits[0].energy`, and is filled into the spectrum of the cluster center module.
+It is filled into the spectrum of the cluster center module
+(`modules_5by5/`); the island energy `hits[0].energy` fills a parallel spectrum
+(`modules_island/`).
 
-### 4.2 Energy layers
-
-For each peak, the position difference is divided by the pitch and rounded:
-
-$$
-n_x=\operatorname{round}(\Delta x/p),\qquad
-n_y=\operatorname{round}(\Delta y/p),
-$$
-
-and the layer is the Chebyshev distance:
-
-$$
-L=\max(|n_x|,|n_y|).
-$$
-
-| Layer | Region | Modules in a complete window |
-|---|---|---:|
-| 0 | Center crystal | 1 |
-| 1 | Central 3×3 excluding the center | 8 |
-| 2 | Outer ring of the 5×5 | 16 |
-
-The corresponding sums are stored as `center_energy`,
-`second_layer_energy`, and `third_layer_energy`.
-
-### 4.3 Center-energy fraction cut
-
-The event must satisfy
-
-$$
-f_\mathrm{center}=
-\frac{E_\mathrm{center}}{E_\mathrm{cluster}}>0.6.
-$$
-
-The denominator is the clusterer result `hits[0].energy`, not
-$E_{5\times5}$. The diagnostic layer fractions use the same denominator:
-
-$$
-f_2=\frac{E_\mathrm{layer2}}{E_\mathrm{cluster}},
-\qquad
-f_3=\frac{E_\mathrm{layer3}}{E_\mathrm{cluster}}.
-$$
-
-The current ROOT histogram titles describe the latter two as
-`E_layer/E_5x5`, but the implementation divides by `hits[0].energy`. Interpret
-the histograms according to the implementation.
+The center-energy fraction $E_\mathrm{center}/E_\mathrm{cluster}$ (denominator
+`hits[0].energy`) is histogrammed for diagnostics only; no cut is applied on it.
 
 ---
 
@@ -329,11 +285,13 @@ After merging all worker histograms, the main thread processes W1–W1156.
 
 ### 5.1 Minimum statistics and dead modules
 
-- A spectrum with fewer than 100 entries is skipped completely: it is not fit
-  and does not appear in `calib_result_iterN.json`.
+- A spectrum with fewer than 40 entries is skipped completely: it is not fit
+  and does not appear in `calib_result_iterN.json`. Between 40 and 99 entries
+  the fitter itself refuses the spectrum (it needs at least 100), so the
+  expected-peak fallback of §5.4 applies (ratio 1, `fit_good=false`).
 - A run-config dead module is not updated.
 - A dead module appears in the result JSON only if its spectrum first reaches
-  100 entries; its numeric fields are zero and `fit_good=false`.
+  40 entries; its numeric fields are zero and `fit_good=false`.
 - `kDeadNeighbor` is recorded as `is_deadNeighbor`, but does not currently
   prevent fitting or updating.
 
@@ -373,7 +331,10 @@ therefore all propagate into the final calibration.
 
 ### 5.3 Gaussian peak fit
 
-`PhysicsTools::fitGaus(h, expected_peak)` performs the following steps:
+`PhysicsTools::fitPeak(h, expected_peak, false, use_crystal_ball)` fits a
+Gaussian by default (`fitGaus`) or a Crystal Ball with `-f crystalball`
+(`fitCrystalBall`, with its own peak-search window). The Gaussian fit performs
+the following steps:
 
 1. require at least 100 entries;
 2. find the highest local maximum in
@@ -406,12 +367,14 @@ For a positive fitted peak:
 
 ```text
 raw_ratio  = expected_peak / peak
-ratio      = 1 + 0.85 * (raw_ratio - 1)
+ratio      = 1 + 0.95 * (raw_ratio - 1)
 ratio      = clamp(ratio, 0.5, 2.0)
 new_factor = old_factor * ratio
 ```
 
-The module calibration base energy is also set to `expected_peak`.
+The module calibration base energy is also set to `expected_peak`. With `-k`,
+modules flagged `kTransition` or `kInnerBound` are fitted and reported, but
+keep their current factor (`new_factor = old_factor`).
 
 Importantly, `fit_good` is currently a diagnostic flag, **not an update gate**.
 A positive peak is used even when its sigma or chi-square fails the quality
@@ -505,7 +468,7 @@ This diagnostic array contains one object per processed module:
 | `is_dead` | Run-config dead-module flag |
 | `is_deadNeighbor` | Dead-neighbor flag |
 
-Only modules with at least 100 spectrum entries appear. Do not use this file
+Only modules with at least 40 spectrum entries appear. Do not use this file
 alone to determine whether all 1156 modules are present in the final table.
 
 Example:
@@ -514,8 +477,8 @@ Example:
 {
   "module_id": 1735,
   "old_factor": 0.1500,
-  "new_factor": 0.15525,
-  "ratio": 1.035,
+  "new_factor": 0.157125,
+  "ratio": 1.0475,
   "peak": 3300.0,
   "expected_peak": 3465.0,
   "sigma": 72.0,
@@ -527,8 +490,8 @@ Example:
 ```
 
 The fitted peak is 5% below expectation. The undamped correction is
-$3465/3300=1.05$; after damping it is $1+0.7\times0.05=1.035$, so the factor
-increases from 0.1500 to 0.15525.
+$3465/3300=1.05$; after damping it is $1+0.95\times0.05=1.0475$, so the factor
+increases from 0.1500 to 0.157125.
 
 | Result pattern | Likely meaning | Recommended action |
 |---|---|---|
@@ -540,24 +503,25 @@ increases from 0.1500 to 0.15525.
 | `peak == expected_peak` and `sigma == 0` | Typical complete-fit fallback | Ratio 1 does not mean a perfect fit |
 | `is_dead=true` with zero numeric fields | Dead module was skipped | Do not treat zero as a new valid factor |
 | `is_deadNeighbor=true` | Leakage into a dead region is possible | Inspect peak shape and iteration stability |
-| Module absent from result JSON | Usually fewer than 100 entries | Check its ROOT spectrum; factor normally remains unchanged |
+| Module absent from result JSON | Usually fewer than 40 entries | Check its ROOT spectrum; factor normally remains unchanged |
 
 ### 7.3 `calib_result_iterN.root`
 
 | ROOT object | Contents |
 |---|---|
-| `h1_E_mod_<id>_merged` | 5×5 seed spectrum for every W module |
+| `modules_5by5/h1_E_mod_<id>_merged` | 5×5 seed spectrum for every W module (the fitted spectra) |
+| `modules_island/h1_E_mod_<id>_island_merged` | Island cluster-energy seed spectrum for every W module (not fitted) |
 | `h2_energy_theta_merged` | Selected $E_{5\times5}$ versus reconstructed $\theta$ |
 | `hit_pos_merged` | Selected reconstructed hit positions |
 | `h_E_1cl_merged` | Inclusive selected single-cluster 5×5 energy |
 | `h_center_energy_fraction` | $E_\mathrm{center}/E_\mathrm{cluster}$ |
 | `h_center_energy` | Center-crystal energy |
-| `h_2nd_energy_fraction` | Actually $E_\mathrm{layer2}/E_\mathrm{cluster}$ in the code |
-| `h_3rd_energy_fraction` | Actually $E_\mathrm{layer3}/E_\mathrm{cluster}$ in the code |
 | `h_fit_peak_energy` | Fitted or fallback peaks across modules |
 | `h_fit_peak_ratio` | Damped correction-factor distribution |
 | `h_fit_peak_chi2ndf` | Module-fit $\chi^2/\mathrm{NDF}$ distribution |
 | `h_fit_peak_sigma` | Module-fit sigma distribution |
+| `h1_E_1cl_island`, `h1_E_1cl_square`, `h1_dE_1cl` | Island energy, 5×5 energy and their difference, for seeds inside `InHyCalRing(4, 14)` |
+| `h2_cl_module_occupancy` | Module offsets of the selected cluster's hits from its center, for the same seeds (scaled so the center bin is 100) |
 
 #### Per-module input spectra
 
@@ -577,10 +541,8 @@ dead-neighbor shapes require manual review. The JSON `peak`, `sigma`, and
   selection nonuniformities.
 - `h_E_1cl_merged`: shows the inclusive selected spectrum but cannot replace
   individual module spectra.
-- `h_center_energy_fraction`: selected entries begin above 0.6. A large pileup
-  at the threshold indicates sensitivity to this cut.
-- The center and layer histograms show shower-energy sharing and help diagnose
-  leakage near edges and dead regions.
+- The center-energy and center-fraction histograms show shower-energy sharing
+  and help diagnose leakage near edges and dead regions.
 
 #### Cross-module fit summaries
 
@@ -639,6 +601,7 @@ installed build, use `prad2ana_physics_calib` from `PATH`.
 ```text
 prad2ana_physics_calib <input_raw.root|dir> [more files/dirs...]
     [-i iteration] [-o output_dir] [-c seed_calib.json] [-j num_threads]
+    [-f gaus|crystalball] [-a] [-k]
 ```
 
 | Argument | Default | Description |
@@ -646,11 +609,11 @@ prad2ana_physics_calib <input_raw.root|dir> [more files/dirs...]
 | Positional input | Required | Raw ROOT file or directory containing `*_raw.root`; multiple allowed |
 | `-i <N>` | `1` | Iteration number, at least 1 |
 | `-o <dir>` | `.` | Output base; `Physics_calib/runN` is appended |
-| `-c <json>` | Database seed | Initial calibration for iteration 1 only |
+| `-c <json>` | Run-info `energy_calib_file` | Initial calibration for iteration 1 only |
 | `-j <N>` | `4` | Reconstruction workers, limited to the number of files |
-
-The no-input usage string in the source still says `calib_5by5`; this is a
-stale message. The actual executable is `prad2ana_physics_calib`.
+| `-f <mode>` | `gaus` | Peak-fit function: `gaus` or `crystalball` |
+| `-a` | off | Disable the central-region cut of §3.3 |
+| `-k` | off | Keep the current factor for transition (`kTransition`) and beam-hole (`kInnerBound`) modules |
 
 ### 8.3 Examples
 
@@ -718,7 +681,8 @@ the convergence behavior.
 2. Confirm that `PRAD2_DATABASE_DIR` matches the data-taking period.
 3. Check `Ebeam`, `hycal_z`, and dead modules for the run in
    `runinfo/general.json`.
-4. Confirm that gain corrections are present in `hycal.gain_factor`.
+4. Confirm that the run's gain-correction file (`prad_<run>_gain_corr.root`)
+   exists; without it no gain correction is applied.
 5. Validate the time cuts, time offsets, and reconstruction configuration.
 6. Keep one consistent output path across iterations.
 
@@ -753,7 +717,7 @@ Do not judge convergence only by successful program exit. Useful criteria are:
 - failed modules are stable and have been reviewed individually;
 - few or no modules remain at the 0.5 or 2.0 clamp.
 
-Because each iteration applies only 70% of the correction, multiple iterations
+Because each iteration applies only 95% of the correction, multiple iterations
 are normally required. The necessary count depends on the seed, statistics,
 and background and should not be fixed mechanically.
 
@@ -770,36 +734,24 @@ and background and should not be fixed mechanically.
 3. **The first file determines global run state:** each worker infers its own
    run for the pipeline, but mixed runs are not rejected.
 
-4. **No event-count option:** an unused `max_events` variable exists, but there
-   is no `-n` option. Every entry in every input file is processed.
+4. **No event-count option:** there is no `-n` option. Every entry in every
+   input file is processed.
 
 5. **A failed input file does not abort the full job:** the worker reports
    `FAILED`, other files continue, and outputs may still be written. Review the
    log for failed files.
 
-6. **Calibration loading is not explicitly validated by this tool:** verify
-   that the seed or preceding JSON exists, parses correctly, and contains the
-   expected modules.
+6. **Calibration loading:** the tool aborts if the seed or preceding JSON loads
+   no modules; it does not check that all expected modules are present.
 
 7. **`fit_good` does not prevent an update:** any positive fitted peak produces
    a correction even if its width or chi-square is unacceptable.
 
 8. **Low-statistics modules are absent from the result JSON:** modules below
-   100 entries retain their old factor without an explicit low-stat status.
+   40 entries retain their old factor without an explicit low-stat status.
 
 9. **Dead-neighbor is currently diagnostic only:** these modules are updated
    normally despite possible shower leakage into a dead crystal.
-
-10. **The 5×5 uses a fixed 20.75 mm pitch:** it is a coordinate window rather
-    than an explicit neighbor graph; edge and transition geometry is handled
-    only by the geometric and inner-side cuts.
-
-11. **Layer-fraction titles differ from the implementation:** the code divides
-    layer 2 and layer 3 by cluster energy, not 5×5 energy.
-
-12. **The merged hit-position title has an inconsistent unit:** the filled
-    HyCal coordinates are used elsewhere as mm, although the merged histogram
-    title says `X (cm);Y (cm)`.
 
 In summary, this calibration selects clean single-cluster elastic-`ep` showers,
 assigns each 5×5 spectrum to its seed PbWO4 module, aligns the fitted peak with
@@ -1101,7 +1053,7 @@ The ratio and factor use the same update rule as the producer:
 
 $$
 ratio = \operatorname{clamp}\left(
-1+0.7\left(\frac{expected\_peak}{peak}-1\right), 0.5, 2.0\right),
+1+0.95\left(\frac{expected\_peak}{peak}-1\right), 0.5, 2.0\right),
 $$
 
 $$

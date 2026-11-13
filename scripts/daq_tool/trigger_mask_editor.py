@@ -22,10 +22,19 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+# scripts/ on sys.path for prad2_env (daq_common does the same, but it
+# imports PyQt6 and so cannot come first).
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from prad2_env import fix_qt_lib_path  # noqa: E402
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QSplitter, QFileDialog,
-    QGroupBox, QFormLayout,
+    QGroupBox, QFormLayout, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
 from PyQt6.QtGui import QColor, QFont
@@ -383,9 +392,13 @@ class TriggerMaskEditor(QMainWindow):
             self, "Save Trigger Mask", self._output_path or "trigger_mask.cnf",
             "Config Files (*.cnf);;All Files (*)")
         if path:
+            try:
+                with open(path, "w") as f:
+                    f.write(self._text.toPlainText())
+            except (OSError, ValueError, UnicodeError) as exc:
+                QMessageBox.critical(self, "Save failed", f"{path}\n\n{exc}")
+                return
             self._output_path = path
-            with open(path, "w") as f:
-                f.write(self._text.toPlainText())
             self._status.setText(f"Saved to {path}")
 
     def _load_file(self):
@@ -393,8 +406,12 @@ class TriggerMaskEditor(QMainWindow):
             self, "Load Trigger Mask", "",
             "Config Files (*.cnf);;All Files (*)")
         if path:
-            with open(path) as f:
-                text = f.read()
+            try:
+                with open(path) as f:
+                    text = f.read()
+            except (OSError, ValueError, UnicodeError) as exc:
+                QMessageBox.critical(self, "Load failed", f"{path}\n\n{exc}")
+                return
             disabled = parse_trigger_mask(text, self._modules)
             self._map.disabled = disabled
             self._on_mask_changed()
