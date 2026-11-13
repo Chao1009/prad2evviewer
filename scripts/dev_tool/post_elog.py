@@ -251,7 +251,8 @@ def main(argv=None):
     print(f"title : {title}")
     print(f"xml   : {xml_path}")
 
-    if not args.force:
+    # --check-only always runs the check and never posts, even with --force.
+    if args.check_only or not args.force:
         print("checking elog...")
         c = check_elog(args.url, args.book, args.cert, args.key, title)
         if not c.get("checked"):

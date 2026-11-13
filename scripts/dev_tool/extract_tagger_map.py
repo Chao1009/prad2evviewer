@@ -57,7 +57,7 @@ def extract(xlsx_path: Path) -> list[dict]:
 
 
 def main() -> int:
-    here = Path(__file__).resolve().parent.parent
+    here = Path(__file__).resolve().parents[2]   # repo root
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--in", dest="inp", type=Path,
                     default=here / "docs" / "Tagger_translation_0.xlsx")

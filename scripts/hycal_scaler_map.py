@@ -21,6 +21,10 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel,

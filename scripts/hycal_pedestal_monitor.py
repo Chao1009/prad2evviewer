@@ -28,6 +28,10 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from prad2_env import fix_qt_lib_path
+
+fix_qt_lib_path()   # before the first PyQt6 import
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QMessageBox,
@@ -134,6 +138,10 @@ def read_all_pedestals(
                 if mod is not None:
                     result[mod] = val
     return result
+
+
+# What a missing / unreadable / malformed .cnf raises from read_all_pedestals.
+_PED_READ_ERRORS = (OSError, ValueError, IndexError, UnicodeError)
 
 
 # ---- Parse faV3peds stdout for per-channel RMS -----------------------------
@@ -504,9 +512,13 @@ class PedestalMonitorWindow(QMainWindow):
         if self._sim:
             self._load_sim_data()
             return
-        self._configured = read_all_pedestals(
-            ORIGINAL_PED_DIR, "_ped.cnf", self._daq_map)
-        mt_latest = self._read_latest()
+        try:
+            self._configured = read_all_pedestals(
+                ORIGINAL_PED_DIR, "_ped.cnf", self._daq_map)
+            mt_latest = self._read_latest()
+        except _PED_READ_ERRORS as exc:
+            self._show_ped_read_error(exc)
+            return
 
         n_o, n_l = len(self._configured), len(self._latest)
         age = ""
@@ -519,6 +531,13 @@ class PedestalMonitorWindow(QMainWindow):
         self._set_status_style("idle")
         self._update_maps()
         self._update_report()
+
+    def _show_ped_read_error(self, exc: Exception):
+        self._status_lbl.setText(f"ERROR reading pedestal files: {exc}")
+        self._set_status_style("error")
+        QMessageBox.critical(self, "Pedestal files",
+                             f"Reading the pedestal .cnf files failed:\n\n"
+                             f"{type(exc).__name__}: {exc}")
 
     def _read_latest(self) -> Optional[float]:
         """Load the *_latest.cnf pedestals into ``self._latest``; return
@@ -679,8 +698,12 @@ class PedestalMonitorWindow(QMainWindow):
             "Text files (*.txt);;All files (*)")
         if not path:
             return
-        with open(path, "w") as f:
-            f.write(text + "\n")
+        try:
+            with open(path, "w") as f:
+                f.write(text + "\n")
+        except (OSError, ValueError, UnicodeError) as exc:
+            QMessageBox.critical(self, "Save Report", f"{path}\n\n{exc}")
+            return
         self._status_lbl.setText(f"Report saved to {path}")
         self._set_status_style("done")
 
@@ -731,7 +754,10 @@ class PedestalMonitorWindow(QMainWindow):
         self._reload_btn.setEnabled(True)
         self._measure_btn.setText("Measure Pedestals")
 
-        self._read_latest()
+        try:
+            self._read_latest()
+        except _PED_READ_ERRORS as exc:
+            self._show_ped_read_error(exc)
 
         n = len(self._measured)
         self._status_lbl.setText(
