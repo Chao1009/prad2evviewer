@@ -1,4 +1,15 @@
 
+// nonlinearity — per-module HyCal energy non-linearity from three beam energies
+//
+// Usage:
+//   nonlinearity -a <3.5 GeV recon files...> -b <2.2 GeV recon files...>
+//                -c <0.7 GeV recon files...> [-g] [-o out.root] [-n max_events]
+//                [-p png_dir] [-s seed_calibration.json]
+//   -g  use the matched GEM position instead of the HyCal cluster position
+//   -s  seed calibration (absolute path, or relative to the database dir;
+//       default calibration/old/calibration_factor_3p5_June1.json)
+// Writes new_calibration_NonLinearity.json in the current directory.
+
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
 #include "EventData.h"
@@ -75,6 +86,7 @@ int main(int argc, char *argv[]){
 
     std::string output;
     std::string pngDir = "module_hists";
+    std::string seedCalib = "calibration/old/calibration_factor_3p5_June1.json";
 
     int max_events = -1;
     bool use_GEM = false;
@@ -89,6 +101,7 @@ int main(int argc, char *argv[]){
             else if (arg == "-o")  { cur = nullptr; if (++i < argc) output = argv[i]; }
             else if (arg == "-n")  { cur = nullptr; if (++i < argc) max_events = std::atoi(argv[i]); }
             else if (arg == "-p")  { cur = nullptr; if (++i < argc) pngDir = argv[i]; }
+            else if (arg == "-s")  { cur = nullptr; if (++i < argc) seedCalib = argv[i]; }
             else if (!arg.empty() && arg[0] != '-' && cur) { cur->push_back(arg); }
         }
     }
@@ -99,6 +112,19 @@ int main(int argc, char *argv[]){
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
     PhysicsTools physics(hycal);
+
+    // the output is written from the seed constants; without them every module
+    // would get factor 0, so fail before the event loop
+    std::string calib_file = (!seedCalib.empty() && seedCalib[0] == '/')
+                           ? seedCalib : dbDir + "/" + seedCalib;
+    int nmatched = hycal.LoadCalibration(calib_file);
+    if (nmatched <= 0) {
+        std::cerr << "Error: cannot load seed calibration " << calib_file
+                  << (nmatched == 0 ? " (no module matched)" : "")
+                  << "; choose one with -s. Aborting.\n";
+        return 1;
+    }
+    std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
 
     // Energy histogram for each crystal
     for (int i = 0; i < hycal.module_count(); ++i) {
@@ -127,6 +153,8 @@ int main(int argc, char *argv[]){
 
         EventVars_Recon ev;
         prad2::SetReconReadBranches(&chain, ev);
+        prad2::ReconMatchVectorBindings match_bindings;  // must outlive chain.GetEntry
+        if (use_GEM) prad2::BindReconMatchVectorBranches(&chain, ev, match_bindings);
 
         {
             std::lock_guard<std::mutex> lk(io_mtx);
@@ -152,11 +180,6 @@ int main(int argc, char *argv[]){
         std::cerr << "); check trigger_bits in the inputs. Aborting before writing calibration.\n";
         return 1;
     }
-
-    std::string calib_file = dbDir + "/" + "calibration/calibration_factor_3p5_June1.json";
-    int nmatched = hycal.LoadCalibration(calib_file);
-    if (nmatched >= 0)
-        std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
 
     TH1F *h_energy_peak_3p5 = new TH1F("h_energy_peak_3p5", "Energy Peak Distribution;Energy (MeV);Counts", 4000, 0, 4000);
 
@@ -458,7 +481,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue;
 
-            float c_x, c_y, c_z;
+            float c_x = 0.f, c_y = 0.f, c_z = 0.f;
             if(!use_GEM){
                 c_x = ev.cl_x[j];
                 c_y = ev.cl_y[j];
@@ -470,8 +493,7 @@ long long process_event(bool use_GEM, TTree *tree, const EventVars_Recon &ev, co
                     if(ev.matchFlag[j] & 1 << d) match[d] = true;
                 }
                 if( (match[0] || match[1]) && (match[2] || match[3]) ){
-                    if(match[0]) ev.first_match(j, 0, c_x, c_y, c_z);
-                    else ev.first_match(j, 1, c_x, c_y, c_z);
+                    if (!ev.first_match(j, match[0] ? 0 : 1, c_x, c_y, c_z)) continue;
                     //projection onto the HyCal module plane
                     float scale = 6275.f / c_z;
                     c_x *= scale;

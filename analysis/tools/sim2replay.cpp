@@ -166,22 +166,15 @@ int main (int argc, char *argv[])
     // --- loop over events and fill output tree ---
     int ep_count = 0, ee_count = 0;
     for(int i = 0; i < N_ep + N_ee; i++){
-        if(i + 1 % 4 == 0 && ep_count < N_ep) {
+        // exactly one entry per iteration (both trees fill the same *sim):
+        // ep on every 4th iteration, ee otherwise, then whatever is left
+        if(((i + 1) % 4 == 0 || ee_count == N_ee) && ep_count < N_ep) {
             tree_ep->GetEntry(ep_count);
             ep_count++;
-        } else if(ee_count < N_ee) {
+        } else {
             tree_ee->GetEntry(ee_count);
             ee_count++;
         }
-        if(ep_count == N_ep && ee_count < N_ee) {
-            tree_ee->GetEntry(ee_count);
-            ee_count++;
-        }
-        if(ee_count == N_ee && ep_count < N_ep) {
-            tree_ep->GetEntry(ep_count);
-            ep_count++;
-        }
-        if(ee_count == N_ee && ep_count == N_ep) break;
         if((i + 1) % 1000 == 0) {
             std::cerr << "Processing event " << i + 1 << "/" << N_ep + N_ee << "\r" << std::flush;
         }

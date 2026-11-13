@@ -126,6 +126,8 @@ bool parse_args(int argc, char **argv, Config &cfg)
         default:  usage(argv[0]); return false;
         }
     }
+    // `-i prad_*.root` expands to several words; the rest arrive as positionals
+    for (int k = optind; k < argc; ++k) cfg.inputs.emplace_back(argv[k]);
     if (cfg.inputs.empty() || cfg.output_json.empty()) {
         usage(argv[0]);
         return false;

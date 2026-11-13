@@ -261,6 +261,10 @@ int main(int argc, char *argv[])
     rate_out.close();
 
     // ── JSON output ───────────────────────────────────────────────────────
+    // one module per line; the separator runs across groups (no comma after the last)
+    size_t n_json_modules = 0;
+    for (auto *g : groups) n_json_modules += g->modules.size();
+
     if (run_number > 0) {
         auto make_entry = [&](const Module &m) -> std::string {
             char buf[512];
@@ -315,11 +319,12 @@ int main(int argc, char *argv[])
             std::string out_path = Form("cosmic_modules_run%d.json", run_number);
             std::ofstream json_out(out_path);
             json_out << "{\n";
+            size_t k = 0;
             for (auto *g : groups)
                 for (size_t i = 0; i < g->modules.size(); i++) {
                     json_out << "  \"" << g->key << g->modules[i].number << "\": ["
                              << make_entry(g->modules[i]) << "]";
-                    if (i + 1 < g->modules.size()) json_out << ",";
+                    if (++k < n_json_modules) json_out << ",";
                     json_out << "\n";
                 }
             json_out << "}\n";
@@ -331,12 +336,13 @@ int main(int argc, char *argv[])
     if (!lg_only) {
         std::ofstream lms_json_out(Form("lms_run_%d.json", run_number));
         lms_json_out << "{\n";
+        size_t k = 0;
         for (auto *g : groups)
             for (size_t i = 0; i < g->modules.size(); i++) {
                 const auto &f = g->modules[i].fit[kLmsIntegral];
                 lms_json_out << "  \"" << g->key << g->modules[i].number << "\": {\"run\": " << run_number
                              << ", \"lms_peak\": " << f.mean << ", \"lms_rms\": " << f.sigma << "}";
-                if (i + 1 < g->modules.size()) lms_json_out << ",";
+                if (++k < n_json_modules) lms_json_out << ",";
                 lms_json_out << "\n";
             }
         lms_json_out << "}\n";
