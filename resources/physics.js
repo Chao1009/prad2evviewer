@@ -100,7 +100,7 @@ function plotEnergyAngle(){
         margin:{l:55,r:80,t:30,b:40},
         showlegend:showElastic,
         legend:{x:0.7,y:0.95,font:{size:10,color:THEME.textDim},bgcolor:'rgba(0,0,0,0)'},
-        shapes:refShapes('energy_angle'),
+        shapes:refShapes(['energy_angle_hist','energy_angle']),
     },PC_EPICS);
 
     const ml=mollerData;
@@ -135,7 +135,7 @@ function plotMollerXY(){
     // via r = dz · tan(θ), centered at (target_x, target_y).  dz is the
     // target→HyCal lever arm — same geometry the server uses to compute the
     // per-cluster theta in app_state.cpp.
-    const shapes=[...(refShapes('moller_xy')||[])];
+    const shapes=[...(refShapes(['moller','moller_xy'])||[])];
     const target=d.target||[0,0,0];
     const dz=((d.hycal_z!=null?d.hycal_z:0)-target[2]);
     if(dz>0 && cuts.angle_min!=null && cuts.angle_max!=null){
@@ -167,7 +167,7 @@ function plotHycalXY(){
     const fracPct=((c.energy_frac_min||0.9)*100).toFixed(0);
     const cutTxt=`Ncl=${c.n_clusters||1}, E≥${fracPct}% Eb, blocks∈[${c.nblocks_min||0},${c.nblocks_max||0}]`;
 
-    Plotly.react(div,[physHeatmap(d.xy_bins,d.xy_nx,d.xy_ny,d.xy_x_min,d.xy_x_step,d.xy_y_min,d.xy_y_step,logZ,'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>','log₁₀')],physXYLayout(`HyCal Cluster Hits (${d.events} evts) ${cutTxt}`,refShapes('hycal_xy')),PC_EPICS);
+    Plotly.react(div,[physHeatmap(d.xy_bins,d.xy_nx,d.xy_ny,d.xy_x_min,d.xy_x_step,d.xy_y_min,d.xy_y_step,logZ,'x=%{x:.1f} y=%{y:.1f} mm: %{text}<extra></extra>','log₁₀')],physXYLayout(`HyCal Cluster Hits (${d.events} evts) ${cutTxt}`,refShapes(['hycal_cluster_hit','hycal_xy'])),PC_EPICS);
 }
 
 function clearPhysicsFrontend(){

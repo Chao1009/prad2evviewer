@@ -2,7 +2,7 @@
 
 let currentWaveform=null;  // {x:[], y:[]} for copy button
 let wfStackEnabled=false;
-let wfStackTraces=[];      // [{x,y},...] accumulated waveforms
+let wfStackTraces=[];      // [{ev,x,y},...] accumulated waveforms, one per event
 let wfStackModKey='';      // module key for current stack (clear on module change)
 let wfDaqEnabled=false;    // DAQ-mode toggle: render firmware Mode 1/2/3 annotations
 let currentHist={};  // {divId: {x:[], y:[]}} for histogram copy
@@ -268,14 +268,18 @@ function renderWaveform(mod, key, d, samples){
 
     // --- stacking mode ---
     if(wfStackEnabled){
-        wfStackTraces.push({x:Array.from(x), y:Array.from(samples)});
+        // One entry per event: re-rendering the same event (theme change,
+        // histogram clear, cut save, report restore) replaces its trace.
+        const prev=wfStackTraces.findIndex(w=>w.ev===currentEvent);
+        if(prev>=0) wfStackTraces.splice(prev,1);
+        wfStackTraces.push({ev:currentEvent, x:Array.from(x), y:Array.from(samples)});
 
         const maxStack=200;
         while(wfStackTraces.length>maxStack) wfStackTraces.shift();
 
         const traces=wfStackTraces.map(w=>({
             x:w.x, y:w.y, type:'scatter', mode:'lines',
-            line:{color:THEME.accent, width:1, opacity:0.25},
+            line:{color:THEME.accent, width:1}, opacity:0.25,
             showlegend:false, hoverinfo:'skip',
         }));
         if(wfStackTraces.length>0){

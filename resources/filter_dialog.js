@@ -5,13 +5,14 @@ function initFilterDialog(){
     function openFilterDialog(){
         setDialogOpen('filter', true);
         document.getElementById('flt-status-msg').textContent='';
+        buildTrigTypeChecks();
         // populate from current filter state
         fetch('/api/filter').then(r=>r.json()).then(f=>{
             const w=f.waveform||{}, c=f.clustering||{};
             document.getElementById('flt-wf-enable').checked=w.enable||false;
             document.getElementById('flt-wf-modules').value=(w.modules||[]).join(', ');
-            document.getElementById('flt-wf-nmin').value=w.n_peaks_min||1;
-            document.getElementById('flt-wf-nmax').value=w.n_peaks_max||999999;
+            document.getElementById('flt-wf-nmin').value=w.n_peaks_min??1;
+            document.getElementById('flt-wf-nmax').value=w.n_peaks_max??999999;
             document.getElementById('flt-wf-tmin').value=w.time_min!=null?w.time_min:'';
             document.getElementById('flt-wf-tmax').value=w.time_max!=null?w.time_max:'';
             document.getElementById('flt-wf-imin').value=w.integral_min!=null?w.integral_min:'';
@@ -19,14 +20,14 @@ function initFilterDialog(){
             document.getElementById('flt-wf-hmin').value=w.height_min!=null?w.height_min:'';
             document.getElementById('flt-wf-hmax').value=w.height_max!=null?w.height_max:'';
             document.getElementById('flt-cl-enable').checked=c.enable||false;
-            document.getElementById('flt-cl-nmin').value=c.n_min||0;
-            document.getElementById('flt-cl-nmax').value=c.n_max||999999;
+            document.getElementById('flt-cl-nmin').value=c.n_min??0;
+            document.getElementById('flt-cl-nmax').value=c.n_max??999999;
             document.getElementById('flt-cl-emin').value=c.energy_min!=null?c.energy_min:'';
             document.getElementById('flt-cl-emax').value=c.energy_max!=null?c.energy_max:'';
-            document.getElementById('flt-cl-smin').value=c.size_min||1;
-            document.getElementById('flt-cl-smax').value=c.size_max||999999;
+            document.getElementById('flt-cl-smin').value=c.size_min??1;
+            document.getElementById('flt-cl-smax').value=c.size_max??999999;
             document.getElementById('flt-cl-includes').value=(c.includes_modules||[]).join(', ');
-            document.getElementById('flt-cl-incmin').value=c.includes_min||1;
+            document.getElementById('flt-cl-incmin').value=c.includes_min??1;
             document.getElementById('flt-cl-centers').value=(c.center_modules||[]).join(', ');
             toggleFilterFields();
         }).catch(()=>{});
@@ -44,10 +45,19 @@ function initFilterDialog(){
     }
     function parseModuleList(s){ return s.split(/[,\s]+/).map(x=>x.trim()).filter(x=>x); }
     function optFloat(id){ const v=document.getElementById(id).value; return v===''?undefined:parseFloat(v); }
+    // integer field; empty / non-numeric -> dflt (0 is a valid value)
+    function intOr(id, dflt){ const v=parseInt(document.getElementById(id).value); return Number.isNaN(v)?dflt:v; }
 
-    // build trigger type checkboxes in filter dialog
-    const ttContainer=document.getElementById('flt-tt-checks');
-    if(ttContainer && triggerTypeDef.length){
+    // build trigger type checkboxes in filter dialog — on open, since the
+    // definitions arrive with /api/config after init; rebuilt only when
+    // they change so the user's ticks persist between opens.
+    let ttBuiltSig=null;
+    function buildTrigTypeChecks(){
+        const ttContainer=document.getElementById('flt-tt-checks');
+        const sig=JSON.stringify(triggerTypeDef);
+        if(!ttContainer || sig===ttBuiltSig) return;
+        ttBuiltSig=sig;
+        ttContainer.innerHTML='';
         for(const d of triggerTypeDef){
             const lbl=document.createElement('label');
             lbl.style.cssText='display:flex;align-items:center;gap:3px;cursor:pointer';
@@ -58,6 +68,7 @@ function initFilterDialog(){
             lbl.appendChild(document.createTextNode(d.label||d.name));
             ttContainer.appendChild(lbl);
         }
+        toggleFilterFields();
     }
 
     document.getElementById('btn-filter').onclick=()=>openFilterDialog();
@@ -77,8 +88,8 @@ function initFilterDialog(){
         const wf={enable:document.getElementById('flt-wf-enable').checked};
         const wfMods=parseModuleList(document.getElementById('flt-wf-modules').value);
         if(wfMods.length) wf.modules=wfMods;
-        wf.n_peaks_min=parseInt(document.getElementById('flt-wf-nmin').value)||1;
-        wf.n_peaks_max=parseInt(document.getElementById('flt-wf-nmax').value)||999999;
+        wf.n_peaks_min=intOr('flt-wf-nmin',1);
+        wf.n_peaks_max=intOr('flt-wf-nmax',999999);
         const tmin=optFloat('flt-wf-tmin'); if(tmin!=null) wf.time_min=tmin;
         const tmax=optFloat('flt-wf-tmax'); if(tmax!=null) wf.time_max=tmax;
         const imin=optFloat('flt-wf-imin'); if(imin!=null) wf.integral_min=imin;
@@ -87,14 +98,14 @@ function initFilterDialog(){
         const hmax=optFloat('flt-wf-hmax'); if(hmax!=null) wf.height_max=hmax;
         fj.waveform=wf;
         const cl={enable:document.getElementById('flt-cl-enable').checked};
-        cl.n_min=parseInt(document.getElementById('flt-cl-nmin').value)||0;
-        cl.n_max=parseInt(document.getElementById('flt-cl-nmax').value)||999999;
+        cl.n_min=intOr('flt-cl-nmin',0);
+        cl.n_max=intOr('flt-cl-nmax',999999);
         const emin=optFloat('flt-cl-emin'); if(emin!=null) cl.energy_min=emin;
         const emax=optFloat('flt-cl-emax'); if(emax!=null) cl.energy_max=emax;
-        cl.size_min=parseInt(document.getElementById('flt-cl-smin').value)||1;
-        cl.size_max=parseInt(document.getElementById('flt-cl-smax').value)||999999;
+        cl.size_min=intOr('flt-cl-smin',1);
+        cl.size_max=intOr('flt-cl-smax',999999);
         const incMods=parseModuleList(document.getElementById('flt-cl-includes').value);
-        if(incMods.length){ cl.includes_modules=incMods; cl.includes_min=parseInt(document.getElementById('flt-cl-incmin').value)||1; }
+        if(incMods.length){ cl.includes_modules=incMods; cl.includes_min=intOr('flt-cl-incmin',1); }
         const ctrMods=parseModuleList(document.getElementById('flt-cl-centers').value);
         if(ctrMods.length) cl.center_modules=ctrMods;
         fj.clustering=cl;

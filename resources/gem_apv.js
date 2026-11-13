@@ -105,6 +105,15 @@ let gemApvSource = gemApvPrefGet('source', 'full');
 // (both 'event' and 'full_event' branches would return).
 if (gemApvLayout !== 'overlay' && gemApvLayout !== 'sequential') gemApvLayout = 'sequential';
 if (gemApvSource !== 'current' && gemApvSource !== 'full')       gemApvSource = 'full';
+// Only the ET thread fills the monitoring-event snapshot, so in file mode
+// the tab always follows the current event; gemApvSource keeps the
+// operator's choice for when the viewer is online again.
+function gemApvEffSource() {
+    return (mode === 'file') ? 'current' : gemApvSource;
+}
+// Which source the displayed gemApvData came from ('current' | 'full'),
+// for the status line — independent of the selector.
+let gemApvDataSource = '';
 // Pause — freezes auto-refresh on this tab.  WS new_event /
 // gem_apv_full_event notifications skip the refetch while true; explicit
 // user actions (σ change, navigation, source/layout change) still refresh.
@@ -131,8 +140,9 @@ const GEM_APV_HIT_BLOCK_H = 2 * GEM_APV_HIT_ROW_H + 1;
 // ── Fetch + section build ─────────────────────────────────────────────
 // Apply a successfully-fetched APV payload: cache it, sync σ input, rebuild
 // section skeleton if needed, refresh calib on rev mismatch, then redraw.
-function applyGemApvData(data) {
+function applyGemApvData(data, src) {
     gemApvData = data;
+    gemApvDataSource = src;
     // Pull the event from the payload — the server stamps it and it's the
     // single source of truth for "what is being displayed" (in 'full' mode
     // this is the snapshot's seq, not the live currentEvent).
@@ -163,7 +173,7 @@ function fetchGemApv(url) {
         })
         .then(data => {
             if (data.error) { gemApvSetStatus(data.error); return; }
-            applyGemApvData(data);
+            applyGemApvData(data, url.endsWith('/latest_full') ? 'full' : 'current');
         })
         .catch(err => gemApvSetStatus('Fetch error: ' + err));
 }
@@ -188,7 +198,7 @@ function fetchGemApvLatestFull() {
 // the bypass path for the pause gate — explicit user actions always run
 // through here regardless of gemApvPaused.
 function refreshGemApv(currentEventNum) {
-    if (gemApvSource === 'full') {
+    if (gemApvEffSource() === 'full') {
         return fetchGemApvLatestFull();
     }
     return fetchGemApvData(currentEventNum);
@@ -202,8 +212,8 @@ function refreshGemApv(currentEventNum) {
 // the operator's deliberate "show me this event" still goes through.
 // 'full_event' always comes from the WS push and is never manual.
 function gemApvOnLiveEvent(evnum, kind /* 'event' | 'full_event' */, manual) {
-    if (kind === 'full_event' && gemApvSource !== 'full') return;
-    if (kind === 'event'      && gemApvSource !== 'current') return;
+    if (kind === 'full_event' && gemApvEffSource() !== 'full') return;
+    if (kind === 'event'      && gemApvEffSource() !== 'current') return;
     if (gemApvPaused && !manual) {
         gemApvSkippedSincePause++;
         // Cheap status refresh so the operator sees the staleness counter
@@ -242,6 +252,17 @@ function ensureGemApvCalib(force) {
         .finally(() => { gemApvCalibInflight = false; });
     gemApvCalibInflight = p;
     return p;
+}
+
+// Sync the Source selector with the viewer mode (called from applyConfig):
+// file mode shows "All events" with "Monitoring event" disabled; online
+// shows the operator's stored choice again.
+function syncGemApvSourceUi() {
+    const srcEl = document.getElementById('gem-apv-source');
+    if (!srcEl) return;
+    const fullOpt = srcEl.querySelector('option[value="full"]');
+    if (fullOpt) fullOpt.disabled = (mode === 'file');
+    srcEl.value = gemApvEffSource();
 }
 
 // Update the toolbar σ input without re-firing onchange (which would
@@ -384,7 +405,7 @@ function renderGemApvPanels() {
 
     const mode = gemApvShowProcessed ? 'processed' : 'raw';
     const layoutLbl = (gemApvLayout === 'sequential') ? ' seq' : '';
-    const srcLbl = (gemApvSource === 'full') ? ' mon' : '';
+    const srcLbl = (gemApvDataSource === 'full') ? ' mon' : '';
     const evlbl = gemApvCurrentEvent > 0 ? `evt ${gemApvCurrentEvent}` : '';
     const pauseLbl = gemApvPaused
         ? `  PAUSED${gemApvSkippedSincePause ? ` (skipped ${gemApvSkippedSincePause})` : ''}`
@@ -727,7 +748,7 @@ function setupGemApvControls() {
     // the prior source's live feed).
     const srcEl = document.getElementById('gem-apv-source');
     if (srcEl) {
-        srcEl.value = gemApvSource;
+        srcEl.value = gemApvEffSource();
         srcEl.onchange = () => {
             gemApvSource = srcEl.value;
             gemApvPrefSet('source', gemApvSource);

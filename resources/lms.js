@@ -94,8 +94,12 @@ function fetchLmsSummary(){
     const refQ=g_lmsRefIndex>=0?`?ref=${g_lmsRefIndex}`:'';
     return fetch(`/api/lms/summary${refQ}`).then(r=>r.json()).then(data=>{
         lmsSummaryData=data;
-        geoLms();
-        updateLmsTable();
+        // Also polled from other tabs for the alert dot: the geo canvas is
+        // shared, so only repaint it (and the table) while LMS is shown.
+        if(activeTab==='lms'){
+            geoLms();
+            updateLmsTable();
+        }
         if(hoveredModule) updateGeoTooltip();
         // Always refresh dot+pill state.  The dot itself is suppressed when
         // on the LMS tab (see below) — but the pill lives in the LMS toolbar

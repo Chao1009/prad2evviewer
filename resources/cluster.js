@@ -100,8 +100,18 @@ function geoCluster(){
 }
 
 function loadGemHits(evnum){
-    if(gemHitsEvent===evnum && gemHits) { geoCluster(); return; }
-    fetch('/api/gem/hits').then(r=>r.json()).then(data=>{
+    // Servers that embed the event's GEM hits in /api/clusters/<n>: use those.
+    if(clusterEvent===evnum && clusterData && clusterData.gem_hits){
+        gemHits=clusterData.gem_hits;
+        gemHitsEvent=evnum;
+        geoCluster();
+        return Promise.resolve();
+    }
+    if(gemHitsEvent===evnum && gemHits) { geoCluster(); return Promise.resolve(); }
+    // Older servers: /api/gem/hits has no event id and returns whatever
+    // event the server's GEM state processed last.
+    return fetch('/api/gem/hits').then(r=>r.json()).then(data=>{
+        if(evnum!==clusterEvent) return;   // clusters of another event are shown by now
         gemHits=data;
         gemHitsEvent=evnum;
         geoCluster();
@@ -121,17 +131,19 @@ function clusterOfModule(idx){
     return clusters.findIndex(cl=>cl.modules&&cl.modules.includes(idx));
 }
 
+// Returns a promise that settles once the data (and GEM overlay) is drawn.
 function loadClusterData(evnum){
     if(clusterEvent===evnum && clusterData) {
         geoCluster(); updateClusterTable();
-        loadGemHits(evnum);
-        return;
+        return loadGemHits(evnum);
     }
     document.getElementById('status-bar').textContent=`Loading clusters for sample ${evnum}...`;
-    fetch(`/api/clusters/${evnum}`).then(r=>{
+    return fetch(`/api/clusters/${evnum}`).then(r=>{
         if(!r.ok) throw new Error('not available');
         return r.json();
     }).then(data=>{
+        // Late reply for an older event: never replace the current event's data.
+        if(evnum!==currentEvent && clusterEvent===currentEvent) return;
         if(data.error){ document.getElementById('status-bar').textContent=data.error; return; }
         clusterData=data;
         clusterEvent=evnum;
@@ -142,8 +154,9 @@ function loadClusterData(evnum){
         // refresh cluster histograms from server (accumulated there)
         fetchClHist();
         fetchGemResiduals();
-        loadGemHits(evnum);
+        const gemDone=loadGemHits(evnum);
         updateStatusBar();
+        return gemDone;
     }).catch(err=>{ document.getElementById('status-bar').textContent=`Error: ${err}`; });
 }
 
@@ -309,14 +322,14 @@ function plotClHist(){
     const sel=selectedClEnergy();
     currentClHist=plotBarHist('cl-energy-hist',sel.bins,clHistMin,clHistStep,{
         max:clHistMax, title:`Cluster Energy${sel.label}`, xTitle:'Energy (MeV)', color:'#ff922b',
-        logYId:'clhist-logy', refKey:'cluster_energy', hover:'%{x:.0f} MeV: %{y}<extra></extra>',
+        logYId:'clhist-logy', refKey:['energy_hist','cluster_energy'], hover:'%{x:.0f} MeV: %{y}<extra></extra>',
         stats:n=>`${clHistEvents} evts | ${n} clusters`});
 }
 
 function plotRawEnergyHist(){
     currentRawEnergyHist=plotBarHist('cl-rawe-hist',rawEnergyBins,rawEnergyMin,rawEnergyStep,{
         max:rawEnergyMax, title:'Raw Energy Sum', xTitle:'ΣE (MeV)', color:'#ffa94d',
-        logYId:'clrawe-logy', refKey:'raw_energy', hover:'%{x:.0f} MeV: %{y}<extra></extra>',
+        logYId:'clrawe-logy', refKey:['raw_energy_hist','raw_energy'], hover:'%{x:.0f} MeV: %{y}<extra></extra>',
         stats:n=>`${n} evts`});
 }
 
@@ -324,12 +337,12 @@ function plotClStatHists(){
     const nblocksSel=selectedNblocks();
     const hint=selectedNcl>=0?' · click again or another bar to change':' · click a bar to filter';
     currentNclustHist=plotBarHist('cl-nclust-hist',nclustBins,nclustMin,nclustStep,{
-        title:'Clusters per Event', xTitle:'# Clusters', color:'#00b4d8', refKey:'cluster_number',
+        title:'Clusters per Event', xTitle:'# Clusters', color:'#00b4d8', refKey:['nclusters_hist','cluster_number'],
         selectedIdx:selectedNcl, hover:'%{x:.0f} clusters: %{y}<extra></extra>',
         stats:n=>`${n} entries${hint}`});
     currentNblocksHist=plotBarHist('cl-nblocks-hist',nblocksSel.bins,nblocksMin,nblocksStep,{
         title:`Blocks per Cluster${nblocksSel.label}`, xTitle:'# Blocks', color:'#51cf66',
-        refKey:'cluster_size', stats:n=>`${n} entries`});
+        refKey:['nblocks_hist','cluster_size'], stats:n=>`${n} entries`});
 
     // Wire up the click handler on the Ncl histogram once.  Plotly's
     // graphDiv keeps event subscriptions across Plotly.react calls, so

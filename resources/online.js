@@ -122,6 +122,7 @@ function stopMonitorStatusPolling(){
     }
 }
 
+let wsConnectedOnce = false;
 function connectWebSocket() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${proto}//${location.host}`);
@@ -135,6 +136,13 @@ function connectWebSocket() {
                 capabilities: ['auto_report'],
             }));
         } catch(e) {}
+        // Reconnect (e.g. server restart): mode, file and totals may all have
+        // changed while we were disconnected — re-initialise from scratch.
+        if (wsConnectedOnce) {
+            clearFrontend();
+            fetchConfigAndApply();
+        }
+        wsConnectedOnce = true;
     };
     ws.onclose = () => {
         setTimeout(connectWebSocket, 2000);
@@ -179,26 +187,35 @@ function connectWebSocket() {
                 if(activeTab==='gem') fetchGemAccum();
             } else if (msg.type === 'hist_config_updated') {
                 // Server's peak_filter changed (any client could have edited).
-                // Pull fresh config so histConfig.waveform_filter and the
-                // "apply" checkbox stay in sync, then redraw histograms and
-                // the geo (color metric uses the time filter).
-                fetchConfigAndApply();
-                if (selectedModule) showHistograms(selectedModule);
-                redrawGeo();
+                // The message carries the new filter; apply only that (a full
+                // applyConfig would reset event, view and per-tab filters),
+                // then redraw histograms and the geo (color metric uses the
+                // time filter).
+                if (msg.waveform_filter_active !== undefined) applyPeakFilterConfig(msg);
+                lastHistModule = '';
+                if (selectedModule) showWaveform(selectedModule);
+                else                redrawGeo();
             } else if (msg.type === 'lms_event') {
-                if (now - lastLmsFetch > refreshLmsMs) {
+                // The summary also drives the tab's alert dot, so keep
+                // polling it (at a fifth of the rate) while the tab is hidden.
+                const lmsMs = activeTab === 'lms' ? refreshLmsMs : 5 * refreshLmsMs;
+                if (now - lastLmsFetch > lmsMs) {
                     lastLmsFetch = now;
-                    if(activeTab==='lms'){ fetchLmsSummary(); refreshSelectedLmsHistory(); }
+                    fetchLmsSummary();
+                    if(activeTab==='lms') refreshSelectedLmsHistory();
                 }
             } else if (msg.type === 'lms_cleared') {
                 lmsSummaryData=null; resetLmsSelection();
                 if(activeTab==='lms'){ geoLms(); updateLmsTable(); }
             } else if (msg.type === 'epics_event') {
-                if (now - lastEpicsFetch > refreshEpicsMs) {
+                // Latest values drive the tab's alert dot — fetch them on any
+                // tab (slower when hidden); the slot plots only when visible.
+                const epicsMs = activeTab === 'epics' ? refreshEpicsMs : 5 * refreshEpicsMs;
+                if (now - lastEpicsFetch > epicsMs) {
                     lastEpicsFetch = now;
+                    fetchEpicsLatest();
                     if(activeTab==='epics'){
                         fetchEpicsChannels();
-                        fetchEpicsLatest();
                         fetchAllEpicsSlots();
                     }
                 }

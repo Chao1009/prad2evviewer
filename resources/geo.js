@@ -213,8 +213,11 @@ function geoValueColor(val, vmin, vmax, useLog, emptyColor){
 function geoDq(){
     const useLog=document.getElementById('log-scale').checked;
     const vals=modules.map(modVal);
+    let autoMax=0;
+    for(const v of vals) if(v!==null&&v>autoMax) autoMax=v;
+    if(autoMax<=0) autoMax=1;
     const vmin=rangeMin!==null?rangeMin:0;
-    const vmax=rangeMax!==null?rangeMax:100;
+    const vmax=rangeMax!==null?rangeMax:autoMax;
 
     renderGeo(
         i => vals[i]!==null ? geoValueColor(vals[i],vmin,vmax,useLog) : geoEmptyColor(modules[i].t),
@@ -246,11 +249,15 @@ function tallest(peaks){
     return best;
 }
 
-// occupancy of channel `key` in % (time-cut counts while the time cut is
-// shown), or null before any events have been accumulated
+// The server counts occ_tcut only from peaks passing the peak filter while
+// that filter is applied ("apply" toggle) — and counts every peak otherwise.
+function occIsCut(){ return !!histConfig.waveform_filter_active; }
+
+// occupancy of channel `key` in % (filtered counts while the peak filter is
+// applied), or null before any events have been accumulated
 function occPct(key){
     if(occTotal<=0) return null;
-    return 100.0*((isTimeCut()?occTcutData:occData)[key]||0)/occTotal;
+    return 100.0*((occIsCut()?occTcutData:occData)[key]||0)/occTotal;
 }
 
 function modVal(m){
