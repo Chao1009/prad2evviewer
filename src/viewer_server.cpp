@@ -185,8 +185,7 @@ void ViewerServer::run()
     // load initial file (blocking)
     if (!cfg_.initial_file.empty()) {
         mode_ = Mode::File;
-        hist_enabled_ = cfg_.hist_enabled;
-        loadFileInternal(cfg_.initial_file);
+        loadFileInternal(cfg_.initial_file, cfg_.hist_enabled);
     }
 
     // if --et, switch to online mode
@@ -309,6 +308,11 @@ bool ViewerServer::clearDomain(const std::string &what)
     else if (what == "lms")   app.clearLms();
     else if (what == "epics") app.clearEpics();
     else return false;
+    // File mode: let already-viewed events accumulate again after a wipe.
+    if (&app == &app_file_ && what != "epics") {
+        std::lock_guard<std::mutex> lk(ondemand_mtx_);
+        ondemand_processed_.clear();
+    }
     wsBroadcast("{\"type\":\"" + what + "_cleared\"}");
     return true;
 }
@@ -409,16 +413,15 @@ void ViewerServer::loadFile(const std::string &path, bool hist)
         if (mode_.load() == Mode::Online)
             et_active_ = false;
 #endif
-        hist_enabled_ = hist;
         setMode(Mode::File);
     }
 
     std::lock_guard<std::mutex> lk(load_mtx_);
     if (load_thread_.joinable()) load_thread_.join();
-    load_thread_ = std::thread([this, path]() { loadFileInternal(path); });
+    load_thread_ = std::thread([this, path, hist]() { loadFileInternal(path, hist); });
 }
 
-void ViewerServer::loadFileInternal(const std::string &filepath)
+void ViewerServer::loadFileInternal(const std::string &filepath, bool hist)
 {
     progress_.loading = true;
     progress_.setFile(filepath);
@@ -426,9 +429,6 @@ void ViewerServer::loadFileInternal(const std::string &filepath)
 
     auto data = std::make_shared<FileData>();
     data->filepath = filepath;
-
-    // reset on-demand accumulation tracking
-    { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
 
     std::cerr << "Loading: " << filepath << "\n";
 
@@ -450,19 +450,27 @@ void ViewerServer::loadFileInternal(const std::string &filepath)
     std::cerr << "  Indexed " << data->event_count << " events"
               << " (source: " << data->caps.source_type << ")\n";
 
+    // The open succeeded: commit the accumulate policy (a failed load keeps
+    // the old file's) before the new source becomes visible to accumulate().
+    hist_enabled_ = hist;
+
     // install the new data source before building histograms
     // (buildHistograms reads data_source_; loadFileInternal runs on the load
     // thread, and HTTP threads acquire data_source_mtx_ for random access)
     { std::lock_guard<std::mutex> lk(data_source_mtx_); data_source_ = std::move(source); }
 
+    // reset on-demand accumulation tracking (only once the old file is gone)
+    { std::lock_guard<std::mutex> lk(ondemand_mtx_); ondemand_processed_.clear(); }
+
     // always reset accumulators when opening a new file
     app_file_.clearHistograms();
     app_file_.clearLms();
     app_file_.clearEpics();
+    app_file_.resetPerFileState();
 
     // build filtered index if filter is active
     if (app_file_.filterActive())
-        buildFilteredIndex();
+        buildFilteredIndex(true);
 
     if (hist_enabled_) {
         progress_.total = data->event_count;
@@ -542,6 +550,15 @@ void ViewerServer::accumulate(int ev1, fdec::EventData &event,
 {
     if (hist_enabled_) return;  // preprocessed — already done
 
+    // EPICS / Sync / control index entries are not physics events; the
+    // preprocessing pass does not accumulate them either.
+    {
+        std::lock_guard<std::mutex> lk(data_source_mtx_);
+        if (!data_source_ ||
+            data_source_->eventTypeAt(ev1 - 1) != evc::EventType::Physics)
+            return;
+    }
+
     std::lock_guard<std::mutex> lk(ondemand_mtx_);
     if (!ondemand_processed_.insert(ev1).second) return;  // already seen
 
@@ -616,7 +633,7 @@ void ViewerServer::resetAfterFilterChange()
     wsBroadcast("{\"type\":\"hist_cleared\"}");
 }
 
-void ViewerServer::buildFilteredIndex()
+void ViewerServer::buildFilteredIndex(bool in_load)
 {
     filtered_indices_.clear();
     if (!app_file_.filterActive()) return;
@@ -624,27 +641,31 @@ void ViewerServer::buildFilteredIndex()
     std::lock_guard<std::mutex> lk(data_source_mtx_);
     if (!data_source_) return;
 
-    int idx = 0;
+    int n_seen = 0;
 
-    progress_.loading = true;
-    progress_.setFile("Filtering events");
+    // As a phase of loadFileInternal the load owns progress_.loading/file.
+    if (!in_load) {
+        progress_.loading = true;
+        progress_.setFile("Filtering events");
+    }
     progress_.phase = 1;
     progress_.current = 0;
     progress_.total = 0;
 
     data_source_->iterateAll(
-        [&](int /*i*/, fdec::EventData &ev, ssp::SspEventData *ssp) {
-            idx++;
-            progress_.current = idx;
+        [&](int i, fdec::EventData &ev, ssp::SspEventData *ssp) {
+            n_seen++;
+            progress_.current = i + 1;
+            if (data_source_->eventTypeAt(i) != evc::EventType::Physics) return;
             if (app_file_.evaluateFilter(ev, ssp))
-                filtered_indices_.push_back(idx);  // 1-based
+                filtered_indices_.push_back(i + 1);  // 1-based, as /api/event/<n>
         },
         nullptr, nullptr, nullptr
     );
 
-    progress_.loading = false;
+    if (!in_load) progress_.loading = false;
     progress_.phase = 0;
-    std::cerr << "Filter: " << filtered_indices_.size() << " / " << idx << " events pass\n";
+    std::cerr << "Filter: " << filtered_indices_.size() << " / " << n_seen << " events pass\n";
 }
 
 json ViewerServer::decodeEvent(int ev1)
@@ -692,10 +713,18 @@ json ViewerServer::decodeEvent(int ev1)
 json ViewerServer::computeClusters(int ev1)
 {
     return withFileEvent(ev1,
-        [&](fdec::EventData &event, ssp::SspEventData &) {
+        [&](fdec::EventData &event, ssp::SspEventData &ssp_evt) {
             auto ana = app_file_.makeAnalyzer();
             fdec::WaveResult wres;
-            return app_file_.computeClustersJson(event, ev1, ana, wres);
+            json result = app_file_.computeClustersJson(event, ev1, ana, wres);
+            // This event's own GEM hits, so the overlay matches the clusters
+            // (accumulate() is deduped, so gem_sys may hold another event).
+            if (app_file_.gem_enabled) {
+                std::lock_guard<std::mutex> lk(app_file_.gem_mtx);
+                app_file_.prepareGemForView(ssp_evt);
+                result["gem_hits"] = app_file_.gemHitsJson();
+            }
+            return result;
         },
         [&](const prad2::ReconEventData &recon) {
             return app_file_.encodeReconClustersJson(recon, ev1);

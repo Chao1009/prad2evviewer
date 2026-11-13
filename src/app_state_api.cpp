@@ -481,6 +481,18 @@ void AppState::clearEpics()
     epics_events = 0;
 }
 
+void AppState::resetPerFileState()
+{
+    // Beam energy back to the run-info default (EPICS of the new file will
+    // override it again); left alone when no run-info value was loaded.
+    if (beam_energy_runinfo > 0.f) beam_energy.store(beam_energy_runinfo);
+    measured_livetime.store(-1.0);
+    dsc_prev_gated.store(0);
+    dsc_prev_ungated.store(0);
+    std::lock_guard<std::mutex> lk(gem_mtx);
+    if (gem_enabled) gem_sys.Clear();
+}
+
 // DSC2 → measured livetime from two consecutive cumulative readings.
 // Convention: gated counts LIVE time in this DAQ (Group A enabled while NOT
 // busy), so live = gated / ungated.  Until a second read arrives we display

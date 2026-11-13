@@ -269,14 +269,14 @@ void ViewerServer::etReaderThread()
 
                     // --- live tagger stream: batch + broadcast ---------------
                     if (want_tagger && tdc_evt.n_hits > 0) {
-                        if (tagger_batch_hits == 0) {
-                            // Grow to header size on first hit of the batch.
-                            tagger_batch.resize(TAGGER_HDR_SIZE);
-                            tagger_batch_first_seq = static_cast<uint32_t>(seq);
-                        }
                         const uint32_t evnum = static_cast<uint32_t>(event.info.event_number);
                         const uint32_t tbits = event.info.trigger_bits;
                         for (int h = 0; h < tdc_evt.n_hits; ++h) {
+                            if (tagger_batch_hits == 0) {
+                                // Grow to header size on first hit of the batch.
+                                tagger_batch.resize(TAGGER_HDR_SIZE);
+                                tagger_batch_first_seq = static_cast<uint32_t>(seq);
+                            }
                             const auto &src = tdc_evt.hits[h];
                             TaggerBinHit bh;
                             bh.event_num    = evnum;
@@ -291,9 +291,14 @@ void ViewerServer::etReaderThread()
                             tagger_batch.resize(off + TAGGER_HIT_SIZE);
                             std::memcpy(tagger_batch.data() + off, &bh, TAGGER_HIT_SIZE);
                             ++tagger_batch_hits;
-                            if (tagger_batch_hits >= TAGGER_BATCH_MAX) { tagger_flush(); break; }
+                            if (tagger_batch_hits >= TAGGER_BATCH_MAX) {
+                                // Full: send it and carry on with a fresh batch.
+                                tagger_batch_last_seq = static_cast<uint32_t>(seq);
+                                tagger_flush();
+                            }
                         }
-                        tagger_batch_last_seq = static_cast<uint32_t>(seq);
+                        if (tagger_batch_hits > 0)
+                            tagger_batch_last_seq = static_cast<uint32_t>(seq);
                     }
                     // Time-based flush (covers sparse streams).
                     if (tagger_batch_hits > 0 &&
@@ -317,8 +322,13 @@ void ViewerServer::etReaderThread()
 
                         std::string evjson = app_online_.encodeEventJson(
                             event, seq, ana, wres, true).dump();
-                        std::string cljson = app_online_.computeClustersJson(
-                            event, seq, ana, wres).dump();
+                        // gem_sys holds this event (processEvent above; this
+                        // thread is its only writer), so the ring entry's
+                        // clusters carry their own matching GEM hits.
+                        nlohmann::json cl_j = app_online_.computeClustersJson(event, seq, ana, wres);
+                        if (app_online_.gem_enabled)
+                            cl_j["gem_hits"] = app_online_.gemHitsJson();
+                        std::string cljson = cl_j.dump();
                         // GEM per-APV waveforms — encoded here so the API
                         // for older ring events doesn't need to re-process
                         // gem_sys (which would clobber the live state used

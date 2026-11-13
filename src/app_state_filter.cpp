@@ -33,58 +33,67 @@ void AppState::resolveFilterKeys()
 
 std::string AppState::loadFilter(const json &j)
 {
-    trigger_type_filter = {};
-    waveform_filter = {};
-    cluster_filter = {};
-
-    if (j.contains("trigger_type")) {
-        auto &tt = j["trigger_type"];
-        if (tt.contains("enable")) trigger_type_filter.enable = tt["enable"];
-        if (tt.contains("accept") && tt["accept"].is_array()) {
-            for (auto &v : tt["accept"])
-                trigger_type_filter.accept.push_back(static_cast<uint8_t>(v.get<int>()));
+    // Parse into temporaries and commit only on success, so a malformed
+    // filter (wrong JSON types throw) leaves the current filter intact.
+    TriggerTypeFilter tt_f;
+    WaveformFilter    wf_f;
+    ClusterFilter     cl_f;
+    try {
+        if (j.contains("trigger_type")) {
+            auto &tt = j["trigger_type"];
+            if (tt.contains("enable")) tt_f.enable = tt["enable"].get<bool>();
+            if (tt.contains("accept") && tt["accept"].is_array()) {
+                for (auto &v : tt["accept"])
+                    tt_f.accept.push_back(static_cast<uint8_t>(v.get<int>()));
+            }
         }
+
+        if (j.contains("waveform")) {
+            auto &w = j["waveform"];
+            auto &f = wf_f;
+            if (w.contains("enable"))       f.enable       = w["enable"].get<bool>();
+            if (w.contains("n_peaks_min"))  f.n_peaks_min  = w["n_peaks_min"].get<int>();
+            if (w.contains("n_peaks_max"))  f.n_peaks_max  = w["n_peaks_max"].get<int>();
+            auto bound = [&](const char *key, std::optional<float> &b) {
+                if (w.contains(key)) b = w[key].get<float>();
+            };
+            bound("time_min", f.peak.time_min);
+            bound("time_max", f.peak.time_max);
+            bound("integral_min", f.peak.integral_min);
+            bound("integral_max", f.peak.integral_max);
+            bound("height_min", f.peak.height_min);
+            bound("height_max", f.peak.height_max);
+            if (w.contains("modules"))
+                for (auto &m : w["modules"])
+                    f.modules.push_back(m.get<std::string>());
+        }
+
+        if (j.contains("clustering")) {
+            auto &c = j["clustering"];
+            auto &f = cl_f;
+            if (c.contains("enable"))           f.enable       = c["enable"].get<bool>();
+            if (c.contains("n_min"))            f.n_min        = c["n_min"].get<int>();
+            if (c.contains("n_max"))            f.n_max        = c["n_max"].get<int>();
+            if (c.contains("energy_min"))       f.energy_min   = c["energy_min"].get<float>();
+            if (c.contains("energy_max"))       f.energy_max   = c["energy_max"].get<float>();
+            if (c.contains("size_min"))         f.size_min     = c["size_min"].get<int>();
+            if (c.contains("size_max"))         f.size_max     = c["size_max"].get<int>();
+            if (c.contains("includes_min"))     f.includes_min = c["includes_min"].get<int>();
+            if (c.contains("includes_modules"))
+                for (auto &m : c["includes_modules"])
+                    f.includes_modules.push_back(m.get<std::string>());
+            if (c.contains("center_modules"))
+                for (auto &m : c["center_modules"])
+                    f.center_modules.push_back(m.get<std::string>());
+        }
+    } catch (const std::exception &e) {
+        std::cerr << "Filter rejected (previous filter kept): " << e.what() << "\n";
+        return std::string("invalid filter: ") + e.what();
     }
 
-    if (j.contains("waveform")) {
-        auto &w = j["waveform"];
-        auto &f = waveform_filter;
-        if (w.contains("enable"))       f.enable       = w["enable"];
-        if (w.contains("n_peaks_min"))  f.n_peaks_min  = w["n_peaks_min"];
-        if (w.contains("n_peaks_max"))  f.n_peaks_max  = w["n_peaks_max"];
-        auto bound = [&](const char *key, std::optional<float> &b) {
-            if (w.contains(key)) b = w[key].get<float>();
-        };
-        bound("time_min", f.peak.time_min);
-        bound("time_max", f.peak.time_max);
-        bound("integral_min", f.peak.integral_min);
-        bound("integral_max", f.peak.integral_max);
-        bound("height_min", f.peak.height_min);
-        bound("height_max", f.peak.height_max);
-        if (w.contains("modules"))
-            for (auto &m : w["modules"])
-                f.modules.push_back(m.get<std::string>());
-    }
-
-    if (j.contains("clustering")) {
-        auto &c = j["clustering"];
-        auto &f = cluster_filter;
-        if (c.contains("enable"))           f.enable       = c["enable"];
-        if (c.contains("n_min"))            f.n_min        = c["n_min"];
-        if (c.contains("n_max"))            f.n_max        = c["n_max"];
-        if (c.contains("energy_min"))       f.energy_min   = c["energy_min"];
-        if (c.contains("energy_max"))       f.energy_max   = c["energy_max"];
-        if (c.contains("size_min"))         f.size_min     = c["size_min"];
-        if (c.contains("size_max"))         f.size_max     = c["size_max"];
-        if (c.contains("includes_min"))     f.includes_min = c["includes_min"];
-        if (c.contains("includes_modules"))
-            for (auto &m : c["includes_modules"])
-                f.includes_modules.push_back(m.get<std::string>());
-        if (c.contains("center_modules"))
-            for (auto &m : c["center_modules"])
-                f.center_modules.push_back(m.get<std::string>());
-    }
-
+    trigger_type_filter = std::move(tt_f);
+    waveform_filter     = std::move(wf_f);
+    cluster_filter      = std::move(cl_f);
     resolveFilterKeys();
 
     std::cerr << "Filter loaded: waveform "

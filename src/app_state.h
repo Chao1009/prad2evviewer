@@ -46,14 +46,17 @@ inline uint32_t bitsMaskFromArray(const nlohmann::json &arr,
     if (!arr.is_array() || arr.empty()) return 0;
     uint32_t m = 0;
     for (auto &item : arr) {
-        if (item.is_number()) {
-            m |= (1u << item.get<int>());
+        if (item.is_number_integer()) {
+            const auto b = item.get<long long>();
+            if (b >= 0 && b <= 31) m |= (1u << b);
+            else std::cerr << who << ": bit " << b << " out of range [0,31]\n";
         } else if (item.is_string()) {
             auto s = item.get<std::string>();
             bool found = false;
             for (auto &def : bits_defs) {
                 if (def.value("name", "") == s || def.value("label", "") == s) {
-                    m |= (1u << def.value("bit", 0));
+                    const int b = def.value("bit", 0);
+                    if (b >= 0 && b <= 31) m |= (1u << b);
                     found = true;
                     break;
                 }
@@ -229,7 +232,10 @@ struct AppState {
         return ana;
     }
 
-    // GEM system
+    // GEM system.  gem_mtx guards gem_sys's per-event state against a
+    // writer on another thread (processEvent / prepareGemForView callers);
+    // take it before data_mtx / lms_mtx, never while holding them.
+    mutable std::mutex gem_mtx;
     gem::GemSystem gem_sys;
     gem::GemCluster gem_clusterer;
     bool gem_enabled = false;       // true if gem_map.json loaded successfully
@@ -682,7 +688,8 @@ struct AppState {
     // ---- Per-event processing ----------------------------------------------
 
     // Run the GEM clear + ProcessEvent + Reconstruct pipeline without
-    // touching accumulators.  Used by the on-demand APV endpoint so a
+    // touching accumulators (an event without SSP data just clears gem_sys).
+    // Caller holds gem_mtx when another thread may also process events.  Used by the on-demand APV endpoint so a
     // re-request for an event already accumulated still leaves gem_sys
     // populated with that event's per-APV working buffers.
     void prepareGemForView(const ssp::SspEventData &ssp_evt);
@@ -756,6 +763,11 @@ struct AppState {
     // ungated counts have been seen yet.
     void processDsc(const dsc::DscEventData &dsc);
 
+    // Per-file values that are not accumulators (file mode, on a new load):
+    // beam_energy back to the run-info value, measured livetime + previous
+    // DSC2 counters, and gem_sys's last-event hits.
+    void resetPerFileState();
+
     // ---- Clearing ----------------------------------------------------------
     void clearHistograms();   // locks data_mtx
     void clearLms();          // locks lms_mtx
@@ -789,7 +801,11 @@ struct AppState {
     nlohmann::json apiEpicsChannel(const std::string &name) const;
     nlohmann::json apiEpicsBatch(const std::vector<std::string> &names) const;
     nlohmann::json apiEpicsLatest() const;
+    // /api/gem/hits: hits of the event gem_sys last processed (locks gem_mtx).
     nlohmann::json apiGemHits() const;
+    // Same payload without locking; caller holds gem_mtx (or is the thread
+    // that is the only writer of this gem_sys, i.e. the ET reader online).
+    nlohmann::json gemHitsJson() const;
     nlohmann::json apiGemConfig() const;
     nlohmann::json apiGemOccupancy() const;
     // Per-event APV waveform dump (for the GEM APV monitor tab).
@@ -839,8 +855,8 @@ private:
 
     // HyCal cluster input of one channel: ADC1881M uses samples[0] at t = 0;
     // otherwise, with cluster_cfg.seed_time_window > 0, every peak of wres
-    // with integral > 0 at its time, else the largest-integral peak
-    // (bestPeak) at t = 0.  Energy: mod.energize(adc) when cal_factor > 0,
+    // with integral > 0 at its calibrated time (raw - mod.time_offset), else
+    // the largest-integral peak (bestPeak) at t = 0.  Energy: mod.energize(adc) when cal_factor > 0,
     // else adc * adc_to_mev.  Each fed energy is added to energy_sum.
     void feedClusterChannel(fdec::HyCalCluster &cl, const fdec::Module &mod,
                             const fdec::ChannelData &cd,
@@ -863,6 +879,10 @@ private:
     };
     PhysCluster physCluster(float x, float y, int center_id,
                             float energy, int nblocks) const;
+    // Same from a lab-frame position (recon files store cl_x/y/z in the lab
+    // frame); the HyCal-local x,y come from hycal_transform.labToLocal.
+    PhysCluster physClusterLab(float lx, float ly, float lz,
+                               float energy, int nblocks) const;
     // Lab-frame hits of the event currently held by gem_sys, per detector.
     std::vector<std::vector<LabHit>> gemLabHits() const;
     // Per-event fill of the cluster histograms (when cluster_hists) and of
