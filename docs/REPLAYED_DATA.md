@@ -17,14 +17,16 @@ below.  `runinfo` is run-scoped (one row per CODA control event:
 PRESTART / GO / END), with no row-level join key.
 
 `prad2ana_replay_recon` writes one per-split `_recon.root` first, then
-by default merges successful split outputs with `hadd` in groups of 80
+by default merges successful split outputs with `hadd` in groups of 62
 as `prad_<run>_recon_<batch>.root`.  Use `-m 0` to disable merged
 outputs, or `-m N` to change the number of split files per merged file.
 
 When `prad2ana_replay_filter` receives multiple replay ROOT files, it
-writes one filtered ROOT per input by inserting `_filter` before the
-final `.root`.  For example, `prad_024327_recon_000.root` becomes
-`prad_024327_recon_000_filter.root`.  It also writes a run-level
+writes one filtered ROOT per input, replacing `_recon` with `_filter` and
+keeping the batch/split index.  For example, `prad_024327_recon_000.root`
+becomes `prad_024327_filter_000.root` and `prad_024327.00040_recon.root`
+becomes `prad_024327_filter_00040.root`; other names get `_filter` inserted
+before the final `.root`.  It also writes a run-level
 `prad_<run>_epics.root` containing only `scalers`, `epics`, and
 `runinfo`, plus one run-level JSON report.  The shell replay pipeline
 writes these products side by side in `<output_base>/prad_<run>/`, with
@@ -60,7 +62,7 @@ FADC250 channels (HyCal + Veto + LMS) — distinguish via `hycal.module_type`:
 | 4 | LMS     | `hycal_map.json` `t="LMS"` (LMSPin, LMS1..3) |
 
 `hycal.module_id` encoding (globally unique):
-PbGlass = 1..1156, PbWO4 = 1001..2152, VETO = 3001..3004,
+PbGlass = 1..900, PbWO4 = 1001..2156, VETO = 3001..3004,
 LMS = 3100 (Pin) / 3101..3103.
 
 ## Branches
@@ -300,14 +302,16 @@ upstream — only physics events reach the tree.
 
 The command-line reconstruction modes are:
 
-- default: PRad-II raw-sum, LMS, and Alpha events;
+- default: PRad-II reconstruction;
 - `-prad1`: legacy PRad-I ADC1881M reconstruction without GEM;
-- `-x17`: events carrying the 1-, 2-, or 3-cluster trigger bits, plus LMS
-  and Alpha events.
+- `-x17` / `-x17_full`: X17 reconstruction (no `veto_*` branches).
 
-For X17 blind analysis, all 1-/2-cluster events are retained. A
-3-cluster event is retained only when `event_num % 10 == 8`, producing a
-deterministic 10% sample. `-prad1` and `-x17` cannot be combined.
+Every mode keeps events carrying the sum (bit 8), 3-cluster (bit 11), LMS
+or Alpha trigger bit (`-random` keeps every event); events with only the
+1-/2-cluster bits are not written. For X17 blind analysis (`-x17`), an
+event with the 3-cluster bit is retained only when `event_num % 10 == 8`,
+producing a deterministic 10% sample, even if it also carries the sum bit;
+`-x17_full` keeps them all. `-prad1` and `-x17` cannot be combined.
 
 ### Event header
 
@@ -317,7 +321,7 @@ deterministic 10% sample. `-prad1` and `-x17` cannot be combined.
 | `trigger_type` | `uint8`          | Main trigger type |
 | `trigger_bits` | `uint32`         | FP trigger bits (32-bit bitmask) |
 | `timestamp`    | `int64`          | 48-bit TI timestamp (250 MHz ticks) |
-| `total_energy` | `float`          | Σ HyCal cluster energy (MeV) |
+| `total_energy` | `float`          | Σ energy of the HyCal module hits passed to clustering (MeV) |
 | `ssp_raw`      | `vector<uint32>` | Raw 0xE10C SSP trigger bank words |
 | `vtp_roc_tags` | `vector<uint32>` | Parent ROC tag for each 0xE122 VTP bank (same encoding as the events tree — see "VTP raw banks" above) |
 | `vtp_nwords`   | `vector<uint32>` | Word count per VTP bank, parallel to `vtp_roc_tags` |
@@ -353,13 +357,20 @@ an offline-calibrated MeV energy.
 | Branch | Type | Meaning |
 |---|---|---|
 | `n_clusters` | `int`                | Number of reconstructed clusters |
-| `cl_x`       | `float[n_clusters]`  | Cluster x at HyCal face + shower depth |
-| `cl_y`       | `float[n_clusters]`  | Cluster y |
-| `cl_z`       | `float[n_clusters]`  | `hycal_z` + shower-depth correction |
+| `cl_x`       | `float[n_clusters]`  | Cluster x: placed at shower-max depth, then projected along the line from the target back to the HyCal face plane `z = hycal_z` (with `-no_dep`: at the face, no depth) |
+| `cl_y`       | `float[n_clusters]`  | Cluster y (same treatment) |
+| `cl_z`       | `float[n_clusters]`  | Lab z of that point, i.e. the HyCal face plane (`hycal_z`) |
 | `cl_energy`  | `float[n_clusters]`  | Cluster energy (MeV) |
+| `cl_linear_corr` | `float[n_clusters]` | Linearity correction factor applied (E_corr / E_meas) |
+| `cl_bias_corr` | `float[n_clusters]` | Position-dependent energy-bias correction factor applied |
 | `cl_nblocks` | `uint8[n_clusters]`  | Modules summed into the cluster |
+| `cl_npos`    | `uint8[n_clusters]`  | Modules used in the position reconstruction |
 | `cl_center`  | `uint16[n_clusters]` | Center module ID (same numbering as `hycal.module_id`) |
+| `cl_time`    | `float[n_clusters]`  | Peak time of the center module (ns) |
 | `cl_flag`    | `uint32[n_clusters]` | HyCal cluster flags (bit field) |
+| `cl_dt_rf`   | `float[n_clusters]`  | `cl_time` − nearest RF channel-A tick, folded into one RF period, minus the per-module RF offset (ns); NaN when the event has no RF channel-A hit |
+| `rf_n_a`, `rf_n_b` | `uint8`        | Number of RF leading-edge hits on channels A / B |
+| `rf_ns_a`, `rf_ns_b` | `float[16]` | RF leading-edge times on channels A / B (ns) |
 
 ### Per-cluster HyCal↔GEM match (all 4 GEMs)
 
@@ -538,14 +549,16 @@ The LMS group remains available in both layouts.
 | Branch | Type | Meaning |
 |---|---|---|
 | `veto_nch`          | `int`              | Number of Veto channels with data |
-| `veto_id`           | `uint8[veto_nch]`  | 0..3 (V1..V4) |
+| `veto_id`           | `uint8[veto_nch]`  | 1..4 (V1..V4) |
 | `veto_npeaks`       | `int[veto_nch]`    | Soft peaks found |
 | `veto_peak_time`    | `float[veto_nch][8]` | Peak time (ns) |
+| `veto_peak_height`  | `float[veto_nch][8]` | Peak height above pedestal |
 | `veto_peak_integral`| `float[veto_nch][8]` | Peak integral |
 | `lms_nch`           | `int`              | Number of LMS channels with data |
 | `lms_id`            | `uint8[lms_nch]`   | 0=Pin, 1..3 = LMS1..3 |
 | `lms_npeaks`        | `int[lms_nch]`     | Soft peaks found |
 | `lms_peak_time`     | `float[lms_nch][8]` | Peak time (ns) |
+| `lms_peak_height`   | `float[lms_nch][8]` | Peak height above pedestal |
 | `lms_peak_integral` | `float[lms_nch][8]` | Peak integral |
 
 # `scalers` tree (DSC2 livetime)

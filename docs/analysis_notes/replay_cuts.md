@@ -85,7 +85,7 @@ The recon output is what physics analyses normally consume; the raw
 output is mostly for diagnostics or if you need access to the FADC
 samples that the recon step has already collapsed into clusters. Pick
 one — there is no need to run both. By default replay recon also merges
-successful split outputs in groups of 80 with `hadd`; add `-m 0` if a
+successful split outputs in groups of 62 with `hadd`; add `-m 0` if a
 cut workflow should keep only the per-split `_recon.root` files.
 
 ---
@@ -108,9 +108,9 @@ prad2ana_replay_filter prad_024327_recon_*.root \
 
 Output:
 
-* `prad_024327_recon_000_filter.root`, `prad_024327_recon_001_filter.root`,
-  ... — one filtered ROOT per input ROOT, named by inserting `_filter`
-  before the final `.root`; each file keeps its own `scalers`, `epics`,
+* `prad_024327_filter_000.root`, `prad_024327_filter_001.root`,
+  ... — one filtered ROOT per input ROOT, named by replacing `_recon`
+  with `_filter` and keeping the batch index; each file keeps its own `scalers`, `epics`,
   and `runinfo` trees with an extra `good` bool on the slow trees.
 * `prad_024327_epics.root` — run-level `scalers`, `epics`, and `runinfo`
   only, concatenated from every input file.
@@ -130,6 +130,13 @@ The convenience scripts in `scripts/shell/` run this sequence as
 `replay_recon -> replay_filter -> live_charge -> quick_check`, write all
 products directly under `<output_base>/prad_<run>/`, and reuse the same
 CPU count for replay, filter, and quick check.
+With a `split` block in the cut JSON the filter writes
+`prad_<run>_filter_full_<batch>.root` and `prad_<run>_filter_empty_<batch>.root`,
+and both this glob and the scripts (which pass every
+`prad_<run>_filter*.root`) hand the full- and empty-target files to a single
+`live_charge` call, so that number is not a per-state charge; run
+`live_charge` on one side's files (e.g. `prad_024327_filter_full_*.root`)
+for that.
 
 ### Cut JSON in 30 seconds
 

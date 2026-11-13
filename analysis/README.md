@@ -29,7 +29,7 @@ Both replay programs are multi-threaded; point them at one or more EVIO
 files (or a directory of segments) and tune parallelism with `-j`.
 Output goes to `<output_dir>/<input_stem>_raw.root` (`replay_rawdata`)
 or `_recon.root` (`replay_recon`), one ROOT file per input EVIO segment.
-`replay_recon` also runs `hadd` after replay by default, merging every 80
+`replay_recon` also runs `hadd` after replay by default, merging every 62
 successful split outputs into `prad_<run>_recon_<batch>.root`; pass
 `-m 0` to disable this, or `-m N` to choose a different group size.
 The shell pipeline scripts use those merged recon files as the downstream
@@ -65,25 +65,28 @@ the offline reconstruction matches what the live monitor produces.
 
 ```bash
 prad2ana_replay_recon <evio_or_dir> [more...] -o <output_dir> \
-    [-f max_files] [-n max_events] [-j num_threads] \
+    [-f max_files] [-j num_threads] [-r recon_config.json] \
     [-c daq_config.json] [-d hycal_map.json] \
     [-g gem_pedestal.json] [-z zerosup_threshold] [-m merge_files] \
-    [-prad1 | -x17]
+    [-prad1 | -x17 | -x17_full] [-random] [-gem_hit] [-no_dep]
 ```
 
 `-prad1` selects **PRad-I data format** (no GEM, ADC1881M Fastbus
 pedestals). `-x17` selects the X17 reconstruction path. The two modes
-are mutually exclusive.
+are mutually exclusive. Long options must be spelled out in full: an
+abbreviation such as `-p` or `-gem` is rejected as an invalid option.
 
-X17 reconstruction accepts the 1-, 2-, and 3-cluster trigger bits plus
-LMS and Alpha events. All 1-/2-cluster events are retained; for blind
-analysis, a 3-cluster event is retained only when `event_num % 10 == 8`
-(a deterministic 10% sample).
+Every recon mode keeps events carrying the sum (bit 8), 3-cluster
+(bit 11), LMS or Alpha trigger bit (`-random` keeps every event); events
+with only the 1-/2-cluster bits are not written. For blind analysis,
+`-x17` keeps an event with the 3-cluster bit only when
+`event_num % 10 == 8` (a deterministic 10% sample), even if it also
+carries the sum bit; `-x17_full` keeps them all.
 
 `-g` overrides the GEM pedestal file from `runinfo`; `-z` overrides the
 zero-suppression sigma threshold. `-m`
 sets how many split `_recon.root` files go into each merged `hadd`
-output; the default is 80, and `-m 0` leaves only the per-split files.
+output; the default is 62, and `-m 0` leaves only the per-split files.
 
 ### replay_filter
 
@@ -100,9 +103,11 @@ prad2ana_replay_filter <input.root> [more.root ...] \
 Inputs may be either `replay_rawdata` (`events`) or `replay_recon`
 (`recon`) outputs; the tree name is auto-detected and preserved.  All
 splits of a run can be passed in a single invocation.  Multi-input
-filtered output names are derived by inserting `_filter` before the final
-`.root`, e.g. `prad_024327.evio.00040_recon.root` becomes
-`prad_024327.evio.00040_recon_filter.root`.  The filter also writes one
+filtered output names replace the `_recon` part with `_filter` and keep
+the split/batch index, e.g. `prad_024327_recon_000.root` becomes
+`prad_024327_filter_000.root` and `prad_024327.00040_recon.root` (or
+`prad_024327.evio.00040_recon.root`) becomes `prad_024327_filter_00040.root`;
+other names get `_filter` inserted before the final `.root`.  The filter also writes one
 run-level slow-control file, `prad_<run>_epics.root`, containing only
 `scalers`, `epics`, and `runinfo`, plus one run-level JSON report.
 For multi-input filtering, a typical run directory therefore contains
@@ -255,29 +260,7 @@ average current, and the count of total / kept / integrated / skipped
 checkpoint pairs.  `-j` additionally writes a JSON dump suitable for
 diff-checking against `replay_filter`'s `live_charge` block.
 
-## Calibration
-
-### epCalib
-
-Elastic *e-p* calibration. Fits the elastic peak per module from
-`replay_rawdata` ROOT files (peak mode) and writes gain-correction
-constants.
-
-```bash
-prad2ana_epCalib <input.root> [-o output_calib_file] \
-    [-D daq_config.json] [-n max_events]
-```
-
 ## Physics analysis
-
-### analysis_example
-
-Worked offline analysis reading reconstructed ROOT trees. Fills energy,
-hit-position, and Møller-event histograms with optional GEM matching.
-
-```bash
-prad2ana_analysis_example <input_recon.root> [-o output.root] [-n max_events]
-```
 
 ### cosmic_test
 

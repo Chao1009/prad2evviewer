@@ -10,18 +10,21 @@ in [`gem/`](../gem/README.md).
 EVIO file structure inspector.
 
 ```bash
-evio_dump <file> [-m mode] [-n N] [-D daq_config.json]
+evio_dump <file> [-m mode] [-n N] [-D daq_config.json] [-v]
 ```
 
-Modes: (default) summary by tag, `tree`, `tags`, `epics`, `event`
-(detail for event *N*), and `triggers`.
+Modes: (default) summary by tag, `tree`, `tags`, `epics`, `vtp`
+(VTP banks), `rf` (RF time TDC hits), `event` (detail for event *N*),
+`triggers`, `trig-debug` (event tags vs. TI type vs. FP trigger bits),
+and `bank-debug` (bank structure / dispatch coverage).  `-v` prints
+every event in the `triggers` / `trig-debug` modes.
 
 ### ped_calc
 
 Compute HyCal per-channel pedestals from trigger-selected events.
 
 ```bash
-ped_calc <evio_file> -D <daq_config.json> [-t bit] [-o file.json] [-n N]
+ped_calc <evio_file> [-D daq_config.json] [-t bit] [-o file.json] [-n N]
 ```
 
 Default trigger bit is 3 (LMS_Alpha / pedestal for PRad).

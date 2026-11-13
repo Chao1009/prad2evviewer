@@ -12,7 +12,14 @@ function, and namespace constant exported by the library.
 | Header | Namespace | Public symbols |
 |---|---|---|
 | [`HyCalSystem.h`](#hycalsystemh) | `fdec` | `HyCalSystem`, `Module`, `ModuleType`, `Sector`, `SectorInfo`, `NeighborInfo`, `DaqAddr`, `LayoutFlag` |
-| [`HyCalCluster.h`](#hycalclusterh) | `fdec` | `HyCalCluster`, `ClusterConfig`, `ModuleHit`, `ModuleCluster`, `ClusterHit`, `IClusterProfile`, `SimpleProfile`, `shower_depth()` |
+| [`HyCalCluster.h`](#hycalclusterh) | `fdec` | `HyCalCluster`, `ClusterConfig`, `ModuleHit`, `ModuleCluster`, `ClusterHit`, `IClusterProfile`, `SimpleProfile`, `Geant4Profile`, `shower_depth()` |
+| `HyCalEnergyBias.h` | `fdec` | `HyCalEnergyBias`, `HyCalEnergyBiasSet`, `SelectHyCalEnergyBiasSet()`, `LoadHyCalEnergyBias()` |
+| `HyCalDeadModules.h` | `prad2` | `HyCalDeadModuleSummary`, `ApplyHyCalDeadModules()` |
+| `HyCalModuleTable.h` | `prad2` | `HyCalModuleTableStats`, `LoadHyCalModuleTable()`, `ParseHyCalTableNumber()` |
+| `HyCalTimeCalib.h` | `prad2` | `HyCalTimeCalibSummary`, `LoadHyCalTimeCalib()` |
+| `HyCalTimeCuts.h` | `prad2` | `HyCalTimeCuts`, `LoadHyCalTimeCuts()` |
+| `HyCalRfOffsets.h` | `prad2` | `HyCalRfOffsets`, `LoadHyCalRfOffsets()` |
+| `RfTime.h` | `prad2` | `RF_PERIOD_NS`, `RF_DIVIDER`, `RF_DIV_NS`, `FoldRfDelta()`, `ClusterDeltaRf()` |
 | [`GemSystem.h`](#gemsystemh) | `gem` | `GemSystem`, `DetectorConfig`, `PlaneConfig`, `ApvConfig`, `ApvPedestal`, `ClusterConfig`, `StripHit`, `StripCluster`, `GEMHit`, `MapStrip()`, `MapApvStrips()` |
 | [`GemCluster.h`](#gemclusterh) | `gem` | `GemCluster` |
 | [`GemPedestal.h`](#gempedestalh) | `gem` | `GemPedestal` |
@@ -46,7 +53,7 @@ HyCal calorimeter. Initialized once from JSON; immutable per event.
 |---|---|
 | `ModuleType` | `PbGlass=0`, `PbWO4=1`, `LMS=2`, `Veto=3`, `Unknown=-1` |
 | `Sector`     | `Center=0`, `Top=1`, `Right=2`, `Bottom=3`, `Left=4`, `Max=5` |
-| `LayoutFlag` (bit positions) | `kPbGlass`, `kPbWO4`, `kTransition`, `kInnerBound`, `kOuterBound`, `kDeadModule`, `kDeadNeighbor`, `kSplit`, `kLeakCorr` |
+| `LayoutFlag` (bit positions) | `kPbGlass`, `kPbWO4`, `kTransition`, `kInnerBound`, `kOuterBound`, `kDeadModule`, `kDeadNeighbor`, `kSplit`, `kLeakCorr`, `kLeakage` |
 
 Helpers: `set_bit`, `clear_bit`, `test_bit` operate on the packed `Module::flag`.
 
@@ -56,15 +63,16 @@ Helpers: `set_bit`, `clear_bit`, `test_bit` operate on the packed `Module::flag`
 
 | Field | Description |
 |---|---|
-| `name`, `id`, `index` | identity (`id` is PRimEx 1..1156 G / 1001..2152 W; `index` is contiguous) |
+| `name`, `id`, `index` | identity (`id` is PRimEx 1..900 G / 1001..2156 W; `index` is contiguous) |
 | `type` | `ModuleType` |
 | `x`, `y`, `size_x`, `size_y` | geometry (mm) |
 | `flag`, `sector`, `row`, `column` | layout |
 | `daq` | `DaqAddr{crate, slot, channel}` |
-| `cal_factor`, `cal_base_energy`, `cal_non_linear` | per-module calibration |
+| `cal_factor`, `cal_base_energy`, `cal_non_linear_1`, `cal_non_linear_2` | per-module calibration |
+| `time_offset` | per-module time offset (ns); calibrated time = raw time − `time_offset` |
 | `neighbors[]`, `neighbor_count` | pre-computed cross-sector neighbours |
 
-Member helpers: `energize(adc)` → MeV (incl. non-linear correction);
+Member helpers: `energize(adc)` → MeV (`cal_factor · adc`, 0 for negative ADC; no non-linear term);
 `is_pwo4()`, `is_glass()`, `is_hycal()`; `is_neighbor(other, include_corners=true)`.
 
 `SectorInfo` — per-sector geometry. `set_boundary(x1,y1,x2,y2)` /
@@ -81,7 +89,7 @@ Member helpers: `energize(adc)` → MeV (incl. non-linear correction);
 | Method | Description |
 |---|---|
 | `bool Init(const std::string &map_path)` | Load merged HyCal map JSON (one record per module: `n,t,geo,daq`). Returns `false` on error. |
-| `int LoadCalibration(const std::string &calib_path)` | Load `[{name,factor,base_energy,non_linear}, …]`. Returns matched count or `-1`. |
+| `int LoadCalibration(const std::string &calib_path)` | Load `[{name,factor,base_energy,nl1,nl2}, …]`. Returns matched count or `-1`. |
 | `int module_count() const` | |
 | `const Module &module(int index) const` / `Module &module(int)` | |
 | `const Module *module_by_name(const std::string&) const` | |
@@ -97,6 +105,7 @@ Member helpers: `energize(adc)` → MeV (incl. non-linear correction);
 | `void SetPositionResolutionParams(float A, float B, float C)` | |
 | `float GetPositionResolutionA/B/C() const` | |
 | `float PositionResolution(float energy_mev) const` | σ(E) = √((A/√Eg)² + (B/Eg)² + C²), in mm |
+| `void SetEnergyResolutionParams(float A, float B, float C)`, `float GetEnergyResolutionA/B/C() const`, `float EnergyResolution(float energy_mev) const` | energy-resolution model |
 | `static int name_to_id(const std::string&)` | |
 | `int id_to_index(int id) const` | |
 | `static std::string id_to_name(int id)` | |
@@ -123,15 +132,25 @@ Algorithm details: `docs/technical_notes/hycal_clustering/`.
 | `log_weight_thres`  | 3.6 | W = max(0, thres + ln(E_i / E_tot)) |
 | `non_linear_corr`   | true | apply per-module energy non-linearity correction |
 | `energy_bias_correction` | false | apply the beam- and position-dependent PbWO4 energy correction (5x5, 8x8, or 10x10) |
+| `energy_bias`, `profile` | null | shared `HyCalEnergyBias` tables / cluster profile (`SetConfig` installs a non-null `profile`) |
+| `leakage_correction` | false | apply the leakage correction |
+| `leakage_iterations` | 6 | |
+| `least_leakage_fraction` | 0.01 | |
+| `max_leakage_fraction` | 0.30 | |
+| `leakage_convergence_rel` | 0.001 | |
+| `seed_time_window` | −1 ns | when > 0, multiple pulses per module may be added and a neighbour joins an island only with its largest unconsumed pulse within ±window of the seed; ≤ 0 ignores the time |
 
 ### Per-event types
 
 `ModuleHit { index, energy, time }`.
 
-`ModuleCluster { center, hits, energy, flag }` with `add_hit(h)`.
+`ModuleCluster { center, hits, energy, energy_square, leakage, flag,
+has_leakage_position, leakage_x, leakage_y, leakage_npos }` with `add_hit(h)`.
 
 `ClusterHit { center_id, x, y, energy, time, nblocks, npos, flag,
-linear_corr, bias_corr }` — reconstructed cluster output. `linear_corr`
+linear_corr, bias_corr, energy_square, leakage }` — reconstructed cluster
+output (`energy_square`: raw module-energy sum in the 5x5 area around the
+center; `leakage`: leakage correction in MeV). `linear_corr`
 contains only the non-linearity factor and `bias_corr` contains only the
 position-dependent energy-bias factor.
 
@@ -140,10 +159,15 @@ discriminating PWO4 vs PbGlass via `PWO_ID0`.
 
 ### Cluster profile
 
-`IClusterProfile` — abstract interface; one method
-`GetFraction(ModuleType, dist, energy)`.
+`IClusterProfile` — abstract interface; one pure virtual
+`ProfileValue GetFractionValue(ModuleType, dist, energy)` (`ProfileValue
+{ frac, err }`), plus the non-virtual `GetFraction(...)` returning `.frac`.
 
 `SimpleProfile` — analytical fall-off (default).
+
+`Geant4Profile` — tabulated profile read per module type with
+`Load(ModuleType, path)`; falls back to `SimpleProfile` for a type without a
+table.
 
 ### `HyCalCluster` methods
 
@@ -151,7 +175,7 @@ discriminating PWO4 vs PbGlass via `PWO_ID0`.
 |---|---|
 | `explicit HyCalCluster(const HyCalSystem &sys)` | |
 | `void SetConfig(const ClusterConfig&)` / `const ClusterConfig &GetConfig() const` | |
-| `void SetProfile(IClusterProfile *prof)` | takes ownership |
+| `void SetProfile(std::shared_ptr<const IClusterProfile>)` / `void SetProfile(IClusterProfile *prof)` | the raw-pointer overload takes ownership |
 | `void Clear()` | |
 | `void AddHit(int module_index, float energy, float time)` | |
 | `void FormClusters()` | |
@@ -269,7 +293,7 @@ instantiating a `GemSystem`. `GemSystem::buildStripMap()` delegates to
 
 | Method | Description |
 |---|---|
-| `void Init(const std::string &map_file)` | Load `gem_map.json` (detectors + APVs). |
+| `void Init(const std::string &map_file)` | Load `gem_map.json` (detectors + APVs). Comment-only entries in the `apvs` array (no `crate`/`mpd`/`adc`) are skipped, so `GetNApvs()` counts real APVs only. |
 | `void LoadPedestals(const std::string &ped_file, const std::map<int,int> &crate_remap = {})` | Upstream APV-block text format. `crate_remap` maps file-side hardware crate IDs to logical IDs (e.g. 146→1, 147→2). Slot field in headers is ignored. |
 | `void LoadCommonModeRange(const std::string &cm_file, const std::map<int,int> &crate_remap = {})` | Per-APV CM bounds into `ApvConfig::cm_range_min/max`; not used by the reconstruction. |
 | `void SetReconConfigs(std::vector<ClusterConfig>)` | Per-detector cluster/match parameters; vector clamped/padded to `GetNDetectors()`. |
@@ -321,8 +345,11 @@ Free helpers (namespace `gem`), reusable on any `ts_adc` vector:
 
 ## `GemPedestal.h`
 
-`gem::GemPedestal` — per-strip pedestal accumulator with the same CM
-correction as the live GEM pipeline.
+`gem::GemPedestal` — per-strip pedestal accumulator. Its common mode is
+computed on the raw samples (per time sample, the mean of the middle 72 of
+the 128 sorted strip ADCs); the live `GemSystem` path instead subtracts the
+loaded pedestal and then the mean of the strips excluding the
+`NUM_HIGH_STRIPS` highest.
 
 | Method | Description |
 |---|---|
@@ -402,16 +429,22 @@ must `invalidate()` afterwards. `set()` does both in one shot.
 
 ## `RunInfoConfig.h`
 
-Header-only loader for the run-period JSON
-(`{ "configurations": [...] }`). `LoadRunConfig` picks the entry with
-the largest `run_number` ≤ the requested run (or the latest if `< 0`).
+Header-only loader for the run-period JSON (`{ "defaults": {...},
+"configurations": [...], "gem_pedestals": [...], ... }`). `LoadRunConfig`
+starts from `defaults` and overlays every `configurations` entry with
+`from_run` ≤ the requested run in ascending order (all entries if `< 0`);
+the independent tables `gem_pedestals`, `beam_target_positions` and
+`hycal_dead_modules` each contribute only their single entry with the
+largest `from_run` ≤ the run. `run_number` is accepted as an alias for
+`from_run`. The HyCal and GEM positions returned are shifted by the target
+position.
 
 ### `prad2::RunConfig` fields
 
 | Field | Default | |
 |---|---|---|
 | `energy_calib_file` | "" | HyCal calibration file path |
-| `default_adc2mev` | 0.078 | fallback gain |
+| `default_adc2mev` | 0.12 | fallback gain |
 | `Ebeam` | 0 | MeV |
 | `target_x/y/z` | 0,0,0 | mm |
 | `hycal_x/y/z` | 0, 0, 6225 | mm |
@@ -422,9 +455,12 @@ the largest `run_number` ≤ the requested run (or the latest if `< 0`).
 | `hc_time_win_lo`, `hc_time_win_hi` | 100, 200 | ns |
 | `matching_radius` | 15 mm | |
 | `matching_use_square` | true | square vs circular cut |
-| `gain_data_dir` | "gain_factor" | |
+| `matching_energy_dependent`, `matching_sigma` | true, 5 | |
+| `gain_data_dir` | "" | `gain_factor.data_dir`; when empty, `LoadRunConfig` sets `<database>/gain_factor/gain_correction` (two levels above the runinfo file) |
 | `gain_ref_run` | 23915 | reference run for gain factors |
 | `gain_ref_pmt` | 23 | `gain_factor.ref_PMT`: PbWO4 reference PMTs to average (`1`, `2`, `3`, `12`, `13`, `23`, `123`) |
+| `hycal_time_cut_file`, `hycal_rf_offset_file` | "" | `time_cuts.hycal_module_file` / `time_cuts.hycal_rf_offsets` |
+| `hycal_dead_modules` | {} | module names from the `hycal_dead_modules` table |
 
 ### Functions
 
@@ -455,15 +491,19 @@ server, Python bindings) share the same wiring.
 | `hycal` | initialized + calibrated `fdec::HyCalSystem` |
 | `gem`   | initialized GEM with pedestals / CM / per-detector configs installed |
 | `hycal_cluster_cfg` | `fdec::ClusterConfig` (caller wires into `HyCalCluster::SetConfig`) |
+| `hycal_profile` | shared cluster profile (`Geant4Profile` from `cluster_profiles/prof_pwo.dat` + `prof_lg.dat`, else `SimpleProfile`) |
+| `hycal_energy_res[3]` | energy-resolution (A,B,C); default {3.3, 0, 0} |
 | `hycal_energy_bias` | shared ee/ep 5x5, 8x8, or 10x10 bias tables loaded when the correction is enabled |
 | `hycal_energy_bias_nominal` | selected nominal parameter energy in MeV (700, 2200, or 3500) |
+| `hycal_time_cuts` | `HyCalTimeCuts`, per-module peak-time windows, sized to `hycal.module_count()` |
+| `hycal_rf_offsets` | `HyCalRfOffsets`, per-module HyCal→RF offsets, sized to `hycal.module_count()` |
 | `hycal_transform`, `gem_transforms[4]` | poses already `set()`, matrices cached |
 | `hycal_pos_res[3]` | (A,B,C) face σ; default {2.6, 0, 0} |
 | `gem_pos_res` | per-detector σ (mm) |
 | `target_pos_res[3]` | (σx, σy, σz) at target |
 | `match_method` | post-match selector from `reconstruction_config.json:matching.match_method` (branches of `MatchingTools::PostMatch`: `1` = per GEM pair, the hit closest to the HyCal cluster; other = the GEM-hit pair with minimum ΔR between the two hits) |
 | `gem_crate_remap` | derived from `daq_cfg.roc_tags[type=="gem"]` |
-| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `hycal_energy_bias_ee_path`, `hycal_energy_bias_ep_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
+| `daq_config_path`, `recon_config_path`, `runinfo_path`, `hycal_map_path`, `gem_map_path`, `hycal_calib_path`, `hycal_energy_bias_ee_path`, `hycal_energy_bias_ep_path`, `hycal_time_calib_path`, `hycal_time_cut_path`, `hycal_rf_offset_path`, `gem_pedestal_path`, `gem_common_mode_path` | resolved absolute paths (empty if step skipped) |
 
 Move-only — `HyCalSystem` and `GemSystem` hold large internal buffers.
 
@@ -481,6 +521,9 @@ PipelineBuilder &set_runinfo(std::string);
 PipelineBuilder &set_hycal_map(std::string);
 PipelineBuilder &set_gem_map(std::string);
 PipelineBuilder &set_hycal_calib(std::string);
+PipelineBuilder &set_hycal_time_calib(std::string);
+PipelineBuilder &set_hycal_time_cut(std::string);
+PipelineBuilder &set_hycal_rf_offset(std::string);
 PipelineBuilder &set_gem_pedestal(std::string);
 PipelineBuilder &set_gem_common_mode(std::string);
 
@@ -492,13 +535,14 @@ PipelineBuilder &set_log_pedestal_checksum(bool);
 
 PipelineBuilder &set_path_resolver(std::function<std::string(const std::string&)>);
 
-Pipeline build();   // throws std::runtime_error on hard failures
+Pipeline build();   // throws std::runtime_error if the DAQ config cannot be loaded
 ```
 
-Hard failures (throws): missing daq_config / recon_config / runinfo /
-hycal_map / gem_map. Soft failures (warns): missing calibration /
-pedestal / common-mode files leave the corresponding `Pipeline` paths
-empty.
+Hard failure (throws): the DAQ config cannot be loaded (not checked when
+`set_loaded_daq_config` was used). Everything else is soft (warns):
+missing recon_config / runinfo / maps / calibration / pedestal /
+common-mode files leave the corresponding fields at their defaults and
+the `Pipeline` paths empty.
 
 ---
 
@@ -516,6 +560,7 @@ produced by `analysis/Replay`. No ROOT headers — pure C++ types.
 | `kMaxGemStrips` | `ssp::MAX_MPDS · MAX_APVS_PER_MPD · APV_STRIP_SIZE` |
 | `kMaxClusters` | 100 |
 | `kMaxGemHits` | 400 |
+| `kMaxGemClusters` | 400 (1-D GEM clusters, all detectors + planes) |
 
 ### Trigger-bit masks
 
@@ -538,8 +583,8 @@ These constants are masks, not bit indexes; test them with
 
 | Type | id range |
 |---|---|
-| MOD_PbGlass | 1..1156 |
-| MOD_PbWO4   | 1001..2152 |
+| MOD_PbGlass | 1..900 |
+| MOD_PbWO4   | 1001..2156 |
 | MOD_VETO    | 3001..3004 (V1..V4) |
 | MOD_LMS     | 3100..3103 (LMSPin, LMS1..3) |
 
@@ -628,8 +673,10 @@ has_waveform }`.
 has_vtp_raw, has_vtp_cl, has_rf, has_gem_hits, has_gem_qa, has_gem_cl, has_gem_ts }`
 (`has_gem_ts`: `gem_xy_corr` + `gem_cl_ts_adc`; missing GEM quality arrays read as NaN).
 
-`ssp_raw` is a `std::vector<uint32_t>` branch — readers must bind their
-own held `vector<uint32_t>**` (see comment in header).
+`ssp_raw` and the `vtp_*` / `tdc_*` word vectors are `std::vector<uint32_t>`
+branches that `Set*ReadBranches` does not bind; readers bind them with
+`BindRawVectorBranches(tree, ev, RawVectorBindings&)` (works for both
+`RawEventData` and `ReconEventData`; recon trees have no `tdc_*`).
 
 ### Fillers — copy decoded `prad2dec` records into the side-tree PODs
 

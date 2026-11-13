@@ -126,7 +126,7 @@ Resolution order per module:
 - Build `TChain("events")` and bind `RawEventData` branches.
 - Load run-dependent energy calibration and initialize HyCal.
 - Load an existing time-offset file:
-  - If `-V` is not given, default is `database/hycal_time_offsets/test.json`.
+  - If `-V` is not given, default is `database/hycal_time_offsets/time_calib.json`.
   - If `-V` is given, use that file.
 - `-v` enables validation mode (explained in 4.4).
 
@@ -297,7 +297,7 @@ PRad-II reconstruction goes through `PipelineBuilder`, which reads HyCal time-ca
 
 - In `database/reconstruction_config.json`:
   - `hycal.time_calib` (enable/disable)
-  - `hycal.time_calib_file` (for example, `hycal_time_offsets/test.json`)
+  - `hycal.time_calib_file` (for example, `hycal_time_offsets/time_calib.json`)
 - In `prad2det/src/PipelineBuilder.cpp`, `LoadHyCalTimeCalib(...)` is called during build and writes values into each `Module::time_offset`.
 
 Therefore `analysis/tools/replay_recon.cpp` does not need a separate manual offset-load step. Pass the correct recon config and the offsets are applied automatically.
@@ -317,7 +317,7 @@ Example replay recon run:
 
 ```bash
 prad2ana_replay_recon /path/to/evio_or_dir \
-  -c database/reconstruction_config.json \
+  -r database/reconstruction_config.json \
   -o /path/to/recon_output
 ```
 

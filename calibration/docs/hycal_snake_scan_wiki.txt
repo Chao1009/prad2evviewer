@@ -115,7 +115,7 @@ The HyCal map shows live FADC scaler counts as a heat map. Controls below the ma
 * '''Auto''': auto-range the colour scale, excluding the top 5 hot channels
 * '''Min/Max + Apply''': manual range
 * '''Log''': log scale for the colour mapping
-* '''Palette button''': click to cycle through 5 colour palettes
+* '''Palette button''': click to cycle through 8 colour palettes
 
 == Position Check Panel ==
 
@@ -170,7 +170,7 @@ Run Coordinator.
 |-
 | Position errors       || Motor speed, backlash, encoder
 |-
-| Move timeout (>300 s) || Motor stall, limit switch, IOC
+| Move timeout (>900 s) || Motor stall, limit switch, IOC
 |-
 | Beam trip pause       || Beam current < threshold; dwell auto-resumes when beam recovers
 |-

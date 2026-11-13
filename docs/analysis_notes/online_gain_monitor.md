@@ -236,13 +236,14 @@ in-memory cache. The newest configured runs are then redrawn in:
 | **Open Folder** | Open a directory containing `prad_NNNNNN_gain_corr.root` files and use it as an offline data source. |
 | **every** | Poll interval in seconds when no immediately downloadable file is found or a retry is needed. Range: 5–3600 s; default: 30 s. |
 | **batch** | LMS events per gain-fit batch. Range: 100–100000; default: 1000. At the nominal 10 Hz LMS rate, 1000 events are roughly 100 s. |
+| **Re-analyze** | Recompute the gain output of the visible (or entered) runs from their existing `_lms.root` files with the current **batch** (back end with `-a`); queued if a replay is running. |
 | **evio skip** | Sampling factor for remote EVIO splits. `0` keeps every eligible split; `N` keeps one split and skips the next `N`. |
 | **max evio** | Maximum number of files copied in one scan for each run. Default: 10. |
 | **queue cap** | Maximum pending EVIO files across the download and replay-queue trees. Downloads pause at this limit. Default: 100. |
 | **runs shown** | Number of latest runs with gain output loaded and displayed together. Run-number gaps do not count. Default: 5. |
 | **threads** | Requested C++ replay threads. The GUI may cap this to the CPUs available after reserving resources for the viewer/download work. |
 
-Changing **batch** affects the next back-end recomputation. Existing
+Changing **batch** schedules a **Re-analyze** shortly after the last change. Existing
 LMS intermediates are reused, so changing batch size does not require
 downloading or replaying EVIO again.
 
@@ -271,10 +272,14 @@ excluded from module averages and change calculations.
 Let
 
 ```text
-G(run,batch,module,ref) = gain_W / gain_W_ref
+G(run,batch,module,ref) = gain_W / gain_ref
 ```
 
-for a valid module/reference value.
+for a valid module/reference value, where `gain_ref` is taken from, in order:
+the **Ref File** `.dat`; with a **ref run** set, its
+`gain_factor/ref_gain/prad_RUN_LMS.dat` in the database, else the average
+`gain_W` of that run's gain ROOT file in storage; otherwise (`auto`, or no
+usable reference found) the `gain_W_ref` stored in each file.
 
 | Quantity | Map meaning | Batch-chart meaning |
 |---|---|---|
@@ -303,7 +308,7 @@ reference channels for each W module.
 
 ### HyCal map
 
-Only the 1156 PbWO4 modules (`W1`–`W1156`) are coloured. Click a module
+Only the 1152 PbWO4 modules in `hycal_map.json` (`W1`–`W1156`) are coloured. Click a module
 to select it for the chart on the right.
 
 - ratio quantities use a scale centred on 1;
@@ -317,9 +322,10 @@ The upper-right chart displays batch values for the selected W module.
 Run boundaries are dashed and labelled with six-digit run numbers.
 
 With **Avg** selected, Ref1/2/3 points are shown separately and a line
-connects their valid average. The x-axis is a continuous batch index
-across visible runs; its label estimates batch duration from
-`batch_size / 10 Hz`.
+connects their valid average. The **X axis** buttons select a continuous
+batch index across visible runs (**Batch ID**, the default; its label
+estimates batch duration from `batch_size / 10 Hz`), the batch `unix_time`
+(**Date/Time**), or minutes from the first valid batch (**Minutes**).
 
 ### Reference-PMT ratio chart
 
@@ -409,6 +415,7 @@ Options:
 | `-b <N>` | 1000 | LMS events per output batch. |
 | `-r <run>` | runinfo reference run | Reference-gain run. |
 | `-R <file>` | unset | Explicit reference gain table; overrides `-r`. |
+| `-a` | off | Re-analyze the existing `_lms.root` files in `-w` only; no EVIO input required. |
 
 Inputs may be individual EVIO files, directories, or a mixture. The
 run number is inferred from the first sorted EVIO path, so one
@@ -432,6 +439,7 @@ The output contains one `gain_corr` entry per completed LMS batch:
 | `n_lms_events` | scalar | LMS events accumulated |
 | `n_alpha_events` | scalar | Alpha events accumulated in the same interval |
 | `ref_run` | scalar | Reference-gain run |
+| `unix_time` | scalar | Unix time at the batch midpoint; 0 when no EPICS/scaler time anchor is available |
 | `refPMT_ratio` | `[3]` | Fitted LMS/Alpha ratio for Ref1–3 |
 | `gain_W` | `[1156][3]` | Current W-module gain from each reference |
 | `gain_W_ref` | `[1156][3]` | Reference gain table copied into the batch |

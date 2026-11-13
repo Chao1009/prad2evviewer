@@ -200,8 +200,10 @@ Two DAQ livetime channels are provided:
 reports and in `replay_report_viewer.py`.  It is computed from adjacent
 DSC2 scaler rows sorted by `scalers:event_number`.  If the counter moves
 backward, the baseline is reset to `(0, 0)`, matching
-`replay_filter::compute_delta_live_pct()`.  Rows with no ungated
-advance are skipped.
+`analysis::DeltaLivetime()` (`analysis/src/SlowControl.cpp`, via
+`dsc::delta_live_ratio()` in `prad2dec/include/DscData.h`), which
+`replay_filter` uses.  Rows with no ungated advance, or with gated
+advancing more than ungated, are skipped.
 
 This is the quantity to use for normal DAQ live-time quality checks.  It
 should typically sit near the expected run value, for example around

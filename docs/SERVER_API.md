@@ -31,7 +31,7 @@ Large payloads are gzipped on demand when the client advertises `Accept-Encoding
 | GET | `/api/event/<n>` | Decoded event `n` (1-based in file mode; seq number in online mode) |
 | GET | `/api/event/latest` | Latest event from the ring buffer (online mode) |
 | GET | `/api/waveform/<n>/<roc_slot_ch>` | On-demand waveform samples for a single channel (file mode) |
-| GET | `/api/clusters/<n>` | Cluster reconstruction for event `n` |
+| GET | `/api/clusters/<n>` | Cluster reconstruction for event `n`. Also carries `gem_hits` (same shape as `/api/gem/hits`) for that event; absent when GEM is disabled or for recon ROOT sources |
 | GET | `/api/ring` | Ring buffer summary: `{"ring": [seq…], "latest": <seq>}` |
 
 ## File Browser
@@ -50,16 +50,16 @@ Large payloads are gzipped on demand when the client advertises `Accept-Encoding
 | GET | `/api/hist/<module_key>` | Integral (amplitude) histogram for a module |
 | GET | `/api/poshist/<module_key>` | Position histogram for a module |
 | GET | `/api/heighthist/<module_key>` | Peak-height histogram for a module |
-| POST | `/api/hist/clear` | Clear accumulated histograms (broadcasts `hist_cleared`) |
+| GET/POST | `/api/hist/clear` | Clear accumulated histograms (broadcasts `hist_cleared`). The method is not checked; the frontend uses GET |
 
 ## LMS (Laser Monitoring)
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/lms/summary[?ref=<ch>]` | LMS summary across all modules. Optional `ref` channel for normalization |
-| GET | `/api/lms/<module>[?ref=<ch>]` | LMS time series for a single module |
+| GET | `/api/lms/summary[?ref=<i>]` | LMS summary across all modules. Optional `ref` = integer `index` from `/api/lms/refs` for normalization (absent or `-1` = none) |
+| GET | `/api/lms/<module>[?ref=<i>]` | LMS time series for a single module |
 | GET | `/api/lms/refs` | List available LMS reference channels |
-| POST | `/api/lms/clear` | Clear LMS accumulator (broadcasts `lms_cleared`) |
+| GET/POST | `/api/lms/clear` | Clear LMS accumulator (broadcasts `lms_cleared`). The method is not checked; the frontend uses GET |
 
 ## EPICS
 
@@ -69,7 +69,7 @@ Large payloads are gzipped on demand when the client advertises `Accept-Encoding
 | GET | `/api/epics/latest` | Latest values for all EPICS channels |
 | GET | `/api/epics/channel/<name>` | Time series for a single EPICS channel (URL-decoded) |
 | GET | `/api/epics/batch?ch=<n1>&ch=<n2>` | Batch fetch multiple channels |
-| POST | `/api/epics/clear` | Clear EPICS history (broadcasts `epics_cleared`) |
+| GET/POST | `/api/epics/clear` | Clear EPICS history (broadcasts `epics_cleared`). The method is not checked; the frontend uses GET |
 
 ## GEM
 
@@ -82,6 +82,7 @@ Large payloads are gzipped on demand when the client advertises `Accept-Encoding
 | GET | `/api/gem/efficiency` | Per-detector tracking-efficiency counters + last-good-event snapshot |
 | GET | `/api/gem/calib` | Per-APV pedestal noise + global `zs_sigma` (one-shot; cached on the client and refetched only when `calib_rev` changes) |
 | GET | `/api/gem/apv/<n>` | Per-event GEM APV waveforms for event `n` |
+| GET | `/api/gem/apv/latest_full` | GEM APV waveforms (all channels) of the latest full-readout monitoring event seen in online mode; `{"error": …}` until one has been captured (always in file mode) |
 | POST | `/api/gem/threshold` | Update zero-suppression threshold. JSON body: `{"zs_sigma": N}`. Broadcasts `gem_threshold_updated` |
 
 ## Physics
@@ -106,14 +107,18 @@ Load from a file (`-f filter.json`) or at runtime via the API / UI panel.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/filter` | Current filter state |
-| POST | `/api/filter/load` | Load filter (JSON body). Rebuilds indices and histograms |
+| POST | `/api/filter/load` | Load filter (JSON body). Rebuilds indices and histograms. An ill-typed filter returns `{"error": "invalid filter: …"}` and leaves the previous filter in place |
 | POST | `/api/filter/unload` | Remove all filters. Rebuilds |
-| GET | `/api/filter/indices` | List of 1-based event indices passing the filter |
+| GET | `/api/filter/indices` | List of event indices passing the filter (physics events only; same 1-based index space as `/api/event/<n>`) |
 
 ### Filter JSON format
 
 ```json
 {
+  "trigger_type": {
+    "enable": true,
+    "accept": [1, 2]
+  },
   "waveform": {
     "enable": true,
     "modules": ["W100", "W101"],
@@ -134,6 +139,8 @@ Load from a file (`-f filter.json`) or at runtime via the API / UI panel.
 ```
 
 Each section has `enable: false` by default. All other fields optional.
+`trigger_type.accept` lists the accepted event `trigger_type` values (an empty list accepts all).
+While a filter is active, `filtered_count` in `/api/config` is the number of passing events (possibly 0).
 Events pass if ALL enabled filters return true. Loading/unloading clears
 accumulated data and rebuilds histograms if the file was preprocessed.
 
@@ -159,8 +166,6 @@ Connect to `ws://localhost:<port>` for real-time push notifications.
 | `status` | `connected`, `waiting?`, `retries?` | ET connection status change |
 | `new_event` | `seq` | New event available in ring buffer |
 | `mode_changed` | `mode` | Mode changed (`file`, `online`, `idle`) |
-| `file_loaded` | (full config) | File finished loading |
-| `load_progress` | `phase`, `current`, `total` | File load progress update |
 | `hist_cleared` | — | Histograms were cleared |
 | `hist_config_updated` | `waveform_filter`, `waveform_filter_active` | Waveform peak filter changed |
 | `lms_cleared` | — | LMS data was cleared |
@@ -168,9 +173,10 @@ Connect to `ws://localhost:<port>` for real-time push notifications.
 | `epics_cleared` | — | EPICS data was cleared |
 | `epics_event` | `count` | New EPICS event received |
 | `gem_threshold_updated` | `zs_sigma` | GEM zero-suppression threshold changed |
-| `control_event` | `kind` (`prestart`/`end`), `run_number`, `unix_time` | EVIO control event seen on the stream |
 | `capture_request` | `request_id`, `run`, `reason` | Server asks an `auto_report`-capable client to take and post an auto-report. Client must reply via `POST /api/elog/post` with `auto:true` and the same `request_id` |
 | `auto_capture_done` | `run`, `posted`, `saved_xml` | Auto-report capture handshake finished |
+| `autoclear_done` | — | Auto-clear fired (histograms, LMS, EPICS and the latest full-readout GEM APV snapshot were cleared) |
+| `gem_apv_full_event` | `seq` | New full-readout GEM APV snapshot available at `/api/gem/apv/latest_full` |
 | `tagger_subscribed` | `subscribers` | Confirms tagger subscription |
 | `tagger_unsubscribed` | `subscribers` | Confirms tagger unsubscription |
 
