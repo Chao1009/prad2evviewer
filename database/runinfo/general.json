@@ -165,7 +165,27 @@
     "// Per-run overrides for beam and target positions.  Independent lookup, no chaining;": "",
     "// if a run has an entry here, it overrides the target_* fields for the runs >= from_run.": "",
     "beam_target_positions": [
-        {"from_run": 24185, "target": [0.0, 0.0, 0.0]}
+        {"from_run": 24000, "target": [0.120, 1.020, -4.5],
+         "from_run": 24584, "target": [0.118, 1.014, -4.5],
+         "from_run": 24586, "target": [1.076, 1.044, -4.5],
+         "from_run": 24589, "target": [0.139, 1.038, -4.5],
+         "from_run": 24590, "target": [0.130, 1.052, -4.5],
+         "from_run": 24603, "target": [0.166, 1.033, -4.5],
+         "from_run": 24604, "target": [0.141, 1.019, -4.5],
+         "from_run": 24932, "target": [0.837, 1.427, -4.5],
+         "from_run": 24936, "target": [0.845, 1.430, -4.5],
+         "from_run": 24938, "target": [0.840, 1.428, -4.5],
+         "from_run": 24940, "target": [0.843, 1.428, -4.5],
+         "from_run": 24941, "target": [0.845, 1.431, -4.5],
+         "from_run": 24947, "target": [0.848, 1.438, -4.5],
+         "from_run": 24949, "target": [0.848, 1.440, -4.5],
+         "from_run": 24950, "target": [0.846, 1.438, -4.5],
+         "from_run": 24955, "target": [0.848, 1.437, -4.5],
+         "from_run": 25349, "target": [0.864, 1.552, -4.5],
+         "from_run": 25353, "target": [0.867, 1.524, -4.5],
+         "from_run": 25358, "target": [0.868, 1.522, -4.5],
+         "from_run": 25367, "target": [0.849, 1.527, -7.5]    
+        }
     ],
 
     "// Per-run HyCal dead modules list. Independent lookup, no chaining": "",

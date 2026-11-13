@@ -421,9 +421,7 @@ int main(int argc, char *argv[])
     std::cout << "Beam center (X, Y): " << alignment_params["beam_center_x"] + in_run_config.target_x << ", "
               << alignment_params["beam_center_y"] + in_run_config.target_y << std::endl;
     std::cout << "Beam center from individual GEM chambers (HyCal-center coordinates):"
-              << std::endl;
-    std::cout << "Beam Center (X, Y) from HyCal: " << alignment_params["moller_HC_x"] + in_run_config.target_x << ", "
-              << alignment_params["moller_HC_y"] + in_run_config.target_y << std::endl;
+              << std::endl;s
     for (int det = 0; det < 4; ++det) {
         const std::string prefix = "beam_center_gem" + std::to_string(det);
         std::cout << "  GEM" << det << " (X, Y): "
@@ -431,6 +429,9 @@ int main(int argc, char *argv[])
                   << alignment_params[prefix + "_y"] + in_run_config.target_y
                   << std::endl;
     }
+    std::cout << "Beam Center (X, Y) from HyCal: " << alignment_params["moller_HC_x"] + in_run_config.target_x << ", "
+              << alignment_params["moller_HC_y"] + in_run_config.target_y << std::endl;
+              
     // Target center Z measurement from each GEM
     alignment_params["target_center_z_gem3"] = in_run_config.gem_z[3] - alignment_params["moller_GEM3_z"];
     alignment_params["target_center_z_gem0"] = in_run_config.gem_z[0] - alignment_params["moller_GEM0_z"];
