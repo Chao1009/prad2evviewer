@@ -634,7 +634,7 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             const bool is_moller =
                 std::isfinite(theta1) && std::isfinite(theta2)
                 && PhysicsTools::isMoller_kinematic(
-                    theta1, moller.first.E, theta2, moller.second.E, Ebeam, 0.03f * 1.3f)
+                    theta1, moller.first.E, theta2, moller.second.E, Ebeam, 0.03f * 2.0f)
                 && PhysicsTools::isBackToBack(moller, 8.f);
             if (!is_moller) continue;
         }
@@ -667,7 +667,8 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
 
             // require the hit near the seed module centre (|xd|,|yd| < 0.1 module sizes)
             const auto [xd, yd] = mod->cell_offset<float>(hc_hit.x, hc_hit.y);
-            if (std::abs(xd) >= 0.1f || std::abs(yd) >= 0.1f) continue;
+            if (InHyCalRing(mod->x, mod->y, 2.0, 12.) && (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f)) continue;
+            if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f)) continue;
 
             bool veto = false;
             float sci_time, sci_int;
