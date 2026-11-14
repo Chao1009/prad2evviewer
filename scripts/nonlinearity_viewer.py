@@ -214,6 +214,7 @@ def fit_peak_full(
 _NL_FIT_ENERGY_MAX = 3500.0
 _NL_FIT_MAX_DEVIATION = 0.2
 _NL_MANUAL_COEFFICIENT_LIMIT = 1_000_000.0
+_NL_FIXED_VERTEX_ENERGY = 3000.0
 
 
 def _nl_coefficient_bounds(E_base: float, order: int) -> Tuple[List[float], List[float]]:
@@ -382,6 +383,7 @@ class ModuleData:
         self.chi2_nl2:   float = 0.0
         self.ndf_nl2:    int   = 0
         self.nl_coefficients_manual: bool = False
+        self.nl2_vertex_fixed: bool = False
         self.mean_abs_data_fit_deviation_2nd = math.nan
         self.base_ee_corr_residual_2nd = math.nan
 
@@ -459,9 +461,51 @@ class ModuleData:
         self.nl2_2     = 0.0 if force_zero else float(nl2)
         self.nl2_2_err = float(nl2_err)
         self.nl_coefficients_manual = False
+        self.nl2_vertex_fixed = False
 
         self.update_correction_residuals(
             E_base, E_exp, E_rec, [p[0] for p in pts], base_beam_tag)
+
+    def fit_nl2_fixed_vertex(self, base_beam_tag: str) -> Tuple[float, float]:
+        """Fit base-beam e-p/e-e points with R(E_base)=1 and a fixed vertex."""
+        keys = (f"ep_{base_beam_tag}", f"ee_{base_beam_tag}")
+        E_base = self.e_exp[keys[0]]
+        if E_base <= 0.0:
+            raise ValueError("Base-energy e-p expected energy is unavailable.")
+
+        vertex_t = (_NL_FIXED_VERTEX_ENERGY - E_base) / 1000.0
+        basis = []
+        residuals = []
+        weights = []
+        for key in keys:
+            E_exp = self.e_exp[key]
+            E_rec = self.measured_peak(key)
+            if E_exp <= 0.0 or E_rec <= 0.0:
+                raise ValueError(
+                    f"{peak_cfg(key)['label']} peak is unavailable; fit both base-energy peaks first.")
+            t = (E_rec - E_base) / 1000.0
+            basis.append(t * (t - 2.0 * vertex_t))
+            residuals.append(E_rec / E_exp - 1.0)
+            error = self.peak_mean_error[key]
+            sigma_Erec = error if math.isfinite(error) and error > 0.0 else 1.0
+            sigma_ratio = sigma_Erec / E_exp
+            weights.append(2.0 / max(sigma_ratio * sigma_ratio, 1e-24))
+
+        basis_arr = np.asarray(basis)
+        residuals_arr = np.asarray(residuals)
+        weights_arr = np.asarray(weights)
+        denominator = float(np.sum(weights_arr * basis_arr * basis_arr))
+        if not math.isfinite(denominator) or denominator <= 0.0:
+            raise ValueError("Base-energy peaks do not constrain the fixed-vertex fit.")
+
+        nl2 = float(np.sum(weights_arr * basis_arr * residuals_arr) / denominator)
+        if not math.isfinite(nl2) or nl2 >= 0.0:
+            raise ValueError(
+                "The base-energy peaks do not produce a concave-down fit with a maximum.")
+        nl1 = -2.0 * nl2 * vertex_t
+        if max(abs(nl1), abs(nl2)) > _NL_MANUAL_COEFFICIENT_LIMIT:
+            raise ValueError("The fitted coefficients exceed the manual coefficient limit.")
+        return nl1, nl2
 
     def update_correction_residuals(
         self, E_base: float, E_exp: np.ndarray, E_rec: np.ndarray,
@@ -809,19 +853,34 @@ class NLViewerWindow(QMainWindow):
 
     def _build_manual_nl_controls(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Manual non-linearity coefficients")
-        row = QHBoxLayout(group)
-        row.setContentsMargins(8, 3, 8, 3)
-        row.setSpacing(6)
-        row.addWidget(QLabel("1st nl₁:"))
-        row.addWidget(self._new_nl_spin("nl1"))
-        row.addSpacing(8)
-        row.addWidget(QLabel("2nd nl₁:"))
-        row.addWidget(self._new_nl_spin("nl2_1"))
-        row.addWidget(QLabel("nl₂:"))
-        row.addWidget(self._new_nl_spin("nl2_2"))
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 3, 8, 6)
+        layout.setSpacing(3)
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        controls.addWidget(QLabel("1st nl₁:"))
+        controls.addWidget(self._new_nl_spin("nl1"))
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("2nd nl₁:"))
+        controls.addWidget(self._new_nl_spin("nl2_1"))
+        controls.addWidget(QLabel("nl₂:"))
+        controls.addWidget(self._new_nl_spin("nl2_2"))
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        actions = QHBoxLayout()
+        self._fit_fixed_vertex_btn = QPushButton("Fit 2nd (vertex = 3000 MeV)")
+        self._fit_fixed_vertex_btn.setEnabled(False)
+        self._fit_fixed_vertex_btn.setToolTip(
+            "Fit only the selected base-energy e-p and e-e peaks.\n"
+            "Constrain the 2nd-order curve to R(E_base)=1 and its maximum to 3000 MeV.")
+        self._fit_fixed_vertex_btn.clicked.connect(self._do_fit_fixed_vertex)
         hint = QLabel("Edit or use arrows; curves and corrected points update live.")
         hint.setStyleSheet(f"color: {THEME.TEXT_DIM}; font-size: 10px;")
-        row.addWidget(hint)
+        actions.addWidget(self._fit_fixed_vertex_btn)
+        actions.addWidget(hint)
+        actions.addStretch()
+        layout.addLayout(actions)
         parent_layout.addWidget(group)
 
     def _build_histogram_grid(self) -> QWidget:
@@ -1013,6 +1072,7 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             for spin in self._manual_nl_spins.values():
                 spin.setEnabled(False)
+            self._fit_fixed_vertex_btn.setEnabled(False)
             return
         values = {"nl1": d.nl, "nl2_1": d.nl2_1, "nl2_2": d.nl2_2}
         for key, spin in self._manual_nl_spins.items():
@@ -1023,6 +1083,7 @@ class NLViewerWindow(QMainWindow):
                 _NL_MANUAL_COEFFICIENT_LIMIT)))
             spin.setEnabled(True)
             spin.blockSignals(False)
+        self._fit_fixed_vertex_btn.setEnabled(True)
 
     def _on_manual_nl_changed(self, coefficient: str, value: float) -> None:
         d = self._cur
@@ -1032,8 +1093,10 @@ class NLViewerWindow(QMainWindow):
             d.nl = float(value)
         elif coefficient == "nl2_1":
             d.nl2_1 = float(value)
+            d.nl2_vertex_fixed = False
         else:
             d.nl2_2 = float(value)
+            d.nl2_vertex_fixed = False
         d.nl_coefficients_manual = True
         points = d.linearity_points(self._base_beam_tag)
         E_exp = np.array([p[1] for p in points])
@@ -1045,6 +1108,37 @@ class NLViewerWindow(QMainWindow):
         self._refresh_current_fit_display(refit=False)
         self._status_lbl.setText(
             f"{d.name}: manual coefficients updated; click Refit Linearity to restore fitted values.")
+
+    def _do_fit_fixed_vertex(self) -> None:
+        d = self._cur
+        if d is None:
+            return
+        try:
+            nl1, nl2 = d.fit_nl2_fixed_vertex(self._base_beam_tag)
+        except ValueError as exc:
+            self._status_lbl.setText(f"Fixed-vertex fit failed: {exc}")
+            return
+
+        d.nl2_1, d.nl2_2 = nl1, nl2
+        d.nl_coefficients_manual = True
+        d.nl2_vertex_fixed = True
+        points = d.linearity_points(self._base_beam_tag)
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        d.update_correction_residuals(
+            E_base,
+            np.array([p[1] for p in points]),
+            np.array([p[2] for p in points]),
+            [p[0] for p in points],
+            self._base_beam_tag,
+        )
+        self._refresh_map()
+        self._refresh_current_fit_display(
+            status=(
+                f"{d.name}: fitted base-energy e-p/e-e only; "
+                f"2nd-order maximum fixed at {_NL_FIXED_VERTEX_ENERGY:.0f} MeV "
+                f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1."),
+            refit=False,
+        )
 
     def _refresh_current_fit_display(self, status: Optional[str] = None, refit: bool = True):
         d = self._cur
@@ -1450,7 +1544,8 @@ class NLViewerWindow(QMainWindow):
             ax.plot(xplot, y1fit, color="cornflowerblue", linewidth=2.0,
                     label="1st order fit")
 
-        if E_base > 0.0 and len(pts) >= 3 and has_2nd_coefficients:
+        if (E_base > 0.0 and (len(pts) >= 3 or d.nl_coefficients_manual)
+                and has_2nd_coefficients):
             y2fit = nl_ratio_2nd(xplot, d.nl2_1, d.nl2_2, E_base)
             ax.plot(xplot, y2fit, color="violet", linewidth=2.0,
                     linestyle="--", label="2nd order fit")
@@ -1475,7 +1570,8 @@ class NLViewerWindow(QMainWindow):
                            marker="s", edgecolors="white", linewidths=0.5)
 
         # Corrected points — 2nd order
-        if E_base > 0.0 and len(pts) >= 3 and has_2nd_coefficients:
+        if (E_base > 0.0 and (len(pts) >= 3 or d.nl_coefficients_manual)
+                and has_2nd_coefficients):
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_2nd(ye_rec, d.nl2_1, d.nl2_2, E_base)
                 E_corr2 = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1500,6 +1596,7 @@ class NLViewerWindow(QMainWindow):
                     f"MANUAL COEFFICIENTS\n"
                     f"1st: nl₁={d.nl:.6f}\n"
                     f"2nd: nl₁={d.nl2_1:.6f}  nl₂={d.nl2_2:.6f}\n"
+                    f"{'vertex=3000 MeV\n' if d.nl2_vertex_fixed else ''}"
                     f"E_base={E_base:.1f} MeV "
                     f"({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
                 )
