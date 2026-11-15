@@ -387,7 +387,7 @@ class ModuleData:
         self.chi2_nl2:   float = 0.0
         self.ndf_nl2:    int   = 0
         self.nl_coefficients_manual: bool = False
-        self.nl2_vertex_fixed: bool = False
+        self.nl2_fixed_vertex_energy: Optional[float] = None
         self.mean_abs_data_fit_deviation_2nd = math.nan
         self.base_ee_corr_residual_2nd = math.nan
 
@@ -465,19 +465,23 @@ class ModuleData:
         self.nl2_2     = 0.0 if force_zero else float(nl2)
         self.nl2_2_err = float(nl2_err)
         self.nl_coefficients_manual = False
-        self.nl2_vertex_fixed = False
+        self.nl2_fixed_vertex_energy = None
 
         self.update_correction_residuals(
             E_base, E_exp, E_rec, [p[0] for p in pts], base_beam_tag)
 
-    def fit_nl2_fixed_vertex(self, base_beam_tag: str) -> Tuple[float, float]:
+    def fit_nl2_fixed_vertex(
+        self, base_beam_tag: str, vertex_energy: float = _NL_FIXED_VERTEX_ENERGY,
+    ) -> Tuple[float, float]:
         """Fit base-beam e-p/e-e points with R(E_base)=1 and a fixed vertex."""
+        if not math.isfinite(vertex_energy) or vertex_energy <= 0.0:
+            raise ValueError("Vertex energy must be a positive finite value.")
         keys = (f"ep_{base_beam_tag}", f"ee_{base_beam_tag}")
         E_base = self.e_exp[keys[0]]
         if E_base <= 0.0:
             raise ValueError("Base-energy e-p expected energy is unavailable.")
 
-        vertex_t = (_NL_FIXED_VERTEX_ENERGY - E_base) / 1000.0
+        vertex_t = (vertex_energy - E_base) / 1000.0
         basis = []
         residuals = []
         weights = []
@@ -873,15 +877,31 @@ class NLViewerWindow(QMainWindow):
         layout.addLayout(controls)
 
         actions = QHBoxLayout()
-        self._fit_fixed_vertex_btn = QPushButton("Fit 2nd (vertex = 3000 MeV)")
+        self._fit_fixed_vertex_btn = QPushButton("Fit Current Module")
         self._fit_fixed_vertex_btn.setEnabled(False)
         self._fit_fixed_vertex_btn.setToolTip(
             "Fit only the selected base-energy e-p and e-e peaks.\n"
-            "Constrain the 2nd-order curve to R(E_base)=1 and its maximum to 3000 MeV.")
+            "Constrain the 2nd-order curve to R(E_base)=1 and its maximum to the selected vertex energy.")
         self._fit_fixed_vertex_btn.clicked.connect(self._do_fit_fixed_vertex)
+        actions.addWidget(self._fit_fixed_vertex_btn)
+        actions.addWidget(QLabel("Vertex (MeV):"))
+        self._fixed_vertex_energy_spin = QDoubleSpinBox()
+        self._fixed_vertex_energy_spin.setDecimals(1)
+        self._fixed_vertex_energy_spin.setRange(0.1, 10000.0)
+        self._fixed_vertex_energy_spin.setSingleStep(50.0)
+        self._fixed_vertex_energy_spin.setValue(_NL_FIXED_VERTEX_ENERGY)
+        self._fixed_vertex_energy_spin.setFixedWidth(100)
+        self._fixed_vertex_energy_spin.setToolTip(
+            "Energy coordinate of the fixed maximum for constrained 2nd-order fits.")
+        actions.addWidget(self._fixed_vertex_energy_spin)
+        self._fit_fixed_vertex_all_btn = QPushButton("Fit All Modules")
+        self._fit_fixed_vertex_all_btn.setEnabled(False)
+        self._fit_fixed_vertex_all_btn.setToolTip(
+            "Apply the fixed-vertex fit to every loaded module using its base-energy e-p/e-e peaks.")
+        self._fit_fixed_vertex_all_btn.clicked.connect(self._do_fit_fixed_vertex_all)
+        actions.addWidget(self._fit_fixed_vertex_all_btn)
         hint = QLabel("Edit or use arrows; curves and corrected points update live.")
         hint.setStyleSheet(f"color: {THEME.TEXT_DIM}; font-size: 10px;")
-        actions.addWidget(self._fit_fixed_vertex_btn)
         actions.addWidget(hint)
         actions.addStretch()
         layout.addLayout(actions)
@@ -1038,6 +1058,7 @@ class NLViewerWindow(QMainWindow):
         self._export_btn.setEnabled(bool(self._data))
         self._prev_module_btn.setEnabled(bool(self._data))
         self._next_module_btn.setEnabled(bool(self._data))
+        self._fit_fixed_vertex_all_btn.setEnabled(bool(self._data))
 
     def _set_peak_controls_enabled(self, enabled: bool):
         for key in _PEAK_KEYS:
@@ -1097,10 +1118,10 @@ class NLViewerWindow(QMainWindow):
             d.nl = float(value)
         elif coefficient == "nl2_1":
             d.nl2_1 = float(value)
-            d.nl2_vertex_fixed = False
+            d.nl2_fixed_vertex_energy = None
         else:
             d.nl2_2 = float(value)
-            d.nl2_vertex_fixed = False
+            d.nl2_fixed_vertex_energy = None
         d.nl_coefficients_manual = True
         points = d.linearity_points(self._base_beam_tag)
         E_exp = np.array([p[1] for p in points])
@@ -1117,15 +1138,28 @@ class NLViewerWindow(QMainWindow):
         d = self._cur
         if d is None:
             return
+        vertex_energy = self._fixed_vertex_energy_spin.value()
         try:
-            nl1, nl2 = d.fit_nl2_fixed_vertex(self._base_beam_tag)
+            self._apply_fixed_vertex_fit(d, vertex_energy)
         except ValueError as exc:
             self._status_lbl.setText(f"Fixed-vertex fit failed: {exc}")
             return
 
+        nl1, nl2 = d.nl2_1, d.nl2_2
+        self._refresh_map()
+        self._refresh_current_fit_display(
+            status=(
+                f"{d.name}: fitted base-energy e-p/e-e only; "
+                f"2nd-order maximum fixed at {vertex_energy:.1f} MeV "
+                f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1."),
+            refit=False,
+        )
+
+    def _apply_fixed_vertex_fit(self, d: ModuleData, vertex_energy: float) -> None:
+        nl1, nl2 = d.fit_nl2_fixed_vertex(self._base_beam_tag, vertex_energy)
         d.nl2_1, d.nl2_2 = nl1, nl2
         d.nl_coefficients_manual = True
-        d.nl2_vertex_fixed = True
+        d.nl2_fixed_vertex_energy = vertex_energy
         points = d.linearity_points(self._base_beam_tag)
         E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
         d.update_correction_residuals(
@@ -1135,14 +1169,36 @@ class NLViewerWindow(QMainWindow):
             [p[0] for p in points],
             self._base_beam_tag,
         )
+
+    def _do_fit_fixed_vertex_all(self) -> None:
+        if not self._data:
+            return
+        vertex_energy = self._fixed_vertex_energy_spin.value()
+        succeeded = 0
+        failures: Dict[str, List[str]] = {}
+        for module in self._data.values():
+            try:
+                self._apply_fixed_vertex_fit(module, vertex_energy)
+                succeeded += 1
+            except ValueError as exc:
+                failures.setdefault(str(exc), []).append(module.name)
+
         self._refresh_map()
-        self._refresh_current_fit_display(
-            status=(
-                f"{d.name}: fitted base-energy e-p/e-e only; "
-                f"2nd-order maximum fixed at {_NL_FIXED_VERTEX_ENERGY:.0f} MeV "
-                f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1."),
-            refit=False,
+        if self._cur is not None:
+            self._refresh_current_fit_display(refit=False)
+        skipped = len(self._data) - succeeded
+        summary = (
+            f"Fixed-vertex fit at {vertex_energy:.1f} MeV: "
+            f"{succeeded}/{len(self._data)} modules succeeded; {skipped} skipped."
         )
+        if failures:
+            details = "; ".join(
+                f"{len(names)}: {reason} (e.g. {', '.join(names[:3])})"
+                for reason, names in sorted(
+                    failures.items(), key=lambda item: len(item[1]), reverse=True)
+            )
+            summary += f" Reasons: {details}"
+        self._status_lbl.setText(summary)
 
     def _refresh_current_fit_display(self, status: Optional[str] = None, refit: bool = True):
         d = self._cur
@@ -1596,11 +1652,14 @@ class NLViewerWindow(QMainWindow):
             chi2_str = (f"χ²/ndf={d.chi2_nl2:.2f}/{d.ndf_nl2}"
                         if d.ndf_nl2 > 0 else "")
             if d.nl_coefficients_manual:
+                vertex_note = (
+                    f"vertex={d.nl2_fixed_vertex_energy:.1f} MeV\n"
+                    if d.nl2_fixed_vertex_energy is not None else "")
                 note = (
                     f"MANUAL COEFFICIENTS\n"
                     f"1st: nl₁={d.nl:.6f}\n"
                     f"2nd: nl₁={d.nl2_1:.6f}  nl₂={d.nl2_2:.6f}\n"
-                    f"{'vertex=3000 MeV\n' if d.nl2_vertex_fixed else ''}"
+                    f"{vertex_note}"
                     f"E_base={E_base:.1f} MeV "
                     f"({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
                 )

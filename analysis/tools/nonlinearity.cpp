@@ -679,6 +679,10 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             // get the energy ratio of measured energy to expected energy calculated with beam position correction
             // then multiply by the expected energy calculated with module center position correction
             // to produce a corrected energy value that is independent of the beam position
+            
+            // A potential bug, the e-p clusters are also corrected with the e-e expected energy, so the e-p energy are
+            // shifted down by a few 10s MeV, but if we fix the vertex of 2nd order poly curve and only matched with the ee peak
+            // then it has no effect on the final non-linearity correction, so I leave it as is for now. 
             float theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
             float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
             float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
