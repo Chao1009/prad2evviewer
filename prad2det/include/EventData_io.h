@@ -134,9 +134,9 @@ inline void BindRawVectorBranches(TTree *tree, Event &ev, RawVectorBindings &b)
 
 // ── Raw "events" tree — write ────────────────────────────────────────────
 inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks, bool Ecalib = false, bool noWaveform = false)
-{
+{   
+    tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     if(!Ecalib) {
-        tree->Branch("event_num",    &ev.event_num,    "event_num/I");
         tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
     }
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
