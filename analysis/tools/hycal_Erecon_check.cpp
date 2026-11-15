@@ -185,8 +185,8 @@ int main(int argc, char *argv[])
         TH1F *energy_histogram = merged->h1_E_modules[i].get();
         if (energy_histogram->GetEntries() < 200) continue;
 
-        float mod_x = mod->x - gRunConfig.target_x;
-        float mod_y = mod->y - gRunConfig.target_y;
+        float mod_x = mod->x;
+        float mod_y = mod->y;
 
         const float theta = std::atan2(
             std::sqrt(mod_x * mod_x + mod_y * mod_y),
