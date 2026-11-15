@@ -618,6 +618,11 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             MollerEvent moller_event = {DataPoint(hc_hit[0].x, hc_hit[0].y, hc_hit[0].z, hc_hit[0].energy),
                         DataPoint(hc_hit[1].x, hc_hit[1].y, hc_hit[1].z, hc_hit[1].energy)};
 
+            const float theta0 = std::atan2(
+                std::sqrt(hc_hit[0].x * hc_hit[0].x + hc_hit[0].y * hc_hit[0].y), hc_hit[0].z) * 180.0f / M_PI;
+            const float theta1 = std::atan2(
+                std::sqrt(hc_hit[1].x * hc_hit[1].x + hc_hit[1].y * hc_hit[1].y), hc_hit[1].z) * 180.0f / M_PI;
+
             // Move back to HyCal center coordinates
             hc_hit[0].x -= event.hycal_center_x;
             hc_hit[0].y -= event.hycal_center_y;
@@ -627,16 +632,11 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             if (!InHyCalRing(hc_hit[0].x, hc_hit[0].y, 2.0, 15.)) continue;
             if (!InHyCalRing(hc_hit[1].x, hc_hit[1].y, 2.0, 15.)) continue;
 
-            const float theta0 = std::atan2(
-                std::sqrt(hc_hit[0].x * hc_hit[0].x + hc_hit[0].y * hc_hit[0].y), hc_hit[0].z) * 180.0f / M_PI;
-            const float theta1 = std::atan2(
-                std::sqrt(hc_hit[1].x * hc_hit[1].x + hc_hit[1].y * hc_hit[1].y), hc_hit[1].z) * 180.0f / M_PI;
-
             if (!PhysicsTools::isMoller_kinematic(
                     theta0, hc_hit[0].energy, theta1, hc_hit[1].energy,
                     run_config.Ebeam, 0.03f))
                 continue;
-            if (!PhysicsTools::isBackToBack(moller_event, 5.0f)) continue;
+            if (!PhysicsTools::isBackToBack(moller_event, 8.0f)) continue;
             const float theta[2] = {theta0, theta1};
             for (int i = 0; i < 2; ++i) {
                 const auto *mod = hycal.module_by_id(event.cl_center[i]);
@@ -650,17 +650,22 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     result->h1_yield_theta->Fill(
                         theta[i], 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
                     result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[i]);
-                    if (std::fabs(xd_hycal) < 0.1f && std::fabs(yd_hycal) < 0.1f) {
+                    if (std::fabs(xd_hycal) < 0.15f && std::fabs(yd_hycal) < 0.15f) {
                         result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[i]);
                     } else {
                         result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[i]);
                     }
                 }
-
                 result->h2_Erecon_theta->Fill(theta[i], event.cl_energy[i]);
-                if (std::fabs(xd_hycal) < 0.1f && std::fabs(yd_hycal) < 0.1f) {
+
+                float expect_energy = PhysicsTools::ExpectedEnergy(theta[i], run_config.Ebeam, "ee");
+                float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
+                float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, run_config.Ebeam, "ee");
+                float energy = event.cl_energy[i] / expect_energy * expect_energy_moduleCenter;
+
+                if (std::fabs(xd_hycal) < 0.15f && std::fabs(yd_hycal) < 0.15f) {
                     result->h2_Erecon_theta_center->Fill(theta[i], event.cl_energy[i]);
-                    result->h1_E_modules[module_index]->Fill(event.cl_energy[i]);
+                    result->h1_E_modules[module_index]->Fill(energy);
                 } else {
                     result->h2_Erecon_theta_edge->Fill(theta[i], event.cl_energy[i]);
                 }
