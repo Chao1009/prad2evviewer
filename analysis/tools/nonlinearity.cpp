@@ -14,6 +14,7 @@
 #include "HyCalSystem.h"
 #include "EventData.h"
 #include "EventData_io.h"
+#include "MatchingTools.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
 #include "ToolUtils.h"
@@ -292,6 +293,8 @@ int main(int argc, char *argv[]){
         }
         EventVars_Recon ev;
         prad2::SetReconReadBranches(&chain, ev);
+        prad2::ReconMatchVectorBindings match_bindings;
+        prad2::BindReconMatchVectorBranches(&chain, ev, match_bindings);
         const Long64_t entries = chain.GetEntries();
         {
             std::lock_guard<std::mutex> lk(io_mtx);
@@ -348,8 +351,7 @@ int main(int argc, char *argv[]){
         int mod_id = mod.id;
         if (!mod.is_pwo4()) continue;
 
-        float x = mod.x, y = mod.y;
-        if (!InHyCalRing(x, y, 2.0, 16.)) continue;
+        if (!InHyCalRing(mod.x, mod.y, 2.0, 16.)) continue;
 
         // Fit and draw a peak using the same adaptive Gaussian fit as physics_calib.
         auto fitPeakAndDraw = [&](TH1F *h, double Eexp, int color,
@@ -389,6 +391,8 @@ int main(int argc, char *argv[]){
             const BeamSet &beam = beams[b];
             const bool top = (b == 0), bottom = (b == kNBeams - 1);
             TH1F *h = beam.hists.at(mod_id);
+            const float x = mod.x - beam.run_config.target_x;
+            const float y = mod.y - beam.run_config.target_y;
             float theta = std::atan2(std::sqrt(x*x + y*y), beam.run_config.hycal_z) * 180.f / M_PI;
             exp_ep[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ep");
             exp_ee[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ee");
@@ -604,6 +608,10 @@ int main(int argc, char *argv[]){
         beam.dir->cd();
         TNamed hycal_z("hycal_z_mm", Form("%.9g", beam.run_config.hycal_z));
         hycal_z.Write();
+        TNamed target_x("target_x_mm", Form("%.9g", beam.run_config.target_x));
+        target_x.Write();
+        TNamed target_y("target_y_mm", Form("%.9g", beam.run_config.target_y));
+        target_y.Write();
         for (auto &[id, h] : beam.hists) if (h) h->Write();
         if (beam.energy_vs_theta) beam.energy_vs_theta->Write();
     }
@@ -670,30 +678,36 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             auto mod = hycal.module_by_id(mod_id);
             if ( !mod || !mod->is_pwo4()) continue;
             if (!InHyCalRing(mod->x, mod->y, 2.0, 16.)) continue;
+            if (ev.matchFlag[j] == 0) continue;
 
             HCHit hc_hit;
             hc_hit.x = ev.cl_x[j];
             hc_hit.y = ev.cl_y[j];
             hc_hit.z = ev.cl_z[j];
 
-            // get the energy ratio of measured energy to expected energy calculated with beam position correction
-            // then multiply by the expected energy calculated with module center position correction
-            // to produce a corrected energy value that is independent of the beam position
-            float energy = ev.cl_energy[j];
-            float theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
-            if ( ev.cl_energy[j] < Ebeam - 3.0f * 0.03 / std::sqrt(Ebeam/1000.0f) ){
-                float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
-                float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
-                float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, Ebeam, "ee");
-                energy = ev.cl_energy[j] / expect_energy * expect_energy_moduleCenter;
+            GEMHit gem_hit;
+            bool has_gem_hit = false;
+            for (int did = 3; did >=0; did--){
+                if (ev.first_match(j, did, gem_hit.x, gem_hit.y, gem_hit.z)) {
+                    has_gem_hit = true;
+                    break;
+                }
             }
+            if (!has_gem_hit) continue;
+            // Project to HyCal surface
+            GetProjection(gem_hit, hc_hit.z);
+
+            float energy = ev.cl_energy[j];
+            float theta = std::atan2(std::sqrt(gem_hit.x*gem_hit.x + gem_hit.y*gem_hit.y), run_config.hycal_z) * 180.f / M_PI;
 
             // Move back to HyCal center coordinates
             hc_hit.x -= ev.hycal_center_x;
             hc_hit.y -= ev.hycal_center_y;
+            gem_hit.x -= ev.hycal_center_x;
+            gem_hit.y -= ev.hycal_center_y;
 
-            // require the hit near the seed module centre (|xd|,|yd| < 0.1 module sizes)
-            const auto [xd, yd] = mod->cell_offset<float>(hc_hit.x, hc_hit.y);
+            // require the hit near the seed module centre (|xd|,|yd| < 0.15 module sizes)
+            const auto [xd, yd] = mod->cell_offset<float>(gem_hit.x, gem_hit.y);
             if (InHyCalRing(mod->x, mod->y, 2.0, 12.) && (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f)) continue;
 
             bool veto = false;
