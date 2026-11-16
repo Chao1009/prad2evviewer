@@ -680,7 +680,7 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             // then multiply by the expected energy calculated with module center position correction
             // to produce a corrected energy value that is independent of the beam position
             float energy, theta;
-            if ( ev.cl_energy < Ebeam - 3.0f * 0.03 / std::sqrt(Ebeam/1000.0f) ){
+            if ( ev.cl_energy[j] < Ebeam - 3.0f * 0.03 / std::sqrt(Ebeam/1000.0f) ){
                 theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
                 float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
                 float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
