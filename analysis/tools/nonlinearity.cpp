@@ -708,7 +708,7 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
 
             // require the hit near the seed module centre (|xd|,|yd| < 0.15 module sizes)
             const auto [xd, yd] = mod->cell_offset<float>(gem_hit.x, gem_hit.y);
-            if (InHyCalRing(mod->x, mod->y, 2.0, 12.) && (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f)) continue;
+            if ( std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f )  continue;
 
             bool veto = false;
             float sci_time, sci_int;
