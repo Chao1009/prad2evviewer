@@ -1,0 +1,6 @@
+# copy to farm_env.sh (same directory) and edit; sourced by farm_job.sh and check_build.sh before their defaults.
+# Every line is optional: the defaults derive from the location of the scripts.
+#export PRAD2_ROOT=/work/clas12/jyzhou/prad2evviewer
+#export PRAD2_BINDINGS=$PRAD2_ROOT/build/python          # directory with prad2py*.so built for the Python below
+#export PYTHON=python3
+#export PY_SETUP='source /work/clas12/jyzhou/venv/bin/activate'   # or: module load python
