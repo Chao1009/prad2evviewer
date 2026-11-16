@@ -20,6 +20,12 @@ scan    all EVIO files (splits) of one 0p73GeV_H2, 2p24GeV_H2, 3p49GeV_H2 or 2p2
         per-event counts, and two random reservoirs (k >= 2 and k == 1, A_main >= A_EX) of raw
         waveforms with their fits, and per module (up to EX_PER_MODULE per run) random pile-up (cut) channels and
         (up to EX_CLEAN_PER_MODULE) one-pulse channels above the E_main threshold, after the vetoes, for the hot-module and ring examples.
+        Quality variables per kept channel (quality_vars; exotic-waveform study, notes/plan_exotic_waveforms_20261112.md X4): far, z_b, z_n, slope
+        (ADC per 100 ns) of the first 30 samples against the module's noise reference; w50 (waveform FWHM above the fit baseline / template FWHM at the
+        fitted time) and tail (mean of waveform - baseline - main component over [t_main + 40, t_main + 120] ns, in units of A_main), stored as ch_far,
+        ch_zb, ch_zn, ch_slope, ch_w50, ch_tail; ev_timestamp per passing event; per module the rows with far and z_n > 3 among the bad waveforms
+        (mod_rej_bad) and among the rows failing the 8 / 10 ADC cuts (mod_rej_cut), and those failing the cuts (mod_cut_fail); four refit-sample
+        reservoirs qx_<far|k4|chi2|w50>_* (20 per module, own random generator).  fit() and the other outputs are unchanged.
 report  pool the <scan dir>/run_*.npz scans per run type -> pileup_rates.tsv, pileup_grid_<RT>.tsv,
         pileup_modules_<RT>.tsv, pileup_rate_map_<RT>.png, pileup_rate_slices_<RT>.png, pileup_slices.tsv,
         summary.txt and pileup_rates.pdf in <out dir>, plus examples.pdf (pile-up (cut) examples per run type; the X17 beam-hole
@@ -108,7 +114,17 @@ SAT_NCLIP = 3     # a clipped main pulse is extrapolated by the fit (e.g. 12 000
 CHI2_MAX = 1000.0 # chi2/dof above this: distorted waveforms; cross-talk spikes (5–20) and unresolved pile-up (10–100s) stay
 CHI_EDGES = np.logspace(-1, 5, 61)   # chi2/dof histogram bins (10 per decade); values outside are put in the end bins
 REC = dict(midx=np.int16, ev=np.int32, k=np.int8, a=np.float32, t=np.float32, chi2=np.float32,
-           ped=np.float32, sig=np.float32, nclip=np.int8, dped=np.float32, trunc_main=bool)          # per kept channel (ped includes dped)
+           ped=np.float32, sig=np.float32, nclip=np.int8, dped=np.float32, trunc_main=bool,          # per kept channel (ped includes dped)
+           far=bool, zb=np.float32, zn=np.float32, slope=np.float32, w50=np.float32, tail=np.float32)   # quality variables (quality_vars)
+# Pile-up study options (default OFF: every output is then the same as without them).  Environment variables, so scan() and the study scripts share them.
+MONO_EDGE = os.environ.get("PILEUP_MONO_EDGE", "0") == "1"      # monotonic-edge rule (find_candidates, add_shoulders; see MF.protected)
+NOISE_FLAG = os.environ.get("PILEUP_NOISE_FLAG", "0") == "1"    # noisy-waveform flag (MF.noise_check); adds ch_noisy to the scan output
+MONO_RISE_N, MONO_FALL_N, MONO_NSIG = 3, 10, 2.0 * np.sqrt(2.0)   # rise window: differences ending at the 3 samples up to the peak; fall window: 10 samples after it; |d| threshold 2 sqrt(2) sigma
+NOISE_NSIG, NOISE_WIN, NOISE_MARKS, NOISE_FLIPS = 5.0, 10, 3, 2  # noisy: a 10-sample window with >= 3 samples at |r| > 5 sqrt(V) and >= 2 sign flips among them
+QX_CONDS, QX_PER, QX_W50, QX_CHI, QX_K = ("far", "k4", "chi2", "w50"), 20, 1.3, 10.0, 4   # refit-sample reservoirs: four loose fixed conditions, QX_PER per module and condition
+if NOISE_FLAG:
+    REC["noisy"] = bool                                         # single-pulse-fit residual flag per kept channel
+TAIL_LO, TAIL_HI, ZN_REJ = 40.0, 120.0, 3.0   # tail window after the main pulse's time (ns); rejected-row counter: far and z_n above this
 A_EX, N_RES = 200.0, 60                # example reservoirs: A_main >= A_EX, N_RES per class and run
 DT_EDGES = [8, 12, 16, 20, 24, 32, 48, 64, 96, 128, np.inf]
 R_EDGES = [0, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, np.inf]
@@ -276,6 +292,74 @@ class MF:
             delta = np.where(okp, 0.5 * (sm - sp) / np.where(okp, den, 1.0), 0.0)
         return (q - 3).astype(F32) + np.clip(delta, -1.0, 1.0).astype(F32)
 
+    def protected(self, y, w, sig, tmain, has):
+        """Monotonic-edge rule (MONO_EDGE).  Dominant peak P = the largest sample of y (clipped rows, w == 0 at the overflow
+        samples: the first overflow sample P1 ends the rise window, the last one P2 starts the fall window; differences with an overflow
+        sample count as monotonic).  d_j = y[j + 1] - y[j].  Rising-monotonic: every d ending at samples P1 - 2 .. P1 is > -MONO_NSIG sigma;
+        falling-monotonic: every d ending at samples P2 + 1 .. P2 + 10 (cut at the waveform end) is < +MONO_NSIG sigma.  Forbidden onsets
+        (ns): [tmain, DT P2] if rising-monotonic, [DT P2, DT P2 + 40] if falling-monotonic; tmain = onset of the main pulse, `has` [n]
+        the rows that have one.  Returns (lo1, hi1, lo2, hi2) [n]: two closed onset intervals, empty (lo = inf, hi = -inf) where unprotected."""
+        n, ns = y.shape
+        ov = np.zeros(y.shape, bool) if w is None else (w <= 0)
+        anyov = ov.any(axis=1)
+        p1 = np.where(anyov, np.argmax(ov, axis=1), np.argmax(y, axis=1))
+        p2 = np.where(anyov, ns - 1 - np.argmax(ov[:, ::-1], axis=1), p1)
+        d = y[:, 1:] - y[:, :-1]
+        skip = ov[:, 1:] | ov[:, :-1]                                  # pairs with an overflow sample
+        j = np.arange(ns - 1)[None, :]
+        thr = (MONO_NSIG * sig)[:, None]
+        rwin = (j >= (p1 - MONO_RISE_N)[:, None]) & (j <= (p1 - 1)[:, None])
+        fwin = (j >= p2[:, None]) & (j <= (p2 + MONO_FALL_N - 1)[:, None])
+        rise = ~(rwin & ~skip & (d <= -thr)).any(axis=1)
+        fall = ~(fwin & ~skip & (d >= thr)).any(axis=1)
+        inf = np.float64(np.inf)
+        tp = DT * p2.astype(np.float64)
+        lo1 = np.where(has & rise, tmain, inf)
+        hi1 = np.where(has & rise, tp, -inf)
+        lo2 = np.where(has & fall, tp, inf)
+        hi2 = np.where(has & fall, tp + DT * MONO_FALL_N, -inf)
+        return lo1, hi1, lo2, hi2
+
+    @staticmethod
+    def inside(t, prot):
+        """[n, ...] bool: onsets t (ns, rows first) inside one of the intervals of protected()."""
+        lo1, hi1, lo2, hi2 = (x.reshape((-1,) + (1,) * (np.ndim(t) - 1)) for x in prot)
+        return ((t >= lo1) & (t <= hi1)) | ((t >= lo2) & (t <= hi2))
+
+    def noise_check(self, y, w, m, sig, t0m, has):
+        """Noisy flag (NOISE_FLAG): a single pulse (the main pulse, onset start t0m) is fitted alone (fit_group, K = 1); residual r = y - model,
+        V = the sigma(t) variance of that pulse with noise sqrt(sig^2 + 1/12) (as the chi2/dof of fit()); samples with |r| > NOISE_NSIG sqrt(V)
+        are marked (clipped samples never); noisy = some NOISE_WIN-sample window holds >= NOISE_MARKS marked samples with >= NOISE_FLIPS
+        sign changes between consecutive marked ones.  Returns (noisy [n], marked [n, ns], model [n, ns]); rows without a pulse: False."""
+        n, ns = y.shape
+        noisy, marked, model = np.zeros(n, bool), np.zeros((n, ns), bool), np.zeros((n, ns), F32)
+        rows = np.nonzero(has)[0]
+        if rows.size == 0:
+            return noisy, marked, model
+        wr = None if w is None else w[rows]
+        t1, a1, v1, md, _ = self.fit_group(y[rows], wr, m[rows], sig[rows], t0m[rows, None].astype(F32), np.ones((rows.size, 1), bool), ns)
+        noise = np.sqrt(sig[rows].astype(np.float64) ** 2 + 1.0 / 12.0)
+        var = self.variance(m[rows], t1, a1, v1, noise, ns)
+        r = y[rows] - md
+        mk = np.abs(r) > NOISE_NSIG * np.sqrt(var)
+        if wr is not None:
+            mk &= wr > 0
+        marked[rows], model[rows] = mk, md
+        sg = np.sign(r)
+        cand = np.nonzero(mk.sum(axis=1) >= NOISE_MARKS)[0]
+        if cand.size:
+            mw = sliding_window_view(mk[cand], NOISE_WIN, axis=1)       # [c, ns - W + 1, W]
+            sw = sliding_window_view(sg[cand], NOISE_WIN, axis=1)
+            last = np.zeros(mw.shape[:2])
+            flips = np.zeros(mw.shape[:2], np.int64)
+            for c in range(NOISE_WIN):
+                mc, sc = mw[:, :, c], sw[:, :, c]
+                flips += mc & (last != 0) & (sc != last)
+                last = np.where(mc, sc, last)
+            hit = ((mw.sum(axis=2) >= NOISE_MARKS) & (flips >= NOISE_FLIPS)).any(axis=1)
+            noisy[rows[cand[hit]]] = True
+        return noisy, marked, model
+
     def find_candidates(self, y, w, m, sig):
         """Stage A, one pass over the waveform: local maxima of the matched-filter amplitude smoothed by a Gaussian of
         PEAK_SMOOTH_NS, with prominence >= max(NSIGMA sigma_A, MIN_AMP) (for the candidates after the highest one sigma_A
@@ -325,6 +409,10 @@ class MF:
         t0, valid = np.zeros((n, KMAX), F32), np.zeros((n, KMAX), bool)
         t0[row, rank] = self.onset(Sg, row, q)
         valid[row, rank] = Ag[row, q] >= np.maximum(NSIGMA * sig[row] * Ig[row, q], MIN_AMP)
+        if MONO_EDGE:                                  # monotonic-edge rule: candidates other than the main one (rank 0) inside the protected stretch never enter the fit
+            has = valid[:, 0]
+            prot = self.protected(y, w, sig, t0[:, 0].astype(np.float64), has)
+            valid[:, 1:] &= ~self.inside(t0[:, 1:].astype(np.float64), prot)
         return t0, valid
 
     def solve(self, y, w, m, t0, valid, ns, sig):
@@ -473,7 +561,7 @@ class MF:
         a, valid, S, _, db = self.solve(y, w, m, t0, valid, ns, sig)
         return t0, a, valid, np.matmul(a[:, None, :], S)[:, 0, :] + db[:, None], db
 
-    def shoulder_candidate(self, r, w, m, sig, valid, t0, a):
+    def shoulder_candidate(self, r, w, m, sig, valid, t0, a, prot=None):
         """Best matched-filter onset of the residual r at >= MIN_SEP_NS from every pulse, and whether its amplitude
         passes A >= max(NSIGMA sigma_A, MIN_AMP) and A >= R_MODEL x every pulse within one kernel span (DT L) of it."""
         Sg, Ag, Ig = self.score(r, w, m)
@@ -481,12 +569,16 @@ class MF:
         for k in range(KMAX):
             too_close = valid[:, k, None] & (np.abs(onsets[None, :] - t0[:, k, None]) < MIN_SEP_NS)
             Sg = np.where(too_close, -np.inf, Sg)
+        if prot is not None:                          # monotonic-edge rule: no candidate inside the protected stretch
+            Sg = np.where(self.inside(np.broadcast_to(onsets, Sg.shape), prot), -np.inf, Sg)
         row = np.arange(r.shape[0])
         q = np.argmax(Sg, axis=1)
         tn, A = self.onset(Sg, row, q), Ag[row, q]
         ok = np.isfinite(Sg[row, q]) & (A >= np.maximum(NSIGMA * sig * Ig[row, q], MIN_AMP))
         ok &= ~(valid & (np.abs(tn[:, None] - t0) < MIN_SEP_NS)).any(axis=1)
         ok &= A >= R_MODEL * np.where(valid & (np.abs(tn[:, None] - t0) < DT * L), a, 0.0).max(axis=1)
+        if prot is not None:
+            ok &= ~self.inside(tn.astype(np.float64), prot)
         return tn, ok
 
     def add_shoulders(self, y, w, m, sig, t0, a, valid, model, db):
@@ -497,11 +589,16 @@ class MF:
         ns = y.shape[1]
         wt = np.ones_like(y) if w is None else w
         active = valid.sum(1) < KMAX
+        prot = None
+        if MONO_EDGE:                                  # stretch from the stage B main pulse (largest fitted amplitude), fixed during stage C
+            ar = np.arange(y.shape[0])
+            mi = np.where(valid, a, -1.0).argmax(1)
+            prot = self.protected(y, w, sig, t0[ar, mi].astype(np.float64), valid.any(axis=1))
         while active.any():
             g = np.nonzero(active)[0]
             old = model[g]
             tn, ok = self.shoulder_candidate((y[g] - old) * wt[g], None if w is None else w[g], m[g], sig[g],
-                                             valid[g], t0[g], a[g])
+                                             valid[g], t0[g], a[g], None if prot is None else tuple(x[g] for x in prot))
             g, tn, old = g[ok], tn[ok], old[ok]
             wg = None if w is None else w[g]
             t1, v1 = t0[g].copy(), valid[g].copy()
@@ -522,6 +619,8 @@ class MF:
         """Stages A, B, C on pedestal-subtracted rows y [n, ns] (clipped samples zeroed and weight w = 0 there; w None
         without clipping): (t0, a, valid, db) [n, KMAX], db the fitted baseline offset [n]."""
         t0, valid = self.find_candidates(y, w, m, sig)
+        if NOISE_FLAG:                                 # single-pulse fit of the stage A main candidate (rank 0): independent of MONO_EDGE
+            self.noisy = self.noise_check(y, w, m, sig, t0[:, 0], valid[:, 0])[0]
         t0, a, valid, model, db = self.fit_all(y, w, m, sig, t0, valid, y.shape[1])
         return self.add_shoulders(y, w, m, sig, t0, a, valid, model, db)
 
@@ -619,6 +718,7 @@ def run_ref(mf, Y, midx, overflow, sig, b_ref):
     W = (Yf < overflow).astype(F32)
     T0, A, V = np.zeros((n, KMAX), F32), np.zeros((n, KMAX), F32), np.zeros((n, KMAX), bool)
     DB = np.zeros(n, F32)
+    mf.noisy_rows = np.zeros(n, bool)                  # NOISE_FLAG: noisy flag per row of the last call
     for masked in (False, True):
         sel = np.nonzero(cand & (clipped == masked))[0]
         if sel.size == 0:
@@ -627,6 +727,8 @@ def run_ref(mf, Y, midx, overflow, sig, b_ref):
         if masked:
             ys = ys * w
         t0, a, v, db = mf.find_pulses(ys, w, ms, sig[sel])
+        if NOISE_FLAG:
+            mf.noisy_rows[sel] = mf.noisy
         if masked:
             v &= ~mf.bad_clipped(v, t0, w, ms, ns)[:, None]
         T0[sel], A[sel], V[sel], DB[sel] = t0, np.where(v, a, 0.0), v, np.where(v.any(axis=1), db, 0.0)
@@ -678,9 +780,70 @@ def fit(mf, Y, m, sig, b_ref):
     tk = lambda x: np.take_along_axis(x, o, axis=1)                   # noqa: E731
     vs = tk(v)
     comp = np.take_along_axis(np.where(v, a, 0.0)[:, :, None] * S, o[:, :, None], axis=1)
-    return dict(ped=ped, sig=sig, k=v.sum(1), t=np.where(vs, tk(t0), np.nan), a=np.where(vs, tk(a), 0.0),
-                comp=comp, chi2=chi2, nclip=clipped(Y), dped=dped, far=far,
-                trunc_main=trunc[np.arange(Y.shape[0]), np.where(v, a, -1.0).argmax(1)])      # main pulse's fit window cut by the end of the waveform
+    out = dict(ped=ped, sig=sig, k=v.sum(1), t=np.where(vs, tk(t0), np.nan), a=np.where(vs, tk(a), 0.0),
+               comp=comp, chi2=chi2, nclip=clipped(Y), dped=dped, far=far,
+               trunc_main=trunc[np.arange(Y.shape[0]), np.where(v, a, -1.0).argmax(1)])      # main pulse's fit window cut by the end of the waveform
+    if NOISE_FLAG:
+        out["noisy"] = mf.noisy_rows
+    return out
+
+
+def base_vars(Y, b_ref, sig_ref):
+    """Baseline variables of the first PED_NSAMPLES samples of rows Y [n, ns] against the module's reference (b_ref, sig_ref [n]):
+    far (pedestal() farther than START_NSIGMA sigma_ref from b_ref, as run_ref), z_b = (pedestal - b_ref) / sigma_ref, z_n = rms
+    about the median / sigma_ref, slope = least-squares slope (ADC per 100 ns).  b_ref NaN: far False, z_b NaN."""
+    x = Y[:, :PED_NSAMPLES].astype(np.float64)
+    zb = (pedestal(Y).astype(np.float64) - b_ref) / sig_ref
+    zn = np.sqrt(((x - np.median(x, axis=1)[:, None]) ** 2).mean(axis=1)) / sig_ref
+    i = np.arange(PED_NSAMPLES) - 0.5 * (PED_NSAMPLES - 1)
+    slope = (x * i).sum(axis=1) / (i * i).sum() * (100.0 / DT)
+    with np.errstate(invalid="ignore"):
+        far = np.abs(zb) > START_NSIGMA
+    return far, zb, zn, slope
+
+
+def fwhm(y):
+    """Full width at half maximum (ns) of each row of y [n, ns] around its largest sample: linear interpolation of the two half-height
+    crossings; an edge is used where the row never falls below half height; nan where the maximum is <= 0."""
+    n, ns = y.shape
+    ar, ii = np.arange(n), np.arange(ns)[None, :]
+    p = y.argmax(1)
+    h = 0.5 * y[ar, p]
+    below = y < h[:, None]
+    lm = np.where(below & (ii < p[:, None]), ii, -1).max(1)
+    rm = np.where(below & (ii > p[:, None]), ii, ns).min(1)
+    l0, l1 = np.maximum(lm, 0), np.minimum(lm + 1, ns - 1)
+    r0, r1 = np.maximum(rm - 1, 0), np.minimum(rm, ns - 1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        xl = np.where(lm >= 0, lm + (h - y[ar, l0]) / (y[ar, l1] - y[ar, l0]), 0.0)
+        xr = np.where(rm < ns, rm - 1 + (y[ar, r0] - h) / (y[ar, r0] - y[ar, r1]), ns - 1.0)
+    return np.where(y[ar, p] > 0, DT * (xr - xl), np.nan)
+
+
+def shape_vars(Y, base, m, f, bank):
+    """Pulse-shape variables of rows Y [n, ns] with their fit f (fit(): a, t, comp) and baseline `base` [n] (the baseline the fit
+    used, f["ped"]): w50 = FWHM of the waveform above base / FWHM of the template (LUT row m) sampled at the main pulse's fitted
+    time; tail = mean over [t_main + TAIL_LO, t_main + TAIL_HI] ns (inside the record) of (waveform - base - main component) / A_main."""
+    n, ns = Y.shape
+    ar = np.arange(n)
+    main = f["a"].argmax(1)
+    tm, am = f["t"][ar, main].astype(np.float64), f["a"][ar, main].astype(np.float64)
+    tpl = bank.shape(m[:, None], DT * np.arange(ns, dtype=F32)[None, :] - tm[:, None].astype(F32)).astype(np.float64)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        w50 = fwhm(Y.astype(np.float64) - base[:, None]) / fwhm(tpl)
+        r = (Y - base[:, None] - f["comp"][ar, main]) / am[:, None]
+        tt = DT * np.arange(ns)[None, :] - tm[:, None]
+        win = (tt >= TAIL_LO) & (tt <= TAIL_HI)
+        tail = np.where(win.any(1), (r * win).sum(1) / win.sum(1), np.nan)
+    return w50, tail
+
+
+def quality_vars(Y, m, mi, f, bank, b_ref, sig_ref):
+    """Quality variables of kept channels: Y [n, ns] raw rows, m LUT rows, mi module indices, f = their fit() result.  Returns
+    far, zb, zn, slope, w50, tail (float32 but far)."""
+    far, zb, zn, slope = base_vars(Y, b_ref[mi], sig_ref[mi])
+    w50, tail = shape_vars(Y, f["ped"], m, f, bank)
+    return dict(far=far, zb=zb.astype(F32), zn=zn.astype(F32), slope=slope.astype(F32), w50=w50.astype(F32), tail=tail.astype(F32))
 
 
 def main_other(k, a, t):
@@ -744,6 +907,7 @@ def scan(out, evios):
     mf = MF(bank)
     rng = np.random.default_rng(run)
     rng_mod = np.random.default_rng(run + 1)                   # keys of the per-module reservoirs (separate: the other reservoirs stay unchanged)
+    rng_q = np.random.default_rng(run + 2)                     # keys of the refit-sample reservoirs (own generator)
     gain = module_gain(cfg, rt, names)                         # MeV per ADC; nan: no calibration
     athr = np.where(np.isfinite(gain), CUT_EFRAC * cfg["beam"] / gain, np.inf)   # ADC threshold of E_main >= CUT_EFRAC E_beam
     print(f"[setup] run {run} {len(evios)} splits {rt}; {len(mods)} modules; beam {cfg['beam']:g} MeV; dead {sorted(dead)}", flush=True)
@@ -752,7 +916,9 @@ def scan(out, evios):
     bad_count, trunc_count, digit_count = (np.zeros(len(mods), np.int64) for _ in range(3))   # per module: bad waveforms, kept channels with a truncated main pulse, digitised channels
     ex = {0: None, 1: None}                                    # reservoirs: 1 = k >= 2, 0 = k == 1
     pm = {0: None, 1: None}                                    # per-module reservoirs after the vetoes: 1 = pile-up (cut), 0 = k == 1 above threshold
-    evnum, rows, evs, mis = [], [], [], []
+    qx = {c: None for c in QX_CONDS}                           # refit samples: kept channels meeting one loose condition, QX_PER per module
+    rej_bad, rej_cut, cut_fail = (np.zeros(len(mods), np.int64) for _ in range(3))   # per module: far and z_n > ZN_REJ among bad rows / among rows failing the 8 or 10 ADC cut; rows failing it
+    evnum, evts, rows, evs, mis = [], [], [], [], []
 
     sig_ref = b_ref = None                                   # noise reference of the file being read
     ref_n, ref_b, ref_sig = [], [], []                       # per file: reference waveforms, b_ref, sigma_ref per module
@@ -764,18 +930,31 @@ def scan(out, evios):
         Y, ev, mi = np.stack(rows), np.array(evs), np.array(mis)
         rows.clear(), evs.clear(), mis.clear()
         bad = bad_waveform(Y)                                              # flagged before any cut: removed, only counted
+        far0, _, zn0, _ = base_vars(Y, b_ref[mi], sig_ref[mi])
+        rej = far0 & (zn0 > ZN_REJ)                                        # rejected-row counters (no arrays for these rows)
+        rej_bad[:] += np.bincount(mi[bad & rej], minlength=len(mods))
         digit_count[:] += np.bincount(mi, minlength=len(mods))
         bad_count[:] += np.bincount(mi[bad], minlength=len(mods))
-        Y, ev, mi = Y[~bad], ev[~bad], mi[~bad]
+        Y, ev, mi, rej = Y[~bad], ev[~bad], mi[~bad], rej[~bad]
         x = np.median(Y[:, :PED_NSAMPLES], axis=1)
         s = np.nonzero(Y.max(axis=1) - x >= PRECUT_ADC)[0]
         f = fit(mf, Y[s], bank.row[mi[s]], sig_ref[mi[s]], b_ref[mi[s]])
         n_base_ref[:] += np.bincount(mi[s][f.pop("far")], minlength=len(mods))
         keep = f["a"].max(axis=1) >= KEEP_ADC
+        failed = np.ones(len(mi), bool)
+        failed[s[keep]] = False                                            # rows failing the 8 ADC raw cut or the 10 ADC fitted cut
+        cut_fail[:] += np.bincount(mi[failed], minlength=len(mods))
+        rej_cut[:] += np.bincount(mi[failed & rej], minlength=len(mods))
         s = s[keep]
         f = {k: v[keep] for k, v in f.items()}
+        qv = quality_vars(Y[s], bank.row[mi[s]], mi[s], f, bank, b_ref, sig_ref)       # kept alongside f: the existing reservoirs keep their content
+        qk = dict(far=qv["far"], k4=f["k"] >= QX_K, chi2=np.nan_to_num(f["chi2"], nan=0.0) > QX_CHI, w50=np.nan_to_num(qv["w50"], nan=0.0) > QX_W50)
+        for c, sel in qk.items():
+            new = dict(samples=Y[s[sel]], midx=mi[s[sel]], evnum=np.array(evnum)[ev[s[sel]]], key=rng_q.random(int(sel.sum())),
+                       k=f["k"][sel], **{q: f[q][sel].astype(np.float32) for q in ("ped", "sig", "t", "a", "chi2")}, **{q: qv[q][sel] for q in ("zb", "zn", "w50")})
+            qx[c] = reservoir(qx[c], new, QX_PER)
         trunc_count[:] += np.bincount(mi[s][f["trunc_main"]], minlength=len(mods))
-        for k, v in dict(midx=mi[s], ev=ev[s], **{k: f[k] for k in rec if k in f}).items():
+        for k, v in dict(midx=mi[s], ev=ev[s], **{k: (f[k] if k in f else qv[k]) for k in rec if k in f or k in qv}).items():
             rec[k].append(v.astype(REC[k]))
         big = (f["a"].max(axis=1) >= A_EX) & ~f["trunc_main"]
         for c, sel in ((1, big & (f["k"] >= 2)), (0, big & (f["k"] == 1))):
@@ -886,6 +1065,7 @@ def scan(out, evios):
                     continue
                 ev = len(evnum)
                 evnum.append(int(fe.info.event_number))
+                evts.append(int(fe.info.timestamp))
                 for ri in range(fe.nrocs):
                     roc = fe.roc(ri)
                     crate = crate_map.get(roc.tag) if roc.present else None
@@ -910,11 +1090,12 @@ def scan(out, evios):
     r = {k: (np.concatenate(v) if v else np.zeros((0, KMAX) if k in ("a", "t") else 0, REC[k])) for k, v in rec.items()}
     n_pass = len(evnum)
     pu = r["k"] >= 2
-    ev_out = dict(ev_number=np.array(evnum, dtype=np.int64),
+    ev_out = dict(ev_number=np.array(evnum, dtype=np.int64), ev_timestamp=np.array(evts, dtype=np.int64),
                   ev_n_kept=np.bincount(r["ev"], minlength=n_pass))
     wall = time.monotonic() - t_start
     exo = {f"ex{c}_{k}": v for c in (0, 1) if ex[c] is not None for k, v in ex[c].items()}
     exo.update({f"pm{c}_{k}": v for c in (0, 1) if pm[c] is not None for k, v in pm[c].items()})
+    exo.update({f"qx_{c}_{k}": v for c in QX_CONDS if qx[c] is not None for k, v in qx[c].items()})
     sr = np.array(ref_sig)[np.array(ref_n) >= MIN_REF_WAVEFORMS]
     sr = sr if sr.size else np.array([SIGMA_MIN])
     print(f"[noise reference] sigma_ref median {np.median(sr):.3f} ADC (16-84 %: {np.percentile(sr, 16):.3f}-{np.percentile(sr, 84):.3f}); "
@@ -922,7 +1103,7 @@ def scan(out, evios):
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
     np.savez_compressed(out, run=run, splits=splits, run_type=rt, n_seen=n_seen, n_trig=n_trig, n_lms=n_lms,
                         n_pass=n_pass, wall_s=wall, beam_energy_mev=cfg["beam"], dead_file=cfg["dead_src"],
-                        mod_n_ref=np.array(ref_n), mod_b_ref=np.array(ref_b), mod_sig_ref=np.array(ref_sig), mod_n_base_ref=n_base_ref, dead_modules=np.array(sorted(dead), dtype=str), bad_count=bad_count, trunc_count=trunc_count, digit_count=digit_count, mod_name=names, mod_pwo4=pwo4,
+                        mod_n_ref=np.array(ref_n), mod_b_ref=np.array(ref_b), mod_sig_ref=np.array(ref_sig), mod_n_base_ref=n_base_ref, dead_modules=np.array(sorted(dead), dtype=str), bad_count=bad_count, trunc_count=trunc_count, digit_count=digit_count, mod_rej_bad=rej_bad, mod_rej_cut=rej_cut, mod_cut_fail=cut_fail, mod_name=names, mod_pwo4=pwo4,
                         **{f"ch_{k}": v for k, v in r.items()}, **ev_out, **exo)
     print(f"[done] {out}: {n_seen} events, {n_pass} after trigger + LMS, {r['k'].size} channels kept, "
           f"{int(pu.sum())} with k >= 2; {wall:.0f} s", flush=True)
