@@ -3,6 +3,7 @@
 #include "HyCalSystem.h"
 #include "EventData.h"
 #include "EventData_io.h"
+#include "MatchingTools.h"
 #include "InstallPaths.h"
 #include "ConfigSetup.h"
 #include "ToolUtils.h"
@@ -185,8 +186,8 @@ int main(int argc, char *argv[])
         TH1F *energy_histogram = merged->h1_E_modules[i].get();
         if (energy_histogram->GetEntries() < 200) continue;
 
-        float mod_x = mod->x;
-        float mod_y = mod->y;
+        float mod_x = mod->x - gRunConfig.target_x;
+        float mod_y = mod->y - gRunConfig.target_y;
 
         const float theta = std::atan2(
             std::sqrt(mod_x * mod_x + mod_y * mod_y),
@@ -542,6 +543,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
     EventVars_Recon event;
     prad2::SetReconReadBranches(tree, event);
+    prad2::ReconMatchVectorBindings match_bindings;
+    prad2::BindReconMatchVectorBranches(tree, event, match_bindings);
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
 
@@ -603,6 +606,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         if (mode == EnergyMode::Ee) {
             if (event.n_clusters != 2) continue;
             if (event.cl_nblocks[0] < 3 || event.cl_nblocks[1] < 3) continue;
+            if (event.matchFlag[0] == 0 || event.matchFlag[1] == 0) continue;
 
             HCHit hc_hit[2];
             hc_hit[0].x = event.cl_x[0];
@@ -615,13 +619,28 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             hc_hit[1].z = event.cl_z[1];
             hc_hit[1].energy = event.cl_energy[1];
 
-            MollerEvent moller_event = {DataPoint(hc_hit[0].x, hc_hit[0].y, hc_hit[0].z, hc_hit[0].energy),
-                        DataPoint(hc_hit[1].x, hc_hit[1].y, hc_hit[1].z, hc_hit[1].energy)};
+            GEMHit gem_hit[2];
+            bool has_gem_hit[2] = {false, false};
+            for (int j = 0; j < 2; j++){
+                for (int did = 3; did >=0; did--){
+                    if (event.first_match(j, did, gem_hit[j].x, gem_hit[j].y, gem_hit[j].z)) {
+                        has_gem_hit[j] = true;
+                        break;
+                    }
+                }
+            }
+            if (!has_gem_hit[0] || !has_gem_hit[1]) continue;
+            // Project to HyCal surface
+            GetProjection(gem_hit[0], hc_hit[0].z);
+            GetProjection(gem_hit[1], hc_hit[1].z);
+
+            MollerEvent moller_event = {DataPoint(gem_hit[0].x, gem_hit[0].y, gem_hit[0].z, hc_hit[0].energy),
+                        DataPoint(gem_hit[1].x, gem_hit[1].y, gem_hit[1].z, hc_hit[1].energy)};
 
             const float theta0 = std::atan2(
-                std::sqrt(hc_hit[0].x * hc_hit[0].x + hc_hit[0].y * hc_hit[0].y), hc_hit[0].z) * 180.0f / M_PI;
+                std::sqrt(gem_hit[0].x * gem_hit[0].x + gem_hit[0].y * gem_hit[0].y), gem_hit[0].z) * 180.0f / M_PI;
             const float theta1 = std::atan2(
-                std::sqrt(hc_hit[1].x * hc_hit[1].x + hc_hit[1].y * hc_hit[1].y), hc_hit[1].z) * 180.0f / M_PI;
+                std::sqrt(gem_hit[1].x * gem_hit[1].x + gem_hit[1].y * gem_hit[1].y), gem_hit[1].z) * 180.0f / M_PI;
 
             // Move back to HyCal center coordinates
             hc_hit[0].x -= event.hycal_center_x;
@@ -629,8 +648,13 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             hc_hit[1].x -= event.hycal_center_x;
             hc_hit[1].y -= event.hycal_center_y;
 
-            if (!InHyCalRing(hc_hit[0].x, hc_hit[0].y, 2.0, 15.)) continue;
-            if (!InHyCalRing(hc_hit[1].x, hc_hit[1].y, 2.0, 15.)) continue;
+            gem_hit[0].x -= event.hycal_center_x;
+            gem_hit[0].y -= event.hycal_center_y;
+            gem_hit[1].x -= event.hycal_center_x;
+            gem_hit[1].y -= event.hycal_center_y;
+
+            if (!InHyCalRing(gem_hit[0].x, gem_hit[0].y, 2.0, 15.)) continue;
+            if (!InHyCalRing(gem_hit[1].x, gem_hit[1].y, 2.0, 15.)) continue;
 
             if (!PhysicsTools::isMoller_kinematic(
                     theta0, hc_hit[0].energy, theta1, hc_hit[1].energy,
@@ -643,14 +667,14 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 if (!mod) continue;
                 const int module_index = mod->id - 1001;
                 if (module_index < 0 || module_index >= 1156) continue;
-                const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit[i].x, hc_hit[i].y);
+                const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit[i].x, gem_hit[i].y);
 
                 const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta[i]);
                 if (theta_bin >= 1 && theta_bin <= Nbins) {
                     result->h1_yield_theta->Fill(
                         theta[i], 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
                     result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[i]);
-                    if (std::fabs(xd_hycal) < 0.15f && std::fabs(yd_hycal) < 0.15f) {
+                    if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
                         result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[i]);
                     } else {
                         result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[i]);
@@ -658,20 +682,15 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 }
                 result->h2_Erecon_theta->Fill(theta[i], event.cl_energy[i]);
 
-                float expect_energy = PhysicsTools::ExpectedEnergy(theta[i], run_config.Ebeam, "ee");
-                float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
-                float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, run_config.Ebeam, "ee");
-                float energy = event.cl_energy[i] / expect_energy * expect_energy_moduleCenter;
-
-                if (std::fabs(xd_hycal) < 0.15f && std::fabs(yd_hycal) < 0.15f) {
+                if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
                     result->h2_Erecon_theta_center->Fill(theta[i], event.cl_energy[i]);
-                    result->h1_E_modules[module_index]->Fill(energy);
+                    result->h1_E_modules[module_index]->Fill(event.cl_energy[i]);
                 } else {
                     result->h2_Erecon_theta_edge->Fill(theta[i], event.cl_energy[i]);
                 }
 
                 result->h2_hit_hycal->Fill(hc_hit[i].x, hc_hit[i].y);
-                result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+                result->h2_hit_module_hycal->Fill(xd_gem, yd_gem);
             }
             ++result->events_processed;
         }
