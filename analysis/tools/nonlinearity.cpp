@@ -679,15 +679,14 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             // get the energy ratio of measured energy to expected energy calculated with beam position correction
             // then multiply by the expected energy calculated with module center position correction
             // to produce a corrected energy value that is independent of the beam position
-            
-            // A potential bug, the e-p clusters are also corrected with the e-e expected energy, so the e-p energy are
-            // shifted down by a few 10s MeV, but if we fix the vertex of 2nd order poly curve and only matched with the ee peak
-            // then it has no effect on the final non-linearity correction, so I leave it as is for now. 
-            float theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
-            float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
-            float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
-            float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, Ebeam, "ee");
-            float energy = ev.cl_energy[j] / expect_energy * expect_energy_moduleCenter;
+            float energy, theta;
+            if ( ev.cl_energy < Ebeam - 3.0f * 0.03 / std::sqrt(Ebeam/1000.0f) ){
+                theta = std::atan2(std::sqrt(hc_hit.x*hc_hit.x + hc_hit.y*hc_hit.y), run_config.hycal_z) * 180.f / M_PI;
+                float expect_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
+                float theta_moduleCenter = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
+                float expect_energy_moduleCenter = PhysicsTools::ExpectedEnergy(theta_moduleCenter, Ebeam, "ee");
+                energy = ev.cl_energy[j] / expect_energy * expect_energy_moduleCenter;
+            }
 
             // Move back to HyCal center coordinates
             hc_hit.x -= ev.hycal_center_x;
@@ -696,7 +695,6 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             // require the hit near the seed module centre (|xd|,|yd| < 0.1 module sizes)
             const auto [xd, yd] = mod->cell_offset<float>(hc_hit.x, hc_hit.y);
             if (InHyCalRing(mod->x, mod->y, 2.0, 12.) && (std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f)) continue;
-            if ((std::abs(xd) >= 0.3f || std::abs(yd) >= 0.3f)) continue;
 
             bool veto = false;
             float sci_time, sci_int;
