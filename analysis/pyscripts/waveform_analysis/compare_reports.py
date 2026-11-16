@@ -8,8 +8,8 @@ the yield loss (%), and real/null verdicts (|d| >= 2 SE, D3; in and out of sampl
 import argparse, csv, math
 import numpy as np
 
-QS = ("res_cb", "res_cb_oos", "res_g2", "tail_hi3", "tail_hi3_oos", "tail_lo3", "leak_cut", "leak_cut_oos", "eff_cut", "mu")
-VERDICTS = ("res_cb", "res_cb_oos", "tail_hi3", "tail_hi3_oos", "leak_cut", "leak_cut_oos")
+QS = ("res_cb", "res_cb_oos", "res_g2", "tail_hi3", "tail_hi3_oos", "tail_lo3", "tail_lo_f", "leak_cut", "leak_cut_oos", "eff_cut", "mu")
+VERDICTS = ("res_cb", "res_cb_oos", "tail_hi3", "tail_hi3_oos", "tail_lo_f", "leak_cut", "leak_cut_oos")
 
 
 def tsv_rows(path):
@@ -67,9 +67,9 @@ def main():
         f.writelines("\t".join(fmt(x) for x in r) + "\n" for r in rows)
     ix = {h: i for i, h in enumerate(head)}
     pm = lambda r, q: f"{fmt(r[ix['d_' + q]])}±{fmt(r[ix['d_' + q + '_se']])}"
-    print("path kind region n d_res_cb d_tail_hi3 d_leak_cut yield_loss verdicts(" + ",".join(VERDICTS) + ")")
+    print("path kind region n d_res_cb d_tail_hi3 d_tail_lo_f d_leak_cut yield_loss verdicts(" + ",".join(VERDICTS) + ")")
     for r in rows:
-        print(*r[:4], pm(r, "res_cb"), pm(r, "tail_hi3"), pm(r, "leak_cut"), fmt(r[ix["yield_loss"]]), "/".join(r[-len(VERDICTS):]))
+        print(*r[:4], pm(r, "res_cb"), pm(r, "tail_hi3"), pm(r, "tail_lo_f"), pm(r, "leak_cut"), fmt(r[ix["yield_loss"]]), "/".join(r[-len(VERDICTS):]))
 
 
 if __name__ == "__main__":

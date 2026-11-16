@@ -202,7 +202,22 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("left",     &fdec::Peak::left)
         .def_readwrite("right",    &fdec::Peak::right)
         .def_readwrite("overflow", &fdec::Peak::overflow)
-        .def_readwrite("quality",  &fdec::Peak::quality);
+        .def_readwrite("quality",  &fdec::Peak::quality)
+        .def_readonly("time_algo", &fdec::Peak::time_algo,
+            "Timing algorithm that produced `time`: 0 peaking sub-sample, "
+            "1 linear CFD, 2 log-normal fit CFD.");
+
+    py::class_<fdec::LogNormalFitResult>(m, "LogNormalFitResult",
+        "Log-normal CFD fit result for one peak (see WaveAnalyzer.analyze_fit). "
+        "ok=False means no fit was done or it failed.")
+        .def(py::init<>())
+        .def_readonly("ok",           &fdec::LogNormalFitResult::ok)
+        .def_readonly("t_cfd_sample", &fdec::LogNormalFitResult::t_cfd_sample)
+        .def_readonly("chi2_per_dof", &fdec::LogNormalFitResult::chi2_per_dof)
+        .def_readonly("A",            &fdec::LogNormalFitResult::A)
+        .def_readonly("t0",           &fdec::LogNormalFitResult::t0)
+        .def_readonly("mu",           &fdec::LogNormalFitResult::mu)
+        .def_readonly("sigma",        &fdec::LogNormalFitResult::sigma);
 
     py::class_<fdec::Pedestal>(m, "Pedestal",
         "Per-channel pedestal estimate from WaveAnalyzer.\n\n"
@@ -411,6 +426,16 @@ void bind_fadc(py::module_ &m)
             "tuple — Pedestal exposes nused / quality / slope, each Peak "
             "exposes its quality bitmask.  Use this when documenting the "
             "analyzer or when downstream code needs the quality flags.")
+        .def("analyze_fit",
+            [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
+                const fdec::WaveResult r = run_analyze(self, samples);
+                std::vector<fdec::LogNormalFitResult> fits(r.peaks_fit, r.peaks_fit + r.npeaks);
+                return py::make_tuple(r.ped.mean, r.ped.rms, list_of(r.peaks, r.npeaks), fits);
+            },
+            py::arg("samples"),
+            "Like analyze() but returns (ped_mean, ped_rms, peaks, fits); "
+            "fits[i] is the LogNormalFitResult aligned with peaks[i] "
+            "(ok=False when no fit was attempted).")
         .def("smooth",
             [](const fdec::WaveAnalyzer &self, const U16Array &samples) {
                 const U16Span s = u16_span(samples);

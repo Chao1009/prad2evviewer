@@ -223,6 +223,8 @@ def main():
         for fn in sorted((SCAN / rt).glob("*.npz")):
             with np.load(fn, allow_pickle=False) as z:
                 run, splits = int(z["run"]), [int(x) for x in z["splits"]]
+            if run in bm.EXCLUDE_RUNS:                  # as the benchmark's report
+                continue
             for sp in splits:
                 jobs.append((str(fn), sp))
                 info.setdefault(rt, {}).setdefault(run, []).append((sp, str(CACHE / f"{fn.stem}_{rt}_{sp}.pkl")))
