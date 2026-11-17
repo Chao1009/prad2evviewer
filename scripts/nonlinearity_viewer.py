@@ -38,7 +38,7 @@ from PyQt6.QtGui import QFont, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton,
-    QSizePolicy, QSpinBox, QSplitter, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QDoubleSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
 import matplotlib
 matplotlib.use("QtAgg")
@@ -71,13 +71,13 @@ MODULES_JSON = find_database_file("hycal_map.json", use_env=False)
 
 # Tool constants
 
-Z_HYCAL    = 6270.0    # mm
-RESOLUTION = 0.035     # 3.5% / sqrt(E/1000)
+Z_HYCAL    = 6270.0    # Legacy ROOT files without run-geometry metadata.
+RESOLUTION = 0.03      # 3% / sqrt(E/1000), matching PhysicsTools::findPeakWindow.
 
 
 def estimate_sigma(E: float) -> float:
-    """Energy resolution estimate: σ = E × 3.5% / √(E/1000)."""
-    return E * RESOLUTION / math.sqrt(max(E, 1.0) / 1000.0)
+    """Expected peak width used to initialize PhysicsTools::fitPeak."""
+    return RESOLUTION * math.sqrt(max(E, 0.0) * 1000.0)
 
 
 # Gaussian fit helpers
@@ -95,10 +95,10 @@ def _gauss_fit_range(
     sig_max: float,
     mu0: Optional[float] = None,
     maxfev: int = 2000,
-) -> Optional[Tuple[float, float, float]]:
+) -> Optional[Tuple[float, float, float, float]]:
     """Fit a Gaussian with its mean bounded to [lo, hi] to the non-empty bins
     in that range; ``mu0`` defaults to their weighted mean.  Returns
-    (mean, sigma, amp), or None with fewer than 4 bins.  curve_fit errors
+    (mean, sigma, amp, mean_error), or None with fewer than 4 bins.  curve_fit errors
     propagate."""
     mask = (centers >= lo) & (centers <= hi) & (counts > 0)
     if mask.sum() < 4:
@@ -106,77 +106,130 @@ def _gauss_fit_range(
     xf, yf = centers[mask], counts[mask].astype(float)
     if mu0 is None:
         mu0 = float((xf * yf).sum() / yf.sum())
-    popt, _ = curve_fit(
+    popt, pcov = curve_fit(
         _gauss, xf, yf,
         p0=[float(yf.max()), mu0, sig0],
         bounds=([0.0, lo, 1e-6], [np.inf, hi, sig_max]),
         maxfev=maxfev,
     )
-    return float(popt[1]), abs(float(popt[2])), float(popt[0])
+    mean_error = math.sqrt(max(float(pcov[1, 1]), 0.0))
+    return float(popt[1]), abs(float(popt[2])), float(popt[0]), mean_error
 
 
-def _gauss_fit_window(
-    centers: np.ndarray,
+def _find_peak_window(
     counts: np.ndarray,
-    mu0: float,
-    half_width: float,
-) -> Optional[Tuple[float, float, float]]:
-    """Fit Gaussian in [mu0 ± half_width].  Returns (mean, sigma, amp) or None."""
-    bw = float(centers[1] - centers[0]) if len(centers) > 1 else 1.0
-    try:
-        return _gauss_fit_range(centers, counts, mu0 - half_width, mu0 + half_width,
-                                max(half_width / 3.0, bw), half_width * 2.0, mu0=mu0)
-    except Exception:
+    edges: np.ndarray,
+    Eexp: float,
+) -> Optional[Tuple[float, float, float, float, float]]:
+    """Mirror PhysicsTools::findPeakWindow for the Gaussian peak fit."""
+    n_bins = len(counts)
+    if n_bins < 4:
         return None
+
+    first = max(0, int(np.searchsorted(edges, 0.8 * Eexp, side="right") - 1))
+    last = min(n_bins - 1, int(np.searchsorted(edges, 1.2 * Eexp, side="right") - 1))
+    peak_bin = -1
+    peak_height = 0.0
+    if first <= last:
+        for i in range(first, last + 1):
+            left = counts[i - 1] if i > 0 else counts[i]
+            right = counts[i + 1] if i < n_bins - 1 else counts[i]
+            if counts[i] > 0.0 and counts[i] >= left and counts[i] >= right and counts[i] > peak_height:
+                peak_bin, peak_height = i, float(counts[i])
+
+    if peak_bin < 0:
+        peak_bin = int(np.argmax(counts))
+        peak_height = float(counts[peak_bin])
+    if peak_height <= 0.0:
+        return None
+
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    peak0 = float(centers[peak_bin])
+    sigma0 = estimate_sigma(peak0)
+    left_bin = right_bin = peak_bin
+    threshold = 0.4 * peak_height
+
+    while left_bin > 0 and counts[left_bin] > threshold:
+        left_bin -= 1
+    while right_bin < n_bins - 1 and counts[right_bin] > threshold:
+        right_bin += 1
+    while centers[right_bin] - centers[left_bin] < 2.5 * sigma0 and (
+        left_bin > 0 or right_bin < n_bins - 1
+    ):
+        if left_bin > 0:
+            left_bin -= 1
+        if right_bin < n_bins - 1:
+            right_bin += 1
+    while centers[right_bin] - centers[left_bin] > 4.5 * sigma0 and (
+        left_bin > 0 or right_bin < n_bins - 1
+    ):
+        left_bin += 1
+        right_bin -= 1
+
+    lo, hi = float(centers[left_bin]), float(centers[right_bin])
+    if not (hi > lo and math.isfinite(sigma0) and sigma0 > 0.0):
+        return None
+    return peak_height, peak0, sigma0, lo, hi
 
 
 def fit_peak_full(
     counts: np.ndarray,
     edges: np.ndarray,
     Eexp: float,
-    sigma_exp: float,
-) -> Tuple[float, float, float]:
+    entries: float,
+) -> Tuple[float, float, float, float]:
     """
-    3-step Gaussian fit following nonlinearity.cpp fitPeakAndDraw.
-
-    Step 2: weighted mean in search window [Eexp ± 6σ_exp]
-    Step 3: first Gaussian fit in [mean ± 2σ(mean)]
-    Step 4: final Gaussian fit in [mean ± 1σ(mean)]
-
-    Returns (mean_MeV, sigma_MeV, amplitude).  mean=0 on failure.
+    Adaptive Gaussian fit matching PhysicsTools::fitPeak(h, Eexp, true).
+    Returns (mean_MeV, sigma_MeV, amplitude, mean_error_MeV).
+    mean=0 on failure.
     """
+    if entries < 100.0 or not HAS_SCIPY:
+        return 0.0, 0.0, 0.0, 0.0
+    window = _find_peak_window(counts, edges, Eexp)
+    if window is None:
+        return 0.0, 0.0, 0.0, 0.0
+
+    height, peak0, sigma0, lo, hi = window
     centers = 0.5 * (edges[:-1] + edges[1:])
+    mask = (centers >= lo) & (centers <= hi) & (counts > 0.0)
+    if np.count_nonzero(mask) < 4:
+        return 0.0, 0.0, 0.0, 0.0
 
-    # Step 2: weighted mean in search window
-    mask = (centers >= Eexp - 6.0 * sigma_exp) & (centers <= Eexp + 6.0 * sigma_exp)
-    w = counts[mask]
-    x = centers[mask]
-    if w.sum() <= 0.0:
-        return 0.0, 0.0, 0.0
-
-    mean = float((x * w).sum() / w.sum())
-
-    if not HAS_SCIPY:
-        return mean, estimate_sigma(mean), float(w.max())
-
-    best: Optional[Tuple[float, float, float]] = None
-
-    # Step 3: first fit in [mean ± 2σ]
-    r = _gauss_fit_window(centers, counts, mean, 2.0 * estimate_sigma(mean))
-    if r is not None:
-        mean = r[0]
-        best = r
-
-    # Step 4: final fit in [mean ± 1σ]
-    r = _gauss_fit_window(centers, counts, mean, estimate_sigma(mean))
-    if r is not None:
-        return r
-    if best is not None:
-        return best
-    return mean, estimate_sigma(mean), float(w.max())
+    xf = centers[mask]
+    yf = counts[mask].astype(float)
+    try:
+        params, pcov = curve_fit(
+            _gauss, xf, yf,
+            p0=[height, peak0, sigma0],
+            sigma=np.sqrt(yf),
+            absolute_sigma=True,
+            maxfev=2000,
+        )
+    except (RuntimeError, ValueError, FloatingPointError):
+        return 0.0, 0.0, 0.0, 0.0
+    amp, mean, sigma = (float(v) for v in params)
+    mean_error = math.sqrt(max(float(pcov[1, 1]), 0.0))
+    if not all(math.isfinite(v) for v in (amp, mean, sigma, mean_error)) or abs(sigma) <= 0.0:
+        return 0.0, 0.0, 0.0, 0.0
+    return mean, abs(sigma), amp, mean_error
 
 
 # Non-linearity model & fit  (match nonlinearity.cpp)
+_NL_FIT_ENERGY_MAX = 3500.0
+_NL_FIT_MAX_DEVIATION = 0.2
+_NL_MANUAL_COEFFICIENT_LIMIT = 1_000_000.0
+_NL_FIXED_VERTEX_ENERGY = 3000.0
+
+
+def _nl_coefficient_bounds(E_base: float, order: int) -> Tuple[List[float], List[float]]:
+    max_abs_t = max(E_base, abs(_NL_FIT_ENERGY_MAX - E_base)) / 1000.0
+    deviation = _NL_FIT_MAX_DEVIATION if order == 1 else _NL_FIT_MAX_DEVIATION / 2.0
+    nl1_limit = deviation / max_abs_t
+    if order == 1:
+        return [-nl1_limit], [nl1_limit]
+    nl2_limit = deviation / max_abs_t**2
+    return [-nl1_limit, -nl2_limit], [nl1_limit, nl2_limit]
+
 
 def nl_ratio_1st(E_rec: np.ndarray, nl1: float, E_base: float) -> np.ndarray:
     """1st order: E_rec/E_exp = 1 + nl1*(E_rec-E_base)/1000"""
@@ -195,8 +248,11 @@ def fit_nonlinearity(
     E_base: float,
     order: int = 1,
     nl1_init: float = 0.01,
+    sigma_Erec: Optional[np.ndarray] = None,
+    point_weights: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, float, int]:
-    """Fit the 1st- or 2nd-order nl model to E_rec/E_exp vs E_rec.
+    """Fit E_rec/E_exp vs E_rec using propagated peak-mean uncertainties.
+    ``point_weights`` multiplies each point's chi-square weight.
     Returns (params, errors, chi2, ndf) with ``order`` params each;
     all zeros when the fit cannot run or fails."""
     failed = (np.zeros(order), np.zeros(order), 0.0, 0)
@@ -204,14 +260,35 @@ def fit_nonlinearity(
         return failed
     if order == 1:
         model = lambda x, nl1: nl_ratio_1st(x, nl1, E_base)
+        bounds = _nl_coefficient_bounds(E_base, order)
+        nl1_limit = bounds[1][0]
+        p0 = [float(np.clip(nl1_init, -nl1_limit * 0.999, nl1_limit * 0.999))]
     else:
         model = lambda x, nl1, nl2: nl_ratio_2nd(x, nl1, nl2, E_base)
-    ratio = E_rec / np.where(E_exp > 0, E_exp, 1.0)
+        bounds = _nl_coefficient_bounds(E_base, order)
+        nl1_limit = bounds[1][0]
+        p0 = [
+            float(np.clip(nl1_init, -nl1_limit * 0.999, nl1_limit * 0.999)),
+            0.0,
+        ]
+    safe_E_exp = np.where(E_exp > 0, E_exp, 1.0)
+    ratio = E_rec / safe_E_exp
+    if sigma_Erec is None:
+        sigma_ratio = np.ones_like(ratio)
+    else:
+        errors = np.asarray(sigma_Erec, dtype=float)
+        errors = np.where(np.isfinite(errors) & (errors > 0.0), errors, 1.0)
+        sigma_ratio = errors / safe_E_exp
+    if point_weights is not None:
+        sigma_ratio /= np.sqrt(np.maximum(np.asarray(point_weights, dtype=float), 1.0))
+    sigma_ratio = np.maximum(sigma_ratio, 1e-12)
     try:
         popt, pcov = curve_fit(model, E_rec, ratio,
-                               p0=[nl1_init] + [0.0] * (order - 1), maxfev=5000)
+                               p0=p0, bounds=bounds,
+                               sigma=sigma_ratio,
+                               absolute_sigma=True, maxfev=5000)
         perr = np.sqrt(np.maximum(np.diag(pcov), 0.0))
-        chi2 = float(np.sum((ratio - model(E_rec, *popt)) ** 2))
+        chi2 = float(np.sum(((ratio - model(E_rec, *popt)) / sigma_ratio) ** 2))
         return popt, perr, chi2, len(E_rec) - order
     except Exception:
         return failed
@@ -221,7 +298,8 @@ def fit_nonlinearity(
 
 # Beam tag (ROOT dir energy_<tag>GeV, histogram h_energy_<name>_<tag>) and
 # beam energy [MeV].
-_BEAMS = (("3p5", 3485.0), ("2p2", 2239.0), ("0p7", 729.0))
+_BEAMS = (("3p5", 3485.41), ("2p2", 2239.51), ("0p7", 728.9))
+_BASE_BEAMS = (("3p5", "3.5"), ("2p2", "2.2"), ("0p7", "0.7"))
 _KINDS = (("ep", "e-p", "tomato"), ("ee", "e-e", "cornflowerblue"))
 _BEAM_TAGS = [tag for tag, _ in _BEAMS]
 
@@ -235,7 +313,8 @@ for _kind, _name, _color in _KINDS:
             "kind": _kind, "color": _color, "tag": _tag, "energy_label": _energy,
         }
         if _kind == "ee":
-            _cfg.update(skip_if_close_to=f"ep_{_tag}", min_separation=170.0)
+            _cfg.update(skip_if_close_to=f"ep_{_tag}",
+                        min_separation=170.0 if _tag == "0p7" else 0.0)
         _PEAK_CONFIGS.append(_cfg)
 del _kind, _name, _color, _tag, _ebeam, _energy, _cfg
 _PEAK_KEYS = [cfg["key"] for cfg in _PEAK_CONFIGS]
@@ -263,25 +342,40 @@ def should_fit_peak(d: "ModuleData", key: str) -> bool:
 class ModuleData:
     """All non-linearity data for one PbWO4 module."""
 
-    def __init__(self, name: str, x: float, y: float, row: int = -1, col: int = -1):
+    def __init__(
+        self, name: str, x: float, y: float, row: int = -1, col: int = -1,
+        hycal_z_by_beam: Optional[Dict[str, float]] = None,
+        target_xy_by_beam: Optional[Dict[str, Tuple[float, float]]] = None,
+    ):
         self.name  = name
         self.x     = float(x)
         self.y     = float(y)
         self.row   = int(row)
         self.col   = int(col)
-        self.theta = math.degrees(math.atan2(math.hypot(x, y), Z_HYCAL))
+        hycal_z_by_beam = hycal_z_by_beam or {}
+        target_xy_by_beam = target_xy_by_beam or {}
+        target_x, target_y = target_xy_by_beam.get("3p5", (0.0, 0.0))
+        self.theta = math.degrees(math.atan2(
+            math.hypot(x - target_x, y - target_y),
+            hycal_z_by_beam.get("3p5", Z_HYCAL)))
 
         self.e_exp:     Dict[str, float] = {}
         self.sigma_exp: Dict[str, float] = {}
         for cfg in _PEAK_CONFIGS:
             key = str(cfg["key"])
-            E = expected_energy(self.theta, float(cfg["ebeam"]), str(cfg["kind"]))
+            tag = str(cfg["tag"])
+            z = hycal_z_by_beam.get(tag, Z_HYCAL)
+            target_x, target_y = target_xy_by_beam.get(tag, (0.0, 0.0))
+            theta = math.degrees(math.atan2(
+                math.hypot(x - target_x, y - target_y), z))
+            E = expected_energy(theta, float(cfg["ebeam"]), str(cfg["kind"]))
             self.e_exp[key]     = E
             self.sigma_exp[key] = estimate_sigma(E) if E > 0.0 else 1.0
 
         # fitted peak results (0 = not found / invalid)
         self.peaks:      Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_sigma: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
+        self.peak_mean_error: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_amp:   Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
         self.peak_enabled: Dict[str, bool] = {k: True for k in _PEAK_KEYS}
         self.manual_peaks: Dict[str, float] = {k: 0.0 for k in _PEAK_KEYS}
@@ -299,6 +393,10 @@ class ModuleData:
         self.nl2_2_err:  float = 0.0
         self.chi2_nl2:   float = 0.0
         self.ndf_nl2:    int   = 0
+        self.nl_coefficients_manual: bool = False
+        self.nl2_fixed_vertex_energy: Optional[float] = None
+        self.mean_abs_data_fit_deviation_2nd = math.nan
+        self.base_ee_corr_residual_2nd = math.nan
 
         # geometry flags (0-based row/col)
         self.is_absorber = self.row >= 0 and hole_ring(self.row + 1, self.col + 1) <= 1
@@ -306,6 +404,7 @@ class ModuleData:
         # raw histograms loaded from ROOT (counts, edges), keyed by beam tag
         self.hists: Dict[str, Optional[Tuple[np.ndarray, np.ndarray]]] = {
             t: None for t in _BEAM_TAGS}
+        self.hist_entries: Dict[str, float] = {t: 0.0 for t in _BEAM_TAGS}
 
     def measured_peak(self, key: str) -> float:
         """Manual peak center when set, else the fitted peak (0 = none)."""
@@ -317,8 +416,10 @@ class ModuleData:
         return (layers > 0 and self.row >= 0 and self.col >= 0
                 and edge_depth(self.row + 1, self.col + 1) <= layers)
 
-    def linearity_points(self) -> List[Tuple[str, float, float]]:
+    def linearity_points(self, base_beam_tag: str = "2p2") -> List[Tuple[str, float, float]]:
         """(key, E_expected, E_rec) for every enabled peak with a valid measurement."""
+        if self.measured_peak(f"ep_{base_beam_tag}") <= 0.0:
+            return []
         pts = []
         for key in _PEAK_KEYS:
             p = self.measured_peak(key)
@@ -327,42 +428,115 @@ class ModuleData:
         return pts
 
     def auto_fit_peaks(self) -> bool:
-        """3-step auto fit (fitPeakAndDraw) of every peak; True if any peak was fit."""
+        """Adaptive PhysicsTools Gaussian fit of every peak; True if any succeeded."""
         any_ok = False
         for key in _PEAK_KEYS:
             hist = hist_for_key(self, key)
             E = self.e_exp[key]
             if hist is None or E <= 0.0 or not should_fit_peak(self, key):
                 continue
-            mu, sigma_f, amp = fit_peak_full(hist[0], hist[1], E, self.sigma_exp[key])
+            entries = self.hist_entries[str(peak_cfg(key)["tag"])]
+            mu, sigma_f, amp, mean_error = fit_peak_full(hist[0], hist[1], E, entries)
             if mu > 0.0:
                 self.peaks[key], self.peak_sigma[key], self.peak_amp[key] = mu, sigma_f, amp
+                self.peak_mean_error[key] = mean_error
                 any_ok = True
         return any_ok
 
-    def refit_nl(self, outer_zero_layers: int = 1) -> None:
+    def refit_nl(self, outer_zero_layers: int = 1, base_beam_tag: str = "2p2") -> None:
         """Re-run the 1st and 2nd order non-linearity fits from current measured peaks."""
-        pts = self.linearity_points()
+        pts = self.linearity_points(base_beam_tag)
         E_exp = np.array([p[1] for p in pts])
         E_rec = np.array([p[2] for p in pts])
-        E_base = self.e_exp["ep_3p5"]
+        # A manually entered peak without covariance gets a conservative 1 MeV error.
+        sigma_Erec = np.array([
+            error if math.isfinite(error) and error > 0.0 else 1.0
+            for error in (self.peak_mean_error[p[0]] for p in pts)
+        ])
+        point_weights = np.array([
+            2.0 if peak_cfg(p[0])["tag"] == base_beam_tag else 1.0
+            for p in pts
+        ])
+        E_base = self.e_exp[f"ep_{base_beam_tag}"]
         force_zero = self.is_outer_layer(outer_zero_layers) or self.is_absorber
-        (nl,), (err,), self.chi2_nl, self.ndf_nl = fit_nonlinearity(E_exp, E_rec, E_base)
+        (nl,), (err,), self.chi2_nl, self.ndf_nl = fit_nonlinearity(
+            E_exp, E_rec, E_base, sigma_Erec=sigma_Erec,
+            point_weights=point_weights)
         self.nl     = 0.0 if force_zero else float(nl)
         self.nl_err = float(err)
         (nl1, nl2), (nl1_err, nl2_err), self.chi2_nl2, self.ndf_nl2 = fit_nonlinearity(
-            E_exp, E_rec, E_base, order=2, nl1_init=self.nl)
+            E_exp, E_rec, E_base, order=2, nl1_init=self.nl,
+            sigma_Erec=sigma_Erec, point_weights=point_weights)
         self.nl2_1     = 0.0 if force_zero else float(nl1)
         self.nl2_1_err = float(nl1_err)
         self.nl2_2     = 0.0 if force_zero else float(nl2)
         self.nl2_2_err = float(nl2_err)
+        self.nl_coefficients_manual = False
+        self.nl2_fixed_vertex_energy = None
 
+        self.update_correction_residuals(
+            E_base, E_exp, E_rec, [p[0] for p in pts], base_beam_tag)
+
+    def fit_nl2_fixed_vertex(
+        self, base_beam_tag: str, vertex_energy: float = _NL_FIXED_VERTEX_ENERGY,
+    ) -> Tuple[float, float]:
+        """Fit base-beam e-p/e-e points with R(E_base)=1 and a fixed vertex."""
+        if not math.isfinite(vertex_energy) or vertex_energy <= 0.0:
+            raise ValueError("Vertex energy must be a positive finite value.")
+        keys = (f"ep_{base_beam_tag}", f"ee_{base_beam_tag}")
+        E_base = self.e_exp[keys[0]]
+        if E_base <= 0.0:
+            raise ValueError("Base-energy e-p expected energy is unavailable.")
+
+        vertex_t = (vertex_energy - E_base) / 1000.0
+        basis = []
+        residuals = []
+        weights = []
+        for key in keys:
+            E_exp = self.e_exp[key]
+            E_rec = self.measured_peak(key)
+            if E_exp <= 0.0 or E_rec <= 0.0:
+                raise ValueError(
+                    f"{peak_cfg(key)['label']} peak is unavailable; fit both base-energy peaks first.")
+            t = (E_rec - E_base) / 1000.0
+            basis.append(t * (t - 2.0 * vertex_t))
+            residuals.append(E_rec / E_exp - 1.0)
+            error = self.peak_mean_error[key]
+            sigma_Erec = error if math.isfinite(error) and error > 0.0 else 1.0
+            sigma_ratio = sigma_Erec / E_exp
+            weights.append(2.0 / max(sigma_ratio * sigma_ratio, 1e-24))
+
+        basis_arr = np.asarray(basis)
+        residuals_arr = np.asarray(residuals)
+        weights_arr = np.asarray(weights)
+        denominator = float(np.sum(weights_arr * basis_arr * basis_arr))
+        if not math.isfinite(denominator) or denominator <= 0.0:
+            raise ValueError("Base-energy peaks do not constrain the fixed-vertex fit.")
+
+        nl2 = float(np.sum(weights_arr * basis_arr * residuals_arr) / denominator)
+        if not math.isfinite(nl2) or nl2 >= 0.0:
+            raise ValueError(
+                "The base-energy peaks do not produce a concave-down fit with a maximum.")
+        nl1 = -2.0 * nl2 * vertex_t
+        if max(abs(nl1), abs(nl2)) > _NL_MANUAL_COEFFICIENT_LIMIT:
+            raise ValueError("The fitted coefficients exceed the manual coefficient limit.")
+        return nl1, nl2
+
+    def update_correction_residuals(
+        self, E_base: float, E_exp: np.ndarray, E_rec: np.ndarray,
+        keys: List[str], base_beam_tag: str,
+    ) -> None:
         # Mean |corrected ratio - 1| for map colouring
         self.mean_corr_resid_1st: float = 0.0
         self.mean_corr_resid_2nd: float = 0.0
+        self.mean_abs_data_fit_deviation_2nd = math.nan
+        self.base_ee_corr_residual_2nd = math.nan
         if len(E_exp) > 0 and E_base > 0.0:
             resids1, resids2 = [], []
-            for Ee, Er in zip(E_exp, E_rec):
+            fit_deviations_2nd = []
+            base_ee_residual = None
+            has_2nd_fit = self.ndf_nl2 > 0 or self.nl_coefficients_manual
+            for key, Ee, Er in zip(keys, E_exp, E_rec):
                 if Ee <= 0.0:
                     continue
                 d1 = nl_ratio_1st(Er, self.nl, E_base)
@@ -373,24 +547,75 @@ class ModuleData:
                 if d2 != 0.0:
                     Ec2 = Er / d2
                     resids2.append(abs(Ec2 / Ee - 1.0))
+                    if has_2nd_fit:
+                        fit_deviations_2nd.append(
+                            abs(Er / Ee - d2))
+                        if key == f"ee_{base_beam_tag}":
+                            base_ee_residual = Ec2 / Ee - 1.0
             if resids1:
                 self.mean_corr_resid_1st = float(np.mean(resids1))
             if resids2:
                 self.mean_corr_resid_2nd = float(np.mean(resids2))
+            if fit_deviations_2nd:
+                self.mean_abs_data_fit_deviation_2nd = float(
+                    np.mean(fit_deviations_2nd))
+            if base_ee_residual is not None:
+                self.base_ee_corr_residual_2nd = float(base_ee_residual)
 
 
 # Data loading
 
 def _load_json_geometry(path: Path) -> Dict[str, Tuple[float, float, int, int]]:
     """Read hycal_map.json and return {name: (x, y, row_0based, col_0based)}
-    for PbWO4 modules only."""
+    for in-fiducial PbWO4 modules, matching nonlinearity.cpp."""
     result: Dict[str, Tuple[float, float, int, int]] = {}
     try:
         result = {m.name: (float(m.x), float(m.y), m.row - 1, m.col - 1)
-                  for m in load_modules(path) if m.mod_type == "PbWO4"}
+                  for m in load_modules(path)
+                  if m.mod_type == "PbWO4"
+                  and (abs(m.x) > 2.0 * 20.77 or abs(m.y) > 2.0 * 20.75)
+                  and abs(m.x) < 16.0 * 20.77
+                  and abs(m.y) < 16.0 * 20.75}
     except Exception as e:
         print(f"Warning: cannot read geometry from {path}: {e}", file=sys.stderr)
     return result
+
+
+def _read_hycal_z(root_dir) -> Optional[float]:
+    """Read the per-beam HyCal Z metadata written by nonlinearity.cpp."""
+    if root_dir is None:
+        return None
+    try:
+        value = float(root_dir["hycal_z_mm"].member("fTitle"))
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0.0 else None
+
+
+def _read_target_xy(root_dir) -> Optional[Tuple[float, float]]:
+    """Read the per-beam target coordinates written by nonlinearity.cpp."""
+    if root_dir is None:
+        return None
+    try:
+        x = float(root_dir["target_x_mm"].member("fTitle"))
+        y = float(root_dir["target_y_mm"].member("fTitle"))
+    except (KeyError, AttributeError, TypeError, ValueError):
+        return None
+    if not (math.isfinite(x) and math.isfinite(y)):
+        return None
+    return x, y
+
+
+def _read_base_beam_tag(root_path: Path) -> Optional[str]:
+    """Read the selected base beam written by nonlinearity.cpp."""
+    if not HAS_UPROOT:
+        return None
+    try:
+        with uproot.open(str(root_path)) as root_file:
+            label = str(root_file["base_beam_energy_GeV"].member("fTitle")).strip()
+    except (OSError, KeyError, AttributeError, TypeError, ValueError):
+        return None
+    return next((tag for tag, energy in _BASE_BEAMS if label == energy), None)
 
 
 def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
@@ -399,10 +624,34 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
         print("Warning: hycal_map.json not found", file=sys.stderr)
         return {}
 
+    hycal_z_by_beam = {}
+    target_xy_by_beam = {}
+    root_dirs = {}
+    if root_path is not None and root_path.is_file() and HAS_UPROOT:
+        try:
+            with uproot.open(str(root_path)) as f:
+                root_dirs = {t: f.get(f"energy_{t}GeV") for t in _BEAM_TAGS}
+                for tag, root_dir in root_dirs.items():
+                    z = _read_hycal_z(root_dir)
+                    if z is not None:
+                        hycal_z_by_beam[tag] = z
+                    target_xy = _read_target_xy(root_dir)
+                    if target_xy is not None:
+                        target_xy_by_beam[tag] = target_xy
+            if not hycal_z_by_beam:
+                print(
+                    "Warning: ROOT file has no hycal_z_mm metadata; "
+                    f"using legacy {Z_HYCAL:g} mm geometry.",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"ROOT read error: {e}", file=sys.stderr)
+
     geo = _load_json_geometry(MODULES_JSON)
     data: Dict[str, ModuleData] = {}
     for name, (x, y, row, col) in geo.items():
-        data[name] = ModuleData(name, x, y, row, col)
+        data[name] = ModuleData(
+            name, x, y, row, col, hycal_z_by_beam, target_xy_by_beam)
 
     if root_path is not None and root_path.is_file() and HAS_UPROOT:
         try:
@@ -413,7 +662,9 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
                         if root_dir is None:
                             continue
                         try:
-                            d.hists[t] = root_dir[f"h_energy_{name}_{t}"].to_numpy()
+                            hist = root_dir[f"h_energy_{name}_{t}"]
+                            d.hists[t] = hist.to_numpy()
+                            d.hist_entries[t] = float(hist.member("fEntries"))
                         except Exception:
                             pass
         except Exception as e:
@@ -427,20 +678,14 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
     return data
 
 
-# Matplotlib canvas  (2x3 peak histograms + 1 large linearity plot)
+# Matplotlib canvas
 
-class TripleCanvas(FigureCanvas):
+class PlotCanvas(FigureCanvas):
     def __init__(self):
         fc = THEME.CANVAS
         self.fig = Figure(facecolor=fc)
-        # Peak histograms: top row e-p, second row e-e; columns 3.5, 2.2, 0.7 GeV.
-        gs = self.fig.add_gridspec(3, 3, height_ratios=[1, 1, 2],
-                                   hspace=0.60, wspace=0.42,
-                                   left=0.07, right=0.97, top=0.96, bottom=0.07)
-        self.axes: List = [self.fig.add_subplot(gs[r, c]) for r in range(2) for c in range(3)]
-        self.axes.append(self.fig.add_subplot(gs[2, :]))
-        for ax in self.axes:
-            ax.set_facecolor(fc)
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor(fc)
         super().__init__(self.fig)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -478,7 +723,12 @@ class NLViewerWindow(QMainWindow):
 
         self._peak_use_cb: Dict[str, QCheckBox] = {}
         self._peak_center_edit: Dict[str, QLineEdit] = {}
+        self._manual_nl_spins: Dict[str, QDoubleSpinBox] = {}
+        self._hist_canvases: Dict[str, PlotCanvas] = {}
+        self._linearity_canvas: Optional[PlotCanvas] = None
         self._fit_order_cb: Optional[QComboBox] = None
+        self._base_energy_cb: Optional[QComboBox] = None
+        self._base_beam_tag = "2p2"
 
         # scan state
         self._scan_timer  = QTimer(self)
@@ -510,12 +760,23 @@ class NLViewerWindow(QMainWindow):
         self._file_lbl = QLabel("No file loaded")
         self._file_lbl.setStyleSheet(f"color: {THEME.TEXT_DIM};")
         top.addWidget(self._file_lbl, stretch=1)
+        top.addWidget(QLabel("Base energy:"))
+        self._base_energy_cb = QComboBox()
+        for tag, energy in _BASE_BEAMS:
+            self._base_energy_cb.addItem(f"{energy} GeV", tag)
+        self._base_energy_cb.setCurrentIndex(1)
+        self._base_energy_cb.setToolTip(
+            "Beam energy whose e-p expected energy defines E_base for both nl fits.")
+        self._base_energy_cb.currentIndexChanged.connect(self._on_base_energy_changed)
+        top.addWidget(self._base_energy_cb)
         top.addWidget(QLabel("Color map:"))
         self._mode_cb = QComboBox()
         self._mode_cb.addItems([
             "Non-linearity (nl)",
             "Mean |corr/exp-1| (1st order)",
             "Mean |corr/exp-1| (2nd order)",
+            "Mean |data - 2nd-order fit| (E_rec/E_exp)",
+            "Base-energy e-e (corr/exp - 1), 2nd order",
             "Flat",
         ])
         self._mode_cb.currentIndexChanged.connect(self._on_mode_changed)
@@ -559,8 +820,8 @@ class NLViewerWindow(QMainWindow):
         top.addSpacing(12)
         self._export_btn = QPushButton("↩ Export nl → JSON")
         self._export_btn.setToolTip(
-            "Read a base calibration JSON, fill in nl1/nl2 values from the current\n"
-            "analysis results, and save a new JSON in the current directory.")
+            "Read a base calibration JSON and save nl1/nl2 coefficients from the current\n"
+            "fit or manual adjustment (2nd order by default) and selected base beam energy.")
         self._export_btn.setEnabled(False)
         self._export_btn.clicked.connect(self._export_nl)
         top.addWidget(self._export_btn)
@@ -571,6 +832,10 @@ class NLViewerWindow(QMainWindow):
         stop_sc.activated.connect(self._stop_scan)
         stop_sc2 = QShortcut(QKeySequence(Qt.Key.Key_Enter), self)
         stop_sc2.activated.connect(self._stop_scan)
+        prev_module_sc = QShortcut(QKeySequence(Qt.Key.Key_PageUp), self)
+        prev_module_sc.activated.connect(lambda: self._shortcut_jump_module(-1))
+        next_module_sc = QShortcut(QKeySequence(Qt.Key.Key_PageDown), self)
+        next_module_sc.activated.connect(lambda: self._shortcut_jump_module(1))
 
         # horizontal splitter: map | plots+controls
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -594,18 +859,145 @@ class NLViewerWindow(QMainWindow):
         right_lay.setContentsMargins(4, 0, 4, 4)
         right_lay.setSpacing(4)
 
+        module_nav = QHBoxLayout()
         self._mod_lbl = QLabel("← click a W module on the map")
         self._mod_lbl.setFont(QFont("Monospace", 12, QFont.Weight.Bold))
         self._mod_lbl.setStyleSheet(f"color: {THEME.ACCENT};")
-        right_lay.addWidget(self._mod_lbl)
-
-        self._canvas = TripleCanvas()
-        right_lay.addWidget(self._canvas, stretch=1)
+        module_nav.addWidget(self._mod_lbl, stretch=1)
+        self._prev_module_btn = QPushButton("← Previous module")
+        self._prev_module_btn.setEnabled(False)
+        self._prev_module_btn.setToolTip("Select the previous module by W number (PageUp).")
+        self._prev_module_btn.clicked.connect(lambda: self._jump_module(-1))
+        module_nav.addWidget(self._prev_module_btn)
+        self._next_module_btn = QPushButton("Next module →")
+        self._next_module_btn.setEnabled(False)
+        self._next_module_btn.setToolTip("Select the next module by W number (PageDown).")
+        self._next_module_btn.clicked.connect(lambda: self._jump_module(1))
+        module_nav.addWidget(self._next_module_btn)
+        right_lay.addLayout(module_nav)
 
         right_lay.addWidget(self._build_refit_panel())
+        right_lay.addWidget(self._build_histogram_grid(), stretch=3)
+        self._build_manual_nl_controls(right_lay)
+        self._linearity_canvas = PlotCanvas()
+        right_lay.addWidget(self._linearity_canvas, stretch=2)
 
         splitter.addWidget(right)
         splitter.setSizes([460, 900])
+
+    def _build_manual_nl_controls(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Manual non-linearity coefficients")
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(8, 3, 8, 6)
+        layout.setSpacing(3)
+        controls = QHBoxLayout()
+        controls.setSpacing(6)
+        controls.addWidget(QLabel("1st nl₁:"))
+        controls.addWidget(self._new_nl_spin("nl1"))
+        controls.addSpacing(8)
+        controls.addWidget(QLabel("2nd nl₁:"))
+        controls.addWidget(self._new_nl_spin("nl2_1"))
+        controls.addWidget(QLabel("nl₂:"))
+        controls.addWidget(self._new_nl_spin("nl2_2"))
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        actions = QHBoxLayout()
+        self._fit_fixed_vertex_btn = QPushButton("Fit Current Module")
+        self._fit_fixed_vertex_btn.setEnabled(False)
+        self._fit_fixed_vertex_btn.setToolTip(
+            "Fit only the selected base-energy e-p and e-e peaks.\n"
+            "Constrain the 2nd-order curve to R(E_base)=1 and its maximum to the selected vertex energy.")
+        self._fit_fixed_vertex_btn.clicked.connect(self._do_fit_fixed_vertex)
+        actions.addWidget(self._fit_fixed_vertex_btn)
+        actions.addWidget(QLabel("Vertex (MeV):"))
+        self._fixed_vertex_energy_spin = QDoubleSpinBox()
+        self._fixed_vertex_energy_spin.setDecimals(1)
+        self._fixed_vertex_energy_spin.setRange(0.1, 10000.0)
+        self._fixed_vertex_energy_spin.setSingleStep(50.0)
+        self._fixed_vertex_energy_spin.setValue(_NL_FIXED_VERTEX_ENERGY)
+        self._fixed_vertex_energy_spin.setFixedWidth(100)
+        self._fixed_vertex_energy_spin.setToolTip(
+            "Energy coordinate of the fixed maximum for constrained 2nd-order fits.")
+        actions.addWidget(self._fixed_vertex_energy_spin)
+        self._fit_fixed_vertex_all_btn = QPushButton("Fit All Modules")
+        self._fit_fixed_vertex_all_btn.setEnabled(False)
+        self._fit_fixed_vertex_all_btn.setToolTip(
+            "Apply the fixed-vertex fit to every loaded module using its base-energy e-p/e-e peaks.")
+        self._fit_fixed_vertex_all_btn.clicked.connect(self._do_fit_fixed_vertex_all)
+        actions.addWidget(self._fit_fixed_vertex_all_btn)
+        hint = QLabel("Edit or use arrows; curves and corrected points update live.")
+        hint.setStyleSheet(f"color: {THEME.TEXT_DIM}; font-size: 10px;")
+        actions.addWidget(hint)
+        actions.addStretch()
+        layout.addLayout(actions)
+        parent_layout.addWidget(group)
+
+    def _build_histogram_grid(self) -> QWidget:
+        grid_widget = QWidget()
+        grid = QGridLayout(grid_widget)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        for idx, key in enumerate(_PEAK_KEYS):
+            cell = QWidget()
+            cell_lay = QVBoxLayout(cell)
+            cell_lay.setContentsMargins(0, 0, 0, 0)
+            cell_lay.setSpacing(0)
+            canvas = PlotCanvas()
+            canvas.setMinimumHeight(100)
+            self._hist_canvases[key] = canvas
+            cell_lay.addWidget(canvas, stretch=1)
+            cell_lay.addWidget(self._build_peak_control_cell(key))
+            grid.addWidget(cell, idx // 3, idx % 3)
+        return grid_widget
+
+    def _build_peak_control_cell(self, key: str) -> QWidget:
+        cell = QWidget()
+        cell_lay = QHBoxLayout(cell)
+        cell_lay.setContentsMargins(2, 0, 2, 0)
+        cell_lay.setSpacing(4)
+
+        use_cb = QCheckBox("Use")
+        use_cb.setChecked(True)
+        use_cb.setEnabled(False)
+        use_cb.setToolTip("Include this peak point in the linearity fit.")
+        use_cb.toggled.connect(
+            lambda checked, _key=key: self._on_peak_use_changed(_key, checked))
+
+        center_edit = QLineEdit()
+        center_edit.setPlaceholderText("μ (MeV)")
+        center_edit.setFixedWidth(78)
+        center_edit.setEnabled(False)
+        center_edit.setToolTip(
+            "Manual peak center in MeV. Leave empty to use the fitted peak.")
+        center_edit.editingFinished.connect(
+            lambda _key=key: self._on_peak_center_edit(_key))
+
+        cell_lay.addStretch()
+        cell_lay.addWidget(use_cb)
+        cell_lay.addWidget(center_edit)
+        cell_lay.addStretch()
+
+        self._peak_use_cb[key] = use_cb
+        self._peak_center_edit[key] = center_edit
+        return cell
+
+    def _new_nl_spin(self, coefficient: str) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(6)
+        spin.setRange(-_NL_MANUAL_COEFFICIENT_LIMIT, _NL_MANUAL_COEFFICIENT_LIMIT)
+        spin.setSingleStep(0.001)
+        spin.setKeyboardTracking(True)
+        spin.setFixedWidth(105)
+        spin.setEnabled(False)
+        spin.setToolTip(
+            "Manual coefficients can exceed the automatic fit bounds. "
+            "Large values may move the curve outside the visible plot range.")
+        spin.valueChanged.connect(
+            lambda value, name=coefficient: self._on_manual_nl_changed(name, value))
+        self._manual_nl_spins[coefficient] = spin
+        return spin
 
     def _build_refit_panel(self) -> QGroupBox:
         box = QGroupBox("Peak re-fit  (drag on histogram to auto-fit)")
@@ -627,7 +1019,8 @@ class NLViewerWindow(QMainWindow):
         self._clear_range_btn = QPushButton("✕ Clear")
         self._clear_range_btn.setFixedWidth(60)
         self._clear_range_btn.setEnabled(False)
-        self._clear_range_btn.setToolTip("Clear the drag-selected fit range and revert to auto (Eexp ± 6σ)")
+        self._clear_range_btn.setToolTip(
+            "Clear the drag-selected fit range and revert to the adaptive PhysicsTools fit window.")
         self._clear_range_btn.clicked.connect(self._clear_span_range)
         row1.addWidget(self._clear_range_btn)
 
@@ -636,7 +1029,7 @@ class NLViewerWindow(QMainWindow):
         self._refit_peak_btn = QPushButton("Refit All Peaks")
         self._refit_peak_btn.setEnabled(False)
         self._refit_peak_btn.setToolTip(
-            "Re-run 3-step auto Gaussian fit on all 6 peaks (clears manual drag ranges).\n"
+            "Re-run the adaptive PhysicsTools Gaussian fit on all 6 peaks (clears manual drag ranges).\n"
             "Updates the linearity plot.")
         self._refit_peak_btn.clicked.connect(self._do_refit_all_peaks)
         row1.addWidget(self._refit_peak_btn)
@@ -647,6 +1040,7 @@ class NLViewerWindow(QMainWindow):
         self._refit_nl_btn.setEnabled(False)
         self._refit_nl_btn.setToolTip(
             "Re-run the non-linearity fit using current measurement points.\n"
+            "Weighted by each peak-fit mean uncertainty; peaks at the selected base beam have 2x weight.\n"
             "1st: E_rec/E_exp = 1 + nl1*(E_rec-E_base)/1000\n"
             "2nd: + nl2*((E_rec-E_base)/1000)^2")
         self._refit_nl_btn.clicked.connect(self._do_refit_nl)
@@ -656,51 +1050,17 @@ class NLViewerWindow(QMainWindow):
         row1.addWidget(QLabel("Export fit:"))
         self._fit_order_cb = QComboBox()
         self._fit_order_cb.addItems(["2nd order", "1st order"])
+        self._fit_order_cb.setCurrentIndex(0)
         self._fit_order_cb.setEnabled(False)
         self._fit_order_cb.setToolTip(
             "Coefficient order used when exporting JSON for this module.\n"
-            "2nd order writes nl1/nl2 from the 2nd-order fit.\n"
-            "1st order writes nl1 from the 1st-order fit and nl2 = 0.")
+            "2nd order is the default and matches the C++ calibration output.\n"
+            "1st order writes the linear coefficient and nl2 = 0.")
         self._fit_order_cb.currentIndexChanged.connect(self._on_fit_order_changed)
         row1.addWidget(self._fit_order_cb)
 
         row1.addStretch()
         lay.addLayout(row1)
-
-        peak_grid = QGridLayout()
-        peak_grid.setHorizontalSpacing(8)
-        peak_grid.setVerticalSpacing(2)
-        for idx, key in enumerate(_PEAK_KEYS):
-            cfg = peak_cfg(key)
-            cell = QWidget()
-            cell_lay = QHBoxLayout(cell)
-            cell_lay.setContentsMargins(0, 0, 0, 0)
-            cell_lay.setSpacing(3)
-
-            use_cb = QCheckBox("Use")
-            use_cb.setChecked(True)
-            use_cb.setEnabled(False)
-            use_cb.setToolTip("Include this peak point in the linearity fit.")
-            use_cb.toggled.connect(lambda checked, _key=key: self._on_peak_use_changed(_key, checked))
-
-            center_edit = QLineEdit()
-            center_edit.setPlaceholderText("μ MeV")
-            center_edit.setFixedWidth(62)
-            center_edit.setEnabled(False)
-            center_edit.setToolTip("Manual peak center in MeV. Leave empty to use the fitted peak.")
-            center_edit.editingFinished.connect(lambda _key=key: self._on_peak_center_edit(_key))
-
-            label = QLabel(str(cfg["label"]).replace("  ", " "))
-            label.setStyleSheet(f"color: {cfg['color']}; font-size: 10px;")
-            cell_lay.addWidget(label)
-            cell_lay.addWidget(use_cb)
-            cell_lay.addWidget(center_edit)
-            cell_lay.addStretch()
-
-            self._peak_use_cb[key] = use_cb
-            self._peak_center_edit[key] = center_edit
-            peak_grid.addWidget(cell, idx // 3, idx % 3)
-        lay.addLayout(peak_grid)
 
         self._status_lbl = QLabel("(select a module first)")
         self._status_lbl.setFont(QFont("Monospace", 9))
@@ -722,6 +1082,9 @@ class NLViewerWindow(QMainWindow):
     def _after_load(self):
         self._scan_btn.setEnabled(bool(self._data))
         self._export_btn.setEnabled(bool(self._data))
+        self._prev_module_btn.setEnabled(bool(self._data))
+        self._next_module_btn.setEnabled(bool(self._data))
+        self._fit_fixed_vertex_all_btn.setEnabled(bool(self._data))
 
     def _set_peak_controls_enabled(self, enabled: bool):
         for key in _PEAK_KEYS:
@@ -752,21 +1115,136 @@ class NLViewerWindow(QMainWindow):
             if d is None:
                 self._fit_order_cb.setCurrentIndex(0)
             else:
-                self._fit_order_cb.setCurrentIndex(1 if d.fit_order == "1st" else 0)
+                self._fit_order_cb.setCurrentIndex(0 if d.fit_order == "2nd" else 1)
             self._fit_order_cb.blockSignals(False)
+        self._sync_manual_nl_controls(d)
+
+    def _sync_manual_nl_controls(self, d: Optional[ModuleData]) -> None:
+        if d is None:
+            for spin in self._manual_nl_spins.values():
+                spin.setEnabled(False)
+            self._fit_fixed_vertex_btn.setEnabled(False)
+            return
+        values = {"nl1": d.nl, "nl2_1": d.nl2_1, "nl2_2": d.nl2_2}
+        for key, spin in self._manual_nl_spins.items():
+            spin.blockSignals(True)
+            spin.setRange(-_NL_MANUAL_COEFFICIENT_LIMIT, _NL_MANUAL_COEFFICIENT_LIMIT)
+            spin.setValue(float(np.clip(
+                values[key], -_NL_MANUAL_COEFFICIENT_LIMIT,
+                _NL_MANUAL_COEFFICIENT_LIMIT)))
+            spin.setEnabled(True)
+            spin.blockSignals(False)
+        self._fit_fixed_vertex_btn.setEnabled(True)
+
+    def _on_manual_nl_changed(self, coefficient: str, value: float) -> None:
+        d = self._cur
+        if d is None:
+            return
+        if coefficient == "nl1":
+            d.nl = float(value)
+        elif coefficient == "nl2_1":
+            d.nl2_1 = float(value)
+            d.nl2_fixed_vertex_energy = None
+        else:
+            d.nl2_2 = float(value)
+            d.nl2_fixed_vertex_energy = None
+        d.nl_coefficients_manual = True
+        points = d.linearity_points(self._base_beam_tag)
+        E_exp = np.array([p[1] for p in points])
+        E_rec = np.array([p[2] for p in points])
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        d.update_correction_residuals(
+            E_base, E_exp, E_rec, [p[0] for p in points], self._base_beam_tag)
+        self._refresh_map()
+        self._refresh_current_fit_display(refit=False)
+        self._status_lbl.setText(
+            f"{d.name}: manual coefficients updated; click Refit Linearity to restore fitted values.")
+
+    def _do_fit_fixed_vertex(self) -> None:
+        d = self._cur
+        if d is None:
+            return
+        vertex_energy = self._fixed_vertex_energy_spin.value()
+        try:
+            self._apply_fixed_vertex_fit(d, vertex_energy)
+        except ValueError as exc:
+            self._status_lbl.setText(f"Fixed-vertex fit failed: {exc}")
+            return
+
+        nl1, nl2 = d.nl2_1, d.nl2_2
+        self._refresh_map()
+        self._refresh_current_fit_display(
+            status=(
+                f"{d.name}: fitted base-energy e-p/e-e only; "
+                f"2nd-order maximum fixed at {vertex_energy:.1f} MeV "
+                f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1."),
+            refit=False,
+        )
+
+    def _apply_fixed_vertex_fit(self, d: ModuleData, vertex_energy: float) -> None:
+        nl1, nl2 = d.fit_nl2_fixed_vertex(self._base_beam_tag, vertex_energy)
+        d.nl2_1, d.nl2_2 = nl1, nl2
+        d.nl_coefficients_manual = True
+        d.nl2_fixed_vertex_energy = vertex_energy
+        points = d.linearity_points(self._base_beam_tag)
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        d.update_correction_residuals(
+            E_base,
+            np.array([p[1] for p in points]),
+            np.array([p[2] for p in points]),
+            [p[0] for p in points],
+            self._base_beam_tag,
+        )
+
+    def _do_fit_fixed_vertex_all(self) -> None:
+        if not self._data:
+            return
+        vertex_energy = self._fixed_vertex_energy_spin.value()
+        succeeded = 0
+        failures: Dict[str, List[str]] = {}
+        for module in self._data.values():
+            try:
+                self._apply_fixed_vertex_fit(module, vertex_energy)
+                succeeded += 1
+            except ValueError as exc:
+                failures.setdefault(str(exc), []).append(module.name)
+
+        self._refresh_map()
+        if self._cur is not None:
+            self._refresh_current_fit_display(refit=False)
+        skipped = len(self._data) - succeeded
+        summary = (
+            f"Fixed-vertex fit at {vertex_energy:.1f} MeV: "
+            f"{succeeded}/{len(self._data)} modules succeeded; {skipped} skipped."
+        )
+        if failures:
+            details = "; ".join(
+                f"{len(names)}: {reason} (e.g. {', '.join(names[:3])})"
+                for reason, names in sorted(
+                    failures.items(), key=lambda item: len(item[1]), reverse=True)
+            )
+            summary += f" Reasons: {details}"
+        self._status_lbl.setText(summary)
 
     def _refresh_current_fit_display(self, status: Optional[str] = None, refit: bool = True):
         d = self._cur
         if d is None:
             return
         if refit:
-            d.refit_nl(self._outer_zero_layers())
+            d.refit_nl(self._outer_zero_layers(), self._base_beam_tag)
             self._refresh_map()
+        self._sync_manual_nl_controls(d)
         self._draw_module(d)
-        self._mod_lbl.setText(
-            f"Module: {d.name}   θ={d.theta:.3f}°   "
-            f"nl = {d.nl:.4f} ± {d.nl_err:.4f}   "
-            f"χ²/ndf = {d.chi2_nl:.2f}/{d.ndf_nl}")
+        if d.nl_coefficients_manual:
+            self._mod_lbl.setText(
+                f"Module: {d.name}   θ={d.theta:.3f}°   "
+                f"manual 1st nl₁={d.nl:.6f}; "
+                f"2nd (nl₁, nl₂)=({d.nl2_1:.6f}, {d.nl2_2:.6f})")
+        else:
+            self._mod_lbl.setText(
+                f"Module: {d.name}   θ={d.theta:.3f}°   "
+                f"nl = {d.nl:.4f} ± {d.nl_err:.4f}   "
+                f"χ²/ndf = {d.chi2_nl:.2f}/{d.ndf_nl}")
         if status is not None:
             self._status_lbl.setText(status)
 
@@ -810,13 +1288,31 @@ class NLViewerWindow(QMainWindow):
         d = self._cur
         if d is None or self._fit_order_cb is None:
             return
-        d.fit_order = "1st" if self._fit_order_cb.currentIndex() == 1 else "2nd"
+        d.fit_order = "2nd" if self._fit_order_cb.currentIndex() == 0 else "1st"
         self._status_lbl.setText(
             f"{d.name} export will use {self._fit_order_cb.currentText()} coefficients.")
+
+    def _on_base_energy_changed(self, _idx: int):
+        if self._base_energy_cb is None:
+            return
+        self._base_beam_tag = str(self._base_energy_cb.currentData())
+        if not self._data:
+            return
+        self._refit_all_nl()
+        self._refresh_map()
+        self._refresh_current_fit_display(refit=False)
+        energy = dict(_BASE_BEAMS)[self._base_beam_tag]
+        self._status_lbl.setText(f"Base beam energy set to {energy} GeV.")
 
     def _load(self, path: Path):
         self._file_lbl.setText(f"Loading {path.name} …")
         QApplication.processEvents()
+        root_base = _read_base_beam_tag(path)
+        if root_base is not None and self._base_energy_cb is not None:
+            self._base_energy_cb.setCurrentIndex(
+                next(i for i, (tag, _) in enumerate(_BASE_BEAMS) if tag == root_base))
+        else:
+            self._base_beam_tag = str(self._base_energy_cb.currentData())
         self._data   = load_all(path)
         self._refit_all_nl()
         self._cur    = None
@@ -857,7 +1353,7 @@ class NLViewerWindow(QMainWindow):
     def _refit_all_nl(self):
         layers = self._outer_zero_layers()
         for d in self._data.values():
-            d.refit_nl(layers)
+            d.refit_nl(layers, self._base_beam_tag)
 
     def _on_outer_layers_changed(self, _value: int):
         if not self._data:
@@ -888,6 +1384,26 @@ class NLViewerWindow(QMainWindow):
                     std  = float(np.std(arr))
                     self._range_ctrl.set_range(mean - 3.0 * std,
                                                mean + 3.0 * std)
+        elif "data - 2nd-order fit" in mode:
+            values = {
+                name: d.mean_abs_data_fit_deviation_2nd
+                for name, d in self._data.items()
+            }
+            if mode_changed:
+                vals = [v for v in values.values() if math.isfinite(v)]
+                vmax = float(np.percentile(np.array(vals), 95)) if vals else 0.01
+                self._range_ctrl.set_range(0.0, max(vmax, 1e-6))
+        elif "Base-energy e-e" in mode:
+            values = {
+                name: d.base_ee_corr_residual_2nd
+                for name, d in self._data.items()
+            }
+            if mode_changed:
+                vals = [v for v in values.values() if math.isfinite(v)]
+                vmax = (float(np.percentile(np.abs(vals), 95))
+                        if vals else 0.01)
+                vmax = max(vmax, 1e-6)
+                self._range_ctrl.set_range(-vmax, vmax)
         elif "order" in mode:
             attr = "mean_corr_resid_1st" if "1st" in mode else "mean_corr_resid_2nd"
             values = {name: getattr(d, attr) for name, d in self._data.items()}
@@ -924,6 +1440,11 @@ class NLViewerWindow(QMainWindow):
         self._stop_scan()
         idx = self._current_index(names, -1 if step > 0 else 0)
         self._show_module_at(names, (idx + step) % len(names))
+
+    def _shortcut_jump_module(self, step: int):
+        if isinstance(QApplication.focusWidget(), QLineEdit):
+            return
+        self._jump_module(step)
 
     def keyPressEvent(self, event):
         focus = QApplication.focusWidget()
@@ -970,39 +1491,47 @@ class NLViewerWindow(QMainWindow):
         if d is None:
             return
         self._refresh_current_fit_display(
-            "Fit ranges cleared; peaks refit with auto windows.",
+            "Fit ranges cleared; peaks refit with adaptive windows.",
             refit=d.auto_fit_peaks())
 
     # ── drawing ────────────────────────────────────────────────────────────
 
     def _clear_plots(self):
-        for ax in self._canvas.axes:
+        canvases = [*self._hist_canvases.values()]
+        if self._linearity_canvas is not None:
+            canvases.append(self._linearity_canvas)
+        for canvas in canvases:
+            ax = canvas.ax
             ax.cla()
             ax.set_facecolor(THEME.CANVAS)
-        self._canvas.redraw()
+            canvas.redraw()
 
     def _draw_module(self, d: ModuleData):
-        axes = self._canvas.axes
-        for ax in axes:
+        for key in _PEAK_KEYS:
+            canvas = self._hist_canvases[key]
+            ax = canvas.ax
             ax.cla()
             ax.set_facecolor(THEME.CANVAS)
-
-        for i, key in enumerate(_PEAK_KEYS):
-            self._draw_energy_hist_single(axes[i], d, key)
+            self._draw_energy_hist_single(ax, d, key)
             cfg = peak_cfg(key)
-            self._canvas._style(axes[i],
+            canvas._style(ax,
                 title=f"{cfg['label']}  ({cfg['energy_label']})",
                 xlabel="E (MeV)", ylabel="Counts")
+            canvas.redraw()
 
-        # Large linearity plot on bottom row
-        self._draw_linearity(axes[6], d)
-        self._canvas._style(axes[6], title="Non-linearity",
-                            xlabel="E_rec (MeV)", ylabel="E_rec / E_exp")
-        self._canvas.redraw()
+        if self._linearity_canvas is not None:
+            ax = self._linearity_canvas.ax
+            ax.cla()
+            ax.set_facecolor(THEME.CANVAS)
+            self._draw_linearity(ax, d)
+            self._linearity_canvas._style(
+                ax, title="Non-linearity",
+                xlabel="E_rec (MeV)", ylabel="E_rec / E_exp")
+            self._linearity_canvas.redraw()
         self._setup_span_selectors(d)
 
     def _draw_energy_hist_single(self, ax, d: ModuleData, key: str):
-        """Draw histogram for one peak key with x-range [Eexp ± 8σ]."""
+        """Draw histogram for one peak key in the expected-energy search range."""
         cfg = peak_cfg(key)
         hist = hist_for_key(d, key)
         if hist is None:
@@ -1016,9 +1545,11 @@ class NLViewerWindow(QMainWindow):
         Eexp  = d.e_exp[key]
         sig   = d.sigma_exp[key]
 
-        # X range: [Eexp ± 8σ], clipped to histogram bounds
-        xlo = max(float(edges[0]),  Eexp - 8.0 * sig)
-        xhi = min(float(edges[-1]), Eexp + 8.0 * sig)
+        # Show a 50% wider display window for e-e peaks while keeping the
+        # actual peak-search and fit range aligned with PhysicsTools::fitPeak.
+        display_half_width = 0.3 if key.startswith("ee_") else 0.2
+        xlo = max(float(edges[0]), (1.0 - display_half_width) * Eexp)
+        xhi = min(float(edges[-1]), (1.0 + display_half_width) * Eexp)
         ax.set_xlim(xlo, xhi)
 
         ax.step(centers, counts, where="mid",
@@ -1038,11 +1569,11 @@ class NLViewerWindow(QMainWindow):
                        linewidth=1.2, linestyle="-", alpha=0.8, zorder=3)
 
         if Eexp > 0.0:
-            # Search window shading [Eexp ± 6σ]
-            ax.axvspan(Eexp - 6.0 * sig, Eexp + 6.0 * sig,
+            # Candidate peak search range [0.8 Eexp, 1.2 Eexp].
+            ax.axvspan(0.8 * Eexp, 1.2 * Eexp,
                        alpha=0.07, color=color, linewidth=0)
             # Expected energy marker
-            ax.axvline(Eexp, color=color, linewidth=0.8, linestyle=":", alpha=0.5)
+            ax.axvline(Eexp, color="orange", linewidth=1.5, linestyle="-", alpha=0.95)
             ax.text(0.97, 0.97, f"exp={Eexp:.0f}\nσ={sig:.0f}",
                     transform=ax.transAxes, fontsize=6, ha="right", va="top",
                     color=THEME.TEXT_DIM)
@@ -1062,7 +1593,7 @@ class NLViewerWindow(QMainWindow):
                         xy=(mu, amp), xytext=(0, 6), textcoords="offset points",
                         color=color, fontsize=7, ha="center", va="bottom")
         elif Eexp > 0.0:
-            ax.axvline(Eexp, color=color, linewidth=1.0, linestyle=":", alpha=0.5)
+            ax.axvline(Eexp, color="orange", linewidth=1.5, linestyle="-", alpha=0.95)
         if manual_mu > 0.0:
             ax.axvline(manual_mu, color=color, linewidth=1.5, linestyle="--", alpha=0.9)
             ax.annotate(f"manual {manual_mu:.1f}",
@@ -1074,29 +1605,33 @@ class NLViewerWindow(QMainWindow):
                     fontsize=7, color=THEME.TEXT_DIM, ha="left", va="top")
 
     def _draw_linearity(self, ax, d: ModuleData):
-        E_base = d.e_exp["ep_3p5"]
-        pts = d.linearity_points()
+        ax.set_xlim(0, 4500)
+        E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
+        pts = d.linearity_points(self._base_beam_tag)
         if not pts:
             ax.text(0.5, 0.5, "No valid peaks found", ha="center", va="center",
                     transform=ax.transAxes, color=THEME.TEXT_DIM, fontsize=9)
             return
 
         E_rec_arr = np.array([p[2] for p in pts])
+        has_1st_coefficients = d.ndf_nl > 0 or d.nl_coefficients_manual
+        has_2nd_coefficients = d.ndf_nl2 > 0 or d.nl_coefficients_manual
 
         ax.set_ylim(0.85, 1.15)
 
-        margin = (E_rec_arr.max() - E_rec_arr.min()) * 0.15 if len(E_rec_arr) > 1 else E_rec_arr.max() * 0.15
-        xplot = np.linspace(max(0, E_rec_arr.min() - margin), E_rec_arr.max() + margin, 300)
+        xlo, xhi = ax.get_xlim()
+        xplot = np.linspace(xlo, xhi, 500)
 
         ax.axhline(1.0, color="tomato", linestyle="--",
                    linewidth=1.5, alpha=0.75, label="y = 1 (ideal)")
 
-        if E_base > 0.0 and len(pts) >= 2:
+        if E_base > 0.0 and len(pts) >= 2 and has_1st_coefficients:
             y1fit = nl_ratio_1st(xplot, d.nl, E_base)
             ax.plot(xplot, y1fit, color="cornflowerblue", linewidth=2.0,
                     label="1st order fit")
 
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 >= 0:
+        if (E_base > 0.0 and (len(pts) >= 3 or d.nl_coefficients_manual)
+                and has_2nd_coefficients):
             y2fit = nl_ratio_2nd(xplot, d.nl2_1, d.nl2_2, E_base)
             ax.plot(xplot, y2fit, color="violet", linewidth=2.0,
                     linestyle="--", label="2nd order fit")
@@ -1112,7 +1647,7 @@ class NLViewerWindow(QMainWindow):
                         color=str(cfg["color"]), fontsize=6.5)
 
         # Corrected points — 1st order: E_corr = E_rec / (1 + nl*(E_rec-E_base)/1000)
-        if E_base > 0.0 and len(pts) >= 2:
+        if E_base > 0.0 and len(pts) >= 2 and has_1st_coefficients:
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_1st(ye_rec, d.nl, E_base)
                 E_corr = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1121,7 +1656,8 @@ class NLViewerWindow(QMainWindow):
                            marker="s", edgecolors="white", linewidths=0.5)
 
         # Corrected points — 2nd order
-        if E_base > 0.0 and len(pts) >= 3 and d.ndf_nl2 >= 0:
+        if (E_base > 0.0 and (len(pts) >= 3 or d.nl_coefficients_manual)
+                and has_2nd_coefficients):
             for key, xe, ye_rec in pts:
                 denom = nl_ratio_2nd(ye_rec, d.nl2_1, d.nl2_2, E_base)
                 E_corr2 = ye_rec / denom if denom != 0.0 else ye_rec
@@ -1141,13 +1677,26 @@ class NLViewerWindow(QMainWindow):
                         if d.ndf_nl > 0 else "")
             chi2_str = (f"χ²/ndf={d.chi2_nl2:.2f}/{d.ndf_nl2}"
                         if d.ndf_nl2 > 0 else "")
-            note = (
-                f"1st: nl₁={d.nl:.4f}±{d.nl_err:.4f}  {chi1_str}\n"
-                f"2nd: nl₁={d.nl2_1:.4f}±{d.nl2_1_err:.4f}"
-                f"  nl₂={d.nl2_2:.4f}±{d.nl2_2_err:.4f}\n"
-                f"     {chi2_str}\n"
-                f"E_base={E_base:.1f} MeV"
-            )
+            if d.nl_coefficients_manual:
+                vertex_note = (
+                    f"vertex={d.nl2_fixed_vertex_energy:.1f} MeV\n"
+                    if d.nl2_fixed_vertex_energy is not None else "")
+                note = (
+                    f"MANUAL COEFFICIENTS\n"
+                    f"1st: nl₁={d.nl:.6f}\n"
+                    f"2nd: nl₁={d.nl2_1:.6f}  nl₂={d.nl2_2:.6f}\n"
+                    f"{vertex_note}"
+                    f"E_base={E_base:.1f} MeV "
+                    f"({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
+                )
+            else:
+                note = (
+                    f"1st: nl₁={d.nl:.4f}±{d.nl_err:.4f}  {chi1_str}\n"
+                    f"2nd: nl₁={d.nl2_1:.4f}±{d.nl2_1_err:.4f}"
+                    f"  nl₂={d.nl2_2:.4f}±{d.nl2_2_err:.4f}\n"
+                    f"     {chi2_str}\n"
+                    f"E_base={E_base:.1f} MeV ({dict(_BASE_BEAMS)[self._base_beam_tag]} GeV)"
+                )
             ax.text(0.03, 0.97, note,
                     transform=ax.transAxes, fontsize=7.0,
                     va="top", ha="left", color="lightcyan",
@@ -1174,16 +1723,44 @@ class NLViewerWindow(QMainWindow):
                   loc="upper right", bbox_to_anchor=(1.0, 1.0),
                   **_leg_kw)
 
+        y_values = []
+        for line in ax.lines:
+            x_data = np.asarray(line.get_xdata(), dtype=float)
+            y_data = np.asarray(line.get_ydata(), dtype=float)
+            visible = np.isfinite(x_data) & np.isfinite(y_data) & (x_data >= xlo) & (x_data <= xhi)
+            if np.any(visible):
+                y_values.append(y_data[visible])
+        for collection in ax.collections:
+            offsets = np.asarray(collection.get_offsets(), dtype=float)
+            if offsets.ndim == 2 and offsets.shape[1] >= 2:
+                visible = (
+                    np.isfinite(offsets[:, 0]) & np.isfinite(offsets[:, 1])
+                    & (offsets[:, 0] >= xlo) & (offsets[:, 0] <= xhi)
+                )
+                if np.any(visible):
+                    y_values.append(offsets[visible, 1])
+        if y_values:
+            visible_y = np.concatenate(y_values)
+            y_min, y_max = float(np.min(visible_y)), float(np.max(visible_y))
+            y_span = max(y_max - y_min, 0.3)
+            padding = 0.05 * y_span
+            current_min, current_max = 0.85, 1.15
+            ax.set_ylim(
+                min(current_min, y_min - padding),
+                max(current_max, y_max + padding),
+            )
+
     # ── span selector ──────────────────────────────────────────────────────
 
     def _setup_span_selectors(self, d: ModuleData):
         """Attach SpanSelectors to all 6 peak histogram axes.
         Must be called after every canvas redraw (axes are recreated)."""
         self._span_selectors.clear()
-        for ax, key in zip(self._canvas.axes[:6], _PEAK_KEYS):
+        for key in _PEAK_KEYS:
             hist = hist_for_key(d, key)
             if hist is None:
                 continue
+            ax = self._hist_canvases[key].ax
             sel = SpanSelector(
                 ax,
                 lambda xmin, xmax, _key=key: self._on_span_select(_key, xmin, xmax),
@@ -1235,7 +1812,7 @@ class NLViewerWindow(QMainWindow):
             self._status_lbl.setText(
                 f"Not enough bins in [{xmin:.0f}, {xmax:.0f}] MeV — try wider.")
             return False
-        mu, sigma_f, amp = r
+        mu, sigma_f, amp, mean_error = r
         range_note = f"  (drag [{xmin:.0f}, {xmax:.0f}] MeV)"
         if mu <= 0.0:
             self._status_lbl.setText(
@@ -1244,19 +1821,20 @@ class NLViewerWindow(QMainWindow):
         d.peaks[key]      = mu
         d.peak_sigma[key] = sigma_f
         d.peak_amp[key]   = amp
+        d.peak_mean_error[key] = mean_error
         self._status_lbl.setText(
             f"{cfg['label']}: μ={mu:.2f} MeV, σ={sigma_f:.2f} MeV{range_note}")
         return True
 
     def _do_refit_all_peaks(self):
-        """Refit all 6 peaks with auto windows (clears manual ranges)."""
+        """Refit all 6 peaks with adaptive windows (clears manual ranges)."""
         d = self._cur
         if d is None:
             return
         self._reset_spans()
         ok = d.auto_fit_peaks()
         self._refresh_current_fit_display(
-            "All 6 peaks refit with auto windows." if ok else None, refit=ok)
+            "All 6 peaks refit with adaptive windows." if ok else None, refit=ok)
 
     def _do_refit_nl(self):
         d = self._cur
@@ -1331,14 +1909,16 @@ class NLViewerWindow(QMainWindow):
                 n_skipped += 1
                 continue
 
-            has_fit = d.ndf_nl > 0
-            force_zero = d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber
+            has_fit = d.ndf_nl2 > 0 or d.nl_coefficients_manual
+            has_anchor = d.measured_peak(f"ep_{self._base_beam_tag}") > 0.0
+            force_zero = has_anchor and (
+                d.is_outer_layer(self._outer_zero_layers()) or d.is_absorber)
             if not (has_fit or force_zero):
                 n_skipped += 1
                 continue
 
-            entry["base_energy"] = round(float(d.e_exp["ep_3p5"]), 6)
-            if force_zero:
+            entry["base_energy"] = round(float(d.e_exp[f"ep_{self._base_beam_tag}"]), 6)
+            if force_zero and not d.nl_coefficients_manual:
                 nl1, nl2 = 0.0, 0.0
             elif d.fit_order == "1st":
                 nl1, nl2 = d.nl, 0.0
