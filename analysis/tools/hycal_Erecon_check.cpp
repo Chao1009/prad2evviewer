@@ -608,6 +608,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             for( int j = 0; j < event.n_clusters; j++) {
                 if (event.cl_nblocks[j] < 3) continue;
                 if (event.matchFlag[j] == 0) continue;
+                if (!InHyCalRing(event.cl_x[j], event.cl_y[j], 2.0, 16.)) continue;
 
                 HCHit hc_hit;
                 hc_hit.x = event.cl_x[j];
