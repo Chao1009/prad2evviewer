@@ -187,13 +187,12 @@ int main(int argc, char *argv[]){
 
     // the output is written from the seed constants; without them every module
     // would get factor 0, so fail before the event loop
-    std::string calib_file = (!seedCalib.empty() && seedCalib[0] == '/')
-                           ? seedCalib : dbDir + "/" + seedCalib;
+    std::string calib_file = seed_calib_file.empty()
+        ? dbDir + "/calibration/calibration_factor_3p5_June1.json"
+        : seed_calib_file;
     int nmatched = hycal.LoadCalibration(calib_file);
     if (nmatched <= 0) {
-        std::cerr << "Error: cannot load seed calibration " << calib_file
-                  << (nmatched == 0 ? " (no module matched)" : "")
-                  << "; choose one with -s. Aborting.\n";
+        std::cerr << "Failed to load seed calibration from " << calib_file << "\n";
         return 1;
     }
     std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
@@ -326,16 +325,6 @@ int main(int argc, char *argv[]){
         std::cerr << "); check trigger_bits in the inputs. Aborting before writing calibration.\n";
         return 1;
     }
-
-    std::string calib_file = seed_calib_file.empty()
-        ? dbDir + "/calibration/calibration_factor_3p5_June1.json"
-        : seed_calib_file;
-    int nmatched = hycal.LoadCalibration(calib_file);
-    if (nmatched <= 0) {
-        std::cerr << "Failed to load seed calibration from " << calib_file << "\n";
-        return 1;
-    }
-    std::cerr << "Calibration: " << calib_file << " (" << nmatched << " modules)\n";
 
     TH1F *h_energy_peak_3p5 = new TH1F("h_energy_peak_3p5", "Energy Peak Distribution;Energy (MeV);Counts", 4000, 0, 4000);
 
