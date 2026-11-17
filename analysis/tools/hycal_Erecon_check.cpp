@@ -604,92 +604,69 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
         }
 
         if (mode == EnergyMode::Ee) {
-            if (event.n_clusters != 2) continue;
-            if (event.cl_nblocks[0] < 3 || event.cl_nblocks[1] < 3) continue;
-            if (event.matchFlag[0] == 0 || event.matchFlag[1] == 0) continue;
+            if (event.n_clusters > 2) continue;
+            for( int j = 0; j < event.n_clusters; j++) {
+                if (event.cl_nblocks[j] < 3) continue;
+                if (event.matchFlag[j] == 0) continue;
 
-            HCHit hc_hit[2];
-            hc_hit[0].x = event.cl_x[0];
-            hc_hit[0].y = event.cl_y[0];
-            hc_hit[0].z = event.cl_z[0];
-            hc_hit[0].energy = event.cl_energy[0];
+                HCHit hc_hit;
+                hc_hit.x = event.cl_x[j];
+                hc_hit.y = event.cl_y[j];
+                hc_hit.z = event.cl_z[j];
+                hc_hit.energy = event.cl_energy[j];
 
-            hc_hit[1].x = event.cl_x[1];
-            hc_hit[1].y = event.cl_y[1];
-            hc_hit[1].z = event.cl_z[1];
-            hc_hit[1].energy = event.cl_energy[1];
+                if (hc_hit.energy > run_config.Ebeam - 3.0f * 0.03 / std::sqrt(run_config.Ebeam / 1000.f) * run_config.Ebeam)
+                    continue;
 
-            GEMHit gem_hit[2];
-            bool has_gem_hit[2] = {false, false};
-            for (int j = 0; j < 2; j++){
+                GEMHit gem_hit;
+                bool has_gem_hit = false;
                 for (int did = 3; did >=0; did--){
-                    if (event.first_match(j, did, gem_hit[j].x, gem_hit[j].y, gem_hit[j].z)) {
-                        has_gem_hit[j] = true;
+                    if (event.first_match(j, did, gem_hit.x, gem_hit.y, gem_hit.z)) {
+                        has_gem_hit = true;
                         break;
                     }
                 }
-            }
-            if (!has_gem_hit[0] || !has_gem_hit[1]) continue;
-            // Project to HyCal surface
-            GetProjection(gem_hit[0], hc_hit[0].z);
-            GetProjection(gem_hit[1], hc_hit[1].z);
+                if (!has_gem_hit) continue;
+                // Project to HyCal surface
+                GetProjection(gem_hit, hc_hit.z);
 
-            MollerEvent moller_event = {DataPoint(gem_hit[0].x, gem_hit[0].y, gem_hit[0].z, hc_hit[0].energy),
-                        DataPoint(gem_hit[1].x, gem_hit[1].y, gem_hit[1].z, hc_hit[1].energy)};
+                const float theta = std::atan2(
+                    std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z) * 180.0f / M_PI;
 
-            const float theta0 = std::atan2(
-                std::sqrt(gem_hit[0].x * gem_hit[0].x + gem_hit[0].y * gem_hit[0].y), gem_hit[0].z) * 180.0f / M_PI;
-            const float theta1 = std::atan2(
-                std::sqrt(gem_hit[1].x * gem_hit[1].x + gem_hit[1].y * gem_hit[1].y), gem_hit[1].z) * 180.0f / M_PI;
+                // Move back to HyCal center coordinates
+                hc_hit.x -= event.hycal_center_x;
+                hc_hit.y -= event.hycal_center_y;
 
-            // Move back to HyCal center coordinates
-            hc_hit[0].x -= event.hycal_center_x;
-            hc_hit[0].y -= event.hycal_center_y;
-            hc_hit[1].x -= event.hycal_center_x;
-            hc_hit[1].y -= event.hycal_center_y;
+                gem_hit.x -= event.hycal_center_x;
+                gem_hit.y -= event.hycal_center_y;
 
-            gem_hit[0].x -= event.hycal_center_x;
-            gem_hit[0].y -= event.hycal_center_y;
-            gem_hit[1].x -= event.hycal_center_x;
-            gem_hit[1].y -= event.hycal_center_y;
-
-            if (!InHyCalRing(gem_hit[0].x, gem_hit[0].y, 2.0, 15.)) continue;
-            if (!InHyCalRing(gem_hit[1].x, gem_hit[1].y, 2.0, 15.)) continue;
-
-            if (!PhysicsTools::isMoller_kinematic(
-                    theta0, hc_hit[0].energy, theta1, hc_hit[1].energy,
-                    run_config.Ebeam, 0.03f))
-                continue;
-            if (!PhysicsTools::isBackToBack(moller_event, 8.0f)) continue;
-            const float theta[2] = {theta0, theta1};
-            for (int i = 0; i < 2; ++i) {
-                const auto *mod = hycal.module_by_id(event.cl_center[i]);
+                const auto *mod = hycal.module_by_id(event.cl_center[j]);
                 if (!mod) continue;
                 const int module_index = mod->id - 1001;
                 if (module_index < 0 || module_index >= 1156) continue;
-                const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit[i].x, gem_hit[i].y);
+                const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
 
-                const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta[i]);
+                const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta);
                 if (theta_bin >= 1 && theta_bin <= Nbins) {
                     result->h1_yield_theta->Fill(
-                        theta[i], 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
-                    result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[i]);
+                        theta, 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
+                    result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[j]);
                     if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
-                        result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[i]);
+                        result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[j]);
                     } else {
-                        result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[i]);
+                        result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[j]);
                     }
                 }
-                result->h2_Erecon_theta->Fill(theta[i], event.cl_energy[i]);
+                result->h2_Erecon_theta->Fill(theta, event.cl_energy[j]);
 
                 if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
-                    result->h2_Erecon_theta_center->Fill(theta[i], event.cl_energy[i]);
-                    result->h1_E_modules[module_index]->Fill(event.cl_energy[i]);
+                    result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[j]);
+                    result->h1_E_modules[module_index]->Fill(event.cl_energy[j]);
                 } else {
-                    result->h2_Erecon_theta_edge->Fill(theta[i], event.cl_energy[i]);
+                    result->h2_Erecon_theta_edge->Fill(theta, event.cl_energy[j]);
                 }
 
-                result->h2_hit_hycal->Fill(hc_hit[i].x, hc_hit[i].y);
+                result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
                 result->h2_hit_module_hycal->Fill(xd_gem, yd_gem);
             }
             ++result->events_processed;
