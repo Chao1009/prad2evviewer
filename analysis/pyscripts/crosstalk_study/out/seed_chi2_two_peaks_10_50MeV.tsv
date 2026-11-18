@@ -1,0 +1,20 @@
+# final scans (per-module noise reference, 1 sigma baseline clip); fit: sum of two Gaussians in log10(chi-squared per degree of freedom), 60 bins 0.1-100, Poisson weights; peaks in linear units; frac_seeds_in_peak2_window = fraction of all seeds within 1 sigma of peak 2
+run_type	N_seeds	one_gauss_chi2_ndf	two_gauss_chi2_ndf	peak1_chi2dof	sigma1_log10	frac1	peak2_chi2dof	sigma2_log10	frac2	frac_seeds_in_peak2_window	fit_note
+0p73GeV_H2	2018289	1123.4/57	562.6/54	0.871	0.1573	0.9988	2.593	0.1504	0.001155	0.02004	free fit degenerate (peaks 0.87 and 0.88, chi2 408.7); shown: second peak constrained above 2.59
+2p24GeV_H2	6328634	149610.8/57	5438.7/54	0.8336	0.1582	0.9733	5.381	0.2883	0.02667	0.01863	free
+3p49GeV_H2	2332345	195967.0/57	44357.4/54	0.8543	0.1597	0.9337	17	0.1878	0.06627	0.04488	free
+
+# tail fractions of seed chi-squared per degree of freedom (10-50 MeV clusters)
+run_type	N	frac_gt2	frac_gt4	frac_gt10
+0p73GeV_H2	2018289	0.0115	0.0002	0.0000
+2p24GeV_H2	6328634	0.0338	0.0182	0.0051
+3p49GeV_H2	2332345	0.0949	0.0776	0.0608
+
+# populations: |log10 chi2 - log10 peak_i| <= 1 sigma_i and not in the other window; 0p73GeV_H2 population 2 is the upper tail of peak 1 (no separated peak). Rise/fall from raw samples re-decoded from the first gated events of each run (splits read in scan order as needed; same gate, light-monitoring veto and event order as the scan; event numbers checked against the scan): baseline = stored scan pedestal ch_ped of the channel; peak = largest sample within 12 ns of the matched-filter onset of the largest in-window pulse + template peak time; rise = t(90 %) - t(10 %) on the rising edge (last sample below the level before the peak), fall = t(10 %) - t(90 %) after the peak (first sample below the level), linear interpolation; channels with an overflow sample excluded (N_clipped_excluded); fall NaN when the waveform ends above 10 % of the peak; comb structure in the histograms comes from 4 ns sampling and integer ADC levels on 15-30 ADC peaks. Each run gets a share of the per-type budget in proportion to its number of splits (a run with fewer gated events than its share is used whole). Decoded: 0p73GeV_H2: 24590 (prad_024590.evio.00010;prad_024590.evio.00020, 312500 events), 24603 (prad_024603.evio.00050, 187500 events); 2p24GeV_H2: 25228 (prad_025228.evio.00050, 130953 events), 25257 (prad_025257.evio.00100, 83333 events), 25260 (prad_025260.evio.00100, 95238 events), 25299 (prad_025299.evio.00100, 95238 events), 25320 (prad_025320.evio.00050, 95238 events); 3p49GeV_H2: 24698 (prad_024698.evio.00050;prad_024698.evio.00100, 200000 events), 24911 (prad_024911.evio.00100;prad_024911.evio.00200, 200000 events), 24937 (prad_024937.evio.00050;prad_024937.evio.00100;prad_024937.evio.00150;prad_024937.evio.00200, 93781 events)
+run_type	population	events_decoded	N_in_window_decoded	N_clipped_excluded	rise_N	rise_median_ns	rise_p16	rise_p84	fall_N	fall_median_ns	fall_p16	fall_p84
+0p73GeV_H2	1	500000	220299	0	220299	6.735	5.99	8.653	220299	45.67	34.07	55.13
+0p73GeV_H2	2	500000	6476	0	6475	7.412	5.728	12.18	6474	37.6	25.52	50.13
+2p24GeV_H2	1	500000	315631	0	315626	6.838	6.022	8.88	315629	44.8	33.65	54.63
+2p24GeV_H2	2	500000	8706	0	8692	12.56	9.471	16.33	8696	12.19	6.744	16.89
+3p49GeV_H2	1	493781	255975	0	255956	6.946	6.057	9.097	255971	43.26	33.07	53.51
+3p49GeV_H2	2	493781	17382	0	17345	9.162	7.463	12.08	17350	6.301	5.436	7.079

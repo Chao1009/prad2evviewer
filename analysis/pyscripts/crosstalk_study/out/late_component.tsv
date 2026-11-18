@@ -1,0 +1,347 @@
+# late component: t_cfd - (matched-filter onset + template 50 % rise time) > +8 ns; core median 0.0 ns for every run type; 10-4000 MeV clusters of output/crosstalk_study/scan
+# roles: seed = seed of a cluster with >= 2 members; neighbour = non-seed member; isolated = single-member cluster; adjacent FADC channel = same crate and slot, channel number +-1
+table	run_type	key1	key2	entries	value_late	value_control	note
+fraction	0p73GeV_H2	seed	10-50 MeV	276797	5.780e-05		late fraction
+fraction	0p73GeV_H2	seed	50-100 MeV	319885	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	100-200 MeV	338393	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	200-500 MeV	1148096	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	500-1000 MeV	1977778	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	1000-2000 MeV	627	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	2000-3000 MeV	137	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	3000-4000 MeV	1	0.000e+00		late fraction
+fraction	0p73GeV_H2	seed	all 10-4000 MeV	4061714	3.939e-06		late fraction
+fraction	0p73GeV_H2	neighbour	10-50 MeV	289830	3.726e-04		late fraction
+fraction	0p73GeV_H2	neighbour	50-100 MeV	421664	1.660e-04		late fraction
+fraction	0p73GeV_H2	neighbour	100-200 MeV	608317	1.282e-04		late fraction
+fraction	0p73GeV_H2	neighbour	200-500 MeV	3465609	2.115e-04		late fraction
+fraction	0p73GeV_H2	neighbour	500-1000 MeV	8219480	7.440e-04		late fraction
+fraction	0p73GeV_H2	neighbour	1000-2000 MeV	3652	5.476e-04		late fraction
+fraction	0p73GeV_H2	neighbour	2000-3000 MeV	1049	0.000e+00		late fraction
+fraction	0p73GeV_H2	neighbour	3000-4000 MeV	5	0.000e+00		late fraction
+fraction	0p73GeV_H2	neighbour	all 10-4000 MeV	13009606	5.462e-04		late fraction
+fraction	0p73GeV_H2	isolated	10-50 MeV	1741434	1.774e-04		late fraction
+fraction	0p73GeV_H2	isolated	50-100 MeV	140372	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	100-200 MeV	38974	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	200-500 MeV	10011	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	500-1000 MeV	158	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	1000-2000 MeV	24	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	2000-3000 MeV	2	0.000e+00		late fraction
+fraction	0p73GeV_H2	isolated	3000-4000 MeV	0	nan		late fraction
+fraction	0p73GeV_H2	isolated	all 10-4000 MeV	1930975	1.600e-04		late fraction
+fraction_vs_amplitude	0p73GeV_H2	all roles	10-20 ADC	6321450	1.174e-03		late fraction by own main amplitude
+fraction_vs_amplitude	0p73GeV_H2	all roles	20-50 ADC	5623151	2.134e-06		late fraction by own main amplitude
+fraction_vs_amplitude	0p73GeV_H2	all roles	50-4096 ADC	7057694	0.000e+00		late fraction by own main amplitude
+hit_vs_control	0p73GeV_H2	entries		7431	7431	4118373	late hits matched / control hits (weighted to the late hits' module, amplitude band and role)
+hit_vs_control	0p73GeV_H2	k >= 2 pulses	fraction	7431	0.0022	0.0014	
+hit_vs_control	0p73GeV_H2	extra pulse amplitude (ADC)	median [16 %, 84 %]	16	7.931 [6.158, 9.782]	8.151 [6.309, 10.38]	largest non-main pulse, k >= 2
+hit_vs_control	0p73GeV_H2	extra pulse onset - main onset (ns)	median [16 %, 84 %]	16	19.64 [-103.9, 151.3]	40.22 [-110.5, 154.8]	k >= 2
+hit_vs_control	0p73GeV_H2	chi-squared per degree of freedom	median [16 %, 84 %]	7431	2.194 [1.601, 2.941]	1.003 [0.684, 1.503]	
+hit_vs_control	0p73GeV_H2	main amplitude (ADC)	median [16 %, 84 %]	7431	11.1 [10.28, 12.87]	11.6 [10.55, 13.1]	
+hit_vs_control	0p73GeV_H2	largest geometric neighbour amplitude (ADC)	median [16 %, 84 %]	7144	507.8 [341.4, 603]	366.8 [126.2, 534.6]	
+hit_vs_control	0p73GeV_H2	largest geometric neighbour onset - hit onset (ns)	median [16 %, 84 %]	7144	-1.861 [-3.918, 0.3292]	-0.5429 [-3.258, 1.882]	
+hit_vs_control	0p73GeV_H2	largest geometric neighbour in the same FADC slot	fraction	7431	0.5556	0.4659	among hits with a neighbour >= 10 ADC
+hit_vs_control	0p73GeV_H2	t_cfd(hit) - t_mf(largest geometric neighbour) (ns)	median [16 %, 84 %]	7144	12.69 [10.28, 14.89]	0.734 [-1.778, 3.621]	
+hit_vs_control	0p73GeV_H2	largest adjacent FADC channel amplitude (ADC)	median [16 %, 84 %]	7431	77.67 [0, 567.3]	0 [0, 217]	
+hit_vs_control	0p73GeV_H2	adjacent FADC channel > 300 ADC	fraction	7431	0.4469	0.1283	
+hit_vs_control	0p73GeV_H2	adjacent FADC channel > 300 ADC and not a geometric neighbour	fraction	7431	0.0054	0.0007	
+hit_vs_control	0p73GeV_H2	t_cfd(hit) - t_mf(adjacent FADC channel) (ns)	median [16 %, 84 %]	3321	12.49 [10.74, 14.38]	1.282 [-0.6149, 3.527]	adjacent channel > 300 ADC
+hit_vs_control	0p73GeV_H2	matched-filter onset hit - adjacent FADC channel (ns)	median [16 %, 84 %]	3321	1.752 [0.1851, 3.381]	0.9281 [-0.7709, 2.792]	adjacent channel > 300 ADC
+hit_vs_control	0p73GeV_H2	hit amplitude / adjacent FADC channel amplitude	median [16 %, 84 %]	3321	0.02191 [0.01819, 0.02819]	0.02602 [0.02045, 0.03428]	adjacent channel > 300 ADC
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	none read out >= 10 ADC	4066152	7.336e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	1-100 ADC	1376972	5.708e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	100-200 ADC	231230	6.098e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	200-300 ADC	157358	1.239e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	300-500 ADC	301219	4.239e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	500-700 ADC	185540	1.070e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	700-1000 ADC	2959	1.724e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	1000-1500 ADC	1	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	1500-2000 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; all	2000-4096 ADC	17	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	4066152	7.336e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1-100 ADC	209673	2.432e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	100-200 ADC	22979	6.093e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	200-300 ADC	8565	1.051e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	300-500 ADC	6471	2.627e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	500-700 ADC	2145	9.790e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	700-1000 ADC	29	6.897e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1000-1500 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1500-2000 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	2000-4096 ADC	11	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	none read out >= 10 ADC	3299750	9.092e-07		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	1-100 ADC	1378346	7.255e-07		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	100-200 ADC	240957	4.150e-06		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	200-300 ADC	163845	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	300-500 ADC	318124	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	500-700 ADC	218582	3.202e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	700-1000 ADC	3545	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	1000-1500 ADC	2	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	1500-2000 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; all	2000-4096 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	3299750	9.092e-07		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1-100 ADC	178993	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	100-200 ADC	14342	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	200-300 ADC	4916	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	300-500 ADC	2945	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	500-700 ADC	637	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	700-1000 ADC	5	0.000e+00		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1000-1500 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1500-2000 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	0p73GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	2000-4096 ADC	0	nan		P(late) by largest adjacent FADC channel amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	0-1 ADC	1035338	2.560e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1-100 ADC	675045	2.415e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	100-200 ADC	414251	2.728e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	200-300 ADC	610599	3.800e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	300-500 ADC	1589988	7.704e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	500-700 ADC	936446	1.812e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	700-1000 ADC	11581	1.036e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1000-1500 ADC	5	0.000e+00		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1500-2000 ADC	0	nan		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	0p73GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	2000-4096 ADC	0	nan		P(late) by largest geometric neighbour amplitude
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 0	649378	1.654e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 1	527966	2.152e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 2	533799	1.055e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 3	571777	6.121e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 4	503856	7.879e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 5	408921	8.926e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 6	391098	1.521e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 7	435669	8.516e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 8	248118	6.529e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 9	406305	1.698e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 10	324161	8.391e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 11	220971	8.463e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 12	287185	6.651e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 13	287058	1.087e-03		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 14	259269	8.833e-04		
+late_vs_fadc_channel	0p73GeV_H2	own 10-20 ADC	channel 15	265919	1.974e-03		
+fraction	2p24GeV_H2	seed	10-50 MeV	1206023	4.084e-03		late fraction
+fraction	2p24GeV_H2	seed	50-100 MeV	922378	1.117e-04		late fraction
+fraction	2p24GeV_H2	seed	100-200 MeV	685727	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	200-500 MeV	1690548	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	500-1000 MeV	1704592	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	1000-2000 MeV	3434607	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	2000-3000 MeV	2364350	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	3000-4000 MeV	997	0.000e+00		late fraction
+fraction	2p24GeV_H2	seed	all 10-4000 MeV	12009222	4.187e-04		late fraction
+fraction	2p24GeV_H2	neighbour	10-50 MeV	1321916	8.372e-03		late fraction
+fraction	2p24GeV_H2	neighbour	50-100 MeV	1344965	1.485e-03		late fraction
+fraction	2p24GeV_H2	neighbour	100-200 MeV	1352998	5.824e-04		late fraction
+fraction	2p24GeV_H2	neighbour	200-500 MeV	4793361	3.050e-04		late fraction
+fraction	2p24GeV_H2	neighbour	500-1000 MeV	8120247	1.100e-03		late fraction
+fraction	2p24GeV_H2	neighbour	1000-2000 MeV	22586366	2.491e-03		late fraction
+fraction	2p24GeV_H2	neighbour	2000-3000 MeV	17165691	2.609e-03		late fraction
+fraction	2p24GeV_H2	neighbour	3000-4000 MeV	3924	1.580e-02		late fraction
+fraction	2p24GeV_H2	neighbour	all 10-4000 MeV	56689468	2.211e-03		late fraction
+fraction	2p24GeV_H2	isolated	10-50 MeV	5121281	2.609e-03		late fraction
+fraction	2p24GeV_H2	isolated	50-100 MeV	261533	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	100-200 MeV	63273	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	200-500 MeV	23113	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	500-1000 MeV	3815	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	1000-2000 MeV	6176	1.619e-04		late fraction
+fraction	2p24GeV_H2	isolated	2000-3000 MeV	798	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	3000-4000 MeV	93	0.000e+00		late fraction
+fraction	2p24GeV_H2	isolated	all 10-4000 MeV	5480082	2.438e-03		late fraction
+fraction_vs_amplitude	2p24GeV_H2	all roles	10-20 ADC	20044375	6.527e-03		late fraction by own main amplitude
+fraction_vs_amplitude	2p24GeV_H2	all roles	20-50 ADC	23110170	5.585e-04		late fraction by own main amplitude
+fraction_vs_amplitude	2p24GeV_H2	all roles	50-4096 ADC	31024225	3.223e-08		late fraction by own main amplitude
+hit_vs_control	2p24GeV_H2	entries		143744	143744	24116292	late hits matched / control hits (weighted to the late hits' module, amplitude band and role)
+hit_vs_control	2p24GeV_H2	k >= 2 pulses	fraction	143744	0.0151	0.0046	
+hit_vs_control	2p24GeV_H2	extra pulse amplitude (ADC)	median [16 %, 84 %]	2165	9.533 [7.787, 11.67]	9.014 [6.553, 12.56]	largest non-main pulse, k >= 2
+hit_vs_control	2p24GeV_H2	extra pulse onset - main onset (ns)	median [16 %, 84 %]	2165	12.41 [10.8, 14.69]	23.39 [-110.7, 150.2]	k >= 2
+hit_vs_control	2p24GeV_H2	chi-squared per degree of freedom	median [16 %, 84 %]	143744	5.017 [2.71, 8.131]	0.9555 [0.6509, 1.496]	
+hit_vs_control	2p24GeV_H2	main amplitude (ADC)	median [16 %, 84 %]	143744	13.27 [10.83, 18.05]	13.39 [11.07, 18.37]	
+hit_vs_control	2p24GeV_H2	largest geometric neighbour amplitude (ADC)	median [16 %, 84 %]	131540	1115 [386.9, 1546]	788.3 [60.94, 1443]	
+hit_vs_control	2p24GeV_H2	largest geometric neighbour onset - hit onset (ns)	median [16 %, 84 %]	131540	-4.05 [-5.857, -1.874]	-0.5143 [-3.016, 2.079]	
+hit_vs_control	2p24GeV_H2	largest geometric neighbour in the same FADC slot	fraction	143744	0.5311	0.3947	among hits with a neighbour >= 10 ADC
+hit_vs_control	2p24GeV_H2	t_cfd(hit) - t_mf(largest geometric neighbour) (ns)	median [16 %, 84 %]	131540	13.73 [11.76, 15.58]	0.5806 [-2.038, 3.29]	
+hit_vs_control	2p24GeV_H2	largest adjacent FADC channel amplitude (ADC)	median [16 %, 84 %]	143744	110 [0, 1371]	0 [0, 103.1]	
+hit_vs_control	2p24GeV_H2	adjacent FADC channel > 300 ADC	fraction	143744	0.4734	0.0951	
+hit_vs_control	2p24GeV_H2	adjacent FADC channel > 300 ADC and not a geometric neighbour	fraction	143744	0.0559	0.0067	
+hit_vs_control	2p24GeV_H2	t_cfd(hit) - t_mf(adjacent FADC channel) (ns)	median [16 %, 84 %]	68053	13.68 [12.1, 15.37]	1.507 [-0.6392, 4.068]	adjacent channel > 300 ADC
+hit_vs_control	2p24GeV_H2	matched-filter onset hit - adjacent FADC channel (ns)	median [16 %, 84 %]	68053	3.92 [2.315, 5.372]	1.373 [-0.5321, 3.323]	adjacent channel > 300 ADC
+hit_vs_control	2p24GeV_H2	hit amplitude / adjacent FADC channel amplitude	median [16 %, 84 %]	68053	0.01254 [0.009489, 0.01705]	0.02032 [0.01288, 0.03513]	adjacent channel > 300 ADC
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	none read out >= 10 ADC	11227048	3.365e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	1-100 ADC	5922835	4.772e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	100-200 ADC	852877	2.922e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	200-300 ADC	429109	3.365e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	300-500 ADC	465691	6.195e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	500-700 ADC	295671	1.770e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	700-1000 ADC	338534	4.480e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	1000-1500 ADC	393207	6.774e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	1500-2000 ADC	112691	9.011e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; all	2000-4096 ADC	6536	1.204e-01		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	11227048	3.365e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1-100 ADC	1000080	2.509e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	100-200 ADC	163320	3.686e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	200-300 ADC	74566	4.922e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	300-500 ADC	76913	9.660e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	500-700 ADC	39149	2.189e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	700-1000 ADC	27208	5.120e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1000-1500 ADC	29611	9.017e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1500-2000 ADC	18998	1.072e-01		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	2000-4096 ADC	1661	1.445e-01		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	none read out >= 10 ADC	10047893	2.423e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	1-100 ADC	8089959	3.616e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	100-200 ADC	1255599	2.166e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	200-300 ADC	621915	1.319e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	300-500 ADC	665492	6.311e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	500-700 ADC	425237	4.468e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	700-1000 ADC	522415	2.431e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	1000-1500 ADC	911429	2.229e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	1500-2000 ADC	547908	8.277e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; all	2000-4096 ADC	22269	1.962e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	10047893	2.423e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1-100 ADC	1343138	1.787e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	100-200 ADC	178448	8.406e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	200-300 ADC	67641	7.392e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	300-500 ADC	58700	3.407e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	500-700 ADC	24347	8.215e-05		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	700-1000 ADC	12849	3.113e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1000-1500 ADC	6156	3.411e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1500-2000 ADC	2312	2.595e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	2p24GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	2000-4096 ADC	120	9.167e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	0-1 ADC	3307479	3.364e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1-100 ADC	2470511	3.216e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	100-200 ADC	687673	2.312e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	200-300 ADC	777123	1.051e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	300-500 ADC	1354853	9.455e-04		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	500-700 ADC	1199886	1.999e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	700-1000 ADC	1810871	4.911e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1000-1500 ADC	3239460	6.746e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1500-2000 ADC	1670869	3.904e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	2p24GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	2000-4096 ADC	77470	3.292e-03		P(late) by largest geometric neighbour amplitude
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 0	1770104	6.843e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 1	1606340	6.458e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 2	1651971	3.470e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 3	1788985	3.751e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 4	1619053	4.086e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 5	1286656	1.010e-02		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 6	1170924	6.771e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 7	1380647	6.879e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 8	920205	3.256e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 9	1271626	8.808e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 10	1073507	3.360e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 11	803906	8.286e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 12	943615	4.321e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 13	989973	8.580e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 14	883679	6.680e-03		
+late_vs_fadc_channel	2p24GeV_H2	own 10-20 ADC	channel 15	883184	1.805e-02		
+fraction	3p49GeV_H2	seed	10-50 MeV	531649	1.166e-02		late fraction
+fraction	3p49GeV_H2	seed	50-100 MeV	292404	2.811e-03		late fraction
+fraction	3p49GeV_H2	seed	100-200 MeV	174959	2.858e-05		late fraction
+fraction	3p49GeV_H2	seed	200-500 MeV	316692	0.000e+00		late fraction
+fraction	3p49GeV_H2	seed	500-1000 MeV	625753	0.000e+00		late fraction
+fraction	3p49GeV_H2	seed	1000-2000 MeV	868035	0.000e+00		late fraction
+fraction	3p49GeV_H2	seed	2000-3000 MeV	939291	0.000e+00		late fraction
+fraction	3p49GeV_H2	seed	3000-4000 MeV	989281	0.000e+00		late fraction
+fraction	3p49GeV_H2	seed	all 10-4000 MeV	4738064	1.483e-03		late fraction
+fraction	3p49GeV_H2	neighbour	10-50 MeV	612496	2.199e-02		late fraction
+fraction	3p49GeV_H2	neighbour	50-100 MeV	488750	7.300e-03		late fraction
+fraction	3p49GeV_H2	neighbour	100-200 MeV	378437	1.802e-03		late fraction
+fraction	3p49GeV_H2	neighbour	200-500 MeV	968412	6.154e-04		late fraction
+fraction	3p49GeV_H2	neighbour	500-1000 MeV	2802135	1.139e-03		late fraction
+fraction	3p49GeV_H2	neighbour	1000-2000 MeV	5490188	2.839e-03		late fraction
+fraction	3p49GeV_H2	neighbour	2000-3000 MeV	6975676	2.169e-03		late fraction
+fraction	3p49GeV_H2	neighbour	3000-4000 MeV	7686847	1.934e-03		late fraction
+fraction	3p49GeV_H2	neighbour	all 10-4000 MeV	25402941	2.641e-03		late fraction
+fraction	3p49GeV_H2	isolated	10-50 MeV	1798794	5.095e-03		late fraction
+fraction	3p49GeV_H2	isolated	50-100 MeV	56389	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	100-200 MeV	10909	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	200-500 MeV	2770	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	500-1000 MeV	212	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	1000-2000 MeV	994	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	2000-3000 MeV	197	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	3000-4000 MeV	14	0.000e+00		late fraction
+fraction	3p49GeV_H2	isolated	all 10-4000 MeV	1870279	4.900e-03		late fraction
+fraction_vs_amplitude	3p49GeV_H2	all roles	10-20 ADC	7320584	9.308e-03		late fraction by own main amplitude
+fraction_vs_amplitude	3p49GeV_H2	all roles	20-50 ADC	9498005	1.594e-03		late fraction by own main amplitude
+fraction_vs_amplitude	3p49GeV_H2	all roles	50-4096 ADC	15192695	1.316e-07		late fraction by own main amplitude
+hit_vs_control	3p49GeV_H2	entries		83276	83276	9755064	late hits matched / control hits (weighted to the late hits' module, amplitude band and role)
+hit_vs_control	3p49GeV_H2	k >= 2 pulses	fraction	83276	0.0168	0.0042	
+hit_vs_control	3p49GeV_H2	extra pulse amplitude (ADC)	median [16 %, 84 %]	1402	11.04 [8.48, 15.13]	9.548 [6.686, 13.82]	largest non-main pulse, k >= 2
+hit_vs_control	3p49GeV_H2	extra pulse onset - main onset (ns)	median [16 %, 84 %]	1402	12.05 [10.67, 13.71]	16.17 [-106.5, 148.3]	k >= 2
+hit_vs_control	3p49GeV_H2	chi-squared per degree of freedom	median [16 %, 84 %]	83276	6.223 [3.01, 12.58]	0.9719 [0.6562, 1.549]	
+hit_vs_control	3p49GeV_H2	main amplitude (ADC)	median [16 %, 84 %]	83276	13.74 [10.9, 20.78]	13.92 [11.13, 21.01]	
+hit_vs_control	3p49GeV_H2	largest geometric neighbour amplitude (ADC)	median [16 %, 84 %]	74532	1034 [30.44, 1976]	926.7 [31.9, 1884]	
+hit_vs_control	3p49GeV_H2	largest geometric neighbour onset - hit onset (ns)	median [16 %, 84 %]	74532	-3.941 [-5.836, -1.643]	-0.5635 [-2.82, 1.92]	
+hit_vs_control	3p49GeV_H2	largest geometric neighbour in the same FADC slot	fraction	83276	0.5121	0.4032	among hits with a neighbour >= 10 ADC
+hit_vs_control	3p49GeV_H2	t_cfd(hit) - t_mf(largest geometric neighbour) (ns)	median [16 %, 84 %]	74532	13.64 [11.37, 15.53]	0.6304 [-1.861, 3.061]	
+hit_vs_control	3p49GeV_H2	largest adjacent FADC channel amplitude (ADC)	median [16 %, 84 %]	83276	43.37 [0, 1536]	11.5 [0, 101.6]	
+hit_vs_control	3p49GeV_H2	adjacent FADC channel > 300 ADC	fraction	83276	0.4108	0.0903	
+hit_vs_control	3p49GeV_H2	adjacent FADC channel > 300 ADC and not a geometric neighbour	fraction	83276	0.0893	0.0151	
+hit_vs_control	3p49GeV_H2	t_cfd(hit) - t_mf(adjacent FADC channel) (ns)	median [16 %, 84 %]	34211	13.89 [12.32, 15.45]	1.614 [-0.7198, 4.165]	adjacent channel > 300 ADC
+hit_vs_control	3p49GeV_H2	matched-filter onset hit - adjacent FADC channel (ns)	median [16 %, 84 %]	34211	4.033 [2.477, 5.482]	1.456 [-0.6062, 3.427]	adjacent channel > 300 ADC
+hit_vs_control	3p49GeV_H2	hit amplitude / adjacent FADC channel amplitude	median [16 %, 84 %]	34211	0.01215 [0.008715, 0.01695]	0.02029 [0.0119, 0.03754]	adjacent channel > 300 ADC
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	none read out >= 10 ADC	3980462	4.300e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	1-100 ADC	2309498	9.743e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	100-200 ADC	306397	4.736e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	200-300 ADC	128087	5.520e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	300-500 ADC	166730	8.421e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	500-700 ADC	117343	2.069e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	700-1000 ADC	117217	5.333e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	1000-1500 ADC	108696	8.439e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	1500-2000 ADC	50972	8.536e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; all	2000-4096 ADC	35139	7.849e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	3980462	4.300e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1-100 ADC	388027	5.059e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	100-200 ADC	64176	7.261e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	200-300 ADC	29098	1.007e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	300-500 ADC	31415	1.891e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	500-700 ADC	17480	3.999e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	700-1000 ADC	15380	7.159e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1000-1500 ADC	13365	1.244e-01		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	1500-2000 ADC	11114	1.037e-01		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 10-20 ADC; adjacent not a geometric neighbour	2000-4096 ADC	24212	7.748e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	none read out >= 10 ADC	3476781	5.755e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	1-100 ADC	3738601	1.231e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	100-200 ADC	588603	9.344e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	200-300 ADC	259897	5.233e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	300-500 ADC	300057	3.833e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	500-700 ADC	195685	2.300e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	700-1000 ADC	213625	3.324e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	1000-1500 ADC	284694	3.003e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	1500-2000 ADC	238875	1.001e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; all	2000-4096 ADC	201163	2.175e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	none read out >= 10 ADC	3476781	5.755e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1-100 ADC	600421	7.162e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	100-200 ADC	93946	3.513e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	200-300 ADC	41609	4.326e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	300-500 ADC	41214	2.912e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	500-700 ADC	20255	3.950e-04		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	700-1000 ADC	15534	1.287e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1000-1500 ADC	9590	5.527e-03		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	1500-2000 ADC	2322	3.144e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_adjacent_channel	3p49GeV_H2	own 20-50 ADC; adjacent not a geometric neighbour	2000-4096 ADC	2478	7.708e-02		P(late) by largest adjacent FADC channel amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	0-1 ADC	1320500	6.129e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1-100 ADC	1020369	1.125e-02		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	100-200 ADC	183363	1.061e-02		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	200-300 ADC	157893	3.939e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	300-500 ADC	465578	1.435e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	500-700 ADC	430119	1.758e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	700-1000 ADC	531734	3.750e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1000-1500 ADC	756420	5.641e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	1500-2000 ADC	630668	5.432e-03		P(late) by largest geometric neighbour amplitude
+late_vs_geometric_neighbour	3p49GeV_H2	own 10-20 ADC; geometric neighbour not adjacent in FADC, adjacent channels < 100 ADC	2000-4096 ADC	564127	3.185e-03		P(late) by largest geometric neighbour amplitude
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 0	573998	5.535e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 1	600427	7.232e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 2	594581	4.645e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 3	643721	5.860e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 4	587402	6.643e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 5	512665	1.460e-02		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 6	421214	9.102e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 7	491392	6.716e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 8	353967	5.512e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 9	424271	8.869e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 10	391550	7.338e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 11	340211	1.686e-02		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 12	352946	7.100e-03		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 13	367172	2.082e-02		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 14	331328	1.387e-02		
+late_vs_fadc_channel	3p49GeV_H2	own 10-20 ADC	channel 15	333739	1.946e-02		
+pair	3p49GeV_H2	W667 <- W664 (boards 4/8 ch 5 <- 3/5 ch 14)	aggressor > 300 ADC, run 24698	9314	17.14 [15.83, 17.93]		late hits: t_cfd(hit) - t_mf(aggressor) median [16 %, 84 %] ns; P(late | aggressor 1200-2000 ADC) 0.437
+pair	3p49GeV_H2	W693 <- W661 (boards 2/5 ch 11 <- 3/15 ch 0)	aggressor > 300 ADC, run 24698	5774	14.88 [13.85, 15.76]		P(late | aggressor 1200-2000 ADC) 0.421
+pair	3p49GeV_H2	W761 <- W729 (boards 2/5 ch 7 <- 3/14 ch 10)	aggressor > 300 ADC, run 24698	1221	14.18 [13.02, 14.99]		P(late | aggressor 1200-2000 ADC) 0.515
+pair	3p49GeV_H2	W829 <- W797 (boards 2/15 ch 15 <- 3/13 ch 2)	aggressor > 300 ADC, run 24698	339	14.09 [12.93, 15.02]		P(late | aggressor 1200-2000 ADC) 0.553
+pair	3p49GeV_H2	W660 <- W662 (boards 2/5 ch 13 <- 3/15 ch 1)	aggressor > 300 ADC, run 24698	5300	13.91 [12.82, 14.86]		P(late | aggressor 1200-2000 ADC) 0.194
+traced	0p73GeV_H2	share of late hits	adjacent digitizer channel > 300 ADC or boards 2/5, 4/8	7431	0.596		adjacent > 300 ADC alone 0.447; boards 2/5 and 4/8 alone 0.179
+traced	2p24GeV_H2	share of late hits	adjacent digitizer channel > 300 ADC or boards 2/5, 4/8	143745	0.745		adjacent > 300 ADC alone 0.473; boards 2/5 and 4/8 alone 0.327
+traced	3p49GeV_H2	share of late hits	adjacent digitizer channel > 300 ADC or boards 2/5, 4/8	83283	0.761		adjacent > 300 ADC alone 0.411; boards 2/5 and 4/8 alone 0.400

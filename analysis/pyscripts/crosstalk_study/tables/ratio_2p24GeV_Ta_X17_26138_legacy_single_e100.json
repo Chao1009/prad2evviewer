@@ -1,0 +1,1 @@
+{"run_type": "2p24GeV_Ta_X17_26138", "path": "legacy", "selection": "single", "time_source": "cfd", "cfd_algo": "fit", "ct_lo": 7.0, "ct_hi": 15.0, "cluster_thr": 100.0, "n_ev": 15217, "n_ev_with_hits": 15213, "n_ev_window": 5449, "n_hits": 131398, "n_hits_window": 6414, "core": 2.0, "n_ev_core": 15205, "n_hits_core": 107881}

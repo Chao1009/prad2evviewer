@@ -1,0 +1,1 @@
+{"run_type": "0p73GeV_H2", "path": "legacy", "selection": "ep", "time_source": "cfd", "cfd_algo": "fit", "ct_lo": 7.0, "ct_hi": 15.0, "n_ev": 1080125, "n_ev_with_hits": 1080042, "n_ev_window": 6560, "n_hits": 4720970, "n_hits_window": 6690, "core": 2.0, "n_ev_core": 1079938, "n_hits_core": 4455810}
