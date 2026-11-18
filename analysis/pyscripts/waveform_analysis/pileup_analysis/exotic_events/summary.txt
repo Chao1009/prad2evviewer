@@ -1,0 +1,99 @@
+=== run 24590 event 4084847 module W121 ===
+EVIO file prad_024590.evio.00020 (split ordinal 1); trigger bits 0x100; beam 728.9 MeV; run type 0p73GeV_H2; calibration calibration/calibration_factor_3p5_June7_nonLinear.json
+5 HyCal channels in the event, 0 bad waveforms, 5 kept (A_main >= 10 ADC)
+W121: DAQ crate 3 slot 4 channel 0; gain 0.9384 MeV/ADC; sigma_ref 0.963 ADC; b_ref 179.59
+  E_main 83.1 MeV (A_main 88.5 ADC x gain)
+  baseline: 30-sample pedestal 203.87 ADC, b_ref 179.59 (+25.2 sigma_ref; farther than 3 sigma_ref, so the fit starts at b_ref); fit baseline 180.55 ADC; rms (clipped samples 0-29) 3.879 ADC (raw std 3.879); slope -2.770 ADC per 100 ns
+  fitted pulses k = 4, chi2/dof 127.57, clipped samples 0:
+    pulse 1: t0 = 195.3 ns, A = 75.9 ADC (E = 71.3 MeV)
+    pulse 2: t0 = 240.7 ns, A = 88.5 ADC (E = 83.1 MeV)
+    pulse 3: t0 = 274.6 ns, A = 72.8 ADC (E = 68.3 MeV)
+    pulse 4: t0 = 310.6 ns, A = 55.4 ADC (E = 52.0 MeV)
+  cluster: seed W121 (E 71.3 MeV), E_cluster 79.4 MeV (sum of members 71.3), size 1 modules, E/E_beam 0.109, position (31.2, 280.1) mm; W121 has 71.3 MeV (100 % of the sum); seed distance 0.0 mm
+  all clusters: [seed W564 E 750 MeV size 4 E/Eb 1.03 at (50, 4) mm], [seed W121 E 79 MeV size 1 E/Eb 0.11 at (31, 280) mm]
+  pileup_rates chain cluster: seed W564; W121 is not a member (4 members)
+  neighbours (row top to bottom = y larger to smaller; col left to right): E_main (MeV) | k | ped rms
+    ---                          ---                          ---                       
+    ---                          W121* 83.1 | k4 | 3.88       ---                       
+    ---                          ---                          ---                       
+  neighbour pulses (t0 ns : A ADC):
+  coherence (page 3): fADC board crate 3 slot 4; no-pulse channels in the mean: event-wide 0, crate 0, board 0
+  highlighted fit windows cover 54 of 100 samples; r = Pearson correlation of pedestal-subtracted waveforms; 'out' = samples outside both fitted-pulse windows (n), 'all' = all 100 samples
+    common mode (board, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+    common mode (crate, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+    common mode (event, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+  persistence of W121 baseline noise in its EVIO split: stride sample = every physics event (197945 decoded of 199076), plus all events within +-5000 event numbers of the event; statistics are over the events where the channel was read out (sparse readout)
+  readout fraction in the stride sample (events with the channel present / decoded): W86 0.10 %, W87 0.10 %, W88 0.09 %, W120 0.12 %, W121* 0.12 %, W122 0.11 %, W154 0.13 %, W155 0.11 %, W156 0.12 %
+  pedestal rms (samples 0-29, ADC): this event 3.88 ADC; fraction of W121's read-out events below it 98.71 %, of the pooled neighbours' 99.651 %
+    W121: 50%: 0.95, 90%: 1.17, 99%: 3.58, 99.9%: 13.72, max 16.59 (N=232)
+    neighbours pooled: 50%: 0.95, 90%: 1.25, 99%: 1.60, 99.9%: 9.57, max 16.77 (N=1720)
+      W86: median 1.03, 99 % 1.91, max 8.06 (N=193)
+      W87: median 0.99, 99 % 1.48, max 3.18 (N=190)
+      W88: median 0.98, 99 % 1.48, max 1.57 (N=183)
+      W120: median 0.98, 99 % 1.55, max 2.79 (N=235)
+      W122: median 0.83, 99 % 1.21, max 1.31 (N=214)
+      W154: median 0.98, 99 % 3.55, max 13.42 (N=248)
+      W155: median 0.99, 99 % 4.08, max 16.77 (N=227)
+      W156: median 0.87, 99 % 1.26, max 1.33 (N=230)
+    W121 read-out events with rms above 3 x the pooled-neighbour median (2.86 ADC): 4 of 232 (1.72 %); inside the +-5000 window 2 of 12; outside it 2 of 220 (0.91 %)
+    those events (event number: value): 4058492: 16.6, 4084847: 3.9, 4087512: 4.2, 4140552: 2.9
+      W86: 2 of 193 read-out events above the same threshold (event numbers 3991637, 4144683)
+      W87: 1 of 190 read-out events above the same threshold (event numbers 4176235)
+      W88: 0 of 183 read-out events above the same threshold
+      W120: 0 of 235 read-out events above the same threshold
+      W122: 0 of 214 read-out events above the same threshold
+      W154: 4 of 248 read-out events above the same threshold (event numbers 3990593, 4030789, 4131196, 4186115)
+      W155: 3 of 227 read-out events above the same threshold (event numbers 4013117, 4140843, 4151063)
+      W156: 0 of 230 read-out events above the same threshold
+  baseline offset (30-sample baseline - b_ref) / sigma_ref: this event 25.21 sigma_ref; fraction of W121's read-out events below it 99.14 %, of the pooled neighbours' 100.000 %
+    W121: 50%: -0.22, 90%: 0.24, 99%: 4.79, 99.9%: 181.91, max 228.99 (N=232)
+    neighbours pooled: 50%: 0.00, 90%: 0.53, 99%: 0.89, 99.9%: 2.73, max 6.42 (N=1344)
+      W86: no valid b_ref in this file's noise reference
+      W87: median -0.09, 99 % 0.64, max 2.05 (N=190)
+      W88: no valid b_ref in this file's noise reference
+      W120: median -0.15, 99 % 0.48, max 0.78 (N=235)
+      W122: median 0.17, 99 % 0.95, max 1.34 (N=214)
+      W154: median -0.07, 99 % 1.40, max 6.42 (N=248)
+      W155: median 0.16, 99 % 0.88, max 2.79 (N=227)
+      W156: median 0.03, 99 % 0.83, max 0.96 (N=230)
+    W121 read-out events with |offset| > 3 sigma_ref (the chain's 'far' criterion, baseline start replaced by b_ref): 3 of 232 (1.29 %); inside the +-5000 window 1 of 12; outside it 2 of 220 (0.91 %)
+    those events (event number: value): 4058492: 229.0, 4084847: 25.2, 4140552: 6.2
+      W86: no valid b_ref in this file's noise reference
+      W87: 0 of 190 read-out events above the same threshold
+      W88: no valid b_ref in this file's noise reference
+      W120: 0 of 235 read-out events above the same threshold
+      W122: 0 of 214 read-out events above the same threshold
+      W154: 1 of 248 read-out events above the same threshold (event numbers 4030789)
+      W155: 0 of 227 read-out events above the same threshold
+      W156: 0 of 230 read-out events above the same threshold
+
+=== run 24590 event 2069998 module W493 ===
+EVIO file prad_024590.evio.00010 (split ordinal 0); trigger bits 0x100; beam 728.9 MeV; run type 0p73GeV_H2; calibration calibration/calibration_factor_3p5_June7_nonLinear.json
+8 HyCal channels in the event, 0 bad waveforms, 6 kept (A_main >= 10 ADC)
+W493: DAQ crate 3 slot 18 channel 5; gain 1.0206 MeV/ADC; sigma_ref 0.890 ADC; b_ref 170.41
+  E_main 122.2 MeV (A_main 119.8 ADC x gain)
+  baseline: 30-sample pedestal 169.93 ADC, b_ref 170.41 (-0.5 sigma_ref; within 3 sigma_ref, so the fit starts at the 30-sample pedestal); fit baseline 170.82 ADC; rms (clipped samples 0-29) 0.691 ADC (raw std 0.763); slope +0.612 ADC per 100 ns
+  fitted pulses k = 5, chi2/dof 1.15, clipped samples 0:
+    pulse 1: t0 = 154.2 ns, A = 119.8 ADC (E = 122.2 MeV)
+    pulse 2: t0 = 163.6 ns, A = 41.3 ADC (E = 42.1 MeV)
+    pulse 3: t0 = 178.5 ns, A = 23.4 ADC (E = 23.9 MeV)
+    pulse 4: t0 = 196.5 ns, A = 16.3 ADC (E = 16.6 MeV)
+    pulse 5: t0 = 230.0 ns, A = 8.2 ADC (E = 8.4 MeV)
+  cluster: seed W494 (E 268.9 MeV), E_cluster 531.7 MeV (sum of members 464.6), size 4 modules, E/E_beam 0.729, position (1.3, 59.6) mm; W493 has 122.2 MeV (26 % of the sum); seed distance 20.8 mm
+  all clusters: [seed W494 E 532 MeV size 4 E/Eb 0.73 at (1, 60) mm], [seed W325 E 97 MeV size 1 E/Eb 0.13 at (31, 156) mm]
+  pileup_rates chain cluster: seed W494; W493 is a member (4 members)
+  neighbours (row top to bottom = y larger to smaller; col left to right): E_main (MeV) | k | ped rms
+    ---                          W459 20.1 | k1 | 0.74        W460 53.4 | k1 | 0.63     
+    ---                          W493* 122.2 | k5 | 0.69      W494 268.9 | k1 | 0.88    
+    ---                          ---                          ---                       
+  neighbour pulses (t0 ns : A ADC):
+    W459: 148.4:19.7
+    W460: 150.2:56.3
+    W494: 151.0:261.6
+  coherence (page 3): fADC board crate 3 slot 18; no-pulse channels in the mean: event-wide 0, crate 0, board 0
+  highlighted fit windows cover 51 of 100 samples; r = Pearson correlation of pedestal-subtracted waveforms; 'out' = samples outside both fitted-pulse windows (n), 'all' = all 100 samples
+    ch 7 W459  k=1: r_out +0.156 (n=48), r_all +0.758
+    common mode (board, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+    common mode (crate, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+    common mode (event, N=0): r_out +nan (n=0), r_all +nan; mean-waveform rms n/a
+

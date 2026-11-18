@@ -1,0 +1,49 @@
+run_type	quantity	uniform	per_type
+0p73GeV_H2	f1 db >	8	8
+0p73GeV_H2	f1 tail <	-5	-5.223
+0p73GeV_H2	f2 w50 >	3	2.8176
+0p73GeV_H2	f3 LAM	2	1.9479
+0p73GeV_H2	core db median		0.0010524
+0p73GeV_H2	core db sigma		0.30549
+0p73GeV_H2	core tail median		0.54291
+0p73GeV_H2	core tail sigma		0.64924
+0p73GeV_H2	core w50 median		0.98579
+0p73GeV_H2	core w50 sigma		0.086419
+0p73GeV_H2	core chi2 median		0.864
+0p73GeV_H2	core chi2 sigma		0.32395
+2p24GeV_H2	f1 db >	8	7.9212
+2p24GeV_H2	f1 tail <	-5	-4.9228
+2p24GeV_H2	f2 w50 >	3	3.0224
+2p24GeV_H2	f3 LAM	2	1.9703
+2p24GeV_H2	core db median		0.0009787
+2p24GeV_H2	core db sigma		0.30248
+2p24GeV_H2	core tail median		0.49659
+2p24GeV_H2	core tail sigma		0.61022
+2p24GeV_H2	core w50 median		0.98775
+2p24GeV_H2	core w50 sigma		0.095991
+2p24GeV_H2	core chi2 median		0.87394
+2p24GeV_H2	core chi2 sigma		0.36537
+3p49GeV_H2	f1 db >	8	8.0058
+3p49GeV_H2	f1 tail <	-5	-5.0728
+3p49GeV_H2	f2 w50 >	3	3.0857
+3p49GeV_H2	f3 LAM	2	2.0963
+3p49GeV_H2	core db median		0.0011957
+3p49GeV_H2	core db sigma		0.30571
+3p49GeV_H2	core tail median		0.49809
+3p49GeV_H2	core tail sigma		0.62728
+3p49GeV_H2	core w50 median		0.98437
+3p49GeV_H2	core w50 sigma		0.099136
+3p49GeV_H2	core chi2 median		0.92981
+3p49GeV_H2	core chi2 sigma		0.41114
+2p24GeV_Ta_X17	f1 db >	8	9.761
+2p24GeV_Ta_X17	f1 tail <	-5	-5.0369
+2p24GeV_Ta_X17	f2 w50 >	3	3.1228
+2p24GeV_Ta_X17	f3 LAM	2	1.8636
+2p24GeV_Ta_X17	core db median		-0.02714
+2p24GeV_Ta_X17	core db sigma		0.37382
+2p24GeV_Ta_X17	core tail median		0.35547
+2p24GeV_Ta_X17	core tail sigma		0.60717
+2p24GeV_Ta_X17	core w50 median		0.97929
+2p24GeV_Ta_X17	core w50 sigma		0.10113
+2p24GeV_Ta_X17	core chi2 median		0.82658
+2p24GeV_Ta_X17	core chi2 sigma		0.34977
