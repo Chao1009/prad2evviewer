@@ -1,0 +1,5 @@
+# per run, gate path g4, out of sample: E1 + E2 sigma/E (%) per split (mean, s.e.) and pooled; gain_L* = mean over the modules of layer L (rings around the beam hole: L12 = innermost two, the central block H; L3 = next ring) of 1 / (calibration factor x Moller gain of the run's in-sample solve), relative to the first run; calib_L* = the calibration-file part alone
+run	date	calib	pairs	n_splits	res	res_se	res_pooled	res_pooled_se	gain_L12	calib_L12	n_L12	gain_L3	calib_L3	n_L3
+25800	2026-07-12	x17_25825.json	7525	8	2.09533	0.040984	2.11405	0.0363826	1	1	32	1	1	28
+26138	2026-08-06	x17_26094.json	3742	4	1.95902	0.0916608	1.98366	0.101459	0.88011	0.884303	32	0.885414	0.901236	28
+26230	2026-08-12	x17_26214.json	9224	13	2.13153	0.0587212	2.17439	0.0575964	1.9746	1.98906	32	0.861181	0.894257	28

@@ -1,0 +1,6 @@
+# per run: mean and standard error over the run's splits; flag = out-of-sample sigma/E more than 3 standard errors from the run-type mean
+run	path	n_splits	res_cb	res_cb_se	res_cb_oos	res_cb_oos_se	mu_ep	mu_ep_se	mu_ep_oos	mu_ep_oos_se	n_used	flag
+24590	legacy	10	3.40752	0.018231	3.42233	0.0157588	0.240031	0.0178842	0.227699	0.0210081	280011	0
+24603	legacy	6	3.3575	0.0188754	3.41608	0.0302895	0.201775	0.0249766	0.218106	0.0320575	163000	0
+24590	g11.5	10	3.39626	0.0121836	3.40606	0.0105926	0.294307	0.0126369	0.264992	0.0157476	283350	0
+24603	g11.5	6	3.33272	0.0264071	3.40082	0.0309243	0.245411	0.0286483	0.255737	0.0310636	162186	0

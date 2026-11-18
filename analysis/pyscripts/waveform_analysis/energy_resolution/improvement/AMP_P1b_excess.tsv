@@ -1,0 +1,18 @@
+cause	variance_pct2	se_pct2	method	recoverable_by	source
+total excess raw over integral (robust sigma, 19 k elastic clusters)	1.99833	0.11013	arms	-	AMP_P1b_arms.tsv
+total, direct cluster-level D (variance, mean removed)	1.55504	0.0144482	direct	-	direct.tsv
+1 sampling-phase curve of the raw peak against the integral (per-module 16-bin table)	0.834282	0.091867	arms: raw minus raw with table	calibration (P5 M1-type table)	AMP_P1b_arms_contrasts.tsv
+1 (direct)	0.647419	nan	direct	calibration	direct.tsv
+2 amplitude-dependent bias g(A) of raw / integral (swing 0.9 %), after the phase table	-0.0164138	0.0356302	arms	calibration (small)	AMP_P1b_arms_contrasts.tsv
+2 (direct)	0.072439	nan	direct	calibration	direct.tsv
+3 pile-up members (h_k >= 2 or extra pulse), raw only in those hits, no tables	0.202331	0.0415521	arms	estimator / fitter (not calibration)	AMP_P1b_arms_contrasts.tsv
+3 (direct)	0.12264	nan	direct	estimator	direct.tsv
+4 single-sample fluctuation ~ 1 / sqrt(A) (a / A term of the hit scatter)	0.438624	0.0657936	predicted: hit-level fit propagated to clusters	intrinsic to the single sample	budget/predict.tsv
+5 amplitude-proportional shape term (c, hit scatter 0.6 %)	0.178669	0.0268003	predicted: hit-level fit propagated to clusters	intrinsic to the single sample	budget/predict.tsv
+6 white pedestal noise of one sample (n / A term, fitted n)	0.0127094	0.00190641	predicted: hit-level fit propagated to clusters	intrinsic to the single sample	budget/predict.tsv
+6 (analytic) white noise from the pedestal rms, 0.84 ADC excess over the matched filter	0.0177406	0.00354813	predicted: pedestal statistics	intrinsic	budget/predict.tsv
+7 cross terms of the member shifts after both tables (intra-cluster correlation; direct)	0.00653264	0.00656356	direct	none: consistent with zero (phase harmonic fit removes 0.0005)	direct.tsv
+arms total minus direct total: gain solve and position-map cost of the noisier estimator (not isolated)	0.44329	0.11013	difference	statistics of the calibration (more runs)	
+remainder after phase and amplitude tables (raw, direct; all independent hit scatter)	0.835182	0.00789785	direct	-	direct.tsv
+sum of causes 1 to 6 (arms for 1-3, 2 taken as >= 0)	1.66662	0.136893	sum	-	
+unexplained: total minus sum of causes 1 to 6	0.331715	0.175694	difference	overlaps the arms-minus-direct row (calibration solve), not intra-cluster correlation	

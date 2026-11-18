@@ -1,0 +1,32 @@
+term	run_type	path	n_pairs	R_ctrl	d	d_se	q	q_se	verdict	status	source
+log_weight_thres R7ri (P4b)	0p73GeV_H2	g12	16	3.3701	0.0058225	0.0029644	-0.19819	0.050495	null	lever	P4_switches.tsv
+Moller rejection (P1a)	0p73GeV_H2	legacy	16	3.3888	0.167	0.012614	-1.0769	0.04165	real	lever	P1_reconcile.tsv
+non-linearity (P1g)	0p73GeV_H2	legacy	16	3.3888	-0.033394	0.011326	0.47457	0.080078	real	lever	P1_reconcile.tsv
+time gate g20 calibrated (P15)	0p73GeV_H2	g20	16	3.3888	-0.023613	0.0068179	0.39935	0.057453	real	lever	P15
+log_weight_thres R7ri (P4b)	2p24GeV_H2	g12	42	1.8636	-0.011392	0.0017245	0.20574	0.015525	real	lever	P4_switches.tsv
+Moller rejection (P1a)	2p24GeV_H2	legacy	42	1.8759	0.0094198	0.0014313	-0.18823	0.014336	real	lever	P1_reconcile.tsv
+time gate g16 calibrated (P15)	2p24GeV_H2	g16	42	1.8759	-0.019566	0.0024148	0.27023	0.016588	real	lever	P15
+log_weight_thres R7ri (P4b)	3p49GeV_H2	g12	16	1.5712	-0.025977	0.0025963	0.28453	0.0141	real	lever	P4_switches.tsv
+Moller rejection (P1a)	3p49GeV_H2	legacy	16	1.5854	0	0	0	nan	null	lever	P1_reconcile.tsv
+non-linearity (P1g)	3p49GeV_H2	legacy	16	1.5854	0.095456	0.002926	-0.55838	0.008808	real	lever	P1_reconcile.tsv
+time gate g16 calibrated (P15)	3p49GeV_H2	g16	16	1.5854	-0.019985	0.002558	0.25094	0.015957	real	lever	P15
+log_weight_thres R7ri (P4b)	3p49GeV_H2_old	g12	28	1.5484	-0.032779	0.003271	0.31692	0.015643	real	lever	P4_switches.tsv
+Moller rejection (P1a)	3p49GeV_H2_old	legacy	28	1.5591	-3.5714e-07	3.5714e-07	0.0010553	0.00052764	null	lever	P1_reconcile.tsv
+non-linearity (P1g)	3p49GeV_H2_old	legacy	28	1.5591	0.10281	0.0019186	-0.57546	0.0055409	real	lever	P1_reconcile.tsv
+time gate g16 calibrated (P15)	3p49GeV_H2_old	g16	28	1.5591	-0.013052	0.0019147	0.20132	0.014704	real	lever	P15
+Moller rejection (P1a)	2p24GeV_Ta_X17	legacy	25	2.3081	-0.0031492	0.0080015	0.12053	0.15302	null	lever	P1_reconcile.tsv
+time gate g8 calibrated (P15)	2p24GeV_Ta_X17	g8	25	2.3081	-0.30423	0.030176	1.1454	0.052796	real	lever	P15
+onset-phase correction (P4a, applied)	2p24GeV_H2	legacy	8	1.8816	0.058003	0.0066797	0.47079	0.02752	real	applied	P4 a, run 25320
+MIN_SEP_NS 12 (P3B)	2p24GeV_H2	legacy	8	1.8816	-0.00039375	0.0018133	0.038492	0.088622	null	lever	P3 B, run 25320
+R_MODEL 0.3 (P3B)	2p24GeV_H2	legacy	8	1.8816	-0.035707	0.0076761	0.36483	0.038838	real	lever	P3 B, run 25320
+R_MODEL 0.3, D5 extension	2p24GeV_H2	legacy	42	1.8759	-0.02462	0.0025975	0.30292	0.015874	real	lever	P5 extension
+R_MODEL 0.3, D5 extension	2p24GeV_H2	g12	42	1.8636	-0.01604	0.0023105	0.24397	0.017496	real	lever	P5 extension
+R_MODEL 0.3, D5 extension	3p49GeV_H2	legacy	16	1.5851	-0.029563	0.00248	0.3047	0.01266	real	lever	P5 extension
+R_MODEL 0.3, D5 extension	3p49GeV_H2	g12	16	1.5711	-0.01634	0.0026766	0.226	0.018414	real	lever	P5 extension
+R_MODEL 0.3, D5 extension	2p24GeV_Ta_X17	legacy	4	2.2954	0.04916	0.049664	-0.47759	0.2438	null	lever	P5 extension
+R_MODEL 0.3, D5 extension	2p24GeV_Ta_X17	g8	4	1.9084	0.08323	0.025238	-0.56974	0.088225	real	lever	P5 extension
+R_MODEL 0.3 on calibrated g16 + log weight	2p24GeV_H2	g16	42	1.8465	-0.013244	0.0022438	0.22075	0.018634	real	lever	P5 combination
+R_MODEL 0.3 on calibrated g16 + log weight	3p49GeV_H2	g16	16	1.5377	-0.013414	0.0033439	0.20266	0.02515	real	lever	P5 combination
+log weight on calibrated g16	2p24GeV_H2	g16	42	1.8563	-0.0098576	0.0022056	0.19105	0.021316	real	lever	P5 combination
+log weight on calibrated g16	3p49GeV_H2	g16	16	1.5655	-0.027329	0.002813	0.29123	0.014857	real	lever	P5 combination
+log weight on calibrated g16	3p49GeV_H2_old	g16	28	1.546	-0.037137	0.0029642	0.33682	0.013279	real	lever	P5 combination

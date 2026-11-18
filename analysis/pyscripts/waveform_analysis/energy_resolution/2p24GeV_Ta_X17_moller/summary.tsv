@@ -1,0 +1,30 @@
+# 2p24GeV_Ta_X17 Moller calibration: res = per-split Crystal Ball sigma / peak (%) mean, res_se its standard error over the splits; res_pooled = all splits in one fit, res_pooled_se bootstrap over the splits; E = mean E_pred (MeV; sum: Ebeam + m_e - 2 x energy loss at the symmetric angle; the sum fitted is E1 + E2 itself); peak = CB peak / E - 1 (%); h2 = H2 curve (0.9015, 2.05, 1.35) at E (sum: quadrature of the two clusters' curve values / E); core sigma of tan th1 tan th2 (gamma + 1) / 2: 0.0555; lo, hi = E_pred bin edges (MeV); res_cluster_equiv(_se) = sqrt(2) res of the symmetric-pair sum = single-cluster sigma / E at E_cluster (MeV); selection: isolation 60 mm
+path	protocol	quantity	E	n	n_splits	n_fit_splits	res	res_se	res_pooled	res_pooled_se	res_pooled_fit_err	peak	h2	lo	hi	res_cluster_equiv	res_cluster_equiv_se	res_cluster_equiv_pooled	res_cluster_equiv_pooled_se	E_cluster
+legacy	in-sample	cluster	1118.49	41994	25	25	4.07515	0.0525604	4.08198	0.0493887	0.056378	-0.207099	2.45496	nan	nan	nan	nan	nan	nan	nan
+legacy	in-sample	sum	2235.91	20997	25	25	2.1017	0.0354601	2.15445	0.0317676	0.0355778	0.0397038	1.75125	nan	nan	nan	nan	nan	nan	nan
+legacy	in-sample	sum, symmetric pairs |E1 - E2| < 0.15 (E1 + E2)	2235.91	4935	25	25	1.92783	0.0690229	2.05764	0.0670625	0.0460028	0.299194	1.73851	nan	nan	2.72636	0.0976131	2.90994	0.0948407	1119.59
+legacy	in-sample	cluster, E_pred bin 1	610.642	10610	25	25	5.89666	0.113502	6.29905	0.0995164	0.0859327	-2.67714	3.54717	320.655	771.485	nan	nan	nan	nan	nan
+legacy	in-sample	cluster, E_pred bin 2	941.656	10385	25	25	4.66071	0.0828358	4.8213	0.0852427	0.0526845	-0.773011	2.70757	771.485	1120.65	nan	nan	nan	nan	nan
+legacy	in-sample	cluster, E_pred bin 3	1295.26	10396	25	25	3.79155	0.0826679	3.8761	0.0806971	0.0377093	0.0584394	2.26794	1120.65	1465.53	nan	nan	nan	nan	nan
+legacy	in-sample	cluster, E_pred bin 4	1626.54	10603	25	25	3.10389	0.0652026	3.08193	0.0422487	0.0519208	0.426259	2.02121	1465.53	1904.81	nan	nan	nan	nan	nan
+legacy	out-of-sample	cluster	1118.49	41994	25	25	4.18509	0.0561926	4.19035	0.0572791	0.0613637	-0.202598	2.45496	nan	nan	nan	nan	nan	nan	nan
+legacy	out-of-sample	sum	2235.91	20997	25	25	2.16258	0.0396909	2.22721	0.0437107	0.0405763	0.0188321	1.75125	nan	nan	nan	nan	nan	nan	nan
+legacy	out-of-sample	sum, symmetric pairs |E1 - E2| < 0.15 (E1 + E2)	2235.91	4935	25	25	2.0271	0.0634644	2.1634	0.0746938	0.0480443	0.19312	1.73851	nan	nan	2.86676	0.0897522	3.05952	0.105633	1119.59
+legacy	out-of-sample	cluster, E_pred bin 1	610.642	10610	25	25	6.01905	0.106846	6.44692	0.0916369	0.0686473	-2.86509	3.54717	320.655	771.485	nan	nan	nan	nan	nan
+legacy	out-of-sample	cluster, E_pred bin 2	941.656	10385	25	25	4.86781	0.0769885	5.01683	0.0903903	0.0540391	-0.958913	2.70757	771.485	1120.65	nan	nan	nan	nan	nan
+legacy	out-of-sample	cluster, E_pred bin 3	1295.26	10396	25	25	3.88844	0.0855582	3.98735	0.0901839	0.0430523	0.0545372	2.26794	1120.65	1465.53	nan	nan	nan	nan	nan
+legacy	out-of-sample	cluster, E_pred bin 4	1626.54	10603	25	25	3.15951	0.0636594	3.15351	0.0527642	0.0633624	0.544304	2.02121	1465.53	1904.81	nan	nan	nan	nan	nan
+g4	in-sample	cluster	1118.49	40982	25	25	4.01957	0.0513053	4.03707	0.0506584	0.0509551	-0.62807	2.45496	nan	nan	nan	nan	nan	nan	nan
+g4	in-sample	sum	2235.91	20491	25	25	2.03351	0.0228765	2.07307	0.0249968	0.0314332	-0.338352	1.75107	nan	nan	nan	nan	nan	nan	nan
+g4	in-sample	sum, symmetric pairs |E1 - E2| < 0.15 (E1 + E2)	2235.91	4870	25	25	1.92578	0.0854118	2.02146	0.0737153	0.0487163	-0.0108372	1.7386	nan	nan	2.72347	0.120791	2.85878	0.104249	1119.71
+g4	in-sample	cluster, E_pred bin 1	612.027	10246	25	25	5.84597	0.129721	6.25366	0.0995418	0.0912415	-2.7595	3.54185	320.655	771.485	nan	nan	nan	nan	nan
+g4	in-sample	cluster, E_pred bin 2	941.907	10245	25	25	4.63933	0.0875667	4.79154	0.0777823	0.051892	-0.957691	2.70715	771.485	1120.65	nan	nan	nan	nan	nan
+g4	in-sample	cluster, E_pred bin 3	1295.14	10245	25	25	3.82474	0.0695793	3.88712	0.0747565	0.0517082	-0.386932	2.26805	1120.65	1465.53	nan	nan	nan	nan	nan
+g4	in-sample	cluster, E_pred bin 4	1624.92	10246	25	25	2.93786	0.0574069	2.93458	0.0445864	0.0504571	-0.114996	2.02219	1465.53	1904.81	nan	nan	nan	nan	nan
+g4	out-of-sample	cluster	1118.49	40982	25	25	4.09498	0.0494182	4.10986	0.0502419	0.0527934	-0.606523	2.45496	nan	nan	nan	nan	nan	nan	nan
+g4	out-of-sample	sum	2235.91	20491	25	25	2.09234	0.0370572	2.15944	0.038355	0.0293742	-0.367963	1.75107	nan	nan	nan	nan	nan	nan	nan
+g4	out-of-sample	sum, symmetric pairs |E1 - E2| < 0.15 (E1 + E2)	2235.91	4870	25	25	2.01306	0.076709	2.13996	0.0834719	0.0452083	-0.119142	1.7386	nan	nan	2.84689	0.108483	3.02636	0.118047	1119.71
+g4	out-of-sample	cluster, E_pred bin 1	612.027	10246	25	25	5.99043	0.118515	6.42068	0.0917266	0.0729557	-2.94976	3.54185	320.655	771.485	nan	nan	nan	nan	nan
+g4	out-of-sample	cluster, E_pred bin 2	941.907	10245	25	25	4.86283	0.0736218	4.98376	0.0844226	0.062002	-1.1428	2.70715	771.485	1120.65	nan	nan	nan	nan	nan
+g4	out-of-sample	cluster, E_pred bin 3	1295.14	10245	25	25	3.9002	0.0809762	4.00967	0.0784772	0.0551869	-0.390425	2.26805	1120.65	1465.53	nan	nan	nan	nan	nan
+g4	out-of-sample	cluster, E_pred bin 4	1624.92	10246	25	25	3.02627	0.0667369	3.05635	0.0609291	0.0527359	-0.0239723	2.02219	1465.53	1904.81	nan	nan	nan	nan	nan

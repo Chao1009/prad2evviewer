@@ -1,0 +1,28 @@
+variant	var_pct2	se_pct2	robust_sigma_pct	note
+rawpk: all members	1.55504	0.0144482	1.29385	mean 0.592 %
+rawpk: all members: independent part (mean of the sum of squared member terms; holds member-level mean biases)	1.52881	0.0118094	nan	
+rawpk: all members: cross terms = variance of D minus the independent part	0.0261833	0.00688597	nan	
+rawpk: all members: removable by a member-weighted k = 1, 2 phase harmonic fit (in sample)	0.467125	nan	nan	
+rawpk: phase table	0.907621	0.00823519	0.952878	mean 0.633 %
+rawpk: phase + amplitude tables	0.835182	0.00789785	0.91328	mean 0.477 %
+rawpk: phase + amplitude tables: independent part (mean of the sum of squared member terms; holds member-level mean biases)	0.828614	0.00542929	nan	
+rawpk: phase + amplitude tables: cross terms = variance of D minus the independent part	0.00653264	0.00656356	nan	
+rawpk: phase + amplitude tables: removable by a member-weighted k = 1, 2 phase harmonic fit (in sample)	0.000482084	nan	nan	
+rawpk: single-pulse members only (pile-up members u=0)	1.4324	0.0138096	1.21299	mean 0.599 %
+rawpk: phase + amplitude tables, single-pulse members only	0.761942	0.00705294	0.856418	mean 0.463 %
+rawpk: members >= 100 MeV only	1.29805	0.0121783	1.20137	mean -0.045 %
+rawpk: members < 100 MeV only	0.193572	0.00198713	0.440083	mean 0.636 %
+rawpk: members >= 400 MeV only	1.2302	0.0116852	1.17066	mean 0.037 %
+rawpk: members < 400 MeV only	0.265106	0.00262189	0.511674	mean 0.555 %
+rawpk: members >= 1000 MeV only	1.04262	0.010757	1.01679	mean 0.129 %
+rawpk: members < 1000 MeV only	0.428719	0.00571856	0.605899	mean 0.463 %
+rawpk: independent-member prediction (single-pulse members, hit scatter with phase)	1.24285	0.00234785	nan	
+sum5: all members	1.56672	0.0158649	1.21387	mean -0.617 %
+sum5: all members: independent part (mean of the sum of squared member terms; holds member-level mean biases)	1.56966	0.0155624	nan	
+sum5: all members: cross terms = variance of D minus the independent part	-0.00293796	0.00913751	nan	
+sum5: all members: removable by a member-weighted k = 1, 2 phase harmonic fit (in sample)	0.903267	nan	nan	
+sum5: phase table	0.438488	0.0117819	0.432463	mean -0.375 %
+sum5: phase + amplitude tables	0.43363	0.0117364	0.424622	mean -0.383 %
+sum5: phase + amplitude tables: independent part (mean of the sum of squared member terms; holds member-level mean biases)	0.450305	0.0121336	nan	
+sum5: phase + amplitude tables: cross terms = variance of D minus the independent part	-0.0166745	0.00339265	nan	
+sum5: phase + amplitude tables: removable by a member-weighted k = 1, 2 phase harmonic fit (in sample)	0.00417454	nan	nan	

@@ -1,0 +1,4 @@
+arm	n	sig_control_pct	sig_arm_pct	excess_quadrature_pct	sig_pair_diff_pct	rms_pair_diff_pct	median_diff_pct	corr_control_vs_diff
+rawpk	18865	1.9535	2.40697	1.40618	1.21983	1.18694	0.039351	0.0143768
+rawpk_phase	18998	1.96676	2.244	1.08045	0.88423	0.891269	-0.0292373	0.0609179
+sum5_tables	19120	1.97942	2.07794	0.632229	0.493552	0.722098	0.0328823	-0.0828035

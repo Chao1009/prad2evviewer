@@ -1,0 +1,6 @@
+item	integral	raw	raw_excess
+pile-up flag: all clusters, CB integral / raw / quadrature excess	1.86555	2.32111	1.38104
+pile-up flag: clusters without the flag (73 %)	1.84276	2.33728	1.43775
+member threshold 14 MeV: CB integral / raw / excess variance difference (robust, percent^2)	1.95467	2.42537	2.02742
+member threshold 19 MeV: CB integral / raw / excess variance difference (robust, percent^2)	2.00586	2.46774	2.0544
+member threshold 25 MeV: CB integral / raw / excess variance difference (robust, percent^2)	2.10434	2.57753	2.21053

@@ -1,0 +1,17 @@
+contrast	from	to	d_var_pct2	d_var_se_pct2
+phase table (vs integral)	rawpk	rawpk@corrhephase	-0.834282	0.091867
+amplitude table after phase table	rawpk@corrhephase	rawpk@corrhephase+amp	0.0164138	0.0356302
+phase table (vs h_a)	rawpk	rawpk@corrphase	-0.475909	0.0604417
+raw -> 5-sample sum, no tables	rawpk	sum5	-0.758763	0.101572
+raw -> 5-sample sum, both with phase + amplitude tables	rawpk@corrhephase+amp	sum5@corrhephase+amp	-0.78384	0.0855246
+raw -> 7-sample sum, both with tables	rawpk@corrhephase+amp	sum7@corrhephase+amp	-0.697265	0.0913224
+raw -> 4-sample sum, both with tables	rawpk@corrhephase+amp	sum4@corrhephase+amp	-0.375853	0.0644255
+raw -> CFD-anchored 7-sample sum, both with tables	rawpk@corrhephase+amp	cfd7@corrhephase+amp	-0.81304	0.0778696
+5-sample peak-anchored -> CFD-anchored 7-sample sum, both with tables	sum5@corrhephase+amp	cfd7@corrhephase+amp	-0.0292002	0.0632796
+pile-up hits only (raw in kn)	integral	rawpk@kn	0.202331	0.0415521
+single-pulse hits only (raw in k1)	integral	rawpk@k1	1.8765	0.0993443
+hits >= 400 MeV only	integral	rawpk@above400	1.65137	0.106793
+hits < 400 MeV only	integral	rawpk@below400	0.404875	0.0513687
+hits >= 1000 MeV only	integral	rawpk@above1000	1.42046	0.0939278
+hits < 1000 MeV only	integral	rawpk@below1000	0.599034	0.0802545
+integral -> raw (total)	integral	rawpk	1.99833	0.11013

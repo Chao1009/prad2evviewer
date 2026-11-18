@@ -1,0 +1,25 @@
+arm	class	n	sig_pair_diff_pct	sig_arm_pct	sig_control_pct
+rawpk	pu flag off	13911	1.22679	2.35075	1.90868
+rawpk	pu flag on	4954	1.189	2.57428	2.09734
+rawpk	members <= 9	271	1.24131	2.58989	2.1805
+rawpk	members 10-14	12735	1.21587	2.44208	1.98028
+rawpk	members >= 15	5859	1.21376	2.32064	1.89539
+rawpk	seed fraction < 0.6	5246	1.07465	2.5536	2.14448
+rawpk	seed fraction 0.6-0.8	11251	1.23932	2.3493	1.88091
+rawpk	seed fraction >= 0.8	2368	1.28765	2.37869	1.88743
+rawpk_phase	pu flag off	14025	0.870236	2.17177	1.92366
+rawpk_phase	pu flag on	4973	0.928405	2.45741	2.10487
+rawpk_phase	members <= 9	275	0.978154	2.35288	2.15309
+rawpk_phase	members 10-14	12830	0.878367	2.2695	1.99556
+rawpk_phase	members >= 15	5893	0.893395	2.16589	1.90874
+rawpk_phase	seed fraction < 0.6	5268	0.895184	2.46121	2.15974
+rawpk_phase	seed fraction 0.6-0.8	11346	0.872226	2.16356	1.9015
+rawpk_phase	seed fraction >= 0.8	2384	0.83153	2.1536	1.90415
+sum5_tables	pu flag off	14106	0.479925	2.0378	1.93479
+sum5_tables	pu flag on	5014	0.541241	2.22657	2.12904
+sum5_tables	members <= 9	281	0.504043	2.27518	2.231
+sum5_tables	members 10-14	12906	0.488715	2.0947	2.00726
+sum5_tables	members >= 15	5933	0.503516	2.04292	1.9208
+sum5_tables	seed fraction < 0.6	5320	0.530459	2.24124	2.18682
+sum5_tables	seed fraction 0.6-0.8	11399	0.476446	2.01038	1.91448
+sum5_tables	seed fraction >= 0.8	2401	0.497025	2.04452	1.92132

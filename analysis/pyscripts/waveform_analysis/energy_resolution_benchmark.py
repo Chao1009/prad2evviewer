@@ -4,6 +4,8 @@
     python3 waveform_analysis/energy_resolution_benchmark.py scan <out.npz> <evio file> [<evio file> ...]
     python3 waveform_analysis/energy_resolution_benchmark.py report [--out <dir>] <scan dir> [<gate_ns> ...]     # no gates: CONTROL_GATE of the run type
     python3 waveform_analysis/energy_resolution_benchmark.py summary <out dir>     # <out dir>/summary.pdf from the five reports
+    python3 waveform_analysis/energy_resolution_benchmark.py report --calib moller [--out <dir>] <Ta X17 scan dir> [<gate_ns>]
+        # Moller two-cluster calibration of the 2p24GeV_Ta_X17 runs (moller_calib.py); --calib ep (default) is the chain below
   scan and report also take `--set NAME=VALUE` (repeatable, NAME in OVERRIDABLE): a module constant is overridden for the run and
   recorded in regions_splits.tsv / regions.tsv (`# overrides:` line) and the scan file (key overrides).
 
@@ -132,6 +134,11 @@ BELOW_THR = "auto"                     # P16 (KTeV-style): "auto" (default) = BE
                                        # pair <run type>_even.npz / _odd.npz (built on the even / odd split ordinals, improvement/tools/p16_table.py --half; a split uses the other half's table, preferred when present); each PbWO4 window module of a cluster without any stored hit in the event gets a virtual member with the table's expected energy, before gains, position correction and shape factor (all refitted); "" = off, a run type without a table is unchanged
 PHASE_STUDY = False                    # P10: write phase_clusters.npz: the control-gate pool clusters (E / E', top-3 member fractions and onset phases)
 SECONDARY_DUMP = False                 # write secondaries.npz: extra pulses of the legacy pool clusters' member modules
+EXOTIC_HOOK = ""                       # P9 exotic events (report side, opt-in; pileup_analysis/exotic_events/exotic_p9_calibration_impact.py): "" = off (every path unchanged), else an npz of
+                                       # splits [n, 2] (run, split): the report (and --calib moller) runs on these splits only; veto [n, 3] (run, EVIO event number, seed module index): such clusters are dropped on
+                                       # every path (Moller: the pair); rmin (mm): clusters whose seed-centre radius is below it are dropped (Moller: not applied); corr [n, 4] (run, event number, seed, module)
+                                       # with corr_rho [n]: that member's raw energy is multiplied by 1 + rho, er and e follow (first order: clustering, seed and position unchanged);
+                                       # the ep report writes <out>/<run type>/p9_clusters.npz (control-gate pool clusters, energies in and out of sample, used flags), the Moller report p9_moller.npz
 SECONDARY_RULE = {}                    # P8 (report side): {"mode": "merge" | "drop", "dt": (lo, hi) ns, "ar_max": r}: an extra pulse with lo < t - t_main <= hi and A / A_main < r (its module's largest pulse; matched-filter hits only) is removed, its energy added to that main pulse ("merge") or discarded ("drop"); {} = unchanged
 
 # --- module set (elastic-window method, no gain applied)
@@ -241,7 +248,7 @@ AMP_SCALE = ""                         # report side, ENERGY_DEF != "integral": 
 OVERRIDABLE = ("PEAK_COLUMNS", "PEAK_SEARCH_NS", "PEAK_CFD_FRAC", "ENERGY_DEF", "TIME_DEF", "TIME_OFFSETS_FILE", "AMP_SCALE", "PC_EXTRA_BY_RT", "PC_EXTRA_ANCHOR", "PC_EXTRA_CORE_K", "ASYM_WINDOW", "TIME_OFFSETS", "CONTROL_GATE", "LOG_WEIGHT_BY_RT", "EXCLUDE_RUNS", "EVAL_REGIONS", "T_LG_STUDY", "TWO_PEAK_WITH_REJECT", "CLUSTER_SET", "MOLLER_BEAM_OFFSET", "MOLLER_PAIRS", "SECONDARY_DUMP", "SECONDARY_RULE", "PHASE_STUDY", "PHASE_RESID",
                "PC_EXTRA", "PHASE_CORR", "MOLLER_REJECT", "NONLINEAR", "MIN_SEP_NS", "R_MODEL",
                "GAIN_MODE", "GAIN_SEED_STEP", "GAIN_FIXED_WINDOWS", "GAIN_MIN_SEED_FRAC", "GAIN_WIN_LO_NSIGMA", "GAIN_SEED_FRAC", "GAIN_FREE_FRAC", "GAIN_MAX_ITER", "GAIN_N_REFIT", "PC_SETTING", "TRAIN_REGIONS", "TRAIN_PC_REGIONS", "GAIN_COMBINE_RUNS", "GAIN_FREEZE_POOL", "GAIN_REGION_SCOPE", "GAIN_RING_PRIOR_X", "GAIN_COMBINE_LOO", "THR_DUMP", "BELOW_THR",
-               "BELOW_THR_BY_RT", "PHASE_RESID_BY_RT", "RING_CALIB_BY_RT")   # constants that --set may replace
+               "BELOW_THR_BY_RT", "PHASE_RESID_BY_RT", "RING_CALIB_BY_RT", "EXOTIC_HOOK")   # constants that --set may replace
 # P7 training beyond the pool (improvement/P7_beyond_pool.md); defaults = control (pool-only training)
 TRAIN_REGIONS = ()                     # P7: regions (names from REGION_NAMES: "H", "M", "O", "T") whose legacy clusters join the pool in the gain-solve (and, with TRAIN_PC_REGIONS, own-polynomial) training sample; needs EVAL_REGIONS.  The global elastic scale (mu_global, sigma_glob, <E'>) and the position map and shape factor stay fitted on the pool clusters; a region seed module is selected, windowed and solved like a pool module.  () = pool only
 TRAIN_PC_REGIONS = False               # P7: with TRAIN_REGIONS, the position correction (map, own polynomials of the modules with >= PC_SETTING[rt][1] clusters) and the shape factor are also fitted on the training regions' clusters; without GAIN_REGION_SCOPE this changes the pool's correction too
@@ -1238,6 +1245,50 @@ def below_thr(pools, h, geo, rt, par):
         me = objects([np.concatenate([a, b[k]]) for a, b, k in zip(pl["me"], add, ok)])
         tot = add.sum(1)
         out[p] = pl | dict(mi=mi, me=me, er=pl["er"] + tot, e=pl["e"] * (1.0 + tot / pl["er"]), nv=ok.sum(1))
+    return out
+
+
+_EXO = {}
+
+
+def exotic_hook():
+    """EXOTIC_HOOK arrays (loaded once per process)."""
+    if EXOTIC_HOOK not in _EXO:
+        with np.load(EXOTIC_HOOK, allow_pickle=False) as z:
+            _EXO[EXOTIC_HOOK] = {q: z[q] for q in z.files}
+    return _EXO[EXOTIC_HOOK]
+
+
+def exotic_apply(pools, run, evnum, geo, rmin=True):
+    """P9 (EXOTIC_HOOK) on clusters {path: clusters with ev, seed, mi, me, e, er}: member corrections (corr, corr_rho) of run, then the veto and
+    (rmin) the seed-radius cut.  evnum: EVIO event number of each scan event (ev indexes it)."""
+    x = exotic_hook()
+    v = x["veto"][x["veto"][:, 0] == run]
+    vset = set(zip(v[:, 1].tolist(), v[:, 2].tolist()))
+    cm = x["corr"][:, 0] == run
+    cor = {}
+    for (en_, s_, m_), r_ in zip(x["corr"][cm][:, 1:].tolist(), x["corr_rho"][cm].tolist()):
+        cor.setdefault((en_, s_), {})[m_] = r_
+    rad = np.hypot(geo["x"], geo["y"])
+    r0 = float(x["rmin"]) if rmin and "rmin" in x else 0.0
+    out = {}
+    for p, pl in pools.items():
+        en = evnum[pl["ev"].astype(np.int64)].astype(np.int64).tolist() if pl["e"].size else []
+        seed = pl["seed"].astype(np.int64)
+        keys = list(zip(en, seed.tolist()))
+        hit = [i for i, k in enumerate(keys) if k in cor]
+        if hit:
+            me, er, e = pl["me"].copy(), pl["er"].astype(np.float64), pl["e"].astype(np.float64)
+            for i in hit:
+                c = cor[keys[i]]
+                w = me[i] * np.array([1.0 + c.get(int(m), 0.0) for m in pl["mi"][i]])
+                d = float(w.sum() - me[i].sum())
+                e[i] *= (er[i] + d) / er[i] if er[i] > 0 else 1.0
+                er[i] += d
+                me[i] = w
+            pl = pl | dict(me=me, er=er.astype(pl["er"].dtype), e=e.astype(pl["e"].dtype))
+        keep = np.array([k not in vset for k in keys], bool) & (rad[seed] >= r0)
+        out[p] = take(pl, keep)
     return out
 
 
@@ -2430,6 +2481,8 @@ def split_job(job):
     base, n_single = cluster_events(h, cls, geo, SIGNAL_MIN * kE, SEED_MIN * kE, pairs)
     if BELOW_THR:                      # P16: virtual below-threshold members before every correction
         base = below_thr(base, h, geo, rt, split_parity(z, fn, split))
+    if EXOTIC_HOOK:                    # P9: veto / member corrections before every correction (both passes)
+        base = exotic_apply(base, run, z["ev_number"], geo)
     t_cl = time.monotonic() - t0
     full = base
     if EVAL_REGIONS:                   # the corrections, arms, spectra and the pool row run on the pool clusters as without it
@@ -2489,6 +2542,16 @@ def split_job(job):
                    ref=np.full(n, sets_all["legacy"][1]), ref_oos=np.full(n, sets_oos["legacy"][1] if oos else np.nan),
                    nmem=np.array([x.size for x in d["mi"]], np.int64), win_m=wm.astype(np.int16), win_p=wp,
                    mi=np.concatenate(list(d["mi"])) if n else np.zeros(0, np.int64), me=np.concatenate(list(d["me"])) if n else np.zeros(0))
+    p9 = None
+    if EXOTIC_HOOK:           # P9: control-gate pool clusters, default arm in sample (e) and out of sample (e_oos)
+        pp = f"g{CONTROL_GATE.get(rt, 0):g}"
+        pp = pp if pp in main else list(main)[-1]
+        d, n = main[pp], main[pp]["e"].size
+        eo = apply_arm(base[pp], switches(ARMS[DEFAULT_ARM]), oos, geo, mass)["e"] if oos else np.full(n, np.nan)
+        p9 = dict(run=np.full(n, run), split=np.full(n, split), evn=z["ev_number"][d["ev"].astype(np.int64)].astype(np.int64), seed=d["seed"],
+                  e=d["e"], e_oos=eo, x=d["x"], y=d["y"], pu=d["pu"], clip=d["clip"], used=np.isin(d["seed"], list(sets_all[pp][0])),
+                  used_oos=np.isin(d["seed"], list(sets_oos[pp][0])) if oos else np.zeros(n, bool),
+                  ref=np.full(n, sets_all["legacy"][1]), ref_oos=np.full(n, sets_oos["legacy"][1] if oos else np.nan))
     sec = None
     if SECONDARY_DUMP:        # the clusters that define the legacy pu column
         d = take(main["legacy"], np.isin(main["legacy"]["seed"], list(sets_all["legacy"][0])))
@@ -2496,7 +2559,7 @@ def split_job(job):
                    e_over_ep=d["e"] / ep_lookup(sets_all["legacy"][0], geo["x"].size)[d["seed"].astype(np.int64)],
                    n_extra=d["n_extra"], dt=d["dt"], ar=d["ar"], member_rank=d["rank"], e_extra=d["e_extra"])
     print(f"  [split] run {run} split {split}: {evs.size} events, clustering {t_cl:.0f} s", flush=True)
-    return dict(rows=rows, spectra=spectra, ratio=ratio, ref=ref, kE=kE, kS=kS, regions=regions, sec=sec, pst=pst, thr=thr,
+    return dict(rows=rows, spectra=spectra, ratio=ratio, ref=ref, kE=kE, kS=kS, regions=regions, sec=sec, pst=pst, thr=thr, p9=p9,
                 tdump=None if tdump is None else {p: d | dict(run=run, split=split, kE=kE, kS=kS) for p, d in tdump.items()})
 
 
@@ -2738,6 +2801,11 @@ def report(scan_dir, gates, out_root=OUT_ROOT):
             scan_ovr |= {str(z["overrides"])} if "overrides" in z.files else set()
             run_of[str(fn)] = int(z["run"])
             jobs += [(str(fn), int(s)) for s in z["splits"]]
+    if EXOTIC_HOOK:                    # P9: the hook's splits only
+        want = set(map(tuple, exotic_hook()["splits"].tolist()))
+        jobs = [j for j in jobs if (run_of[j[0]], j[1]) in want]
+        run_of = {fn: r for fn, r in run_of.items() if any(j[0] == fn for j in jobs)}
+        print(f"[note] EXOTIC_HOOK {EXOTIC_HOOK}: {len(jobs)} splits", flush=True)
     if len(types) != 1:
         sys.exit(f"[ERROR] {scan_dir} holds several run types: {sorted(types)}")
     if ENERGY_DEF not in ("integral",) + tuple(AMP_COLUMN) or TIME_DEF not in ("mf", "cfd"):
@@ -2812,6 +2880,10 @@ def report(scan_dir, gates, out_root=OUT_ROOT):
     if THR_DUMP:              # P16
         np.savez_compressed(out / "thr_clusters.npz", hz=first[0]["geo"]["hz"], ebeam=first[0]["geo"]["ebeam"],
                             **{q: np.concatenate([x["thr"][q] for x in res]) for q in res[0]["thr"]})
+    if EXOTIC_HOOK:           # P9
+        g0 = first[0]["geo"]
+        np.savez_compressed(out / "p9_clusters.npz", hz=g0["hz"], ebeam=g0["ebeam"], mod_x=g0["x"], mod_y=g0["y"], mod_name=np.asarray(g0["name"]).astype(str), mod_pwo4=g0["pwo4"],
+                            **{q: np.concatenate([x["p9"][q] for x in res]) for q in res[0]["p9"]})
     if SECONDARY_DUMP:
         np.savez_compressed(out / "secondaries.npz", **{q: np.concatenate([x["sec"][q] for x in res]) for q in res[0]["sec"]})
     write_pdf(summ, spectra, rows, rt, gates, out)
@@ -3057,6 +3129,16 @@ def main():
     elif len(a) >= 3 and a[0] == "scan":
         scan(a[1], a[2:])
     elif len(a) >= 2 and a[0] == "report":
+        if "--calib" in a:                 # --calib ep (default, this chain) | moller (moller_calib.py: Ta X17 two-cluster Moller path)
+            i = a.index("--calib")
+            calib = a[i + 1] if i + 1 < len(a) else ""
+            del a[i:i + 2]
+            if calib == "moller":
+                import moller_calib
+                moller_calib.erb = sys.modules[__name__]       # the --set overrides of this process
+                return moller_calib.main(a)
+            if calib != "ep" or len(a) < 2:
+                sys.exit(f"[ERROR] --calib {calib!r}: ep or moller, then <scan dir>")
         out_root = OUT_ROOT
         if a[1] == "--out":
             out_root, a = Path(a[2]), a[2:]

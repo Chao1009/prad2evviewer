@@ -1,0 +1,12 @@
+# raw-peak excess over the matched filter propagated to the elastic clusters
+component	hit_parameter	cluster_sigma_pct
+white noise n/A	0.710134	0.112736
+stochastic a/A	0.0999182	0.662287
+constant c	0.00595203	0.422692
+total	nan	0.793727
+raw sample noise (pedestal std), all members	0.952311	0.151182
+raw sample noise (pedestal std), seed only	0.952311	0.0410928
+noise in excess of the matched filter (psd sqrt(1 - 1/sumsq)), all members	0.839001	0.133194
+noise in excess of the matched filter (psd sqrt(1 - 1/sumsq)), seed only	0.839001	0.0362034
+median seed amplitude (ADC)	1604.15	nan
+median seed sigma_noise / A (percent)	0.952311	0.0593656

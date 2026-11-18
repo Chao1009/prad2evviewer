@@ -1,0 +1,17 @@
+path	step	cut	events
+legacy	0	all events	2520012
+legacy	1	hit sum > 0.8 Ebeam (prefilter)	1340288
+legacy	2	two largest clusters PbWO4, loose: |dphi - 180| < 30 deg about (0, 0), |E1 + E2 - Ebeam| < 0.3 Ebeam	185361
+legacy	3	isolation: no other cluster above 50 MeV within 60 mm of either	102895
+legacy	4	fiducial: both seeds outside H and T, seed >= 200 MeV	40515
+legacy	5	energy sum: |E1 + E2 - Ebeam| < 0.2 Ebeam	37931
+legacy	6	coplanar: |dphi - 180| < 10 deg about the beam centre	31677
+legacy	7	Moller angles: |tan th1 tan th2 (gamma + 1) / 2 - 1| < 0.15	20997
+g4	0	all events	2520012
+g4	1	hit sum > 0.8 Ebeam (prefilter)	1340288
+g4	2	two largest clusters PbWO4, loose: |dphi - 180| < 30 deg about (0, 0), |E1 + E2 - Ebeam| < 0.3 Ebeam	176723
+g4	3	isolation: no other cluster above 50 MeV within 60 mm of either	83815
+g4	4	fiducial: both seeds outside H and T, seed >= 200 MeV	38744
+g4	5	energy sum: |E1 + E2 - Ebeam| < 0.2 Ebeam	36223
+g4	6	coplanar: |dphi - 180| < 10 deg about the beam centre	30378
+g4	7	Moller angles: |tan th1 tan th2 (gamma + 1) / 2 - 1| < 0.15	20491

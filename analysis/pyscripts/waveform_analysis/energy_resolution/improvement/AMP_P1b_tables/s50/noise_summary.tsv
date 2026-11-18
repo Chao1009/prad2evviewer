@@ -1,0 +1,12 @@
+quantity	value
+modules	925
+psd_adc_median	0.952311
+psd_adc_q10	0.85647
+psd_adc_q90	1.06948
+lag1_median	-0.371621
+sig_ref_median	1.13288
+template_sumsq_median	4.46804
+template_sum_median	7.90413
+sigma_a_MF_adc (psd/sqrt(sq))	0.450526
+sigma_raw_adc (psd)	0.952311
+sigma_excess_white_adc (psd sqrt(1-1/sq))	0.839001
