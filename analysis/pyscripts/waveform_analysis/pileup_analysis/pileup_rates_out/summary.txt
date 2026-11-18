@@ -1,0 +1,102 @@
+pileup_rates.py report: 13 run scans (output/pileup_rates/scan)
+pile-up (cut): E_main >= 0.1 E_beam of the run (runinfo beam_energy; 0p73GeV_H2 72.9 MeV, 2p24GeV_H2 224.0 MeV, 3p49GeV_H2 348.5 MeV, 2p24GeV_Ta_X17 224.0 MeV; E_main = A_main x gain, gain = calibration factor of the run (database/runinfo/general.json -> database/calibration/*.json) x I_int of the module's spline template; modules without a factor are left out) and another fitted pulse with A_other / A_main > 0.1 and |dt| >= 8 ns (suppresses noise-driven secondaries); cut rates = N(pile-up (cut)) / N(kept channels with E_main >= thr); cluster cut rates = clusters with a member at E_used >= thr and an extra pulse with r > 0.1, over leading clusters with seed E_used >= thr; raw (uncut) rates are comparison columns
+MF: nsigma 5, min_amp 5, kmax 6, r_model 0.02, MIN_SEP_NS = 8 ns, clipped samples weight 0; kept channel: A_main >= 10 ADC (MF only if raw max - baseline >= 8 ADC); note: the raw k >= 2 counts and the k maps now use the 10 ADC denominator
+bad waveforms (any sample 0 or more than 20 ADC below the baseline) are removed before the matched filter and excluded from everything; channels whose main pulse is truncated by the end of the waveform stay in the raw k counts and k maps but are excluded from every E_main-based quantity
+channels that are the only kept channel in their event are vetoed (self-triggered bursts in a few modules), as are channels of events with >= 300 kept channels (array-wide pulses); the cut rates, maps and clusters exclude them, raw k >= 2 numbers do not
+saturated channels (nclip >= 3) and bad fits (chi2/dof > 1000) are excluded like bad waveforms (cut rates, clusters, slices, medians, maps, examples; only counted per module)
+events: trigger gate + LMS veto only; channels: PbWO4 and lead glass (lead glass fitted with the bank's average PbWO4 spline)
+cluster: seed = kept channel with the largest pulse with onset in (130, 200) ns (as the benchmark's pre-window, time offsets off); members = seed + modules within 1.5 x the mean module size that have an in-window pulse; used pulse = largest in-window one, other pulses = extras (in-window or not; r = A_extra / A_used)
+per-module rates (pileup_modules_*.tsv, maps): raw k >= 2 rate only for modules with n_kept > 100; cut rate only for modules with >= 100 channels at E_main >= threshold
+
+[0p73GeV_H2] runs [24590, 24603], 16 splits, 3137974 events seen, 0 LMS-vetoed, 3133150 after trigger + LMS
+  channel level, PRIMARY (cut): 53931/5646572 = 0.955 +- 0.004 % (N(kept, E_main >= 72.9 MeV) = 5646572)
+  dead modules (runinfo hycal_dead_modules, excluded from the scan; dead in any run of the type): 4: W691, W1019, W1020, W1124
+  E_main >= 0.1 E_beam = 72.9 MeV (beam energies 728.9); median gain 0.9619 MeV/ADC (equivalent ADC threshold 76 at the median); 583 modules without a calibration factor, 24493 kept non-veto channels in them left out of the cut rates
+  channel level, cut extras (largest A_other per channel; dt = t_other - t_main): median dt 14.4 ns, median |dt| 15.4 ns, median r 0.128, before the main pulse 5.6 %
+  cluster level, PRIMARY (cut): 3119784 leading clusters with seed E_used >= 72.9 MeV (of 3130974); clusters with a member at E_used >= 72.9 MeV and an extra with r > 0.1, |dt| >= 8 ns: all extras 1.460 +- 0.007 %, in-window extras 1.353 +- 0.007 %
+  cluster level, cut extras (largest-r triggering extra per cluster; dt = t_extra - t_used): all extras median dt 14.3 ns, median r 0.127; in-window extras median dt 14.0 ns, median r 0.125
+  single-channel veto: 2085 of 20978594 kept channels vetoed (0.01 %), 549 of them would be pile-up (cut)
+  array-wide veto: 8 events, 12485 kept channels vetoed, 5666 of them would be pile-up (cut)
+  channel level, raw (comparison): 387858/20978594 = 1.849 +- 0.003 % with k >= 2 (PbWO4 only: 385249/20950799 = 1.839 +- 0.003 %)
+  k distribution (k = 1 ... 6): [20590736, 360201, 16233, 4848, 3748, 2828] -> k = 1 fraction 0.9815; k = 6 channels: 2828
+  bad waveforms: 15709 of 22596106 digitised channels (0.070 %); modules with the most: W598 96, W560 65, W335 47
+  saturated (nclip >= 3): 22 of 20979171 kept channels before the exclusion (0.000 %); modules with the most: W335 13, W927 5, W10 1
+  bad fit (chi2/dof > 1000): 568 of 20979171 kept channels before the exclusion (0.003 %); modules with the most: W335 45, W494 22, W663 21
+  channels with a truncated main pulse: 142974 of 20978594 kept (0.682 %), excluded from the E_main-based quantities
+  baseline offset dped / sigma of the kept channels: median 0.003, 16th-84th percentile -0.509 ... 0.608; fraction clipped at ±1 sigma: 13.348 %
+  leading clusters: 3130974 of 3130994 events with a kept channel (3133150 after trigger + LMS; 20 without an in-window pulse, 0.00 %)
+  clipped (any sample >= 4095): channel level 9/20978594 = 0.0000 +- 0.0000 %, cluster level 8/3130974 = 0.0003 +- 0.0001 %; pile-up (k >= 2) among clipped channels: 8/9 = 88.889 +- 10.476 %
+  median chi2/dof of k = 1 channels with A <= 1000 ADC: 0.865
+  scan wall time per run: median 2539 s, max 3227 s
+  PbWO4 modules with n_kept > 100: 1148 of 1148 (dead excluded); with >= 100 channels at E_main >= thr (cut rate): 1011, per-module cut rate median 0.85 %, p90 1.73 %
+  pooled cut rate (%) in E_main/E_beam slices 0.1–0.3 ... 1.1–1.3 = N(cut channels with E_main in the slice) / N(all 20964024 kept channels of the run type, every energy; per-module values: / kept channels of the module; drawn for >= 10 channels in the slice): 0.215, 0.035, 0.005, 0.002, 0.000, 0.000
+
+[2p24GeV_H2] runs [25228, 25257, 25260, 25299, 25320], 42 splits, 6730876 events seen, 0 LMS-vetoed, 6702649 after trigger + LMS
+  channel level, PRIMARY (cut): 67731/12424782 = 0.545 +- 0.002 % (N(kept, E_main >= 224.0 MeV) = 12424782)
+  dead modules (runinfo hycal_dead_modules, excluded from the scan; dead in any run of the type): 3: W1019, W1020, W1124
+  E_main >= 0.1 E_beam = 224.0 MeV (beam energies 2239.51); median gain 0.9494 MeV/ADC (equivalent ADC threshold 236 at the median); 583 modules without a calibration factor, 421416 kept non-veto channels in them left out of the cut rates
+  channel level, cut extras (largest A_other per channel; dt = t_other - t_main): median dt 11.2 ns, median |dt| 13.0 ns, median r 0.121, before the main pulse 10.6 %
+  cluster level, PRIMARY (cut): 6600205 leading clusters with seed E_used >= 224.0 MeV (of 6690677); clusters with a member at E_used >= 224.0 MeV and an extra with r > 0.1, |dt| >= 8 ns: all extras 0.825 +- 0.004 %, in-window extras 0.688 +- 0.003 %
+  cluster level, cut extras (largest-r triggering extra per cluster; dt = t_extra - t_used): all extras median dt 11.3 ns, median r 0.121; in-window extras median dt 10.7 ns, median r 0.117
+  single-channel veto: 10490 of 96224982 kept channels vetoed (0.01 %), 5719 of them would be pile-up (cut)
+  array-wide veto: 34 events, 39343 kept channels vetoed, 10104 of them would be pile-up (cut)
+  channel level, raw (comparison): 2753486/96224982 = 2.862 +- 0.002 % with k >= 2 (PbWO4 only: 2740171/95791176 = 2.861 +- 0.002 %)
+  k distribution (k = 1 ... 6): [93471496, 2626888, 82409, 17135, 14733, 12321] -> k = 1 fraction 0.9714; k = 6 channels: 12321
+  bad waveforms: 61393 of 108143922 digitised channels (0.057 %); modules with the most: W563 1371, W560 1109, W528 914
+  saturated (nclip >= 3): 2398 of 96230900 kept channels before the exclusion (0.002 %); modules with the most: W457 510, W613 306, W218 102
+  bad fit (chi2/dof > 1000): 3844 of 96230900 kept channels before the exclusion (0.004 %); modules with the most: W494 114, W663 113, W564 102
+  channels with a truncated main pulse: 865836 of 96224982 kept (0.900 %), excluded from the E_main-based quantities
+  baseline offset dped / sigma of the kept channels: median -0.018, 16th-84th percentile -0.627 ... 0.662; fraction clipped at ±1 sigma: 19.184 %
+  leading clusters: 6690677 of 6690893 events with a kept channel (6702649 after trigger + LMS; 216 without an in-window pulse, 0.00 %)
+  clipped (any sample >= 4095): channel level 1169/96224982 = 0.0012 +- 0.0000 %, cluster level 955/6690677 = 0.0143 +- 0.0005 %; pile-up (k >= 2) among clipped channels: 1047/1169 = 89.564 +- 0.894 %
+  median chi2/dof of k = 1 channels with A <= 1000 ADC: 0.881
+  scan wall time per run: median 3643 s, max 4797 s
+  PbWO4 modules with n_kept > 100: 1149 of 1149 (dead excluded); with >= 100 channels at E_main >= thr (cut rate): 999, per-module cut rate median 0.29 %, p90 0.83 %
+  pooled cut rate (%) in E_main/E_beam slices 0.1–0.3 ... 1.1–1.3 = N(cut channels with E_main in the slice) / N(all 96175149 kept channels of the run type, every energy; per-module values: / kept channels of the module; drawn for >= 10 channels in the slice): 0.061, 0.005, 0.002, 0.001, 0.001, 0.001
+
+[3p49GeV_H2] runs [24698, 24911, 24937], 20 splits, 2557856 events seen, 0 LMS-vetoed, 2546884 after trigger + LMS
+  channel level, PRIMARY (cut): 13829/4939358 = 0.280 +- 0.002 % (N(kept, E_main >= 348.5 MeV) = 4939358)
+  dead modules (runinfo hycal_dead_modules, excluded from the scan; dead in any run of the type): 4: W1019, W1020, W1124, W1141
+  E_main >= 0.1 E_beam = 348.5 MeV (beam energies 3485.41); median gain 0.9670 MeV/ADC (equivalent ADC threshold 360 at the median); 583 modules without a calibration factor, 47969 kept non-veto channels in them left out of the cut rates
+  channel level, cut extras (largest A_other per channel; dt = t_other - t_main): median dt 12.1 ns, median |dt| 14.7 ns, median r 0.121, before the main pulse 11.5 %
+  cluster level, PRIMARY (cut): 2437063 leading clusters with seed E_used >= 348.5 MeV (of 2464285); clusters with a member at E_used >= 348.5 MeV and an extra with r > 0.1, |dt| >= 8 ns: all extras 0.423 +- 0.004 %, in-window extras 0.334 +- 0.004 %
+  cluster level, cut extras (largest-r triggering extra per cluster; dt = t_extra - t_used): all extras median dt 11.8 ns, median r 0.121; in-window extras median dt 10.9 ns, median r 0.117
+  single-channel veto: 20438 of 46842755 kept channels vetoed (0.04 %), 819 of them would be pile-up (cut)
+  array-wide veto: 10 events, 11108 kept channels vetoed, 324 of them would be pile-up (cut)
+  channel level, raw (comparison): 1502391/46842755 = 3.207 +- 0.003 % with k >= 2 (PbWO4 only: 1498243/46790553 = 3.202 +- 0.003 %)
+  k distribution (k = 1 ... 6): [45340364, 1444458, 39121, 7463, 6086, 5263] -> k = 1 fraction 0.9679; k = 6 channels: 5263
+  bad waveforms: 44812 of 52171842 digitised channels (0.086 %); modules with the most: G58 2100, W563 1092, W528 843
+  saturated (nclip >= 3): 472 of 46844862 kept channels before the exclusion (0.001 %); modules with the most: W613 69, W218 19, W307 19
+  bad fit (chi2/dof > 1000): 1715 of 46844862 kept channels before the exclusion (0.004 %); modules with the most: W598 53, W559 50, W494 49
+  channels with a truncated main pulse: 489989 of 46842755 kept (1.046 %), excluded from the E_main-based quantities
+  baseline offset dped / sigma of the kept channels: median -0.054, 16th-84th percentile -0.819 ... 0.668; fraction clipped at ±1 sigma: 23.953 %
+  leading clusters: 2464285 of 2513897 events with a kept channel (2546884 after trigger + LMS; 49612 without an in-window pulse, 1.97 %)
+  clipped (any sample >= 4095): channel level 224/46842755 = 0.0005 +- 0.0000 %, cluster level 188/2464285 = 0.0076 +- 0.0006 %; pile-up (k >= 2) among clipped channels: 179/224 = 79.911 +- 2.677 %
+  median chi2/dof of k = 1 channels with A <= 1000 ADC: 0.928
+  scan wall time per run: median 4182 s, max 4823 s
+  PbWO4 modules with n_kept > 100: 1149 of 1148 (dead excluded); with >= 100 channels at E_main >= thr (cut rate): 628, per-module cut rate median 0.10 %, p90 0.43 %
+  pooled cut rate (%) in E_main/E_beam slices 0.1–0.3 ... 1.1–1.3 = N(cut channels with E_main in the slice) / N(all 46811209 kept channels of the run type, every energy; per-module values: / kept channels of the module; drawn for >= 10 channels in the slice): 0.026, 0.002, 0.001, 0.001, 0.000, 0.000
+
+[2p24GeV_Ta_X17] runs [25800, 26138, 26230], 25 splits, 2538447 events seen, 2 LMS-vetoed, 2520012 after trigger + LMS
+  channel level, PRIMARY (cut): 404701/5520554 = 7.331 +- 0.011 % (N(kept, E_main >= 224.0 MeV) = 5520554)
+  dead modules (runinfo hycal_dead_modules, excluded from the scan; dead in any run of the type): 4: W781, W1019, W1020, W1124
+  E_main >= 0.1 E_beam = 224.0 MeV (beam energies 2239.51); median gain 0.8782 MeV/ADC (equivalent ADC threshold 255 at the median); 583 modules without a calibration factor, 15480 kept non-veto channels in them left out of the cut rates
+  channel level, cut extras (largest A_other per channel; dt = t_other - t_main): median dt 12.8 ns, median |dt| 88.0 ns, median r 0.190, before the main pulse 46.6 %
+  cluster level, PRIMARY (cut): 2299454 leading clusters with seed E_used >= 224.0 MeV (of 2519986); clusters with a member at E_used >= 224.0 MeV and an extra with r > 0.1, |dt| >= 8 ns: all extras 7.416 +- 0.017 %, in-window extras 1.763 +- 0.009 %
+  cluster level, cut extras (largest-r triggering extra per cluster; dt = t_extra - t_used): all extras median dt 13.9 ns, median r 0.202; in-window extras median dt 10.2 ns, median r 0.178
+  single-channel veto: 3 of 79197020 kept channels vetoed (0.00 %), 1 of them would be pile-up (cut)
+  array-wide veto: 15 events, 22240 kept channels vetoed, 5705 of them would be pile-up (cut)
+  channel level, raw (comparison): 17935760/79197020 = 22.647 +- 0.005 % with k >= 2 (PbWO4 only: 17929878/79176100 = 22.646 +- 0.005 %)
+  k distribution (k = 1 ... 6): [61261260, 13059981, 3327595, 945583, 329971, 272630] -> k = 1 fraction 0.7735; k = 6 channels: 272630
+  bad waveforms: 1060436 of 88670130 digitised channels (1.196 %); modules with the most: W528 53660, W527 51092, W563 49124
+  saturated (nclip >= 3): 8 of 79245463 kept channels before the exclusion (0.000 %); modules with the most: W59 1, W457 1, W577 1
+  bad fit (chi2/dof > 1000): 48438 of 79245463 kept channels before the exclusion (0.061 %); modules with the most: W493 1842, W494 1740, W663 1715
+  channels with a truncated main pulse: 7203132 of 79197020 kept (9.095 %), excluded from the E_main-based quantities
+  baseline offset dped / sigma of the kept channels: median -0.108, 16th-84th percentile -0.863 ... 0.541; fraction clipped at ±1 sigma: 21.292 %
+  leading clusters: 2519986 of 2519994 events with a kept channel (2520012 after trigger + LMS; 8 without an in-window pulse, 0.00 %)
+  clipped (any sample >= 4095): channel level 12/79197020 = 0.0000 +- 0.0000 %, cluster level 7/2519986 = 0.0003 +- 0.0001 %; pile-up (k >= 2) among clipped channels: 11/12 = 91.667 +- 7.979 %
+  median chi2/dof of k = 1 channels with A <= 1000 ADC: 0.831
+  scan wall time per run: median 4569 s, max 5893 s
+  PbWO4 modules with n_kept > 100: 1148 of 1148 (dead excluded); with >= 100 channels at E_main >= thr (cut rate): 644, per-module cut rate median 0.43 %, p90 1.93 %
+  pooled cut rate (%) in E_main/E_beam slices 0.1–0.3 ... 1.1–1.3 = N(cut channels with E_main in the slice) / N(all 79174777 kept channels of the run type, every energy; per-module values: / kept channels of the module; drawn for >= 10 channels in the slice): 0.440, 0.042, 0.018, 0.011, 0.000, 0.000
+
