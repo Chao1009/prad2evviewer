@@ -1,0 +1,46 @@
+[load] 2 files, runs [24590, 24603], 4266927 pulses, E_beam 728.9 MeV; first-choice fit pools 202849, held out 50787
+[setup] DAQ config : /Users/L00338853/work/PRad/prad2evviewer/database/daq_config.json
+[setup] Run number : 24590
+RunInfo   : chained 3 config(s), last from_run=24551  ped_from_run=24535  beam_from_run=24185  dead_from_run=0 from /Users/L00338853/work/PRad/prad2evviewer/database/runinfo/general.json
+[setup] RunInfo    : /Users/L00338853/work/PRad/prad2evviewer/database/runinfo/general.json  beam=728 MeV  hycal_z=6265.9 mm
+[setup] HC sigma_E : E*sqrt(3.300^2/E_GeV+0.000^2+0.000^2/E_GeV^2)/100
+[setup] HC profile : loaded PWO and PbGlass tables
+[setup] HC dead    : modules=580  neighbors=145
+[setup] HC calib   : /Users/L00338853/work/PRad/prad2evviewer/database/calibration/calibration_factor_3p5_June7_nonLinear.json (1728 modules)
+[setup] HC t calib: default=0 ns  per-module=1152 (/Users/L00338853/work/PRad/prad2evviewer/database/hycal_time_offsets/time_calib.json)
+[setup] HC time   : default=[130, 200] ns
+[setup] HC RF off : default=0 ns
+[setup] HC sigma(E)= sqrt((3.600/sqrt(E_GeV))^2+(0.000/E_GeV)^2+0.000^2) mm
+[setup] GEM sigma  : [0.500,0.500,0.500,0.500] mm
+[setup] HC E bias : disabled
+[setup] HC cluster : min_mod_E=1  min_ctr_E=10  min_cl_E=50  split_iter=6  nonlin=on  E_bias=off  seed_t_win=4ns (gated)
+[setup] GEM map    : /Users/L00338853/work/PRad/prad2evviewer/database/gem_map.json  (4 detectors)
+[setup] GEM crate remap: {146: 146, 147: 147}
+GemSystem::LoadPedestals: 144 APVs loaded from /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/gem_ped_24535.dat
+[setup] GEM peds   : /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/gem_ped_24535.dat
+GemSystem::LoadCommonModeRange: 144 APVs loaded from /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/CommonModeRange_24535.txt
+[setup] GEM CM     : /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/CommonModeRange_24535.txt
+[PEDSUM] n_apvs=200 n_strips=25600 sum_noise=36068918.091993 sum_offset=30067.978918
+[GEMSYS] common_mode_thr=20 zero_sup_thr=5 cross_talk_thr=8 min_peak=30 min_sum=60 rej_first=0 rej_last=0
+[GEMCFG] d0 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d1 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d2 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d3 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+  [modules] 100/1152  7 s
+  [modules] 200/1152  11 s
+  [modules] 300/1152  16 s
+  [modules] 400/1152  34 s
+  [modules] 500/1152  64 s
+  [modules] 600/1152  96 s
+  [modules] 700/1152  128 s
+  [modules] 800/1152  153 s
+  [modules] 900/1152  164 s
+  [modules] 1000/1152  168 s
+  [modules] 1100/1152  171 s
+[cutflow] (select, PbWO4) nseen 22537190  c1_clip_ok 22537148  c5_amp_ge50 7173269  c4_contained 7115999  c3_first_thr 4993904  c8_pedestal 4546452  c9_tail 4545201  c2_no_secondary 4513253  c10_smooth 4267689  stored 4266927
+[summary] own template 1132 (general pool 217), run-type average 16 (14202 pulses), dead 4 (W1019 W1020 W1124 W691); single pulse 50, shape_sigma borrowed 515
+[summary] pool size min 1 p10 5 median 32 max 1000, >= 50: 429; total before cap median 36 max 83596, capped 109; lambda 100:135 1000:310 10000:687
+[summary] alignment rms vs CFD (median over own modules with pool >= 2), per pass: 0.121 0.125 0.129 ns
+[summary] own shape_sigma median over modules: peak 1.96 %, leading edge (t50) 0.69 % of the peak; elastic (424 modules) t50 0.65 %
+[summary] pulse jitter median over own-sigma modules: rise 0.14 ns, fall 2.11 ns
+[done] /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/waveform_analysis/pulse_templates/0p73GeV_H2/templates_0p73GeV_H2.npz (38.1 MB), .pdf, .root, n_templates_map.png; 286 s

@@ -1,0 +1,16 @@
+# source: /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00000 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00010 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00020 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00030 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00040 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00050 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00060 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00070 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00080 ; map /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/waveform_analysis/snake_scan/hycal_map_til_run023849.json
+# affine map of EPICS ptrans (mm) to HyCal module-centre position (mm), fitted on 9 clean dwells
+# module position = a * ptrans + b, per axis (axis-aligned; ptrans_y spans only rows 17-18)
+x: a=1.0000 b=126.750 mm  residual rms=0.00 mm  max|res|=0.00 mm  ptrans_rms=135.0 mm  slope_fixed=False
+y: a=-1.0000 b=10.110 mm  residual rms=0.00 mm  max|res|=0.00 mm  ptrans_rms=10.3 mm  slope_fixed=True
+module	ptrans_x	ptrans_y	res_x_mm	res_y_mm	nearest_module	dist_mm
+W599	-54.05	20.49	0.00	0.00	W599	0.00
+W594	-157.90	20.49	0.00	0.00	W594	0.00
+W590	-240.99	20.49	0.00	0.00	W590	0.00
+W585	-344.83	20.49	-0.00	0.00	W585	0.00
+W580	-448.68	20.49	-0.00	0.00	W580	0.00
+W547	-427.92	-0.27	0.00	-0.00	W547	0.00
+W552	-324.07	-0.27	0.00	-0.00	W552	0.00
+W557	-220.21	-0.27	-0.00	-0.00	W557	0.00
+W564	-74.82	-0.27	-0.00	-0.00	W564	0.00
+# verdict: ptrans usable

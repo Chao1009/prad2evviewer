@@ -1,0 +1,13 @@
+# source: edge edge_23701.tsv; L_scan lms_scan.tsv; L_prod lms_prod_3p49GeV_H2.tsv; gains /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/output/energy_resolution/control_phase2_v3_20261114/v3_defaults/3p49GeV_H2/ring/gains.tsv; map hycal_map_til_run023849.json (regions as energy_resolution_benchmark)
+# N_rt = 0.962953 (median of g s L_prod/L_scan over 4 pool modules); pool spread (1.48 MAD of r) = 0.0303 over 4 modules, expected 0.0088; gate (<= 0.02) fail
+# g_T = N (L_scan/L_prod)/s; sigma_T = g_T hypot(s_err/s, L_scan err, L_prod err) (N error not included); r = g_pool/g_T; g_pool = inverse-variance mean over the run rows with prior_frac < 0.5 of ring/gains.tsv (nan: none)
+module	region	s	s_err	L_scan	L_prod	g_T	sigma_T	g_pool	r	sigma_pool	group	exp_r	L_scan_err	L_prod_err	L_source
+W547	O	0.98741	0.00313	8297.77	8440.33	0.958759	0.00975359	nan	nan	nan	-	nan	79.8555	7.6819	23701
+W552	pool	1.09704	0.00367	5406.34	5094.21	0.931556	0.00569087	0.950184	1.02	0.00172048	pool	0.00637169	27.1355	4.9284	23701
+W557	pool	1.02368	0.00421	2989.84	2893.52	0.971991	0.0121205	0.952555	0.980004	0.000451594	pool	0.0124788	35.0321	3.2899	23701
+W564	H	1.10808	0.00971	1565.95	1485.77	0.915925	0.014885	0.917973	1.00224	0.000203011	H	0.0162528	21.3251	2.0305	23701
+W580	T	0.9594	0.00312	4909.18	5065.65	0.972699	0.0120646	nan	nan	nan	-	nan	58.552	5.09	23701
+W585	M	1.00126	0.00279	5505.75	5596.47	0.946151	0.0108661	nan	nan	nan	-	nan	61.103	5.493	23701
+W590	pool	1.02363	0.00323	5633.89	5343.44	0.991857	0.0071502	0.9711	0.979073	0.000653236	pool	0.00724021	36.163	4.8089	23701
+W594	H	0.99843	0.00333	4461.59	3999.52	1.07589	0.00725188	1.09838	1.0209	0.00185251	H	0.00694814	25.5409	4.9585	23701
+W599	pool	1.02891	0.00398	7160.96	7670.72	0.8737	0.0066323	0.935622	1.07087	0.00025849	pool	0.00759608	46.3646	6.6002	23701

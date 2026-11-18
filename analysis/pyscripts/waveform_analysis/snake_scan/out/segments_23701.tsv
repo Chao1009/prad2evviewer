@@ -1,0 +1,17 @@
+# D8 segments, run 23701: per-file LMS2/LMS3 (median LMS / median alpha) and median PbWO4 pedestal (ADC)
+# source: lms_23701_00000.npz lms_23701_00010.npz lms_23701_00020.npz lms_23701_00030.npz lms_23701_00040.npz lms_23701_00050.npz lms_23701_00060.npz lms_23701_00070.npz lms_23701_00080.npz; map hycal_map_til_run023849.json
+# step = consecutive-file difference > 3 sigma, sigma = 1.48 MAD of that series' differences
+# sigma_R2 = 0.042812
+# sigma_R3 = 0.024159
+# sigma_ped = 0.14198
+split	n_lms	n_alpha	ts_first	R_LMS2	R_LMS3	ped_med	z_R2	z_R3	z_ped
+00000	3	146	10570854414	2.3703	0.45617	162.12	-	-	-
+00010	9	499	101434333681	2.371	0.46997	162.36	0.02	0.57	1.65
+00020	4	148	185501233666	2.4009	0.47137	162.35	0.70	0.06	-0.02
+00030	1	96	308819828744	2.339	0.44069	162.26	-1.45	-1.27	-0.68
+00040	0	183	0	nan	nan	nan	-	-	-
+00050	2	109	485286437673	2.3712	0.46873	162.3	0.75	1.16	0.32
+00060	1	108	581135958618	2.4011	0.48642	162.43	0.70	0.73	0.88
+00070	3	208	706139754841	2.3418	0.47073	162.14	-1.38	-0.65	-2.01
+00080	2	281	806747136808	2.4006	0.46022	162.04	1.37	-0.44	-0.69
+# steps: none (no |z| > 3)

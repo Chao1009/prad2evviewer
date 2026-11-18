@@ -1,0 +1,108 @@
+[setup] DAQ config : /Users/L00338853/work/PRad/prad2evviewer/database/daq_config.json
+[setup] Run number : 25228
+RunInfo   : chained 5 config(s), last from_run=25200  ped_from_run=24535  beam_from_run=24185  dead_from_run=25200 from /Users/L00338853/work/PRad/prad2evviewer/database/runinfo/general.json
+[setup] RunInfo    : /Users/L00338853/work/PRad/prad2evviewer/database/runinfo/general.json  beam=2239 MeV  hycal_z=6265.9 mm
+[setup] HC sigma_E : E*sqrt(3.300^2/E_GeV+0.000^2+0.000^2/E_GeV^2)/100
+[setup] HC profile : loaded PWO and PbGlass tables
+[setup] HC dead    : modules=579  neighbors=137
+[setup] HC calib   : /Users/L00338853/work/PRad/prad2evviewer/database/calibration/PRad2_2p2_round1_1.json (1728 modules)
+[setup] HC t calib: default=0 ns  per-module=1152 (/Users/L00338853/work/PRad/prad2evviewer/database/hycal_time_offsets/time_calib.json)
+[setup] HC time   : default=[130, 200] ns
+[setup] HC RF off : default=0 ns
+[setup] HC sigma(E)= sqrt((3.600/sqrt(E_GeV))^2+(0.000/E_GeV)^2+0.000^2) mm
+[setup] GEM sigma  : [0.500,0.500,0.500,0.500] mm
+[setup] HC E bias : disabled
+[setup] HC cluster : min_mod_E=1  min_ctr_E=10  min_cl_E=50  split_iter=6  nonlin=on  E_bias=off  seed_t_win=4ns (gated)
+[setup] GEM map    : /Users/L00338853/work/PRad/prad2evviewer/database/gem_map.json  (4 detectors)
+[setup] GEM crate remap: {146: 146, 147: 147}
+GemSystem::LoadPedestals: 144 APVs loaded from /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/gem_ped_24535.dat
+[setup] GEM peds   : /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/gem_ped_24535.dat
+GemSystem::LoadCommonModeRange: 144 APVs loaded from /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/CommonModeRange_24535.txt
+[setup] GEM CM     : /Users/L00338853/work/PRad/prad2evviewer/database/gem_peds/CommonModeRange_24535.txt
+[PEDSUM] n_apvs=200 n_strips=25600 sum_noise=36068918.091993 sum_offset=30067.978918
+[GEMSYS] common_mode_thr=20 zero_sup_thr=5 cross_talk_thr=8 min_peak=30 min_sum=60 rej_first=0 rej_last=0
+[GEMCFG] d0 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d1 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d2 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[GEMCFG] d3 min_hits=1 max_hits=20 consec=1 split=14 xtalk=2 xtalk_peak_ratio_max=0.4 match_mode=1 asym=0.7 tdiff=50 xy_corr=-1 tperiod=25 strip_t=[-inf,inf] unimodal=0 seed_peak=0 seed_sum=0 strip_dt=-1 ts_corr=-1
+[setup] run 25228, trigger physics, calib /Users/L00338853/work/PRad/prad2evviewer/database/calibration/PRad2_2p2_round1_1.json, E_beam 2239.5 MeV; dead modules excluded (3, general.json hycal_dead_modules from_run 25200): W1019 W1020 W1124
+  [progress] 20000 events, stored 51470, 659 ev/s
+  [progress] 40000 events, stored 103270, 660 ev/s
+  [progress] 60000 events, stored 155445, 661 ev/s
+  [progress] 80000 events, stored 207246, 661 ev/s
+  [progress] 100000 events, stored 258985, 662 ev/s
+  [progress] 120000 events, stored 310169, 662 ev/s
+  [progress] 140000 events, stored 361897, 661 ev/s
+  [progress] 20000 events, stored 51430, 654 ev/s
+  [progress] 40000 events, stored 103288, 653 ev/s
+  [progress] 60000 events, stored 155325, 654 ev/s
+  [progress] 80000 events, stored 207524, 654 ev/s
+  [progress] 100000 events, stored 259810, 654 ev/s
+  [progress] 120000 events, stored 311004, 655 ev/s
+  [progress] 140000 events, stored 363054, 654 ev/s
+  [progress] 20000 events, stored 51653, 658 ev/s
+  [progress] 40000 events, stored 103670, 652 ev/s
+  [progress] 60000 events, stored 155667, 653 ev/s
+  [progress] 80000 events, stored 207739, 655 ev/s
+  [progress] 100000 events, stored 259603, 654 ev/s
+  [progress] 120000 events, stored 311709, 654 ev/s
+  [progress] 140000 events, stored 363761, 654 ev/s
+  [progress] 20000 events, stored 51305, 663 ev/s
+  [progress] 40000 events, stored 103483, 658 ev/s
+  [progress] 60000 events, stored 155258, 657 ev/s
+  [progress] 80000 events, stored 206397, 659 ev/s
+  [progress] 100000 events, stored 257419, 659 ev/s
+  [progress] 120000 events, stored 309633, 659 ev/s
+  [progress] 140000 events, stored 361577, 658 ev/s
+  [progress] 20000 events, stored 51693, 663 ev/s
+  [progress] 40000 events, stored 103740, 664 ev/s
+  [progress] 60000 events, stored 155800, 663 ev/s
+  [progress] 80000 events, stored 208309, 662 ev/s
+  [progress] 100000 events, stored 259460, 659 ev/s
+  [progress] 120000 events, stored 311200, 657 ev/s
+  [progress] 140000 events, stored 363447, 655 ev/s
+  [progress] 20000 events, stored 51770, 649 ev/s
+  [progress] 40000 events, stored 103772, 648 ev/s
+  [progress] 60000 events, stored 156176, 647 ev/s
+  [progress] 80000 events, stored 208436, 647 ev/s
+  [progress] 100000 events, stored 260797, 654 ev/s
+  [progress] 120000 events, stored 312147, 662 ev/s
+  [progress] 140000 events, stored 364620, 672 ev/s
+  [progress] 20000 events, stored 51477, 776 ev/s
+  [progress] 40000 events, stored 103756, 774 ev/s
+  [progress] 60000 events, stored 156111, 767 ev/s
+  [progress] 80000 events, stored 208496, 764 ev/s
+  [progress] 100000 events, stored 260288, 764 ev/s
+  [progress] 120000 events, stored 312468, 763 ev/s
+  [progress] 140000 events, stored 364911, 775 ev/s
+  [progress] 20000 events, stored 51030, 774 ev/s
+  [progress] 40000 events, stored 103082, 774 ev/s
+  [progress] 60000 events, stored 155126, 801 ev/s
+  [progress] 80000 events, stored 207108, 799 ev/s
+  [progress] 100000 events, stored 258681, 790 ev/s
+  [progress] 120000 events, stored 310847, 782 ev/s
+  [progress] 140000 events, stored 362561, 779 ev/s
+  [progress] 20000 events, stored 51073, 766 ev/s
+  [progress] 40000 events, stored 102724, 821 ev/s
+  [progress] 60000 events, stored 155062, 891 ev/s
+  [progress] 80000 events, stored 207094, 938 ev/s
+  [progress] 100000 events, stored 259292, 935 ev/s
+  [progress] 120000 events, stored 310507, 935 ev/s
+  [progress] 140000 events, stored 362343, 934 ev/s
+  [progress] 20000 events, stored 51409, 945 ev/s
+  [progress] 40000 events, stored 103194, 932 ev/s
+  [progress] 60000 events, stored 155276, 872 ev/s
+  [progress] 80000 events, stored 207332, 838 ev/s
+  [progress] 100000 events, stored 259872, 836 ev/s
+  [progress] 120000 events, stored 311348, 837 ev/s
+  [progress] 140000 events, stored 363217, 839 ev/s
+  [progress] 20000 events, stored 51301, 839 ev/s
+  [progress] 40000 events, stored 103374, 841 ev/s
+  [progress] 60000 events, stored 155622, 841 ev/s
+  [progress] 80000 events, stored 207391, 840 ev/s
+  [progress] 100000 events, stored 259139, 840 ev/s
+  [progress] 120000 events, stored 310316, 839 ev/s
+  [progress] 140000 events, stored 362131, 839 ev/s
+[done] /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/waveform_analysis/pulse_templates/2p24GeV_H2/pulses/run_25228.npz  run 25228, 11 files, 1711846 events in 2393 s; 432.3 MB
+[cutflow] nseen 27321331  c1_clip_ok 27320100  c5_amp_ge50 8083962  c4_contained 8000126  c3_first_thr 5500471  c8_pedestal 4995576  c9_tail 4991899  c2_no_secondary 4920433  c10_smooth 4444110  stored 4443947
+[stored] 4443947 pulses, per module median 648, 3 of 1152 modules empty; busy-event rows dropped 11579, e_rough >= E_max or no calibration factor 163

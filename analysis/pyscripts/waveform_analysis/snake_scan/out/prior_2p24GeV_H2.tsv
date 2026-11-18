@@ -1,0 +1,6 @@
+# source: edge edge_23701.tsv; L_scan lms_scan.tsv; L_prod lms_prod_2p24GeV_H2.tsv; gains /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/output/energy_resolution/control_phase2_v3_20261114/v3_defaults/2p24GeV_H2/ring/gains.tsv; map hycal_map_til_run023849.json (regions as energy_resolution_benchmark)
+# N_rt = 0.981504 (median of g s L_prod/L_scan over 4 pool modules); pool spread (1.48 MAD of r) = 0.0229 over 4 modules, expected 0.0087; gate (<= 0.02) fail
+# g = g_T; sigma_g = max(pool spread x g_T, sigma_T); O and T dwell modules only
+module	g	sigma_g
+W547	0.977695	0.022344
+W580	0.991270	0.022654

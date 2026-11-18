@@ -1,0 +1,44 @@
+# 3p49GeV_H2 old vs new
+old run 24386: E_beam 3488.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124,W691
+old run 24503: E_beam 3488.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124,W691
+old run 24512: E_beam 3488.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124,W691
+new run 24698: E_beam 3485.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124
+new run 24911: E_beam 3485.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124,W1141
+new run 24937: E_beam 3485.4 MeV, calib calibration_factor_3p5_June7_nonLinear.json, trigger physics, dead W1019,W1020,W1124,W1141
+old: distinct E_beam [3488.4], calib ['calibration_factor_3p5_June7_nonLinear.json']
+new: distinct E_beam [3485.4], calib ['calibration_factor_3p5_June7_nonLinear.json']
+pulses stored (PbWO4): old 10041406, new 8310120
+3 'inner' modules (largest min(old,new) count above 0.5 E_beam): W493, W559, W494
+e-p peak (e_rough/E_beam mode): modules with both 383; ratio old/new median 0.9979, mean 1.0112, 16-84% 0.9593-1.0661
+  r 0-150 mm (160 mod): peak ratio median 0.9950, pulse-fraction ratio median 1.000
+  r 150-250 mm (223 mod): peak ratio median 1.0085, pulse-fraction ratio median 0.906
+  high-stat modules (>=2000 pulses above 0.5 E_beam in both, 69): peak ratio median 0.9926, 16-84% 0.9701-1.0035; W493 0.7557/0.7653, W559 0.7547/0.7711, W494 0.6940/0.7235
+pulse-fraction ratio old/new per module: median 0.863, 16-84% 0.726-0.975
+pooled e-p peak e_rough/E_beam: old 0.635, new 0.665
+ped rms old: median 0.401, 16/84% 0.318/0.445
+ped rms new: median 0.401, 16/84% 0.318/0.445
+
+cut flow (PbWO4 modules), count and fraction of 'nseen' (old | new) and of previous cut:
+  nseen                61602492 1.00000 |     52066988 1.00000   step 1.0000 | 1.0000
+  c1_clip_ok           61602363 1.00000 |     52066038 0.99998   step 1.0000 | 1.0000
+  c5_amp_ge50          18942418 0.30749 |     15812284 0.30369   step 0.3075 | 0.3037
+  c4_contained         18868031 0.30629 |     15620625 0.30001   step 0.9961 | 0.9879
+  c3_first_thr         12980783 0.21072 |     10700390 0.20551   step 0.6880 | 0.6850
+  c8_pedestal          11763301 0.19095 |      9693351 0.18617   step 0.9062 | 0.9059
+  c9_tail              11760246 0.19091 |      9686825 0.18605   step 0.9997 | 0.9993
+  c2_no_secondary      11539227 0.18732 |      9506950 0.18259   step 0.9812 | 0.9814
+  c10_smooth           10041407 0.16300 |      8310156 0.15961   step 0.8702 | 0.8741
+  stored               10041406 0.16300 |      8310120 0.15960   step 1.0000 | 1.0000
+
+templates: own (non-fallback, non-single) modules old 1133, new 1115, both 1108
+  old: pool sum 204072, median pool 32, fallback==2 13, single 5, sigma_borrowed 681, runs [24386, 24503, 24512]
+  new: pool sum 198275, median pool 54, fallback==2 8, single 29, sigma_borrowed 539, runs [24698, 24911, 24937]
+  rise old/new median 5.446/5.432 ns, d_rise median -0.013 rms 0.239 ns
+  fall old/new median 56.967/57.713 ns, d_fall median -0.429 rms 0.785 ns
+  max|dshape| (peak-normalised): median 0.0245, 90% 0.0695, max 0.905
+  r 0-150 mm (160): d_rise med -0.015, d_fall med -0.405, max|dshape| med 0.0093
+  r 150-250 mm (295): d_rise med -0.026, d_fall med -0.311, max|dshape| med 0.0156
+  r 250-400 mm (583): d_rise med +0.024, d_fall med -0.615, max|dshape| med 0.0346
+  r 400-inf mm (70): d_rise med -0.030, d_fall med -0.410, max|dshape| med 0.0447
+  t_pk old-new: median -0.020 ns, rms 0.773
+  align_rms_ns median old 0.098, new 0.113

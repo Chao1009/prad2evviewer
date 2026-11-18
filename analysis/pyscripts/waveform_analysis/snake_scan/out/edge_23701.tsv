@@ -1,0 +1,12 @@
+# source: /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00000 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00010 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00020 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00030 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00040 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00050 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00060 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00070 /Users/L00338853/work/PRad/data/evio/prad_023701.evio.00080 ; map /Users/L00338853/work/PRad/prad2evviewer/analysis/pyscripts/waveform_analysis/snake_scan/hycal_map_til_run023849.json ; calib /Users/L00338853/work/PRad/prad2evviewer/database/calibration/calibration_factor_3p5_June7_nonLinear.json
+# s = E_edge/2108.85 of the 3x3 MeV sum (second pass: neighbours with a dwell use W_j/s_j); s_err = hypot(fit error, half window spread x s); window_spread = (max-min)/mean over 3 windows; s_central = same for the central module alone; s_pass1 = s before the neighbour pass
+module	s	s_err	window_spread	n_single	n_pileup	s_central	s_pass1
+W547	0.98741	0.00313	0.00611	283475	268880	0.80347	0.98689
+W552	1.09704	0.00367	0.00645	280455	331145	0.90868	1.09708
+W557	1.02368	0.00421	0.00792	216823	171041	0.82888	1.02395
+W564	1.10808	0.00971	0.01552	122366	112942	0.89967	1.10927
+W580	0.95940	0.00312	0.00632	341605	280293	0.78495	0.95925
+W585	1.00126	0.00279	0.00518	187778	179535	0.81840	1.00232
+W590	1.02363	0.00323	0.00570	103248	85656	0.83754	1.02394
+W594	0.99843	0.00333	0.00645	247028	103330	0.85307	0.99843
+W599	1.02891	0.00398	0.00753	352064	309568	0.82388	1.02981

@@ -1,0 +1,6 @@
+run_type	n_used	n_skipped	n_dead	n_single	rise_median_ns	rise_sigmaMAD_ns	fall_median_ns	fall_sigmaMAD_ns	jitter_50_median_ns	jitter_50_p90_ns	rise_jitter_median_ns	rise_jitter_p90_ns	fall_jitter_median_ns	fall_jitter_p90_ns	rise_std_median_ns	rise_std_p90_ns	fall_std_median_ns	fall_std_p90_ns
+0p73GeV_H2	1132	0	4	42	5.375	0.253	57.605	3.331	0.040	0.052	0.142	0.229	2.112	2.592	nan	nan	nan	nan
+2p24GeV_H2	1146	0	3	5	5.355	0.219	57.534	3.343	0.045	0.063	0.161	0.243	2.359	2.796	nan	nan	nan	nan
+3p49GeV_H2	1141	0	3	26	5.436	0.227	57.720	3.532	0.046	0.064	0.170	0.283	2.290	2.813	nan	nan	nan	nan
+2p24GeV_Ta_X17	1131	0	4	108	5.413	0.231	57.550	3.685	0.043	0.055	0.164	0.273	2.365	2.852	nan	nan	nan	nan
+across_run_types	nan	nan	nan	nan	nan	nan	nan	nan	nan	nan	nan	nan	nan	nan	0.122	0.289	0.596	1.156

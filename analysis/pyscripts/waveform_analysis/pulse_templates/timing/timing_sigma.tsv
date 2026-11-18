@@ -1,0 +1,5 @@
+run_type	n_modules	sigma_at_peak_pct	sigma_at_t50_pct
+0p73GeV_H2	617	1.955	0.692
+2p24GeV_H2	1048	2.128	0.770
+3p49GeV_H2	878	2.030	0.779
+2p24GeV_Ta_X17	723	2.044	0.742
