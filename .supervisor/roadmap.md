@@ -12,3 +12,9 @@
      - .supervisor/memory/decisions/2026-11-14-i-phi-correction-m1-adopted-per-energy.md
      - .supervisor/memory/decisions/2026-11-14-amplitude-calibration-track-parked.md
      - .supervisor/memory/decisions/2026-11-14-snake-scan-uses-lms-ratio-no-tagger.md
+
+2. Exotic waveforms: open follow-ups
+   - Plan: analysis/pyscripts/notes/plan_pileup_fit_validation_20261116.md (open items T3a gate decision on per-module shape error, T4 to T9).
+   - Background: the exotic study is closed with the gate stored below. Open: full ifarm scan with PILEUP_EXOTIC=1 (fetch recipe analysis/pyscripts/notes/rcdb_and_fetch_20261117.md; ifarm login broken); Ta block-H gains need a calibration that frees the inner ring; X17 number to quote (ep 1.98 % vs Møller 2.09 %); amplitude-carrying H2 full rescan; user compile and page check of the chapter.
+   - Decisions:
+     - .supervisor/memory/decisions/2026-11-18-exotic-waveforms-study-2026-11-17-18.md
