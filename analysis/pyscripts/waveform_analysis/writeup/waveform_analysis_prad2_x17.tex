@@ -6,9 +6,9 @@
 %   5.2    waveform_analysis/pileup_analysis/pileup_rates.py (scan, report)
 %   5.3    waveform_analysis/pileup_analysis/pileup_generator_stage1.py
 %   5.4    waveform_analysis/pileup_analysis/pileup_deconvolution_study.py
-%   6      waveform_analysis/pileup_analysis/exotic_events/exotic_p1_quantities.py ... exotic_p10_yield_impact.py,
+%   6      waveform_analysis/pileup_analysis/exotic_events/exotic_p1_quantities.py ... exotic_p13_drop_flagged.py (exotic_p13_recluster.py),
 %          exotic_p7_saturated_seeds.py, exotic_summary.py (front matter = numbers quoted); scan option PILEUP_EXOTIC=1 of pileup_rates.py;
-%          P9 runs energy_resolution_benchmark.py / moller_calib.py with the opt-in EXOTIC_HOOK (default path = v3)
+%          P9 and P13 run energy_resolution_benchmark.py / moller_calib.py with the opt-in EXOTIC_HOOK (default path = v3)
 %   6 figs writeup/make_figs/exotic_events_figs.py (figs/exotic_events/exotic_*.pdf)
 %   7      crosstalk_study/crosstalk_study.py (scan, report)
 %   9      waveform_analysis/energy_resolution_benchmark.py (working tree of 14 Nov 2026, control v3 defaults)
@@ -76,7 +76,7 @@ Fitter & class \code{MF} in \code{pileup\_deconvolution\_study.py} & none (calle
 Rates, hot modules & \code{pileup\_analysis/pileup\_rates.py} & \code{pileup\_rates\_out/} (tables, PDF pages) \\
 Generator & \code{pileup\_analysis/pileup\_generator\_stage1.py} & \code{pileup\_stage1.npz} \\
 Deconvolution study & \code{pileup\_analysis/pileup\_deconvolution\_study.py} & \code{efficiency.tsv}, two PDF files \\
-Exotic waveforms & \code{pileup\_analysis/exotic\_events/exotic\_p1\_quantities.py} to \code{exotic\_p10\_yield\_impact.py} & \code{exotic\_events/exotic\_P<n>\_*.tsv}, \code{exotic\_summary\_20261118.pdf} \\
+Exotic waveforms & \code{pileup\_analysis/exotic\_events/exotic\_p1\_quantities.py} to \code{exotic\_p13\_drop\_flagged.py} & \code{exotic\_events/exotic\_P<n>\_*.tsv}, \code{exotic\_summary\_20261118.pdf} \\
 Crosstalk & \code{crosstalk\_study/crosstalk\_study.py} & \code{crosstalk\_study/out/} \\
 Calibration & \code{waveform\_analysis/energy\_resolution\_benchmark.py} & resolution tables \\
 \bottomrule
@@ -972,7 +972,7 @@ $A_1$ (ADC) & $\rho$ & $-12\ns$ & $-8\ns$ & $+8\ns$ & $+12\ns$ & $+16\ns$ & $+24
 \section{Exotic waveforms}
 \label{sec:exotic}
 
-\paragraph{Purpose, inputs, outputs.} The exotic-waveform study flags the kept channels whose waveform is not a sum of template pulses, counts them per run type, module and cluster role, and measures what they cost in the elastic yields. Its inputs are the kept channels of the pile-up scan of Section~\ref{sec:rates} with the option \code{PILEUP\_EXOTIC=1} on the runs of Table~\ref{tab:runs} (99 raw-data files, the full scan), a two-file sample per run for the quantities the scan does not store, and the gated clusters of the calibration chain of Section~\ref{sec:calib} (control~v3). Run 24937 (\code{3p49GeV\_H2}) is not a good run and is excluded; only PbWO$_4$ modules enter. The outputs are the tables and figures of the steps P1 to P10 in \code{pileup\_analysis/exotic\_events/} and the consolidated \code{exotic\_summary\_20261118.pdf}, whose front matter holds the numbers quoted here. The flags are markers only: no channel is masked or corrected.
+\paragraph{Purpose, inputs, outputs.} The exotic-waveform study flags the kept channels whose waveform is not a sum of template pulses, counts them per run type, module and cluster role, and measures what they cost in the elastic yields. Its inputs are the kept channels of the pile-up scan of Section~\ref{sec:rates} with the option \code{PILEUP\_EXOTIC=1} on the runs of Table~\ref{tab:runs} (99 raw-data files, the full scan), a two-file sample per run for the quantities the scan does not store, and the gated clusters of the calibration chain of Section~\ref{sec:calib} (control~v3). Run 24937 (\code{3p49GeV\_H2}) is not a good run and is excluded; only PbWO$_4$ modules enter. The outputs are the tables and figures of the steps P1 to P13 in \code{pileup\_analysis/exotic\_events/} and the consolidated \code{exotic\_summary\_20261118.pdf}, whose front matter holds the numbers quoted here. The flags are markers only: no channel is masked or corrected, and a policy that drops every flagged channel was tested and is not adopted (Section~\ref{sec:exotic_status}).
 
 \subsection{Types and identification}
 \label{sec:exotic_id}
@@ -1045,6 +1045,54 @@ Run type & $N_{\mathrm{kept}}$ & f1 & f2 & f3 & f4 & f5 & any \\
 \label{fig:exotic_maps}
 \end{figure}
 
+\paragraph{Rates per energy slice.} Table~\ref{tab:exotic_slices} and Fig.~\ref{fig:exotic_slices} give the exclusive rates per slice of the channel energy ($A_{\mathrm{main}}$ times the gain, channels of at least 10\,MeV) for the 2.24\,GeV hydrogen and tantalum run types; the step P12 output holds the same tables for 0.73 and 3.49\,GeV. The flags concentrate between 50 and 300\,MeV: the hydrogen any-flag rate is 0.26 to 0.27\,\% at 2.24\,GeV, 0.23 to 0.24\,\% at 3.49\,GeV and 0.18 to 0.33\,\% at 0.73\,GeV (intervals of $\pm 0.01$\,\% or less), carried by f1 at the two higher energies and by f3 at 0.73\,GeV ($0.220 \pm 0.006\,\%$ at 100 to 300\,MeV). Tantalum is about ten times higher, $2.54 \pm 0.01\,\%$ at 100 to 300\,MeV, almost all f1. Between 1 and 2.5\,GeV the any-flag rates have fallen by a factor of 7 to 34 (0.008 to 0.024\,\% at 2.24\,GeV H$_2$, 0.007 to 0.034\,\% at 3.49\,GeV, 0.14 to 0.22\,\% in tantalum, with intervals of $\pm 0.007$\,\% or less), with f3 the largest category. Above the beam energy the rates at 2.24 and 3.49\,GeV rise to 39 to 100\,\% ($\pm 7$\,\% or less, fewer than 15 channels per slice at 0.73\,GeV) and are mostly f4 and f5 (f3 $5.3^{+0.9}_{-0.8}\,\%$ at 2.5 to 3.5\,GeV). A fit extrapolated over clipped samples places the pulse above $E_b$ by construction, so these slices count the saturated records and measure no rate.
+
+At cluster level (dashed curves, per slice of $E_{\mathrm{cluster}}$) the fraction of clusters with a flagged member is flat in hydrogen below the beam energy, 0.11 to 0.54\,\% (intervals 0.108 to 0.118 and 0.511 to 0.567\,\%, slices of at least $10^4$ clusters), and rises in tantalum from $1.26 \pm 0.06\,\%$ at 10 to 50\,MeV to $7.02 \pm 0.03\,\%$ at 1000 to 1500\,MeV. Below the beam energy the flagged members carry a mean fraction $\langle f_E \rangle$ per cluster of 0.029 to 0.29\,\% in hydrogen (same slices) and 0.49 to 0.74\,\% in tantalum below 2.5\,GeV ($\pm 0.04$\,\% or less), and 34 to 68\,\% ($\pm 4$\,\% or less) for the 2.24\,GeV hydrogen clusters at or above 2.5\,GeV, the saturated fakes of Section~\ref{sec:exotic_cluster}.
+
+\begin{table}[htbp]
+\centering
+\caption{Exclusive category rate per slice of the channel energy (MeV), in \% of the kept PbWO$_4$ channels of the slice with the asymmetric 68\,\% Wilson interval; $N$ in millions (counts below 10\,000 as given). A cell $<x$ holds no flag and gives the upper end of the interval, rounded up. Hydrogen from the two-file sample, tantalum from the 19 stored full-scan files. Source: \code{exotic\_P12\_rates\_vs\_energy\_20261118.tsv}, table \code{chan}.}
+\label{tab:exotic_slices}
+\scriptsize
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lrllllll}
+\toprule
+Slice & $N$ & f1 & f2 & f3 & f4 & f5 & any \\
+\midrule
+\multicolumn{8}{l}{\code{2p24GeV\_H2}} \\
+10--50 & 14.69 & $0.0131^{+0.0003}_{-0.0003}$ & $0.0004^{+0.0001}_{-0.0000}$ & $0.0114^{+0.0003}_{-0.0003}$ & $<7{\cdot}10^{-6}$ & $<7{\cdot}10^{-6}$ & $0.0249^{+0.0004}_{-0.0004}$ \\
+50--100 & 2.66 & $0.2455^{+0.0031}_{-0.0030}$ & $0.0004^{+0.0001}_{-0.0001}$ & $0.0166^{+0.0008}_{-0.0008}$ & $<4{\cdot}10^{-5}$ & $<4{\cdot}10^{-5}$ & $0.2626^{+0.0032}_{-0.0031}$ \\
+100--300 & 2.37 & $0.2033^{+0.0030}_{-0.0029}$ & $0.0002^{+0.0001}_{-0.0001}$ & $0.0667^{+0.0017}_{-0.0017}$ & $<5{\cdot}10^{-5}$ & $<5{\cdot}10^{-5}$ & $0.2702^{+0.0034}_{-0.0034}$ \\
+300--500 & 0.69 & $0.0029^{+0.0007}_{-0.0006}$ & $0.0006^{+0.0004}_{-0.0002}$ & $0.1313^{+0.0044}_{-0.0043}$ & $<2{\cdot}10^{-4}$ & $<2{\cdot}10^{-4}$ & $0.1348^{+0.0045}_{-0.0043}$ \\
+500--1000 & 0.77 & $0.0012^{+0.0005}_{-0.0003}$ & $0.0023^{+0.0006}_{-0.0005}$ & $0.0846^{+0.0034}_{-0.0032}$ & $<2{\cdot}10^{-4}$ & $0.0001^{+0.0002}_{-0.0001}$ & $0.0882^{+0.0034}_{-0.0033}$ \\
+1000--1500 & 0.61 & $<2{\cdot}10^{-4}$ & $0.0007^{+0.0004}_{-0.0003}$ & $0.0069^{+0.0012}_{-0.0010}$ & $<2{\cdot}10^{-4}$ & $0.0003^{+0.0003}_{-0.0002}$ & $0.0079^{+0.0012}_{-0.0011}$ \\
+1500--2500 & 0.39 & $<3{\cdot}10^{-4}$ & $0.0018^{+0.0008}_{-0.0006}$ & $0.0140^{+0.0020}_{-0.0018}$ & $0.0082^{+0.0016}_{-0.0013}$ & $<3{\cdot}10^{-4}$ & $0.0240^{+0.0026}_{-0.0024}$ \\
+2500--3500 & 681 & $<0.2$ & $0.29^{+0.29}_{-0.15}$ & $5.29^{+0.92}_{-0.79}$ & $25.8^{+1.7}_{-1.6}$ & $7.8^{+1.1}_{-1.0}$ & $39.2^{+1.9}_{-1.9}$ \\
+3500--4000 & 181 & $<0.6$ & $0.55^{+0.88}_{-0.34}$ & $1.7^{+1.2}_{-0.7}$ & $38.1^{+3.7}_{-3.5}$ & $33.7^{+3.6}_{-3.4}$ & $74.0^{+3.1}_{-3.4}$ \\
+$>$4000 & 491 & $<0.3$ & $<0.3$ & $<0.3$ & $54.2^{+2.2}_{-2.3}$ & $45.4^{+2.3}_{-2.2}$ & $99.59^{+0.20}_{-0.41}$ \\
+\midrule
+\multicolumn{8}{l}{\code{2p24GeV\_Ta\_X17}} \\
+10--50 & 38.58 & $0.5875^{+0.0012}_{-0.0012}$ & $0.0273^{+0.0003}_{-0.0003}$ & $0.2342^{+0.0008}_{-0.0008}$ & $<3{\cdot}10^{-6}$ & $<3{\cdot}10^{-6}$ & $0.8490^{+0.0015}_{-0.0015}$ \\
+50--100 & 8.73 & $2.0012^{+0.0048}_{-0.0047}$ & $0.0048^{+0.0002}_{-0.0002}$ & $0.1294^{+0.0012}_{-0.0012}$ & $<2{\cdot}10^{-5}$ & $<2{\cdot}10^{-5}$ & $2.1354^{+0.0049}_{-0.0049}$ \\
+100--300 & 6.25 & $2.3668^{+0.0061}_{-0.0061}$ & $0.0004^{+0.0001}_{-0.0001}$ & $0.1719^{+0.0017}_{-0.0016}$ & $<2{\cdot}10^{-5}$ & $<2{\cdot}10^{-5}$ & $2.5391^{+0.0063}_{-0.0063}$ \\
+300--500 & 1.42 & $0.4059^{+0.0054}_{-0.0053}$ & $0.0004^{+0.0002}_{-0.0001}$ & $0.2801^{+0.0045}_{-0.0044}$ & $<8{\cdot}10^{-5}$ & $<8{\cdot}10^{-5}$ & $0.6863^{+0.0070}_{-0.0069}$ \\
+500--1000 & 1.23 & $0.1675^{+0.0037}_{-0.0036}$ & $0.0001^{+0.0001}_{-0.0001}$ & $0.2500^{+0.0045}_{-0.0045}$ & $<9{\cdot}10^{-5}$ & $<9{\cdot}10^{-5}$ & $0.4176^{+0.0058}_{-0.0058}$ \\
+1000--1500 & 0.46 & $0.0613^{+0.0038}_{-0.0036}$ & $<3{\cdot}10^{-4}$ & $0.1623^{+0.0061}_{-0.0058}$ & $<3{\cdot}10^{-4}$ & $<3{\cdot}10^{-4}$ & $0.2236^{+0.0071}_{-0.0069}$ \\
+1500--2500 & 0.31 & $0.0319^{+0.0034}_{-0.0031}$ & $<4{\cdot}10^{-4}$ & $0.1068^{+0.0060}_{-0.0057}$ & $0.0026^{+0.0011}_{-0.0008}$ & $<4{\cdot}10^{-4}$ & $0.1413^{+0.0069}_{-0.0066}$ \\
+2500--3500 & 46 & $<3$ & $<3$ & $4.3^{+4.1}_{-2.2}$ & $2.2^{+3.4}_{-1.3}$ & $10.9^{+5.4}_{-3.8}$ & $17.4^{+6.3}_{-4.9}$ \\
+3500--4000 & 5 & $<20$ & $<20$ & $<20$ & $<20$ & $<20$ & $<20$ \\
+$>$4000 & 6 & $<20$ & $<20$ & $<20$ & $67^{+16}_{-20}$ & $33^{+20}_{-16}$ & $100^{+0}_{-14}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.8\textwidth]{exotic_rates_vs_energy.pdf}
+\caption{Exclusive category rate per slice of the channel energy for the four run types (solid, one curve per flag, 68\,\% Wilson error bars; slices with no flag omitted) and the fraction of clusters with a flagged member per slice of the cluster energy (dashed). Source: \code{exotic\_P12\_rates\_vs\_energy\_20261118.tsv}.}
+\label{fig:exotic_slices}
+\end{figure}
+
 \subsection{Nature of the categories}
 \label{sec:exotic_nature}
 
@@ -1102,27 +1150,31 @@ Run type & Population & \multicolumn{2}{c}{any role} & \multicolumn{2}{c}{seed} 
 \label{fig:exotic_satseeds}
 \end{figure}
 
+\paragraph{Clusters under the drop policy.} The rule we proposed for this study, to use no f1 to f5 channel in the clustering or in the energy calibration, was tested in step P13 by removing every flagged channel from the hit list before clustering (arm D). The affected clusters are those of Table~\ref{tab:exotic_cluster}; what the drop changes is their fate. A dropped seed is lost in $0.048 \pm 0.002$, $0.127 \pm 0.002$, $0.103 \pm 0.003$ and $0.535 \pm 0.003\,\%$ of all clusters (0.73, 2.24, 3.49\,GeV H$_2$, Ta). The cluster then vanishes (0.020 to 0.085\,\% in hydrogen, $0.255 \pm 0.002\,\%$ in tantalum, with intervals of $\pm 0.002$\,\% or less), is re-seeded by a former member, which keeps a median 0.43 to 0.47 of the energy ($\pm 0.01$ or less), or merges into a neighbour. In the elastic window the seed loss is $0.032^{+0.013}_{-0.009}$, $0.008 \pm 0.002$, $0.009 \pm 0.002$ and $0.287 \pm 0.015\,\%$, and $0.061^{+0.016}_{-0.013}\,\%$ of the M\o ller pairs. The drop also creates clusters, as former members seed new ones and events whose fake second cluster vanishes enter the single-cluster selection: $0.018^{+0.008}_{-0.006}$, $0.051 \pm 0.004$, $0.073^{+0.009}_{-0.008}$ and $0.82 \pm 0.03\,\%$ of the calibration pool under D are new. Every fake of the V3 veto below vanishes under D (23 of 23 and 14 of 14, lower limits 96 and 93\,\%).
+
 \subsection{Impact on yields}
 \label{sec:exotic_yields}
 
-Four vetoes are applied per cluster to the elastic window of the calibration chain and to the M\o ller pairs. V1 removes a cluster whose seed is flagged in any category, V2 one with any flagged member, V3 one with a saturated seed (f4 or f5) that carries more than 0.95 of the cluster energy, and V4 adds the f1 and f3 seeds to V3. A M\o ller pair is lost when either member is vetoed, and the loss is the fraction of the population removed (Table~\ref{tab:exotic_veto}). V3 removes exactly the 23 and 14 fakes of the previous subsection at 2.24 and 3.49\,GeV, a loss of 0.0044 and 0.0067\,\%, keeps the four W398 showers, and removes nothing at 0.73\,GeV or in tantalum. The tantalum V4 loss is concentrated in the inner ring (0.305\,\% at 0 to 120\,mm).
+Four vetoes and the drop policy are applied to the elastic window of the calibration chain and to the M\o ller pairs. V1 removes a cluster whose seed is flagged in any category, V2 one with any flagged member, V3 one with a saturated seed (f4 or f5) that carries more than 0.95 of the cluster energy, and V4 adds the f1 and f3 seeds to V3. D re-forms the clusters without the flagged channels and counts the window clusters of the default chain that are lost. A M\o ller pair is lost when either member is vetoed or lost, and the cost is the fraction of the population removed. V2 costs 0.10 to 0.21\,\% of the hydrogen elastic clusters ($\pm 0.02$\,\% or less), $5.98 \pm 0.07\,\%$ of the tantalum ones and $1.64^{+0.11}_{-0.10}\,\%$ of the M\o ller pairs, and is rejected; V1 and V4 differ only at 3.49\,GeV (18 against 14 clusters). Table~\ref{tab:exotic_veto} compares V3, V4 and D.
 
-V3 is adopted as the policy for the 2.24 and 3.49\,GeV hydrogen data: it costs less than 0.01\,\% and removes only fakes, so no efficiency correction follows. V4 is not adopted: the calibration-impact step below shows no gain in resolution or peak position for its loss (0.286\,\% of the tantalum elastic clusters). V2 costs 6.0\,\% of those clusters and is rejected.
+V3 removes exactly the 23 and 14 fakes of the previous subsection at 2.24 and 3.49\,GeV, keeps the four W398 showers and removes nothing at 0.73\,GeV or in tantalum. The tantalum V4 loss is concentrated in the inner ring ($0.305 \pm 0.016\,\%$ at 0 to 120\,mm). D costs 6.4 and 4.5 times V3 at 2.24 and 3.49\,GeV and removes real clusters at 0.73\,GeV, where V3 removes none. In tantalum most of the lost window clusters re-form outside the $\pm 3\sigma$ window ($1.237 \pm 0.031\,\%$), and 570 clusters enter the window in their place. The net loss is $0.875 \pm 0.037\,\%$ (Poisson error), with $0.243^{+0.044}_{-0.037}\,\%$ of the M\o ller pairs lost and $0.34 \pm 0.05\,\%$ of the pairs under D new.
+
+V3 is adopted as the policy for the 2.24 and 3.49\,GeV hydrogen data: it costs less than 0.01\,\% and removes only fakes, so no efficiency correction follows. V4 and D are not adopted, because the calibration-impact step below shows no gain in resolution or peak position for their loss.
 
 \begin{table}[htbp]
 \centering
-\caption{Yield loss under each veto, in \% of the ep elastic-window clusters (M\o ller: of the selected pairs), with the vetoed count over the population. Hydrogen from the two-file sample, tantalum from the full scan. Source: \code{exotic\_P10\_yield\_impact\_20261118.tsv}.}
+\caption{Cost of the vetoes V3 and V4 and of the drop policy D, in \% of the ep elastic-window clusters of the default chain (M\o ller: of the selected pairs; 68\,\% Wilson interval, count removed); $N$ is the population. A cell $<x$ removes nothing and gives the upper end of the interval. Hydrogen from the two-file sample, tantalum from the full scan; the M\o ller pairs of D are counted on the 19 split runs of step P13 (14\,785 pairs). Sources: \code{exotic\_P10\_yield\_impact\_20261118.tsv} (V3, V4) and \code{exotic\_P13\_drop\_flagged\_20261118.tsv} (D).}
 \label{tab:exotic_veto}
 \small
-\begin{tabular}{llrrrr}
+\begin{tabular}{llrlll}
 \toprule
-Run type & Population & V1 & V2 & V3 & V4 \\
+Run type & Population & $N$ & V3 & V4 & D \\
 \midrule
-\code{0p73GeV\_H2} & elastic & 0.036 (10/28\,076) & 0.103 (29) & 0 (0) & 0.036 (10) \\
-\code{2p24GeV\_H2} & elastic & 0.008 (43/518\,921) & 0.148 (768) & 0.0044 (23) & 0.008 (43) \\
-\code{3p49GeV\_H2} & elastic & 0.009 (18/210\,355) & 0.205 (431) & 0.0067 (14) & 0.0067 (14) \\
-\code{2p24GeV\_Ta\_X17} & elastic & 0.286 (373/130\,240) & 5.979 (7787) & 0 (0) & 0.286 (373) \\
- & M\o ller & 0.122 (18/14\,786) & 1.637 (242) & 0 (0) & 0.122 (18) \\
+\code{0p73GeV\_H2} & elastic & 28\,076 & $<0.004$ (0) & $0.036^{+0.013}_{-0.010}$ (10) & $0.100^{+0.021}_{-0.017}$ (28) \\
+\code{2p24GeV\_H2} & elastic & 518\,921 & $0.0044^{+0.0010}_{-0.0008}$ (23) & $0.0083^{+0.0014}_{-0.0012}$ (43) & $0.0285^{+0.0024}_{-0.0022}$ (148) \\
+\code{3p49GeV\_H2} & elastic & 210\,355 & $0.0067^{+0.0020}_{-0.0016}$ (14) & $0.0067^{+0.0020}_{-0.0016}$ (14) & $0.0299^{+0.0040}_{-0.0035}$ (63) \\
+\code{2p24GeV\_Ta\_X17} & elastic & 130\,240 & $<0.0008$ (0) & $0.286^{+0.015}_{-0.014}$ (373) & $1.312^{+0.032}_{-0.031}$ (1709) \\
+ & M\o ller & 14\,786 & $<0.007$ (0) & $0.122^{+0.032}_{-0.026}$ (18) & $0.243^{+0.044}_{-0.037}$ (36) \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1130,20 +1182,20 @@ Run type & Population & V1 & V2 & V3 & V4 \\
 \subsection{Energy error, calibration impact and status}
 \label{sec:exotic_status}
 
-\paragraph{Energy error (P8).} Each flagged member of a cluster of the calibration samples is refitted with the alternative of its category: a sloped baseline for f1, a single time-stretched template for f3, \code{CLIP\_SINGLE} for f4, a single template pulse for f2, and for f5 a single template pulse extrapolated over the clipped samples or the measured integral. The change of the clustered pulse, propagated to the cluster energy at first order, gives the energy-scale shift $S = \sum \Delta E / \sum E$ of each calibration sample per category and seed-radius ring (Fig.~\ref{fig:exotic_escale}). The sloped baseline is a credible estimate for f1: it keeps the clustered pulse, lowers $A_{\mathrm{main}}$ by 6\,\% in the median and leaves the residuals no worse. The stretched template is credible for f3 in tantalum only, where the median stretch is 1.0; in hydrogen (stretch 1.4 to 1.9) it absorbs real close pile-up. For f4 and f2 the default fit remains the better estimate: where \code{CLIP\_SINGLE} differs it rearranges genuine pile-up trains, and a single pulse usually lands on another hit of the module and empties the flagged member. For f5 the extrapolation holds for mild clipping (clipped area 2 to 4\,\%); on the W398 showers the measured integral misses 0.7 to 1.0\,\% of the cluster energy, and deep saturation is not correctable, which is why those clusters are vetoed.
-
-In tantalum the f1 correction shifts the elastic energy scale by $-0.0144 \pm 0.0003\,\%$ (inner ring $-0.0153\,\%$) and the f3 correction by $-0.0028\,\%$; for the M\o ller pairs the f1 shift is $-0.0051\,\%$ ($-0.0114\,\%$ in the inner ring). The inner-ring modules W493, W494, W559, W564, W593 and W663 shift the elastic clusters they seed by $-0.018$ to $-0.027\,\%$ when every flagged member is corrected ($-0.014$ to $-0.021\,\%$ from f1 alone). Every hydrogen cell with at least ten flagged clusters lies below 0.001\,\%; the largest cell with fewer flagged clusters is $+0.012 \pm 0.014\,\%$ (f5, 3.49\,GeV, 320 to 450\,mm, three clusters), consistent with zero. Sample-wide, the exotic shapes cannot move the hydrogen energy scale at the 0.01\,\% level and move the tantalum scale by about $-0.015\,\%$; the calibration-impact step below tests this directly.
+\paragraph{Energy removed under the drop policy (P13).} Dropping every flagged channel removes from each calibration sample the energy fraction $-S$, where $S = -\sum E_{\mathrm{flagged}} / \sum E_{\mathrm{cluster}}$ is the first-order scale shift of the step P13 output (Fig.~\ref{fig:exotic_eremoved}; ratio-estimator errors). In tantalum $-S$ is $0.553 \pm 0.005\,\%$ over all clusters, $0.398 \pm 0.010\,\%$ in the elastic window and $0.089 \pm 0.014\,\%$ for the M\o ller pairs, from the f1 and f3 neighbours and seeds of the inner ring. In hydrogen $-S$ is $0.112 \pm 0.045$, $0.201 \pm 0.008$ and $0.091 \pm 0.006\,\%$ over all clusters (0.73, 2.24, 3.49\,GeV) and $0.030 \pm 0.006$, $0.0115 \pm 0.0012$ and $0.0115 \pm 0.0020\,\%$ in the elastic window, from the f3 members and, at 2.24 and 3.49\,GeV, the f4 and f5 seeds, the saturated fakes. The seed-dropped fractions are the seed losses of Section~\ref{sec:exotic_cluster}, 0.05 to 0.13\,\% of the hydrogen clusters ($\pm 0.003$\,\% or less) and $0.535 \pm 0.003\,\%$ of the tantalum ones. A correction in place (steps P8 and P9) was also tested: it shifts the tantalum elastic scale by $-0.0144 \pm 0.0003\,\%$ and no hydrogen cell by 0.01\,\%, and the gain refit absorbs it (tantalum peak $-0.0004 \pm 0.0047\,\%$).
 
 \begin{figure}[htbp]
 \centering
-\includegraphics[width=0.8\textwidth]{exotic_energy_scale.pdf}
-\caption{Energy-scale shift $S = \sum \Delta E / \sum E$ of the calibration samples per seed-radius ring if the category were corrected (step P8): tantalum elastic clusters (filled circles) and M\o ller pairs (open squares) for the f1 sloped-baseline and f3 stretched-template corrections, and the 2.24 and 3.49\,GeV hydrogen elastic clusters for f1 (triangles). Error bars: statistical. Source: \code{exotic\_P8\_energy\_error\_20261118.tsv}, table \code{scale}.}
-\label{fig:exotic_escale}
+\includegraphics[width=0.5\textwidth]{exotic_energy_removed.pdf}
+\caption{Energy removed from each calibration sample if every flagged channel is dropped, $-S$ with $S = -\sum E_{\mathrm{flagged}} / \sum E_{\mathrm{cluster}}$, in \%, per run type: all PbWO$_4$-seeded clusters, clusters above $0.5\,E_b$, the elastic window and the tantalum M\o ller pairs. Error bars: ratio-estimator errors. Source: \code{exotic\_P13\_drop\_flagged\_20261118.tsv}, table \code{p8\_scale}.}
+\label{fig:exotic_eremoved}
 \end{figure}
 
-\paragraph{Calibration impact (P9).} Four arms run on identical events of the same splits (hydrogen two-file sample, 19 tantalum splits, 0.73\,GeV at $r_\perp \ge 107$\,mm) through the calibration chain of Section~\ref{sec:calib} itself. Arm A is the default control v3, V3 and V4 are the vetoes of Table~\ref{tab:exotic_veto}, and arm C corrects each flagged member's energy at first order by the credible P8 alternative (ambiguous keys keep the default). The benchmark and M\o ller scripts gained an opt-in \code{EXOTIC\_HOOK} for this, whose default path reproduces v3 exactly. The arms are compared on the same splits: with the calibration refit on fewer splits, the arm-A values (out-of-sample $\sigma_E/E$ of 3.37, 1.78, 1.59 and 2.00\,\% for the four run types, 2.1\,\% for the tantalum M\o ller pair sum) sit above the full-data numbers of Table~\ref{tab:calibres}, which serve only as context. No arm moves the out-of-sample $\sigma_E/E$, the elastic peak or the tails beyond $2\sigma$ of the paired bootstrap error at any run type or in the M\o ller pair sum (largest $|z| = 1.8$, the 3.49\,GeV C-arm peak at $+0.0009 \pm 0.0005\,\%$). No free module gain moves by $2\sigma_g$ (largest W659, tantalum M\o ller V4, $-0.87\,\%$ at $-1.98\sigma_g$). The gain refit absorbs the C-arm scale shift of P8: the tantalum elastic peak moves by $-0.0004 \pm 0.0047\,\%$, consistent with zero at the 0.005\,\% level. Three caveats hold. The correction is first order, without reclustering. The tantalum inner ring is held at the prior in the M\o ller calibration and largely so in the ep calibration (6 of 36 module-run entries free, prior fraction 0.47 to 0.57), so its gain change is not measurable with the current calibrations. Arm C extrapolates f5 only up to 3 overflow samples (the mild clipping of P8) and keeps the default fit for deeper saturation.
+\paragraph{Calibration impact (P13, arms A, V3, D, D$'$).} Four arms run on identical events of the same splits (hydrogen two-file sample, 19 tantalum splits, 0.73\,GeV at $r_\perp \ge 107$\,mm) through the calibration chain of Section~\ref{sec:calib}. Arm A is the default control v3, V3 the veto of Table~\ref{tab:exotic_veto}, D the drop in both passes (clustering and gain solve, ep and the tantalum M\o ller calibration) and D$'$ the drop in the gain solve only (ep), which isolates the calibration effect. The benchmark and M\o ller scripts gained an opt-in \code{EXOTIC\_HOOK} for this, whose default path reproduces v3 exactly. With the refit on fewer splits, the arm-A values (out-of-sample $\sigma_E/E$ of 3.37, 1.78, 1.59 and 2.00\,\%, 2.12\,\% for the M\o ller pair sum; errors 0.006 to 0.06\,\%) sit above the context values of Table~\ref{tab:calibres}, and the arms are compared on the clusters present in both, with paired bootstrap errors.
 
-\paragraph{Gate decision and status.} With the V3 policy approved and the P9 and P10 results, the gate decides: the 2.24 and 3.49\,GeV hydrogen data keep V3 (0.0044 and 0.0067\,\% of the elastic window, fakes only), without V4 and without in-place correction; the 0.73\,GeV hydrogen and the tantalum data get no veto and no correction. The flags remain event markers, the gated options \code{PILEUP\_BASE\_SLOPE} and \code{PILEUP\_CLIP\_SINGLE} stay off, and the full-data scan on the farm keeps all five flags, f5 included. The hydrogen numbers of this chapter rest on two files per run (the 3.49\,GeV sample is runs 24698 and 24911).
+No arm improves $\sigma_E/E$ or the peak anywhere. At 2.24 and 3.49\,GeV H$_2$ the D and V3 differences in $\sigma_E/E$ and peak stay within $|z| \le 1.2$. The only entries beyond $2\sigma$ are the 2.24\,GeV low tail, which D lowers by $0.017 \pm 0.006$ percentage points ($z = -2.9$, the removed fakes), and the D$'$ peak at 2.24\,GeV, $+0.0014 \pm 0.0006\,\%$ ($z = 2.3$). At 0.73\,GeV $\sigma_E/E$ and the peak do not move ($|z| \le 0.5$). Four free module-runs move beyond $2\sigma_g$ (W522 at 2.24\,GeV, W702 and W556 at 0.73\,GeV, W659 in the M\o ller calibration), the largest W702 in run 24603 by $-1.47 \pm 0.34\,\%$ ($-4.4\sigma_g$). In tantalum the ep $\sigma_E/E$ and peak stay ($+0.010 \pm 0.012$ points, $+0.005 \pm 0.010\,\%$), but the low tail grows by $0.24 \pm 0.06$ points ($z = 3.8$): the dropped f1 and f3 neighbours take $0.40 \pm 0.01\,\%$ of the elastic energy, and the gain refit only recentres the peak (D$'$ alone moves it by $+0.052 \pm 0.006\,\%$). The M\o ller pair-sum peak shifts by $+0.028 \pm 0.011\,\%$ ($z = 2.6$) at unchanged width ($-0.014 \pm 0.012$ points). The tantalum inner ring (block H) stays at the prior in the M\o ller calibration (0 of 64 module-runs free in A and D) and largely so in the ep calibration (4 free in A, 3 in D, $|\Delta g| \le 0.56\sigma_g$), so the drop does not make its gain measurable.
+
+\paragraph{Gate decision and status.} The drop policy was the rule we proposed, and the data argue against it. It improves neither the resolution nor the peak at any run type. It costs 0.03 to 0.10\,\% of the hydrogen elastic windows, where V3 removes the same fakes for at most 0.0067\,\% (intervals in Table~\ref{tab:exotic_veto}). In tantalum it costs $0.875 \pm 0.037\,\%$ of the elastic window net and $0.243^{+0.044}_{-0.037}\,\%$ of the M\o ller pairs while it widens the low tail and shifts the M\o ller peak. The gate therefore stands: the 2.24 and 3.49\,GeV hydrogen data keep V3 (fakes only), without V4, without the drop and without in-place correction; the 0.73\,GeV hydrogen and the tantalum data get no veto, no drop and no correction. The flags remain event markers, the gated options \code{PILEUP\_BASE\_SLOPE} and \code{PILEUP\_CLIP\_SINGLE} stay off, and the full-data scan on the farm keeps all five flags, f5 included. The hydrogen numbers of this chapter rest on two files per run (the 3.49\,GeV sample is runs 24698 and 24911).
 \clearpage
 
 \section{Crosstalk study}
