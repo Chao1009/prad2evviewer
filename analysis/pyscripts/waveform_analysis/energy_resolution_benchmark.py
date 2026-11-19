@@ -139,6 +139,8 @@ EXOTIC_HOOK = ""                       # P9 exotic events (report side, opt-in; 
                                        # every path (Moller: the pair); rmin (mm): clusters whose seed-centre radius is below it are dropped (Moller: not applied); corr [n, 4] (run, event number, seed, module)
                                        # with corr_rho [n]: that member's raw energy is multiplied by 1 + rho, er and e follow (first order: clustering, seed and position unchanged);
                                        # the ep report writes <out>/<run type>/p9_clusters.npz (control-gate pool clusters, energies in and out of sample, used flags), the Moller report p9_moller.npz
+                                       # P13 (optional keys): drop [n, 3] (run, EVIO event number, module): every hit of that channel is removed before clustering (ep and Moller; the
+                                       # below-threshold fill still sees it as stored); drop_calib_only (ep only): remove them in the first pass (the gain-solve input) only
 SECONDARY_RULE = {}                    # P8 (report side): {"mode": "merge" | "drop", "dt": (lo, hi) ns, "ar_max": r}: an extra pulse with lo < t - t_main <= hi and A / A_main < r (its module's largest pulse; matched-filter hits only) is removed, its energy added to that main pulse ("merge") or discarded ("drop"); {} = unchanged
 
 # --- module set (elastic-window method, no gain applied)
@@ -1257,6 +1259,21 @@ def exotic_hook():
         with np.load(EXOTIC_HOOK, allow_pickle=False) as z:
             _EXO[EXOTIC_HOOK] = {q: z[q] for q in z.files}
     return _EXO[EXOTIC_HOOK]
+
+
+def exotic_drop(h, run, evnum, first_pass):
+    """P13 (EXOTIC_HOOK key drop): the hits h without those of the dropped channels (run, event number, module) of run; with drop_calib_only only
+    in the first pass (first_pass True).  A hook without drop returns h unchanged.  evnum: EVIO event number of each scan event (h_ev indexes it)."""
+    x = exotic_hook()
+    calib_only = "drop_calib_only" in x and bool(x["drop_calib_only"])
+    if "drop" not in x or (calib_only and not first_pass):
+        return h
+    d = x["drop"][x["drop"][:, 0] == run].astype(np.int64)
+    if not d.size or not h["h_ev"].size:
+        return h
+    key = evnum[h["h_ev"].astype(np.int64)].astype(np.int64) * 4096 + h["h_mod"].astype(np.int64)
+    keep = ~np.isin(key, d[:, 1] * 4096 + d[:, 2])
+    return {q: v[keep] for q, v in h.items()}
 
 
 def exotic_apply(pools, run, evnum, geo, rmin=True):
@@ -2478,7 +2495,8 @@ def split_job(job):
         h = phase_resid(h, z, geo, split, fn)
     t0 = time.monotonic()
     pairs = {}
-    base, n_single = cluster_events(h, cls, geo, SIGNAL_MIN * kE, SEED_MIN * kE, pairs)
+    h_cl = exotic_drop(h, run, z["ev_number"], corr is None) if EXOTIC_HOOK else h     # P13: dropped channels (the below-threshold fill keeps h)
+    base, n_single = cluster_events(h_cl, cls, geo, SIGNAL_MIN * kE, SEED_MIN * kE, pairs)
     if BELOW_THR:                      # P16: virtual below-threshold members before every correction
         base = below_thr(base, h, geo, rt, split_parity(z, fn, split))
     if EXOTIC_HOOK:                    # P9: veto / member corrections before every correction (both passes)

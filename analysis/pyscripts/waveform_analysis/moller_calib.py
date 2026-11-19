@@ -127,6 +127,8 @@ def pair_job(job):
     h = {q: z[q][lo:hi] for q in ("h_mod", "h_t", "h_e", "h_k", "h_extra")} | {"h_ev": h_ev[lo:hi]}
     if erb.PHASE_RESID:
         h = erb.phase_resid(h, z, geo, split, fn)
+    if erb.EXOTIC_HOOK:                            # P13: dropped channels removed before clustering
+        h = erb.exotic_drop(h, run, z["ev_number"], True)
     ev, pwo4, cstore = h["h_ev"], geo["pwo4"], CL_STORE * kE
     out = {p: {q: [] for q in PAIR_F + ("ev", "e3", "dn", "en", "mi", "me")} for p in cls}
     ncl = {p: np.zeros((len(CL_COUNT), 6), np.int64) for p in cls}
@@ -206,6 +208,8 @@ def collect(scan_dir, gate, cache):
     files = sorted(Path(scan_dir).glob("*.npz"))
     jobs = []
     want = set(map(tuple, erb.exotic_hook()["splits"].tolist())) if erb.EXOTIC_HOOK else None   # P9: the hook's splits only
+    if erb.EXOTIC_HOOK and "drop_calib_only" in erb.exotic_hook() and bool(erb.exotic_hook()["drop_calib_only"]):
+        sys.exit("[ERROR] EXOTIC_HOOK drop_calib_only: not supported by --calib moller (one candidate set serves the solve and the evaluation)")
     for fn in files:
         with np.load(fn, allow_pickle=False) as z:
             if str(z["run_type"]) != RT:
@@ -221,6 +225,8 @@ def collect(scan_dir, gate, cache):
     key = repr(files_id) + repr(sorted((Path(j[0]).name, j[1]) for j in jobs)) + repr((CL_STORE, DPHI_STORE, ESUM_STORE, ESUM_TOL, CL_COUNT, erb.PHASE_RESID,
                                                                        erb.TIME_OFFSETS, erb.OVERRIDES,
                                                                        hashlib.sha1(inspect.getsource(pair_job).encode()).hexdigest()))
+    if erb.EXOTIC_HOOK and "drop" in erb.exotic_hook():                       # P13: the dropped channels enter the candidates
+        key += hashlib.sha1(np.ascontiguousarray(erb.exotic_hook()["drop"], np.int64).tobytes()).hexdigest()
     if f.exists():
         z = np.load(f, allow_pickle=False)
         if str(z["key"]) == key:
