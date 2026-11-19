@@ -171,7 +171,7 @@ def f2_table(D):
             hi = f["amax"] > A_HI
             nh = int(hi.sum())
             lo_, hi_ = wilson(nh, n)
-            r = dict(run_type=rt, source=src, n_f2=n, n_f2_A_gt300=nh, frac_A_gt300=nh / max(n, 1), lo68=float(lo_), hi68=float(hi_), A_median=float(np.median(f["amax"])) if n else np.nan)
+            r = dict(run_type=rt, source=src, n_f2=n, n_f2_A_gt300=nh, frac_A_gt300=nh / max(n, 1), lo68=float(lo_), hi68=float(hi_), A_median=float(np.median(f["amax"])) if n else np.nan, frac_lo68=float(lo_), frac_hi68=float(hi_))
             kk = f["k"][hi]
             kl = f["k"][~hi]
             for lab, v in (("hi", kk), ("lo", kl)):
@@ -180,9 +180,15 @@ def f2_table(D):
             mh = f["midx"][hi]
             u, c = np.unique(mh, return_counts=True)
             o = np.argsort(-c)
+            for lab, v in (("hi", kk), ("lo", kl)):               # k >= 4 fraction of each group, Wilson 68 %
+                c4, nn = int((v >= 4).sum()), int(v.size)
+                l4, h4 = wilson(c4, nn) if nn else (float("nan"), float("nan"))
+                r[f"frac_k4p_{lab}"], r[f"frac_k4p_{lab}_lo68"], r[f"frac_k4p_{lab}_hi68"] = (c4 / nn if nn else float("nan")), float(l4), float(h4)
             r["n_modules_hi"] = int(u.size)
             r["top_modules_hi"] = "; ".join(f"{names[u[j]]}:{int(c[j])}" for j in o[:6])
             r["top1_share_hi"] = float(c[o[0]] / max(nh, 1)) if nh else float("nan")
+            t1l, t1h = wilson(int(c[o[0]]), nh) if nh else (float("nan"), float("nan"))
+            r["top1_share_hi_lo68"], r["top1_share_hi_hi68"] = float(t1l), float(t1h)
             ml = f["midx"][~hi]
             u2, c2 = np.unique(ml, return_counts=True)
             o2 = np.argsort(-c2)
@@ -212,8 +218,10 @@ def prof_rows(D):
     rows = []
     for rt in TYPES:
         for x in D[rt]["prof"]:
+            la, ha = wilson(x["n_hi"], x["n"])
+            lk, hk = wilson(x["n_k2"], x["n"])
             rows.append(dict(run_type=rt, w50_lo=x["lo"], w50_hi=x["hi"], n_kept=x["n"], n_A_gt300=x["n_hi"], frac_A_gt300=x["n_hi"] / max(x["n"], 1), n_k_ge2=x["n_k2"],
-                             frac_k_ge2=x["n_k2"] / max(x["n"], 1), n_clipped=x["n_clip"]))
+                             frac_k_ge2=x["n_k2"] / max(x["n"], 1), n_clipped=x["n_clip"], frac_lo68=float(la), frac_hi68=float(ha), frac_k_ge2_lo68=float(lk), frac_k_ge2_hi68=float(hk)))
     return rows
 
 
@@ -309,10 +317,11 @@ def ci(lo, hi, nd):
 
 def table_pages(pdf, plt, D, t2, ts, tp, tb):
     L = [f"f2 rows (uniform P2 thresholds; w50 > 3, not truncated, not clipped) by fitted A_max; high group = A > {A_HI:.0f} ADC.  [68 % Wilson interval]", "",
-         f"{'run type':<17}{'source':<25}{'n f2':>8}{'n A>300':>9}{'fraction':>10}{'[lo, hi]':>18}{'A med':>8}   k in hi group (1/2/3/4+)  k in lo group (1/2/3/4+)  hi: n mod, top-1 share, w50 med"]
+         f"{'run type':<17}{'source':<25}{'n f2':>8}{'n A>300':>9}{'fraction':>10}{'[lo, hi]':>20}{'A med':>8}   k in hi group (1/2/3/4+)  k in lo group (1/2/3/4+)  hi: n mod, top-1 share [lo, hi], w50 med; k>=4 fraction hi / lo [lo, hi]"]
     for r in t2:
-        L.append(f"{RT_LABEL[r['run_type']]:<17}{r['source']:<25}{r['n_f2']:>8d}{r['n_f2_A_gt300']:>9d}{r['frac_A_gt300']:>10.3f}{ci(r['lo68'], r['hi68'], 3):>18}{r['A_median']:>8.0f}"
-                 f"   {r['k1_hi']:>5d}/{r['k2_hi']}/{r['k3_hi']}/{r['k4p_hi']}      {r['k1_lo']}/{r['k2_lo']}/{r['k3_lo']}/{r['k4p_lo']}      {r['n_modules_hi']}, {r['top1_share_hi']:.2f}, {r['w50_median_hi']:.2f}")
+        L.append(f"{RT_LABEL[r['run_type']]:<17}{r['source']:<25}{r['n_f2']:>8d}{r['n_f2_A_gt300']:>9d}{r['frac_A_gt300']:>10.3f}{ci(r['lo68'], r['hi68'], 4):>20}{r['A_median']:>8.0f}"
+                 f"   {r['k1_hi']:>5d}/{r['k2_hi']}/{r['k3_hi']}/{r['k4p_hi']}      {r['k1_lo']}/{r['k2_lo']}/{r['k3_lo']}/{r['k4p_lo']}      {r['n_modules_hi']}, {r['top1_share_hi']:.2f} {ci(r['top1_share_hi_lo68'], r['top1_share_hi_hi68'], 2)}, {r['w50_median_hi']:.2f}")
+        L.append(f"{'':<42}k>=4 fraction: hi {r['frac_k4p_hi']:.3f} {ci(r['frac_k4p_hi_lo68'], r['frac_k4p_hi_hi68'], 3)} ({r['k4p_hi']} of {r['n_f2_A_gt300']}); lo {r['frac_k4p_lo']:.3f} {ci(r['frac_k4p_lo_lo68'], r['frac_k4p_lo_hi68'], 3)} ({r['k4p_lo']} of {r['n_f2'] - r['n_f2_A_gt300']})")
         L.append(f"{'':<42}top modules (hi): {r['top_modules_hi']}")
         L.append(f"{'':<42}top modules (lo): {r['top_modules_lo']}")
     L = [f"*** {EXCL_NOTE} ***  categories exclusive, priority {ORDER_TXT}", ""] + L
@@ -323,11 +332,11 @@ def table_pages(pdf, plt, D, t2, ts, tp, tb):
         L.append(f"{RT_LABEL[r['run_type']]:<17}{r['source']:<20}{r['n_kept']:>11d}{r['n_clip']:>8d}{r['pct_clip']:>9.4f}{ci(r['lo68'], r['hi68'], 4):>20}{r['n_f4']:>6d}{r['n_f5']:>6d}"
                  f"{r['n_E_gt_0p5']:>10d}{r['n_clip_E_gt_0p5']:>6d}{r['pct_clip_E_gt_0p5']:>9.3f}{ci(r['lo68_E'], r['hi68_E'], 3):>18}{r['edge_adc_median']:>10.0f}")
     L += ["", "edge ADC = beam energy / module gain (median over PbWO4 modules), the elastic-edge amplitude; saturation sets in at ~4095 - pedestal.  Percentages in [lo, hi] are in %.", "",
-          "w50 profile of all kept channels of the sample (n, % with A_max > 300 ADC, % with k >= 2 per w50 bin):",
-          f"{'run type':<17}" + "".join(f"{f'{lo:g}-{hi:g}':>26}" for lo, hi in WBINS)]
+          "w50 profile of all kept channels of the sample (n, % with A_max > 300 ADC [68 % Wilson], % with k >= 2 [68 % Wilson] per w50 bin):",
+          f"{'run type':<17}" + "".join(f"{f'{lo:g}-{hi:g}':>50}" for lo, hi in WBINS)]
     for rt in TYPES:
         rows = [x for x in tp if x["run_type"] == rt]
-        L.append(f"{RT_LABEL[rt]:<17}" + "".join(f"{str(x['n_kept']) + ', ' + format(100 * x['frac_A_gt300'], '.1f') + ', ' + format(100 * x['frac_k_ge2'], '.1f'):>26}" for x in rows))
+        L.append(f"{RT_LABEL[rt]:<17}" + "".join(f"{str(x['n_kept']) + ', ' + format(100 * x['frac_A_gt300'], '.2f') + ' [' + format(100 * x['frac_lo68'], '.2f') + ', ' + format(100 * x['frac_hi68'], '.2f') + '], ' + format(100 * x['frac_k_ge2'], '.2f') + ' [' + format(100 * x['frac_k_ge2_lo68'], '.2f') + ', ' + format(100 * x['frac_k_ge2_hi68'], '.2f') + ']':>50}" for x in rows))
     L += ["", "(b) rows with w50 > 2 and their raw peaks:",
           f"{'run type':<17}{'rows':>8}{'no raw':>8}{'clipped':>9}{'f4':>6}{'f5':>6}{'f2':>8}{'f2 raw>300':>12}{'f2 fitA>300':>13}{'unclip w50>3':>14}{'raw>300':>9}"]
     for r in tb:
@@ -474,7 +483,9 @@ def report(data, out, evio_dir, jobs):
               ["section", "run_type", "source", "n_f2", "n_f2_A_gt300", "frac_A_gt300", "lo68", "hi68", "A_median", "k1_hi", "k2_hi", "k3_hi", "k4p_hi", "k1_lo", "k2_lo", "k3_lo", "k4p_lo", "n_modules_hi",
                "top_modules_hi", "top1_share_hi", "top_modules_lo", "w50_median_hi", "w50_median_lo", "n_kept", "n_clip", "pct_clip", "n_f4", "n_f5", "n_E_gt_0p5", "n_clip_E_gt_0p5", "pct_clip_E_gt_0p5",
                "lo68_E", "hi68_E", "n_f4_E", "n_f5_E", "edge_adc_median", "w50_lo", "w50_hi", "n_A_gt300", "n_k_ge2", "frac_k_ge2", "n_clipped", "n_rows_w50_gt2", "n_no_raw", "n_saturated", "n_f2_raw_gt300",
-               "n_f2_fitA_gt300", "n_unclipped_w50_gt3", "n_unclipped_w50_gt3_raw_gt300", "run", "ev", "module", "k", "w50", "chi2", "amain", "E_MeV", "E_over_Eb", "nclip", "pulses", "n"])
+               "n_f2_fitA_gt300", "n_unclipped_w50_gt3", "n_unclipped_w50_gt3_raw_gt300", "run", "ev", "module", "k", "w50", "chi2", "amain", "E_MeV", "E_over_Eb", "nclip", "pulses", "n",
+               "frac_lo68", "frac_hi68", "frac_k_ge2_lo68", "frac_k_ge2_hi68", "frac_k4p_hi", "frac_k4p_hi_lo68", "frac_k4p_hi_hi68", "frac_k4p_lo", "frac_k4p_lo_lo68", "frac_k4p_lo_hi68",
+               "top1_share_hi_lo68", "top1_share_hi_hi68"])
     print(f"[report] {stem}.pdf; examples (high-A) " + ", ".join(f"{rt} {len(hex_[rt])}" for rt in hex_) + "; uniform " + ", ".join(f"{rt} {len(uex[rt])}" for rt in uex))
     for r in t2:
         print({k: (round(v, 3) if isinstance(v, float) else v) for k, v in r.items()})

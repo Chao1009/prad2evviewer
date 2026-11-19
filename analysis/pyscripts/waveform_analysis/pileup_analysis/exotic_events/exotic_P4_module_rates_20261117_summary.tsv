@@ -1,373 +1,381 @@
-run_type	threshold_set	flag	n_kept	n_flag	rate_percent	lo68_percent	hi68_percent
-0p73GeV_H2	type	f1	20951376	6730	0.032122	0.031733	0.032516
-0p73GeV_H2	type	f2	20951376	285	0.0013603	0.0012821	0.0014433
-0p73GeV_H2	type	f3	20951376	7836	0.037401	0.036981	0.037826
-0p73GeV_H2	type	f4	20951376	23	0.00010978	8.915e-05	0.00013518
-0p73GeV_H2	type	f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05
-0p73GeV_H2	type	clipped	20951376	31	0.00014796	0.00012367	0.00017703
-0p73GeV_H2	type	any	20951376	14470	0.069065	0.068493	0.069641
-0p73GeV_H2	type	excl_f1	20951376	6730	0.032122	0.031733	0.032516
-0p73GeV_H2	type	excl_f2	20951376	267	0.0012744	0.0011987	0.0013548
-0p73GeV_H2	type	excl_f3	20951376	7442	0.03552	0.035111	0.035934
-0p73GeV_H2	type	excl_f4	20951376	23	0.00010978	8.915e-05	0.00013518
-0p73GeV_H2	type	excl_f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05
-0p73GeV_H2	type	excl_any	20951376	14470	0.069065	0.068493	0.069641
-0p73GeV_H2	type	moved_f1_to_f2	20951376	0	0		
-0p73GeV_H2	type	moved_f1_to_f3	20951376	0	0		
-0p73GeV_H2	type	moved_f1_to_f4	20951376	0	0		
-0p73GeV_H2	type	moved_f1_to_f5	20951376	0	0		
-0p73GeV_H2	type	moved_f2_to_f1	20951376	18	8.5913e-05		
-0p73GeV_H2	type	moved_f2_to_f3	20951376	0	0		
-0p73GeV_H2	type	moved_f2_to_f4	20951376	0	0		
-0p73GeV_H2	type	moved_f2_to_f5	20951376	0	0		
-0p73GeV_H2	type	moved_f3_to_f1	20951376	274	0.0013078		
-0p73GeV_H2	type	moved_f3_to_f2	20951376	114	0.00054412		
-0p73GeV_H2	type	moved_f3_to_f4	20951376	6	2.8638e-05		
-0p73GeV_H2	type	moved_f3_to_f5	20951376	0	0		
-0p73GeV_H2	type	moved_f4_to_f1	20951376	0	0		
-0p73GeV_H2	type	moved_f4_to_f2	20951376	0	0		
-0p73GeV_H2	type	moved_f4_to_f3	20951376	0	0		
-0p73GeV_H2	type	moved_f4_to_f5	20951376	0	0		
-0p73GeV_H2	type	moved_f5_to_f1	20951376	0	0		
-0p73GeV_H2	type	moved_f5_to_f2	20951376	0	0		
-0p73GeV_H2	type	moved_f5_to_f3	20951376	0	0		
-0p73GeV_H2	type	moved_f5_to_f4	20951376	0	0		
-0p73GeV_H2	uniform	f1	20951376	6735	0.032146	0.031757	0.03254
-0p73GeV_H2	uniform	f2	20951376	248	0.0011837	0.0011109	0.0012613
-0p73GeV_H2	uniform	f3	20951376	7895	0.037682	0.037261	0.038109
-0p73GeV_H2	uniform	f4	20951376	23	0.00010978	8.915e-05	0.00013518
-0p73GeV_H2	uniform	f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05
-0p73GeV_H2	uniform	clipped	20951376	31	0.00014796	0.00012367	0.00017703
-0p73GeV_H2	uniform	any	20951376	14513	0.06927	0.068697	0.069847
-0p73GeV_H2	uniform	excl_f1	20951376	6735	0.032146	0.031757	0.03254
-0p73GeV_H2	uniform	excl_f2	20951376	232	0.0011073	0.001037	0.0011825
-0p73GeV_H2	uniform	excl_f3	20951376	7515	0.035869	0.035457	0.036285
-0p73GeV_H2	uniform	excl_f4	20951376	23	0.00010978	8.915e-05	0.00013518
-0p73GeV_H2	uniform	excl_f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05
-0p73GeV_H2	uniform	excl_any	20951376	14513	0.06927	0.068697	0.069847
-0p73GeV_H2	uniform	moved_f1_to_f2	20951376	0	0		
-0p73GeV_H2	uniform	moved_f1_to_f3	20951376	0	0		
-0p73GeV_H2	uniform	moved_f1_to_f4	20951376	0	0		
-0p73GeV_H2	uniform	moved_f1_to_f5	20951376	0	0		
-0p73GeV_H2	uniform	moved_f2_to_f1	20951376	16	7.6367e-05		
-0p73GeV_H2	uniform	moved_f2_to_f3	20951376	0	0		
-0p73GeV_H2	uniform	moved_f2_to_f4	20951376	0	0		
-0p73GeV_H2	uniform	moved_f2_to_f5	20951376	0	0		
-0p73GeV_H2	uniform	moved_f3_to_f1	20951376	274	0.0013078		
-0p73GeV_H2	uniform	moved_f3_to_f2	20951376	100	0.0004773		
-0p73GeV_H2	uniform	moved_f3_to_f4	20951376	6	2.8638e-05		
-0p73GeV_H2	uniform	moved_f3_to_f5	20951376	0	0		
-0p73GeV_H2	uniform	moved_f4_to_f1	20951376	0	0		
-0p73GeV_H2	uniform	moved_f4_to_f2	20951376	0	0		
-0p73GeV_H2	uniform	moved_f4_to_f3	20951376	0	0		
-0p73GeV_H2	uniform	moved_f4_to_f5	20951376	0	0		
-0p73GeV_H2	uniform	moved_f5_to_f1	20951376	0	0		
-0p73GeV_H2	uniform	moved_f5_to_f2	20951376	0	0		
-0p73GeV_H2	uniform	moved_f5_to_f3	20951376	0	0		
-0p73GeV_H2	uniform	moved_f5_to_f4	20951376	0	0		
-0p73GeV_H2	check	uniform_before		323			
-0p73GeV_H2	check	uniform_trunc_only		248			
-0p73GeV_H2	check	uniform_after		248			
-0p73GeV_H2	check	type_trunc_only		285			
-0p73GeV_H2	check	uni_f1_and_f4		0			
-0p73GeV_H2	check	uni_f3_and_f4		6			
-0p73GeV_H2	check	uni_f2_and_f4		0			
-0p73GeV_H2	check	type_before		365			
-0p73GeV_H2	check	type_after		285			
-0p73GeV_H2	check	stored_f1		6735			
-0p73GeV_H2	check	stored_f2		329			
-0p73GeV_H2	check	stored_f3		7895			
-0p73GeV_H2	check	stored_f4		23			
-0p73GeV_H2	check	uni_f1		6735			
-0p73GeV_H2	check	uni_f3		7895			
-0p73GeV_H2	check	uni_f4		23			
-0p73GeV_H2	check	uni_f5		8			
-0p73GeV_H2	check	uni_f5_and_f1		0			
-0p73GeV_H2	check	uni_f5_and_f2		0			
-0p73GeV_H2	check	uni_f5_and_f3		0			
-0p73GeV_H2	check	uni_f5_and_f4		0			
-2p24GeV_H2	type	f1	95797094	58173	0.060725	0.060474	0.060977
-2p24GeV_H2	type	f2	95797094	547	0.000571	0.0005471	0.00059594
-2p24GeV_H2	type	f3	95797094	31015	0.032376	0.032192	0.03256
-2p24GeV_H2	type	f4	95797094	2247	0.0023456	0.0022966	0.0023956
-2p24GeV_H2	type	f5	95797094	1391	0.001452	0.0014136	0.0014915
-2p24GeV_H2	type	clipped	95797094	3638	0.0037976	0.0037352	0.0038611
-2p24GeV_H2	type	any	95797094	86814	0.090623	0.090316	0.090931
-2p24GeV_H2	type	excl_f1	95797094	58173	0.060725	0.060474	0.060977
-2p24GeV_H2	type	excl_f2	95797094	422	0.00044051	0.00041959	0.00046249
-2p24GeV_H2	type	excl_f3	95797094	24581	0.025659	0.025496	0.025824
-2p24GeV_H2	type	excl_f4	95797094	2247	0.0023456	0.0022966	0.0023956
-2p24GeV_H2	type	excl_f5	95797094	1391	0.001452	0.0014136	0.0014915
-2p24GeV_H2	type	excl_any	95797094	86814	0.090623	0.090316	0.090931
-2p24GeV_H2	type	moved_f1_to_f2	95797094	0	0		
-2p24GeV_H2	type	moved_f1_to_f3	95797094	0	0		
-2p24GeV_H2	type	moved_f1_to_f4	95797094	0	0		
-2p24GeV_H2	type	moved_f1_to_f5	95797094	0	0		
-2p24GeV_H2	type	moved_f2_to_f1	95797094	125	0.00013048		
-2p24GeV_H2	type	moved_f2_to_f3	95797094	0	0		
-2p24GeV_H2	type	moved_f2_to_f4	95797094	0	0		
-2p24GeV_H2	type	moved_f2_to_f5	95797094	0	0		
-2p24GeV_H2	type	moved_f3_to_f1	95797094	5893	0.0061515		
-2p24GeV_H2	type	moved_f3_to_f2	95797094	150	0.00015658		
-2p24GeV_H2	type	moved_f3_to_f4	95797094	192	0.00020042		
-2p24GeV_H2	type	moved_f3_to_f5	95797094	199	0.00020773		
-2p24GeV_H2	type	moved_f4_to_f1	95797094	0	0		
-2p24GeV_H2	type	moved_f4_to_f2	95797094	0	0		
-2p24GeV_H2	type	moved_f4_to_f3	95797094	0	0		
-2p24GeV_H2	type	moved_f4_to_f5	95797094	0	0		
-2p24GeV_H2	type	moved_f5_to_f1	95797094	0	0		
-2p24GeV_H2	type	moved_f5_to_f2	95797094	0	0		
-2p24GeV_H2	type	moved_f5_to_f3	95797094	0	0		
-2p24GeV_H2	type	moved_f5_to_f4	95797094	0	0		
-2p24GeV_H2	uniform	f1	95797094	56978	0.059478	0.059229	0.059727
-2p24GeV_H2	uniform	f2	95797094	562	0.00058666	0.00056243	0.00061193
-2p24GeV_H2	uniform	f3	95797094	31140	0.032506	0.032323	0.032691
-2p24GeV_H2	uniform	f4	95797094	2247	0.0023456	0.0022966	0.0023956
-2p24GeV_H2	uniform	f5	95797094	1391	0.001452	0.0014136	0.0014915
-2p24GeV_H2	uniform	clipped	95797094	3638	0.0037976	0.0037352	0.0038611
-2p24GeV_H2	uniform	any	95797094	85813	0.089578	0.089273	0.089884
-2p24GeV_H2	uniform	excl_f1	95797094	56978	0.059478	0.059229	0.059727
-2p24GeV_H2	uniform	excl_f2	95797094	431	0.00044991	0.00042875	0.00047211
-2p24GeV_H2	uniform	excl_f3	95797094	24766	0.025853	0.025689	0.026017
-2p24GeV_H2	uniform	excl_f4	95797094	2247	0.0023456	0.0022966	0.0023956
-2p24GeV_H2	uniform	excl_f5	95797094	1391	0.001452	0.0014136	0.0014915
-2p24GeV_H2	uniform	excl_any	95797094	85813	0.089578	0.089273	0.089884
-2p24GeV_H2	uniform	moved_f1_to_f2	95797094	0	0		
-2p24GeV_H2	uniform	moved_f1_to_f3	95797094	0	0		
-2p24GeV_H2	uniform	moved_f1_to_f4	95797094	0	0		
-2p24GeV_H2	uniform	moved_f1_to_f5	95797094	0	0		
-2p24GeV_H2	uniform	moved_f2_to_f1	95797094	131	0.00013675		
-2p24GeV_H2	uniform	moved_f2_to_f3	95797094	0	0		
-2p24GeV_H2	uniform	moved_f2_to_f4	95797094	0	0		
-2p24GeV_H2	uniform	moved_f2_to_f5	95797094	0	0		
-2p24GeV_H2	uniform	moved_f3_to_f1	95797094	5827	0.0060826		
-2p24GeV_H2	uniform	moved_f3_to_f2	95797094	156	0.00016284		
-2p24GeV_H2	uniform	moved_f3_to_f4	95797094	192	0.00020042		
-2p24GeV_H2	uniform	moved_f3_to_f5	95797094	199	0.00020773		
-2p24GeV_H2	uniform	moved_f4_to_f1	95797094	0	0		
-2p24GeV_H2	uniform	moved_f4_to_f2	95797094	0	0		
-2p24GeV_H2	uniform	moved_f4_to_f3	95797094	0	0		
-2p24GeV_H2	uniform	moved_f4_to_f5	95797094	0	0		
-2p24GeV_H2	uniform	moved_f5_to_f1	95797094	0	0		
-2p24GeV_H2	uniform	moved_f5_to_f2	95797094	0	0		
-2p24GeV_H2	uniform	moved_f5_to_f3	95797094	0	0		
-2p24GeV_H2	uniform	moved_f5_to_f4	95797094	0	0		
-2p24GeV_H2	check	uniform_before		770			
-2p24GeV_H2	check	uniform_trunc_only		575			
-2p24GeV_H2	check	uniform_after		562			
-2p24GeV_H2	check	type_trunc_only		560			
-2p24GeV_H2	check	uni_f1_and_f4		0			
-2p24GeV_H2	check	uni_f3_and_f4		192			
-2p24GeV_H2	check	uni_f2_and_f4		0			
-2p24GeV_H2	check	type_before		749			
-2p24GeV_H2	check	type_after		547			
-2p24GeV_H2	check	stored_f1		56978			
-2p24GeV_H2	check	stored_f2		1021			
-2p24GeV_H2	check	stored_f3		31140			
-2p24GeV_H2	check	stored_f4		2247			
-2p24GeV_H2	check	uni_f1		56978			
-2p24GeV_H2	check	uni_f3		31140			
-2p24GeV_H2	check	uni_f4		2247			
-2p24GeV_H2	check	uni_f5		1391			
-2p24GeV_H2	check	uni_f5_and_f1		0			
-2p24GeV_H2	check	uni_f5_and_f2		0			
-2p24GeV_H2	check	uni_f5_and_f3		199			
-2p24GeV_H2	check	uni_f5_and_f4		0			
-3p49GeV_H2	type	f1	46057162	25727	0.055859	0.055512	0.056208
-3p49GeV_H2	type	f2	46057162	250	0.0005428	0.00050954	0.00057824
-3p49GeV_H2	type	f3	46057162	10505	0.022809	0.022587	0.023032
-3p49GeV_H2	type	f4	46057162	373	0.00080986	0.000769	0.0008529
-3p49GeV_H2	type	f5	46057162	327	0.00070999	0.0006718	0.00075035
-3p49GeV_H2	type	clipped	46057162	700	0.0015199	0.0014635	0.0015784
-3p49GeV_H2	type	any	46057162	33807	0.073402	0.073004	0.073802
-3p49GeV_H2	type	excl_f1	46057162	25727	0.055859	0.055512	0.056208
-3p49GeV_H2	type	excl_f2	46057162	146	0.000317	0.00029183	0.00034434
-3p49GeV_H2	type	excl_f3	46057162	7234	0.015707	0.015523	0.015892
-3p49GeV_H2	type	excl_f4	46057162	373	0.00080986	0.000769	0.0008529
-3p49GeV_H2	type	excl_f5	46057162	327	0.00070999	0.0006718	0.00075035
-3p49GeV_H2	type	excl_any	46057162	33807	0.073402	0.073004	0.073802
-3p49GeV_H2	type	moved_f1_to_f2	46057162	0	0		
-3p49GeV_H2	type	moved_f1_to_f3	46057162	0	0		
-3p49GeV_H2	type	moved_f1_to_f4	46057162	0	0		
-3p49GeV_H2	type	moved_f1_to_f5	46057162	0	0		
-3p49GeV_H2	type	moved_f2_to_f1	46057162	104	0.00022581		
-3p49GeV_H2	type	moved_f2_to_f3	46057162	0	0		
-3p49GeV_H2	type	moved_f2_to_f4	46057162	0	0		
-3p49GeV_H2	type	moved_f2_to_f5	46057162	0	0		
-3p49GeV_H2	type	moved_f3_to_f1	46057162	3119	0.006772		
-3p49GeV_H2	type	moved_f3_to_f2	46057162	60	0.00013027		
-3p49GeV_H2	type	moved_f3_to_f4	46057162	41	8.902e-05		
-3p49GeV_H2	type	moved_f3_to_f5	46057162	51	0.00011073		
-3p49GeV_H2	type	moved_f4_to_f1	46057162	0	0		
-3p49GeV_H2	type	moved_f4_to_f2	46057162	0	0		
-3p49GeV_H2	type	moved_f4_to_f3	46057162	0	0		
-3p49GeV_H2	type	moved_f4_to_f5	46057162	0	0		
-3p49GeV_H2	type	moved_f5_to_f1	46057162	0	0		
-3p49GeV_H2	type	moved_f5_to_f2	46057162	0	0		
-3p49GeV_H2	type	moved_f5_to_f3	46057162	0	0		
-3p49GeV_H2	type	moved_f5_to_f4	46057162	0	0		
-3p49GeV_H2	uniform	f1	46057162	25778	0.05597	0.055622	0.056319
-3p49GeV_H2	uniform	f2	46057162	269	0.00058406	0.00054952	0.00062077
-3p49GeV_H2	uniform	f3	46057162	10375	0.022526	0.022306	0.022749
-3p49GeV_H2	uniform	f4	46057162	373	0.00080986	0.000769	0.0008529
-3p49GeV_H2	uniform	f5	46057162	327	0.00070999	0.0006718	0.00075035
-3p49GeV_H2	uniform	clipped	46057162	700	0.0015199	0.0014635	0.0015784
-3p49GeV_H2	uniform	any	46057162	33746	0.07327	0.072872	0.07367
-3p49GeV_H2	uniform	excl_f1	46057162	25778	0.05597	0.055622	0.056319
-3p49GeV_H2	uniform	excl_f2	46057162	155	0.00033654	0.00031057	0.00036468
-3p49GeV_H2	uniform	excl_f3	46057162	7113	0.015444	0.015262	0.015628
-3p49GeV_H2	uniform	excl_f4	46057162	373	0.00080986	0.000769	0.0008529
-3p49GeV_H2	uniform	excl_f5	46057162	327	0.00070999	0.0006718	0.00075035
-3p49GeV_H2	uniform	excl_any	46057162	33746	0.07327	0.072872	0.07367
-3p49GeV_H2	uniform	moved_f1_to_f2	46057162	0	0		
-3p49GeV_H2	uniform	moved_f1_to_f3	46057162	0	0		
-3p49GeV_H2	uniform	moved_f1_to_f4	46057162	0	0		
-3p49GeV_H2	uniform	moved_f1_to_f5	46057162	0	0		
-3p49GeV_H2	uniform	moved_f2_to_f1	46057162	114	0.00024752		
-3p49GeV_H2	uniform	moved_f2_to_f3	46057162	0	0		
-3p49GeV_H2	uniform	moved_f2_to_f4	46057162	0	0		
-3p49GeV_H2	uniform	moved_f2_to_f5	46057162	0	0		
-3p49GeV_H2	uniform	moved_f3_to_f1	46057162	3106	0.0067438		
-3p49GeV_H2	uniform	moved_f3_to_f2	46057162	64	0.00013896		
-3p49GeV_H2	uniform	moved_f3_to_f4	46057162	41	8.902e-05		
-3p49GeV_H2	uniform	moved_f3_to_f5	46057162	51	0.00011073		
-3p49GeV_H2	uniform	moved_f4_to_f1	46057162	0	0		
-3p49GeV_H2	uniform	moved_f4_to_f2	46057162	0	0		
-3p49GeV_H2	uniform	moved_f4_to_f3	46057162	0	0		
-3p49GeV_H2	uniform	moved_f4_to_f5	46057162	0	0		
-3p49GeV_H2	uniform	moved_f5_to_f1	46057162	0	0		
-3p49GeV_H2	uniform	moved_f5_to_f2	46057162	0	0		
-3p49GeV_H2	uniform	moved_f5_to_f3	46057162	0	0		
-3p49GeV_H2	uniform	moved_f5_to_f4	46057162	0	0		
-3p49GeV_H2	check	uniform_before		362			
-3p49GeV_H2	check	uniform_trunc_only		278			
-3p49GeV_H2	check	uniform_after		269			
-3p49GeV_H2	check	type_trunc_only		257			
-3p49GeV_H2	check	uni_f1_and_f4		0			
-3p49GeV_H2	check	uni_f3_and_f4		41			
-3p49GeV_H2	check	uni_f2_and_f4		0			
-3p49GeV_H2	check	type_before		337			
-3p49GeV_H2	check	type_after		250			
-3p49GeV_H2	check	stored_f1		25778			
-3p49GeV_H2	check	stored_f2		431			
-3p49GeV_H2	check	stored_f3		10375			
-3p49GeV_H2	check	stored_f4		373			
-3p49GeV_H2	check	uni_f1		25778			
-3p49GeV_H2	check	uni_f3		10375			
-3p49GeV_H2	check	uni_f4		373			
-3p49GeV_H2	check	uni_f5		327			
-3p49GeV_H2	check	uni_f5_and_f1		0			
-3p49GeV_H2	check	uni_f5_and_f2		0			
-3p49GeV_H2	check	uni_f5_and_f3		51			
-3p49GeV_H2	check	uni_f5_and_f4		0			
-2p24GeV_Ta_X17	type	f1	79224543	477190	0.60233	0.60146	0.6032
-2p24GeV_Ta_X17	type	f2	79224543	80661	0.10181	0.10146	0.10217
-2p24GeV_Ta_X17	type	f3	79224543	306567	0.38696	0.38626	0.38766
-2p24GeV_Ta_X17	type	f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05
-2p24GeV_Ta_X17	type	f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05
-2p24GeV_Ta_X17	type	clipped	79224543	21	2.6507e-05	2.1319e-05	3.2957e-05
-2p24GeV_Ta_X17	type	any	79224543	668552	0.84387	0.84284	0.8449
-2p24GeV_Ta_X17	type	excl_f1	79224543	477190	0.60233	0.60146	0.6032
-2p24GeV_Ta_X17	type	excl_f2	79224543	12854	0.016225	0.016082	0.016368
-2p24GeV_Ta_X17	type	excl_f3	79224543	178487	0.22529	0.22476	0.22583
-2p24GeV_Ta_X17	type	excl_f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05
-2p24GeV_Ta_X17	type	excl_f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05
-2p24GeV_Ta_X17	type	excl_any	79224543	668552	0.84387	0.84284	0.8449
-2p24GeV_Ta_X17	type	moved_f1_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f1_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f1_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f1_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f2_to_f1	79224543	67807	0.085588		
-2p24GeV_Ta_X17	type	moved_f2_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f2_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f2_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f3_to_f1	79224543	122355	0.15444		
-2p24GeV_Ta_X17	type	moved_f3_to_f2	79224543	5721	0.0072212		
-2p24GeV_Ta_X17	type	moved_f3_to_f4	79224543	4	5.0489e-06		
-2p24GeV_Ta_X17	type	moved_f3_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f4_to_f1	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f4_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f4_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f4_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f5_to_f1	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f5_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f5_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	type	moved_f5_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	uniform	f1	79224543	713377	0.90045	0.89939	0.90151
-2p24GeV_Ta_X17	uniform	f2	79224543	87761	0.11078	0.1104	0.11115
-2p24GeV_Ta_X17	uniform	f3	79224543	310609	0.39206	0.39136	0.39276
-2p24GeV_Ta_X17	uniform	f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05
-2p24GeV_Ta_X17	uniform	f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05
-2p24GeV_Ta_X17	uniform	clipped	79224543	21	2.6507e-05	2.1319e-05	3.2957e-05
-2p24GeV_Ta_X17	uniform	any	79224543	882817	1.1143	1.1131	1.1155
-2p24GeV_Ta_X17	uniform	excl_f1	79224543	713377	0.90045	0.89939	0.90151
-2p24GeV_Ta_X17	uniform	excl_f2	79224543	12957	0.016355	0.016212	0.016499
-2p24GeV_Ta_X17	uniform	excl_f3	79224543	156462	0.19749	0.19699	0.19799
-2p24GeV_Ta_X17	uniform	excl_f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05
-2p24GeV_Ta_X17	uniform	excl_f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05
-2p24GeV_Ta_X17	uniform	excl_any	79224543	882817	1.1143	1.1131	1.1155
-2p24GeV_Ta_X17	uniform	moved_f1_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f1_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f1_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f1_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f2_to_f1	79224543	74804	0.09442		
-2p24GeV_Ta_X17	uniform	moved_f2_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f2_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f2_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f3_to_f1	79224543	148587	0.18755		
-2p24GeV_Ta_X17	uniform	moved_f3_to_f2	79224543	5556	0.007013		
-2p24GeV_Ta_X17	uniform	moved_f3_to_f4	79224543	4	5.0489e-06		
-2p24GeV_Ta_X17	uniform	moved_f3_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f4_to_f1	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f4_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f4_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f4_to_f5	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f5_to_f1	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f5_to_f2	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f5_to_f3	79224543	0	0		
-2p24GeV_Ta_X17	uniform	moved_f5_to_f4	79224543	0	0		
-2p24GeV_Ta_X17	check	uniform_before		88317			
-2p24GeV_Ta_X17	check	uniform_trunc_only		87761			
-2p24GeV_Ta_X17	check	uniform_after		87761			
-2p24GeV_Ta_X17	check	type_trunc_only		80661			
-2p24GeV_Ta_X17	check	uni_f1_and_f4		0			
-2p24GeV_Ta_X17	check	uni_f3_and_f4		4			
-2p24GeV_Ta_X17	check	uni_f2_and_f4		0			
-2p24GeV_Ta_X17	check	type_before		81175			
-2p24GeV_Ta_X17	check	type_after		80661			
-2p24GeV_Ta_X17	check	stored_f1		713377			
-2p24GeV_Ta_X17	check	stored_f2		88318			
-2p24GeV_Ta_X17	check	stored_f3		310609			
-2p24GeV_Ta_X17	check	stored_f4		14			
-2p24GeV_Ta_X17	check	uni_f1		713377			
-2p24GeV_Ta_X17	check	uni_f3		310609			
-2p24GeV_Ta_X17	check	uni_f4		14			
-2p24GeV_Ta_X17	check	uni_f5		7			
-2p24GeV_Ta_X17	check	uni_f5_and_f1		0			
-2p24GeV_Ta_X17	check	uni_f5_and_f2		0			
-2p24GeV_Ta_X17	check	uni_f5_and_f3		0			
-2p24GeV_Ta_X17	check	uni_f5_and_f4		0			
-0p73GeV_H2	radius_0-120mm	sat	17498990	0	0	0	5.7146e-06
-0p73GeV_H2	radius_120-170mm	sat	1569292	0	0	0	6.3723e-05
-0p73GeV_H2	radius_170-230mm	sat	933938	1	0.00010707	4.0898e-05	0.00028032
-0p73GeV_H2	radius_230-320mm	sat	614590	26	0.0042305	0.0034782	0.0051454
-0p73GeV_H2	radius_320-450mm	sat	323888	4	0.001235	0.00075287	0.0020259
-0p73GeV_H2	radius_450-700mm	sat	10678	0	0	0	0.0093642
-2p24GeV_H2	radius_0-120mm	sat	73563386	1075	0.0014613	0.0014174	0.0015066
-2p24GeV_H2	radius_120-170mm	sat	8408586	315	0.0037462	0.003541	0.0039633
-2p24GeV_H2	radius_170-230mm	sat	5906312	443	0.0075005	0.0071525	0.0078654
-2p24GeV_H2	radius_230-320mm	sat	5140813	711	0.01383	0.013321	0.014359
-2p24GeV_H2	radius_320-450mm	sat	2747520	1078	0.039235	0.038059	0.040448
-2p24GeV_H2	radius_450-700mm	sat	30477	16	0.052499	0.040914	0.06736
-3p49GeV_H2	radius_0-120mm	sat	34970789	78	0.00022304	0.00019918	0.00024977
-3p49GeV_H2	radius_120-170mm	sat	4837224	65	0.0013437	0.0011871	0.0015211
-3p49GeV_H2	radius_170-230mm	sat	3727411	143	0.0038364	0.0035288	0.0041709
-3p49GeV_H2	radius_230-320mm	sat	2059649	138	0.0067002	0.0061536	0.0072953
-3p49GeV_H2	radius_320-450mm	sat	452645	271	0.05987	0.056343	0.063618
-3p49GeV_H2	radius_450-700mm	sat	9444	5	0.052944	0.033979	0.082485
-2p24GeV_Ta_X17	radius_0-120mm	sat	63946075	13	2.033e-05	1.5419e-05	2.6804e-05
-2p24GeV_Ta_X17	radius_120-170mm	sat	7521582	1	1.3295e-05	5.0783e-06	3.4807e-05
-2p24GeV_Ta_X17	radius_170-230mm	sat	4270489	0	0	0	2.3417e-05
-2p24GeV_Ta_X17	radius_230-320mm	sat	2449685	1	4.0822e-05	1.5592e-05	0.00010687
-2p24GeV_Ta_X17	radius_320-450mm	sat	1014815	6	0.00059124	0.00039416	0.00088686
-2p24GeV_Ta_X17	radius_450-700mm	sat	21897	0	0	0	0.0045666
+run_type	threshold_set	flag	n_kept	n_flag	rate_percent	lo68_percent	hi68_percent	of_raw_percent	of_raw_lo68_percent	of_raw_hi68_percent
+0p73GeV_H2	type	f1	20951376	6730	0.032122	0.031733	0.032516			
+0p73GeV_H2	type	f2	20951376	285	0.0013603	0.0012821	0.0014433			
+0p73GeV_H2	type	f3	20951376	7836	0.037401	0.036981	0.037826			
+0p73GeV_H2	type	f4	20951376	23	0.00010978	8.915e-05	0.00013518			
+0p73GeV_H2	type	f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05			
+0p73GeV_H2	type	clipped	20951376	31	0.00014796	0.00012367	0.00017703			
+0p73GeV_H2	type	any	20951376	14470	0.069065	0.068493	0.069641			
+0p73GeV_H2	type	excl_f1	20951376	6730	0.032122	0.031733	0.032516			
+0p73GeV_H2	type	excl_f2	20951376	267	0.0012744	0.0011987	0.0013548			
+0p73GeV_H2	type	excl_f3	20951376	7442	0.03552	0.035111	0.035934			
+0p73GeV_H2	type	excl_f4	20951376	23	0.00010978	8.915e-05	0.00013518			
+0p73GeV_H2	type	excl_f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05			
+0p73GeV_H2	type	excl_any	20951376	14470	0.069065	0.068493	0.069641			
+0p73GeV_H2	type	f4_over_clipped	31	23	74.194	65.665	81.21			
+0p73GeV_H2	type	moved_f1_to_f2	20951376	0	0	0	4.773e-06	0	0	0.014857
+0p73GeV_H2	type	moved_f1_to_f3	20951376	0	0	0	4.773e-06	0	0	0.014857
+0p73GeV_H2	type	moved_f1_to_f4	20951376	0	0	0	4.773e-06	0	0	0.014857
+0p73GeV_H2	type	moved_f1_to_f5	20951376	0	0	0	4.773e-06	0	0	0.014857
+0p73GeV_H2	type	moved_f2_to_f1	20951376	18	8.5913e-05	6.791e-05	0.00010869	6.3158	5.0221	7.915
+0p73GeV_H2	type	moved_f2_to_f3	20951376	0	0	0	4.773e-06	0	0	0.34965
+0p73GeV_H2	type	moved_f2_to_f4	20951376	0	0	0	4.773e-06	0	0	0.34965
+0p73GeV_H2	type	moved_f2_to_f5	20951376	0	0	0	4.773e-06	0	0	0.34965
+0p73GeV_H2	type	moved_f3_to_f1	20951376	274	0.0013078	0.0012311	0.0013892	3.4967	3.295	3.7102
+0p73GeV_H2	type	moved_f3_to_f2	20951376	114	0.00054412	0.00049549	0.00059752	1.4548	1.3256	1.5964
+0p73GeV_H2	type	moved_f3_to_f4	20951376	6	2.8638e-05	1.9092e-05	4.2957e-05	0.07657	0.051052	0.11483
+0p73GeV_H2	type	moved_f3_to_f5	20951376	0	0	0	4.773e-06	0	0	0.01276
+0p73GeV_H2	type	moved_f4_to_f1	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	type	moved_f4_to_f2	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	type	moved_f4_to_f3	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	type	moved_f4_to_f5	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	type	moved_f5_to_f1	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	type	moved_f5_to_f2	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	type	moved_f5_to_f3	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	type	moved_f5_to_f4	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	uniform	f1	20951376	6735	0.032146	0.031757	0.03254			
+0p73GeV_H2	uniform	f2	20951376	248	0.0011837	0.0011109	0.0012613			
+0p73GeV_H2	uniform	f3	20951376	7895	0.037682	0.037261	0.038109			
+0p73GeV_H2	uniform	f4	20951376	23	0.00010978	8.915e-05	0.00013518			
+0p73GeV_H2	uniform	f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05			
+0p73GeV_H2	uniform	clipped	20951376	31	0.00014796	0.00012367	0.00017703			
+0p73GeV_H2	uniform	any	20951376	14513	0.06927	0.068697	0.069847			
+0p73GeV_H2	uniform	excl_f1	20951376	6735	0.032146	0.031757	0.03254			
+0p73GeV_H2	uniform	excl_f2	20951376	232	0.0011073	0.001037	0.0011825			
+0p73GeV_H2	uniform	excl_f3	20951376	7515	0.035869	0.035457	0.036285			
+0p73GeV_H2	uniform	excl_f4	20951376	23	0.00010978	8.915e-05	0.00013518			
+0p73GeV_H2	uniform	excl_f5	20951376	8	3.8184e-05	2.6861e-05	5.4279e-05			
+0p73GeV_H2	uniform	excl_any	20951376	14513	0.06927	0.068697	0.069847			
+0p73GeV_H2	uniform	f4_over_clipped	31	23	74.194	65.665	81.21			
+0p73GeV_H2	uniform	moved_f1_to_f2	20951376	0	0	0	4.773e-06	0	0	0.014846
+0p73GeV_H2	uniform	moved_f1_to_f3	20951376	0	0	0	4.773e-06	0	0	0.014846
+0p73GeV_H2	uniform	moved_f1_to_f4	20951376	0	0	0	4.773e-06	0	0	0.014846
+0p73GeV_H2	uniform	moved_f1_to_f5	20951376	0	0	0	4.773e-06	0	0	0.014846
+0p73GeV_H2	uniform	moved_f2_to_f1	20951376	16	7.6367e-05	5.9513e-05	9.7994e-05	6.4516	5.0598	8.1932
+0p73GeV_H2	uniform	moved_f2_to_f3	20951376	0	0	0	4.773e-06	0	0	0.40161
+0p73GeV_H2	uniform	moved_f2_to_f4	20951376	0	0	0	4.773e-06	0	0	0.40161
+0p73GeV_H2	uniform	moved_f2_to_f5	20951376	0	0	0	4.773e-06	0	0	0.40161
+0p73GeV_H2	uniform	moved_f3_to_f1	20951376	274	0.0013078	0.0012311	0.0013892	3.4706	3.2704	3.6825
+0p73GeV_H2	uniform	moved_f3_to_f2	20951376	100	0.0004773	0.00043189	0.00052747	1.2666	1.1468	1.3988
+0p73GeV_H2	uniform	moved_f3_to_f4	20951376	6	2.8638e-05	1.9092e-05	4.2957e-05	0.075997	0.05067	0.11397
+0p73GeV_H2	uniform	moved_f3_to_f5	20951376	0	0	0	4.773e-06	0	0	0.012665
+0p73GeV_H2	uniform	moved_f4_to_f1	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	uniform	moved_f4_to_f2	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	uniform	moved_f4_to_f3	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	uniform	moved_f4_to_f5	20951376	0	0	0	4.773e-06	0	0	4.1667
+0p73GeV_H2	uniform	moved_f5_to_f1	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	uniform	moved_f5_to_f2	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	uniform	moved_f5_to_f3	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	uniform	moved_f5_to_f4	20951376	0	0	0	4.773e-06	0	0	11.111
+0p73GeV_H2	check	uniform_before		323						
+0p73GeV_H2	check	uniform_trunc_only		248						
+0p73GeV_H2	check	uniform_after		248						
+0p73GeV_H2	check	type_trunc_only		285						
+0p73GeV_H2	check	uni_f1_and_f4		0						
+0p73GeV_H2	check	uni_f3_and_f4		6						
+0p73GeV_H2	check	uni_f2_and_f4		0						
+0p73GeV_H2	check	type_before		365						
+0p73GeV_H2	check	type_after		285						
+0p73GeV_H2	check	stored_f1		6735						
+0p73GeV_H2	check	stored_f2		329						
+0p73GeV_H2	check	stored_f3		7895						
+0p73GeV_H2	check	stored_f4		23						
+0p73GeV_H2	check	uni_f1		6735						
+0p73GeV_H2	check	uni_f3		7895						
+0p73GeV_H2	check	uni_f4		23						
+0p73GeV_H2	check	uni_f5		8						
+0p73GeV_H2	check	uni_f5_and_f1		0						
+0p73GeV_H2	check	uni_f5_and_f2		0						
+0p73GeV_H2	check	uni_f5_and_f3		0						
+0p73GeV_H2	check	uni_f5_and_f4		0						
+2p24GeV_H2	type	f1	95797094	58173	0.060725	0.060474	0.060977			
+2p24GeV_H2	type	f2	95797094	547	0.000571	0.0005471	0.00059594			
+2p24GeV_H2	type	f3	95797094	31015	0.032376	0.032192	0.03256			
+2p24GeV_H2	type	f4	95797094	2247	0.0023456	0.0022966	0.0023956			
+2p24GeV_H2	type	f5	95797094	1391	0.001452	0.0014136	0.0014915			
+2p24GeV_H2	type	clipped	95797094	3638	0.0037976	0.0037352	0.0038611			
+2p24GeV_H2	type	any	95797094	86814	0.090623	0.090316	0.090931			
+2p24GeV_H2	type	excl_f1	95797094	58173	0.060725	0.060474	0.060977			
+2p24GeV_H2	type	excl_f2	95797094	422	0.00044051	0.00041959	0.00046249			
+2p24GeV_H2	type	excl_f3	95797094	24581	0.025659	0.025496	0.025824			
+2p24GeV_H2	type	excl_f4	95797094	2247	0.0023456	0.0022966	0.0023956			
+2p24GeV_H2	type	excl_f5	95797094	1391	0.001452	0.0014136	0.0014915			
+2p24GeV_H2	type	excl_any	95797094	86814	0.090623	0.090316	0.090931			
+2p24GeV_H2	type	f4_over_clipped	3638	2247	61.765	60.956	62.567			
+2p24GeV_H2	type	moved_f1_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.001719
+2p24GeV_H2	type	moved_f1_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.001719
+2p24GeV_H2	type	moved_f1_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.001719
+2p24GeV_H2	type	moved_f1_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.001719
+2p24GeV_H2	type	moved_f2_to_f1	95797094	125	0.00013048	0.00011932	0.00014269	22.852	21.107	24.696
+2p24GeV_H2	type	moved_f2_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.18248
+2p24GeV_H2	type	moved_f2_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.18248
+2p24GeV_H2	type	moved_f2_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.18248
+2p24GeV_H2	type	moved_f3_to_f1	95797094	5893	0.0061515	0.0060719	0.0062322	19	18.779	19.224
+2p24GeV_H2	type	moved_f3_to_f2	95797094	150	0.00015658	0.00014431	0.0001699	0.48364	0.44581	0.52466
+2p24GeV_H2	type	moved_f3_to_f4	95797094	192	0.00020042	0.00018647	0.00021542	0.61906	0.57608	0.66521
+2p24GeV_H2	type	moved_f3_to_f5	95797094	199	0.00020773	0.00019352	0.00022299	0.64163	0.59785	0.68858
+2p24GeV_H2	type	moved_f4_to_f1	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	type	moved_f4_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	type	moved_f4_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	type	moved_f4_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	type	moved_f5_to_f1	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	type	moved_f5_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	type	moved_f5_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	type	moved_f5_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	uniform	f1	95797094	56978	0.059478	0.059229	0.059727			
+2p24GeV_H2	uniform	f2	95797094	562	0.00058666	0.00056243	0.00061193			
+2p24GeV_H2	uniform	f3	95797094	31140	0.032506	0.032323	0.032691			
+2p24GeV_H2	uniform	f4	95797094	2247	0.0023456	0.0022966	0.0023956			
+2p24GeV_H2	uniform	f5	95797094	1391	0.001452	0.0014136	0.0014915			
+2p24GeV_H2	uniform	clipped	95797094	3638	0.0037976	0.0037352	0.0038611			
+2p24GeV_H2	uniform	any	95797094	85813	0.089578	0.089273	0.089884			
+2p24GeV_H2	uniform	excl_f1	95797094	56978	0.059478	0.059229	0.059727			
+2p24GeV_H2	uniform	excl_f2	95797094	431	0.00044991	0.00042875	0.00047211			
+2p24GeV_H2	uniform	excl_f3	95797094	24766	0.025853	0.025689	0.026017			
+2p24GeV_H2	uniform	excl_f4	95797094	2247	0.0023456	0.0022966	0.0023956			
+2p24GeV_H2	uniform	excl_f5	95797094	1391	0.001452	0.0014136	0.0014915			
+2p24GeV_H2	uniform	excl_any	95797094	85813	0.089578	0.089273	0.089884			
+2p24GeV_H2	uniform	f4_over_clipped	3638	2247	61.765	60.956	62.567			
+2p24GeV_H2	uniform	moved_f1_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.001755
+2p24GeV_H2	uniform	moved_f1_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.001755
+2p24GeV_H2	uniform	moved_f1_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.001755
+2p24GeV_H2	uniform	moved_f1_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.001755
+2p24GeV_H2	uniform	moved_f2_to_f1	95797094	131	0.00013675	0.00012531	0.00014923	23.31	21.574	25.14
+2p24GeV_H2	uniform	moved_f2_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.17762
+2p24GeV_H2	uniform	moved_f2_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.17762
+2p24GeV_H2	uniform	moved_f2_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.17762
+2p24GeV_H2	uniform	moved_f3_to_f1	95797094	5827	0.0060826	0.0060035	0.0061629	18.712	18.492	18.934
+2p24GeV_H2	uniform	moved_f3_to_f2	95797094	156	0.00016284	0.00015032	0.00017641	0.50096	0.46251	0.54259
+2p24GeV_H2	uniform	moved_f3_to_f4	95797094	192	0.00020042	0.00018647	0.00021542	0.61657	0.57377	0.66254
+2p24GeV_H2	uniform	moved_f3_to_f5	95797094	199	0.00020773	0.00019352	0.00022299	0.63905	0.59545	0.68582
+2p24GeV_H2	uniform	moved_f4_to_f1	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	uniform	moved_f4_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	uniform	moved_f4_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	uniform	moved_f4_to_f5	95797094	0	0	0	1.0439e-06	0	0	0.044484
+2p24GeV_H2	uniform	moved_f5_to_f1	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	uniform	moved_f5_to_f2	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	uniform	moved_f5_to_f3	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	uniform	moved_f5_to_f4	95797094	0	0	0	1.0439e-06	0	0	0.071839
+2p24GeV_H2	check	uniform_before		770						
+2p24GeV_H2	check	uniform_trunc_only		575						
+2p24GeV_H2	check	uniform_after		562						
+2p24GeV_H2	check	type_trunc_only		560						
+2p24GeV_H2	check	uni_f1_and_f4		0						
+2p24GeV_H2	check	uni_f3_and_f4		192						
+2p24GeV_H2	check	uni_f2_and_f4		0						
+2p24GeV_H2	check	type_before		749						
+2p24GeV_H2	check	type_after		547						
+2p24GeV_H2	check	stored_f1		56978						
+2p24GeV_H2	check	stored_f2		1021						
+2p24GeV_H2	check	stored_f3		31140						
+2p24GeV_H2	check	stored_f4		2247						
+2p24GeV_H2	check	uni_f1		56978						
+2p24GeV_H2	check	uni_f3		31140						
+2p24GeV_H2	check	uni_f4		2247						
+2p24GeV_H2	check	uni_f5		1391						
+2p24GeV_H2	check	uni_f5_and_f1		0						
+2p24GeV_H2	check	uni_f5_and_f2		0						
+2p24GeV_H2	check	uni_f5_and_f3		199						
+2p24GeV_H2	check	uni_f5_and_f4		0						
+3p49GeV_H2	type	f1	46057162	25727	0.055859	0.055512	0.056208			
+3p49GeV_H2	type	f2	46057162	250	0.0005428	0.00050954	0.00057824			
+3p49GeV_H2	type	f3	46057162	10505	0.022809	0.022587	0.023032			
+3p49GeV_H2	type	f4	46057162	373	0.00080986	0.000769	0.0008529			
+3p49GeV_H2	type	f5	46057162	327	0.00070999	0.0006718	0.00075035			
+3p49GeV_H2	type	clipped	46057162	700	0.0015199	0.0014635	0.0015784			
+3p49GeV_H2	type	any	46057162	33807	0.073402	0.073004	0.073802			
+3p49GeV_H2	type	excl_f1	46057162	25727	0.055859	0.055512	0.056208			
+3p49GeV_H2	type	excl_f2	46057162	146	0.000317	0.00029183	0.00034434			
+3p49GeV_H2	type	excl_f3	46057162	7234	0.015707	0.015523	0.015892			
+3p49GeV_H2	type	excl_f4	46057162	373	0.00080986	0.000769	0.0008529			
+3p49GeV_H2	type	excl_f5	46057162	327	0.00070999	0.0006718	0.00075035			
+3p49GeV_H2	type	excl_any	46057162	33807	0.073402	0.073004	0.073802			
+3p49GeV_H2	type	f4_over_clipped	700	373	53.286	51.397	55.165			
+3p49GeV_H2	type	moved_f1_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.0038868
+3p49GeV_H2	type	moved_f1_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.0038868
+3p49GeV_H2	type	moved_f1_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.0038868
+3p49GeV_H2	type	moved_f1_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.0038868
+3p49GeV_H2	type	moved_f2_to_f1	46057162	104	0.00022581	0.00020472	0.00024906	41.6	38.522	44.745
+3p49GeV_H2	type	moved_f2_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.39841
+3p49GeV_H2	type	moved_f2_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.39841
+3p49GeV_H2	type	moved_f2_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.39841
+3p49GeV_H2	type	moved_f3_to_f1	46057162	3119	0.006772	0.0066518	0.0068944	29.691	29.247	30.138
+3p49GeV_H2	type	moved_f3_to_f2	46057162	60	0.00013027	0.00011451	0.00014821	0.57116	0.50219	0.64953
+3p49GeV_H2	type	moved_f3_to_f4	46057162	41	8.902e-05	7.6161e-05	0.00010405	0.39029	0.334	0.45603
+3p49GeV_H2	type	moved_f3_to_f5	46057162	51	0.00011073	9.6274e-05	0.00012736	0.48548	0.42222	0.55817
+3p49GeV_H2	type	moved_f4_to_f1	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	type	moved_f4_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	type	moved_f4_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	type	moved_f4_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	type	moved_f5_to_f1	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	type	moved_f5_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	type	moved_f5_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	type	moved_f5_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	uniform	f1	46057162	25778	0.05597	0.055622	0.056319			
+3p49GeV_H2	uniform	f2	46057162	269	0.00058406	0.00054952	0.00062077			
+3p49GeV_H2	uniform	f3	46057162	10375	0.022526	0.022306	0.022749			
+3p49GeV_H2	uniform	f4	46057162	373	0.00080986	0.000769	0.0008529			
+3p49GeV_H2	uniform	f5	46057162	327	0.00070999	0.0006718	0.00075035			
+3p49GeV_H2	uniform	clipped	46057162	700	0.0015199	0.0014635	0.0015784			
+3p49GeV_H2	uniform	any	46057162	33746	0.07327	0.072872	0.07367			
+3p49GeV_H2	uniform	excl_f1	46057162	25778	0.05597	0.055622	0.056319			
+3p49GeV_H2	uniform	excl_f2	46057162	155	0.00033654	0.00031057	0.00036468			
+3p49GeV_H2	uniform	excl_f3	46057162	7113	0.015444	0.015262	0.015628			
+3p49GeV_H2	uniform	excl_f4	46057162	373	0.00080986	0.000769	0.0008529			
+3p49GeV_H2	uniform	excl_f5	46057162	327	0.00070999	0.0006718	0.00075035			
+3p49GeV_H2	uniform	excl_any	46057162	33746	0.07327	0.072872	0.07367			
+3p49GeV_H2	uniform	f4_over_clipped	700	373	53.286	51.397	55.165			
+3p49GeV_H2	uniform	moved_f1_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.0038791
+3p49GeV_H2	uniform	moved_f1_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.0038791
+3p49GeV_H2	uniform	moved_f1_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.0038791
+3p49GeV_H2	uniform	moved_f1_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.0038791
+3p49GeV_H2	uniform	moved_f2_to_f1	46057162	114	0.00024752	0.0002254	0.00027181	42.379	39.4	45.415
+3p49GeV_H2	uniform	moved_f2_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.37037
+3p49GeV_H2	uniform	moved_f2_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.37037
+3p49GeV_H2	uniform	moved_f2_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.37037
+3p49GeV_H2	uniform	moved_f3_to_f1	46057162	3106	0.0067438	0.0066239	0.0068659	29.937	29.49	30.389
+3p49GeV_H2	uniform	moved_f3_to_f2	46057162	64	0.00013896	0.00012264	0.00015745	0.61687	0.54461	0.69864
+3p49GeV_H2	uniform	moved_f3_to_f4	46057162	41	8.902e-05	7.6161e-05	0.00010405	0.39518	0.33818	0.46174
+3p49GeV_H2	uniform	moved_f3_to_f5	46057162	51	0.00011073	9.6274e-05	0.00012736	0.49157	0.42751	0.56516
+3p49GeV_H2	uniform	moved_f4_to_f1	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	uniform	moved_f4_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	uniform	moved_f4_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	uniform	moved_f4_to_f5	46057162	0	0	0	2.1712e-06	0	0	0.26738
+3p49GeV_H2	uniform	moved_f5_to_f1	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	uniform	moved_f5_to_f2	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	uniform	moved_f5_to_f3	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	uniform	moved_f5_to_f4	46057162	0	0	0	2.1712e-06	0	0	0.30488
+3p49GeV_H2	check	uniform_before		362						
+3p49GeV_H2	check	uniform_trunc_only		278						
+3p49GeV_H2	check	uniform_after		269						
+3p49GeV_H2	check	type_trunc_only		257						
+3p49GeV_H2	check	uni_f1_and_f4		0						
+3p49GeV_H2	check	uni_f3_and_f4		41						
+3p49GeV_H2	check	uni_f2_and_f4		0						
+3p49GeV_H2	check	type_before		337						
+3p49GeV_H2	check	type_after		250						
+3p49GeV_H2	check	stored_f1		25778						
+3p49GeV_H2	check	stored_f2		431						
+3p49GeV_H2	check	stored_f3		10375						
+3p49GeV_H2	check	stored_f4		373						
+3p49GeV_H2	check	uni_f1		25778						
+3p49GeV_H2	check	uni_f3		10375						
+3p49GeV_H2	check	uni_f4		373						
+3p49GeV_H2	check	uni_f5		327						
+3p49GeV_H2	check	uni_f5_and_f1		0						
+3p49GeV_H2	check	uni_f5_and_f2		0						
+3p49GeV_H2	check	uni_f5_and_f3		51						
+3p49GeV_H2	check	uni_f5_and_f4		0						
+2p24GeV_Ta_X17	type	f1	79224543	477190	0.60233	0.60146	0.6032			
+2p24GeV_Ta_X17	type	f2	79224543	80661	0.10181	0.10146	0.10217			
+2p24GeV_Ta_X17	type	f3	79224543	306567	0.38696	0.38626	0.38766			
+2p24GeV_Ta_X17	type	f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05			
+2p24GeV_Ta_X17	type	f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05			
+2p24GeV_Ta_X17	type	clipped	79224543	21	2.6507e-05	2.1319e-05	3.2957e-05			
+2p24GeV_Ta_X17	type	any	79224543	668552	0.84387	0.84284	0.8449			
+2p24GeV_Ta_X17	type	excl_f1	79224543	477190	0.60233	0.60146	0.6032			
+2p24GeV_Ta_X17	type	excl_f2	79224543	12854	0.016225	0.016082	0.016368			
+2p24GeV_Ta_X17	type	excl_f3	79224543	178487	0.22529	0.22476	0.22583			
+2p24GeV_Ta_X17	type	excl_f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05			
+2p24GeV_Ta_X17	type	excl_f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05			
+2p24GeV_Ta_X17	type	excl_any	79224543	668552	0.84387	0.84284	0.8449			
+2p24GeV_Ta_X17	type	f4_over_clipped	21	14	66.667	55.83	75.988			
+2p24GeV_Ta_X17	type	moved_f1_to_f2	79224543	0	0	0	1.2622e-06	0	0	0.00020956
+2p24GeV_Ta_X17	type	moved_f1_to_f3	79224543	0	0	0	1.2622e-06	0	0	0.00020956
+2p24GeV_Ta_X17	type	moved_f1_to_f4	79224543	0	0	0	1.2622e-06	0	0	0.00020956
+2p24GeV_Ta_X17	type	moved_f1_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.00020956
+2p24GeV_Ta_X17	type	moved_f2_to_f1	79224543	67807	0.085588	0.08526	0.085918	84.064	83.935	84.193
+2p24GeV_Ta_X17	type	moved_f2_to_f3	79224543	0	0	0	1.2622e-06	0	0	0.0012397
+2p24GeV_Ta_X17	type	moved_f2_to_f4	79224543	0	0	0	1.2622e-06	0	0	0.0012397
+2p24GeV_Ta_X17	type	moved_f2_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.0012397
+2p24GeV_Ta_X17	type	moved_f3_to_f1	79224543	122355	0.15444	0.154	0.15488	39.911	39.823	40
+2p24GeV_Ta_X17	type	moved_f3_to_f2	79224543	5721	0.0072212	0.0071264	0.0073173	1.8661	1.8419	1.8907
+2p24GeV_Ta_X17	type	moved_f3_to_f4	79224543	4	5.0489e-06	3.0779e-06	8.2822e-06	0.0013048	0.00079541	0.0021403
+2p24GeV_Ta_X17	type	moved_f3_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.00032619
+2p24GeV_Ta_X17	type	moved_f4_to_f1	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	type	moved_f4_to_f2	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	type	moved_f4_to_f3	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	type	moved_f4_to_f5	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	type	moved_f5_to_f1	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	type	moved_f5_to_f2	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	type	moved_f5_to_f3	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	type	moved_f5_to_f4	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	uniform	f1	79224543	713377	0.90045	0.89939	0.90151			
+2p24GeV_Ta_X17	uniform	f2	79224543	87761	0.11078	0.1104	0.11115			
+2p24GeV_Ta_X17	uniform	f3	79224543	310609	0.39206	0.39136	0.39276			
+2p24GeV_Ta_X17	uniform	f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05			
+2p24GeV_Ta_X17	uniform	f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05			
+2p24GeV_Ta_X17	uniform	clipped	79224543	21	2.6507e-05	2.1319e-05	3.2957e-05			
+2p24GeV_Ta_X17	uniform	any	79224543	882817	1.1143	1.1131	1.1155			
+2p24GeV_Ta_X17	uniform	excl_f1	79224543	713377	0.90045	0.89939	0.90151			
+2p24GeV_Ta_X17	uniform	excl_f2	79224543	12957	0.016355	0.016212	0.016499			
+2p24GeV_Ta_X17	uniform	excl_f3	79224543	156462	0.19749	0.19699	0.19799			
+2p24GeV_Ta_X17	uniform	excl_f4	79224543	14	1.7671e-05	1.3538e-05	2.3067e-05			
+2p24GeV_Ta_X17	uniform	excl_f5	79224543	7	8.8356e-06	6.0681e-06	1.2865e-05			
+2p24GeV_Ta_X17	uniform	excl_any	79224543	882817	1.1143	1.1131	1.1155			
+2p24GeV_Ta_X17	uniform	f4_over_clipped	21	14	66.667	55.83	75.988			
+2p24GeV_Ta_X17	uniform	moved_f1_to_f2	79224543	0	0	0	1.2622e-06	0	0	0.00014018
+2p24GeV_Ta_X17	uniform	moved_f1_to_f3	79224543	0	0	0	1.2622e-06	0	0	0.00014018
+2p24GeV_Ta_X17	uniform	moved_f1_to_f4	79224543	0	0	0	1.2622e-06	0	0	0.00014018
+2p24GeV_Ta_X17	uniform	moved_f1_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.00014018
+2p24GeV_Ta_X17	uniform	moved_f2_to_f1	79224543	74804	0.09442	0.094076	0.094766	85.236	85.116	85.355
+2p24GeV_Ta_X17	uniform	moved_f2_to_f3	79224543	0	0	0	1.2622e-06	0	0	0.0011394
+2p24GeV_Ta_X17	uniform	moved_f2_to_f4	79224543	0	0	0	1.2622e-06	0	0	0.0011394
+2p24GeV_Ta_X17	uniform	moved_f2_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.0011394
+2p24GeV_Ta_X17	uniform	moved_f3_to_f1	79224543	148587	0.18755	0.18707	0.18804	47.837	47.748	47.927
+2p24GeV_Ta_X17	uniform	moved_f3_to_f2	79224543	5556	0.007013	0.0069195	0.0071077	1.7887	1.7651	1.8127
+2p24GeV_Ta_X17	uniform	moved_f3_to_f4	79224543	4	5.0489e-06	3.0779e-06	8.2822e-06	0.0012878	0.00078506	0.0021125
+2p24GeV_Ta_X17	uniform	moved_f3_to_f5	79224543	0	0	0	1.2622e-06	0	0	0.00032195
+2p24GeV_Ta_X17	uniform	moved_f4_to_f1	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	uniform	moved_f4_to_f2	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	uniform	moved_f4_to_f3	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	uniform	moved_f4_to_f5	79224543	0	0	0	1.2622e-06	0	0	6.6667
+2p24GeV_Ta_X17	uniform	moved_f5_to_f1	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	uniform	moved_f5_to_f2	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	uniform	moved_f5_to_f3	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	uniform	moved_f5_to_f4	79224543	0	0	0	1.2622e-06	0	0	12.5
+2p24GeV_Ta_X17	check	uniform_before		88317						
+2p24GeV_Ta_X17	check	uniform_trunc_only		87761						
+2p24GeV_Ta_X17	check	uniform_after		87761						
+2p24GeV_Ta_X17	check	type_trunc_only		80661						
+2p24GeV_Ta_X17	check	uni_f1_and_f4		0						
+2p24GeV_Ta_X17	check	uni_f3_and_f4		4						
+2p24GeV_Ta_X17	check	uni_f2_and_f4		0						
+2p24GeV_Ta_X17	check	type_before		81175						
+2p24GeV_Ta_X17	check	type_after		80661						
+2p24GeV_Ta_X17	check	stored_f1		713377						
+2p24GeV_Ta_X17	check	stored_f2		88318						
+2p24GeV_Ta_X17	check	stored_f3		310609						
+2p24GeV_Ta_X17	check	stored_f4		14						
+2p24GeV_Ta_X17	check	uni_f1		713377						
+2p24GeV_Ta_X17	check	uni_f3		310609						
+2p24GeV_Ta_X17	check	uni_f4		14						
+2p24GeV_Ta_X17	check	uni_f5		7						
+2p24GeV_Ta_X17	check	uni_f5_and_f1		0						
+2p24GeV_Ta_X17	check	uni_f5_and_f2		0						
+2p24GeV_Ta_X17	check	uni_f5_and_f3		0						
+2p24GeV_Ta_X17	check	uni_f5_and_f4		0						
+0p73GeV_H2	radius_0-120mm	sat	17498990	0	0	0	5.7146e-06			
+0p73GeV_H2	radius_120-170mm	sat	1569292	0	0	0	6.3723e-05			
+0p73GeV_H2	radius_170-230mm	sat	933938	1	0.00010707	4.0898e-05	0.00028032			
+0p73GeV_H2	radius_230-320mm	sat	614590	26	0.0042305	0.0034782	0.0051454			
+0p73GeV_H2	radius_320-450mm	sat	323888	4	0.001235	0.00075287	0.0020259			
+0p73GeV_H2	radius_450-700mm	sat	10678	0	0	0	0.0093642			
+2p24GeV_H2	radius_0-120mm	sat	73563386	1075	0.0014613	0.0014174	0.0015066			
+2p24GeV_H2	radius_120-170mm	sat	8408586	315	0.0037462	0.003541	0.0039633			
+2p24GeV_H2	radius_170-230mm	sat	5906312	443	0.0075005	0.0071525	0.0078654			
+2p24GeV_H2	radius_230-320mm	sat	5140813	711	0.01383	0.013321	0.014359			
+2p24GeV_H2	radius_320-450mm	sat	2747520	1078	0.039235	0.038059	0.040448			
+2p24GeV_H2	radius_450-700mm	sat	30477	16	0.052499	0.040914	0.06736			
+3p49GeV_H2	radius_0-120mm	sat	34970789	78	0.00022304	0.00019918	0.00024977			
+3p49GeV_H2	radius_120-170mm	sat	4837224	65	0.0013437	0.0011871	0.0015211			
+3p49GeV_H2	radius_170-230mm	sat	3727411	143	0.0038364	0.0035288	0.0041709			
+3p49GeV_H2	radius_230-320mm	sat	2059649	138	0.0067002	0.0061536	0.0072953			
+3p49GeV_H2	radius_320-450mm	sat	452645	271	0.05987	0.056343	0.063618			
+3p49GeV_H2	radius_450-700mm	sat	9444	5	0.052944	0.033979	0.082485			
+2p24GeV_Ta_X17	radius_0-120mm	sat	63946075	13	2.033e-05	1.5419e-05	2.6804e-05			
+2p24GeV_Ta_X17	radius_120-170mm	sat	7521582	1	1.3295e-05	5.0783e-06	3.4807e-05			
+2p24GeV_Ta_X17	radius_170-230mm	sat	4270489	0	0	0	2.3417e-05			
+2p24GeV_Ta_X17	radius_230-320mm	sat	2449685	1	4.0822e-05	1.5592e-05	0.00010687			
+2p24GeV_Ta_X17	radius_320-450mm	sat	1014815	6	0.00059124	0.00039416	0.00088686			
+2p24GeV_Ta_X17	radius_450-700mm	sat	21897	0	0	0	0.0045666			

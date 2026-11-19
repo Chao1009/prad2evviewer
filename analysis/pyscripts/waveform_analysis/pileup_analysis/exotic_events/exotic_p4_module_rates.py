@@ -25,6 +25,8 @@ q in (db, tail, w50) the core median and sigma (1.4826 MAD) are taken per run ty
 z_ref = (thr_uniform - median_ref) / sigma_ref, and the per-type threshold is median_rt + z_ref sigma_rt.  f3: the chi2 penalty scales with the core chi2/dof level of the type,
 LAM_rt = 2 median_rt(chi2/dof, core) / median_ref(chi2/dof, core).  User decision 2: the 0.73 GeV db threshold is never raised above the uniform 8 (marginal f1 cases stay flagged).
 
+Every rate and percentage carries its 68 % Wilson interval (PDF tables "p [lo, hi]"; TSV rate_lo68 / rate_hi68 or lo68_percent / hi68_percent; moved shares and f4 / clipped ratio binomial too;
+f4_over_clipped rows of _summary.tsv: n_kept = clipped records (denominator), n_flag = f4).  Module maps carry no per-bin annotation (module intervals are in the TSV).
 Outputs (--out): exotic_P4_module_rates_20261117.pdf (five main pages: module maps f1..f5, 2x2 run types, per-type thresholds, per-panel log colour scale; summary, threshold, top-20
 tables; appendix with the six maps for the uniform thresholds), .tsv (module x run type x flag x threshold set), _thresholds.tsv, _summary.tsv.
 """
@@ -48,7 +50,7 @@ sys.path.insert(0, str(HERE))
 import numpy as np                                      # noqa: E402
 import exotic_p1_quantities as p1                       # noqa: E402
 from exotic_p1_quantities import TYPES, RT_LABEL, write_tsv, EXCLUDE_RUNS, EXCL_NOTE     # noqa: E402
-from exotic_p3_sample import text_page                  # noqa: E402
+from exotic_p3_sample import text_page, pct_ci as ci_txt, ci_cols   # noqa: E402
 
 STEM = "exotic_P4_module_rates_20261117"
 FLAGS = (1, 2, 3, 4, 5)
@@ -248,55 +250,71 @@ def wilson(c, n, z=1.0):
     den = 1.0 + z * z / n
     mid = (p + z * z / (2 * n)) / den
     h = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
-    return mid - h, mid + h
+    lo, hi = np.where(c <= 0, 0.0, np.clip(mid - h, 0.0, 1.0)), np.where(c >= n, 1.0, np.clip(mid + h, 0.0, 1.0))   # exact 0 at k = 0, exact 1 at k = n
+    return (float(lo), float(hi)) if lo.ndim == 0 else (lo, hi)
 
 
 def pct_ci(c, n):
+    return ci_txt(c, n)
+
+
+def ratio_ci(c, n):
+    """Ratio c / n of two counts with c <= n (a share of n: binomial, Wilson 68 %), as 'r [lo, hi]' (fractions, 3 decimals)."""
     lo, hi = wilson(c, n)
-    return f"{pctf(c, n):.5f} [{100 * float(lo):.5f}, {100 * float(hi):.5f}]"
+    return f"{c / max(n, 1):.3f} [{float(lo):.3f}, {float(hi):.3f}]"
 
 
 def summary_lines(R, ti):
-    L = [f"{'run type':<17}{'N kept':>12}{'set':>9}" + "".join(f"{'f' + str(i) + ' n':>9}{'%':>8}" for i in FLAGS) + f"{'any n':>9}{'%':>8}"]
-    for rt in TYPES:
-        for name in ("type", "uniform"):
-            r = R[name][rt]
-            n = int(r["n"].sum())
-            L.append(f"{RT_LABEL[rt] if name == 'type' else '':<17}{n if name == 'type' else '':>12}{name:>9}"
-                     + "".join(f"{int(r[f'c{i}'].sum()):>9d}{pctf(r[f'c{i}'].sum(), n):>8.4f}" for i in FLAGS) + f"{int(r['cany'].sum()):>9d}{pctf(r['cany'].sum(), n):>8.4f}")
+    """Raw (overlapping) flag counts and rates per run type and threshold set, % [68 % Wilson interval]; two blocks of columns (f1-f3, f4-any) to fit the page."""
+    W = 32
+    L = []
+    for blk in ((1, 2, 3), (4, 5, "any")):
+        L += [f"{'run type':<17}{'N kept':>12}{'set':>9}" + "".join(f"{(('f' + str(i)) if i != 'any' else 'any') + ' n':>9}{'% [68 % Wilson]':>{W}}" for i in blk)]
+        for rt in TYPES:
+            for name in ("type", "uniform"):
+                r = R[name][rt]
+                n = int(r["n"].sum())
+                L.append(f"{RT_LABEL[rt] if name == 'type' else '':<17}{n if name == 'type' else '':>12}{name:>9}"
+                         + "".join(f"{int(r['c' + str(i)].sum()):>9d}{pct_ci(int(r['c' + str(i)].sum()), n):>{W}}" for i in blk))
+        L.append("")
     return L
 
 
 def excl_lines(R):
-    """Exclusive-category rates (every kept channel in one category, order ORDER_TXT) beside the raw (overlapping) rates, and the moved matrix."""
-    L = [f"Exclusive categories, priority {ORDER_TXT} (each kept channel in exactly one category; none = unflagged), % of the kept PbWO4 channels; raw (overlapping) % in brackets:",
-         f"{'run type':<17}{'set':>9}{'N kept':>12}" + "".join(f"{'f' + str(i) + ' n':>9}{'excl %':>9}{'[raw %]':>10}" for i in CAT_ORDER) + f"{'any n':>9}{'excl %':>9}{'[raw %]':>10}"]
-    for rt in TYPES:
-        for name in ("type", "uniform"):
-            r = R[name][rt]
-            n = int(r["n"].sum())
-            cells = "".join(f"{int(r['x%d' % i].sum()):>9d}{pctf(r['x%d' % i].sum(), n):>9.4f}{'[%.4f]' % pctf(r['c%d' % i].sum(), n):>10}" for i in CAT_ORDER)
-            L.append(f"{RT_LABEL[rt] if name == 'type' else '':<17}{name:>9}{n:>12d}" + cells + f"{int(r['xany'].sum()):>9d}{pctf(r['xany'].sum(), n):>9.4f}{'[%.4f]' % pctf(r['cany'].sum(), n):>10}")
-    L += ["", "Moved matrix: channels moved out of the raw flag (row) because a higher-priority flag took them (column = the category they were put in); per run type, uniform | per-type thresholds.",
+    """Exclusive-category rates (every kept channel in one category, order ORDER_TXT; raw overlapping rates are in the summary table) and the moved matrix, all with 68 % Wilson intervals."""
+    W = 32
+    L = [f"Exclusive categories, priority {ORDER_TXT} (each kept channel in exactly one category; none = unflagged), % [68 % Wilson interval] of the kept PbWO4 channels:"]
+    for blk in ((4, 5, 1), (2, 3, "any")):
+        L += [f"{'run type':<17}{'set':>9}{'N kept':>12}" + "".join(f"{(('f' + str(i)) if i != 'any' else 'any') + ' n':>9}{'excl %':>{W}}" for i in blk)]
+        for rt in TYPES:
+            for name in ("type", "uniform"):
+                r = R[name][rt]
+                n = int(r["n"].sum())
+                L.append(f"{RT_LABEL[rt] if name == 'type' else '':<17}{name:>9}{n:>12d}" + "".join(f"{int(r['x%s' % i].sum()):>9d}{pct_ci(int(r['x%s' % i].sum()), n):>{W}}" for i in blk))
+        L.append("")
+    L.pop()
+    L += ["", "Moved matrix: channels moved out of the raw flag (row) because a higher-priority flag took them (column = the category they were put in); count and share of the raw flag count, % [68 % Wilson interval].",
           "(f2 and f4/f5 never overlap: f2 excludes clipped records; f4 and f5 are exclusive by definition.)",
-          f"{'run type':<17}{'from':>6}" + "".join(f"{'-> f' + str(j):>9}" for j in CAT_ORDER) + f"{'| per-type:':>13}" + "".join(f"{'-> f' + str(j):>9}" for j in CAT_ORDER)]
+          f"{'run type':<17}{'set':>9}{'from':>6}" + "".join(f"{'-> f' + str(j):>35}" for j in CAT_ORDER)]
     for rt in TYPES:
-        for i in (1, 2, 3):                                  # f4 and f5 are never moved
-            L.append(f"{RT_LABEL[rt] if i == 1 else '':<17}{'f' + str(i):>6}" + "".join(f"{(R['uniform'][rt]['moved'][(i, j)] if i != j else '-'):>9}" for j in CAT_ORDER) + f"{'':>13}"
-                     + "".join(f"{(R['type'][rt]['moved'][(i, j)] if i != j else '-'):>9}" for j in CAT_ORDER))
+        for name in ("uniform", "type"):
+            for i in (1, 2, 3):                              # f4 and f5 are never moved
+                tot = int(R[name][rt][f"c{i}"].sum())
+                L.append(f"{RT_LABEL[rt] if (i == 1 and name == 'uniform') else '':<17}{name if i == 1 else '':>9}{'f' + str(i):>6}"
+                         + "".join((f"{R[name][rt]['moved'][(i, j)]:>8d}{pct_ci(R[name][rt]['moved'][(i, j)], tot):>27}" if i != j else f"{'-':>35}") for j in CAT_ORDER))
     return L
 
 
 def sat_lines(R, ti):
     """Saturated (clipped-record) ratio per run type with 68 % Wilson intervals; threshold-independent (uniform = per-type).  Full data (all scan files): f4 + f5 = nclip >= 1."""
     L = ["Saturated pulses (clipped record, nclip >= 1 = f4 + f5) as a percentage of the kept PbWO4 channels of the full scan; [68 % Wilson interval]:",
-         f"{'run type':<17}{'N kept':>12}{'clipped n':>11}   {'% [68 % interval]':<30}{'f4 n':>7}{'f4 %':>9}{'f5 n':>7}{'f5 %':>9}{'f4/clip':>9}"]
+         f"{'run type':<17}{'N kept':>12}{'clipped n':>11}{'% [68 % Wilson]':>32}{'f4 n':>8}{'f4 % [68 % Wilson]':>34}{'f5 n':>8}{'f5 % [68 % Wilson]':>34}   {'f4 / clipped [68 % Wilson]':>28}"]
     for rt in TYPES:
         r = R["uniform"][rt]
         n = int(r["n"].sum())
         c4, c5 = int(r["c4"].sum()), int(r["c5"].sum())
-        L.append(f"{RT_LABEL[rt]:<17}{n:>12d}{c4 + c5:>11d}   {pct_ci(c4 + c5, n):<30}{c4:>7d}{pctf(c4, n):>9.5f}{c5:>7d}{pctf(c5, n):>9.5f}{c4 / max(c4 + c5, 1):>9.3f}")
-    L.append("f5 overlaps with the other flags (uniform thresholds; f5&f4 = f5&f2 = 0 by construction):")
+        L.append(f"{RT_LABEL[rt]:<17}{n:>12d}{c4 + c5:>11d}{pct_ci(c4 + c5, n):>32}{c4:>8d}{pct_ci(c4, n):>34}{c5:>8d}{pct_ci(c5, n):>34}   {ratio_ci(c4, c4 + c5):>28}")
+    L.append("f5 overlaps with the other flags (uniform thresholds; f5&f4 = f5&f2 = 0 by construction; counts):")
     L += [f"  {RT_LABEL[rt]:<17} f5&f1 {ti[rt]['uni_f5_and_f1']}, f5&f3 {ti[rt]['uni_f5_and_f3']}, f5&f2 {ti[rt]['uni_f5_and_f2']}, f5&f4 {ti[rt]['uni_f5_and_f4']}" for rt in TYPES]
     L.append(f"Per-module rates are quoted (saturated map and all top-20 lists) only for modules with n_kept >= {MIN_TOP} and n_flag >= {MIN_COUNT} (68 % relative half-width <~ 45 %); the others are grey (the f1..f5 maps colour modules with n_kept >= {MIN_MAP}).")
     return L
@@ -337,18 +355,18 @@ def radial_rows(R, names, key="c6"):
 
 
 def radial_lines(R, names):
-    L = ["Saturated fraction vs distance from the HyCal centre (PbWO4 modules), % (count); 68 % intervals are in the summary TSV:",
-         f"{'run type':<17}" + "".join(f"{f'{lo}-{hi} mm':>26}" for lo, hi in zip(RADBINS[:-1], RADBINS[1:]))]
+    L = ["Saturated fraction vs distance from the HyCal centre (PbWO4 modules), % [68 % Wilson interval] (count of clipped records / kept channels):",
+         f"{'bin':<12}" + "".join(f"{RT_LABEL[rt]:>50}" for rt in TYPES)]
     rr = radial_rows(R, names)
-    for rt in TYPES:
-        row = [x for x in rr if x[0] == rt]
-        L.append(f"{RT_LABEL[rt]:<17}" + "".join(f"{(f'{pctf(c, n):.5f} ({c})' if n else '-'):>26}" for _, _, _, _, n, c in row))
+    for lo, hi in zip(RADBINS[:-1], RADBINS[1:]):
+        row = [x for x in rr if x[1] == lo and x[2] == hi]
+        L.append(f"{f'{lo}-{hi} mm':<12}" + "".join(f"{(f'{pct_ci(c, n)} ({c}/{n})' if n else '-'):>50}" for rt in TYPES for _, _, _, _, n, c in [x for x in row if x[0] == rt]))
     rad = radius_of(names)
     pw = np.array([nm.startswith("W") for nm in names])
     ea = edge_adc(names)
     L.append("elastic-edge amplitude (beam energy / module gain, median over the modules of the bin, ADC; the 12-bit scale clips at ~4095 - pedestal):")
     for rt in TYPES:
-        L.append(f"{RT_LABEL[rt]:<17}" + "".join(f"{np.nanmedian(ea[rt][pw & (rad >= lo) & (rad < hi)]):>26.0f}" for lo, hi in zip(RADBINS[:-1], RADBINS[1:])) + f"   (all PbWO4: {np.nanmedian(ea[rt][pw]):.0f})")
+        L.append(f"{RT_LABEL[rt]:<17}" + "".join(f"{np.nanmedian(ea[rt][pw & (rad >= lo) & (rad < hi)]):>14.0f}" for lo, hi in zip(RADBINS[:-1], RADBINS[1:])) + f"   (all PbWO4: {np.nanmedian(ea[rt][pw]):.0f})")
     return L
 
 
@@ -384,22 +402,22 @@ def top_lists(R, names, name, top=20):
             rate = np.where((n >= MIN_TOP) & (c >= MIN_COUNT), c / np.maximum(n, 1), -1.0)
             o = np.argsort(-rate, kind="stable")[:top]
             lo, hi = wilson(c, n)
-            out[(rt, i)] = [(names[j], int(n[j]), int(c[j]), 100.0 * c[j] / n[j], 100.0 * (hi[j] - lo[j]) / 2) for j in o if rate[j] > 0]
+            out[(rt, i)] = [(names[j], int(n[j]), int(c[j]), 100.0 * c[j] / n[j], 100.0 * lo[j], 100.0 * hi[j]) for j in o if rate[j] > 0]
     return out
 
 
 def top_pages(pdf, plt, R, names, name, label):
     T = top_lists(R, names, name)
     for i in PFLAGS:
-        L = [f"top-20 modules by {FNAME[i]} EXCLUSIVE rate (order {ORDER_TXT}; {label}; modules with n_kept >= {MIN_TOP} and n_flag >= {MIN_COUNT}); module  n_kept  n_flag  rate % +- 68 % half-width", ""]
+        L = [f"top-20 modules by {FNAME[i]} EXCLUSIVE rate (order {ORDER_TXT}; {label}; modules with n_kept >= {MIN_TOP} and n_flag >= {MIN_COUNT}); module  n_kept  n_flag  rate % [68 % Wilson interval]", ""]
         rows = []
         for r in range(20):
             row = ""
             for rt in TYPES:
                 lst = T[(rt, i)]
-                row += (f"{lst[r][0]:<6}{lst[r][1]:>8d}{lst[r][2]:>6d}{lst[r][3]:>7.3f}+-{lst[r][4]:<6.3f}" if r < len(lst) else " " * 34)
+                row += (f"{lst[r][0]:<6}{lst[r][1]:>8d}{lst[r][2]:>6d}  {pct_ci(lst[r][2], lst[r][1])}".ljust(56) if r < len(lst) else " " * 56)
             rows.append(row)
-        L.append("".join(f"{RT_LABEL[rt]:<34}" for rt in TYPES))
+        L.append("".join(f"{RT_LABEL[rt]:<56}" for rt in TYPES))
         L += rows
         text_page(pdf, plt, f"Top-20 modules: {FNAME[i]} (exclusive category)", L, size=8)
 
@@ -414,7 +432,7 @@ def map_page(pdf, plt, R, names, name, i, label):
     pw = [j for j, nme in enumerate(names) if nme.startswith("W")]
     rect = {j: Rectangle((geo[names[j]]["x"] - geo[names[j]]["sx"] / 2, geo[names[j]]["y"] - geo[names[j]]["sy"] / 2), geo[names[j]]["sx"], geo[names[j]]["sy"]) for j in pw}
     fig, axs = plt.subplots(2, 2, figsize=(17, 16))
-    fig.suptitle(f"{FNAME[i]} (exclusive category, order {ORDER_TXT}): rate per PbWO4 module ({label}); log colour scale, own range per panel", fontsize=16, fontweight="bold")
+    fig.suptitle(f"{FNAME[i]} (exclusive category, order {ORDER_TXT}): rate per PbWO4 module ({label});\nlog colour scale, own range per panel; the per-module 68 % Wilson intervals are in the TSV", fontsize=14, fontweight="bold")
     for ax, rt in zip(axs.flat, TYPES):
         n, c = R[name][rt]["n"], R[name][rt][f"x{i}"]
         rate = 100.0 * c / np.maximum(n, 1)
@@ -438,7 +456,7 @@ def map_page(pdf, plt, R, names, name, i, label):
         tot = R[name][rt]
         ax.set_xlim(-600, 600), ax.set_ylim(-600, 600)
         ax.set_aspect("equal")
-        ax.set_title(f"{RT_LABEL[rt]}: {int(c.sum())} / {int(n.sum())} = {pctf(c.sum(), n.sum()):.4f} %  (white: none, grey: " + (f"n < {MIN_TOP} or 0 < flag < {MIN_COUNT}" if i == 6 else f"< {MIN_MAP} ch.") + ")", fontsize=8.5)
+        ax.set_title(f"{RT_LABEL[rt]}: {int(c.sum())} / {int(n.sum())} = {pct_ci(int(c.sum()), int(n.sum()))} % (68 % Wilson); white: none, grey: " + (f"n < {MIN_TOP} or 0 < flag < {MIN_COUNT}" if i == 6 else f"< {MIN_MAP} ch.") + ")", fontsize=8.5)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     pdf.savefig(fig)
     plt.close(fig)
@@ -482,9 +500,10 @@ def report(data, out):
             map_page(pdf, plt, R, names, "type", i, "per-run-type thresholds" if i != 6 else "threshold-independent; full scan")
         text_page(pdf, plt, "P4: exotic-flag rates per run type, full scan (kept PbWO4 channels; per-type vs uniform P2 thresholds)",
                   [f"population: {data['nfiles']} scan files of 12 runs, all EVIO splits; default fit, PILEUP_EXOTIC=1 only.  f2 excludes truncated main pulses and clipped records in both sets; f4 and f5 are the same in both.",
-                   f"*** {EXCL_NOTE} ***", f"Categories are mutually exclusive in the maps and top-20 lists, assigned in the order {ORDER_TXT} (f4 saturated first, f5 saturated single, f1 baseline tail, f2 wide, f3 smooth-wide = residual over-fit class).  Raw rows below are the overlapping flags.", ""]
-                  + sl + [""] + sat_lines(R, ti) + [""] + radial_lines(R, names), size=8.0)
-        text_page(pdf, plt, f"P4: exclusive categories ({ORDER_TXT}) and the moved matrix; {EXCL_NOTE}", excl_lines(R), size=7.5)
+                   f"*** {EXCL_NOTE} ***", f"Categories are mutually exclusive in the maps and top-20 lists, assigned in the order {ORDER_TXT} (f4 saturated first, f5 saturated single, f1 baseline tail, f2 wide, f3 smooth-wide = residual over-fit class).", "Raw rows below are the overlapping flags; every rate is % [68 % Wilson interval].", ""]
+                  + sl, size=8)
+        text_page(pdf, plt, "P4: saturated pulses (clipped records) per run type and vs radius; rates with 68 % Wilson intervals", sat_lines(R, ti) + [""] + radial_lines(R, names), size=7.3)
+        text_page(pdf, plt, f"P4: exclusive categories ({ORDER_TXT}) and the moved matrix; {EXCL_NOTE}", excl_lines(R), size=7.2)
         text_page(pdf, plt, "Thresholds: per-run-type rule, core statistics, f2 truncation exclusion", thr_lines(thr, stats, ref, z, ti), size=9)
         top_pages(pdf, plt, R, names, "type", "per-type thresholds")
         text_page(pdf, plt, "Appendix: the same maps with the uniform P2 thresholds", ["Six maps follow (f1..f5 and the saturated f4+f5); per-module rates of both threshold sets are in exotic_P4_module_rates_20261117.tsv (threshold_set = type | uniform)."])
@@ -512,21 +531,28 @@ def report(data, out):
                 c = int(r[f"x{key}"].sum())
                 lo, hi = wilson(c, n)
                 rows.append(dict(run_type=rt, threshold_set=name, flag=f"excl_f{key}" if key.isdigit() else "excl_any", n_kept=n, n_flag=c, rate_percent=pctf(c, n), lo68_percent=100 * float(lo), hi68_percent=100 * float(hi)))
+            c4, c5 = int(r["c4"].sum()), int(r["c5"].sum())
+            rlo, rhi = wilson(c4, c4 + c5)
+            rows.append(dict(run_type=rt, threshold_set=name, flag="f4_over_clipped", n_kept=c4 + c5, n_flag=c4, rate_percent=pctf(c4, c4 + c5), lo68_percent=100 * float(rlo), hi68_percent=100 * float(rhi)))
             for (i, j), v in r["moved"].items():
-                rows.append(dict(run_type=rt, threshold_set=name, flag=f"moved_f{i}_to_f{j}", n_kept=n, n_flag=v, rate_percent=pctf(v, n), lo68_percent="", hi68_percent=""))
+                lo, hi = wilson(v, n)
+                tot = int(r[f"c{i}"].sum())
+                olo, ohi = wilson(v, tot)
+                rows.append(dict(run_type=rt, threshold_set=name, flag=f"moved_f{i}_to_f{j}", n_kept=n, n_flag=v, rate_percent=pctf(v, n), lo68_percent=100 * float(lo), hi68_percent=100 * float(hi),
+                                 of_raw_percent=pctf(v, tot), of_raw_lo68_percent=100 * float(olo), of_raw_hi68_percent=100 * float(ohi)))
         a = ti[rt]
         for key in ("uniform_before", "uniform_trunc_only", "uniform_after", "type_trunc_only", "uni_f1_and_f4", "uni_f3_and_f4", "uni_f2_and_f4", "type_before", "type_after", "stored_f1", "stored_f2", "stored_f3", "stored_f4", "uni_f1", "uni_f3", "uni_f4", "uni_f5", "uni_f5_and_f1", "uni_f5_and_f2", "uni_f5_and_f3", "uni_f5_and_f4"):
             rows.append(dict(run_type=rt, threshold_set="check", flag=key, n_kept="", n_flag=a[key], rate_percent="", lo68_percent="", hi68_percent=""))
     for rt, lo_r, hi_r, nm_, n_, c_ in radial_rows(R, names):
         lo, hi = wilson(c_, n_)
         rows.append(dict(run_type=rt, threshold_set=f"radius_{lo_r}-{hi_r}mm", flag="sat", n_kept=n_, n_flag=c_, rate_percent=pctf(c_, n_), lo68_percent=100 * float(lo), hi68_percent=100 * float(hi)))
-    write_tsv(str(stem) + "_summary.tsv", rows, ["run_type", "threshold_set", "flag", "n_kept", "n_flag", "rate_percent", "lo68_percent", "hi68_percent"])
+    write_tsv(str(stem) + "_summary.tsv", rows, ["run_type", "threshold_set", "flag", "n_kept", "n_flag", "rate_percent", "lo68_percent", "hi68_percent", "of_raw_percent", "of_raw_lo68_percent", "of_raw_hi68_percent"])
     print("\n".join(sl + [""] + excl_lines(R) + [""] + sat_lines(R, ti) + [""] + radial_lines(R, names) + [""] + thr_lines(thr, stats, ref, z, ti)))
     for name in ("type", "uniform"):
         T = top_lists(R, names, name, 5)
         for rt in TYPES:
             for i in PFLAGS:
-                print(f"[top5 {name}] {rt} f{i}: " + "; ".join(f"{a} {d:.2f}% ({c}/{b})" for a, b, c, d, _ in T[(rt, i)]) + f"  [top-10 share {structure_line(R, names, name, rt, i)}]")
+                print(f"[top5 {name}] {rt} f{i}: " + "; ".join(f"{a} {pct_ci(c, b)} % ({c}/{b})" for a, b, c, d, lo, hi in T[(rt, i)]) + f"  [top-10 share {structure_line(R, names, name, rt, i)}]")
 
 
 def reduce_file(fn):

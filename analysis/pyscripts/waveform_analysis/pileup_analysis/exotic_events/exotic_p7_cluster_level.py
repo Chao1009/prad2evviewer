@@ -391,6 +391,12 @@ def populations(metas, D, X, ds, mol):
     return P, fits, mst
 
 
+def poisson_wilson(k, z=1.0):
+    """Wilson-score 68 % interval of a Poisson mean given k counts (finite at k = 0: [0, 1])."""
+    c, h = k + 0.5 * z * z, z * np.sqrt(k + 0.25 * z * z)
+    return max(c - h, 0.0), c + h
+
+
 def frac_rows(lab, P, D, X, n_ev):
     """TSV rows (table frac) of one dataset: population x axis (overall, ring, ebin) x category (any, f4, f5, f1, f2, f3) x role (any, seed, neighbour)."""
     rows = []
@@ -417,11 +423,13 @@ def frac_rows(lab, P, D, X, n_ev):
                         k = int((m & flag).sum())
                         lo, hi = p4.wilson(k, n)
                         ff = f[m & flag]
+                        rlo, rhi = poisson_wilson(k)
                         q = np.quantile(ff, (0.5, 0.84, 0.99)) if ff.size else (np.nan,) * 3
                         rows.append(dict(table="frac", dataset=lab, population=pop, axis=ax, bin=bl, category=CNAME[c], role=role, n_clusters=n, n_flag=k,
                                          frac=k / n if n else np.nan, frac_lo=float(lo) if n else np.nan, frac_hi=float(hi) if n else np.nan,
-                                         ef_mean=float(f[m].sum() / n) if n else np.nan, ef_med_flag=q[0], ef_q84_flag=q[1], ef_q99_flag=q[2],
-                                         n_events=n_ev, per_kevent=1000.0 * k / n_ev if n_ev else np.nan))
+                                         ef_mean=float(f[m].sum() / n) if n else np.nan, ef_sem=float(np.std(f[m], ddof=1) / np.sqrt(n)) if n > 1 else np.nan, ef_med_flag=q[0], ef_q84_flag=q[1], ef_q99_flag=q[2],
+                                         n_events=n_ev, per_kevent=1000.0 * k / n_ev if n_ev else np.nan,
+                                         rate_lo68=1000.0 * rlo / n_ev if n_ev else np.nan, rate_hi68=1000.0 * rhi / n_ev if n_ev else np.nan))
     return rows
 
 
@@ -515,65 +523,79 @@ def ci(r):
     return f"{pct(r['frac'])} [{pct(r['frac_lo'])}, {pct(r['frac_hi'])}]" if r["n_clusters"] else "-"
 
 
+def efs(r):
+    """<fE> +- SEM in %."""
+    return f"{pct(r['ef_mean'])} +- {100 * r['ef_sem']:.4f}" if r["n_clusters"] > 1 else "-"
+
+
+def rate(r):
+    """rate per 1000 events [Poisson-Wilson 68 %]."""
+    return f"{r['per_kevent']:.3f} [{r['rate_lo68']:.3f}, {r['rate_hi68']:.3f}]"
+
+
 def table_main(rows, dss, pops):
-    L = [f"{'dataset':<26}{'population':<11}{'N clusters':>11}  {'>=1 flagged, % [68 % CI]':<34}{'seed flagged %':>15}{'neighb. %':>11}"
-         + "".join(f"{'f' + str(c) + ' %':>9}" for c in CATS) + f"{'<fE> %':>9}{'fE|fl med/84/99 %':>22}"]
+    g = lambda ds, pop, c, role: get(rows, dataset=ds[0], population=pop, axis="overall", category=CNAME[c], role=role)       # noqa: E731
+    L = ["1a: clusters with >= 1 flagged module (any category): % [68 % CI]; <fE> +- SEM (% of E_g, mean over all clusters of the population)",
+         f"{'dataset':<26}{'population':<12}{'N clusters':>10}  {'any role':<30}{'seed':<30}{'neighbour':<30}{'<fE> +- SEM':>18}{'fE|fl med/84/99 %':>20}"]
     for ds in dss:
         for pop in pops:
-            r = get(rows, dataset=ds[0], population=pop, axis="overall", category="any", role="any")
+            r = g(ds, pop, 0, "any")
             if r is None:
                 continue
-            s = get(rows, dataset=ds[0], population=pop, axis="overall", category="any", role="seed")
-            nb = get(rows, dataset=ds[0], population=pop, axis="overall", category="any", role="neighbour")
-            cs = "".join(f"{pct(get(rows, dataset=ds[0], population=pop, axis='overall', category=CNAME[c], role='any')['frac']):>9}" for c in CATS)
             q = "/".join(f"{100 * r[k]:.1f}" if np.isfinite(r[k]) else "-" for k in ("ef_med_flag", "ef_q84_flag", "ef_q99_flag"))
-            L.append(f"{ds[1]:<26}{pop:<11}{r['n_clusters']:>11d}  {ci(r):<34}{pct(s['frac']):>15}{pct(nb['frac']):>11}{cs}{pct(r['ef_mean']):>9}{q:>22}")
+            L.append(f"{ds[1]:<26}{pop:<12}{r['n_clusters']:>10d}  {ci(r):<30}{ci(g(ds, pop, 0, 'seed')):<30}{ci(g(ds, pop, 0, 'neighbour')):<30}{efs(r):>18}{q:>20}")
+        L.append("")
+    L.append("1b: clusters with >= 1 module of exclusive category c (any role): % [68 % CI]")
+    L.append(f"{'dataset':<26}{'population':<12}" + "".join(f"{'f' + str(c):<26}" for c in CATS))
+    for ds in dss:
+        for pop in pops:
+            if g(ds, pop, 0, "any") is None:
+                continue
+            L.append(f"{ds[1]:<26}{pop:<12}" + "".join(f"{ci(g(ds, pop, c, 'any')):<26}" for c in CATS))
         L.append("")
     return L
 
 
 def table_roles(rows, dss, pop):
-    L = [f"population: {POP_LABEL[pop]}.  Per category and role: fraction of clusters (%, Wilson 68 %), mean flagged energy fraction <fE> (% of E_g, over all clusters of the population)",
-         f"{'dataset':<26}{'category':<22}{'seed % [68 % CI]':<36}{'<fE> seed':>10}   {'neighbour % [68 % CI]':<36}{'<fE> nb':>10}"]
+    L = [f"population: {POP_LABEL[pop]}.  Per category and role: fraction of clusters (%, Wilson 68 %), mean flagged energy fraction <fE> +- SEM (% of E_g, over all clusters of the population)",
+         f"{'dataset':<26}{'category':<22}{'seed % [68 % CI]':<36}{'<fE> seed +- SEM':>20}   {'neighbour % [68 % CI]':<36}{'<fE> nb +- SEM':>20}"]
     for ds in dss:
         for c in CATS:
             s = get(rows, dataset=ds[0], population=pop, axis="overall", category=CNAME[c], role="seed")
             nb = get(rows, dataset=ds[0], population=pop, axis="overall", category=CNAME[c], role="neighbour")
             if s is None:
                 continue
-            L.append(f"{ds[1]:<26}{CNAME[c]:<22}{ci(s):<36}{pct(s['ef_mean']):>10}   {ci(nb):<36}{pct(nb['ef_mean']):>10}")
+            L.append(f"{ds[1]:<26}{CNAME[c]:<22}{ci(s):<36}{efs(s):>20}   {ci(nb):<36}{efs(nb):>20}")
         L.append("")
     return L
 
 
 def table_fake(rows, dss, sat):
-    L = ["Fake-cluster candidates: clusters whose seed (largest member) is flagged.  Population: all PbWO4-seeded clusters.  n, % of clusters, rate per 1000 events",
-         f"{'dataset':<26}{'events':>10}" + "".join(f"{CNAME[c]:>26}" for c in (0,) + CATS)]
-    for ds in dss:
-        cells = []
-        for c in (0,) + CATS:
+    L = ["Fake-cluster candidates: clusters whose seed (largest member) is flagged.  Population: all PbWO4-seeded clusters.  n; % of clusters [Wilson 68 %]; rate per 1000 events [Poisson-Wilson 68 %]"]
+    for c in (0,) + CATS:
+        L += ["", f"{CNAME[c]}:", f"{'dataset':<26}{'events':>10}{'n':>8}  {'% of clusters [68 % CI]':<30}{'rate / 1000 events [68 % CI]':<30}"]
+        for ds in dss:
             r = get(rows, dataset=ds[0], population="all", axis="overall", category=CNAME[c], role="seed")
-            cells.append(f"{r['n_flag']:>7d} {pct(r['frac']):>8} {r['per_kevent']:>8.3f}  ")
-        L.append(f"{ds[1]:<26}{r['n_events']:>10d}" + "".join(f"{x:>26}" for x in cells))
-    L += ["", "Flagged seed vs E_g / E_beam (any category; n, rate per 1000 events):"]
-    L.append(f"{'dataset':<26}" + "".join(f"{f'{EBINS[i]:g}-{EBINS[i + 1]:g}':>18}" for i in range(len(EBINS) - 1)))
+            L.append(f"{ds[1]:<26}{r['n_events']:>10d}{r['n_flag']:>8d}  {ci(r):<30}{rate(r):<30}")
+    L += ["", "Flagged seed (any category) vs E_g / E_beam: n; rate per 1000 events [68 %]:"]
     for ds in dss:
-        L.append(f"{ds[1]:<26}" + "".join(
-            f"{get(rows, dataset=ds[0], population='all', axis='ebin', bin=f'{EBINS[i]:g}-{EBINS[i + 1]:g}', category='any', role='seed')['n_flag']:>8d} "
-            f"{get(rows, dataset=ds[0], population='all', axis='ebin', bin=f'{EBINS[i]:g}-{EBINS[i + 1]:g}', category='any', role='seed')['per_kevent']:>8.4f} "
-            for i in range(len(EBINS) - 1)))
+        L.append(f"{ds[1]}:")
+        for i in range(len(EBINS) - 1):
+            r = get(rows, dataset=ds[0], population="all", axis="ebin", bin=f"{EBINS[i]:g}-{EBINS[i + 1]:g}", category="any", role="seed")
+            L.append(f"   {EBINS[i]:g}-{EBINS[i + 1]:g}".ljust(14) + f"{r['n_flag']:>8d}  {rate(r)}")
     for c in CATS:
-        L += ["", f"seed {CNAME[c]} vs E_g / E_beam (n):"]
+        L += ["", f"seed {CNAME[c]} vs E_g / E_beam: n (rate per 1000 events [68 %]):"]
         for ds in dss:
             L.append(f"{ds[1]:<26}" + "".join(
-                f"{get(rows, dataset=ds[0], population='all', axis='ebin', bin=f'{EBINS[i]:g}-{EBINS[i + 1]:g}', category=CNAME[c], role='seed')['n_flag']:>18d}"
+                f"{(r := get(rows, dataset=ds[0], population='all', axis='ebin', bin=f'{EBINS[i]:g}-{EBINS[i + 1]:g}', category=CNAME[c], role='seed'))['n_flag']:>5d} ({rate(r)})  "
                 for i in range(len(EBINS) - 1)))
-    L += ["", "Saturated seed (f4 or f5) in the ep elastic window: n / N, % [68 % CI]; of these, clusters with <= 2 member modules, median member modules",
+    L += ["", "Saturated seed (f4 or f5) in the ep elastic window: n / N, % [68 % CI]; of these, clusters with <= 2 member modules (n, % of saturated-seed clusters [68 % CI]), median member modules",
           "(saturated-seed clusters / all elastic-window clusters), median seed energy share of the saturated-seed clusters"]
     for ds in dss:
         k, n, k2, mc, ma, fs = sat[ds[0]]
         lo, hi = p4.wilson(k, n)
-        L.append(f"{ds[1]:<26}{k:>6d} / {n:<9d} {pct(k / max(n, 1))} [{pct(float(lo))}, {pct(float(hi))}]   <= 2 modules: {k2:>4d}   "
+        l2, h2 = p4.wilson(k2, k)
+        L.append(f"{ds[1]:<26}{k:>6d} / {n:<9d} {pct(k / max(n, 1))} [{pct(float(lo))}, {pct(float(hi))}]   <= 2 modules: {k2:>4d}" + (f" = {pct(k2 / k)} [{pct(float(l2))}, {pct(float(h2))}]" if k else "") + "   "
                  f"median modules {mc:.1f} / {ma:.1f}   seed share {fs:.3f}")
     return L
 
@@ -582,7 +604,7 @@ def cells(rows, dss):
     """(matter, negligible-max) per dataset: cells (population elastic / moller overall and all x E bin; category x role) with <fE> >= EF_LEVEL."""
     out = {}
     for ds in dss:
-        hit, rest = [], 0.0
+        hit, rest = [], {"ef_mean": 0.0, "ef_sem": 0.0, "n_clusters": 2}
         for r in rows:
             if r["table"] != "frac" or r["dataset"] != ds[0] or r["category"] == "any" or r["role"] == "any":
                 continue
@@ -593,7 +615,7 @@ def cells(rows, dss):
             if r["ef_mean"] >= EF_LEVEL:
                 hit.append(r)
             else:
-                rest = max(rest, r["ef_mean"])
+                rest = r if r["ef_mean"] > rest["ef_mean"] else rest
         out[ds[0]] = (hit, rest)
     return out
 
@@ -610,18 +632,19 @@ def meaning_lines(rows, dss, sat):
         hit, rest = C[ds[0]]
         L.append(f"{ds[1]}:")
         if not hit:
-            L.append(f"  no cell reaches 0.1 % (largest <fE> {pct(rest)} %): negligible for the calibration.")
+            L.append(f"  no cell reaches 0.1 % (largest <fE> {efs(rest)} %): negligible for the calibration.")
         grp = {}
         for r in hit:
             grp.setdefault((r["population"], r["category"], r["role"]), []).append(r)
         for (pop, cat, role), rs in sorted(grp.items(), key=lambda kv: -max(r["ef_mean"] for r in kv[1])):
-            where = ", ".join(f"{r['bin']} {pct(r['ef_mean'])} % ({r['n_flag']} of {r['n_clusters']})" for r in sorted(rs, key=lambda r: r["bin"])
-                              ) if pop == "all" else f"{pct(rs[0]['ef_mean'])} % ({rs[0]['n_flag']} of {rs[0]['n_clusters']} clusters)"
+            where = ", ".join(f"{r['bin']} {efs(r)} % ({r['n_flag']} of {r['n_clusters']})" for r in sorted(rs, key=lambda r: r["bin"])
+                              ) if pop == "all" else f"{efs(rs[0])} % ({rs[0]['n_flag']} of {rs[0]['n_clusters']} clusters)"
             L.append(f"  matters: {POP_LABEL[pop]}, {cat}, {role}: " + ("<fE> per E_g / E_beam bin: " if pop == "all" else "<fE> ") + where)
         if hit:
-            L.append(f"  every other cell < 0.1 % (largest {pct(rest)} %).")
+            L.append(f"  every other cell < 0.1 % (largest {efs(rest)} %).")
         k, n, k2 = sat[ds[0]][:3]
-        L.append(f"  saturated seed in the elastic window: {k} of {n} ({pct(k / max(n, 1))} %), {k2} of them with <= 2 member modules.")
+        lo, hi = p4.wilson(k, n)
+        L.append(f"  saturated seed in the elastic window: {k} of {n} ({pct(k / max(n, 1))} % [{pct(float(lo))}, {pct(float(hi))}]), {k2} of them with <= 2 member modules.")
         L.append("")
     return L
 
@@ -752,7 +775,8 @@ def sub(d, idx):
 
 
 COLS = ("table", "dataset", "population", "axis", "bin", "category", "role", "n_clusters", "n_flag", "frac", "frac_lo", "frac_hi", "ef_mean",
-        "ef_med_flag", "ef_q84_flag", "ef_q99_flag", "n_events", "per_kevent", "mu", "sigma", "n_fit", "own_fit", "source", "n_splits")
+        "ef_med_flag", "ef_q84_flag", "ef_q99_flag", "n_events", "per_kevent", "mu", "sigma", "n_fit", "own_fit", "source", "n_splits",
+        "ef_sem", "rate_lo68", "rate_hi68")
 
 
 def report(metas, D, out, n_ex, evio_dir, nproc):
@@ -783,6 +807,10 @@ def report(metas, D, out, n_ex, evio_dir, nproc):
         sat[ds[0]] = (int(ms_.sum()), int(el.sum()), int((ms_ & (D["cnt"] <= 2)).sum()),
                       float(np.median(D["cnt"][ms_])) if ms_.any() else np.nan, float(np.median(D["cnt"][el])) if el.any() else np.nan,
                       float(np.median(X["f_seed"][ms_])) if ms_.any() else np.nan)
+        k_, n_ = sat[ds[0]][:2]
+        sl, sh = p4.wilson(k_, n_)
+        rows.append(dict(table="sat", dataset=ds[0], population="elastic", axis="overall", bin="all", category="f4+f5", role="seed", n_clusters=n_, n_flag=k_,
+                         frac=k_ / n_ if n_ else np.nan, frac_lo=float(sl) if n_ else np.nan, frac_hi=float(sh) if n_ else np.nan))
         rows.append(dict(table="scope", dataset=ds[0], source=ds[3], n_splits=len(ms), n_events=n_ev, n_clusters=int(P["all"].sum())))
         if ds[0] != "Ta_sample" and n_ex:
             exs += pick_examples(P, D, X, metas, ds, n_ex, rng)

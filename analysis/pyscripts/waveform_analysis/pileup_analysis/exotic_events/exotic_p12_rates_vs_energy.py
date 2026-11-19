@@ -128,6 +128,20 @@ def chan_rows(CH, meta):
     return rows
 
 
+def fill_empty_chan(rows):
+    """Channel rows (N = 0, k = 0, rate and interval NaN) for every (run type, slice) that has clusters but no channels, so the channel and cluster tables list identical slices."""
+    have = {(r["run_type"], r["slice"]) for r in rows if r["table"] == "chan"}
+    add, seen = [], set()
+    for r in rows:
+        key = (r["run_type"], r["slice"])
+        if r["table"] == "cluster" and key not in have and key not in seen:
+            seen.add(key)
+            for c in (0,) + CATS:
+                add.append(dict(table="chan", run_type=r["run_type"], source=r["source"], slice=r["slice"], e_lo=r["e_lo"], e_hi=r["e_hi"], category=CNAME[c], n=0, k=0, rate=np.nan, rate_lo=np.nan, rate_hi=np.nan))
+    ch = sorted([r for r in rows if r["table"] == "chan"] + add, key=lambda r: (TYPES.index(r["run_type"]), r["e_lo"]))      # stable: category order kept
+    return ch + [r for r in rows if r["table"] != "chan"]
+
+
 # ------------------------------------------------------------------------------------------------------------ per cluster
 def cluster_load():
     pm, D = p7.collect([], 1, str(SCAN_ROOT / "exotic_p7_cache.npz"))
@@ -185,46 +199,56 @@ def slices_of(rows, rt, table):
     return seen
 
 
-def chan_table(rows):
-    L = ["Per-channel rate (% of kept PbWO4 channels of the slice), default-fit energy A_main x gain, exclusive categories; any = all categories; dominant = largest category.",
-         "Wilson 68 % half-width of 'any' in brackets (%).  Sources: H2 = sample, Ta X17 = 19 full-scan npz; run 24937 excluded.", ""]
-    for rt in TYPES:
-        L += [f"{RT_LABEL[rt]}  [{SOURCE[rt]}]", f"  {'slice (MeV)':<12}{'N kept':>11}{'any %':>11}{'(+-)':>9}{'dominant':>22}" + "".join(f"{CNAME[c].split()[0] + ' %':>10}{'n':>7}" for c in CATS)]
-        for s in slices_of(rows, rt, "chan"):
-            a = get(rows, table="chan", run_type=rt, slice=s, category="any")
-            cs = {c: get(rows, table="chan", run_type=rt, slice=s, category=CNAME[c]) for c in CATS}
-            dom = max(CATS, key=lambda c: cs[c]["k"])
-            dn = CNAME[dom].split()[0] if a["k"] else "-"
-            L.append(f"  {s:<12}{a['n']:>11d}{pct(a['rate']):>11}{pct((a['rate_hi'] - a['rate_lo']) / 2):>9}{dn:>22}" + "".join(f"{pct(cs[c]['rate']):>10}{cs[c]['k']:>7d}" for c in CATS))
-        L.append("")
+SMALL_N = 100                                           # slices with fewer entries are marked '*' (interval wide, rate poorly known)
+FLAG_ORDER = (1, 2, 3, 4, 5)                            # table columns f1..f5, then any
+
+
+def fmt_ci(r):
+    """'rate % [lo, hi]' (Wilson 68 %) with ~3 significant figures; zero-count cells keep their upper limit."""
+    if r["n"] == 0:
+        return "-"
+    def f(x):
+        v = 100 * x
+        if v <= 0:
+            return "0"
+        return f"{v:.{min(6, max(0, 2 - int(np.floor(np.log10(v)))))}f}"
+    return f"{f(r['rate'])} [{f(r['rate_lo'])}, {f(r['rate_hi'])}]"
+
+
+def flag_lines(rows, table, role, rt):
+    """Lines of the per-flag x per-slice table of one run type: rows = slices, columns = N, f1..f5, any."""
+    cols = [CNAME[c] for c in FLAG_ORDER] + ["any"]
+    w = 32
+    L = [f"{'slice (MeV)':<12}{'N':>11}  " + "".join(f"{c.split()[0] + ' % [lo, hi]':>{w}}" for c in cols)]
+    for sl in slices_of(rows, rt, table):
+        rr = [get(rows, table=table, run_type=rt, slice=sl, category=c, **({"role": role} if role else {})) for c in cols]
+        n = rr[0]["n"]
+        L.append(f"{sl:<12}{n:>10d}{'*' if n < SMALL_N else ' '} " + "".join(f"{fmt_ci(r):>{w}}" for r in rr))
     return L
 
 
-def cluster_table(rows):
-    L = ["Per-cluster fraction (%) with a flagged seed (fake-cluster candidate) and with >= 1 flagged member (any = seed or neighbour); E_cluster = E_g (MeV).  Population: all PbWO4-seeded clusters (P7 cache).",
-         "A cluster counts in every category it holds.  Wilson 68 % half-width in brackets.", ""]
-    for rt in TYPES:
-        L += [f"{RT_LABEL[rt]}  [{SOURCE[rt]}]", f"  {'slice (MeV)':<12}{'N clus':>10}{'seed any':>12}{'(+-)':>9}{'member any':>12}{'(+-)':>9}" + "".join(f"{CNAME[c].split()[0] + ' mem':>10}" for c in CATS)]
-        for s in slices_of(rows, rt, "cluster"):
-            sa = get(rows, table="cluster", run_type=rt, slice=s, category="any", role="seed")
-            ma = get(rows, table="cluster", run_type=rt, slice=s, category="any", role="any")
-            L.append(f"  {s:<12}{sa['n']:>10d}{pct(sa['rate']):>12}{pct((sa['rate_hi'] - sa['rate_lo']) / 2):>9}{pct(ma['rate']):>12}{pct((ma['rate_hi'] - ma['rate_lo']) / 2):>9}"
-                     + "".join(f"{pct(get(rows, table='cluster', run_type=rt, slice=s, category=CNAME[c], role='any')['rate']):>10}" for c in CATS))
-        L.append("")
-    return L
+def table_pages(pdf, plt, rows):
+    """One page per run type at channel level, then one per run type at cluster level (user, 2026-11-18)."""
+    for table, role, what, pop in (("chan", None, "channel", "kept PbWO4 channels (A_main >= 10 ADC) of the slice, energy = A_main x gain"),
+                                   ("cluster", "any", "cluster", "PbWO4-seeded clusters of the slice (P7 cache), E_cluster = E_g; a cluster counts if it holds >= 1 flagged member (seed or neighbour)")):
+        for rt in TYPES:
+            L = [f"Rate (%) of {pop}.", f"{RT_LABEL[rt]}  [{SOURCE[rt]}];  run 24937 excluded.  Cell = rate % [lo, hi], Wilson 68 % interval; exclusive categories f4 > f5 > f1 > f2 > f3 "
+                 + ("(a cluster is counted in every category it holds, so the sum of f1-f5 can exceed 'any')." if table == "cluster" else "(each channel in one category; any = sum)."), f"'*' after N: fewer than {SMALL_N} entries in the slice (small-N, rate poorly determined).  Zero-count cells show the upper limit.", ""]
+            L += flag_lines(rows, table, role, rt)
+            text_page(pdf, plt, f"P12 {what} level, {RT_LABEL[rt]}: rate per flag per energy slice", L, size=7.5)
 
 
 def impact_table(rows):
     L = ["Impact per E_cluster slice of dropping the flagged channels (no correction): energy removed = -<fE>, the mean flagged-energy fraction of all clusters (%, +- s.e.m.), per category and any.",
          "A cluster holding two categories adds to both.  fE = sum of flagged member energies / E_g.", ""]
     for rt in TYPES:
-        L += [f"{RT_LABEL[rt]}  [{SOURCE[rt]}]", f"  {'slice (MeV)':<12}{'N clus':>10}{'-<fE> any %':>13}{'(sem)':>10}{'dominant':>10}" + "".join(f"{CNAME[c].split()[0]:>10}" for c in CATS)]
+        L += [f"{RT_LABEL[rt]}  [{SOURCE[rt]}]", f"  {'slice (MeV)':<12}{'N clus':>10}{'-<fE> any %':>13}{'(sem)':>10}{'dominant':>10}" + "".join(f"{CNAME[c].split()[0] + ' (+-sem)':>21}" for c in CATS)]
         for s in slices_of(rows, rt, "impact"):
             a = get(rows, table="impact", run_type=rt, slice=s, category="any", role="fE")
             cs = {c: get(rows, table="impact", run_type=rt, slice=s, category=CNAME[c], role="fE") for c in CATS}
             dom = min(CATS, key=lambda c: cs[c]["fE_mean"])
             L.append(f"  {s:<12}{a['n']:>10d}{pct(a['fE_mean'], 5):>13}{pct(a['fE_sem'], 5):>10}{(CNAME[dom].split()[0] if a['fE_mean'] < 0 else '-'):>10}"
-                     + "".join(f"{pct(cs[c]['fE_mean'], 5):>10}" for c in CATS))
+                     + "".join(f"{pct(cs[c]['fE_mean'], 5) + '+-' + pct(cs[c]['fE_sem'], 5):>21}" for c in CATS))
         L.append("")
     return L
 
@@ -242,7 +266,9 @@ def draw_rates(axs, rows, table, role, ycol_any=True):
             hi = np.array([100 * (r["rate_hi"] - r["rate"]) for r in rr])
             ax.errorbar(x[ok], y[ok], yerr=[lo[ok], hi[ok]], fmt="-o", ms=4, lw=0.9, capsize=1.5, color=CCOL[c], label=CNAME[c])
         ra = [get(rows, table=table, run_type=rt, slice=s, category="any", **({"role": role} if role else {})) for s in sl]
-        ax.plot(x, [100 * r["rate"] if r["k"] else np.nan for r in ra], "k--", lw=1.0, label="any")
+        ya = np.array([100 * r["rate"] for r in ra])
+        oka = np.array([r["k"] > 0 for r in ra])
+        ax.errorbar(x[oka], ya[oka], yerr=[[max(0.0, 100 * (r["rate"] - r["rate_lo"])) for r in ra if r["k"]], [max(0.0, 100 * (r["rate_hi"] - r["rate"])) for r in ra if r["k"]]], fmt="k--", lw=1.0, capsize=1.5, label="any")
         ax.set_yscale("log")
         ax.set_xticks(x)
         ax.set_xticklabels(sl, rotation=45, ha="right", fontsize=7)
@@ -276,7 +302,6 @@ def report(rows, meta, out, extra):
         fig.suptitle("Per-channel exclusive category rate vs energy slice (Wilson 68 %; markers only where the category has entries); slices above E_beam: f4/f5 extrapolated amplitudes", fontsize=11)
         pdf.savefig(fig)
         plt.close(fig)
-        text_page(pdf, plt, "Per-channel rates per slice (table)", chan_table(rows), size=6.3)
         fig, axs = plt.subplots(2, 2, figsize=(16, 11), sharey=True, layout="constrained")
         draw_rates(axs, rows, "cluster", "any")
         axs[0, 0].legend(fontsize=8, title="clusters with >= 1 flagged member")
@@ -287,7 +312,6 @@ def report(rows, meta, out, extra):
         fig.suptitle("Per-cluster fraction with >= 1 flagged member (seed or neighbour) by category; dashed = any", fontsize=12)
         pdf.savefig(fig)
         plt.close(fig)
-        text_page(pdf, plt, "Per-cluster fractions per slice (table)", cluster_table(rows), size=6.3)
         fig, axs = plt.subplots(2, 2, figsize=(16, 11), layout="constrained")
         for ax, rt in zip(axs.ravel(), TYPES):
             sl = slices_of(rows, rt, "impact")
@@ -295,7 +319,9 @@ def report(rows, meta, out, extra):
             for c in (0,) + CATS:
                 rr = [get(rows, table="impact", run_type=rt, slice=s, category=CNAME[c], role="fE") for s in sl]
                 y = -100 * np.array([r["fE_mean"] for r in rr])
-                ax.plot(x, np.where(y > 0, y, np.nan), "--" if c == 0 else "-o", ms=4, lw=0.9, color="k" if c == 0 else CCOL[c], label=CNAME[c])
+                ye = 100 * np.array([r["fE_sem"] for r in rr])
+                ok = y > 0
+                ax.errorbar(x[ok], y[ok], yerr=np.minimum(ye[ok], 0.999 * y[ok]), fmt="--" if c == 0 else "-o", ms=4, lw=0.9, capsize=1.5, color="k" if c == 0 else CCOL[c], label=CNAME[c])
             ax.set_yscale("log")
             ax.set_xticks(x)
             ax.set_xticklabels(sl, rotation=45, ha="right", fontsize=7)
@@ -303,11 +329,14 @@ def report(rows, meta, out, extra):
             ax.set_xlabel("cluster energy E_cluster (MeV)")
             ax.grid(alpha=0.25, lw=0.4)
         axs[0, 0].legend(fontsize=7, loc="upper left")
-        fig.suptitle("Impact per E_cluster slice: energy removed from the cluster by dropping the flagged channels, -<fE> (magnitude plotted)", fontsize=12)
+        fig.suptitle("Impact per E_cluster slice: energy removed from the cluster by dropping the flagged channels, -<fE> (magnitude plotted; error bars = s.e.m.)", fontsize=12)
         pdf.savefig(fig)
         plt.close(fig)
         text_page(pdf, plt, "Impact per slice (table)", impact_table(rows), size=6.0)
-    cols = ["table", "run_type", "source", "slice", "e_lo", "e_hi", "category", "role", "n", "k", "rate", "rate_lo", "rate_hi", "fE_mean", "fE_sem"]
+        table_pages(pdf, plt, rows)
+    for r in rows:
+        r["small_n"] = int(r["n"] < SMALL_N)
+    cols = ["table", "run_type", "source", "slice", "e_lo", "e_hi", "category", "role", "n", "k", "rate", "rate_lo", "rate_hi", "fE_mean", "fE_sem", "small_n"]
     write_tsv(out / (STEM + ".tsv"), rows, cols)
     print("wrote", out / (STEM + ".pdf"), out / (STEM + ".tsv"))
 
@@ -322,6 +351,7 @@ def main():
     rows = chan_rows(CH, meta)
     pm, D, X, ds = cluster_load()
     rows += cluster_rows(pm, D, X, ds)
+    rows = fill_empty_chan(rows)
     extra = "Impact: -<fE> = energy removed from each cluster by dropping its flagged channels (user policy), P7 cache; the P8 credible-correction join is not used."
     report(rows, meta, a.out, extra)
 

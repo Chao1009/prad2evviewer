@@ -88,6 +88,37 @@ def wil(k, n):
     return float(lo), float(hi)
 
 
+def pci(r, d=3):
+    """'frac [lo, hi]' in % of a row with frac, lo, hi."""
+    return f"{100 * r['frac']:.{d}f} [{100 * r['lo']:.{d}f}, {100 * r['hi']:.{d}f}]"
+
+
+def wci(k, n, d=3):
+    """'k/n %' as 'p [lo, hi]' (Wilson 68 %)."""
+    lo, hi = wil(k, n)
+    return f"{100 * k / n:.{d}f} [{100 * lo:.{d}f}, {100 * hi:.{d}f}]" if n else "nan"
+
+
+def ratio_s(f1, lo1, hi1, f2, lo2, hi2, d=3):
+    """'f1 / f2 +- err' with the relative half-widths of the two 68 % intervals added in quadrature."""
+    s1, s2 = 0.5 * (hi1 - lo1), 0.5 * (hi2 - lo2)
+    r = f1 / f2
+    return f"{r:.{d}f} +- {r * np.hypot(s1 / f1, s2 / f2):.{d}f}"
+
+
+def enrich(rows):
+    """Append the intervals the cached rows lack: rate per 1000 events (Poisson-Wilson 68 %) of every counted row, Wilson 68 % on the ebin fractions and on the in-window counts."""
+    for r in rows:
+        if r.get("table") in ("veto", "ebin") and r.get("n_events"):
+            lo, hi = p7.poisson_wilson(r["k"])
+            r["rate_lo68"], r["rate_hi68"] = 1000.0 * lo / r["n_events"], 1000.0 * hi / r["n_events"]
+        if r.get("table") == "ebin":
+            r["lo"], r["hi"] = wil(r["k"], r["n"]) if r["n"] else (np.nan, np.nan)
+            lo, hi = p7.poisson_wilson(r["k_in_window"])
+            r["kin_rate"], r["kin_rate_lo68"], r["kin_rate_hi68"] = (1000.0 * v / r["n_events"] for v in (r["k_in_window"], lo, hi))
+    return rows
+
+
 def veto_masks(D):
     scat, nm, cnt = D["scat"].astype(np.int64), D["nmask"].astype(np.int64), D["cnt"].astype(np.int64)
     sat = (scat == 4) | (scat == 5)
@@ -383,6 +414,16 @@ def run_stages(a):
 
 
 # ---------------------------------------------------------------------------------------------------------------- analysis helpers
+COV = {}                                                # (a, b) of each line_fit -> cov(a, b), for the elasticity error
+
+
+def elast_err(a, b, sa, sb, xm):
+    """1-sigma error of the elasticity b xm / (a + b xm) (delta method with cov(a, b))."""
+    ym = a + b * xm
+    da, db = -b * xm / ym ** 2, xm * a / ym ** 2
+    return float(np.sqrt(max(da ** 2 * sa ** 2 + db ** 2 * sb ** 2 + 2 * da * db * COV.get((float(a), float(b)), 0.0), 0.0)))
+
+
 def line_fit(x, y, sig):
     """Weighted straight line y = a + b x.  Returns (a, b, sa, sb, chi2, dof); errors scaled by sqrt(chi2/dof) when chi2/dof > 1."""
     x, y, sig = (np.asarray(v, float) for v in (x, y, sig))
@@ -394,6 +435,7 @@ def line_fit(x, y, sig):
     chi2 = float((w * (y - a - b * x) ** 2).sum())
     dof = max(len(x) - 2, 1)
     sc = max(1.0, np.sqrt(chi2 / dof))
+    COV[(float(a), float(b))] = -Sx / d * sc ** 2
     return a, b, sa * sc, sb * sc, chi2, len(x) - 2
 
 
@@ -461,8 +503,8 @@ def veto_tables(rows):
 
 
 def ring_tables(rows, pop, vs=("V1", "V3", "V4")):
-    L = [f"{pop}: loss % per ring (seed radius, mm), k/n"]
-    L.append(f"{'dataset':<20}{'veto':<6}" + "".join(f"{f'{RADBINS[i]:g}-{RADBINS[i + 1]:g}':>22}" for i in range(len(RADBINS) - 1)))
+    L = [f"{pop}: loss % [Wilson 68 %] per ring (seed radius, mm), k/n"]
+    L.append(f"{'dataset':<26}{'veto':<6}" + "".join(f"{f'{RADBINS[i]:g}-{RADBINS[i + 1]:g}':>34}" for i in range(len(RADBINS) - 1)))
     for ds in MAIN:
         if get(rows, table="veto", dataset=ds, population=pop, axis="ring", veto="V1") is None:
             continue
@@ -470,8 +512,8 @@ def ring_tables(rows, pop, vs=("V1", "V3", "V4")):
             cells = []
             for i in range(len(RADBINS) - 1):
                 r = get(rows, table="veto", dataset=ds, population=pop, axis="ring", bin=f"{RADBINS[i]:g}-{RADBINS[i + 1]:g}", veto=v)
-                cells.append(f"{pc(r['frac'], 2)} ({r['k']}/{r['n']})" if r and r["n"] else "-")
-            L.append(f"{DSN[ds]:<20}{v:<6}" + "".join(f"{c:>22}" for c in cells))
+                cells.append(f"{pc(r['frac'], 3)} [{pc(r['lo'], 3)},{pc(r['hi'], 3)}] {r['k']}/{r['n']}" if r and r["n"] else "-")
+            L.append(f"{DSN[ds]:<26}{v:<6}" + "".join(f"{c:>34}" for c in cells))
     return L
 
 
@@ -515,9 +557,14 @@ def pages_veto(pdf, plt, rows, extra, R):
             ys = [get(rows, table="ebin", dataset=ds, bin=f"{eb[i]:g}-{eb[i + 1]:g}", veto=v) for i in range(len(eb) - 1)]
             y = np.array([r["per_kevent"] if r else np.nan for r in ys])
             kin = np.array([1000.0 * r["k_in_window"] / r["n_events"] if r else np.nan for r in ys])
-            ax.plot(xc, np.where(y > 0, y, np.nan), "o-", color=VCOL[v], label=VLAB[v], ms=4)
+            ylo, yhi = (np.array([r[q] if r else np.nan for r in ys]) for q in ("rate_lo68", "rate_hi68"))
+            klo, khi = (np.array([r[q] if r else np.nan for r in ys]) for q in ("kin_rate_lo68", "kin_rate_hi68"))
+            pos = y > 0
+            ax.errorbar(xc[pos], y[pos], yerr=[(y - ylo)[pos], (yhi - y)[pos]], fmt="o-", color=VCOL[v], label=VLAB[v], ms=4, capsize=2, lw=1)
+            ax.plot(xc[~pos], yhi[~pos], "v", color=VCOL[v], mfc="none", ms=5)
             if v in ("V3", "V4"):
-                ax.plot(xc, np.where(kin > 0, kin, np.nan), "s--", color=VCOL[v], ms=4, mfc="none", label=VLAB[v] + ", in ep window")
+                pk = kin > 0
+                ax.errorbar(xc[pk], kin[pk], yerr=[(kin - klo)[pk], (khi - kin)[pk]], fmt="s--", color=VCOL[v], ms=4, mfc="none", capsize=2, lw=1, label=VLAB[v] + ", in ep window")
         ax.set_yscale("log")
         ax.set_xticks(xc)
         ax.set_xticklabels([f"{eb[i]:g}-{eb[i + 1]:g}" if np.isfinite(eb[i + 1]) else f">{eb[i]:g}" for i in xc], fontsize=8)
@@ -527,7 +574,7 @@ def pages_veto(pdf, plt, rows, extra, R):
     axs[0, 0].legend(fontsize=6.5)
     for ax in axs[1]:
         ax.set_xlabel("cluster energy E_g / E_beam")
-    fig.suptitle("Veto-flagged clusters vs cluster energy (E_g > 0.1 E_beam); dashed = those inside the ep elastic window (the contamination a veto removes)", fontsize=11)
+    fig.suptitle("Veto-flagged clusters vs cluster energy (E_g > 0.1 E_beam); dashed = those inside the ep elastic window (the contamination a veto removes)\nerror bars: Poisson-Wilson 68 %; open triangle = upper edge where no cluster is flagged", fontsize=11)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     pdf.savefig(fig)
     plt.close(fig)
@@ -693,19 +740,20 @@ def occ_page(pdf, plt, C):
     pdf.savefig(fig)
     plt.close(fig)
     L = ["f1 rate (exclusive f1 / kept PbWO4 channels; a, b in fraction units, not %) in the inner ring, y = a + b x, weighted least squares (errors scaled by sqrt(chi2/dof) when > 1); n = points.",
-         "Elasticity = d ln(rate) / d ln(x) at the mean = b x_mean / (a + b x_mean): 1 means rate proportional to x; intercept a / rate(x_mean) is the share of the rate that does not follow x.", ""]
-    L.append(f"{'fit':<100}{'n':>4}{'a':>12}{'b +- sb':>28}{'chi2/dof':>10}{'elasticity':>12}")
+         "Elasticity = d ln(rate) / d ln(x) at the mean = b x_mean / (a + b x_mean) (error: delta method with cov(a, b)): 1 means rate proportional to x; intercept a / rate(x_mean) is the share of the rate that does not follow x.", ""]
+    L.append(f"{'fit':<100}{'n':>4}{'a':>12}{'b +- sb':>28}{'chi2/dof':>10}{'elasticity +- err':>20}")
     fits = []
     for lab, a, b, sa, sb, chi2, dof, xm, ym, n in txt:
         el = b * xm / max(a + b * xm, 1e-12)
-        L.append(f"{lab:<100}{n:>4}{a:>12.4g}{f'{b:.4g} +- {sb:.2g}':>28}{chi2 / max(dof, 1):>10.2f}{el:>12.2f}")
-        fits.append(dict(table="occ_fit", dataset=lab, n=n, a=a, b=b, sa=sa, sb=sb, chi2=chi2, dof=dof, elasticity=el))
+        sel = elast_err(a, b, sa, sb, xm)
+        L.append(f"{lab:<100}{n:>4}{a:>12.4g}{f'{b:.4g} +- {sb:.2g}':>28}{chi2 / max(dof, 1):>10.2f}{f'{el:.2f} +- {sel:.2f}':>20}")
+        fits.append(dict(table="occ_fit", dataset=lab, n=n, a=a, b=b, sa=sa, sb=sb, chi2=chi2, dof=dof, elasticity=el, elasticity_err=sel))
     L += ["", f"{'run':<8}{'type':<18}{'current nA':>11}  {'source':<36}{'splits':>7}{'mean kept ch/ev':>17}{'f1 inner rows':>14}{'rate % [68 % CI]':>30}"]
     for r in cur_rows:
         L.append(f"{r['run']:<8}{RT_LABEL[r['rt']]:<18}{r['current']:>11g}  {r['source']:<36}{r['n_splits']:>7}{r['mean_nk']:>17.2f}{r['f1_in']:>14}{f'{100 * r['rate']:.4f} [{100 * r['lo']:.4f}, {100 * r['hi']:.4f}]':>30}")
     t25, t26 = [r for r in cur_rows if r["run"] == 25800][0], [r for r in cur_rows if r["run"] == 26230][0]
     L += ["", f"Ta current: RCDB gives 3.5 nA for 26138 and 26230 and is blank for 25800 (elog: 3.0 nA at 07-12).  Only two current levels exist, so no slope against current is fitted:",
-          f"26230 / 25800: rate ratio {t26['rate'] / t25['rate']:.3f}, current ratio {t26['current'] / t25['current']:.3f}, mean kept channels ratio {t26['mean_nk'] / t25['mean_nk']:.3f}.",
+          f"26230 / 25800: rate ratio {ratio_s(t26['rate'], t26['lo'], t26['hi'], t25['rate'], t25['lo'], t25['hi'], 3)}, current ratio {t26['current'] / t25['current']:.3f}, mean kept channels ratio {t26['mean_nk'] / t25['mean_nk']:.3f}.",
           "H2 runs: 25257 is blank in RCDB (320 nA from the elog); 3.49 GeV 400 nA (24698) vs 700 nA (24911) is the only within-energy current lever."]
     return L, fits, cur_rows
 
@@ -727,16 +775,17 @@ def ooc_page(pdf, plt, C):
            ("no own-pulse hit, pulse inside the window", o & ~hit & inw), ("own-pulse hit, E < 30 MeV (below the seed threshold)", o & hit & (rec["ownE"] < SEED_E_MEV)),
            ("own-pulse hit, E >= 30 MeV, higher neighbour hit (not a local maximum)", o & hit & (rec["ownE"] >= SEED_E_MEV) & nb_hi),
            ("own-pulse hit, E >= 30 MeV, no higher neighbour (not clustered: cluster energy/size cuts)", o & hit & (rec["ownE"] >= SEED_E_MEV) & ~nb_hi)]
-    L = [f"Ta X17 f1 rows (exclusive f1, PbWO4, 19 full-scan splits, 25800 + 26230): {inc.size} total, {int(inc.sum())} in a P7 cluster, {n_o} outside any cluster ({100 * n_o / inc.size:.1f} %).",
+    L = [f"Ta X17 f1 rows (exclusive f1, PbWO4, 19 full-scan splits, 25800 + 26230): {inc.size} total, {int(inc.sum())} in a P7 cluster, {n_o} outside any cluster ({wci(n_o, inc.size, 2)} %).",
          f"NOTE: the P7 Log line says '191k of 558k outside'; the counts are the reverse, 191,223 are INSIDE a cluster and 366,283 are outside (P7 per-split n_rows_in_cluster_cat f1 / n_rows_flag_cat f1 = 0.36).",
          f"Time axis: scan pulse time t0 (largest fitted pulse) + {dtm:.1f} ns, the median offset between t0 and the benchmark hit time of k = 1 rows (n = {sum(i['n_cal'] for i in info)}); benchmark hit window {TWIN[0]:g}-{TWIN[1]:g} ns, cluster time gate {gate:g} ns, seed threshold {SEED_E_MEV:g} MeV.",
          "Energy: benchmark hit energy where a hit exists, else the fitted main amplitude x the module's median MeV/ADC (k = 1 rows matched to a hit).", "",
-         f"{'class of an out-of-cluster f1 row':<92}{'n':>9}{'%':>7}{'A_main med ADC':>16}{'E med MeV':>11}"]
+         f"{'class of an out-of-cluster f1 row':<92}{'n':>9}{'% [68 % CI]':>24}{'A_main med ADC':>16}{'E med MeV':>11}"]
     ooc_rows = []
     for lab, m in cls:
         E = np.where(hit, rec["ownE"], rec["eest"])[m]
-        L.append(f"{lab:<92}{int(m.sum()):>9}{100 * m.sum() / n_o:>7.1f}{np.median(rec['a0'][m]) if m.any() else np.nan:>16.1f}{np.median(E) if m.any() else np.nan:>11.1f}")
-        ooc_rows.append(dict(table="ooc_class", bin=lab, n=int(m.sum()), frac=m.sum() / n_o))
+        L.append(f"{lab:<92}{int(m.sum()):>9}{wci(int(m.sum()), n_o, 2):>24}{np.median(rec['a0'][m]) if m.any() else np.nan:>16.1f}{np.median(E) if m.any() else np.nan:>11.1f}")
+        cl, ch = wil(int(m.sum()), n_o)
+        ooc_rows.append(dict(table="ooc_class", bin=lab, n=int(m.sum()), frac=m.sum() / n_o, lo=cl, hi=ch))
     nh = o & ~hit
     L += ["", "Could they seed fake clusters?  (a) rows without an own-pulse hit (incl. rows whose module has a hit from another pulse): estimated E >= 30 MeV and no higher neighbour hit, if the benchmark trigger-window were widened by w on both sides:",
           f"{'w (ns)':>8}{'rows entering the window':>26}{'E_est >= 30 MeV':>18}{'... and no higher nb (would seed)':>36}"]
@@ -746,18 +795,19 @@ def ooc_page(pdf, plt, C):
         s2 = s & ~(rec["nbE"] > rec["eest"])
         L.append(f"{w:>8}{int(m.sum()):>26}{int(s.sum()):>18}{int(s2.sum()):>36}")
         ooc_rows.append(dict(table="ooc_widen", bin=f"w={w}", n=int(m.sum()), k=int(s.sum()), k_in_window=int(s2.sum())))
-    L += ["(b) rows with a hit of E >= 30 MeV and a higher neighbour hit: time difference to that neighbour, i.e. which cluster time gate would absorb them:", f"{'gate (ns)':>10}{'rows with |dt| < gate':>24}{'%':>8}"]
+    L += ["(b) rows with a hit of E >= 30 MeV and a higher neighbour hit: time difference to that neighbour, i.e. which cluster time gate would absorb them:", f"{'gate (ns)':>10}{'rows with |dt| < gate':>24}{'% [68 % CI]':>26}"]
     m = o & hit & (rec["ownE"] >= SEED_E_MEV) & nb_hi
     for g in (4, 8, 16, 32, 64):
         k = int((m & (np.abs(rec["nbdt"]) < g)).sum())
-        L.append(f"{g:>10}{k:>24}{100 * k / max(int(m.sum()), 1):>8.1f}")
-        ooc_rows.append(dict(table="ooc_gate", bin=f"gate={g}", n=int(m.sum()), k=k))
+        L.append(f"{g:>10}{k:>24}{wci(k, int(m.sum()), 2):>26}")
+        gl, gh = wil(k, int(m.sum()))
+        ooc_rows.append(dict(table="ooc_gate", bin=f"gate={g}", n=int(m.sum()), k=k, frac=k / max(int(m.sum()), 1), lo=gl, hi=gh))
     mi = inc & ((rec["t0"] + dtm < TWIN[0] - 5) | (rec["t0"] + dtm >= TWIN[1] + 5))
     sd = lambda w: int((nh & (tc >= TWIN[0] - w) & (tc < TWIN[1] + w) & (rec["eest"] >= SEED_E_MEV) & ~(rec["nbE"] > rec["eest"])).sum())   # noqa: E731
     w32, w64 = sd(32), sd(64)
     big = o & (np.where(hit, rec["ownE"], rec["eest"]) >= 500)
     L += ["", f"Energy reach: outside-cluster f1 rows with E (own-pulse hit or estimate) >= 500 MeV (the ep selection's SIGNAL_MIN): {int(big.sum())}; >= 100 MeV: {int((o & (np.where(hit, rec['ownE'], rec['eest']) >= 100)).sum())}.",
-          f"In-cluster f1 rows: {int(mi.sum())} of {int(inc.sum())} ({100 * mi.sum() / inc.sum():.1f} %) have their largest (flagged) pulse outside the hit window by > 5 ns; the clustered hit of that module is then another, in-window pulse of the same record riding on the flagged pulse's tail.",
+          f"In-cluster f1 rows: {int(mi.sum())} of {int(inc.sum())} ({wci(int(mi.sum()), int(inc.sum()), 2)} %) have their largest (flagged) pulse outside the hit window by > 5 ns; the clustered hit of that module is then another, in-window pulse of the same record riding on the flagged pulse's tail.",
           "", f"Reading: the outside rows are mostly early pulses (t ~ 0, ~100 ns before the window) whose own pulse never became a hit; {int((o & anyhit & ~hit).sum())} of them share a module with a different in-window hit (another pulse).",
           f"Almost none reach the ep or Moller energy range (>= 500 MeV: see above); a trigger window wider by 32 ns would let {w32} of {n_o} rows seed 30+ MeV clusters, by 64 ns {w64}."]
     text_page(pdf, plt, "Out-of-cluster Ta f1 rows: what they are and whether they could seed clusters", L, size=7.6)
@@ -823,18 +873,19 @@ def summary_lines(rows, fits, cur_rows, ooc):
         if ds == "2p24GeV_Ta_X17":
             L.append(f"  Moller pairs: V3 {ci_s(g(ds, 'moller_pair', 'V3'))}   V4 {ci_s(g(ds, 'moller_pair', 'V4'))}   V2 {ci_s(g(ds, 'moller_pair', 'V2'))} %")
             r0 = g(ds, "elastic", "V4", "ring", f"{RADBINS[0]:g}-{RADBINS[1]:g}")
-            L.append(f"  V4 elastic loss in the inner ring (0-120 mm) {ci_s(r0)} %; other rings <= {100 * max(get(rows, table='veto', dataset=ds, population='elastic', axis='ring', bin=f'{RADBINS[i]:g}-{RADBINS[i + 1]:g}', veto='V4')['frac'] for i in range(1, len(RADBINS) - 1)):.2f} % (Table 2)")
+            rmax = max((get(rows, table='veto', dataset=ds, population='elastic', axis='ring', bin=f'{RADBINS[i]:g}-{RADBINS[i + 1]:g}', veto='V4') for i in range(1, len(RADBINS) - 1)), key=lambda r: r["frac"])
+            L.append(f"  V4 elastic loss in the inner ring (0-120 mm) {ci_s(r0)} %; largest of the other rings ({rmax['bin']} mm) {ci_s(rmax)} % (Table 2)")
     L += ["", "Recommendation (veto vs resolution gain is decided at the gate after P9):",
           f"  H2 2.24 and 3.49 GeV: V3.  It removes {g('2p24GeV_H2', 'elastic', 'V3')['k']} (2.24) and {g('3p49GeV_H2', 'elastic', 'V3')['k']} (3.49) fake clusters from the elastic window at a loss of "
-          f"{pc(g('2p24GeV_H2', 'elastic', 'V3')['frac'], 4)} and {pc(g('3p49GeV_H2', 'elastic', 'V3')['frac'], 4)} %, so no efficiency correction is needed (< 0.01 % : {100 * max(g('2p24GeV_H2', 'elastic', 'V3')['hi'], g('3p49GeV_H2', 'elastic', 'V3')['hi']):.3f} % upper edge).  Keep the {g('3p49GeV_H2', 'elastic', 'V3b')['k']} clipped-seed",
+          f"{pci(g('2p24GeV_H2', 'elastic', 'V3'), 4)} and {pci(g('3p49GeV_H2', 'elastic', 'V3'), 4)} % (Wilson 68 %), so no efficiency correction is needed (< 0.01 % : {100 * max(g('2p24GeV_H2', 'elastic', 'V3')['hi'], g('3p49GeV_H2', 'elastic', 'V3')['hi']):.3f} % upper edge).  Keep the {g('3p49GeV_H2', 'elastic', 'V3b')['k']} clipped-seed",
           "  showers (W398 at 3.49 GeV, a high-ADC/MeV module) in the sample and treat them as an energy-estimate issue (P8/P9).",
-          f"  H2 0.73 GeV: no saturated seed in the window (0/{g('0p73GeV_H2', 'elastic', 'V3')['n']}); V3 is a no-op there.  V4 would cost {pc(g('0p73GeV_H2', 'elastic', 'V4')['frac'], 3)} %: not worth a veto without a P9 gain.",
+          f"  H2 0.73 GeV: no saturated seed in the window (0/{g('0p73GeV_H2', 'elastic', 'V3')['n']}); V3 is a no-op there.  V4 would cost {pci(g('0p73GeV_H2', 'elastic', 'V4'))} %: not worth a veto without a P9 gain.",
           "  H2 V4 (adds f1/f3 seeds): 2.24 GeV costs "
-          f"{pc(g('2p24GeV_H2', 'elastic', 'V4')['frac'], 3)} % (V3 {pc(g('2p24GeV_H2', 'elastic', 'V3')['frac'], 3)} %), 3.49 GeV {pc(g('3p49GeV_H2', 'elastic', 'V4')['frac'] - g('3p49GeV_H2', 'elastic', 'V3')['frac'], 3)} % extra; adopt only if P9 shows a resolution or peak-shift gain.",
-          f"  Ta X17: V3 is a no-op (0 saturated seeds in {g('2p24GeV_Ta_X17', 'elastic', 'V3')['n']} elastic clusters).  V4 costs {pc(g('2p24GeV_Ta_X17', 'elastic', 'V4')['frac'], 3)} % of elastic and "
-          f"{pc(g('2p24GeV_Ta_X17', 'moller_pair', 'V4')['frac'], 3)} % of Moller pairs, concentrated in the inner ring; if P9 shows a gain, correct the yield ring by ring with Table 2.",
-          f"  V2 (any member flagged) is not viable: {pc(g('2p24GeV_Ta_X17', 'elastic', 'V2')['frac'], 1)} % (Ta elastic), {pc(g('2p24GeV_H2', 'elastic', 'V2')['frac'], 1)}-{pc(g('3p49GeV_H2', 'elastic', 'V2')['frac'], 1)} % (H2 2.24/3.49), "
-          f"{pc(g('2p24GeV_Ta_X17', 'moller_pair', 'V2')['frac'], 1)} % of Ta Moller pairs.", ""]
+          f"{pci(g('2p24GeV_H2', 'elastic', 'V4'))} % (V3 {pci(g('2p24GeV_H2', 'elastic', 'V3'), 4)} %), 3.49 GeV {wci(g('3p49GeV_H2', 'elastic', 'V4')['k'] - g('3p49GeV_H2', 'elastic', 'V3')['k'], g('3p49GeV_H2', 'elastic', 'V4')['n'], 4)} % extra (V3 is a subset of V4); adopt only if P9 shows a resolution or peak-shift gain.",
+          f"  Ta X17: V3 is a no-op (0 saturated seeds in {g('2p24GeV_Ta_X17', 'elastic', 'V3')['n']} elastic clusters).  V4 costs {pci(g('2p24GeV_Ta_X17', 'elastic', 'V4'))} % of elastic and "
+          f"{pci(g('2p24GeV_Ta_X17', 'moller_pair', 'V4'))} % of Moller pairs, concentrated in the inner ring; if P9 shows a gain, correct the yield ring by ring with Table 2.",
+          f"  V2 (any member flagged) is not viable: {pci(g('2p24GeV_Ta_X17', 'elastic', 'V2'), 2)} % (Ta elastic), {pci(g('2p24GeV_H2', 'elastic', 'V2'), 2)} / {pci(g('3p49GeV_H2', 'elastic', 'V2'), 2)} % (H2 2.24 / 3.49), "
+          f"{pci(g('2p24GeV_Ta_X17', 'moller_pair', 'V2'), 2)} % of Ta Moller pairs (Wilson 68 %).", ""]
     k1 = next(f for f in fits if f["dataset"].startswith("Ta split level, x = mean kept PbWO4"))
     kev = [f for f in fits if f["dataset"].startswith("Ta event level") and "PER EVENT" not in f["dataset"]]
     t25, t26 = [r for r in cur_rows if r["run"] == 25800][0], [r for r in cur_rows if r["run"] == 26230][0]
@@ -842,22 +893,25 @@ def summary_lines(rows, fits, cur_rows, ooc):
     h73b, h73a = [r for r in cur_rows if r["run"] == 24603][0], [r for r in cur_rows if r["run"] == 24590][0]
     kpe = [f for f in fits if f["dataset"].startswith(("25800", "26230")) and "PER EVENT" in f["dataset"]]
     t38 = [r for r in cur_rows if r["run"] == 26138][0]
+    h2r = [r for r in cur_rows if not r["rt"].endswith("X17")]
+    hmin, hmax = min(h2r, key=lambda r: r["rate"]), max(h2r, key=lambda r: r["rate"])
+    pcr = lambda r, d=3: f"{100 * r['rate']:.{d}f} [{100 * r['lo']:.{d}f}, {100 * r['hi']:.{d}f}]"       # noqa: E731
     L += ["Ta inner-ring f1 rate vs occupancy and current:",
-          f"  Across runs the f1 rate follows the occupancy: slope {100 * k1['b']:.4f} +- {100 * k1['sb']:.4f} % per kept channel per event ({k1['n']} splits, elasticity {k1['elasticity']:.2f}, chi2/dof {k1['chi2'] / max(k1['dof'], 1):.0f}: run-level scatter above the binomial error, only 3 runs).",
-          f"  26230 / 25800: rate x{t26['rate'] / t25['rate']:.2f}, current x{t26['current'] / t25['current']:.2f} (3.5 / 3.0 nA; 25800 from the elog, RCDB blank), kept channels x{t26['mean_nk'] / t25['mean_nk']:.2f}.  "
-          f"26138 has the same 3.5 nA as 26230 but fewer kept channels ({t38['mean_nk']:.1f} vs {t26['mean_nk']:.1f}) and a lower rate ({100 * t38['rate']:.2f} vs {100 * t26['rate']:.2f} %): current and occupancy cannot be separated with three runs.",
-          f"  Within a run, event multiplicity is only a partial proxy: f1 rows per event rise sub-proportionally (elasticity {kpe[0]['elasticity']:.2f} for 25800, {kpe[1]['elasticity']:.2f} for 26230+26138) and the rate per inner row falls "
-          f"(elasticity {kev[0]['elasticity']:.2f}, {kev[1]['elasticity']:.2f}).",
+          f"  Across runs the f1 rate follows the occupancy: slope {100 * k1['b']:.4f} +- {100 * k1['sb']:.4f} % per kept channel per event ({k1['n']} splits, elasticity {k1['elasticity']:.2f} +- {k1['elasticity_err']:.2f}, chi2/dof {k1['chi2'] / max(k1['dof'], 1):.0f}: run-level scatter above the binomial error, only 3 runs).",
+          f"  26230 / 25800: rate x({ratio_s(t26['rate'], t26['lo'], t26['hi'], t25['rate'], t25['lo'], t25['hi'])}), current x{t26['current'] / t25['current']:.2f} (3.5 / 3.0 nA; 25800 from the elog, RCDB blank), kept channels x{t26['mean_nk'] / t25['mean_nk']:.2f}.  "
+          f"26138 has the same 3.5 nA as 26230 but fewer kept channels ({t38['mean_nk']:.1f} vs {t26['mean_nk']:.1f}) and a lower rate ({pc(t38['rate'], 3)} [{pc(t38['lo'], 3)}, {pc(t38['hi'], 3)}] vs {pc(t26['rate'], 3)} [{pc(t26['lo'], 3)}, {pc(t26['hi'], 3)}] %): current and occupancy cannot be separated with three runs.",
+          f"  Within a run, event multiplicity is only a partial proxy: f1 rows per event rise sub-proportionally (elasticity {kpe[0]['elasticity']:.2f} +- {kpe[0]['elasticity_err']:.2f} for 25800, {kpe[1]['elasticity']:.2f} +- {kpe[1]['elasticity_err']:.2f} for 26230+26138) and the rate per inner row falls "
+          f"(elasticity {kev[0]['elasticity']:.2f} +- {kev[0]['elasticity_err']:.2f}, {kev[1]['elasticity']:.2f} +- {kev[1]['elasticity_err']:.2f}).",
           "  So f1 tracks run-level occupancy (elasticity ~1, 3 runs); current, occupancy, trigger version (25800: X17_v3; 26138/26230: X17_v4_RawSum950) and the 08-10 inner-layer HV change are confounded and cannot be separated here.",
           "  Consistent with descending tails of earlier pulses (their rate grows with the pulse rate), not proof: the within-run dependence on in-event multiplicity is only partial.",
-          f"  H2 (event level, three energies): per-row elasticity {min(f['elasticity'] for f in fits if 'GeV H2 event level, x' in f['dataset']):.1f}-{max(f['elasticity'] for f in fits if 'GeV H2 event level, x' in f['dataset']):.1f} (chi2/dof {min(f['chi2'] / max(f['dof'], 1) for f in fits if 'GeV H2 event level, x' in f['dataset']):.0f}-{max(f['chi2'] / max(f['dof'], 1) for f in fits if 'GeV H2 event level, x' in f['dataset']):.0f}: not a straight line) - the H2 f1 rows rise faster than the multiplicity, a different mix from Ta.",
-          f"  H2: rates {100 * min(r['rate'] for r in cur_rows if not r['rt'].endswith('X17')):.3f}-{100 * max(r['rate'] for r in cur_rows if not r['rt'].endswith('X17')):.3f} % (Ta {100 * t25['rate']:.2f}-{100 * t26['rate']:.2f} %); 3.49 GeV 700 vs 400 nA: rate x{h700['rate'] / h400['rate']:.2f} for current x1.75 "
-          f"(single runs, statistical errors only); 0.73 GeV 24603 / 24590: x{h73b['rate'] / h73a['rate']:.2f} for current x{h73b['current'] / h73a['current']:.2f}, so another run condition (24603 has the 250 MeV threshold) matters there.", ""]
+          f"  H2 (event level, three energies): per-row elasticity {min(f['elasticity'] for f in fits if 'GeV H2 event level, x' in f['dataset']):.1f}-{max(f['elasticity'] for f in fits if 'GeV H2 event level, x' in f['dataset']):.1f} (fit errors up to {max(f['elasticity_err'] for f in fits if 'GeV H2 event level, x' in f['dataset']):.1f}; chi2/dof {min(f['chi2'] / max(f['dof'], 1) for f in fits if 'GeV H2 event level, x' in f['dataset']):.0f}-{max(f['chi2'] / max(f['dof'], 1) for f in fits if 'GeV H2 event level, x' in f['dataset']):.0f}: not a straight line) - the H2 f1 rows rise faster than the multiplicity, a different mix from Ta.",
+          f"  H2: rates {pcr(hmin)} to {pcr(hmax)} % (Wilson 68 %; Ta {pcr(t25)} to {pcr(t26)} %); 3.49 GeV 700 vs 400 nA: rate x({ratio_s(h700['rate'], h700['lo'], h700['hi'], h400['rate'], h400['lo'], h400['hi'])}) for current x1.75 "
+          f"(single runs, statistical errors only); 0.73 GeV 24603 / 24590: x({ratio_s(h73b['rate'], h73b['lo'], h73b['hi'], h73a['rate'], h73a['lo'], h73a['hi'])}) for current x{h73b['current'] / h73a['current']:.2f}, so another run condition (24603 has the 250 MeV threshold) matters there.", ""]
     L += ["Out-of-cluster Ta f1 rows:",
-          f"  {ooc['n_out']} of {ooc['n']} f1 rows ({100 * ooc['n_out'] / ooc['n']:.0f} %) are outside any cluster (the P7 Log line has the counts reversed: 191k are inside).  Classes: "
-          + "; ".join(f"{100 * n_ / ooc['n_out']:.1f} % {lab}, E med {me:.0f} MeV" for (lab, n_), me in zip(ooc["cls"], ooc["medE"]) if n_ > 0.001 * ooc["n_out"]) + ".",
+          f"  {ooc['n_out']} of {ooc['n']} f1 rows ({wci(ooc['n_out'], ooc['n'], 2)} %) are outside any cluster (the P7 Log line has the counts reversed: 191k are inside).  Classes: "
+          + "; ".join(f"{wci(n_, ooc['n_out'], 2)} % {lab}, E med {me:.0f} MeV" for (lab, n_), me in zip(ooc["cls"], ooc["medE"]) if n_ > 0.001 * ooc["n_out"]) + ".",
           f"  {ooc['other_hit']} of them share a module with a different in-window hit that is a different pulse (not counted as their own hit).",
-          f"  Practically none can enter the ep or Moller windows (E >= 500 MeV: {ooc['n500']} rows, {100 * ooc['n500'] / ooc['n_out']:.2f} %).  {ooc['w0']} in-window rows have E_est >= 30 MeV and no higher neighbour but did not become hits (the module's hit is often another pulse); a wider trigger window would, see the table (a trigger window wider by 32 / 64 ns: {ooc['w32']} / {ooc['w64']} rows would seed 30+ MeV clusters).  No action for the yields.",
+          f"  Practically none can enter the ep or Moller windows (E >= 500 MeV: {ooc['n500']} rows, {wci(ooc['n500'], ooc['n_out'], 3)} %).  {ooc['w0']} in-window rows have E_est >= 30 MeV and no higher neighbour but did not become hits (the module's hit is often another pulse); a wider trigger window would, see the table (a trigger window wider by 32 / 64 ns: {ooc['w32']} / {ooc['w64']} rows would seed 30+ MeV clusters).  No action for the yields.",
           f"  {ooc['mi']} of {ooc['n_in']} in-cluster f1 rows are flagged on a pulse outside the hit window (mostly early) while the clustered hit is another pulse of the record: relevant for how P8 assigns the f1 correction."]
     return L
 
@@ -869,6 +923,7 @@ def report(C, out):
     from matplotlib.backends.backend_pdf import PdfPages
     out = Path(out)
     rows, extra, metas = C["veto"]
+    enrich(rows)
     with PdfPages(out / f"{STEM}.pdf") as pdf:
         head = [__doc__.split("Inputs.")[1].split("Outputs")[0].strip()]
         text_page(pdf, plt, "P10 impact on yields: definitions and data", "\n".join(head).split("\n"), size=8.4)
@@ -879,15 +934,23 @@ def report(C, out):
         Lc, ooc_rows, ooc_info = ooc_page(pdf, plt, C)
         S = summary_lines(rows, fits, cur_rows, ooc_info)
         text_page(pdf, plt, "Summary: recommended veto per run type (input to the gate after P9 / P10)", S, size=8.2)
-    allrows = [dict(r) for r in rows if r["table"] in ("veto", "ebin", "satmod", "scope")]
+    allrows = [dict(r) for r in enrich(rows) if r["table"] in ("veto", "ebin", "satmod", "scope")]
     for f in fits:
         allrows.append(f)
     for r in cur_rows:
         allrows.append(dict(table="occ_run", dataset=f"{r['run']}", bin=r["rt"], n=r["rows_in"], k=r["f1_in"], frac=r["rate"], lo=r["lo"], hi=r["hi"], a=r["current"], b=r["mean_nk"]))
     for d in occ_tables(C["occ"]):
-        allrows.append(dict(table="occ_split", dataset=f"{d['run']}", bin=f"{d['rt']}_s{d['split']}", n=d["rows_in"], k=d["f1_in"], frac=d["rate"], n_events=d["n_ev"], a=d["mean_nk_all"], b=d["mean_k"]))
+        allrows.append(dict(table="occ_split", dataset=f"{d['run']}", bin=f"{d['rt']}_s{d['split']}", n=d["rows_in"], k=d["f1_in"], frac=d["rate"], lo=wil(d["f1_in"], d["rows_in"])[0], hi=wil(d["f1_in"], d["rows_in"])[1], n_events=d["n_ev"], a=d["mean_nk_all"], b=d["mean_k"]))
     allrows += ooc_rows
-    cols = ("table", "dataset", "population", "axis", "bin", "veto", "n", "k", "k_in_window", "frac", "lo", "hi", "n_events", "per_kevent", "a", "b", "sa", "sb", "chi2", "dof", "elasticity")
+    cols = ("table", "dataset", "population", "axis", "bin", "veto", "n", "k", "k_in_window", "frac", "lo", "hi", "n_events", "per_kevent", "a", "b", "sa", "sb", "chi2", "dof", "elasticity",
+            "rate_lo68", "rate_hi68", "kin_rate", "kin_rate_lo68", "kin_rate_hi68", "elasticity_err")
+    for r in allrows:      # cached Wilson rows from before the clamp: lower bound exact 0 at k = 0, never negative
+        if r.get("table") in ("veto", "ebin", "satmod", "scope", "occ_run", "occ_split") and isinstance(r.get("lo"), (float, np.floating)) and np.isfinite(r["lo"]):
+            r["lo"] = 0.0 if r.get("k") == 0 else max(float(r["lo"]), 0.0)
+    for r in allrows:      # no interval applies -> empty cell, not "nan"
+        for q in ("lo", "hi"):
+            if isinstance(r.get(q), (float, np.floating)) and not np.isfinite(r[q]):
+                r[q] = ""
     write_tsv(out / f"{STEM}.tsv", allrows, cols)
     print("\n".join(S))
     print("\n".join(Lo))

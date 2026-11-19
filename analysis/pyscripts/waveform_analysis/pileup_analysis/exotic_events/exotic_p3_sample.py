@@ -14,6 +14,7 @@ Examples: per flag and run type N_EX random (seed SEED) flagged channels, redraw
 stored k and chi2/dof (SPARE extra draws replace failures).  Each panel: data (red x: overflow), default fit (red total, dashed components, grey baseline, dotted green: the stretched
 single-pulse fit of flag 3 where it ran), residual below.  f1 examples add the PILEUP_BASE_SLOPE refit, f4 examples the PILEUP_CLIP_SINGLE refit (8 ns margin, the default EX_CLIP_NS)
 as a second panel (refits by exotic_p2_flags.fit_opt on the single row; same b_ref, sigma_ref).
+Every percentage carries its 68 % Wilson interval (pct_ci; TSV columns *_lo68 / *_hi68 in percent; k-distribution bars have error bars).
 Outputs (--out): exotic_P3_sample_20261117.pdf (table pages, then examples), .tsv (rates, overlaps, k distributions, f4 leakage), _modules.tsv, _examples.tsv.
 """
 from __future__ import annotations
@@ -225,24 +226,61 @@ def pct(x, n):
     return f"{100 * x / max(n, 1):.3f}"
 
 
+def pct_raw(x, n):
+    """Unrounded percent (repr of the float) for the *_percent_raw TSV columns."""
+    return repr(float(100 * x / max(n, 1)))
+
+
+def wil(c, n):
+    """Wilson 68 % interval (fractions) of c / n; exotic_p4_module_rates.wilson, imported at call time (P4 imports this module)."""
+    from exotic_p4_module_rates import wilson
+    lo, hi = wilson(c, n)
+    return (float(lo), float(hi)) if np.ndim(lo) == 0 else (lo, hi)
+
+
+def pct_ci(c, n):
+    """'p [lo, hi]' in percent, Wilson 68 %, same decimals for all three (set by the half-width, so the interval never collapses)."""
+    lo, hi = wil(c, n)
+    p, lo, hi = 100.0 * c / max(n, 1), max(100 * lo, 0.0), 100 * hi
+    h = max((hi - lo) / 2, 1e-12)
+    dec = max(1, -int(np.floor(np.log10(h))))
+    return f"{p:.{dec}f} [{lo:.{dec}f}, {hi:.{dec}f}]"
+
+
+def ci_cols(c, n):
+    """(lo, hi) in percent, Wilson 68 %."""
+    lo, hi = wil(c, n)
+    return max(100 * lo, 0.0), 100 * hi
+
+
+def ci(c, n):
+    lo, hi = ci_cols(c, n)
+    return dict(percent_lo68=lo, percent_hi68=hi)
+
+
 def tsv_stats(S, names):
     rows = []
     for rt in TYPES:
         r = S["rate"][rt]
         for key in ("n", "f1", "f2", "f3", "f4", "any"):
-            rows.append(dict(section="rate", run_type=rt, item=key, count=r[key], percent=pct(r[key], r["n"]) if key != "n" else ""))
+            rows.append(dict(section="rate", run_type=rt, item=key, count=r[key], percent=pct(r[key], r["n"]) if key != "n" else "", percent_raw=pct_raw(r[key], r["n"]) if key != "n" else "", **(ci(r[key], r["n"]) if key != "n" else {})))
         for c in range(16):
             lab = "+".join(f"f{i}" for i in FLAGS if c >> (i - 1) & 1) or "none"
-            rows.append(dict(section="overlap", run_type=rt, item=lab, count=S["pat"][rt][c], percent=pct(S["pat"][rt][c], r["n"])))
+            rows.append(dict(section="overlap", run_type=rt, item=lab, count=S["pat"][rt][c], percent=pct(S["pat"][rt][c], r["n"]), percent_raw=pct_raw(S["pat"][rt][c], r["n"]), **ci(S["pat"][rt][c], r["n"])))
         for i in FLAGS:
             for lab in ("flagged", "unflagged"):
                 h = S["kdist"][rt][(i, lab)]
                 for b, v in zip(KBINS, h):
-                    rows.append(dict(section="k_dist", run_type=rt, item=f"f{i} {lab} k={b}", count=int(v), percent=pct(v, h.sum())))
+                    rows.append(dict(section="k_dist", run_type=rt, item=f"f{i} {lab} k={b}", count=int(v), percent=pct(v, h.sum()), percent_raw=pct_raw(v, h.sum()), **ci(v, h.sum())))
         f = S["f4"][rt]
         for key in ("n", "main", "sec", "either", "anysec"):
-            rows.append(dict(section="f4_leakage", run_type=rt, item=key, count=f[key], percent=pct(f[key], f["n"]) if key != "n" else "", window=f["win"]))
+            rows.append(dict(section="f4_leakage", run_type=rt, item=key, count=f[key], percent=pct(f[key], f["n"]) if key != "n" else "", percent_raw=pct_raw(f[key], f["n"]) if key != "n" else "", window=f["win"], **(ci(f[key], f["n"]) if key != "n" else {})))
     return rows
+
+
+def mci(f2, f3, n):
+    a, b = ci_cols(f2, n), ci_cols(f3, n)
+    return dict(f2_percent_lo68=a[0], f2_percent_hi68=a[1], f3_percent_lo68=b[0], f3_percent_hi68=b[1])
 
 
 def module_rows(S, names):
@@ -252,12 +290,12 @@ def module_rows(S, names):
         for j, nme in enumerate(names):
             if m["n"][j]:
                 rows.append(dict(run_type=rt, module=nme, midx=j, n=int(m["n"][j]), f2=int(m["f2"][j]), f3=int(m["f3"][j]),
-                                 f2_percent=pct(m["f2"][j], m["n"][j]), f3_percent=pct(m["f3"][j], m["n"][j])))
+                                 f2_percent=pct(m["f2"][j], m["n"][j]), f3_percent=pct(m["f3"][j], m["n"][j]), f2_percent_raw=pct_raw(m["f2"][j], m["n"][j]), f3_percent_raw=pct_raw(m["f3"][j], m["n"][j]), **mci(m["f2"][j], m["f3"][j], m["n"][j])))
     for j, nme in enumerate(names):
         n = sum(int(S["mod"][rt]["n"][j]) for rt in TYPES)
         if n:
             f2, f3 = (sum(int(S["mod"][rt][q][j]) for rt in TYPES) for q in ("f2", "f3"))
-            rows.append(dict(run_type="all", module=nme, midx=j, n=n, f2=f2, f3=f3, f2_percent=pct(f2, n), f3_percent=pct(f3, n)))
+            rows.append(dict(run_type="all", module=nme, midx=j, n=n, f2=f2, f3=f3, f2_percent=pct(f2, n), f3_percent=pct(f3, n), f2_percent_raw=pct_raw(f2, n), f3_percent_raw=pct_raw(f3, n), **mci(f2, f3, n)))
     return rows
 
 
@@ -266,7 +304,7 @@ def top_modules(S, names, q, top=20):
     c = sum(S["mod"][rt][q] for rt in TYPES)
     rate = np.where(n >= MIN_N, c / np.maximum(n, 1), -1.0)
     o = np.argsort(-rate, kind="stable")[:top]
-    return [(names[j], int(n[j]), int(c[j]), 100 * c[j] / n[j]) for j in o if rate[j] >= 0]
+    return [(names[j], int(n[j]), int(c[j]), 100 * c[j] / n[j], *ci_cols(int(c[j]), int(n[j]))) for j in o if rate[j] >= 0]
 
 
 def text_page(pdf, plt, title, lines, size=9.5):
@@ -278,41 +316,44 @@ def text_page(pdf, plt, title, lines, size=9.5):
 
 
 def rate_lines(S):
-    L = [f"{'run type':<18}{'N kept PbWO4':>14}" + "".join(f"{'f' + str(i) + ' n':>9}{'%':>8}" for i in FLAGS) + f"{'any n':>9}{'%':>8}"]
+    L = [f"{'run type':<18}{'N kept PbWO4':>14}" + "".join(f"{'f' + str(i) + ' n':>9}{'% [68 % Wilson interval]':>30}" for i in FLAGS) + f"{'any n':>9}{'% [68 % Wilson interval]':>30}"]
     for rt in TYPES:
         r = S["rate"][rt]
-        L.append(f"{RT_LABEL[rt]:<18}{r['n']:>14d}" + "".join(f"{r[f'f{i}']:>9d}{100 * r[f'f{i}'] / max(r['n'], 1):>8.3f}" for i in FLAGS) + f"{r['any']:>9d}{100 * r['any'] / max(r['n'], 1):>8.3f}")
+        L.append(f"{RT_LABEL[rt]:<18}{r['n']:>14d}" + "".join(f"{r[f'f{i}']:>9d}{pct_ci(r[f'f{i}'], r['n']):>30}" for i in FLAGS) + f"{r['any']:>9d}{pct_ci(r['any'], r['n']):>30}")
     n = sum(S["rate"][rt]["n"] for rt in TYPES)
-    L.append(f"{'all':<18}{n:>14d}" + "".join(f"{sum(S['rate'][rt][f'f{i}'] for rt in TYPES):>9d}{100 * sum(S['rate'][rt][f'f{i}'] for rt in TYPES) / n:>8.3f}" for i in FLAGS)
-             + f"{sum(S['rate'][rt]['any'] for rt in TYPES):>9d}{100 * sum(S['rate'][rt]['any'] for rt in TYPES) / n:>8.3f}")
+    tot = {k: sum(S["rate"][rt][k] for rt in TYPES) for k in ("f1", "f2", "f3", "f4", "any")}
+    L.append(f"{'all':<18}{n:>14d}" + "".join(f"{tot[f'f{i}']:>9d}{pct_ci(tot[f'f{i}'], n):>30}" for i in FLAGS) + f"{tot['any']:>9d}{pct_ci(tot['any'], n):>30}")
     return L
 
 
 def overlap_lines(S):
-    L = [f"{'pattern':<18}" + "".join(f"{RT_LABEL[rt]:>22}" for rt in TYPES)]
+    L = [f"{'pattern':<18}" + "".join(f"{RT_LABEL[rt]:>43}" for rt in TYPES)]
     for c in range(16):
         lab = "+".join(f"f{i}" for i in FLAGS if c >> (i - 1) & 1) or "none"
-        L.append(f"{lab:<18}" + "".join(f"{S['pat'][rt][c]:>12d}{100 * S['pat'][rt][c] / max(S['rate'][rt]['n'], 1):>10.4f}%" for rt in TYPES))
+        L.append(f"{lab:<18}" + "".join(f"{S['pat'][rt][c]:>9d}{pct_ci(S['pat'][rt][c], S['rate'][rt]['n']):>34}" for rt in TYPES))
     L.append("")
-    L.append("pairwise (channels with both flags / channels with the row flag, %), all run types pooled:")
-    L.append(f"{'':<8}" + "".join(f"{'f' + str(j):>9}" for j in FLAGS))
+    L.append("pairwise (channels with both flags / channels with the row flag, % [68 % Wilson interval]), all run types pooled:")
+    L.append(f"{'':<14}" + "".join(f"{'f' + str(j):>30}" for j in FLAGS))
     for i in FLAGS:
         tot = sum(S["rate"][rt][f"f{i}"] for rt in TYPES)
         both = [sum(sum(S["pat"][rt][c] for c in range(16) if (c >> (i - 1) & 1) and (c >> (j - 1) & 1)) for rt in TYPES) for j in FLAGS]
-        L.append(f"{'f' + str(i) + ' n=' + str(tot):<14}" + "".join(f"{100 * b / max(tot, 1):>9.1f}" for b in both))
+        L.append(f"{'f' + str(i) + ' n=' + str(tot):<14}" + "".join(f"{pct_ci(b, tot):>30}" for b in both))
     return L
 
 
 def k_page(pdf, plt, S):
     fig, axs = plt.subplots(len(TYPES), 4, figsize=(18, 13), sharey=False)
-    fig.suptitle("k distribution of flagged vs unflagged kept PbWO4 channels (fraction within each group)", fontsize=16, fontweight="bold")
+    fig.suptitle("k distribution of flagged vs unflagged kept PbWO4 channels (fraction within each group; bars: 68 % Wilson interval)", fontsize=16, fontweight="bold")
     x = np.arange(5)
     for r, rt in enumerate(TYPES):
         for c, i in enumerate(FLAGS):
             ax = axs[r, c]
             for off, lab, col in ((-0.2, "flagged", "tab:red"), (0.2, "unflagged", "0.5")):
                 h = S["kdist"][rt][(i, lab)]
-                ax.bar(x + off, h / max(h.sum(), 1), width=0.4, color=col, label=f"{lab} (n={int(h.sum())})")
+                fr = h / max(h.sum(), 1)
+                lo, hi = wil(h, h.sum())
+                ax.bar(x + off, fr, width=0.4, color=col, label=f"{lab} (n={int(h.sum())})")
+                ax.errorbar(x + off, fr, yerr=[np.maximum(fr - lo, 0), np.maximum(hi - fr, 0)], fmt="none", ecolor="k", elinewidth=0.8, capsize=2)
             ax.set_xticks(x)
             ax.set_xticklabels(KBINS)
             ax.set_yscale("log")
@@ -334,10 +375,10 @@ def module_pages(pdf, plt, S, names):
     rect = {i: Rectangle((geo[names[i]]["x"] - geo[names[i]]["sx"] / 2, geo[names[i]]["y"] - geo[names[i]]["sy"] / 2), geo[names[i]]["sx"], geo[names[i]]["sy"]) for i in pw}
     for q in ("f2", "f3"):
         top = top_modules(S, names, q)
-        lines = [f"top 20 modules by {q} rate, run types pooled, dominated by Ta X17 (modules with >= {MIN_N} kept channels; per-type rates in _modules.tsv)", f"{'module':<10}{'n kept':>10}{'n ' + q:>10}{'rate %':>10}"]
-        lines += [f"{a:<10}{b:>10d}{c:>10d}{d:>10.2f}" for a, b, c, d in top]
+        lines = [f"top 20 modules by {q} rate, run types pooled, dominated by Ta X17 (modules with >= {MIN_N} kept channels; per-type rates in _modules.tsv)", f"{'module':<10}{'n kept':>10}{'n ' + q:>10}  rate % [68 % Wilson interval]"]
+        lines += [f"{a:<10}{b:>10d}{c:>10d}  {pct_ci(c, b)}" for a, b, c, d, lo, hi in top]
         fig = plt.figure(figsize=(18, 13))
-        fig.suptitle(f"{FNAME[int(q[1])]}: per-module rate (kept PbWO4 channels)", fontsize=16, fontweight="bold")
+        fig.suptitle(f"{FNAME[int(q[1])]}: per-module rate (kept PbWO4 channels; map bins carry no interval, the 68 % Wilson interval of every module is in _modules.tsv)", fontsize=14, fontweight="bold")
         fig.text(0.02, 0.94, "\n".join(lines), fontsize=9, va="top", family="monospace", linespacing=1.35)
         vals = {}
         for rt in TYPES:
@@ -377,11 +418,10 @@ def f4_page(pdf, plt, S):
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     pdf.savefig(fig)
     plt.close(fig)
-    L = [f"{'run type':<18}{'window':>9}{'N f4':>8}{'E_main in':>11}{'%':>7}{'E_sec in':>10}{'%':>7}{'either':>8}{'%':>7}{'main or any sec':>17}{'%':>7}"]
+    L = [f"{'run type':<18}{'window':>9}{'N f4':>8}" + "".join(f"{h:>14}{'% [68 % Wilson interval]':>30}" for h in ("E_main in", "E_sec in", "either", "main/any sec"))]
     for rt in TYPES:
         f = S["f4"][rt]
-        L.append(f"{RT_LABEL[rt]:<18}{'+-' + str(f['win']):>9}{f['n']:>8d}{f['main']:>11d}{100 * f['main'] / max(f['n'], 1):>7.1f}{f['sec']:>10d}{100 * f['sec'] / max(f['n'], 1):>7.1f}"
-                 f"{f['either']:>8d}{100 * f['either'] / max(f['n'], 1):>7.1f}{f['anysec']:>17d}{100 * f['anysec'] / max(f['n'], 1):>7.1f}")
+        L.append(f"{RT_LABEL[rt]:<18}{'+-' + str(f['win']):>9}{f['n']:>8d}" + "".join(f"{f[k]:>14d}{pct_ci(f[k], f['n']):>30}" for k in ("main", "sec", "either", "anysec")))
     return L
 
 
@@ -467,22 +507,22 @@ def report(data, out):
         text_page(pdf, plt, "P3: exotic flags on the 2-file sample (default fit, PILEUP_EXOTIC=1, options off)",
                   ["population: kept PbWO4 channels (A_main >= KEEP_ADC) of the 13 runs x 2 splits of exotic_sample, per run type; fractions of that population",
                    "f1 tail-baseline (ex_db > 8, ex_tail < -5); f2 wide (w50 > 3); f3 smooth-wide (k >= 2, stretched single pulse within the BIC allowance); f4 clipped-multi (nclip >= 1, secondary within 8 ns of the clip or E_sec > 0.5 E_beam)", ""]
-                  + rate_lines(S) + [""] + notes, size=10)
-        text_page(pdf, plt, "Overlaps of the four flags (all 16 patterns; count and % of kept PbWO4 channels)", overlap_lines(S))
+                  + rate_lines(S) + [""] + notes, size=8)
+        text_page(pdf, plt, "Overlaps of the four flags (all 16 patterns; count and % [68 % Wilson interval] of kept PbWO4 channels)", overlap_lines(S), size=8.5)
         k_page(pdf, plt, S)
         module_pages(pdf, plt, S, names)
         f4_lines = f4_page(pdf, plt, S)
-        text_page(pdf, plt, "f4 clipped-multi: leakage of the flagged channels into the elastic window (+-3 sigma)",
-                  ["E_main in / E_sec in: flagged channels whose main pulse / largest secondary has |E/E_beam - 1| <= window; either: E_main or E_sec; main or any sec: E_main or any secondary pulse", ""] + f4_lines)
+        text_page(pdf, plt, "f4 clipped-multi: leakage of the flagged channels into the elastic window (+-3 sigma); % of the N f4 flagged channels [68 % Wilson]",
+                  ["E_main in / E_sec in: flagged channels whose main pulse / largest secondary has |E/E_beam - 1| <= window; either: E_main or E_sec; main or any sec: E_main or any secondary pulse", ""] + f4_lines, size=8.5)
         example_pages(pdf, plt, ex)
-    write_tsv(str(stem) + ".tsv", tsv_stats(S, names), ["section", "run_type", "item", "count", "percent", "window"])
-    write_tsv(str(stem) + "_modules.tsv", module_rows(S, names), ["run_type", "module", "midx", "n", "f2", "f3", "f2_percent", "f3_percent"])
+    write_tsv(str(stem) + ".tsv", tsv_stats(S, names), ["section", "run_type", "item", "count", "percent", "window", "percent_lo68", "percent_hi68", "percent_raw"])
+    write_tsv(str(stem) + "_modules.tsv", module_rows(S, names), ["run_type", "module", "midx", "n", "f2", "f3", "f2_percent", "f3_percent", "f2_percent_lo68", "f2_percent_hi68", "f3_percent_lo68", "f3_percent_hi68", "f2_percent_raw", "f3_percent_raw"])
     cols = ["run_type", "flag", "n_in_flag", "run", "ev", "module", "midx", "k", "chi2", "amain", "Emain_MeV", "Emain_Eb", "nclip", "w50", "ex_db", "ex_tail", "ex_s", "ex_chi2s", "ex_chi2k",
             "ex_nm", "ex_dclip", "ex_esec", "f1", "f2", "f3", "f4"] + [f"{t}_{q}" for t in ("bs", "cs8") for q in ("k", "chi2", "amain", "Emain_MeV")] + ["bs_bslope", "bs_gate"]
     write_tsv(str(stem) + "_examples.tsv", example_rows(ex), cols)
     print("\n".join(rate_lines(S) + [""] + overlap_lines(S) + [""] + f4_lines + [""] + notes))
     for q in ("f2", "f3"):
-        print(f"[top {q}] " + "; ".join(f"{a} {d:.1f}% ({c}/{b})" for a, b, c, d in top_modules(S, names, q)))
+        print(f"[top {q}] " + "; ".join(f"{a} {pct_ci(c, b)} % ({c}/{b})" for a, b, c, d, lo, hi in top_modules(S, names, q)))
     for rt in TYPES:
         for i in FLAGS:
             print(f"[examples] {rt} f{i}: {len(ex[(rt, i)])}")

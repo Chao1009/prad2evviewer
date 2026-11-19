@@ -1,269 +1,269 @@
-section	run_type	item	count	percent	window
-rate	0p73GeV_H2	n	5257066		
-rate	0p73GeV_H2	f1	1838	0.035	
-rate	0p73GeV_H2	f2	70	0.001	
-rate	0p73GeV_H2	f3	2617	0.050	
-rate	0p73GeV_H2	f4	2	0.000	
-rate	0p73GeV_H2	any	4417	0.084	
-overlap	0p73GeV_H2	none	5252649	99.916	
-overlap	0p73GeV_H2	f1	1759	0.033	
-overlap	0p73GeV_H2	f2	35	0.001	
-overlap	0p73GeV_H2	f1+f2	4	0.000	
-overlap	0p73GeV_H2	f3	2515	0.048	
-overlap	0p73GeV_H2	f1+f3	72	0.001	
-overlap	0p73GeV_H2	f2+f3	27	0.001	
-overlap	0p73GeV_H2	f1+f2+f3	3	0.000	
-overlap	0p73GeV_H2	f4	1	0.000	
-overlap	0p73GeV_H2	f1+f4	0	0.000	
-overlap	0p73GeV_H2	f2+f4	1	0.000	
-overlap	0p73GeV_H2	f1+f2+f4	0	0.000	
-overlap	0p73GeV_H2	f3+f4	0	0.000	
-overlap	0p73GeV_H2	f1+f3+f4	0	0.000	
-overlap	0p73GeV_H2	f2+f3+f4	0	0.000	
-overlap	0p73GeV_H2	f1+f2+f3+f4	0	0.000	
-k_dist	0p73GeV_H2	f1 flagged k=1	1436	78.128	
-k_dist	0p73GeV_H2	f1 flagged k=2	305	16.594	
-k_dist	0p73GeV_H2	f1 flagged k=3	67	3.645	
-k_dist	0p73GeV_H2	f1 flagged k=4	9	0.490	
-k_dist	0p73GeV_H2	f1 flagged k=>=5	21	1.143	
-k_dist	0p73GeV_H2	f1 unflagged k=1	5155116	98.095	
-k_dist	0p73GeV_H2	f1 unflagged k=2	91342	1.738	
-k_dist	0p73GeV_H2	f1 unflagged k=3	4035	0.077	
-k_dist	0p73GeV_H2	f1 unflagged k=4	1583	0.030	
-k_dist	0p73GeV_H2	f1 unflagged k=>=5	3152	0.060	
-k_dist	0p73GeV_H2	f2 flagged k=1	9	12.857	
-k_dist	0p73GeV_H2	f2 flagged k=2	7	10.000	
-k_dist	0p73GeV_H2	f2 flagged k=3	7	10.000	
-k_dist	0p73GeV_H2	f2 flagged k=4	9	12.857	
-k_dist	0p73GeV_H2	f2 flagged k=>=5	38	54.286	
-k_dist	0p73GeV_H2	f2 unflagged k=1	5156543	98.089	
-k_dist	0p73GeV_H2	f2 unflagged k=2	91640	1.743	
-k_dist	0p73GeV_H2	f2 unflagged k=3	4095	0.078	
-k_dist	0p73GeV_H2	f2 unflagged k=4	1583	0.030	
-k_dist	0p73GeV_H2	f2 unflagged k=>=5	3135	0.060	
-k_dist	0p73GeV_H2	f3 flagged k=1	0	0.000	
-k_dist	0p73GeV_H2	f3 flagged k=2	520	19.870	
-k_dist	0p73GeV_H2	f3 flagged k=3	877	33.512	
-k_dist	0p73GeV_H2	f3 flagged k=4	548	20.940	
-k_dist	0p73GeV_H2	f3 flagged k=>=5	672	25.678	
-k_dist	0p73GeV_H2	f3 unflagged k=1	5156552	98.137	
-k_dist	0p73GeV_H2	f3 unflagged k=2	91127	1.734	
-k_dist	0p73GeV_H2	f3 unflagged k=3	3225	0.061	
-k_dist	0p73GeV_H2	f3 unflagged k=4	1044	0.020	
-k_dist	0p73GeV_H2	f3 unflagged k=>=5	2501	0.048	
-k_dist	0p73GeV_H2	f4 flagged k=1	0	0.000	
-k_dist	0p73GeV_H2	f4 flagged k=2	0	0.000	
-k_dist	0p73GeV_H2	f4 flagged k=3	1	50.000	
-k_dist	0p73GeV_H2	f4 flagged k=4	1	50.000	
-k_dist	0p73GeV_H2	f4 flagged k=>=5	0	0.000	
-k_dist	0p73GeV_H2	f4 unflagged k=1	5156552	98.088	
-k_dist	0p73GeV_H2	f4 unflagged k=2	91647	1.743	
-k_dist	0p73GeV_H2	f4 unflagged k=3	4101	0.078	
-k_dist	0p73GeV_H2	f4 unflagged k=4	1591	0.030	
-k_dist	0p73GeV_H2	f4 unflagged k=>=5	3173	0.060	
-f4_leakage	0p73GeV_H2	n	2		0.095
-f4_leakage	0p73GeV_H2	main	0	0.000	0.095
-f4_leakage	0p73GeV_H2	sec	0	0.000	0.095
-f4_leakage	0p73GeV_H2	either	0	0.000	0.095
-f4_leakage	0p73GeV_H2	anysec	1	50.000	0.095
-rate	2p24GeV_H2	n	22861511		
-rate	2p24GeV_H2	f1	13313	0.058	
-rate	2p24GeV_H2	f2	265	0.001	
-rate	2p24GeV_H2	f3	6862	0.030	
-rate	2p24GeV_H2	f4	543	0.002	
-rate	2p24GeV_H2	any	19452	0.085	
-overlap	2p24GeV_H2	none	22842059	99.915	
-overlap	2p24GeV_H2	f1	11991	0.052	
-overlap	2p24GeV_H2	f2	95	0.000	
-overlap	2p24GeV_H2	f1+f2	12	0.000	
-overlap	2p24GeV_H2	f3	5445	0.024	
-overlap	2p24GeV_H2	f1+f3	1292	0.006	
-overlap	2p24GeV_H2	f2+f3	56	0.000	
-overlap	2p24GeV_H2	f1+f2+f3	18	0.000	
-overlap	2p24GeV_H2	f4	427	0.002	
-overlap	2p24GeV_H2	f1+f4	0	0.000	
-overlap	2p24GeV_H2	f2+f4	65	0.000	
-overlap	2p24GeV_H2	f1+f2+f4	0	0.000	
-overlap	2p24GeV_H2	f3+f4	32	0.000	
-overlap	2p24GeV_H2	f1+f3+f4	0	0.000	
-overlap	2p24GeV_H2	f2+f3+f4	19	0.000	
-overlap	2p24GeV_H2	f1+f2+f3+f4	0	0.000	
-k_dist	2p24GeV_H2	f1 flagged k=1	8349	62.713	
-k_dist	2p24GeV_H2	f1 flagged k=2	3051	22.917	
-k_dist	2p24GeV_H2	f1 flagged k=3	986	7.406	
-k_dist	2p24GeV_H2	f1 flagged k=4	567	4.259	
-k_dist	2p24GeV_H2	f1 flagged k=>=5	360	2.704	
-k_dist	2p24GeV_H2	f1 unflagged k=1	22199164	97.159	
-k_dist	2p24GeV_H2	f1 unflagged k=2	621724	2.721	
-k_dist	2p24GeV_H2	f1 unflagged k=3	17964	0.079	
-k_dist	2p24GeV_H2	f1 unflagged k=4	2974	0.013	
-k_dist	2p24GeV_H2	f1 unflagged k=>=5	6372	0.028	
-k_dist	2p24GeV_H2	f2 flagged k=1	14	5.283	
-k_dist	2p24GeV_H2	f2 flagged k=2	29	10.943	
-k_dist	2p24GeV_H2	f2 flagged k=3	48	18.113	
-k_dist	2p24GeV_H2	f2 flagged k=4	42	15.849	
-k_dist	2p24GeV_H2	f2 flagged k=>=5	132	49.811	
-k_dist	2p24GeV_H2	f2 unflagged k=1	22207499	97.140	
-k_dist	2p24GeV_H2	f2 unflagged k=2	624746	2.733	
-k_dist	2p24GeV_H2	f2 unflagged k=3	18902	0.083	
-k_dist	2p24GeV_H2	f2 unflagged k=4	3499	0.015	
-k_dist	2p24GeV_H2	f2 unflagged k=>=5	6600	0.029	
-k_dist	2p24GeV_H2	f3 flagged k=1	0	0.000	
-k_dist	2p24GeV_H2	f3 flagged k=2	1622	23.637	
-k_dist	2p24GeV_H2	f3 flagged k=3	2915	42.480	
-k_dist	2p24GeV_H2	f3 flagged k=4	1022	14.894	
-k_dist	2p24GeV_H2	f3 flagged k=>=5	1303	18.989	
-k_dist	2p24GeV_H2	f3 unflagged k=1	22207513	97.168	
-k_dist	2p24GeV_H2	f3 unflagged k=2	623153	2.727	
-k_dist	2p24GeV_H2	f3 unflagged k=3	16035	0.070	
-k_dist	2p24GeV_H2	f3 unflagged k=4	2519	0.011	
-k_dist	2p24GeV_H2	f3 unflagged k=>=5	5429	0.024	
-k_dist	2p24GeV_H2	f4 flagged k=1	0	0.000	
-k_dist	2p24GeV_H2	f4 flagged k=2	101	18.600	
-k_dist	2p24GeV_H2	f4 flagged k=3	119	21.915	
-k_dist	2p24GeV_H2	f4 flagged k=4	103	18.969	
-k_dist	2p24GeV_H2	f4 flagged k=>=5	220	40.516	
-k_dist	2p24GeV_H2	f4 unflagged k=1	22207513	97.142	
-k_dist	2p24GeV_H2	f4 unflagged k=2	624674	2.732	
-k_dist	2p24GeV_H2	f4 unflagged k=3	18831	0.082	
-k_dist	2p24GeV_H2	f4 unflagged k=4	3438	0.015	
-k_dist	2p24GeV_H2	f4 unflagged k=>=5	6512	0.028	
-f4_leakage	2p24GeV_H2	n	543		0.052
-f4_leakage	2p24GeV_H2	main	7	1.289	0.052
-f4_leakage	2p24GeV_H2	sec	70	12.891	0.052
-f4_leakage	2p24GeV_H2	either	76	13.996	0.052
-f4_leakage	2p24GeV_H2	anysec	103	18.969	0.052
-rate	3p49GeV_H2	n	11879523		
-rate	3p49GeV_H2	f1	13419	0.113	
-rate	3p49GeV_H2	f2	738	0.006	
-rate	3p49GeV_H2	f3	6603	0.056	
-rate	3p49GeV_H2	f4	103	0.001	
-rate	3p49GeV_H2	any	17503	0.147	
-overlap	3p49GeV_H2	none	11862020	99.853	
-overlap	3p49GeV_H2	f1	10610	0.089	
-overlap	3p49GeV_H2	f2	65	0.001	
-overlap	3p49GeV_H2	f1+f2	136	0.001	
-overlap	3p49GeV_H2	f3	3824	0.032	
-overlap	3p49GeV_H2	f1+f3	2243	0.019	
-overlap	3p49GeV_H2	f2+f3	92	0.001	
-overlap	3p49GeV_H2	f1+f2+f3	430	0.004	
-overlap	3p49GeV_H2	f4	77	0.001	
-overlap	3p49GeV_H2	f1+f4	0	0.000	
-overlap	3p49GeV_H2	f2+f4	12	0.000	
-overlap	3p49GeV_H2	f1+f2+f4	0	0.000	
-overlap	3p49GeV_H2	f3+f4	11	0.000	
-overlap	3p49GeV_H2	f1+f3+f4	0	0.000	
-overlap	3p49GeV_H2	f2+f3+f4	3	0.000	
-overlap	3p49GeV_H2	f1+f2+f3+f4	0	0.000	
-k_dist	3p49GeV_H2	f1 flagged k=1	7615	56.748	
-k_dist	3p49GeV_H2	f1 flagged k=2	2475	18.444	
-k_dist	3p49GeV_H2	f1 flagged k=3	1224	9.121	
-k_dist	3p49GeV_H2	f1 flagged k=4	905	6.744	
-k_dist	3p49GeV_H2	f1 flagged k=>=5	1200	8.943	
-k_dist	3p49GeV_H2	f1 unflagged k=1	11488489	96.818	
-k_dist	3p49GeV_H2	f1 unflagged k=2	363253	3.061	
-k_dist	3p49GeV_H2	f1 unflagged k=3	9821	0.083	
-k_dist	3p49GeV_H2	f1 unflagged k=4	1448	0.012	
-k_dist	3p49GeV_H2	f1 unflagged k=>=5	3093	0.026	
-k_dist	3p49GeV_H2	f2 flagged k=1	13	1.762	
-k_dist	3p49GeV_H2	f2 flagged k=2	52	7.046	
-k_dist	3p49GeV_H2	f2 flagged k=3	108	14.634	
-k_dist	3p49GeV_H2	f2 flagged k=4	135	18.293	
-k_dist	3p49GeV_H2	f2 flagged k=>=5	430	58.266	
-k_dist	3p49GeV_H2	f2 unflagged k=1	11496091	96.778	
-k_dist	3p49GeV_H2	f2 unflagged k=2	365676	3.078	
-k_dist	3p49GeV_H2	f2 unflagged k=3	10937	0.092	
-k_dist	3p49GeV_H2	f2 unflagged k=4	2218	0.019	
-k_dist	3p49GeV_H2	f2 unflagged k=>=5	3863	0.033	
-k_dist	3p49GeV_H2	f3 flagged k=1	0	0.000	
-k_dist	3p49GeV_H2	f3 flagged k=2	1309	19.824	
-k_dist	3p49GeV_H2	f3 flagged k=3	2738	41.466	
-k_dist	3p49GeV_H2	f3 flagged k=4	1090	16.508	
-k_dist	3p49GeV_H2	f3 flagged k=>=5	1466	22.202	
-k_dist	3p49GeV_H2	f3 unflagged k=1	11496104	96.826	
-k_dist	3p49GeV_H2	f3 unflagged k=2	364419	3.069	
-k_dist	3p49GeV_H2	f3 unflagged k=3	8307	0.070	
-k_dist	3p49GeV_H2	f3 unflagged k=4	1263	0.011	
-k_dist	3p49GeV_H2	f3 unflagged k=>=5	2827	0.024	
-k_dist	3p49GeV_H2	f4 flagged k=1	0	0.000	
-k_dist	3p49GeV_H2	f4 flagged k=2	9	8.738	
-k_dist	3p49GeV_H2	f4 flagged k=3	20	19.417	
-k_dist	3p49GeV_H2	f4 flagged k=4	17	16.505	
-k_dist	3p49GeV_H2	f4 flagged k=>=5	57	55.340	
-k_dist	3p49GeV_H2	f4 unflagged k=1	11496104	96.773	
-k_dist	3p49GeV_H2	f4 unflagged k=2	365719	3.079	
-k_dist	3p49GeV_H2	f4 unflagged k=3	11025	0.093	
-k_dist	3p49GeV_H2	f4 unflagged k=4	2336	0.020	
-k_dist	3p49GeV_H2	f4 unflagged k=>=5	4236	0.036	
-f4_leakage	3p49GeV_H2	n	103		0.044
-f4_leakage	3p49GeV_H2	main	10	9.709	0.044
-f4_leakage	3p49GeV_H2	sec	6	5.825	0.044
-f4_leakage	3p49GeV_H2	either	15	14.563	0.044
-f4_leakage	3p49GeV_H2	anysec	16	15.534	0.044
-rate	2p24GeV_Ta_X17	n	18786225		
-rate	2p24GeV_Ta_X17	f1	164655	0.876	
-rate	2p24GeV_Ta_X17	f2	20085	0.107	
-rate	2p24GeV_Ta_X17	f3	71455	0.380	
-rate	2p24GeV_Ta_X17	f4	4	0.000	
-rate	2p24GeV_Ta_X17	any	201877	1.075	
-overlap	2p24GeV_Ta_X17	none	18584348	98.925	
-overlap	2p24GeV_Ta_X17	f1	123000	0.655	
-overlap	2p24GeV_Ta_X17	f2	1599	0.009	
-overlap	2p24GeV_Ta_X17	f1+f2	5820	0.031	
-overlap	2p24GeV_Ta_X17	f3	34432	0.183	
-overlap	2p24GeV_Ta_X17	f1+f3	24357	0.130	
-overlap	2p24GeV_Ta_X17	f2+f3	1187	0.006	
-overlap	2p24GeV_Ta_X17	f1+f2+f3	11478	0.061	
-overlap	2p24GeV_Ta_X17	f4	2	0.000	
-overlap	2p24GeV_Ta_X17	f1+f4	0	0.000	
-overlap	2p24GeV_Ta_X17	f2+f4	1	0.000	
-overlap	2p24GeV_Ta_X17	f1+f2+f4	0	0.000	
-overlap	2p24GeV_Ta_X17	f3+f4	1	0.000	
-overlap	2p24GeV_Ta_X17	f1+f3+f4	0	0.000	
-overlap	2p24GeV_Ta_X17	f2+f3+f4	0	0.000	
-overlap	2p24GeV_Ta_X17	f1+f2+f3+f4	0	0.000	
-k_dist	2p24GeV_Ta_X17	f1 flagged k=1	39653	24.082	
-k_dist	2p24GeV_Ta_X17	f1 flagged k=2	35475	21.545	
-k_dist	2p24GeV_Ta_X17	f1 flagged k=3	24743	15.027	
-k_dist	2p24GeV_Ta_X17	f1 flagged k=4	21347	12.965	
-k_dist	2p24GeV_Ta_X17	f1 flagged k=>=5	43437	26.381	
-k_dist	2p24GeV_Ta_X17	f1 unflagged k=1	14803629	79.497	
-k_dist	2p24GeV_Ta_X17	f1 unflagged k=2	2916381	15.661	
-k_dist	2p24GeV_Ta_X17	f1 unflagged k=3	663841	3.565	
-k_dist	2p24GeV_Ta_X17	f1 unflagged k=4	163569	0.878	
-k_dist	2p24GeV_Ta_X17	f1 unflagged k=>=5	74150	0.398	
-k_dist	2p24GeV_Ta_X17	f2 flagged k=1	169	0.841	
-k_dist	2p24GeV_Ta_X17	f2 flagged k=2	748	3.724	
-k_dist	2p24GeV_Ta_X17	f2 flagged k=3	1758	8.753	
-k_dist	2p24GeV_Ta_X17	f2 flagged k=4	2924	14.558	
-k_dist	2p24GeV_Ta_X17	f2 flagged k=>=5	14486	72.123	
-k_dist	2p24GeV_Ta_X17	f2 unflagged k=1	14843113	79.095	
-k_dist	2p24GeV_Ta_X17	f2 unflagged k=2	2951108	15.726	
-k_dist	2p24GeV_Ta_X17	f2 unflagged k=3	686826	3.660	
-k_dist	2p24GeV_Ta_X17	f2 unflagged k=4	181992	0.970	
-k_dist	2p24GeV_Ta_X17	f2 unflagged k=>=5	103101	0.549	
-k_dist	2p24GeV_Ta_X17	f3 flagged k=1	0	0.000	
-k_dist	2p24GeV_Ta_X17	f3 flagged k=2	10420	14.583	
-k_dist	2p24GeV_Ta_X17	f3 flagged k=3	23567	32.982	
-k_dist	2p24GeV_Ta_X17	f3 flagged k=4	15394	21.544	
-k_dist	2p24GeV_Ta_X17	f3 flagged k=>=5	22074	30.892	
-k_dist	2p24GeV_Ta_X17	f3 unflagged k=1	14843282	79.313	
-k_dist	2p24GeV_Ta_X17	f3 unflagged k=2	2941436	15.717	
-k_dist	2p24GeV_Ta_X17	f3 unflagged k=3	665017	3.553	
-k_dist	2p24GeV_Ta_X17	f3 unflagged k=4	169522	0.906	
-k_dist	2p24GeV_Ta_X17	f3 unflagged k=>=5	95513	0.510	
-k_dist	2p24GeV_Ta_X17	f4 flagged k=1	0	0.000	
-k_dist	2p24GeV_Ta_X17	f4 flagged k=2	2	50.000	
-k_dist	2p24GeV_Ta_X17	f4 flagged k=3	1	25.000	
-k_dist	2p24GeV_Ta_X17	f4 flagged k=4	1	25.000	
-k_dist	2p24GeV_Ta_X17	f4 flagged k=>=5	0	0.000	
-k_dist	2p24GeV_Ta_X17	f4 unflagged k=1	14843282	79.012	
-k_dist	2p24GeV_Ta_X17	f4 unflagged k=2	2951854	15.713	
-k_dist	2p24GeV_Ta_X17	f4 unflagged k=3	688583	3.665	
-k_dist	2p24GeV_Ta_X17	f4 unflagged k=4	184915	0.984	
-k_dist	2p24GeV_Ta_X17	f4 unflagged k=>=5	117587	0.626	
-f4_leakage	2p24GeV_Ta_X17	n	4		0.06
-f4_leakage	2p24GeV_Ta_X17	main	0	0.000	0.06
-f4_leakage	2p24GeV_Ta_X17	sec	1	25.000	0.06
-f4_leakage	2p24GeV_Ta_X17	either	1	25.000	0.06
-f4_leakage	2p24GeV_Ta_X17	anysec	1	25.000	0.06
+section	run_type	item	count	percent	window	percent_lo68	percent_hi68	percent_raw
+rate	0p73GeV_H2	n	5257066					
+rate	0p73GeV_H2	f1	1838	0.035		0.034157	0.035787	0.034962467657815216
+rate	0p73GeV_H2	f2	70	0.001		0.0011816	0.0015005	0.001331541205683931
+rate	0p73GeV_H2	f3	2617	0.050		0.048817	0.050763	0.049780619075354963
+rate	0p73GeV_H2	f4	2	0.000		1.9022e-05	7.6088e-05	3.8044034448112315e-05
+rate	0p73GeV_H2	any	4417	0.084		0.082766	0.085293	0.08402025007865604
+overlap	0p73GeV_H2	none	5252649	99.916		99.915	99.917	99.91597974992135
+overlap	0p73GeV_H2	f1	1759	0.033		0.032672	0.034267	0.03345972829711478
+overlap	0p73GeV_H2	f2	35	0.001		0.00056234	0.00078822	0.0006657706028419655
+overlap	0p73GeV_H2	f1+f2	4	0.000		4.6384e-05	0.00012481	7.608806889622463e-05
+overlap	0p73GeV_H2	f3	2515	0.048		0.046896	0.048804	0.04784037331850123
+overlap	0p73GeV_H2	f1+f3	72	0.001		0.0012174	0.0015408	0.0013695852401320431
+overlap	0p73GeV_H2	f2+f3	27	0.001		0.00042381	0.0006224	0.0005135944650495162
+overlap	0p73GeV_H2	f1+f2+f3	3	0.000		3.2285e-05	0.00010087	5.706605167216847e-05
+overlap	0p73GeV_H2	f4	1	0.000		7.2658e-06	4.98e-05	1.9022017224056157e-05
+overlap	0p73GeV_H2	f1+f4	0	0.000		0	1.9022e-05	0.0
+overlap	0p73GeV_H2	f2+f4	1	0.000		7.2658e-06	4.98e-05	1.9022017224056157e-05
+overlap	0p73GeV_H2	f1+f2+f4	0	0.000		0	1.9022e-05	0.0
+overlap	0p73GeV_H2	f3+f4	0	0.000		0	1.9022e-05	0.0
+overlap	0p73GeV_H2	f1+f3+f4	0	0.000		0	1.9022e-05	0.0
+overlap	0p73GeV_H2	f2+f3+f4	0	0.000		0	1.9022e-05	0.0
+overlap	0p73GeV_H2	f1+f2+f3+f4	0	0.000		0	1.9022e-05	0.0
+k_dist	0p73GeV_H2	f1 flagged k=1	1436	78.128		77.149	79.077	78.12840043525571
+k_dist	0p73GeV_H2	f1 flagged k=2	305	16.594		15.745	17.48	16.59412404787813
+k_dist	0p73GeV_H2	f1 flagged k=3	67	3.645		3.2327	4.1082	3.645266594124048
+k_dist	0p73GeV_H2	f1 flagged k=4	9	0.490		0.3516	0.68157	0.4896626768226333
+k_dist	0p73GeV_H2	f1 flagged k=>=5	21	1.143		0.91987	1.4184	1.1425462459194777
+k_dist	0p73GeV_H2	f1 unflagged k=1	5155116	98.095		98.089	98.101	98.09500177727779
+k_dist	0p73GeV_H2	f1 unflagged k=2	91342	1.738		1.7324	1.7438	1.7381167857988273
+k_dist	0p73GeV_H2	f1 unflagged k=3	4035	0.077		0.075582	0.077998	0.07678068392084987
+k_dist	0p73GeV_H2	f1 unflagged k=4	1583	0.030		0.029375	0.030889	0.030122384794722512
+k_dist	0p73GeV_H2	f1 unflagged k=>=5	3152	0.060		0.05892	0.061056	0.05997836820781135
+k_dist	0p73GeV_H2	f2 flagged k=1	9	12.857		9.3735	17.387	12.857142857142858
+k_dist	0p73GeV_H2	f2 flagged k=2	7	10.000		6.9587	14.168	10.0
+k_dist	0p73GeV_H2	f2 flagged k=3	7	10.000		6.9587	14.168	10.0
+k_dist	0p73GeV_H2	f2 flagged k=4	9	12.857		9.3735	17.387	12.857142857142858
+k_dist	0p73GeV_H2	f2 flagged k=>=5	38	54.286		48.313	60.138	54.285714285714285
+k_dist	0p73GeV_H2	f2 unflagged k=1	5156543	98.089		98.083	98.095	98.08915586011479
+k_dist	0p73GeV_H2	f2 unflagged k=2	91640	1.743		1.7375	1.7489	1.743200869850386
+k_dist	0p73GeV_H2	f2 unflagged k=3	4095	0.078		0.076689	0.079123	0.07789619775248069
+k_dist	0p73GeV_H2	f2 unflagged k=4	1583	0.030		0.029365	0.030879	0.03011225422275383
+k_dist	0p73GeV_H2	f2 unflagged k=>=5	3135	0.060		0.05858	0.060709	0.05963481805959145
+k_dist	0p73GeV_H2	f3 flagged k=1	0	0.000		0	0.038197	0.0
+k_dist	0p73GeV_H2	f3 flagged k=2	520	19.870		19.102	20.662	19.870080244554835
+k_dist	0p73GeV_H2	f3 flagged k=3	877	33.512		32.595	34.441	33.51165456629729
+k_dist	0p73GeV_H2	f3 flagged k=4	548	20.940		20.156	21.746	20.940007642338557
+k_dist	0p73GeV_H2	f3 flagged k=>=5	672	25.678		24.834	26.541	25.678257546809323
+k_dist	0p73GeV_H2	f3 unflagged k=1	5156552	98.137		98.131	98.143	98.1368741042115
+k_dist	0p73GeV_H2	f3 unflagged k=2	91127	1.734		1.7286	1.74	1.7342827002412622
+k_dist	0p73GeV_H2	f3 unflagged k=3	3225	0.061		0.060306	0.062467	0.061376559178707414
+k_dist	0p73GeV_H2	f3 unflagged k=4	1044	0.020		0.019263	0.020493	0.01986887683180482
+k_dist	0p73GeV_H2	f3 unflagged k=>=5	2501	0.048		0.046656	0.048559	0.047597759536727825
+k_dist	0p73GeV_H2	f4 flagged k=1	0	0.000		0	33.333	0.0
+k_dist	0p73GeV_H2	f4 flagged k=2	0	0.000		0	33.333	0.0
+k_dist	0p73GeV_H2	f4 flagged k=3	1	50.000		21.132	78.868	50.0
+k_dist	0p73GeV_H2	f4 flagged k=4	1	50.000		21.132	78.868	50.0
+k_dist	0p73GeV_H2	f4 flagged k=>=5	0	0.000		0	33.333	0.0
+k_dist	0p73GeV_H2	f4 unflagged k=1	5156552	98.088		98.082	98.094	98.0880582773959
+k_dist	0p73GeV_H2	f4 unflagged k=2	91647	1.743		1.7376	1.749	1.7433114757590928
+k_dist	0p73GeV_H2	f4 unflagged k=3	4101	0.078		0.076801	0.079237	0.07800932231374776
+k_dist	0p73GeV_H2	f4 unflagged k=4	1591	0.030		0.029515	0.031032	0.030264040917135495
+k_dist	0p73GeV_H2	f4 unflagged k=>=5	3173	0.060		0.059295	0.061438	0.06035688361412378
+f4_leakage	0p73GeV_H2	n	2		0.095			
+f4_leakage	0p73GeV_H2	main	0	0.000	0.095	0	33.333	0.0
+f4_leakage	0p73GeV_H2	sec	0	0.000	0.095	0	33.333	0.0
+f4_leakage	0p73GeV_H2	either	0	0.000	0.095	0	33.333	0.0
+f4_leakage	0p73GeV_H2	anysec	1	50.000	0.095	21.132	78.868	50.0
+rate	2p24GeV_H2	n	22861511					
+rate	2p24GeV_H2	f1	13313	0.058		0.057731	0.05874	0.058233246262681414
+rate	2p24GeV_H2	f2	265	0.001		0.0010901	0.0012326	0.0011591534785255445
+rate	2p24GeV_H2	f3	6862	0.030		0.029655	0.03038	0.030015513847706742
+rate	2p24GeV_H2	f4	543	0.002		0.0022754	0.0024793	0.0023751710899598895
+rate	2p24GeV_H2	any	19452	0.085		0.084479	0.085698	0.08508623948784487
+overlap	2p24GeV_H2	none	22842059	99.915		99.914	99.916	99.91491376051215
+overlap	2p24GeV_H2	f1	11991	0.052		0.051974	0.052932	0.05245060136226341
+overlap	2p24GeV_H2	f2	95	0.000		0.00037504	0.00046042	0.00041554558664123295
+overlap	2p24GeV_H2	f1+f2	12	0.000		3.9367e-05	6.9987e-05	5.248996883889258e-05
+overlap	2p24GeV_H2	f3	5445	0.024		0.023497	0.024142	0.02381732336064751
+overlap	2p24GeV_H2	f1+f3	1292	0.006		0.0054964	0.0058108	0.005651419978320768
+overlap	2p24GeV_H2	f2+f3	56	0.000		0.00021433	0.00027995	0.00024495318791483203
+overlap	2p24GeV_H2	f1+f2+f3	18	0.000		6.2236e-05	9.9608e-05	7.873495325833888e-05
+overlap	2p24GeV_H2	f4	427	0.002		0.0017795	0.0019604	0.0018677680578505944
+overlap	2p24GeV_H2	f1+f4	0	0.000		0	4.3742e-06	0.0
+overlap	2p24GeV_H2	f2+f4	65	0.000		0.00025117	0.00032184	0.0002843206645440015
+overlap	2p24GeV_H2	f1+f2+f4	0	0.000		0	4.3742e-06	0.0
+overlap	2p24GeV_H2	f3+f4	32	0.000		0.00011732	0.000167	0.00013997325023704687
+overlap	2p24GeV_H2	f1+f3+f4	0	0.000		0	4.3742e-06	0.0
+overlap	2p24GeV_H2	f2+f3+f4	19	0.000		6.6105e-05	0.00010449	8.310911732824659e-05
+overlap	2p24GeV_H2	f1+f2+f3+f4	0	0.000		0	4.3742e-06	0.0
+k_dist	2p24GeV_H2	f1 flagged k=1	8349	62.713		62.293	63.131	62.71313753474048
+k_dist	2p24GeV_H2	f1 flagged k=2	3051	22.917		22.555	23.284	22.917449109892587
+k_dist	2p24GeV_H2	f1 flagged k=3	986	7.406		7.1825	7.6365	7.406294599263878
+k_dist	2p24GeV_H2	f1 flagged k=4	567	4.259		4.0874	4.4375	4.258994967325171
+k_dist	2p24GeV_H2	f1 flagged k=>=5	360	2.704		2.5671	2.8483	2.704123788777886
+k_dist	2p24GeV_H2	f1 unflagged k=1	22199164	97.159		97.156	97.163	97.15936460284527
+k_dist	2p24GeV_H2	f1 unflagged k=2	621724	2.721		2.7177	2.7245	2.721107371355938
+k_dist	2p24GeV_H2	f1 unflagged k=3	17964	0.079		0.078039	0.079212	0.07862326823323222
+k_dist	2p24GeV_H2	f1 unflagged k=4	2974	0.013		0.01278	0.013257	0.013016343783435351
+k_dist	2p24GeV_H2	f1 unflagged k=>=5	6372	0.028		0.027541	0.02824	0.027888413782128463
+k_dist	2p24GeV_H2	f2 flagged k=1	14	5.283		4.0693	6.8329	5.283018867924528
+k_dist	2p24GeV_H2	f2 flagged k=2	29	10.943		9.1705	13.01	10.943396226415095
+k_dist	2p24GeV_H2	f2 flagged k=3	48	18.113		15.869	20.597	18.11320754716981
+k_dist	2p24GeV_H2	f2 flagged k=4	42	15.849		13.735	18.22	15.849056603773585
+k_dist	2p24GeV_H2	f2 flagged k=>=5	132	49.811		46.746	52.878	49.81132075471698
+k_dist	2p24GeV_H2	f2 unflagged k=1	22207499	97.140		97.137	97.144	97.1403702142919
+k_dist	2p24GeV_H2	f2 unflagged k=2	624746	2.733		2.7294	2.7362	2.732773183053977
+k_dist	2p24GeV_H2	f2 unflagged k=3	18902	0.083		0.082082	0.083285	0.08268140765380855
+k_dist	2p24GeV_H2	f2 unflagged k=4	3499	0.015		0.015049	0.015566	0.015305377493422713
+k_dist	2p24GeV_H2	f2 unflagged k=>=5	6600	0.029		0.028517	0.029227	0.028869817506884797
+k_dist	2p24GeV_H2	f3 flagged k=1	0	0.000		0	0.014571	0.0
+k_dist	2p24GeV_H2	f3 flagged k=2	1622	23.637		23.128	24.154	23.637423491693383
+k_dist	2p24GeV_H2	f3 flagged k=3	2915	42.480		41.885	43.078	42.48032643544156
+k_dist	2p24GeV_H2	f3 flagged k=4	1022	14.894		14.469	15.329	14.893617021276595
+k_dist	2p24GeV_H2	f3 flagged k=>=5	1303	18.989		18.52	19.467	18.988633051588458
+k_dist	2p24GeV_H2	f3 unflagged k=1	22207513	97.168		97.165	97.172	97.16847106249587
+k_dist	2p24GeV_H2	f3 unflagged k=2	623153	2.727		2.7232	2.73	2.726591863213476
+k_dist	2p24GeV_H2	f3 unflagged k=3	16035	0.070		0.069609	0.070717	0.07016077997960064
+k_dist	2p24GeV_H2	f3 unflagged k=4	2519	0.011		0.010804	0.011244	0.011021827550272157
+k_dist	2p24GeV_H2	f3 unflagged k=>=5	5429	0.024		0.023434	0.024079	0.02375446676078902
+k_dist	2p24GeV_H2	f4 flagged k=1	0	0.000		0	0.18382	0.0
+k_dist	2p24GeV_H2	f4 flagged k=2	101	18.600		16.989	20.327	18.60036832412523
+k_dist	2p24GeV_H2	f4 flagged k=3	119	21.915		20.193	23.741	21.915285451197054
+k_dist	2p24GeV_H2	f4 flagged k=4	103	18.969		17.344	20.708	18.968692449355434
+k_dist	2p24GeV_H2	f4 flagged k=>=5	220	40.516		38.428	42.638	40.515653775322285
+k_dist	2p24GeV_H2	f4 unflagged k=1	22207513	97.142		97.138	97.145	97.14161272611028
+k_dist	2p24GeV_H2	f4 unflagged k=2	624674	2.732		2.7291	2.7359	2.732491467552905
+k_dist	2p24GeV_H2	f4 unflagged k=3	18831	0.082		0.081774	0.082974	0.08237184007256386
+k_dist	2p24GeV_H2	f4 unflagged k=4	3438	0.015		0.014784	0.015297	0.015038733267987603
+k_dist	2p24GeV_H2	f4 unflagged k=>=5	6512	0.028		0.028134	0.02884	0.028485232996258075
+f4_leakage	2p24GeV_H2	n	543		0.052			
+f4_leakage	2p24GeV_H2	main	7	1.289	0.052	0.88681	1.8705	1.289134438305709
+f4_leakage	2p24GeV_H2	sec	70	12.891	0.052	11.521	14.398	12.89134438305709
+f4_leakage	2p24GeV_H2	either	76	13.996	0.052	12.573	15.552	13.996316758747698
+f4_leakage	2p24GeV_H2	anysec	103	18.969	0.052	17.344	20.708	18.968692449355434
+rate	3p49GeV_H2	n	11879523					
+rate	3p49GeV_H2	f1	13419	0.113		0.11199	0.11394	0.11295908093279503
+rate	3p49GeV_H2	f2	738	0.006		0.0059879	0.0064453	0.006212370648215421
+rate	3p49GeV_H2	f3	6603	0.056		0.054903	0.056271	0.05558303982407375
+rate	3p49GeV_H2	f4	103	0.001		0.00078571	0.00095678	0.0008670381798999842
+rate	3p49GeV_H2	any	17503	0.147		0.14623	0.14845	0.14733756565814973
+overlap	3p49GeV_H2	none	11862020	99.853		99.852	99.854	99.85266243434185
+overlap	3p49GeV_H2	f1	10610	0.089		0.088451	0.090184	0.08931335037610517
+overlap	3p49GeV_H2	f2	65	0.001		0.00048337	0.00061937	0.0005471600164417376
+overlap	3p49GeV_H2	f1+f2	136	0.001		0.0010508	0.0012473	0.001144827111324251
+overlap	3p49GeV_H2	f3	3824	0.032		0.031674	0.032715	0.03218984465958776
+overlap	3p49GeV_H2	f1+f3	2243	0.019		0.018487	0.019284	0.018881229490443345
+overlap	3p49GeV_H2	f2+f3	92	0.001		0.0006978	0.0008595	0.0007744418694252286
+overlap	3p49GeV_H2	f1+f2+f3	430	0.004		0.0034493	0.0037985	0.003619673954922264
+overlap	3p49GeV_H2	f4	77	0.001		0.0005784	0.00072637	0.0006481741733232892
+overlap	3p49GeV_H2	f1+f4	0	0.000		0	8.4178e-06	0.0
+overlap	3p49GeV_H2	f2+f4	12	0.000		7.5761e-05	0.00013469	0.00010101415688155155
+overlap	3p49GeV_H2	f1+f2+f4	0	0.000		0	8.4178e-06	0.0
+overlap	3p49GeV_H2	f3+f4	11	0.000		6.8571e-05	0.00012504	9.25963104747556e-05
+overlap	3p49GeV_H2	f1+f3+f4	0	0.000		0	8.4178e-06	0.0
+overlap	3p49GeV_H2	f2+f3+f4	3	0.000		1.4287e-05	4.4638e-05	2.5253539220387888e-05
+overlap	3p49GeV_H2	f1+f2+f3+f4	0	0.000		0	8.4178e-06	0.0
+k_dist	3p49GeV_H2	f1 flagged k=1	7615	56.748		56.32	57.175	56.74789477606379
+k_dist	3p49GeV_H2	f1 flagged k=2	2475	18.444		18.112	18.781	18.443997317236754
+k_dist	3p49GeV_H2	f1 flagged k=3	1224	9.121		8.8759	9.373	9.121395036887995
+k_dist	3p49GeV_H2	f1 flagged k=4	905	6.744		6.5309	6.9639	6.744168715999702
+k_dist	3p49GeV_H2	f1 flagged k=>=5	1200	8.943		8.6993	9.1919	8.94254415381176
+k_dist	3p49GeV_H2	f1 unflagged k=1	11488489	96.818		96.813	96.823	96.81770023252788
+k_dist	3p49GeV_H2	f1 unflagged k=2	363253	3.061		3.0563	3.0663	3.061265938677092
+k_dist	3p49GeV_H2	f1 unflagged k=3	9821	0.083		0.081935	0.083604	0.08276516032557948
+k_dist	3p49GeV_H2	f1 unflagged k=4	1448	0.012		0.011886	0.012528	0.012202825796908573
+k_dist	3p49GeV_H2	f1 unflagged k=>=5	3093	0.026		0.025601	0.026539	0.026065842672540203
+k_dist	3p49GeV_H2	f2 flagged k=1	13	1.762		1.3385	2.3151	1.7615176151761518
+k_dist	3p49GeV_H2	f2 flagged k=2	52	7.046		6.161	8.0474	7.046070460704607
+k_dist	3p49GeV_H2	f2 flagged k=3	108	14.634		13.381	15.983	14.634146341463415
+k_dist	3p49GeV_H2	f2 flagged k=4	135	18.293		16.913	19.758	18.29268292682927
+k_dist	3p49GeV_H2	f2 flagged k=>=5	430	58.266		56.44	60.068	58.265582655826556
+k_dist	3p49GeV_H2	f2 unflagged k=1	11496091	96.778		96.773	96.783	96.7783405457713
+k_dist	3p49GeV_H2	f2 unflagged k=2	365676	3.078		3.0734	3.0834	3.0783956439989444
+k_dist	3p49GeV_H2	f2 unflagged k=3	10937	0.092		0.091196	0.092956	0.09207170598676548
+k_dist	3p49GeV_H2	f2 unflagged k=4	2218	0.019		0.01828	0.019073	0.018671943300598504
+k_dist	3p49GeV_H2	f2 unflagged k=>=5	3863	0.033		0.032001	0.033048	0.03252016094238594
+k_dist	3p49GeV_H2	f3 flagged k=1	0	0.000		0	0.015142	0.0
+k_dist	3p49GeV_H2	f3 flagged k=2	1309	19.824		19.338	20.32	19.824322277752536
+k_dist	3p49GeV_H2	f3 flagged k=3	2738	41.466		40.861	42.074	41.466000302892624
+k_dist	3p49GeV_H2	f3 flagged k=4	1090	16.508		16.056	16.97	16.507648038770256
+k_dist	3p49GeV_H2	f3 flagged k=>=5	1466	22.202		21.695	22.718	22.202029380584584
+k_dist	3p49GeV_H2	f3 unflagged k=1	11496104	96.826		96.821	96.831	96.82625672538853
+k_dist	3p49GeV_H2	f3 unflagged k=2	364419	3.069		3.0643	3.0743	3.069329196187627
+k_dist	3p49GeV_H2	f3 unflagged k=3	8307	0.070		0.069203	0.070738	0.06996593929715689
+k_dist	3p49GeV_H2	f3 unflagged k=4	1263	0.011		0.010343	0.010941	0.010637652742543536
+k_dist	3p49GeV_H2	f3 unflagged k=>=5	2827	0.024		0.023367	0.024262	0.02381048638414139
+k_dist	3p49GeV_H2	f4 flagged k=1	0	0.000		0	0.96154	0.0
+k_dist	3p49GeV_H2	f4 flagged k=2	9	8.738		6.3373	11.932	8.737864077669903
+k_dist	3p49GeV_H2	f4 flagged k=3	20	19.417		15.822	23.601	19.41747572815534
+k_dist	3p49GeV_H2	f4 flagged k=4	17	16.505		13.173	20.481	16.50485436893204
+k_dist	3p49GeV_H2	f4 flagged k=>=5	57	55.340		50.413	60.164	55.33980582524272
+k_dist	3p49GeV_H2	f4 unflagged k=1	11496104	96.773		96.768	96.778	96.77327680981058
+k_dist	3p49GeV_H2	f4 unflagged k=2	365719	3.079		3.0736	3.0836	3.0785930626242695
+k_dist	3p49GeV_H2	f4 unflagged k=3	11025	0.093		0.091928	0.093695	0.0928075613119159
+k_dist	3p49GeV_H2	f4 unflagged k=4	2336	0.020		0.019262	0.020075	0.01966425970291479
+k_dist	3p49GeV_H2	f4 unflagged k=>=5	4236	0.036		0.035115	0.03621	0.0356583065503198
+f4_leakage	3p49GeV_H2	n	103		0.044			
+f4_leakage	3p49GeV_H2	main	10	9.709	0.044	7.1671	13.025	9.70873786407767
+f4_leakage	3p49GeV_H2	sec	6	5.825	0.044	3.9143	8.5857	5.825242718446602
+f4_leakage	3p49GeV_H2	either	15	14.563	0.044	11.428	18.379	14.563106796116505
+f4_leakage	3p49GeV_H2	anysec	16	15.534	0.044	12.298	19.433	15.533980582524272
+rate	2p24GeV_Ta_X17	n	18786225					
+rate	2p24GeV_Ta_X17	f1	164655	0.876		0.87432	0.87862	0.8764666664005142
+rate	2p24GeV_Ta_X17	f2	20085	0.107		0.10616	0.10767	0.10691344322768412
+rate	2p24GeV_Ta_X17	f3	71455	0.380		0.37894	0.38178	0.3803584807485272
+rate	2p24GeV_Ta_X17	f4	4	0.000		1.298e-05	3.4927e-05	2.1292196809098155e-05
+rate	2p24GeV_Ta_X17	any	201877	1.075		1.0722	1.077	1.0746012038075772
+overlap	2p24GeV_Ta_X17	none	18584348	98.925		98.923	98.928	98.92539879619243
+overlap	2p24GeV_Ta_X17	f1	123000	0.655		0.65288	0.6566	0.6547350518797683
+overlap	2p24GeV_Ta_X17	f2	1599	0.009		0.0083014	0.0087271	0.008511555674436988
+overlap	2p24GeV_Ta_X17	f1+f2	5820	0.031		0.030577	0.031389	0.030980146357237816
+overlap	2p24GeV_Ta_X17	f3	34432	0.183		0.1823	0.18427	0.1832832301327169
+overlap	2p24GeV_Ta_X17	f1+f3	24357	0.130		0.12883	0.13049	0.12965350941980094
+overlap	2p24GeV_Ta_X17	f2+f3	1187	0.006		0.0061377	0.0065045	0.0063184594030998775
+overlap	2p24GeV_Ta_X17	f1+f2+f3	11478	0.061		0.06053	0.061671	0.06109795874370716
+overlap	2p24GeV_Ta_X17	f4	2	0.000		5.323e-06	2.1292e-05	1.0646098404549077e-05
+overlap	2p24GeV_Ta_X17	f1+f4	0	0.000		0	5.323e-06	0.0
+overlap	2p24GeV_Ta_X17	f2+f4	1	0.000		2.0332e-06	1.3936e-05	5.323049202274539e-06
+overlap	2p24GeV_Ta_X17	f1+f2+f4	0	0.000		0	5.323e-06	0.0
+overlap	2p24GeV_Ta_X17	f3+f4	1	0.000		2.0332e-06	1.3936e-05	5.323049202274539e-06
+overlap	2p24GeV_Ta_X17	f1+f3+f4	0	0.000		0	5.323e-06	0.0
+overlap	2p24GeV_Ta_X17	f2+f3+f4	0	0.000		0	5.323e-06	0.0
+overlap	2p24GeV_Ta_X17	f1+f2+f3+f4	0	0.000		0	5.323e-06	0.0
+k_dist	2p24GeV_Ta_X17	f1 flagged k=1	39653	24.082		23.977	24.188	24.082475479031917
+k_dist	2p24GeV_Ta_X17	f1 flagged k=2	35475	21.545		21.444	21.647	21.54504873827093
+k_dist	2p24GeV_Ta_X17	f1 flagged k=3	24743	15.027		14.939	15.115	15.027178038929884
+k_dist	2p24GeV_Ta_X17	f1 flagged k=4	21347	12.965		12.882	13.048	12.964683732653123
+k_dist	2p24GeV_Ta_X17	f1 flagged k=>=5	43437	26.381		26.272	26.489	26.380614011114147
+k_dist	2p24GeV_Ta_X17	f1 unflagged k=1	14803629	79.497		79.488	79.507	79.49721210402775
+k_dist	2p24GeV_Ta_X17	f1 unflagged k=2	2916381	15.661		15.653	15.67	15.661305679381492
+k_dist	2p24GeV_Ta_X17	f1 unflagged k=3	663841	3.565		3.5606	3.5692	3.5649034963217385
+k_dist	2p24GeV_Ta_X17	f1 unflagged k=4	163569	0.878		0.87622	0.88055	0.8783845830399907
+k_dist	2p24GeV_Ta_X17	f1 unflagged k=>=5	74150	0.398		0.39674	0.39966	0.39819413722903063
+k_dist	2p24GeV_Ta_X17	f2 flagged k=1	169	0.841		0.77937	0.90837	0.8414239482200647
+k_dist	2p24GeV_Ta_X17	f2 flagged k=2	748	3.724		3.5929	3.8601	3.7241722678615883
+k_dist	2p24GeV_Ta_X17	f2 flagged k=3	1758	8.753		8.5554	8.9543	8.75280059746079
+k_dist	2p24GeV_Ta_X17	f2 flagged k=4	2924	14.558		14.311	14.809	14.558127956186208
+k_dist	2p24GeV_Ta_X17	f2 flagged k=>=5	14486	72.123		71.806	72.439	72.12347523027135
+k_dist	2p24GeV_Ta_X17	f2 unflagged k=1	14843113	79.095		79.086	79.105	79.09518419877503
+k_dist	2p24GeV_Ta_X17	f2 unflagged k=2	2951108	15.726		15.717	15.734	15.725705978959978
+k_dist	2p24GeV_Ta_X17	f2 unflagged k=3	686826	3.660		3.6556	3.6643	3.659921539538765
+k_dist	2p24GeV_Ta_X17	f2 unflagged k=4	181992	0.970		0.96753	0.97205	0.9697892054519469
+k_dist	2p24GeV_Ta_X17	f2 unflagged k=>=5	103101	0.549		0.5477	0.55111	0.5493990772742823
+k_dist	2p24GeV_Ta_X17	f3 flagged k=1	0	0.000		0	0.0013995	0.0
+k_dist	2p24GeV_Ta_X17	f3 flagged k=2	10420	14.583		14.451	14.715	14.582604436358547
+k_dist	2p24GeV_Ta_X17	f3 flagged k=3	23567	32.982		32.806	33.158	32.9815968091806
+k_dist	2p24GeV_Ta_X17	f3 flagged k=4	15394	21.544		21.39	21.698	21.54362885732279
+k_dist	2p24GeV_Ta_X17	f3 flagged k=>=5	22074	30.892		30.72	31.065	30.892169897138057
+k_dist	2p24GeV_Ta_X17	f3 unflagged k=1	14843282	79.313		79.304	79.323	79.31319487228537
+k_dist	2p24GeV_Ta_X17	f3 unflagged k=2	2941436	15.717		15.709	15.726	15.717190219276006
+k_dist	2p24GeV_Ta_X17	f3 unflagged k=3	665017	3.553		3.5492	3.5577	3.553433998921707
+k_dist	2p24GeV_Ta_X17	f3 unflagged k=4	169522	0.906		0.90363	0.90801	0.9058193074240293
+k_dist	2p24GeV_Ta_X17	f3 unflagged k=>=5	95513	0.510		0.50872	0.51201	0.5103616020928924
+k_dist	2p24GeV_Ta_X17	f4 flagged k=1	0	0.000		0	20	0.0
+k_dist	2p24GeV_Ta_X17	f4 flagged k=2	2	50.000		27.639	72.361	50.0
+k_dist	2p24GeV_Ta_X17	f4 flagged k=3	1	25.000		10	50	25.0
+k_dist	2p24GeV_Ta_X17	f4 flagged k=4	1	25.000		10	50	25.0
+k_dist	2p24GeV_Ta_X17	f4 flagged k=>=5	0	0.000		0	20	0.0
+k_dist	2p24GeV_Ta_X17	f4 unflagged k=1	14843282	79.012		79.002	79.021	79.01153723252803
+k_dist	2p24GeV_Ta_X17	f4 unflagged k=2	2951854	15.713		15.704	15.721	15.712867425545564
+k_dist	2p24GeV_Ta_X17	f4 unflagged k=3	688583	3.665		3.661	3.6697	3.665361969285893
+k_dist	2p24GeV_Ta_X17	f4 unflagged k=4	184915	0.984		0.98204	0.98659	0.9843118528202133
+k_dist	2p24GeV_Ta_X17	f4 unflagged k=>=5	117587	0.626		0.6241	0.62774	0.6259215198202981
+f4_leakage	2p24GeV_Ta_X17	n	4		0.06			
+f4_leakage	2p24GeV_Ta_X17	main	0	0.000	0.06	0	20	0.0
+f4_leakage	2p24GeV_Ta_X17	sec	1	25.000	0.06	10	50	25.0
+f4_leakage	2p24GeV_Ta_X17	either	1	25.000	0.06	10	50	25.0
+f4_leakage	2p24GeV_Ta_X17	anysec	1	25.000	0.06	10	50	25.0

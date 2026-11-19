@@ -36,7 +36,7 @@ sys.path.insert(0, str(HERE))
 import numpy as np                                      # noqa: E402
 import exotic_p1_quantities as p1                       # noqa: E402
 from exotic_p1_quantities import TYPES, RT_LABEL, write_tsv, EXCLUDE_RUNS, EXCL_NOTE     # noqa: E402
-from exotic_p4_module_rates import f2_eligible, exclusive_category, ORDER_TXT          # noqa: E402
+from exotic_p4_module_rates import f2_eligible, exclusive_category, ORDER_TXT, wilson          # noqa: E402
 
 STEM = "exotic_P5_max_amplitude_20261118"
 FLAGS = (1, 2, 3, 4, 5)
@@ -186,11 +186,17 @@ def table(D):
         for lab in ROWS:
             d = D[rt][lab]
             sat = d["smax"][np.isfinite(d["smax"])]
+            ns, nsat = int(sat.size), int((sat >= SAT).sum())
+            na, nasat = int(d["amax"].size), int((d["amax"] > SAT).sum())
+            s_lo, s_hi = wilson(nsat, ns) if ns else (float("nan"), float("nan"))
+            a_lo, a_hi = wilson(nasat, na) if na else (float("nan"), float("nan"))
             for dn, q, _ in DEFS:
                 st = quant(d[q])
-                st.update(rt=rt, flag=lab, defn=dn, n_rows=int(d["amax"].size), frac_smax_ge_4095=(float((sat >= SAT).mean()) if sat.size else float("nan")),
-                          frac_amax_gt_4095=(float((d["amax"] > SAT).mean()) if d["amax"].size else float("nan")),
-                          source="sample npz (2 files/run)" if "H2" in rt else "full scan npz (19 files)")
+                st.update(rt=rt, flag=lab, defn=dn, n_rows=na, frac_smax_ge_4095=(nsat / ns if ns else float("nan")),
+                          frac_amax_gt_4095=(nasat / na if na else float("nan")),
+                          source="sample npz (2 files/run)" if "H2" in rt else "full scan npz (19 files)",
+                          n_smax=ns, n_smax_ge_4095=nsat, frac_smax_ge_4095_lo68=max(float(s_lo), 0.0), frac_smax_ge_4095_hi68=float(s_hi),
+                          n_amax_gt_4095=nasat, frac_amax_gt_4095_lo68=max(float(a_lo), 0.0), frac_amax_gt_4095_hi68=float(a_hi))
                 rows.append(st)
     return rows
 
@@ -250,7 +256,8 @@ def report(data, out):
     from matplotlib.backends.backend_pdf import PdfPages
     D, src, chk = data["D"], data["src"], data["chk"]
     rows = table(D)
-    cols = ["rt", "flag", "defn", "N", "n_rows", "median", "q16", "q84", "mad_lo", "mad_hi", "sigma_mad", "frac_smax_ge_4095", "frac_amax_gt_4095", "source"]
+    cols = ["rt", "flag", "defn", "N", "n_rows", "median", "q16", "q84", "mad_lo", "mad_hi", "sigma_mad", "frac_smax_ge_4095", "frac_amax_gt_4095", "source",
+            "n_smax", "n_smax_ge_4095", "frac_smax_ge_4095_lo68", "frac_smax_ge_4095_hi68", "n_amax_gt_4095", "frac_amax_gt_4095_lo68", "frac_amax_gt_4095_hi68"]
     write_tsv(str(Path(out) / (STEM + ".tsv")), rows, cols)
     e_a = np.logspace(0.7, 4.3, 61)
     e_e = np.logspace(-3.5, 0.5, 61)
@@ -263,8 +270,13 @@ def report(data, out):
              "Flagged = PbWO4 kept channels, uniform P2 thresholds, EXCLUSIVE categories (priority " + ORDER_TXT + "; f2 not truncated and not clipped).", f"*** {EXCL_NOTE} ***", ""]
         L += ["(a) raw peak [ADC]"] + tbl_lines(rows, "raw_adc", f3) + ["", "(b) fitted A_max [ADC]  (A_main identical: the main pulse is the largest-A pulse)"] + tbl_lines(rows, "fit_adc", f3)
         L += ["", "(a) raw peak, E / E_beam"] + tbl_lines(rows, "raw_efrac", f4) + ["", "(b) fitted A_max, E / E_beam"] + tbl_lines(rows, "fit_efrac", f4)
-        sat = [f"{FNAME[lab]:>26s}" + "".join(f"{next(x for x in rows if x['rt'] == rt and x['flag'] == lab and x['defn'] == 'raw_adc')['frac_smax_ge_4095']:>34.3f}" for rt in TYPES) for lab in ROWS]
-        L += ["", "fraction of rows with max sample >= 4095 (saturated record)"] + sat
+        def satcell(rt, lab):
+            r = next(x for x in rows if x["rt"] == rt and x["flag"] == lab and x["defn"] == "raw_adc")
+            if not r["n_smax"]:
+                return "-"
+            return f"{100 * r['frac_smax_ge_4095']:.3f} % [{max(100 * r['frac_smax_ge_4095_lo68'], 0):.3f}, {100 * r['frac_smax_ge_4095_hi68']:.3f}] ({r['n_smax_ge_4095']}/{r['n_smax']})"
+        sat = [f"{FNAME[lab]:>26s}" + "".join(f"{satcell(rt, lab):>52s}" for rt in TYPES) for lab in ROWS]
+        L += ["", f"{'':>26s}" + "".join(f"{RT_LABEL[rt]:>52s}" for rt in TYPES), "fraction of rows with max sample >= 4095 (saturated record), % [Wilson 68 % interval] (k/n)"] + sat
         L += ["", "Sources: H2 types, sample npz (exotic_sample, 2 files per run; the H2 pickles of exotic_full carry no amplitude); Ta X17, 19 full-scan npz; reference row = random "
               f"{data['ref_frac']:.0%} of kept rows.", f"Raw peak re-read from EVIO for the selected rows; {chk['n_noraw']} of {chk['n_rows']} rows without a raw peak (undecodable event).",
               f"A_main != A_max rows: {chk['n_main_ne_max']}.  E/E_beam: module_gain x amplitude / beam energy (raw peak with the same factor)."]
