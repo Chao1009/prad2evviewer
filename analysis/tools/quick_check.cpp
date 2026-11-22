@@ -993,7 +993,7 @@ int main(int argc, char *argv[])
 
         TCanvas energy_vs_theta_canvas("energy_vs_theta_reference",
                                        "Energy vs Theta with ep/ee reference bands", 1000, 750);
-        h2_energy_theta_ep_ee->Draw("COLZ");
+        physics.GetEnergyVsThetaHist()->Draw("COLZ");
         ep_lower.Draw("L SAME");
         ep_upper.Draw("L SAME");
         ee_lower.Draw("L SAME");
