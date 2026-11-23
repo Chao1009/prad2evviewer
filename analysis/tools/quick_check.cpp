@@ -12,6 +12,7 @@
 //   quick_check recon_dir/ recon.root...  -n 100000
 
 #include "PhysicsTools.h"
+#include "MatchingTools.h"
 #include "HyCalSystem.h"
 #include "EventData.h"
 #include "EventData_io.h"
@@ -24,7 +25,11 @@
 #include <TH1F.h>
 #include <TH2F.h>
 #include <TString.h>
+#include <TCanvas.h>
+#include <TGraph.h>
+#include <TLatex.h>
 #include <TLorentzVector.h>
+#include <nlohmann/json.hpp>
 
 #include <iostream>
 #include <array>
@@ -32,6 +37,7 @@
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <fstream>
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
@@ -48,7 +54,7 @@ using EventVars_Recon = prad2::ReconEventData;
 
 static std::string makeDefaultOutput(const std::string &input_path);
 
-static bool inHyCal(float x, float y) { return InHyCalRing(x, y, 2.2, 16.); }
+static bool inHyCal(float x, float y) { return InHyCalRing(x, y, 2.5, 16.); }
 
 static float electronPairInvariantMass(
     float x1, float y1, float z1, float E1,
@@ -359,9 +365,21 @@ static bool processFile(const std::string &path,
                 physics.FillEnergyVsModule(ev.cl_center[j], ev.cl_energy[j]);
                 out.hit_pos->Fill(ev.cl_x[j], ev.cl_y[j]);
                 out.h_all->Fill(ev.cl_energy[j]);
+            }
+            for (int j = 0; j < ev.matchNum; j++){
+                int cl_idx = ev.mHit_cl_index[j];
+                if (ev.cl_nblocks[cl_idx] < 3) continue;
+                GEMHit gem_hit;
+                gem_hit.x = ev.mHit_gx[j][1];
+                gem_hit.y = ev.mHit_gy[j][1];
+                gem_hit.z = ev.mHit_gz[j][1];
+                GetProjection(gem_hit, ev.mHit_z[j]);
+                const float theta = std::atan2(
+                    std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z) * 180.0f / M_PI;
+                if (!inHyCal(gem_hit.x - ev.hycal_center_x, gem_hit.y - ev.hycal_center_y)) continue;
 
-                if (ev.cl_nblocks[j] > 1 && inHyCal(ev.cl_x[j], ev.cl_y[j])) {
-                    physics.FillEnergyVsTheta(theta, ev.cl_energy[j]);
+                if (theta > 0.5f) {
+                    physics.FillEnergyVsTheta(theta, ev.mHit_E[j]);
                 }
             }
             out.h_tot->Fill(ev.total_energy);
@@ -820,6 +838,49 @@ int main(int argc, char *argv[])
 
     std::string dbDir = prad2::database_dir();
 
+    const std::string recon_config_path = dbDir + "/reconstruction_config.json";
+    nlohmann::json recon_config;
+    {
+        std::ifstream config_file(recon_config_path);
+        if (!config_file) {
+            std::cerr << "Cannot open reconstruction config: " << recon_config_path << "\n";
+            return 1;
+        }
+        try {
+            recon_config = nlohmann::json::parse(config_file);
+        } catch (const nlohmann::json::parse_error &e) {
+            std::cerr << "Cannot parse reconstruction config " << recon_config_path
+                      << ": " << e.what() << "\n";
+            return 1;
+        }
+    }
+    const auto config_has_energy_resolution =
+        recon_config.is_object() && recon_config.contains("hycal")
+        && recon_config["hycal"].is_object()
+        && recon_config["hycal"].contains("energy_resolution");
+    if (!config_has_energy_resolution
+        || !recon_config["hycal"]["energy_resolution"].is_array()
+        || recon_config["hycal"]["energy_resolution"].size() != 3) {
+        std::cerr << "Invalid or missing hycal.energy_resolution in "
+                  << recon_config_path << "\n";
+        return 1;
+    }
+    const auto &energy_resolution = recon_config["hycal"]["energy_resolution"];
+    std::array<float, 3> energy_resolution_params{};
+    for (size_t i = 0; i < energy_resolution_params.size(); ++i) {
+        if (!energy_resolution[i].is_number()) {
+            std::cerr << "Invalid hycal.energy_resolution coefficient in "
+                      << recon_config_path << "\n";
+            return 1;
+        }
+        energy_resolution_params[i] = energy_resolution[i].get<float>();
+        if (!std::isfinite(energy_resolution_params[i])) {
+            std::cerr << "Non-finite hycal.energy_resolution coefficient in "
+                      << recon_config_path << "\n";
+            return 1;
+        }
+    }
+
     // --- load run config: assign run_id and Ebeam from gRunConfig ---
     const int run_id = analysis::get_run_int(root_files[0]);
     gRunConfig = analysis::LoadRunConfig(dbDir + "/runinfo/general.json", run_id);
@@ -830,6 +891,8 @@ int main(int argc, char *argv[])
     // --- init detector system ---
     fdec::HyCalSystem hycal;
     hycal.Init(dbDir + "/hycal_map.json");
+    hycal.SetEnergyResolutionParams(
+        energy_resolution_params[0], energy_resolution_params[1], energy_resolution_params[2]);
     std::cout << "Processing " << root_files.size() << " file(s) with "
               << num_threads << " thread(s)\n";
 
@@ -904,6 +967,50 @@ int main(int argc, char *argv[])
     if (physics.GetEnergyVsThetaHist())  physics.GetEnergyVsThetaHist()->Write();
     h_1cl->Write(); h_2cl->Write(); h_all->Write(); h_tot->Write();
     h2_energy_theta_ep_ee->Write();
+    {
+        constexpr int n_points = 150;
+        TGraph ep_lower(n_points), ep_upper(n_points);
+        TGraph ee_lower(n_points), ee_upper(n_points);
+        for (int i = 0; i < n_points; ++i) {
+            const float theta = 0.5f + (4.3f - 0.5f) * i / (n_points - 1);
+            const float ep_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ep");
+            const float ee_energy = PhysicsTools::ExpectedEnergy(theta, Ebeam, "ee");
+            const float ep_sigma = hycal.EnergyResolution(ep_energy);
+            const float ee_sigma = hycal.EnergyResolution(ee_energy);
+            ep_lower.SetPoint(i, theta, ep_energy - 3.f * ep_sigma);
+            ep_upper.SetPoint(i, theta, ep_energy + 3.f * ep_sigma);
+            ee_lower.SetPoint(i, theta, ee_energy - 3.f * ee_sigma);
+            ee_upper.SetPoint(i, theta, ee_energy + 3.f * ee_sigma);
+        }
+        for (TGraph *line : {&ep_lower, &ep_upper}) {
+            line->SetLineColor(kRed + 1);
+            line->SetLineWidth(2);
+        }
+        for (TGraph *line : {&ee_lower, &ee_upper}) {
+            line->SetLineColor(kBlue + 1);
+            line->SetLineWidth(2);
+        }
+
+        TCanvas energy_vs_theta_canvas("energy_vs_theta_reference",
+                                       "Energy vs Theta with ep/ee reference bands", 1000, 750);
+        physics.GetEnergyVsThetaHist()->Draw("COLZ");
+        ep_lower.Draw("L SAME");
+        ep_upper.Draw("L SAME");
+        ee_lower.Draw("L SAME");
+        ee_upper.Draw("L SAME");
+
+        const float label_theta = 4.45f;
+        const float ep_label_energy = PhysicsTools::ExpectedEnergy(label_theta, Ebeam, "ep");
+        const float ee_label_energy = PhysicsTools::ExpectedEnergy(label_theta, Ebeam, "ee");
+        TLatex label;
+        label.SetTextSize(0.035);
+        label.SetTextAlign(12);
+        label.SetTextColor(kRed + 1);
+        label.DrawLatex(label_theta, ep_label_energy, "e-p");
+        label.SetTextColor(kBlue + 1);
+        label.DrawLatex(label_theta, ee_label_energy, "e-e");
+        energy_vs_theta_canvas.Write();
+    }
     merged->h2_ep_E_angle->Write();
     merged->h2_ee_E_angle->Write();
     merged->h2_ep_E_angle_hc->Write();
