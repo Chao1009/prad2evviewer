@@ -48,6 +48,7 @@
 #include <memory>
 #include <mutex>
 #include <getopt.h>
+#include <nlohmann/json.hpp>
 
 using namespace analysis;
 
@@ -99,12 +100,17 @@ struct SharedFillLocks {
     std::atomic<long long> events_processed{0};
 };
 
+enum class EnergyMode { Ep, Ee };
+
 static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix,
                                                   int grid_size);
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
                             const std::string &db_dir, long long max_events,
-                            int grid_size,
+                            int grid_size, EnergyMode mode,
                             HistResult *result, SharedFillLocks *fill_locks);
+static bool loadSeedBias(const std::string &seed_file,
+                         int &seed_grid_size,
+                         std::vector<std::vector<std::vector<float>>> &seed_bias);
 
 int main(int argc, char *argv[])
 {
@@ -112,25 +118,43 @@ int main(int argc, char *argv[])
 
     // ── Argument parsing ─────────────────────────────────────────────────────
     std::string output_name;
+    std::string seed_file;
     int  max_events  = -1;
     int  num_threads = 4;
     int  num_files   = -1;
     int  grids       = fdec::HyCalEnergyBias::GRID_SIZE;
+    bool grid_option_set = false;
+    EnergyMode mode = EnergyMode::Ep;
 
     // getopt_long_only reports an unknown word option such as '-xyz' as one
     // unrecognized option instead of splitting it into short options.
     static option long_options[] = {
+        {"ep_mode", no_argument, nullptr, 1000},
+        {"ee_mode", no_argument, nullptr, 1001},
         {nullptr, 0, nullptr, 0}
     };
     int opt;
-    while ((opt = getopt_long_only(argc, argv, "o:n:f:j:g:",
+    while ((opt = getopt_long_only(argc, argv, "o:n:f:j:g:s:m:",
                                    long_options, nullptr)) != -1) {
         switch (opt) {
             case 'o': output_name = optarg; break;
+            case 's': seed_file     = optarg; break;
             case 'n': max_events       = std::atoi(optarg); break;
             case 'f': num_files        = std::atoi(optarg); break;
             case 'j': num_threads     = std::atoi(optarg); break;
+            case 'm':
+                if (std::string(optarg) == "ep") mode = EnergyMode::Ep;
+                else if (std::string(optarg) == "ee") mode = EnergyMode::Ee;
+                else {
+                    std::cerr << "Invalid energy mode '" << optarg
+                              << "'. Choose ep or ee.\n";
+                    return 1;
+                }
+                break;
+            case 1000: mode = EnergyMode::Ep; break;
+            case 1001: mode = EnergyMode::Ee; break;
             case 'g':
+                grid_option_set = true;
                 if (!ParseIntOption(optarg, grids) ||
                     !fdec::HyCalEnergyBias::supports_grid_size(grids)) {
                     std::cerr << "Invalid grid size: " << optarg
@@ -147,7 +171,8 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: hycal_energy_bowl_shape <input_recon.root|dir> [more...] "
                  "-o <output_name> [-n max_events] [-f nfiles] [-j threads] "
-                 "[-g 5|8|10]\n";
+                 "[-g 5|8|10] [-s seed_bias.json] [-m ep|ee] "
+                 "[--ep_mode|--ee_mode]\n";
         return 1;
     }
 
@@ -155,6 +180,24 @@ int main(int argc, char *argv[])
         std::cerr << "No output prefix provided. Please pass -o <output_prefix>.\n";
         return 1;
     }
+
+    std::vector<std::vector<std::vector<float>>> seed_bias(
+        1156, std::vector<std::vector<float>>(
+            grids, std::vector<float>(grids, 0.f)));
+    int seed_grid_size = grids;
+    if (!seed_file.empty()) {
+        if (!loadSeedBias(seed_file, seed_grid_size, seed_bias)) return 1;
+        if (!grid_option_set) {
+            grids = seed_grid_size;
+        } else if (grids != seed_grid_size) {
+            std::cerr << "Seed grid size " << seed_grid_size
+                      << " does not match requested grid size " << grids << ".\n";
+            return 1;
+        }
+        std::cout << "Using seed bias JSON: " << seed_file
+                  << " (" << grids << "x" << grids << ")\n";
+    }
+
     InitRootThreading();
 
     int run_num = get_run_int(root_files.front());
@@ -166,7 +209,7 @@ int main(int argc, char *argv[])
     SharedFillLocks fill_locks;
     RunFilesInRounds(root_files, num_threads, [&](int idx, int) {
         return processRootFile(root_files[idx], gRunConfig, db_dir, file_limits[idx],
-                               grids, merged.get(), &fill_locks);
+                               grids, mode, merged.get(), &fill_locks);
     });
     merged->events_processed = fill_locks.events_processed.load();
 
@@ -199,7 +242,7 @@ int main(int argc, char *argv[])
             std::sqrt(module->x * module->x + module->y * module->y),
             gRunConfig.hycal_z) * 180.f / 3.14159265f;
         expected_energies[m] = analysis::PhysicsTools::ExpectedEnergy(
-            angle, gRunConfig.Ebeam, "ep");
+            angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
 
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
@@ -249,6 +292,9 @@ int main(int argc, char *argv[])
     std::vector<std::vector<std::vector<float>>> energy_bias(
         1156, std::vector<std::vector<float>>(
             grids, std::vector<float>(grids, 0.f)));
+    if (!seed_file.empty()) {
+        energy_bias = seed_bias;
+    }
     int fit_count = 0, mean_count = 0, analyzed_module_count = 0;
     for (int m = 0; m < 1156; ++m) {
         const auto *module = hycal.module_by_id(1001 + m);
@@ -259,7 +305,7 @@ int main(int argc, char *argv[])
             std::sqrt(module->x * module->x + module->y * module->y),
             gRunConfig.hycal_z) * 180.f / 3.14159265f;
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
-            angle, gRunConfig.Ebeam, "ep");
+            angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 200) continue;
@@ -269,7 +315,18 @@ int main(int argc, char *argv[])
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 400) fit[0] = 0;
                 const double energy = fit[0] != 0
                     ? (fit_count++, fit[0]) : (mean_count++, merged->h1_energy_grid_allModule[m][i][j]->GetMean());
-                energy_bias[m][i][j] = std::clamp(energy / expected_energy - 1.0, -0.04, 0.08);
+                const double residual_bias =
+                    std::clamp(energy / expected_energy - 1.0, -0.04, 0.08);
+                if (!seed_file.empty()) {
+                    const double cumulative_bias =
+                        (1.0 + seed_bias[m][i][j]) *
+                        (1.0 + residual_bias) - 1.0;
+                    energy_bias[m][i][j] =
+                        static_cast<float>(std::clamp(cumulative_bias, -0.04, 0.08));
+                } else {
+                    energy_bias[m][i][j] =
+                        static_cast<float>(residual_bias);
+                }
             }
         }
     }
@@ -353,6 +410,76 @@ int main(int argc, char *argv[])
 
 }
 
+static bool loadSeedBias(const std::string &seed_file,
+                         int &seed_grid_size,
+                         std::vector<std::vector<std::vector<float>>> &seed_bias)
+{
+    std::ifstream input(seed_file);
+    if (!input) {
+        std::cerr << "Cannot open seed bias JSON: " << seed_file << "\n";
+        return false;
+    }
+
+    nlohmann::json root;
+    try {
+        input >> root;
+    } catch (const nlohmann::json::exception &error) {
+        std::cerr << "Cannot parse seed bias JSON " << seed_file
+                  << ": " << error.what() << "\n";
+        return false;
+    }
+    if (!root.is_object()) {
+        std::cerr << "Seed bias JSON is not an object: " << seed_file << "\n";
+        return false;
+    }
+
+    seed_grid_size = fdec::HyCalEnergyBias::GRID_SIZE;
+    if (root.contains("grid_size")) {
+        const auto &grid_node = root["grid_size"];
+        if (!grid_node.is_number_integer()) {
+            std::cerr << "Seed bias JSON has invalid grid_size: " << seed_file << "\n";
+            return false;
+        }
+        seed_grid_size = grid_node.get<int>();
+    }
+    if (!fdec::HyCalEnergyBias::supports_grid_size(seed_grid_size)) {
+        std::cerr << "Seed bias JSON has unsupported grid_size " << seed_grid_size
+                  << ": " << seed_file << "\n";
+        return false;
+    }
+
+    seed_bias.assign(
+        1156, std::vector<std::vector<float>>(
+            seed_grid_size, std::vector<float>(seed_grid_size, 0.f)));
+
+    int loaded = 0;
+    for (int m = 0; m < 1156; ++m) {
+        const std::string module_name = "W" + std::to_string(m + 1);
+        const auto module_it = root.find(module_name);
+        if (module_it == root.end() || !module_it->is_object()) continue;
+        for (int row = 0; row < seed_grid_size; ++row) {
+            const auto row_it = module_it->find("y" + std::to_string(row));
+            if (row_it == module_it->end() || !row_it->is_object()) continue;
+            for (int col = 0; col < seed_grid_size; ++col) {
+                const auto cell_it = row_it->find("x" + std::to_string(col));
+                if (cell_it == row_it->end() || !cell_it->is_number()) continue;
+                const double value = cell_it->get<double>();
+                if (!std::isfinite(value)) continue;
+                seed_bias[m][col][row] =
+                    static_cast<float>(std::clamp(value, -0.04, 0.08));
+                ++loaded;
+            }
+        }
+    }
+    if (loaded == 0) {
+        std::cerr << "Seed bias JSON contains no usable W1..W1156 cells: "
+                  << seed_file << "\n";
+        return false;
+    }
+    std::cout << "Loaded " << loaded << " seed bias cells\n";
+    return true;
+}
+
 static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix,
                                                   int grid_size)
 {
@@ -386,7 +513,7 @@ static std::unique_ptr<HistResult> makeHistResult(const std::string &suffix,
 
 static bool processRootFile(const std::string &input_file, const RunConfig &run_config,
                             const std::string &db_dir, long long max_events,
-                            int grid_size,
+                            int grid_size, EnergyMode mode,
                             HistResult *result, SharedFillLocks *fill_locks)
 {
     TFile input(input_file.c_str(), "READ");
@@ -402,6 +529,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
     EventVars_Recon event;
     prad2::SetReconReadBranches(tree, event);
+    prad2::ReconMatchVectorBindings match_bindings;
+    prad2::BindReconMatchVectorBranches(tree, event, match_bindings);
     fdec::HyCalSystem hycal;
     hycal.Init(db_dir + "/hycal_map.json");
 
@@ -411,54 +540,138 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
     for (Long64_t entry = 0; entry < entries; ++entry) {
         tree->GetEntry(entry);
         if ((event.trigger_bits & prad2::TBIT_sum) == 0) continue;
-        if (event.n_clusters != 1) continue;
-        if (event.cl_nblocks[0] < 3) continue;
-        if (fabs(event.cl_energy[0] - run_config.Ebeam) > 4.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.)) continue;
 
-        HCHit hc_hit;
-        GEMHit gem_hit;
-        hc_hit.x = event.cl_x[0];
-        hc_hit.y = event.cl_y[0];
-        hc_hit.z = event.cl_z[0];
-        hc_hit.energy = event.cl_energy[0];
-        if (event.matchNum == 1){
-            // [0][0]: the matched hit of the downstream GEM pair (GEM1/GEM2)
-            gem_hit.x = event.mHit_gx[0][0];
-            gem_hit.y = event.mHit_gy[0][0];
-            gem_hit.z = event.mHit_gz[0][0];
+        if (mode == EnergyMode::Ep) {
+            if (event.n_clusters != 1) continue;
+            if (event.cl_nblocks[0] < 3) continue;
+            if (fabs(event.cl_energy[0] - run_config.Ebeam) >
+                4.0 * 0.03 * std::sqrt(run_config.Ebeam * 1000.))
+                continue;
+
+            HCHit hc_hit;
+            GEMHit gem_hit;
+            hc_hit.x = event.cl_x[0];
+            hc_hit.y = event.cl_y[0];
+            hc_hit.z = event.cl_z[0];
+            hc_hit.energy = event.cl_energy[0];
+            if (event.matchNum == 1) {
+                gem_hit.x = event.mHit_gx[0][0];
+                gem_hit.y = event.mHit_gy[0][0];
+                gem_hit.z = event.mHit_gz[0][0];
+            }
+
+            if (gem_hit.z != 0.f) GetProjection(gem_hit, hc_hit.z);
+
+            hc_hit.x -= event.hycal_center_x;
+            hc_hit.y -= event.hycal_center_y;
+            gem_hit.x -= event.hycal_center_x;
+            gem_hit.y -= event.hycal_center_y;
+
+            if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 16.)) continue;
+
+            const auto *mod = hycal.module_by_id(event.cl_center[0]);
+            if (!mod) continue;
+            const auto [xd_hycal, yd_hycal] =
+                mod->cell_offset(hc_hit.x, hc_hit.y);
+            const auto [xd_gem, yd_gem] =
+                mod->cell_offset(gem_hit.x, gem_hit.y);
+
+            int col, row;
+            if (!fdec::HyCalEnergyBias::cell(
+                    *mod, hc_hit.x, hc_hit.y, grid_size, col, row))
+                continue;
+            const int all_module_index = mod->id - 1001;
+            {
+                std::lock_guard<std::mutex> lock(fill_locks->module[all_module_index]);
+                result->h1_energy_grid_allModule[all_module_index][col][row]
+                    ->Fill(hc_hit.energy);
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(fill_locks->hit_maps);
+                result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+                if (event.matchNum == 1)
+                    result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
+            }
+            ++events_processed;
         }
 
-        if (gem_hit.z != 0.f) GetProjection(gem_hit, hc_hit.z);
+        if (mode == EnergyMode::Ee) {
+            if (event.n_clusters > 2) continue;
+            for (int j = 0; j < event.n_clusters; ++j) {
+                if (event.cl_nblocks[j] < 3) continue;
+                if (event.matchFlag[j] == 0) continue;
+                if (event.cl_energy[j] >
+                    run_config.Ebeam -
+                    3.0f * 0.03f / std::sqrt(run_config.Ebeam / 1000.f) *
+                    run_config.Ebeam)
+                    continue;
 
-        // Move back to HyCal center coordinates
-        hc_hit.x -= event.hycal_center_x;
-        hc_hit.y -= event.hycal_center_y;
-        gem_hit.x -= event.hycal_center_x;
-        gem_hit.y -= event.hycal_center_y;
+                HCHit hc_hit;
+                GEMHit gem_hit;
+                hc_hit.x = event.cl_x[j];
+                hc_hit.y = event.cl_y[j];
+                hc_hit.z = event.cl_z[j];
+                hc_hit.energy = event.cl_energy[j];
+                if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 16.)) continue;
 
-        if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 16.)) continue;
+                bool has_gem_hit = false;
+                for (int did = 3; did >= 0; --did) {
+                    if (event.first_match(j, did, gem_hit.x, gem_hit.y, gem_hit.z)) {
+                        has_gem_hit = true;
+                        break;
+                    }
+                }
+                if (!has_gem_hit) continue;
+                GetProjection(gem_hit, hc_hit.z);
 
-        const auto *mod = hycal.module_by_id(event.cl_center[0]);
-        if (!mod) continue;
-        const auto [xd_hycal, yd_hycal] = mod->cell_offset(hc_hit.x, hc_hit.y);
-        const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
+                const auto *mod = hycal.module_by_id(event.cl_center[j]);
+                if (!mod) continue;
 
-        // Fill the selected module's energy-grid histogram.
-        int col, row;
-        if (!fdec::HyCalEnergyBias::cell(
-                *mod, hc_hit.x, hc_hit.y, grid_size, col, row)) continue;
-        const int all_module_index = mod->id - 1001;
-        {
-            std::lock_guard<std::mutex> lock(fill_locks->module[all_module_index]);
-            result->h1_energy_grid_allModule[all_module_index][col][row]->Fill(hc_hit.energy);
+                // scaled to the expected energy at the modules center to uncorrlate 
+                // the beam center offset dependence 
+                const float theta = std::atan2(
+                    std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z) * 180.0f / M_PI;
+                const double expect_energy = analysis::PhysicsTools::ExpectedEnergy(
+                    theta, run_config.Ebeam, "ee");
+                const float theta_mod = std::atan2(
+                    std::sqrt(mod->x * mod->x + mod->y * mod->y), gem_hit.z) * 180.0f / M_PI;
+                const double expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
+                    theta_mod, run_config.Ebeam, "ee");
+
+                hc_hit.energy *= expect_energy_mod/expect_energy;
+
+                hc_hit.x -= event.hycal_center_x;
+                hc_hit.y -= event.hycal_center_y;
+                gem_hit.x -= event.hycal_center_x;
+                gem_hit.y -= event.hycal_center_y;
+                if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 16.)) continue;
+
+                const auto [xd_hycal, yd_hycal] =
+                    mod->cell_offset(hc_hit.x, hc_hit.y);
+                const auto [xd_gem, yd_gem] =
+                    mod->cell_offset(gem_hit.x, gem_hit.y);
+
+                int col, row;
+                if (!fdec::HyCalEnergyBias::cell(
+                        *mod, hc_hit.x, hc_hit.y, grid_size, col, row))
+                    continue;
+                const int all_module_index = mod->id - 1001;
+                {
+                    std::lock_guard<std::mutex> lock(
+                        fill_locks->module[all_module_index]);
+                    result->h1_energy_grid_allModule[all_module_index][col][row]
+                        ->Fill(hc_hit.energy);
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(fill_locks->hit_maps);
+                    result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
+                    result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
+                }
+                ++events_processed;
+            }
         }
-
-        {
-            std::lock_guard<std::mutex> lock(fill_locks->hit_maps);
-            result->h2_hit_module_hycal->Fill(xd_hycal, yd_hycal);
-            if (event.matchNum == 1) result->h2_hit_module_gem->Fill(xd_gem, yd_gem);
-        }
-        ++events_processed;
     }
     fill_locks->events_processed.fetch_add(events_processed, std::memory_order_relaxed);
     return true;

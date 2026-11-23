@@ -666,12 +666,24 @@ files. The `-g` option selects the per-module grid resolution; it defaults
 to 5 and accepts 8 or 10 for higher-resolution maps:
 
 ```bash
-prad2ana_hycal_energy_bowl_shape <recon.root|directory> -o <output_prefix> [-g 5|8|10]
+prad2ana_hycal_energy_bowl_shape <recon.root|directory> -o <output_prefix> [-g 5|8|10] [-s seed_bias.json] [-m ep|ee]
 ```
 
 The generated JSON records `grid_size`; the reconstruction pipeline reads
 the selected resolution and uses the matching grid when applying the
 correction.
+
+The default `ep` mode uses the same single-cluster selection as
+`hycal_Erecon_check`. `--ee_mode` (or `-m ee`) processes up to two
+matched clusters and requires a projected GEM hit, using the GEM position
+for ee grid binning.
+
+When `-s seed_bias.json` is provided, the input reconstruction is assumed
+to have already used that seed. The tool measures the residual bias and
+combines it multiplicatively with the seed for each valid grid cell:
+`b_next = (1 + b_seed) * (1 + b_residual) - 1`. Cells with too few entries
+retain the seed value. A seed grid size is used automatically unless `-g`
+is also supplied; when both are present, they must match.
 
 ## Adding a tool
 
