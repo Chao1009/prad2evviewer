@@ -420,6 +420,8 @@ int main(int argc, char *argv[])
     // Beam center measurement with upstream GEM
     alignment_params["beam_center_x"] = extract_peak(h1_beam_CenterX);
     alignment_params["beam_center_y"] = extract_peak(h1_beam_CenterY);
+    alignment_params["beam_center_x_HCcoordinate"] = alignment_params["beam_center_x"] + in_run_config.target_x;
+    alignment_params["beam_center_y_HCcoordinate"] = alignment_params["beam_center_y"] + in_run_config.target_y;
 
     std::cout << " ----- ***** ----- ***** ------ ***** ----- ******" << std::endl;
     std::cout << "Beam center measured by GEMs with good alignment read from database: " << std::endl;
@@ -427,8 +429,8 @@ int main(int argc, char *argv[])
     std::cout << "Beam center (X, Y): " << alignment_params["beam_center_x"] << ", " 
               << alignment_params["beam_center_y"] << std::endl;
     std::cout << "The coordinates of HyCal center: " << std::endl;
-    std::cout << "Beam center (X, Y): " << alignment_params["beam_center_x"] + in_run_config.target_x << ", "
-              << alignment_params["beam_center_y"] + in_run_config.target_y << std::endl;
+    std::cout << "Beam center (X, Y): " << alignment_params["beam_center_x_HCcoordinate"]<< ", "
+              << alignment_params["beam_center_y_HCcoordinate"] << std::endl;
     std::cout << "Beam center from individual GEM chambers (HyCal-center coordinates):"
               << std::endl;
     for (int det = 0; det < 4; ++det) {
