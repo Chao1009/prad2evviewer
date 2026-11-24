@@ -13,7 +13,9 @@
         "hallb_IPM2C21A_YPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
         "hallb_IPM2C24A_XPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
         "hallb_IPM2C24A_YPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
-        "hallb_IPM2H01_XPOS": { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" }
+        "hallb_IPM2H01_XPOS":  { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
+        "TGT:PRad:Cell_P":     { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" },
+        "TGT:PRad:Chamber_P":  { "rel_rms": 3, "gated_by": "hallb_IPM2C21A_CUR" }
     },
 
     "charge": {

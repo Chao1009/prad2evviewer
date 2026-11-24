@@ -45,8 +45,17 @@
             "time_cuts":   {"hc_time_window": [60.0, 400.0]},
             "gain_factor": {"data_dir": "", "ref_run": 24827}
         },
-        {
+        {   "This segement is mainly the calibration runs, was studying GEM HV scan and efficency and veto scan": "",
+            "target is C for most runs": "",
             "from_run":    24185,
+            "beam_energy": 3488.43,
+            "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
+            "time_cuts":   {"hc_time_window": [130.0, 200.0]},
+            "gain_factor": {"data_dir": "", "ref_run":  24827}
+        },
+        {   "This segement has many problems, probably very few good data (DAQ, GEM, HyCal issuels, various beam, beam not stable, target not centered)": "",
+            "target is C for most runs": "",
+            "from_run":    24414,
             "beam_energy": 3488.43,
             "calibration": {"file": "calibration/calibration_factor_3p5_June7_nonLinear.json"},
             "time_cuts":   {"hc_time_window": [130.0, 200.0]},

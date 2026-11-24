@@ -54,7 +54,7 @@ using namespace analysis;
 
 using EventVars_Recon = prad2::ReconEventData;
 
-const int energy_bins = 350; const double energy_min = 500., energy_max = 4000.;
+const int energy_bins = 400; const double energy_min = 0., energy_max = 4000.;
 
 // Modules map that want to draw
 // W456 W457 W458 W459 W460 W461 W462 W463
