@@ -1,6 +1,7 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
+#include "HyCalCluster.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "MatchingTools.h"
@@ -565,6 +566,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
             hc_hit.energy = event.cl_energy[0];
 
             // Move back to HyCal center coordinates
+            // Get the raw reconstructed position before shower depth and beam center correction
+            GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(event.cl_center[0], event.cl_energy[0]));
             hc_hit.x -= event.hycal_center_x;
             hc_hit.y -= event.hycal_center_y;
             if (!InHyCalRing(hc_hit.x, hc_hit.y, 2.0, 15.)) continue;
@@ -635,6 +638,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z) * 180.0f / M_PI;
 
                 // Move back to HyCal center coordinates
+                // Get the raw reconstructed position before shower depth and beam center correction
+                GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(event.cl_center[j], event.cl_energy[j]));
                 hc_hit.x -= event.hycal_center_x;
                 hc_hit.y -= event.hycal_center_y;
 

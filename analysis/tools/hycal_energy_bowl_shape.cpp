@@ -19,6 +19,7 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
+#include "HyCalCluster.h"
 #include "HyCalEnergyBias.h"
 #include "MatchingTools.h"
 #include "EventData.h"
@@ -111,6 +112,10 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 static bool loadSeedBias(const std::string &seed_file,
                          int &seed_grid_size,
                          std::vector<std::vector<std::vector<float>>> &seed_bias);
+static double expectedEnergyForGrid(const fdec::Module &module, int column,
+                                    int row, int grid_size,
+                                    const RunConfig &run_config, EnergyMode mode,
+                                    double z_position);
 
 int main(int argc, char *argv[])
 {
@@ -226,7 +231,6 @@ int main(int argc, char *argv[])
             column_grids.resize(grids);
     }
     std::array<std::unique_ptr<TH2F>, module_count> bowl_shapes;
-    std::array<double, module_count> expected_energies{};
     for (int m = 0; m < module_count; ++m) {
         const int module_number = module_numbers[m];
         bowl_shapes[m] = std::make_unique<TH2F>(
@@ -238,26 +242,23 @@ int main(int argc, char *argv[])
             std::cerr << "Cannot find HyCal module W" << module_number << "\n";
             return 1;
         }
-        const double angle = std::atan2(
-            std::sqrt(module->x * module->x + module->y * module->y),
-            gRunConfig.hycal_z) * 180.f / 3.14159265f;
-        expected_energies[m] = analysis::PhysicsTools::ExpectedEnergy(
-            angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
-
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
+                const double expected_energy = expectedEnergyForGrid(
+                    *module, i, j, grids, gRunConfig, mode,
+                    gRunConfig.hycal_z);
                 auto &grid = energy_grids[m][i][j];
                 grid.reset(static_cast<TH1F *>(
                     merged->h1_energy_grid_allModule[module_number - 1][i][j]->Clone(
                         Form("h1_energy_grid_W%d_%d_%d", module_number, i, j))));
                 grid->SetTitle(Form("Energy Grid W%d;E_{recon} [MeV];Counts", module_number));
                 auto fit = analysis::PhysicsTools::fitPeak(
-                    grid.get(), static_cast<float>(expected_energies[m]), true);
+                    grid.get(), static_cast<float>(expected_energy), true);
                 // Use the histogram mean when the fit failed or there are too few entries.
                 if (grid->GetEntries() < 200) fit[0] = 0;
                 const double energy = fit[0] != 0 ? fit[0] : grid->GetMean();
                 bowl_shapes[m]->SetBinContent(
-                    i + 1, j + 1, energy / expected_energies[m]);
+                    i + 1, j + 1, energy / expected_energy);
             }
         }
     }
@@ -301,14 +302,12 @@ int main(int argc, char *argv[])
         if (!module) continue;
         if (!InHyCalRing(module->x, module->y, 2.0, 16.)) continue;
         ++analyzed_module_count;
-        const double angle = std::atan2(
-            std::sqrt(module->x * module->x + module->y * module->y),
-            gRunConfig.hycal_z) * 180.f / 3.14159265f;
-        const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
-            angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
         for (int i = 0; i < grids; ++i) {
             for (int j = 0; j < grids; ++j) {
                 if (merged->h1_energy_grid_allModule[m][i][j]->GetEntries() < 200) continue;
+                const double expected_energy = expectedEnergyForGrid(
+                    *module, i, j, grids, gRunConfig, mode,
+                    gRunConfig.hycal_z);
                 auto fit = analysis::PhysicsTools::fitPeak(
                     merged->h1_energy_grid_allModule[m][i][j].get(),
                     static_cast<float>(expected_energy), true);
@@ -408,6 +407,25 @@ int main(int argc, char *argv[])
     }
     output_file.Close();
 
+}
+
+static double expectedEnergyForGrid(const fdec::Module &module, int column,
+                                    int row, int grid_size,
+                                    const RunConfig &run_config, EnergyMode mode,
+                                    double z_position)
+{
+    double x = module.x;
+    double y = module.y;
+    x += ((static_cast<double>(column) + 0.5) / grid_size - 0.5) *
+            module.size_x;
+    y += ((static_cast<double>(row) + 0.5) / grid_size - 0.5) *
+            module.size_y;
+
+    const double angle = std::atan2(
+        std::sqrt(x * x + y * y), z_position) *
+        180.0 / 3.14159265358979323846;
+    return analysis::PhysicsTools::ExpectedEnergy(
+        angle, run_config.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
 }
 
 static bool loadSeedBias(const std::string &seed_file,
@@ -562,6 +580,9 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
 
             if (gem_hit.z != 0.f) GetProjection(gem_hit, hc_hit.z);
 
+            // Get the raw reconstructed position before shower depth and beam center correction
+            GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(event.cl_center[0], event.cl_energy[0]));
+
             hc_hit.x -= event.hycal_center_x;
             hc_hit.y -= event.hycal_center_y;
             gem_hit.x -= event.hycal_center_x;
@@ -623,23 +644,25 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     }
                 }
                 if (!has_gem_hit) continue;
+                if (event.matchNum == 1) {
+                    gem_hit.x = event.mHit_gx[0][0];
+                    gem_hit.y = event.mHit_gy[0][0];
+                    gem_hit.z = event.mHit_gz[0][0];
+                }
                 GetProjection(gem_hit, hc_hit.z);
 
                 const auto *mod = hycal.module_by_id(event.cl_center[j]);
                 if (!mod) continue;
 
-                // scaled to the expected energy at the modules center to uncorrlate 
-                // the beam center offset dependence 
+                // scaled to the expected energy at the modules center to uncorrlate
+                // the beam center offset dependence
                 const float theta = std::atan2(
                     std::sqrt(gem_hit.x * gem_hit.x + gem_hit.y * gem_hit.y), gem_hit.z) * 180.0f / M_PI;
                 const double expect_energy = analysis::PhysicsTools::ExpectedEnergy(
                     theta, run_config.Ebeam, "ee");
-                const float theta_mod = std::atan2(
-                    std::sqrt(mod->x * mod->x + mod->y * mod->y), gem_hit.z) * 180.0f / M_PI;
-                const double expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
-                    theta_mod, run_config.Ebeam, "ee");
 
-                hc_hit.energy *= expect_energy_mod/expect_energy;
+                // Get the raw reconstructed position before shower depth and beam center correction
+                GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(event.cl_center[j], event.cl_energy[j]));
 
                 hc_hit.x -= event.hycal_center_x;
                 hc_hit.y -= event.hycal_center_y;
@@ -656,6 +679,10 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 if (!fdec::HyCalEnergyBias::cell(
                         *mod, hc_hit.x, hc_hit.y, grid_size, col, row))
                     continue;
+                const double expect_energy_grid = expectedEnergyForGrid(
+                    *mod, col, row, grid_size, run_config, mode, gem_hit.z);
+                hc_hit.energy *= expect_energy_grid / expect_energy;
+
                 const int all_module_index = mod->id - 1001;
                 {
                     std::lock_guard<std::mutex> lock(

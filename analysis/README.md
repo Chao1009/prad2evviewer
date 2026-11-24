@@ -675,8 +675,11 @@ correction.
 
 The default `ep` mode uses the same single-cluster selection as
 `hycal_Erecon_check`. `--ee_mode` (or `-m ee`) processes up to two
-matched clusters and requires a projected GEM hit, using the GEM position
-for ee grid binning.
+matched clusters and requires a projected GEM hit. In ee mode the event
+energy is normalized from the GEM-track expected energy to the expected
+energy at the selected grid cell's center. The expected energy used for
+each grid cell is calculated from that cell's center position; ep mode
+continues to use the module center.
 
 When `-s seed_bias.json` is provided, the input reconstruction is assumed
 to have already used that seed. The tool measures the residual bias and

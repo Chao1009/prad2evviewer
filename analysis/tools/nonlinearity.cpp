@@ -12,6 +12,7 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
+#include "HyCalCluster.h"
 #include "EventData.h"
 #include "EventData_io.h"
 #include "MatchingTools.h"
@@ -690,6 +691,8 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             float theta = std::atan2(std::sqrt(gem_hit.x*gem_hit.x + gem_hit.y*gem_hit.y), run_config.hycal_z) * 180.f / M_PI;
 
             // Move back to HyCal center coordinates
+            // Get the raw reconstructed position before shower depth and beam center correction
+            GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(ev.cl_center[j], ev.cl_energy[j]));
             hc_hit.x -= ev.hycal_center_x;
             hc_hit.y -= ev.hycal_center_y;
             gem_hit.x -= ev.hycal_center_x;

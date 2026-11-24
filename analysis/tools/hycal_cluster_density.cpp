@@ -1,5 +1,6 @@
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
+#include "HyCalCluster.h"
 #include "MatchingTools.h"
 #include "EventData.h"
 #include "EventData_io.h"
@@ -260,6 +261,8 @@ int main(int argc, char *argv[])
         GetProjection(g_hit, hc_hit.z);
 
         // Move back to HyCal center coordinates
+        // Get the raw reconstructed position before shower depth and beam center correction
+        GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(ev.cl_center[0], ev.cl_energy[0]));
         hc_hit.x -= ev.hycal_center_x;
         hc_hit.y -= ev.hycal_center_y;
         g_hit.x -= ev.hycal_center_x;
