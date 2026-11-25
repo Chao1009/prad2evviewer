@@ -190,10 +190,14 @@ int main(int argc, char *argv[])
         float mod_x = mod->x - gRunConfig.target_x;
         float mod_y = mod->y - gRunConfig.target_y;
 
-        const float theta = std::atan2(
+        float theta = std::atan2(
             std::sqrt(mod_x * mod_x + mod_y * mod_y),
             gRunConfig.hycal_z) * 180.0f / M_PI;
-        const float expected_energy = analysis::PhysicsTools::ExpectedEnergy(
+        float expected_energy = analysis::PhysicsTools::ExpectedEnergy(
+            theta, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
+        theta = std::atan2(std::sqrt(mod_x * mod_x + mod_y * mod_y),
+            gRunConfig.hycal_z + fdec::shower_depth(mod->id, expected_energy)) * 180.0f / M_PI;
+        expected_energy = analysis::PhysicsTools::ExpectedEnergy(
             theta, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
         auto fit_result = physics.fitPeak(energy_histogram, expected_energy, true);
         const float peak = static_cast<float>(fit_result[0]);
@@ -233,6 +237,7 @@ int main(int argc, char *argv[])
         const double angle = 0.5 * (binEdge[i] + binEdge[i + 1]);
         const double expected_energy = analysis::PhysicsTools::ExpectedEnergy(
             angle, gRunConfig.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
+        
         TH1F *const hists[3] = {merged->h1_Erecon_theta[i].get(),
                                 merged->h1_Erecon_theta_center[i].get(),
                                 merged->h1_Erecon_theta_edge[i].get()};
@@ -640,6 +645,8 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 // Move back to HyCal center coordinates
                 // Get the raw reconstructed position before shower depth and beam center correction
                 GetProjection(hc_hit, hc_hit.z + fdec::shower_depth(event.cl_center[j], event.cl_energy[j]));
+                GetProjection(gem_hit, gem_hit.z + fdec::shower_depth(event.cl_center[j], event.cl_energy[j]));
+
                 hc_hit.x -= event.hycal_center_x;
                 hc_hit.y -= event.hycal_center_y;
 

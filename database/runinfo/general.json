@@ -34,7 +34,7 @@
                 {"id": 3, "position": [227.279, 0.814, 5456.658], "tilting": [180.0, 0.0, 179.94]}
             ]
         },
-        "matching":      {"radius": 8.0, "use_square_cut": false, "energy_dependent": true, "sigma": 4.0}
+        "matching":      {"radius": 8.0, "use_square_cut": false, "energy_dependent": true, "sigma": 5.0}
     },
 
     "configurations": [

@@ -644,10 +644,13 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                     }
                 }
                 if (!has_gem_hit) continue;
-                if (event.matchNum == 1) {
-                    gem_hit.x = event.mHit_gx[0][0];
-                    gem_hit.y = event.mHit_gy[0][0];
-                    gem_hit.z = event.mHit_gz[0][0];
+                if (event.matchNum > 0) 
+                for (int m = 0; m < event.matchNum; m++){
+                    if (event.mHit_cl_index[m] == j){
+                        gem_hit.x = event.mHit_gx[m][0];
+                        gem_hit.y = event.mHit_gy[m][0];
+                        gem_hit.z = event.mHit_gz[m][0];
+                    }
                 }
                 GetProjection(gem_hit, hc_hit.z);
 
