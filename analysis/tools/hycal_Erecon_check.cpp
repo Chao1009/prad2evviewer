@@ -657,14 +657,14 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 if (!mod) continue;
                 const int module_index = mod->id - 1001;
                 if (module_index < 0 || module_index >= 1156) continue;
-                const auto [xd_gem, yd_gem] = mod->cell_offset(gem_hit.x, gem_hit.y);
+                const auto [xd_hc, yd_hc] = mod->cell_offset(hc_hit.x, hc_hit.y);
 
                 const int theta_bin = result->h1_yield_theta->GetXaxis()->FindBin(theta);
                 if (theta_bin >= 1 && theta_bin <= Nbins) {
                     result->h1_yield_theta->Fill(
                         theta, 1.0 / result->h1_yield_theta->GetXaxis()->GetBinWidth(theta_bin));
                     result->h1_Erecon_theta[theta_bin - 1]->Fill(event.cl_energy[j]);
-                    if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
+                    if (std::fabs(xd_hc) < 0.15f && std::fabs(yd_hc) < 0.15f) {
                         result->h1_Erecon_theta_center[theta_bin - 1]->Fill(event.cl_energy[j]);
                     } else {
                         result->h1_Erecon_theta_edge[theta_bin - 1]->Fill(event.cl_energy[j]);
@@ -672,7 +672,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 }
                 result->h2_Erecon_theta->Fill(theta, event.cl_energy[j]);
 
-                if (std::fabs(xd_gem) < 0.15f && std::fabs(yd_gem) < 0.15f) {
+                if (std::fabs(xd_hc) < 0.15f && std::fabs(yd_hc) < 0.15f) {
                     result->h2_Erecon_theta_center->Fill(theta, event.cl_energy[j]);
                     result->h1_E_modules[module_index]->Fill(event.cl_energy[j]);
                 } else {
@@ -680,7 +680,7 @@ static bool processRootFile(const std::string &input_file, const RunConfig &run_
                 }
 
                 result->h2_hit_hycal->Fill(hc_hit.x, hc_hit.y);
-                result->h2_hit_module_hycal->Fill(xd_gem, yd_gem);
+                result->h2_hit_module_hycal->Fill(xd_hc, yd_hc);
             }
             ++result->events_processed;
         }
