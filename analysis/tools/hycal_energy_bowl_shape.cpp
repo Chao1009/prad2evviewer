@@ -315,13 +315,13 @@ int main(int argc, char *argv[])
                 const double energy = fit[0] != 0
                     ? (fit_count++, fit[0]) : (mean_count++, merged->h1_energy_grid_allModule[m][i][j]->GetMean());
                 const double residual_bias =
-                    std::clamp(energy / expected_energy - 1.0, -0.04, 0.08);
+                    std::clamp(energy / expected_energy - 1.0, -0.1, 0.2);
                 if (!seed_file.empty()) {
                     const double cumulative_bias =
                         (1.0 + seed_bias[m][i][j]) *
                         (1.0 + residual_bias) - 1.0;
                     energy_bias[m][i][j] =
-                        static_cast<float>(std::clamp(cumulative_bias, -0.04, 0.08));
+                        static_cast<float>(std::clamp(cumulative_bias, -0.1, 0.2));
                 } else {
                     energy_bias[m][i][j] =
                         static_cast<float>(residual_bias);
@@ -421,8 +421,12 @@ static double expectedEnergyForGrid(const fdec::Module &module, int column,
     y += ((static_cast<double>(row) + 0.5) / grid_size - 0.5) *
             module.size_y;
 
-    const double angle = std::atan2(
+    double angle = std::atan2(
         std::sqrt(x * x + y * y), z_position) *
+        180.0 / 3.14159265358979323846;
+    double expect_energy = analysis::PhysicsTools::ExpectedEnergy(
+        angle, run_config.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
+    angle = std::atan2(std::sqrt(x * x + y * y), z_position + fdec::shower_depth(module.id, expect_energy)) *
         180.0 / 3.14159265358979323846;
     return analysis::PhysicsTools::ExpectedEnergy(
         angle, run_config.Ebeam, mode == EnergyMode::Ep ? "ep" : "ee");
