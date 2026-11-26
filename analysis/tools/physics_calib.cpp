@@ -33,6 +33,7 @@
 //   - num_threads: number of worker threads (default: 4)
 //   - -f: peak-fit function, gaus or crystalball (default: gaus)
 //   - -a: disable the central-region cut
+//   - -l: (use island clustering for iteration)
 //   - -k: keep current calibration constants for transition and beam-hole modules
 //
 // Outputs are written under output_dir/Physics_calib/run<run_number>/:
@@ -201,13 +202,14 @@ int main(int argc, char *argv[])
     bool use_crystal_ball = false;
     bool central_region = true;
     bool keep_transition_beam_hole = false;
+    bool use_island = false;
 
     std::string db_dir = prad2::database_dir();
 
     std::string recon_config_file = db_dir + "/reconstruction_config.json";
 
     int opt;
-    while ((opt = getopt(argc, argv, "i:o:j:c:f:ak")) != -1) {
+    while ((opt = getopt(argc, argv, "i:o:j:c:f:akl")) != -1) {
         switch (opt) {
             case 'i': iteration        = std::atoi(optarg); break;
             case 'o': output_path = optarg; break;
@@ -215,6 +217,7 @@ int main(int argc, char *argv[])
             case 'j': num_threads      = std::atoi(optarg); break;
             case 'a': central_region = false; break;
             case 'k': keep_transition_beam_hole = true; break;
+            case 'l': use_island = true; break;
             case 'f': {
                 std::string mode = optarg;
                 std::transform(mode.begin(), mode.end(), mode.begin(), [](unsigned char ch) {
@@ -239,7 +242,8 @@ int main(int argc, char *argv[])
         std::cerr << "No input files specified.\n";
         std::cerr << "Usage: physics_calib <input_raw.root|dir> [more...] "
                      "[-i iter] [-o output_dir] [-c seed_calib.json] [-j threads] "
-                     "[-f gaus|crystalball] [-a(central_region = false)]\n";
+                     "[-f gaus|crystalball] [-a(central_region = false)] [-l (use island clustering for iteration)]"
+                     "[-k keep current calibration constants for transition and beam-hole modules]\n";
         return 1;
     }
 
@@ -362,8 +366,16 @@ int main(int argc, char *argv[])
     int n_kept_unchanged = 0;
     int n_good_fit = 0;
     for (int i = 0; i < 1156; ++i) {
-        if (!merged->h1_E_modules[i]) continue;
-        TH1F *h = merged->h1_E_modules[i].get();
+        //use_island
+        TH1F *h;
+        if (!use_island){
+            if (!merged->h1_E_modules[i]) continue;
+            h = merged->h1_E_modules[i].get();
+        }
+        else {
+            if (!merged->h1_E_modules_island[i]) continue;
+            h = merged->h1_E_modules_island[i].get();
+        }
         if (h->GetEntries() < 40) continue;
 
         int mod_id = i + 1000 + 1;
