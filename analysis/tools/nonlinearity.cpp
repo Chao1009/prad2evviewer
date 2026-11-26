@@ -698,15 +698,21 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             const double expect_energy = analysis::PhysicsTools::ExpectedEnergy(
                     theta, run_config.Ebeam, "ee");
             
-            float theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
-            double expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
-                    theta_mod, run_config.Ebeam, "ee");
-            theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), 
-                run_config.hycal_z + fdec::shower_depth(mod_id, expect_energy_mod)) * 180.f / M_PI;
-            expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
-                    theta_mod, run_config.Ebeam, "ee");
+            bool is_ep = false;
+            if (hc_hit.energy > run_config.Ebeam - 3.0f * 0.03 / std::sqrt(run_config.Ebeam / 1000.f) * run_config.Ebeam)
+                is_ep = true;
+            
+            if (!is_ep){
+                float theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
+                double expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
+                        theta_mod, run_config.Ebeam, "ee");
+                theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), 
+                    run_config.hycal_z + fdec::shower_depth(mod_id, expect_energy_mod)) * 180.f / M_PI;
+                expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
+                        theta_mod, run_config.Ebeam, "ee");
 
-            energy *= expect_energy_mod/expect_energy;
+                energy *= expect_energy_mod/expect_energy;
+            }
 
             // Move back to HyCal center coordinates
             // Get the raw reconstructed position before shower depth and beam center correction

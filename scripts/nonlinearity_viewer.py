@@ -480,43 +480,53 @@ class ModuleData:
     def fit_nl2_fixed_vertex(
         self, base_beam_tag: str, vertex_energy: float = _NL_FIXED_VERTEX_ENERGY,
     ) -> Tuple[float, float]:
-        """Fit base-beam e-p/e-e points with R(E_base)=1 and a fixed vertex."""
+        """Match only the base-beam e-e point with R(E_base)=1 and a fixed vertex.
+
+        If the base-energy e-e ratio (E_rec/E_exp) is >= 1, the point cannot lie
+        on a concave-down curve, so nl2 is set to 0 and nl1 is chosen to match the
+        e-e point with a pure linear correction."""
         if not math.isfinite(vertex_energy) or vertex_energy <= 0.0:
             raise ValueError("Vertex energy must be a positive finite value.")
-        keys = (f"ep_{base_beam_tag}", f"ee_{base_beam_tag}")
-        E_base = self.e_exp[keys[0]]
+        key = f"ee_{base_beam_tag}"
+        E_base = self.e_exp[f"ep_{base_beam_tag}"]
         if E_base <= 0.0:
             raise ValueError("Base-energy e-p expected energy is unavailable.")
 
-        vertex_t = (vertex_energy - E_base) / 1000.0
-        basis = []
-        residuals = []
-        weights = []
-        for key in keys:
-            E_exp = self.e_exp[key]
-            E_rec = self.measured_peak(key)
-            if E_exp <= 0.0 or E_rec <= 0.0:
+        E_exp = self.e_exp[key]
+        E_rec = self.measured_peak(key)
+        if E_exp <= 0.0 or E_rec <= 0.0:
+            raise ValueError(
+                f"{peak_cfg(key)['label']} peak is unavailable; fit the base-energy e-e peak first.")
+        t = (E_rec - E_base) / 1000.0
+        ratio = E_rec / E_exp
+        residual = ratio - 1.0
+
+        # Base-energy e-e ratio >= 1: no concave-down maximum is possible, so
+        # fall back to a linear correction (nl2 = 0) matched to the e-e point.
+        if ratio >= 1.0:
+            if not math.isfinite(t) or t == 0.0:
                 raise ValueError(
-                    f"{peak_cfg(key)['label']} peak is unavailable; fit both base-energy peaks first.")
-            t = (E_rec - E_base) / 1000.0
-            basis.append(t * (t - 2.0 * vertex_t))
-            residuals.append(E_rec / E_exp - 1.0)
-            error = self.peak_mean_error[key]
-            sigma_Erec = error if math.isfinite(error) and error > 0.0 else 1.0
-            sigma_ratio = sigma_Erec / E_exp
-            weights.append(2.0 / max(sigma_ratio * sigma_ratio, 1e-24))
+                    "The base-energy e-e peak coincides with E_base; cannot determine a linear correction.")
+            nl1 = residual / t
+            if not math.isfinite(nl1) or abs(nl1) > _NL_MANUAL_COEFFICIENT_LIMIT:
+                raise ValueError("The linear correction exceeds the manual coefficient limit.")
+            return nl1, 0.0
 
-        basis_arr = np.asarray(basis)
-        residuals_arr = np.asarray(residuals)
-        weights_arr = np.asarray(weights)
-        denominator = float(np.sum(weights_arr * basis_arr * basis_arr))
+        vertex_t = (vertex_energy - E_base) / 1000.0
+        basis = t * (t - 2.0 * vertex_t)
+        error = self.peak_mean_error[key]
+        sigma_Erec = error if math.isfinite(error) and error > 0.0 else 1.0
+        sigma_ratio = sigma_Erec / E_exp
+        weight = 1.0 / max(sigma_ratio * sigma_ratio, 1e-24)
+
+        denominator = weight * basis * basis
         if not math.isfinite(denominator) or denominator <= 0.0:
-            raise ValueError("Base-energy peaks do not constrain the fixed-vertex fit.")
+            raise ValueError("The base-energy e-e peak does not constrain the fixed-vertex fit.")
 
-        nl2 = float(np.sum(weights_arr * basis_arr * residuals_arr) / denominator)
+        nl2 = float(weight * basis * residual / denominator)
         if not math.isfinite(nl2) or nl2 >= 0.0:
             raise ValueError(
-                "The base-energy peaks do not produce a concave-down fit with a maximum.")
+                "The base-energy e-e peak does not produce a concave-down fit with a maximum.")
         nl1 = -2.0 * nl2 * vertex_t
         if max(abs(nl1), abs(nl2)) > _NL_MANUAL_COEFFICIENT_LIMIT:
             raise ValueError("The fitted coefficients exceed the manual coefficient limit.")
@@ -906,7 +916,7 @@ class NLViewerWindow(QMainWindow):
         self._fit_fixed_vertex_btn = QPushButton("Fit Current Module")
         self._fit_fixed_vertex_btn.setEnabled(False)
         self._fit_fixed_vertex_btn.setToolTip(
-            "Fit only the selected base-energy e-p and e-e peaks.\n"
+            "Match only the selected base-energy e-e peak; the e-p measurement is not used.\n"
             "Constrain the 2nd-order curve to R(E_base)=1 and its maximum to the selected vertex energy.")
         self._fit_fixed_vertex_btn.clicked.connect(self._do_fit_fixed_vertex)
         actions.addWidget(self._fit_fixed_vertex_btn)
@@ -923,7 +933,7 @@ class NLViewerWindow(QMainWindow):
         self._fit_fixed_vertex_all_btn = QPushButton("Fit All Modules")
         self._fit_fixed_vertex_all_btn.setEnabled(False)
         self._fit_fixed_vertex_all_btn.setToolTip(
-            "Apply the fixed-vertex fit to every loaded module using its base-energy e-p/e-e peaks.")
+            "Apply the fixed-vertex fit to every loaded module, matching only each base-energy e-e peak.")
         self._fit_fixed_vertex_all_btn.clicked.connect(self._do_fit_fixed_vertex_all)
         actions.addWidget(self._fit_fixed_vertex_all_btn)
         hint = QLabel("Edit or use arrows; curves and corrected points update live.")
@@ -1173,19 +1183,20 @@ class NLViewerWindow(QMainWindow):
 
         nl1, nl2 = d.nl2_1, d.nl2_2
         self._refresh_map()
-        self._refresh_current_fit_display(
-            status=(
-                f"{d.name}: fitted base-energy e-p/e-e only; "
-                f"2nd-order maximum fixed at {vertex_energy:.1f} MeV "
-                f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1."),
-            refit=False,
-        )
+        if nl2 == 0.0:
+            note = (f"{d.name}: base-energy e-e ratio ≥ 1 → linear fallback "
+                    f"(nl₂=0, nl₁={nl1:.6f}); R(E_base)=1.")
+        else:
+            note = (f"{d.name}: matched base-energy e-e only (e-p measurement excluded); "
+                    f"2nd-order maximum fixed at {vertex_energy:.1f} MeV "
+                    f"(nl₁={nl1:.6f}, nl₂={nl2:.6f}); R(E_base)=1.")
+        self._refresh_current_fit_display(status=note, refit=False)
 
     def _apply_fixed_vertex_fit(self, d: ModuleData, vertex_energy: float) -> None:
         nl1, nl2 = d.fit_nl2_fixed_vertex(self._base_beam_tag, vertex_energy)
         d.nl2_1, d.nl2_2 = nl1, nl2
         d.nl_coefficients_manual = True
-        d.nl2_fixed_vertex_energy = vertex_energy
+        d.nl2_fixed_vertex_energy = vertex_energy if nl2 != 0.0 else None
         points = d.linearity_points(self._base_beam_tag)
         E_base = d.e_exp[f"ep_{self._base_beam_tag}"]
         d.update_correction_residuals(
