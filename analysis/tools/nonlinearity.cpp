@@ -381,11 +381,17 @@ int main(int argc, char *argv[]){
             const BeamSet &beam = beams[b];
             const bool top = (b == 0), bottom = (b == kNBeams - 1);
             TH1F *h = beam.hists.at(mod_id);
-            const float x = mod.x - beam.run_config.target_x;
-            const float y = mod.y - beam.run_config.target_y;
+            const float x = mod.x;
+            const float y = mod.y;
             float theta = std::atan2(std::sqrt(x*x + y*y), beam.run_config.hycal_z) * 180.f / M_PI;
             exp_ep[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ep");
             exp_ee[b] = physics.ExpectedEnergy(theta, beam.Ebeam, "ee");
+            float theta_ep = std::atan2(std::sqrt(x*x + y*y), 
+                beam.run_config.hycal_z + fdec::shower_depth(mod_id, exp_ep[b])) * 180.f / M_PI;
+            float theta_ee = std::atan2(std::sqrt(x*x + y*y), 
+                beam.run_config.hycal_z + fdec::shower_depth(mod_id, exp_ee[b])) * 180.f / M_PI;
+            exp_ep[b] = physics.ExpectedEnergy(theta_ep, beam.Ebeam, "ep");
+            exp_ee[b] = physics.ExpectedEnergy(theta_ee, beam.Ebeam, "ee");
 
             ch->cd(b + 1);
             gPad->SetTopMargin(top ? 0.10 : 0.005);
@@ -688,7 +694,19 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             GetProjection(gem_hit, hc_hit.z);
 
             float energy = ev.cl_energy[j];
-            float theta = std::atan2(std::sqrt(gem_hit.x*gem_hit.x + gem_hit.y*gem_hit.y), run_config.hycal_z) * 180.f / M_PI;
+            float theta = std::atan2(std::sqrt(gem_hit.x*gem_hit.x + gem_hit.y*gem_hit.y), gem_hit.z) * 180.f / M_PI;
+            const double expect_energy = analysis::PhysicsTools::ExpectedEnergy(
+                    theta, run_config.Ebeam, "ee");
+            
+            float theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), run_config.hycal_z) * 180.f / M_PI;
+            double expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
+                    theta_mod, run_config.Ebeam, "ee");
+            theta_mod = std::atan2(std::sqrt(mod->x*mod->x + mod->y*mod->y), 
+                run_config.hycal_z + fdec::shower_depth(mod_id, expect_energy_mod)) * 180.f / M_PI;
+            expect_energy_mod = analysis::PhysicsTools::ExpectedEnergy(
+                    theta_mod, run_config.Ebeam, "ee");
+
+            energy *= expect_energy_mod/expect_energy;
 
             // Move back to HyCal center coordinates
             // Get the raw reconstructed position before shower depth and beam center correction
@@ -699,8 +717,8 @@ long long process_event(TTree *tree, const EventVars_Recon &ev, const fdec::HyCa
             gem_hit.y -= ev.hycal_center_y;
 
             // require the hit near the seed module centre (|xd|,|yd| < 0.15 module sizes)
-            const auto [xd, yd] = mod->cell_offset<float>(gem_hit.x, gem_hit.y);
-            if ( std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f )  continue;
+            //const auto [xd, yd] = mod->cell_offset<float>(gem_hit.x, gem_hit.y);
+            //if ( std::abs(xd) >= 0.15f || std::abs(yd) >= 0.15f )  continue;
 
             bool veto = false;
             float sci_time, sci_int;
