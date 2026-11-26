@@ -389,9 +389,12 @@ int main(int argc, char *argv[])
             continue;
         }
 
-        float theta_deg = std::atan(std::sqrt(mod->x * mod->x + mod->y * mod->y)
-                                    / gRunConfig.hycal_z) * 180.f / 3.14159265f;
+        float theta_deg = std::atan2(std::sqrt(mod->x * mod->x + mod->y * mod->y),
+                                    gRunConfig.hycal_z) * 180.f / M_PI;
         float expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
+        theta_deg = std::atan2(std::sqrt(mod->x * mod->x + mod->y * mod->y),
+                                    gRunConfig.hycal_z + fdec::shower_depth(mod_id, expected_peak)) * 180.f / M_PI;
+        expected_peak = analysis::PhysicsTools::ExpectedEnergy(theta_deg, gRunConfig.Ebeam, "ep");
 
         auto fit_result = physics.fitPeak(h, expected_peak, false, use_crystal_ball);
         float peak = static_cast<float>(fit_result[0]);
