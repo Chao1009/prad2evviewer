@@ -345,7 +345,6 @@ class ModuleData:
     def __init__(
         self, name: str, x: float, y: float, row: int = -1, col: int = -1,
         hycal_z_by_beam: Optional[Dict[str, float]] = None,
-        target_xy_by_beam: Optional[Dict[str, Tuple[float, float]]] = None,
     ):
         self.name  = name
         self.x     = float(x)
@@ -353,10 +352,8 @@ class ModuleData:
         self.row   = int(row)
         self.col   = int(col)
         hycal_z_by_beam = hycal_z_by_beam or {}
-        target_xy_by_beam = target_xy_by_beam or {}
-        target_x, target_y = target_xy_by_beam.get("3p5", (0.0, 0.0))
         self.theta = math.degrees(math.atan2(
-            math.hypot(x - target_x, y - target_y),
+            math.hypot(x, y),
             hycal_z_by_beam.get("3p5", Z_HYCAL)))
 
         self.e_exp:     Dict[str, float] = {}
@@ -365,9 +362,7 @@ class ModuleData:
             key = str(cfg["key"])
             tag = str(cfg["tag"])
             z = hycal_z_by_beam.get(tag, Z_HYCAL)
-            target_x, target_y = target_xy_by_beam.get(tag, (0.0, 0.0))
-            theta = math.degrees(math.atan2(
-                math.hypot(x - target_x, y - target_y), z))
+            theta = math.degrees(math.atan2(math.hypot(x, y), z))
             E = expected_energy(theta, float(cfg["ebeam"]), str(cfg["kind"]))
             self.e_exp[key]     = E
             self.sigma_exp[key] = estimate_sigma(E) if E > 0.0 else 1.0
@@ -635,7 +630,6 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
         return {}
 
     hycal_z_by_beam = {}
-    target_xy_by_beam = {}
     root_dirs = {}
     if root_path is not None and root_path.is_file() and HAS_UPROOT:
         try:
@@ -645,9 +639,6 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
                     z = _read_hycal_z(root_dir)
                     if z is not None:
                         hycal_z_by_beam[tag] = z
-                    target_xy = _read_target_xy(root_dir)
-                    if target_xy is not None:
-                        target_xy_by_beam[tag] = target_xy
             if not hycal_z_by_beam:
                 print(
                     "Warning: ROOT file has no hycal_z_mm metadata; "
@@ -661,7 +652,7 @@ def load_all(root_path: Optional[Path]) -> Dict[str, ModuleData]:
     data: Dict[str, ModuleData] = {}
     for name, (x, y, row, col) in geo.items():
         data[name] = ModuleData(
-            name, x, y, row, col, hycal_z_by_beam, target_xy_by_beam)
+            name, x, y, row, col, hycal_z_by_beam)
 
     if root_path is not None and root_path.is_file() and HAS_UPROOT:
         try:
